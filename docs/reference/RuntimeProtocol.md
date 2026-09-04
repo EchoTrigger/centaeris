@@ -196,93 +196,99 @@ The registry separates shared Runtime semantics from execution and native Host
 surfaces. This classification controls dependency ownership; it is not an
 authorization grant.
 
+<!-- BEGIN GENERATED:RUNTIME_METHOD_REGISTRY -->
+
+`operationKind` classifies the observable effect: `read`, `desiredStateWrite`, `identityMutation`, `creation`, or `oneShotAction`. `retryPolicy` is one of `safeRetry`, `sameOperationId`, or `noAutomaticRetry`. A non-empty `reconcileMethod` names the registered method that observes or resumes an uncertain outcome.
+
 ### Shared Runtime
 
-```text
-agent_context_usage_get
-_centaeris/session/compact_context
-agent_dead_letter_dismiss
-agent_dead_letter_get
-agent_dead_letter_list
-agent_dead_letter_replay
-_centaeris/session/activate
-_centaeris/session/answer_now
-_centaeris/session/answer_question
-_centaeris/session/delete
-_centaeris/session/diagnostics
-_centaeris/session/project
-_centaeris/session/reorder
-_centaeris/session/agent-runs
-_centaeris/session/agent-runs/replay
-_centaeris/session/agent-runs/attach
-_centaeris/session/agent-runs/detach
-_centaeris/session/agent-runs/detach-viewer
-_centaeris/session/agent-runs/cancel
-_centaeris/session/supplement
-_centaeris/session/update_metadata
-agent_runtime_config_get
-agent_runtime_config_reset
-agent_runtime_config_set
-agent_runtime_model_test
-mcp/catalog
-mcp/configure
-agent_runtime_garbage_collect
-agent_runtime_job_get
-agent_runtime_job_list
-agent_state_get
-transcript/project
-plugin/catalog_state
-skill/source/list
-skill/source/add
-skill/source/remove
-skill/source/set_enabled
-skill/source/ref
-skill/catalog
-skill/detail
-skill/set_enabled
-skill/reload
-plugin/detail
-plugin/list
-plugin/reload
-plugin/set_enabled
-plugin/source_ref
-session/list
-session/load
-session/new
-session/prompt
-```
+| Method | Operation kind | Retry policy | Reconcile method |
+| --- | --- | --- | --- |
+| `agent_context_usage_get` | `read` | `safeRetry` | — |
+| `_centaeris/session/compact_context` | `oneShotAction` | `noAutomaticRetry` | — |
+| `agent_dead_letter_dismiss` | `identityMutation` | `noAutomaticRetry` | `agent_dead_letter_get` |
+| `agent_dead_letter_get` | `read` | `safeRetry` | — |
+| `agent_dead_letter_list` | `read` | `safeRetry` | — |
+| `agent_dead_letter_replay` | `identityMutation` | `noAutomaticRetry` | `agent_dead_letter_get` |
+| `_centaeris/session/activate` | `desiredStateWrite` | `noAutomaticRetry` | `workspace_get` |
+| `_centaeris/session/answer_now` | `oneShotAction` | `noAutomaticRetry` | — |
+| `_centaeris/session/answer_question` | `oneShotAction` | `noAutomaticRetry` | — |
+| `_centaeris/session/delete` | `identityMutation` | `noAutomaticRetry` | `session/list` |
+| `_centaeris/session/diagnostics` | `read` | `safeRetry` | — |
+| `_centaeris/session/project` | `read` | `safeRetry` | — |
+| `_centaeris/session/reorder` | `desiredStateWrite` | `noAutomaticRetry` | `session/list` |
+| `_centaeris/session/agent-runs` | `read` | `safeRetry` | — |
+| `_centaeris/session/agent-runs/replay` | `read` | `safeRetry` | — |
+| `_centaeris/session/agent-runs/attach` | `identityMutation` | `noAutomaticRetry` | — |
+| `_centaeris/session/agent-runs/detach` | `identityMutation` | `noAutomaticRetry` | — |
+| `_centaeris/session/agent-runs/detach-viewer` | `identityMutation` | `noAutomaticRetry` | — |
+| `_centaeris/session/agent-runs/cancel` | `identityMutation` | `noAutomaticRetry` | `_centaeris/session/agent-runs` |
+| `_centaeris/session/supplement` | `oneShotAction` | `noAutomaticRetry` | — |
+| `_centaeris/session/update_metadata` | `desiredStateWrite` | `noAutomaticRetry` | `session/load` |
+| `agent_runtime_config_get` | `read` | `safeRetry` | — |
+| `agent_runtime_config_reset` | `desiredStateWrite` | `noAutomaticRetry` | `agent_runtime_config_get` |
+| `agent_runtime_config_set` | `desiredStateWrite` | `noAutomaticRetry` | `agent_runtime_config_get` |
+| `agent_runtime_model_test` | `oneShotAction` | `noAutomaticRetry` | — |
+| `mcp/catalog` | `read` | `safeRetry` | — |
+| `mcp/configure` | `desiredStateWrite` | `noAutomaticRetry` | `mcp/catalog` |
+| `agent_runtime_garbage_collect` | `oneShotAction` | `noAutomaticRetry` | — |
+| `agent_runtime_job_get` | `read` | `safeRetry` | — |
+| `agent_runtime_job_list` | `read` | `safeRetry` | — |
+| `agent_state_get` | `read` | `safeRetry` | — |
+| `transcript/project` | `read` | `safeRetry` | — |
+| `plugin/catalog_state` | `read` | `safeRetry` | — |
+| `skill/source/list` | `read` | `safeRetry` | — |
+| `skill/source/add` | `creation` | `noAutomaticRetry` | `skill/source/list` |
+| `skill/source/remove` | `identityMutation` | `noAutomaticRetry` | `skill/source/list` |
+| `skill/source/set_enabled` | `desiredStateWrite` | `noAutomaticRetry` | `skill/source/list` |
+| `skill/source/ref` | `read` | `safeRetry` | — |
+| `skill/catalog` | `read` | `safeRetry` | — |
+| `skill/detail` | `read` | `safeRetry` | — |
+| `skill/set_enabled` | `desiredStateWrite` | `noAutomaticRetry` | `skill/detail` |
+| `skill/reload` | `oneShotAction` | `noAutomaticRetry` | `skill/catalog` |
+| `plugin/detail` | `read` | `safeRetry` | — |
+| `plugin/list` | `read` | `safeRetry` | — |
+| `plugin/reload` | `oneShotAction` | `noAutomaticRetry` | `plugin/catalog_state` |
+| `plugin/set_enabled` | `desiredStateWrite` | `noAutomaticRetry` | `plugin/detail` |
+| `plugin/source_ref` | `read` | `safeRetry` | — |
+| `session/list` | `read` | `safeRetry` | — |
+| `session/load` | `read` | `safeRetry` | — |
+| `session/new` | `creation` | `sameOperationId` | `session/new` |
+| `session/prompt` | `creation` | `sameOperationId` | `session/prompt` |
 
 ### Execution Host
 
-```text
-process_capture
-sidecar_list
-sidecar_start
-sidecar_stop
-workspace_file_tree
-workspace_read_file
-```
+| Method | Operation kind | Retry policy | Reconcile method |
+| --- | --- | --- | --- |
+| `process_capture` | `oneShotAction` | `noAutomaticRetry` | — |
+| `sidecar_list` | `read` | `safeRetry` | — |
+| `sidecar_start` | `creation` | `noAutomaticRetry` | `sidecar_list` |
+| `sidecar_stop` | `identityMutation` | `noAutomaticRetry` | `sidecar_list` |
+| `workspace_file_tree` | `read` | `safeRetry` | — |
+| `workspace_read_file` | `read` | `safeRetry` | — |
 
 ### Native Host surface
 
-```text
-app_exit
-desktop_file_preview_read
-initialize
-plugin/install
-plugin/remove
-workspace_activate
-workspace_get
-workspace_git_diff_get
-workspace_git_file_diff_get
-workspace_git_github_cli_status_get
-workspace_git_status_get
-workspace_open_folder
-workspace_remove
-workspace_reset
-workspace_rename
-workspace_reveal_folder
-```
+| Method | Operation kind | Retry policy | Reconcile method |
+| --- | --- | --- | --- |
+| `app_exit` | `oneShotAction` | `noAutomaticRetry` | — |
+| `desktop_file_preview_read` | `read` | `safeRetry` | — |
+| `initialize` | `desiredStateWrite` | `noAutomaticRetry` | — |
+| `plugin/install` | `creation` | `noAutomaticRetry` | `plugin/list` |
+| `plugin/remove` | `identityMutation` | `noAutomaticRetry` | `plugin/list` |
+| `workspace_activate` | `desiredStateWrite` | `noAutomaticRetry` | `workspace_get` |
+| `workspace_get` | `read` | `safeRetry` | — |
+| `workspace_git_diff_get` | `read` | `safeRetry` | — |
+| `workspace_git_file_diff_get` | `read` | `safeRetry` | — |
+| `workspace_git_github_cli_status_get` | `read` | `safeRetry` | — |
+| `workspace_git_status_get` | `read` | `safeRetry` | — |
+| `workspace_open_folder` | `oneShotAction` | `noAutomaticRetry` | — |
+| `workspace_remove` | `identityMutation` | `noAutomaticRetry` | `workspace_get` |
+| `workspace_reset` | `desiredStateWrite` | `noAutomaticRetry` | `workspace_get` |
+| `workspace_rename` | `desiredStateWrite` | `noAutomaticRetry` | `workspace_get` |
+| `workspace_reveal_folder` | `oneShotAction` | `noAutomaticRetry` | — |
+
+<!-- END GENERATED:RUNTIME_METHOD_REGISTRY -->
 
 Electron-only actions such as opening a directory picker, revealing a local
 Plugin source, and tray events remain outside this registry. They do not become
@@ -294,11 +300,18 @@ name, request structure, response structure, error behavior, and command scope
 change together; a Host must not infer a generic CRUD schema from similarly
 named methods.
 
-The registry is code navigation for the bundled clients. This repository does
-not currently publish a generated, standalone JSON Schema catalog for every
-method. `initialize` appears in the v1 Host-surface registry even though it also
-controls connection registration; the classification describes the current
-registry rather than an authorization boundary.
+The generated registry above and
+`packages/runtime/generated/runtime-methods.json` come from the declarative
+Rust source in `packages/runtime/src/runtime_command_registry.rs`. Run
+`cargo run --locked -p centaeris-runtime --bin
+centaeris-runtime-protocol-docs -- --write` after changing that source; the
+local CI gate runs the generator with `--check` and rejects stale artifacts.
+
+The machine-readable registry contains method names and command scopes. This
+repository does not currently publish a standalone JSON Schema catalog for
+every method. `initialize` appears in the v1 Host-surface registry even though
+it also controls connection registration; the classification describes the
+current registry rather than an authorization boundary.
 
 ## Notifications and replay
 

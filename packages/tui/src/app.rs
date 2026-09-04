@@ -2599,8 +2599,8 @@ fn cancel_agent_run(
     Ok(())
 }
 
-fn show_message(app: &mut App, message: String) {
-    app.message = Some(message);
+fn show_message(app: &mut App, message: impl Into<String>) {
+    app.message = Some(message.into());
     app.show_help = false;
     app.home_risk_panel = None;
     app.mcp_panel = None;
@@ -3396,11 +3396,13 @@ fn build_prompt_request(
     session: &TuiSession,
     message: &str,
     attachments: &[DraftImageAttachment],
+    operation_id: &str,
 ) -> Value {
     let mut attachments = attachments.iter().collect::<Vec<_>>();
     attachments.sort_by_key(|attachment| attachment.start);
     json!({
         "request": {
+            "operationId": operation_id,
             "sessionId": session.id,
             "message": message,
             "attachments": attachments.into_iter().map(|attachment| json!({
@@ -3427,6 +3429,7 @@ fn start_prompt(app: &mut App, message: String) -> Result<(), String> {
     app.show_state = false;
     ensure_runtime(app)?;
     let session = ensure_active_session(app, message.as_str())?;
+    let operation_id = new_runtime_operation_id()?;
     let result = app
         .runtime
         .as_mut()
@@ -3437,6 +3440,7 @@ fn start_prompt(app: &mut App, message: String) -> Result<(), String> {
                 &session,
                 message.as_str(),
                 app.draft_image_attachments.as_slice(),
+                operation_id.as_str(),
             ),
         )?;
     app.transcript.push(TranscriptLine::User(message.clone()));
@@ -3533,22 +3537,38 @@ fn ensure_active_session(app: &mut App, title: &str) -> Result<TuiSession, Strin
     if let Some(session) = app.active_session.clone() {
         return Ok(session);
     }
+    let operation_id = new_runtime_operation_id()?;
     let response = app
         .runtime
         .as_mut()
         .ok_or_else(|| "runtime client is not connected".to_string())?
         .request(
             "session/new",
-            json!({
-                "request": {
-                    "title": title,
-                    "cwd": app.session_cwd.clone(),
-                }
-            }),
+            build_session_create_request(title, app.session_cwd.as_str(), operation_id.as_str()),
         )?;
     let session = tui_session_from_response(&response)?;
     app.active_session = Some(session.clone());
     Ok(session)
+}
+
+fn build_session_create_request(title: &str, cwd: &str, operation_id: &str) -> Value {
+    json!({
+        "request": {
+            "operationId": operation_id,
+            "title": title,
+            "cwd": cwd,
+        }
+    })
+}
+
+fn new_runtime_operation_id() -> Result<String, String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| format!("generate Runtime operation identity failed: {error}"))?;
+    Ok(bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>())
 }
 
 fn ensure_runtime(app: &mut App) -> Result<(), String> {

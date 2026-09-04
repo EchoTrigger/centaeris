@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, type RefObject } from "react";
 import { isNativeHostRuntime } from "../../host/hostBridge";
 import {
   cancelAgentRun,
+  createRuntimeOperationId,
   createSession,
   sendAgentInput,
   sendAgentSupplement,
@@ -243,7 +244,7 @@ export const useChatPromptTransactions = ({
         throw new Error("请先选择真实工作区，再开始本地会话");
       }
       return toCreatedUiSession(
-        await createSession(prompt, workspaceRoot),
+        await createSession(prompt, workspaceRoot, createRuntimeOperationId()),
         prompt,
       );
     },
@@ -448,6 +449,7 @@ export const useChatPromptTransactions = ({
       }
 
       let targetSession: UiSession;
+      const promptOperationId = createRuntimeOperationId();
       try {
         targetSession = await createTargetSession(prompt);
       } catch (error) {
@@ -484,6 +486,7 @@ export const useChatPromptTransactions = ({
       try {
         await waitForNextPaint();
         const response = await sendAgentInput({
+          operationId: promptOperationId,
           sessionId: targetSession.id,
           message: prompt,
           preferredLocale: "zh-CN",
@@ -586,6 +589,7 @@ export const useChatPromptTransactions = ({
       const expectedTailMessageId = expectedTailMessage.id;
 
       let targetSession: UiSession;
+      const promptOperationId = createRuntimeOperationId();
       try {
         targetSession = await createTargetSession(prompt);
       } catch (error) {
@@ -642,6 +646,7 @@ export const useChatPromptTransactions = ({
       try {
         await waitForNextPaint();
         const response = await sendAgentInput({
+          operationId: promptOperationId,
           sessionId: targetSession.id,
           message: prompt,
           preferredLocale: "zh-CN",

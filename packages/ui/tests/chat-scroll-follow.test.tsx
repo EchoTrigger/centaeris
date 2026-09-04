@@ -64,6 +64,7 @@ vi.mock("../src/lib/chatBridge", () => ({
   answerAgentQuestion: vi.fn(),
   cancelAgentRun: vi.fn(),
   compactAgentContext: vi.fn(),
+  createRuntimeOperationId: () => "00000000-0000-4000-8000-000000000001",
   createSession: vi.fn(),
   getAgentContextUsage: vi.fn(),
   getAgentRuntimeConfig: vi.fn(async () => runtimeConfig),

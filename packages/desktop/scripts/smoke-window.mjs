@@ -573,6 +573,7 @@ const FIRST_LAUNCH_EXPRESSION = `(async () => {
   });
   const createdSession = await host.invoke("session/new", {
     request: {
+      operationId: "smoke-window-session-new",
       title: "Electron window smoke persisted session",
       cwd: workspaceRoot,
     },

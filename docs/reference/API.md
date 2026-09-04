@@ -12,8 +12,9 @@ Core constants and contract implementations are the source of truth for runtime 
 - `packages/core/src/extension/` for extension contracts;
 - `packages/core/src/tool/` for model-visible tool contracts.
 
-`packages/runtime/src/host_protocol.rs` is the source of truth for the local Host
-protocol. See [Runtime protocol](RuntimeProtocol.md) for its stable boundary and
+`packages/runtime/src/host_protocol.rs` owns the local Host protocol identity,
+and `packages/runtime/src/runtime_command_registry.rs` owns its method registry.
+See [Runtime protocol](RuntimeProtocol.md) for the stable boundary and
 [Session events](SessionEvents.md) for event projection.
 
 JSON, event, host-protocol, and Electron bridge fields use exact `camelCase`. Built-in model tool names and model-visible parameter keys use canonical `lower_snake_case`. Storage identifiers remain storage-native.
@@ -28,7 +29,7 @@ JSON, event, host-protocol, and Electron bridge fields use exact `camelCase`. Bu
 | Runtime events and continuation | `packages/core/src/runtime/event.rs`, `packages/core/src/runtime/` |
 | Built-in model tools | `packages/core/src/tool/` |
 | Plugin, Skill, MCP, CLI, and Hook declarations | `packages/core/src/extension/` |
-| Local Host protocol | `packages/runtime/src/host_protocol.rs` |
+| Local Host protocol | `packages/runtime/src/host_protocol.rs`, `packages/runtime/src/runtime_command_registry.rs` |
 | Electron bridge | `packages/desktop/src/hostContract.mjs` |
 
 ## MCP contracts
