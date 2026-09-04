@@ -6,7 +6,6 @@ import os from "node:os";
 import path from "node:path";
 
 const hostRoot = path.resolve(import.meta.dirname, "..");
-const repoRoot = path.resolve(hostRoot, "..", "..");
 const defaultElectronExe = path.join(
   hostRoot,
   "dist",

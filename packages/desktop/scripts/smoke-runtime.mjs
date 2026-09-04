@@ -128,13 +128,6 @@ const assertArray = (value, label) => {
   }
 };
 
-const assertOkResponse = (value, label) => {
-  assertRecord(value, label);
-  if (value.ok !== true) {
-    fail(`${label} must acknowledge ok=true`);
-  }
-};
-
 const assertHostTransportIsolatesInvalidLiveText = async (tempRoot) => {
   const isolationRoot = path.join(tempRoot, "live-text-isolation");
   const liveTextRoot = path.join(isolationRoot, "runtime", "live-text");

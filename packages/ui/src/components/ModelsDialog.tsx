@@ -142,6 +142,10 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
   const [providerPickerOpen, setProviderPickerOpen] = useState(false);
   const [providerQuery, setProviderQuery] = useState("");
   const loadSequence = useRef(0);
+  const select = useCallback((next: Selection) => {
+    setSelection(next);
+    setModelTest(null);
+  }, []);
 
   const acceptConfig = useCallback((next: AgentRuntimeConfig) => {
     setConfig(next);
@@ -188,7 +192,7 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
       acceptConfig(response.config);
       setCustomProviders([]);
       setApiKeys({});
-      setSelection({ kind: "empty" });
+      select({ kind: "empty" });
       setCanResetUnsupportedConfig(false);
       setMessage("Runtime configuration reset");
     } catch (error) {
@@ -233,8 +237,6 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
     || provider.providerId === selectedProviderId
     )
   ));
-
-  useEffect(() => setModelTest(null), [selectedProviderId, selectedModelId]);
 
   const updateCustomProvider = (patch: Partial<CustomProviderDraft>) => {
     if (!selectedCustomProvider) return;
@@ -298,7 +300,7 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
         clearModelApiKey: true,
       });
       acceptConfig(next);
-      setSelection({ kind: "provider", providerId });
+      select({ kind: "provider", providerId });
       setMessage("Credential removed");
     } catch (error) {
       setMessage(errorText(error));
@@ -316,7 +318,7 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
       models: [],
     };
     setCustomProviders((providers) => [...providers, provider]);
-    setSelection({ kind: "provider", providerId: provider.providerId });
+    select({ kind: "provider", providerId: provider.providerId });
     setProviderPickerOpen(false);
     setMessage("");
   };
@@ -328,8 +330,7 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
     setCustomProviders((providers) => providers.map((item) => item.providerId === providerId
       ? { ...item, models: [...item.models, model] }
       : item));
-    setSelection({ kind: "model", providerId, modelKey: model.key });
-    setModelTest(null);
+    select({ kind: "model", providerId, modelKey: model.key });
   };
 
   const removeSelectedModel = async () => {
@@ -344,8 +345,7 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
       setCustomProviders((providers) => providers.map((provider) => provider.providerId !== selectedCustomProvider.providerId
         ? provider
         : { ...provider, models: provider.models.filter((model) => model.key !== selectedCustomModel.key) }));
-      setSelection({ kind: "provider", providerId: selectedCustomProvider.providerId });
-      setModelTest(null);
+      select({ kind: "provider", providerId: selectedCustomProvider.providerId });
     } catch (error) {
       setMessage(errorText(error));
     }
@@ -361,8 +361,7 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
       });
       if (!confirmed) return;
       setCustomProviders((providers) => providers.filter((provider) => provider.providerId !== selectedCustomProvider.providerId));
-      setSelection({ kind: "empty" });
-      setModelTest(null);
+      select({ kind: "empty" });
     } catch (error) {
       setMessage(errorText(error));
     }
@@ -424,7 +423,7 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
         {visibleBuiltIns.map((provider) => {
           const active = selectedProviderId === provider.providerId;
           return <div className="modelsProviderGroup" key={provider.providerId}>
-            <button type="button" className={active && selection.kind === "provider" ? "modelsProviderButton is-active" : "modelsProviderButton"} onClick={() => setSelection({ kind: "provider", providerId: provider.providerId })}>
+            <button type="button" className={active && selection.kind === "provider" ? "modelsProviderButton is-active" : "modelsProviderButton"} onClick={() => select({ kind: "provider", providerId: provider.providerId })}>
               <span>{provider.name}</span>{provider.configured ? <span className="modelsConfiguredDot" aria-label="configured" /> : null}
             </button>
           </div>;
@@ -434,10 +433,10 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
           const providerConfig = config?.modelProviders.find((item) => item.providerId === provider.providerId);
           const active = selectedProviderId === provider.providerId;
           return <div className="modelsProviderGroup" key={provider.providerId}>
-            <button type="button" className={active && selection.kind === "provider" ? "modelsProviderButton is-active" : "modelsProviderButton"} onClick={() => setSelection({ kind: "provider", providerId: provider.providerId })}>
+            <button type="button" className={active && selection.kind === "provider" ? "modelsProviderButton is-active" : "modelsProviderButton"} onClick={() => select({ kind: "provider", providerId: provider.providerId })}>
               <span>{provider.name}</span>{providerConfig?.configured ? <span className="modelsConfiguredDot" aria-label="configured" /> : null}
             </button>
-            {providerConfig?.configured ? <div className="modelsProviderModels">{provider.models.map((model) => <button type="button" className={selection.kind === "model" && selection.providerId === provider.providerId && selection.modelKey === model.key ? "is-selected" : ""} key={model.key} onClick={() => setSelection({ kind: "model", providerId: provider.providerId, modelKey: model.key })}>{model.model || "new model"}</button>)}<button type="button" onClick={() => addModel(provider.providerId)}><Plus aria-hidden="true" />model</button></div> : null}
+            {providerConfig?.configured ? <div className="modelsProviderModels">{provider.models.map((model) => <button type="button" className={selection.kind === "model" && selection.providerId === provider.providerId && selection.modelKey === model.key ? "is-selected" : ""} key={model.key} onClick={() => select({ kind: "model", providerId: provider.providerId, modelKey: model.key })}>{model.model || "new model"}</button>)}<button type="button" onClick={() => addModel(provider.providerId)}><Plus aria-hidden="true" />model</button></div> : null}
           </div>;
         })}
         <button type="button" className="modelsAddButton modelsAddProvider" onClick={() => { setProviderQuery(""); setProviderPickerOpen(true); }}><Plus aria-hidden="true" />Add provider</button>
@@ -493,7 +492,7 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
               {customCandidateVisible ? <section><h2>CUSTOM</h2><div className="modelsProviderCards"><button type="button" onClick={addCustomProvider}><strong>OpenAI / Anthropic compatible</strong><span>Custom endpoint · HTTP or HTTPS</span><Plus aria-hidden="true" /></button></div></section> : null}
               {visibleOAuthSubscriptions.length ? <section><h2>OAUTH SUBSCRIPTIONS</h2><div className="modelsProviderCards">{visibleOAuthSubscriptions.map((provider) => <button type="button" disabled key={provider.name} title="OAuth provider SDK adapter is not enabled in this build"><strong>{provider.name}</strong><span>{provider.models}</span><small>SDK adapter pending</small></button>)}</div></section> : null}
               {visibleApiProviders.length ? <section><h2>API</h2><div className="modelsProviderCards">{visibleApiProviders.map((provider) => {
-                return <button type="button" key={provider.providerId} onClick={() => { setSelection({ kind: "provider", providerId: provider.providerId }); setProviderPickerOpen(false); }}><strong>{provider.name}</strong></button>;
+                return <button type="button" key={provider.providerId} onClick={() => { select({ kind: "provider", providerId: provider.providerId }); setProviderPickerOpen(false); }}><strong>{provider.name}</strong></button>;
               })}</div></section> : null}
               {providerPickerEmpty ? <div className="modelsProviderPickerEmpty">No providers found.</div> : null}
             </div>

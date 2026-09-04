@@ -3,14 +3,12 @@ import { readFile } from "node:fs/promises";
 import { test } from "vitest";
 
 const sidebarUrl = new URL("../src/components/Sidebar.tsx", import.meta.url);
-const appUrl = new URL("../src/App.tsx", import.meta.url);
 const confirmDialogUrl = new URL("../src/components/ConfirmDialog.tsx", import.meta.url);
 const stylesUrl = new URL("../src/index.css", import.meta.url);
 
 test("renders session deletion confirmation inside the sidebar row", async () => {
-  const [sidebarSource, appSource, stylesSource] = await Promise.all([
+  const [sidebarSource, stylesSource] = await Promise.all([
     readFile(sidebarUrl, "utf8"),
-    readFile(appUrl, "utf8"),
     readFile(stylesUrl, "utf8"),
   ]);
 
@@ -25,7 +23,6 @@ test("renders session deletion confirmation inside the sidebar row", async () =>
   assert.match(sidebarSource, /event\.key === "Escape"/);
   assert.match(sidebarSource, /!pendingSessionIdRef\.current/);
   assert.match(sidebarSource, /event\.currentTarget\.contains\(event\.relatedTarget\)/);
-  assert.doesNotMatch(appSource, /title: "Delete this conversation\?"/);
   assert.match(stylesSource, /\.thinSessionDeleteConfirm\s*\{/);
   assert.match(stylesSource, /border-left: 3px solid #ef5650/);
   assert.match(stylesSource, /\.thinSessionDeleteConfirm button \{[\s\S]*height: 29px/);

@@ -5,12 +5,26 @@ export const createTrayController = ({
   showMainWindow,
   emitHostEvent,
   requestAppExit,
+  reportActionFailure,
 }) => {
   if (!trayIconPath) {
     throw new Error("trayIconPath is required");
   }
+  if (typeof reportActionFailure !== "function") {
+    throw new Error("tray reportActionFailure is required");
+  }
 
   let tray = null;
+
+  const runAction = (actionName, action) => {
+    try {
+      void Promise.resolve(action()).catch((error) => {
+        reportActionFailure(actionName, error);
+      });
+    } catch (error) {
+      reportActionFailure(actionName, error);
+    }
+  };
 
   const ensureTray = () => {
     if (tray) {
@@ -23,22 +37,22 @@ export const createTrayController = ({
         {
           label: "New Chat",
           click: () => {
-            void showMainWindow();
+            runAction("new-chat", showMainWindow);
             emitHostEvent("centaeris/tray-new-chat", {});
           },
         },
         {
           label: "Open Centaeris",
-          click: () => void showMainWindow(),
+          click: () => runAction("open", showMainWindow),
         },
         {
           label: "Exit",
-          click: () => void requestAppExit(),
+          click: () => runAction("exit", requestAppExit),
         },
       ]),
     );
     tray.on("double-click", () => {
-      void showMainWindow();
+      runAction("double-click", showMainWindow);
     });
     return tray;
   };

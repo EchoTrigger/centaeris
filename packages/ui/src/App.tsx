@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PanelLeft, PanelRight, X } from "lucide-react";
 import { Sidebar, type ResourceModalKind } from "./components/Sidebar";
 import { ChatArea } from "./components/chat/ChatArea";
-import { sessionViewCacheStore } from "./components/chat/chatRuntimeCore";
 import { PluginsDialog } from "./components/PluginsDialog";
 import { ModelsDialog } from "./components/ModelsDialog";
 import { SkillsDialog } from "./components/SkillsDialog";
@@ -11,34 +10,21 @@ import {
   type ConfirmationRequest,
   type ConfirmAction,
 } from "./components/ConfirmDialog";
-import { SummaryPanel, type SummaryPanelTab } from "./components/SummaryPanel";
-import type { UiSession } from "./types/ui";
+import { SummaryPanel } from "./components/SummaryPanel";
+import { useSessionController } from "./components/app/useSessionController";
+import { useWorkspaceController } from "./components/app/useWorkspaceController";
+import { useWorkspacePanelController } from "./components/app/useWorkspacePanelController";
 import {
-  activateSession,
-  deleteSession,
   getAgentRuntimeConfig,
   listenAgentRuntimeConfigChanges,
   listSessions,
-  updateSession,
-  type SessionItem,
 } from "./lib/chatBridge";
 import {
-  activateWorkspaceRoot,
-  getWorkspaceGitHubCliStatus,
-  getWorkspaceGitStatus,
   getWorkspaceInfo,
-  openWorkspaceFolder,
-  readDesktopFilePreview,
-  resetWorkspaceCatalog,
-  type WorkspaceOpenMode,
-  type WorkspaceFileTreeEntry,
-  type WorkspaceGitHubCliStatusResponse,
-  type WorkspaceGitStatusResponse,
   type WorkspaceSnapshot,
 } from "./lib/workspaceBridge";
 
 type AppModal = ResourceModalKind | null;
-type WorkspaceCatalogErrorState = { message: string; canReset: boolean };
 
 const normalizeRoot = (root?: string | null): string =>
   String(root || "")
@@ -48,9 +34,6 @@ const normalizeRoot = (root?: string | null): string =>
     .replace(/\/+$/, "")
     .toLowerCase();
 
-const fileName = (path: string): string =>
-  path.split(/[\\/]/).filter(Boolean).at(-1) || path;
-
 const errorMessage = (error: unknown, fallback: string): string =>
   error instanceof Error && error.message.trim()
     ? error.message
@@ -58,76 +41,15 @@ const errorMessage = (error: unknown, fallback: string): string =>
       ? error
       : fallback;
 
-const toUiSession = (item: SessionItem): UiSession => ({
-  id: item.id,
-  title: item.title || "New chat",
-  summary: item.lastMessage || undefined,
-  updatedAt: item.updatedAt,
-  isPinned: Boolean(item.isPinned),
-  isUnread: Boolean(item.isUnread),
-  messageCount: item.messageCount,
-  cwd: item.cwd,
-  sortOrder: typeof item.sortOrder === "number" ? item.sortOrder : undefined,
-  sessionKind: item.sessionKind,
-  parentSessionId: item.parentSessionId,
-  runtimeJobId: item.runtimeJobId,
-});
-
-const sortSessions = (sessions: UiSession[]): UiSession[] =>
-  [...sessions].sort((left, right) => {
-    if (Boolean(left.isPinned) !== Boolean(right.isPinned)) {
-      return left.isPinned ? -1 : 1;
-    }
-    const leftOrder = left.sortOrder ?? Number.MAX_SAFE_INTEGER;
-    const rightOrder = right.sortOrder ?? Number.MAX_SAFE_INTEGER;
-    return leftOrder - rightOrder || (right.updatedAt ?? 0) - (left.updatedAt ?? 0);
-  });
-
 function App() {
-  const [sessions, setSessions] = useState<UiSession[]>([]);
-  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
-  const [workspaceSnapshot, setWorkspaceSnapshot] = useState<WorkspaceSnapshot>({
-    activeWorkspaceRoot: null,
-    workspaces: [],
-    cancelled: false,
-  });
-  const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(new Set());
-  const [completedSessionIds, setCompletedSessionIds] = useState<Set<string>>(new Set());
-  const [gitStatus, setGitStatus] = useState<WorkspaceGitStatusResponse | null>(null);
-  const [gitStatusError, setGitStatusError] = useState("");
-  const [githubCliStatus, setGithubCliStatus] = useState<WorkspaceGitHubCliStatusResponse | null>(null);
-  const [panelTabs, setPanelTabs] = useState<SummaryPanelTab[]>([]);
-  const [activePanelTabId, setActivePanelTabId] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [isFilePaneOpen, setIsFilePaneOpen] = useState(true);
   const [activeModal, setActiveModal] = useState<AppModal>(null);
   const [hasSelectableModel, setHasSelectableModel] = useState<boolean | null>(null);
   const [runtimeConfigRevision, setRuntimeConfigRevision] = useState(0);
   const [hostError, setHostError] = useState("");
-  const [workspaceCatalogError, setWorkspaceCatalogError] = useState<WorkspaceCatalogErrorState | null>(null);
   const [confirmation, setConfirmation] = useState<ConfirmationRequest | null>(null);
-  const currentSessionIdRef = useRef<string | null>(null);
   const confirmationResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
-
-  const workspaces = workspaceSnapshot.workspaces ?? [];
-  const activeWorkspaceRoot = workspaceSnapshot.activeWorkspaceRoot ?? null;
-  const currentSession = useMemo(
-    () => sessions.find((session) => session.id === currentSessionId) ?? null,
-    [currentSessionId, sessions],
-  );
-  const mainSessions = useMemo(
-    () => sessions.filter((session) => session.sessionKind === "main"),
-    [sessions],
-  );
-  const activeWorkspace = useMemo(
-    () => workspaces.find((workspace) => normalizeRoot(workspace.root) === normalizeRoot(activeWorkspaceRoot)) ?? null,
-    [activeWorkspaceRoot, workspaces],
-  );
-
-  const setCurrentSession = useCallback((sessionId: string | null) => {
-    currentSessionIdRef.current = sessionId;
-    setCurrentSessionId(sessionId);
-  }, []);
+  const runtimeConfigRequestIdRef = useRef(0);
 
   const confirmAction: ConfirmAction = useCallback((request) => {
     if (confirmationResolverRef.current) {
@@ -147,25 +69,66 @@ function App() {
     resolve(confirmed);
   }, []);
 
-  const refreshSessions = useCallback(async (preferredSessionId?: string | null) => {
-    const fetched = sortSessions((await listSessions()).map(toUiSession));
-    setSessions(fetched);
-    const preferred = preferredSessionId
-      ? fetched.find(
-        (session) => session.id === preferredSessionId && session.sessionKind === "main",
-      ) ?? null
-      : null;
-    const workspaceMatch = fetched.find(
-      (session) =>
-        session.sessionKind === "main" &&
-        normalizeRoot(session.cwd) === normalizeRoot(activeWorkspaceRoot),
-    );
-    const next = preferred ?? workspaceMatch ?? null;
-    setCurrentSession(next?.id ?? null);
-  }, [activeWorkspaceRoot, setCurrentSession]);
+  const workspaceController = useWorkspaceController({
+    confirmAction,
+    reportHostError: setHostError,
+  });
+  const {
+    workspaces,
+    activeWorkspaceRoot,
+    activeWorkspace,
+    catalogError: workspaceCatalogError,
+    gitStatus,
+    gitStatusError,
+    githubCliStatus,
+  } = workspaceController;
+  const {
+    applySnapshot: applyWorkspaceSnapshot,
+    beginInitialization: beginWorkspaceInitialization,
+    openWorkspace,
+    reportCatalogFailure: reportWorkspaceCatalogFailure,
+    resetCatalog,
+    retryCatalog,
+    selectWorkspace,
+  } = workspaceController.actions;
+  const sessionController = useSessionController({
+    activeWorkspaceRoot,
+    reportError: setHostError,
+  });
+  const {
+    sessions,
+    currentSessionId,
+    currentSession,
+    mainSessions,
+    runningSessionIds,
+    completedSessionIds,
+  } = sessionController;
+  const {
+    beginInitialization: beginSessionInitialization,
+    clearSelection,
+    completeSession,
+    removeSession,
+    renameSession,
+    resolveSession,
+    selectSession,
+    setRunning,
+  } = sessionController.actions;
+  const workspacePanel = useWorkspacePanelController({
+    workspaceRoot: activeWorkspaceRoot,
+    sessions,
+    currentSessionId,
+  });
+  const {
+    clear: clearWorkspacePanel,
+    removeAgentSessions,
+  } = workspacePanel.actions;
 
   useEffect(() => {
     let cancelled = false;
+    const workspaceInitialization = beginWorkspaceInitialization();
+    const sessionInitialization = beginSessionInitialization();
+    const runtimeConfigRequestId = runtimeConfigRequestIdRef.current + 1;
+    runtimeConfigRequestIdRef.current = runtimeConfigRequestId;
     void Promise.allSettled([
       getWorkspaceInfo(),
       listSessions(),
@@ -179,49 +142,51 @@ function App() {
       };
       if (workspaceResult.status === "fulfilled") {
         snapshot = workspaceResult.value;
-        setWorkspaceSnapshot(snapshot);
-        setWorkspaceCatalogError(null);
-      } else {
-        const message = errorMessage(workspaceResult.reason, "加载工作区列表失败");
-        setWorkspaceCatalogError({
-          message,
-          canReset: message.includes("workspace_catalog_corrupt"),
-        });
+        workspaceInitialization.applySnapshot(snapshot);
+      } else if (workspaceInitialization.isCurrent()) {
+        reportWorkspaceCatalogFailure(workspaceResult.reason, "加载工作区列表失败");
       }
       if (sessionResult.status === "fulfilled") {
-        const mapped = sortSessions(sessionResult.value.map(toUiSession));
-        setSessions(mapped);
         const preferredId = snapshot.workspaces.find(
           (workspace) => normalizeRoot(workspace.root) === normalizeRoot(snapshot.activeWorkspaceRoot),
         )?.activeSessionId;
-        const preferred = mapped.find(
-          (session) => session.id === preferredId && session.sessionKind === "main",
-        );
-        setCurrentSession(preferred?.id ?? null);
-      } else {
+        sessionInitialization.applySessions(sessionResult.value, preferredId);
+      } else if (sessionInitialization.isCurrent()) {
         setHostError(errorMessage(sessionResult.reason, "加载会话失败"));
       }
-      if (configResult.status === "fulfilled") {
-        setHasSelectableModel(configResult.value.selectableModels.length > 0);
-      } else {
-        setHasSelectableModel(false);
+      if (runtimeConfigRequestIdRef.current === runtimeConfigRequestId) {
+        if (configResult.status === "fulfilled") {
+          setHasSelectableModel(configResult.value.selectableModels.length > 0);
+        } else {
+          setHasSelectableModel(false);
+        }
       }
     });
     return () => {
       cancelled = true;
     };
-  }, [setCurrentSession]);
+  }, [
+    beginSessionInitialization,
+    beginWorkspaceInitialization,
+    reportWorkspaceCatalogFailure,
+  ]);
 
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | null = null;
     void listenAgentRuntimeConfigChanges(() => {
       if (disposed) return;
+      const requestId = runtimeConfigRequestIdRef.current + 1;
+      runtimeConfigRequestIdRef.current = requestId;
       setRuntimeConfigRevision((revision) => revision + 1);
       void getAgentRuntimeConfig().then((config) => {
-        if (!disposed) setHasSelectableModel(config.selectableModels.length > 0);
+        if (!disposed && runtimeConfigRequestIdRef.current === requestId) {
+          setHasSelectableModel(config.selectableModels.length > 0);
+        }
       }).catch((error) => {
-        if (!disposed) setHostError(errorMessage(error, "加载模型配置失败"));
+        if (!disposed && runtimeConfigRequestIdRef.current === requestId) {
+          setHostError(errorMessage(error, "加载模型配置失败"));
+        }
       });
     }).then((nextUnlisten) => {
       if (disposed) {
@@ -238,289 +203,35 @@ function App() {
     };
   }, []);
 
-  useEffect(() => {
-    if (!activeWorkspaceRoot) {
-      setGitStatus(null);
-      setGithubCliStatus(null);
-      setGitStatusError("");
-      return;
-    }
-    let cancelled = false;
-    void Promise.allSettled([
-      getWorkspaceGitStatus(activeWorkspaceRoot),
-      getWorkspaceGitHubCliStatus(),
-    ]).then(([gitResult, githubResult]) => {
-      if (cancelled) return;
-      if (gitResult.status === "fulfilled") {
-        setGitStatus(gitResult.value);
-        setGitStatusError("");
-      } else {
-        setGitStatus(null);
-        setGitStatusError(errorMessage(gitResult.reason, "Git 状态不可用"));
-      }
-      setGithubCliStatus(githubResult.status === "fulfilled" ? githubResult.value : null);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [activeWorkspaceRoot]);
+  const handleResetWorkspaceCatalog = useCallback(async () => {
+    if (!await resetCatalog()) return;
+    clearSelection();
+    clearWorkspacePanel();
+  }, [clearSelection, clearWorkspacePanel, resetCatalog]);
 
-  const handleWorkspaceCatalogFailure = (error: unknown, fallback: string) => {
-    const message = errorMessage(error, fallback);
-    if (message.includes("workspace_catalog_")) {
-      setWorkspaceCatalogError({
-        message,
-        canReset: message.includes("workspace_catalog_corrupt"),
-      });
-      return;
-    }
-    setHostError(message);
-  };
+  const handleOpenWorkspace = useCallback(async (mode: Parameters<typeof openWorkspace>[0]) => {
+    if (!await openWorkspace(mode)) return;
+    clearSelection();
+    clearWorkspacePanel();
+  }, [clearSelection, clearWorkspacePanel, openWorkspace]);
 
-  const handleRetryWorkspaceCatalog = async () => {
-    try {
-      const snapshot = await getWorkspaceInfo();
-      setWorkspaceSnapshot(snapshot);
-      setWorkspaceCatalogError(null);
-    } catch (error) {
-      handleWorkspaceCatalogFailure(error, "重新加载工作区列表失败");
-    }
-  };
+  const handleSelectWorkspace = useCallback(async (root: string) => {
+    if (!await selectWorkspace(root)) return;
+    clearSelection();
+    clearWorkspacePanel();
+  }, [clearSelection, clearWorkspacePanel, selectWorkspace]);
 
-  const handleResetWorkspaceCatalog = async () => {
-    try {
-      const confirmed = await confirmAction({
-        title: "Reset the workspace list?",
-        message: "This removes the saved workspace list. Project files stay unchanged.",
-      });
-      if (!confirmed) return;
-      const response = await resetWorkspaceCatalog();
-      setWorkspaceSnapshot(response.snapshot);
-      setWorkspaceCatalogError(null);
-      setCurrentSession(null);
-      setPanelTabs([]);
-      setActivePanelTabId(null);
-    } catch (error) {
-      handleWorkspaceCatalogFailure(error, "重置工作区列表失败");
-    }
-  };
+  const handleSelectSession = useCallback(async (sessionId: string) => {
+    const result = await selectSession(sessionId);
+    if (!result?.workspaceSnapshot) return;
+    applyWorkspaceSnapshot(result.workspaceSnapshot);
+    clearWorkspacePanel();
+  }, [applyWorkspaceSnapshot, clearWorkspacePanel, selectSession]);
 
-  const handleOpenWorkspace = async (mode: WorkspaceOpenMode) => {
-    try {
-      const snapshot = await openWorkspaceFolder(mode);
-      if (snapshot.cancelled) return;
-      setWorkspaceSnapshot(snapshot);
-      setCurrentSession(null);
-      setPanelTabs([]);
-      setActivePanelTabId(null);
-    } catch (error) {
-      handleWorkspaceCatalogFailure(error, "打开工作区失败");
-    }
-  };
-
-  const handleSelectWorkspace = async (root: string) => {
-    try {
-      const snapshot = await activateWorkspaceRoot(root);
-      setWorkspaceSnapshot(snapshot);
-      setCurrentSession(null);
-      setPanelTabs([]);
-      setActivePanelTabId(null);
-    } catch (error) {
-      handleWorkspaceCatalogFailure(error, "切换工作区失败");
-    }
-  };
-
-  const handleSelectSession = async (sessionId: string) => {
-    let target = sessions.find((session) => session.id === sessionId);
-    if (!target) {
-      const fetched = sortSessions((await listSessions()).map(toUiSession));
-      setSessions(fetched);
-      target = fetched.find((session) => session.id === sessionId);
-    }
-    if (!target) return;
-    if (target.sessionKind !== "main") return;
-    if (target.cwd && normalizeRoot(target.cwd) !== normalizeRoot(activeWorkspaceRoot)) {
-      try {
-        const snapshot = await activateWorkspaceRoot(target.cwd);
-        setWorkspaceSnapshot(snapshot);
-        setPanelTabs([]);
-        setActivePanelTabId(null);
-      } catch (error) {
-        setHostError(errorMessage(error, "切换会话工作区失败"));
-        return;
-      }
-    }
-    setCurrentSession(sessionId);
-    setCompletedSessionIds((previous) => {
-      const next = new Set(previous);
-      next.delete(sessionId);
-      return next;
-    });
-    if (target.isUnread) {
-      setSessions((previous) => previous.map((session) => session.id === sessionId ? { ...session, isUnread: false } : session));
-      void updateSession(sessionId, { isUnread: false }).catch(() => undefined);
-    }
-    if (target.sessionKind === "main") {
-      void activateSession(sessionId, Date.now() * 1_000).catch(() => undefined);
-    }
-  };
-
-  const handleRenameSession = async (sessionId: string, title: string) => {
-    try {
-      const updated = toUiSession(await updateSession(sessionId, { title }));
-      setSessions((items) => sortSessions(items.map((session) => session.id === sessionId ? updated : session)));
-    } catch (error) {
-      setHostError(errorMessage(error, "重命名会话失败"));
-      throw error;
-    }
-  };
-
-  const handleDeleteSession = async (sessionId: string) => {
-    try {
-      const target = sessions.find((session) => session.id === sessionId);
-      if (!target) throw new Error(`删除目标会话不存在: ${sessionId}`);
-      const response = await deleteSession(sessionId);
-      if (response.deletedSessionId !== sessionId) {
-        throw new Error(`删除会话响应身份不匹配: ${response.deletedSessionId}`);
-      }
-      const deletedIds = new Set(
-        sessions
-          .filter((session) => session.id === sessionId || session.parentSessionId === sessionId)
-          .map((session) => session.id),
-      );
-      deletedIds.forEach((id) => sessionViewCacheStore.delete(id));
-      setPanelTabs((tabs) => {
-        const next = tabs.filter((tab) =>
-          tab.kind !== "agent"
-          || ((!tab.sessionId || !deletedIds.has(tab.sessionId))
-            && tab.parentSessionId !== sessionId),
-        );
-        if (activePanelTabId && !next.some((tab) => tab.id === activePanelTabId)) {
-          setActivePanelTabId(next.at(-1)?.id ?? null);
-        }
-        return next;
-      });
-      setRunningSessionIds((items) => {
-        const next = new Set(items);
-        deletedIds.forEach((id) => next.delete(id));
-        return next;
-      });
-      setCompletedSessionIds((items) => {
-        const next = new Set(items);
-        deletedIds.forEach((id) => next.delete(id));
-        return next;
-      });
-      await refreshSessions(
-        currentSessionIdRef.current && !deletedIds.has(currentSessionIdRef.current)
-          ? currentSessionIdRef.current
-          : null,
-      );
-    } catch (error) {
-      setHostError(errorMessage(error, "删除会话失败"));
-      throw error;
-    }
-  };
-
-  const handleSessionResolved = useCallback((session: UiSession, options?: { activate?: boolean }) => {
-    setSessions((items) => sortSessions([session, ...items.filter((item) => item.id !== session.id)]));
-    if (options?.activate) setCurrentSession(session.id);
-  }, [setCurrentSession]);
-
-  const handleRunningChange = useCallback((sessionId: string, running: boolean) => {
-    setRunningSessionIds((previous) => {
-      const next = new Set(previous);
-      if (running) next.add(sessionId);
-      else next.delete(sessionId);
-      return next;
-    });
-  }, []);
-
-  const handleSessionCompleted = useCallback((sessionId: string) => {
-    handleRunningChange(sessionId, false);
-    if (currentSessionIdRef.current !== sessionId) {
-      setCompletedSessionIds((previous) => new Set(previous).add(sessionId));
-      setSessions((items) => items.map((session) => session.id === sessionId ? { ...session, isUnread: true } : session));
-    }
-    void refreshSessions(currentSessionIdRef.current).catch(() => undefined);
-  }, [handleRunningChange, refreshSessions]);
-
-  const openFilePath = useCallback(async (
-    path: string,
-    options?: { startLine?: number; endLine?: number; taskId?: string },
-  ) => {
-    const normalizedPath = path.trim();
-    if (!normalizedPath || !activeWorkspaceRoot) return;
-    const tabId = `file:${normalizeRoot(activeWorkspaceRoot)}:${normalizedPath.replace(/\\/g, "/").toLowerCase()}`;
-    const loadingTab: SummaryPanelTab = {
-      id: tabId,
-      kind: "file",
-      title: fileName(normalizedPath),
-      path: normalizedPath,
-      targetLine: options?.startLine,
-      targetEndLine: options?.endLine,
-      loading: true,
-    };
-    setPanelTabs((tabs) => tabs.some((tab) => tab.id === tabId) ? tabs.map((tab) => tab.id === tabId ? loadingTab : tab) : [...tabs, loadingTab]);
-    setActivePanelTabId(tabId);
-    setIsFilePaneOpen(true);
-    try {
-      const file = await readDesktopFilePreview(normalizedPath, { workspaceRoot: activeWorkspaceRoot });
-      setPanelTabs((tabs) => tabs.map((tab) => tab.id === tabId ? {
-        ...loadingTab,
-        title: file.name || loadingTab.title,
-        path: file.path,
-        content: file.content,
-        contentKind: file.contentKind,
-        mimeType: file.mimeType,
-        dataUrl: file.dataUrl,
-        byteLen: file.byteLen,
-        loading: false,
-      } : tab));
-    } catch (error) {
-      setPanelTabs((tabs) => tabs.map((tab) => tab.id === tabId ? {
-        ...loadingTab,
-        loading: false,
-        error: errorMessage(error, "读取文件失败"),
-      } : tab));
-    }
-  }, [activeWorkspaceRoot]);
-
-  const openAgentSession = useCallback((sessionId: string, title: string) => {
-    const normalizedSessionId = sessionId.trim();
-    if (!normalizedSessionId) return;
-    const tabId = `agent:${normalizedSessionId}`;
-    setPanelTabs((tabs) => {
-      if (tabs.some((tab) => tab.id === tabId)) return tabs;
-      const child = sessions.find((session) => session.id === normalizedSessionId);
-      const parentSessionId = child?.parentSessionId || currentSession?.id;
-      const parent = sessions.find((session) => session.id === parentSessionId);
-      return [...tabs, {
-        id: tabId,
-        kind: "agent",
-        title: title.trim() || child?.title || "Agent",
-        sessionId: normalizedSessionId,
-        parentSessionId,
-        parentTitle: parent?.title || currentSession?.title || "主会话",
-      }];
-    });
-    setActivePanelTabId(tabId);
-    setIsFilePaneOpen(true);
-  }, [currentSession, sessions]);
-
-  const handleOpenFile = (entry: WorkspaceFileTreeEntry) => {
-    if (!entry.isDirectory) void openFilePath(entry.path);
-  };
-
-  const closePanelTab = (tabId: string) => {
-    setPanelTabs((tabs) => {
-      const index = tabs.findIndex((tab) => tab.id === tabId);
-      const next = tabs.filter((tab) => tab.id !== tabId);
-      if (activePanelTabId === tabId) {
-        setActivePanelTabId(next[Math.min(index, Math.max(next.length - 1, 0))]?.id ?? null);
-      }
-      return next;
-    });
-  };
+  const handleDeleteSession = useCallback(async (sessionId: string) => {
+    const deletedIds = await removeSession(sessionId);
+    removeAgentSessions(deletedIds);
+  }, [removeAgentSessions, removeSession]);
 
   const modalTitle = activeModal === "models"
     ? "Models"
@@ -529,7 +240,7 @@ function App() {
       : "Plugins";
 
   const chatWorkspaceRoot = currentSession?.cwd ?? activeWorkspaceRoot;
-  const isFilePaneVisible = isFilePaneOpen && panelTabs.length > 0;
+  const isFilePaneVisible = workspacePanel.isVisible;
 
   return (
     <div className={`thinAppShell ${isSidebarOpen ? "is-sidebar-open" : "is-sidebar-collapsed"}`}>
@@ -548,11 +259,11 @@ function App() {
           >
             <PanelLeft aria-hidden="true" />
           </button>
-          {!isFilePaneVisible && panelTabs.length > 0 ? (
+          {!isFilePaneVisible && workspacePanel.tabs.length > 0 ? (
             <button
               type="button"
               className="nativePanelToggle is-right"
-              onClick={() => setIsFilePaneOpen(true)}
+              onClick={workspacePanel.actions.show}
               aria-label="Show right sidebar"
               aria-expanded={false}
               title="Show right sidebar"
@@ -571,16 +282,16 @@ function App() {
           runningSessionIds={runningSessionIds}
           completedSessionIds={completedSessionIds}
           workspaceCatalogError={workspaceCatalogError}
-          onNewChat={() => setCurrentSession(null)}
+          onNewChat={clearSelection}
           onOpenWorkspace={(mode) => void handleOpenWorkspace(mode)}
           onSelectWorkspace={(root) => void handleSelectWorkspace(root)}
-          onRetryWorkspaceCatalog={handleRetryWorkspaceCatalog}
+          onRetryWorkspaceCatalog={retryCatalog}
           onResetWorkspaceCatalog={handleResetWorkspaceCatalog}
           onSelectSession={(sessionId) => void handleSelectSession(sessionId)}
-          onRenameSession={handleRenameSession}
+          onRenameSession={renameSession}
           onDeleteSession={handleDeleteSession}
           onOpenResource={setActiveModal}
-          onOpenFile={handleOpenFile}
+          onOpenFile={workspacePanel.actions.openFile}
         />
       </div>
       <div className="thinWorkspaceShell">
@@ -609,26 +320,26 @@ function App() {
                 gitStatusError={gitStatusError}
                 githubCliStatus={githubCliStatus}
                 runtimeConfigRevision={runtimeConfigRevision}
-                onOpenWorkspacePath={openFilePath}
-                onOpenAgentSession={openAgentSession}
-                onNewSession={() => setCurrentSession(null)}
+                onOpenWorkspacePath={workspacePanel.actions.openFilePath}
+                onOpenAgentSession={workspacePanel.actions.openAgentSession}
+                onNewSession={clearSelection}
                 onOpenResource={setActiveModal}
-                onSessionResolved={handleSessionResolved}
-                onAgentRunningChange={handleRunningChange}
-                onSessionCompleted={handleSessionCompleted}
+                onSessionResolved={resolveSession}
+                onAgentRunningChange={setRunning}
+                onSessionCompleted={completeSession}
               />
             )}
           </main>
 
           <aside className={`thinFilePane ${isFilePaneVisible ? "is-open" : ""}`} aria-label="Preview" aria-hidden={!isFilePaneVisible}>
-            {panelTabs.length > 0 ? (
+            {workspacePanel.tabs.length > 0 ? (
               <SummaryPanel
-                tabs={panelTabs}
-                activeTabId={activePanelTabId}
-                onSelectTab={setActivePanelTabId}
-                onCloseTab={closePanelTab}
-                onCollapse={() => setIsFilePaneOpen(false)}
-                onOpenWorkspacePath={openFilePath}
+                tabs={workspacePanel.tabs}
+                activeTabId={workspacePanel.activeTabId}
+                onSelectTab={workspacePanel.actions.selectTab}
+                onCloseTab={workspacePanel.actions.closeTab}
+                onCollapse={workspacePanel.actions.collapse}
+                onOpenWorkspacePath={workspacePanel.actions.openFilePath}
               />
             ) : null}
           </aside>
