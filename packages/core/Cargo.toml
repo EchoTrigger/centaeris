@@ -1,0 +1,36 @@
+[package]
+name = "centaeris-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Centaeris host-agnostic agent runtime framework"
+
+[lints]
+workspace = true
+
+[lib]
+name = "centaeris_core"
+path = "src/lib.rs"
+
+[dependencies]
+base64.workspace = true
+centaeris-model-catalog.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+image.workspace = true
+unicode-normalization.workspace = true
+url.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tree-sitter.workspace = true
+tree-sitter-bash.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Threading"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true

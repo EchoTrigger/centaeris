@@ -1,0 +1,32 @@
+{
+  "name": "@centaeris/electron-host",
+  "productName": "Centaeris Desktop",
+  "version": "1.0.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EchoTrigger/centaeris.git",
+    "directory": "packages/desktop"
+  },
+  "type": "module",
+  "main": "src/main.mjs",
+  "scripts": {
+    "dev": "node ./scripts/ensure-runtime.mjs --profile debug && electron ./src/main.mjs",
+    "install:electron": "node ./scripts/ensure-electron.mjs",
+    "prebuild": "node ./scripts/ensure-electron.mjs",
+    "build": "npm run build:runtime && node ./scripts/build-dist.mjs",
+    "build:runtime": "cargo build --locked --release -p centaeris-runtime",
+    "check": "node --check ./scripts/ensure-runtime.mjs && node --check ./src/hostContract.mjs && node --check ./src/hostIpc.mjs && node --check ./src/localShellActions.mjs && node --check ./src/defaultWorkspace.mjs && node --check ./src/main.mjs && node --check ./src/preload.cjs && node --check ./src/rendererSecurity.mjs && node --check ./src/runtimeHostTransport.mjs && node --check ./src/systemSkills.mjs && node --check ./src/tray.mjs && node --check ./src/windowShell.mjs && node --check ./scripts/smoke-runtime.mjs && node --check ./scripts/smoke-window.mjs && node --check ./scripts/check-host-parity.mjs && node --test ./src/defaultWorkspace.test.mjs ./src/rendererSecurity.test.mjs ./src/runtimeHostTransport.test.mjs ./src/systemSkills.test.mjs && node ./scripts/check-host-parity.mjs",
+    "check:host-parity": "node ./scripts/check-host-parity.mjs",
+    "check:dist-licenses": "node ./scripts/check-dist-licenses.mjs --dist \"./dist/Centaeris Desktop\"",
+    "test:third-party-licenses": "node --test ./scripts/third-party-licenses.test.mjs",
+    "smoke:runtime": "node ./scripts/ensure-runtime.mjs && node ./scripts/smoke-runtime.mjs",
+    "presmoke:window": "node ./scripts/ensure-electron.mjs",
+    "smoke:window": "node ./scripts/build-dist.mjs && node ./scripts/smoke-window.mjs"
+  },
+  "devDependencies": {
+    "electron": "42.10.1",
+    "resedit": "3.0.2"
+  }
+}

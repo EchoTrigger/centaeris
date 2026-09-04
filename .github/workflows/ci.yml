@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust gate
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Show locked toolchains
+        shell: pwsh
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Run Rust gate
+        shell: pwsh
+        run: |
+          $gitBash = Join-Path $env:ProgramFiles "Git\bin\bash.exe"
+          if (-not (Test-Path -LiteralPath $gitBash)) {
+            throw "Git Bash is required at $gitBash"
+          }
+
+          $env:PATH = "$(Split-Path -Parent $gitBash);$env:PATH"
+          $env:CENTAERIS_TEST_BASH_PATH = $gitBash
+          $resolvedBash = (Get-Command bash.exe -CommandType Application | Select-Object -First 1).Source
+          if ($resolvedBash -ine $gitBash) {
+            throw "Expected Git Bash at $gitBash, resolved $resolvedBash"
+          }
+
+          & $gitBash --version
+          .\scripts\ci.ps1 Rust
+
+  node:
+    name: UI and Electron host gate
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.21.0
+          cache: npm
+
+      - name: Show locked toolchain
+        shell: pwsh
+        run: |
+          node --version
+          npm --version
+
+      - name: Run UI and Electron host gate
+        shell: pwsh
+        run: .\scripts\ci.ps1 Node

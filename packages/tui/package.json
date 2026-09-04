@@ -1,0 +1,9 @@
+{
+  "name": "@centaeris/tui-local",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "centa": "./centa.mjs"
+  }
+}

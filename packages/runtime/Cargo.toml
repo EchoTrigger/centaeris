@@ -1,0 +1,49 @@
+[package]
+name = "centaeris-runtime"
+version.workspace = true
+description = "Centaeris shared local Runtime Host"
+authors = ["EchoTrigger"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+default-run = "centaeris-runtime"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "centaeris-runtime"
+path = "src/main.rs"
+
+[[bin]]
+name = "centaeris-package-catalog"
+path = "src/bin/package_catalog.rs"
+
+[[bin]]
+name = "centaeris-mcp-contract"
+path = "src/bin/mcp_contract.rs"
+
+[dependencies]
+base64.workspace = true
+chrono.workspace = true
+fs2.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+centaeris-core.workspace = true
+centaeris-mcp.workspace = true
+centaeris-runtime-sqlite.workspace = true
+rmcp.workspace = true
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "sync"] }
+toml.workspace = true
+zstd.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Threading"] }
