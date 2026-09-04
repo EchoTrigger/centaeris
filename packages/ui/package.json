@@ -1,0 +1,55 @@
+{
+  "name": "centaeris-ui",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EchoTrigger/centaeris.git",
+    "directory": "packages/ui"
+  },
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "node ./scripts/build.mjs --mode build",
+    "gate": "node ./scripts/build.mjs --mode gate && vitest run",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "node ./scripts/build.mjs --mode typecheck"
+  },
+  "dependencies": {
+    "@codemirror/commands": "6.10.3",
+    "@codemirror/lang-cpp": "6.0.3",
+    "@codemirror/lang-css": "6.3.1",
+    "@codemirror/lang-html": "6.4.11",
+    "@codemirror/lang-java": "6.0.2",
+    "@codemirror/lang-javascript": "6.2.5",
+    "@codemirror/lang-json": "6.0.2",
+    "@codemirror/lang-python": "6.2.1",
+    "@codemirror/lang-rust": "6.0.2",
+    "@codemirror/language": "6.12.3",
+    "@codemirror/state": "6.6.0",
+    "@codemirror/view": "6.42.0",
+    "@radix-ui/react-slot": "1.2.4",
+    "@tailwindcss/postcss": "4.2.4",
+    "@tailwindcss/vite": "4.2.4",
+    "@tanstack/react-virtual": "3.14.2",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "lucide-react": "1.11.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "tailwind-merge": "3.5.0",
+    "tailwindcss": "4.2.4",
+    "zustand": "5.0.14"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.2",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "5.2.0",
+    "typescript": "7.0.2",
+    "vite": "8.1.5",
+    "vitest": "4.1.10"
+  }
+}

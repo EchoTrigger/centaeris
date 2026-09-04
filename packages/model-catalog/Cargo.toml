@@ -1,0 +1,20 @@
+[package]
+name = "centaeris-model-catalog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Centaeris provider and model catalog"
+include = ["src/**", "centaeris_model_catalog/catalog.json"]
+
+[lints]
+workspace = true
+
+[lib]
+name = "centaeris_model_catalog"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

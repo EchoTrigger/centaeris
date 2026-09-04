@@ -1,0 +1,24 @@
+[package]
+name = "centaeris-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+centaeris-core.workspace = true
+futures.workspace = true
+reqwest = { version = "=0.13.4", default-features = false, features = ["json", "stream"] }
+rmcp.workspace = true
+serde_json.workspace = true
+sse-stream.workspace = true
+tokio = { workspace = true, features = ["io-util", "process", "sync", "time"] }
+
+[dev-dependencies]
+axum = { workspace = true, features = ["http1", "tokio"] }
+rmcp = { workspace = true, features = ["macros", "server", "transport-streamable-http-server"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt"] }

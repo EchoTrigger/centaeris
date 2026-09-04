@@ -1,0 +1,217 @@
+{
+  "schema": "centaeris.model_catalog.v1",
+  "providers": [
+    {
+      "providerId": "openai.default",
+      "catalogId": "openai",
+      "displayName": "OpenAI",
+      "providerKind": "open_ai",
+      "api": "openai-responses",
+      "apiBase": "https://api.openai.com/v1",
+      "credential": { "env": "OPENAI_API_KEY", "header": "authorization", "prefix": "Bearer" },
+      "httpHeaders": {},
+      "models": [
+        { "model": "gpt-5.6-sol", "displayName": "GPT-5.6 Sol", "contextTokens": 272000, "maxOutputTokens": 128000, "thinkingMode": "high", "thinkingModes": ["none", "low", "medium", "high", "xhigh", "max"], "supportsVision": true, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "gpt-5.6-terra", "displayName": "GPT-5.6 Terra", "contextTokens": 272000, "maxOutputTokens": 128000, "thinkingMode": "high", "thinkingModes": ["none", "low", "medium", "high", "xhigh", "max"], "supportsVision": true, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "gpt-5.6-luna", "displayName": "GPT-5.6 Luna", "contextTokens": 272000, "maxOutputTokens": 128000, "thinkingMode": "high", "thinkingModes": ["none", "low", "medium", "high", "xhigh", "max"], "supportsVision": true, "apiOverride": null, "apiBaseOverride": null }
+      ]
+    },
+    {
+      "providerId": "anthropic.default",
+      "catalogId": "anthropic",
+      "displayName": "Anthropic",
+      "providerKind": "anthropic",
+      "api": "anthropic-messages",
+      "apiBase": "https://api.anthropic.com/v1",
+      "credential": { "env": "ANTHROPIC_API_KEY", "header": "x-api-key", "prefix": null },
+      "httpHeaders": { "anthropic-version": "2023-06-01" },
+      "models": [
+        { "model": "claude-opus-5", "displayName": "Opus 5", "contextTokens": 1000000, "maxOutputTokens": 128000, "thinkingMode": "high", "thinkingModes": ["low", "medium", "high", "xhigh", "max"], "supportsVision": true, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "claude-sonnet-5", "displayName": "Sonnet 5", "contextTokens": 1000000, "maxOutputTokens": 128000, "thinkingMode": "high", "thinkingModes": ["low", "medium", "high", "xhigh", "max"], "supportsVision": true, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "claude-fable-5", "displayName": "Fable 5", "contextTokens": 1000000, "maxOutputTokens": 128000, "thinkingMode": "high", "thinkingModes": ["low", "medium", "high", "xhigh", "max"], "supportsVision": true, "apiOverride": null, "apiBaseOverride": null }
+      ]
+    },
+    {
+      "providerId": "deepseek.default",
+      "catalogId": "deepseek",
+      "displayName": "DeepSeek",
+      "providerKind": "deep_seek",
+      "api": "openai-completions",
+      "apiBase": "https://api.deepseek.com",
+      "credential": { "env": "DEEPSEEK_API_KEY", "header": "authorization", "prefix": "Bearer" },
+      "httpHeaders": {},
+      "models": [
+        { "model": "deepseek-v4-pro", "displayName": "DeepSeek V4 Pro", "contextTokens": 1000000, "maxOutputTokens": 384000, "thinkingMode": "high", "thinkingModes": ["high", "max"], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "deepseek-v4-flash", "displayName": "DeepSeek V4 Flash", "contextTokens": 1000000, "maxOutputTokens": 384000, "thinkingMode": "high", "thinkingModes": ["low", "high", "max"], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null }
+      ]
+    },
+    {
+      "providerId": "kimi-code.default",
+      "catalogId": "kimi_code",
+      "displayName": "Kimi Code",
+      "providerKind": "kimi",
+      "api": "openai-completions",
+      "apiBase": "https://api.kimi.com/coding/v1",
+      "credential": { "env": "KIMI_CODE_API_KEY", "header": "authorization", "prefix": "Bearer" },
+      "httpHeaders": {},
+      "models": [
+        { "model": "k3", "displayName": "Kimi K3", "contextTokens": 1048576, "maxOutputTokens": 131072, "thinkingMode": "high", "thinkingModes": ["low", "high", "max"], "supportsVision": true, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "kimi-for-coding", "displayName": "Kimi K2.7 Code", "contextTokens": 262144, "maxOutputTokens": 131072, "thinkingMode": "preserved", "thinkingModes": [], "supportsVision": true, "apiOverride": null, "apiBaseOverride": null }
+      ]
+    },
+    {
+      "providerId": "moonshot.default",
+      "catalogId": "moonshot",
+      "displayName": "Moonshot AI",
+      "providerKind": "kimi",
+      "api": "openai-completions",
+      "apiBase": "https://api.moonshot.ai/v1",
+      "credential": { "env": "MOONSHOT_API_KEY", "header": "authorization", "prefix": "Bearer" },
+      "httpHeaders": {},
+      "models": [
+        { "model": "kimi-k3", "displayName": "Kimi K3", "contextTokens": 1048576, "maxOutputTokens": 131072, "thinkingMode": "high", "thinkingModes": ["low", "high", "max"], "supportsVision": true, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "kimi-k2.7-code", "displayName": "Kimi K2.7 Code", "contextTokens": 262144, "maxOutputTokens": 131072, "thinkingMode": null, "thinkingModes": [], "supportsVision": true, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "kimi-k2.6", "displayName": "Kimi K2.6", "contextTokens": 262144, "maxOutputTokens": 131072, "thinkingMode": null, "thinkingModes": [], "supportsVision": true, "apiOverride": null, "apiBaseOverride": null }
+      ]
+    },
+    {
+      "providerId": "kimi.default",
+      "catalogId": "moonshot_cn",
+      "displayName": "Moonshot AI CN",
+      "providerKind": "kimi",
+      "api": "openai-completions",
+      "apiBase": "https://api.moonshot.cn/v1",
+      "credential": { "env": "KIMI_API_KEY", "header": "authorization", "prefix": "Bearer" },
+      "httpHeaders": {},
+      "models": [
+        { "model": "kimi-k3", "displayName": "Kimi K3", "contextTokens": 1048576, "maxOutputTokens": 131072, "thinkingMode": "high", "thinkingModes": ["low", "high", "max"], "supportsVision": true, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "kimi-k2.7-code", "displayName": "Kimi K2.7 Code", "contextTokens": 262144, "maxOutputTokens": 131072, "thinkingMode": null, "thinkingModes": [], "supportsVision": true, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "kimi-k2.6", "displayName": "Kimi K2.6", "contextTokens": 262144, "maxOutputTokens": 131072, "thinkingMode": null, "thinkingModes": [], "supportsVision": true, "apiOverride": null, "apiBaseOverride": null }
+      ]
+    },
+    {
+      "providerId": "minimax.default",
+      "catalogId": "minimax",
+      "displayName": "MiniMax",
+      "providerKind": "custom",
+      "api": "anthropic-messages",
+      "apiBase": "https://api.minimax.io/anthropic",
+      "credential": { "env": "MINIMAX_API_KEY", "header": "x-api-key", "prefix": null },
+      "httpHeaders": { "anthropic-version": "2023-06-01" },
+      "models": [
+        { "model": "MiniMax-M3", "displayName": "MiniMax M3", "contextTokens": 1000000, "maxOutputTokens": 128000, "thinkingMode": null, "thinkingModes": [], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "MiniMax-M2.7", "displayName": "MiniMax M2.7", "contextTokens": 204800, "maxOutputTokens": 131072, "thinkingMode": null, "thinkingModes": [], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "MiniMax-M2.7-highspeed", "displayName": "MiniMax M2.7 Highspeed", "contextTokens": 204800, "maxOutputTokens": 131072, "thinkingMode": null, "thinkingModes": [], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null }
+      ]
+    },
+    {
+      "providerId": "minimax-cn.default",
+      "catalogId": "minimax_cn",
+      "displayName": "MiniMax CN",
+      "providerKind": "custom",
+      "api": "anthropic-messages",
+      "apiBase": "https://api.minimaxi.com/anthropic",
+      "credential": { "env": "MINIMAX_CN_API_KEY", "header": "x-api-key", "prefix": null },
+      "httpHeaders": { "anthropic-version": "2023-06-01" },
+      "models": [
+        { "model": "MiniMax-M3", "displayName": "MiniMax M3", "contextTokens": 1000000, "maxOutputTokens": 128000, "thinkingMode": null, "thinkingModes": [], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "MiniMax-M2.7", "displayName": "MiniMax M2.7", "contextTokens": 204800, "maxOutputTokens": 131072, "thinkingMode": null, "thinkingModes": [], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "MiniMax-M2.7-highspeed", "displayName": "MiniMax M2.7 Highspeed", "contextTokens": 204800, "maxOutputTokens": 131072, "thinkingMode": null, "thinkingModes": [], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null }
+      ]
+    },
+    {
+      "providerId": "opencode-go.default",
+      "catalogId": "opencode_zen_go",
+      "displayName": "OpenCode Go",
+      "providerKind": "custom",
+      "api": "openai-completions",
+      "apiBase": "https://opencode.ai/zen/go/v1",
+      "credential": { "env": "OPENCODE_API_KEY", "header": "authorization", "prefix": "Bearer" },
+      "httpHeaders": {},
+      "models": [
+        { "model": "gpt-5.6-luna", "displayName": "GPT-5.6 Luna", "contextTokens": 1050000, "maxOutputTokens": 128000, "thinkingMode": "high", "thinkingModes": ["low", "medium", "high", "xhigh", "max"], "supportsVision": true, "apiOverride": "openai-responses", "apiBaseOverride": null },
+        { "model": "glm-5.3", "displayName": "GLM-5.3", "contextTokens": 1000000, "maxOutputTokens": 131072, "thinkingMode": "high", "thinkingModes": ["low", "high", "max"], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "kimi-k3", "displayName": "Kimi K3", "contextTokens": 1048576, "maxOutputTokens": 131072, "thinkingMode": "max", "thinkingModes": ["max"], "supportsVision": true, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "kimi-k2.7-code", "displayName": "Kimi K2.7 Code", "contextTokens": 262144, "maxOutputTokens": 131072, "thinkingMode": null, "thinkingModes": [], "supportsVision": true, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "deepseek-v4-pro", "displayName": "DeepSeek V4 Pro", "contextTokens": 1000000, "maxOutputTokens": 384000, "thinkingMode": "high", "thinkingModes": ["high", "max"], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "deepseek-v4-flash", "displayName": "DeepSeek V4 Flash", "contextTokens": 1000000, "maxOutputTokens": 384000, "thinkingMode": "high", "thinkingModes": ["low", "high", "max"], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "minimax-m3", "displayName": "MiniMax M3", "contextTokens": 1000000, "maxOutputTokens": 128000, "thinkingMode": null, "thinkingModes": [], "supportsVision": false, "apiOverride": "anthropic-messages", "apiBaseOverride": "https://opencode.ai/zen/go" },
+        { "model": "qwen3.8-max", "displayName": "Qwen 3.8 Max", "contextTokens": 1000000, "maxOutputTokens": 131072, "thinkingMode": null, "thinkingModes": [], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "mimo-v2.5-pro", "displayName": "MiMo V2.5 Pro", "contextTokens": 1048576, "maxOutputTokens": 128000, "thinkingMode": null, "thinkingModes": [], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null }
+      ]
+    },
+    {
+      "providerId": "qwen.default",
+      "catalogId": "qwen",
+      "displayName": "Qwen Token Plan",
+      "providerKind": "custom",
+      "api": "openai-completions",
+      "apiBase": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+      "credential": { "env": "QWEN_API_KEY", "header": "authorization", "prefix": "Bearer" },
+      "httpHeaders": {},
+      "models": [
+        { "model": "qwen3.8-max", "displayName": "Qwen 3.8 Max", "contextTokens": 1000000, "maxOutputTokens": 131072, "thinkingMode": null, "thinkingModes": ["low", "medium", "xhigh"], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "qwen3.7-plus", "displayName": "Qwen 3.7 Plus", "contextTokens": 1000000, "maxOutputTokens": 65536, "thinkingMode": null, "thinkingModes": [], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "qwen3.7-max", "displayName": "Qwen 3.7 Max", "contextTokens": 1000000, "maxOutputTokens": 131072, "thinkingMode": null, "thinkingModes": [], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null }
+      ]
+    },
+    {
+      "providerId": "qwen-cn.default",
+      "catalogId": "qwen_cn",
+      "displayName": "Qwen Token Plan CN",
+      "providerKind": "custom",
+      "api": "openai-completions",
+      "apiBase": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      "credential": { "env": "QWEN_CN_API_KEY", "header": "authorization", "prefix": "Bearer" },
+      "httpHeaders": {},
+      "models": [
+        { "model": "qwen3.8-max", "displayName": "Qwen 3.8 Max", "contextTokens": 1000000, "maxOutputTokens": 131072, "thinkingMode": null, "thinkingModes": ["low", "medium", "xhigh"], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "qwen3.7-plus", "displayName": "Qwen 3.7 Plus", "contextTokens": 1000000, "maxOutputTokens": 65536, "thinkingMode": null, "thinkingModes": [], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "qwen3.7-max", "displayName": "Qwen 3.7 Max", "contextTokens": 1000000, "maxOutputTokens": 131072, "thinkingMode": null, "thinkingModes": [], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null }
+      ]
+    },
+    {
+      "providerId": "xiaomi.default",
+      "catalogId": "xiaomi",
+      "displayName": "Xiaomi",
+      "providerKind": "custom",
+      "api": "openai-completions",
+      "apiBase": "https://api.xiaomimimo.com/v1",
+      "credential": { "env": "XIAOMI_API_KEY", "header": "authorization", "prefix": "Bearer" },
+      "httpHeaders": {},
+      "models": [
+        { "model": "mimo-v2.5-pro", "displayName": "MiMo V2.5 Pro", "contextTokens": 1048576, "maxOutputTokens": 131072, "thinkingMode": null, "thinkingModes": [], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "mimo-v2.5", "displayName": "MiMo V2.5", "contextTokens": 1048576, "maxOutputTokens": 131072, "thinkingMode": null, "thinkingModes": [], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null }
+      ]
+    },
+    {
+      "providerId": "zai.default",
+      "catalogId": "zai",
+      "displayName": "Z.AI",
+      "providerKind": "zai",
+      "api": "openai-completions",
+      "apiBase": "https://api.z.ai/api/coding/paas/v4",
+      "credential": { "env": "ZAI_API_KEY", "header": "authorization", "prefix": "Bearer" },
+      "httpHeaders": {},
+      "models": [
+        { "model": "glm-5.3", "displayName": "GLM-5.3", "contextTokens": 1000000, "maxOutputTokens": 131072, "thinkingMode": "high", "thinkingModes": ["low", "high", "max"], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "glm-5.2-highspeed", "displayName": "GLM-5.2 Highspeed", "contextTokens": 1000000, "maxOutputTokens": 131072, "thinkingMode": "high", "thinkingModes": ["none", "high", "max"], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null }
+      ]
+    },
+    {
+      "providerId": "zai-coding-cn.default",
+      "catalogId": "zai_coding_cn",
+      "displayName": "Z.AI Coding CN",
+      "providerKind": "zai",
+      "api": "openai-completions",
+      "apiBase": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "credential": { "env": "ZAI_CODING_CN_API_KEY", "header": "authorization", "prefix": "Bearer" },
+      "httpHeaders": {},
+      "models": [
+        { "model": "glm-5.2", "displayName": "GLM-5.2", "contextTokens": 1000000, "maxOutputTokens": 131072, "thinkingMode": "high", "thinkingModes": ["none", "high", "max"], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "glm-5-turbo", "displayName": "GLM-5 Turbo", "contextTokens": 200000, "maxOutputTokens": 131072, "thinkingMode": null, "thinkingModes": [], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null },
+        { "model": "glm-4.7", "displayName": "GLM-4.7", "contextTokens": 204800, "maxOutputTokens": 131072, "thinkingMode": null, "thinkingModes": [], "supportsVision": false, "apiOverride": null, "apiBaseOverride": null }
+      ]
+    }
+  ]
+}
