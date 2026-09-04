@@ -175,10 +175,6 @@ export function CodePreview({ content, path, targetLine, targetEndLine, variant 
     }
     const view = new EditorView({
       parent: container,
-      state: EditorState.create({
-        doc: content,
-        extensions,
-      }),
     });
     viewRef.current = view;
     return () => {
@@ -193,12 +189,8 @@ export function CodePreview({ content, path, targetLine, targetEndLine, variant 
       return;
     }
     view.setState(EditorState.create({ doc: content, extensions }));
-  }, [content, extensions]);
-
-  useEffect(() => {
-    const view = viewRef.current;
     const startLine = normalizeTargetLine(targetLine);
-    if (!view || !startLine) {
+    if (!startLine) {
       return;
     }
     const safeStart = Math.min(startLine, view.state.doc.lines);
@@ -207,7 +199,7 @@ export function CodePreview({ content, path, targetLine, targetEndLine, variant 
       selection: { anchor: line.from },
       effects: EditorView.scrollIntoView(line.from, { y: "center" }),
     });
-  }, [content, targetLine, targetEndLine]);
+  }, [content, extensions, targetLine]);
 
   return <div className={`summaryCodePreview ${variant === "diff" ? "is-diff" : ""}`} ref={containerRef} />;
 }

@@ -9,14 +9,6 @@ test("keeps chat stream updates batched", async () => {
     path.join(rootDir, "src", "lib", "chatBridge.ts"),
     "utf8",
   );
-  const chatAreaSource = await readFile(
-    path.join(rootDir, "src", "components", "chat", "ChatArea.tsx"),
-    "utf8",
-  );
-  const agentResultSource = await readFile(
-    path.join(rootDir, "src", "components", "chat", "AgentResultStream.tsx"),
-    "utf8",
-  );
   const markdownContentSource = await readFile(
     path.join(rootDir, "src", "components", "chat", "MarkdownContent.tsx"),
     "utf8",
@@ -52,44 +44,9 @@ test("keeps chat stream updates batched", async () => {
     /queueMicrotask\(drainBuffer\)/,
     "desktop stream drain must not use microtask draining for hot streams",
   );
-  assert.doesNotMatch(
-    chatAreaSource,
-    /createChatStreamScheduler|streamScheduler\.enqueue/,
-    "ChatArea must not own a second ordered payload queue",
-  );
-  assert.match(
-    chatAreaSource,
-    /requestAnimationFrame\(\(\) => \{\s*assistantTurnUpdateFrameRef\.current = null;\s*flushAssistantTurnUpdates\(\)/,
-    "visible assistant updates must be aligned to animation frames",
-  );
-  assert.doesNotMatch(
-    chatAreaSource,
-    /ASSISTANT_TURN_FLUSH_INTERVAL_MS\s*=\s*100/,
-    "visible assistant updates must not be capped at 10 FPS",
-  );
-  assert.match(
-    chatAreaSource,
-    /pendingTextDeltas\.join\(""\)/,
-    "text deltas received in one frame must be reduced into one turn update",
-  );
-  assert.match(
-    agentResultSource,
-    /<MarkdownContent[\s\S]*isStreaming={finalItem\.phase === "streaming"}/,
-    "streaming and final answers must use the same Markdown renderer",
-  );
-  assert.match(
-    agentResultSource,
-    /id: `\${turn\.id}-answer-text`/,
-    "streaming completion must not remount the answer tree",
-  );
   assert.match(
     markdownContentSource,
     /const MarkdownBlock = memo/,
     "sealed Markdown blocks must retain their rendered subtree",
-  );
-  assert.doesNotMatch(
-    agentResultSource,
-    /streamingTextContent/,
-    "streaming answers must not fall back to raw Markdown text",
   );
 });

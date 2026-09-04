@@ -12,7 +12,10 @@
   "scripts": {
     "dev": "vite",
     "build": "node ./scripts/build.mjs --mode build",
-    "gate": "node ./scripts/build.mjs --mode gate && vitest run",
+    "gate": "node ./scripts/build.mjs --mode gate && npm run lint && vitest run",
+    "lint": "npm --prefix ../.. run lint:ui",
+    "lint:hooks": "npm --prefix ../.. run lint:hooks",
+    "lint:unused": "npm --prefix ../.. run lint:unused",
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "node ./scripts/build.mjs --mode typecheck"
@@ -47,7 +50,9 @@
     "@types/node": "24.12.2",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
+    "@types/react-test-renderer": "19.1.0",
     "@vitejs/plugin-react": "5.2.0",
+    "react-test-renderer": "19.2.7",
     "typescript": "7.0.2",
     "vite": "8.1.5",
     "vitest": "4.1.10"
