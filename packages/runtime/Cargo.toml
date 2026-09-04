@@ -24,6 +24,10 @@ path = "src/bin/package_catalog.rs"
 name = "centaeris-mcp-contract"
 path = "src/bin/mcp_contract.rs"
 
+[[bin]]
+name = "centaeris-runtime-protocol-docs"
+path = "src/bin/runtime_protocol_docs.rs"
+
 [dependencies]
 base64.workspace = true
 chrono.workspace = true

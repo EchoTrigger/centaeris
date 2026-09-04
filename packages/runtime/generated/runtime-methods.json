@@ -1,0 +1,516 @@
+{
+  "methods": [
+    {
+      "name": "agent_context_usage_get",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "_centaeris/session/compact_context",
+      "operationKind": "oneShotAction",
+      "reconcileMethod": null,
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "agent_dead_letter_dismiss",
+      "operationKind": "identityMutation",
+      "reconcileMethod": "agent_dead_letter_get",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "agent_dead_letter_get",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "agent_dead_letter_list",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "agent_dead_letter_replay",
+      "operationKind": "identityMutation",
+      "reconcileMethod": "agent_dead_letter_get",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "_centaeris/session/activate",
+      "operationKind": "desiredStateWrite",
+      "reconcileMethod": "workspace_get",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "_centaeris/session/answer_now",
+      "operationKind": "oneShotAction",
+      "reconcileMethod": null,
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "_centaeris/session/answer_question",
+      "operationKind": "oneShotAction",
+      "reconcileMethod": null,
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "_centaeris/session/delete",
+      "operationKind": "identityMutation",
+      "reconcileMethod": "session/list",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "_centaeris/session/diagnostics",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "_centaeris/session/project",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "_centaeris/session/reorder",
+      "operationKind": "desiredStateWrite",
+      "reconcileMethod": "session/list",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "_centaeris/session/agent-runs",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "_centaeris/session/agent-runs/replay",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "_centaeris/session/agent-runs/attach",
+      "operationKind": "identityMutation",
+      "reconcileMethod": null,
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "_centaeris/session/agent-runs/detach",
+      "operationKind": "identityMutation",
+      "reconcileMethod": null,
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "_centaeris/session/agent-runs/detach-viewer",
+      "operationKind": "identityMutation",
+      "reconcileMethod": null,
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "_centaeris/session/agent-runs/cancel",
+      "operationKind": "identityMutation",
+      "reconcileMethod": "_centaeris/session/agent-runs",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "_centaeris/session/supplement",
+      "operationKind": "oneShotAction",
+      "reconcileMethod": null,
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "_centaeris/session/update_metadata",
+      "operationKind": "desiredStateWrite",
+      "reconcileMethod": "session/load",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "agent_runtime_config_get",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "agent_runtime_config_reset",
+      "operationKind": "desiredStateWrite",
+      "reconcileMethod": "agent_runtime_config_get",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "agent_runtime_config_set",
+      "operationKind": "desiredStateWrite",
+      "reconcileMethod": "agent_runtime_config_get",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "agent_runtime_model_test",
+      "operationKind": "oneShotAction",
+      "reconcileMethod": null,
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "mcp/catalog",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "mcp/configure",
+      "operationKind": "desiredStateWrite",
+      "reconcileMethod": "mcp/catalog",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "agent_runtime_garbage_collect",
+      "operationKind": "oneShotAction",
+      "reconcileMethod": null,
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "agent_runtime_job_get",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "agent_runtime_job_list",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "agent_state_get",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "transcript/project",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "plugin/catalog_state",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "skill/source/list",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "skill/source/add",
+      "operationKind": "creation",
+      "reconcileMethod": "skill/source/list",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "skill/source/remove",
+      "operationKind": "identityMutation",
+      "reconcileMethod": "skill/source/list",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "skill/source/set_enabled",
+      "operationKind": "desiredStateWrite",
+      "reconcileMethod": "skill/source/list",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "skill/source/ref",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "skill/catalog",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "skill/detail",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "skill/set_enabled",
+      "operationKind": "desiredStateWrite",
+      "reconcileMethod": "skill/detail",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "skill/reload",
+      "operationKind": "oneShotAction",
+      "reconcileMethod": "skill/catalog",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "plugin/detail",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "plugin/list",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "plugin/reload",
+      "operationKind": "oneShotAction",
+      "reconcileMethod": "plugin/catalog_state",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "plugin/set_enabled",
+      "operationKind": "desiredStateWrite",
+      "reconcileMethod": "plugin/detail",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "plugin/source_ref",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "session/list",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "session/load",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "session/new",
+      "operationKind": "creation",
+      "reconcileMethod": "session/new",
+      "retryPolicy": "sameOperationId",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "session/prompt",
+      "operationKind": "creation",
+      "reconcileMethod": "session/prompt",
+      "retryPolicy": "sameOperationId",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "process_capture",
+      "operationKind": "oneShotAction",
+      "reconcileMethod": null,
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "executionHost"
+    },
+    {
+      "name": "sidecar_list",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "executionHost"
+    },
+    {
+      "name": "sidecar_start",
+      "operationKind": "creation",
+      "reconcileMethod": "sidecar_list",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "executionHost"
+    },
+    {
+      "name": "sidecar_stop",
+      "operationKind": "identityMutation",
+      "reconcileMethod": "sidecar_list",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "executionHost"
+    },
+    {
+      "name": "workspace_file_tree",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "executionHost"
+    },
+    {
+      "name": "workspace_read_file",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "executionHost"
+    },
+    {
+      "name": "app_exit",
+      "operationKind": "oneShotAction",
+      "reconcileMethod": null,
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "hostSurface"
+    },
+    {
+      "name": "desktop_file_preview_read",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "hostSurface"
+    },
+    {
+      "name": "initialize",
+      "operationKind": "desiredStateWrite",
+      "reconcileMethod": null,
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "hostSurface"
+    },
+    {
+      "name": "plugin/install",
+      "operationKind": "creation",
+      "reconcileMethod": "plugin/list",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "hostSurface"
+    },
+    {
+      "name": "plugin/remove",
+      "operationKind": "identityMutation",
+      "reconcileMethod": "plugin/list",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "hostSurface"
+    },
+    {
+      "name": "workspace_activate",
+      "operationKind": "desiredStateWrite",
+      "reconcileMethod": "workspace_get",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "hostSurface"
+    },
+    {
+      "name": "workspace_get",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "hostSurface"
+    },
+    {
+      "name": "workspace_git_diff_get",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "hostSurface"
+    },
+    {
+      "name": "workspace_git_file_diff_get",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "hostSurface"
+    },
+    {
+      "name": "workspace_git_github_cli_status_get",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "hostSurface"
+    },
+    {
+      "name": "workspace_git_status_get",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "hostSurface"
+    },
+    {
+      "name": "workspace_open_folder",
+      "operationKind": "oneShotAction",
+      "reconcileMethod": null,
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "hostSurface"
+    },
+    {
+      "name": "workspace_remove",
+      "operationKind": "identityMutation",
+      "reconcileMethod": "workspace_get",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "hostSurface"
+    },
+    {
+      "name": "workspace_reset",
+      "operationKind": "desiredStateWrite",
+      "reconcileMethod": "workspace_get",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "hostSurface"
+    },
+    {
+      "name": "workspace_rename",
+      "operationKind": "desiredStateWrite",
+      "reconcileMethod": "workspace_get",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "hostSurface"
+    },
+    {
+      "name": "workspace_reveal_folder",
+      "operationKind": "oneShotAction",
+      "reconcileMethod": null,
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "hostSurface"
+    }
+  ],
+  "schema": "centaeris.runtime-method-registry.v1"
+}
