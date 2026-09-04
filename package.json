@@ -8,6 +8,11 @@
     "url": "git+https://github.com/EchoTrigger/centaeris.git"
   },
   "scripts": {
+    "lint": "npm run lint:ui && npm run lint:desktop",
+    "lint:ui": "node ./node_modules/@biomejs/biome/bin/biome lint packages/ui/src packages/ui/tests packages/ui/scripts",
+    "lint:desktop": "node ./node_modules/@biomejs/biome/bin/biome lint packages/desktop/src packages/desktop/scripts",
+    "lint:hooks": "node ./node_modules/@biomejs/biome/bin/biome lint packages/ui/src packages/ui/tests --only=lint/correctness/useExhaustiveDependencies",
+    "lint:unused": "node ./node_modules/@biomejs/biome/bin/biome lint packages/ui/src packages/ui/tests packages/ui/scripts packages/desktop/src packages/desktop/scripts --only=lint/correctness/noUnusedImports --only=lint/correctness/noUnusedVariables",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },
   "workspaces": [
@@ -20,6 +25,7 @@
   },
   "packageManager": "npm@10.9.4",
   "devDependencies": {
+    "@biomejs/biome": "2.5.12",
     "typescript": "7.0.2",
     "vite": "8.1.5"
   },

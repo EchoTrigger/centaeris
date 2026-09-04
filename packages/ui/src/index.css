@@ -120,6 +120,37 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+.appFatalError {
+  display: grid;
+  align-content: center;
+  justify-items: start;
+  width: min(480px, calc(100% - 48px));
+  min-height: 100%;
+  margin: 0 auto;
+  gap: var(--spacing-sm);
+}
+
+.appFatalError h1,
+.appFatalError p {
+  margin: 0;
+}
+
+.appFatalError h1 {
+  font-size: var(--font-size-xl);
+}
+
+.appFatalError p {
+  color: var(--on-surface-variant);
+}
+
+.appFatalError button {
+  margin-top: var(--spacing-sm);
+  padding: 7px 12px;
+  border: 1px solid var(--outline);
+  border-radius: var(--radius-md);
+  background: var(--surface-variant);
+}
+
 button,
 select {
   color: inherit;

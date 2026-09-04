@@ -97,17 +97,34 @@ const initializeRuntimeHost = () =>
     },
   );
 
+const errorDetail = (error) =>
+  error instanceof Error ? error.stack ?? error.message : String(error);
+
+const reportTrayActionFailure = (actionName, error) => {
+  console.error(`desktop tray action failed (${actionName}): ${errorDetail(error)}`);
+  if (actionName !== "exit") {
+    dialog.showErrorBox("Centaeris action failed", String(error?.message ?? error));
+  }
+};
+
 const trayController = createTrayController({
   trayIconPath: TRAY_ICON_PATH,
   showMainWindow: windowShell.showMainWindow,
   emitHostEvent: windowShell.emitHostEvent,
   requestAppExit,
+  reportActionFailure: reportTrayActionFailure,
 });
 
 const showMainWindowSafely = () => {
   void windowShell.showMainWindow().catch((error) => {
     console.error(`failed to show Centaeris window: ${error.stack ?? error.message}`);
     dialog.showErrorBox("Centaeris window unavailable", error.message);
+  });
+};
+
+const requestAppExitSafely = () => {
+  void requestAppExit().catch((error) => {
+    console.error(`failed to exit Centaeris cleanly: ${errorDetail(error)}`);
   });
 };
 
@@ -163,5 +180,5 @@ app.on("before-quit", (event) => {
     return;
   }
   event.preventDefault();
-  void requestAppExit();
+  requestAppExitSafely();
 });

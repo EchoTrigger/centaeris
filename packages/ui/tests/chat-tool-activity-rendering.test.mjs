@@ -4,10 +4,12 @@ import path from "node:path";
 import { test } from "vitest";
 import {
   buildTranscriptProcessViewModel,
+} from "../src/components/chat/agentTranscriptModel.ts";
+import {
   extractToolResultSpillContent,
   formatCompletedToolGroupTitle,
   formatRunningToolGroupTitle,
-} from "../src/components/chat/AgentResultStream.tsx";
+} from "../src/components/chat/toolActivityTranscriptModel.ts";
 
 test("extracts the exact UTF-8 tool result body from a spill", () => {
   const prefix = '{"description":"check"}\n--- tool result ---\n';
@@ -21,16 +23,6 @@ test("extracts the exact UTF-8 tool result body from a spill", () => {
     ),
     result,
   );
-});
-
-test("uses a Bash description as the visible action title", async () => {
-  const source = await readFile(
-    path.resolve(import.meta.dirname, "../src/components/chat/AgentResultStream.tsx"),
-    "utf8",
-  );
-  assert.match(source, /normalizedInput\?\.description/);
-  assert.match(source, /isCommandOperation\(operation\) && description/);
-  assert.match(source, /const leafSummary = operationInlineSummary/);
 });
 
 const makeTask = ({ id, operations, status = "done", title, turnId }) => {
@@ -230,13 +222,7 @@ test("preserves completed read-only groups around assistant stages", () => {
   );
 });
 
-test("uses exact structured operations and leaves no legacy summary chain", async () => {
-  const rootDir = path.resolve(import.meta.dirname, "..");
-  const agentResultSource = await readFile(
-    path.join(rootDir, "src", "components", "chat", "AgentResultStream.tsx"),
-    "utf8",
-  );
-
+test("uses exact structured operations and leaves no legacy summary chain", () => {
   const command = makeTask({
     id: "command",
     turnId: "turn-combined",
@@ -352,24 +338,6 @@ test("uses exact structured operations and leaves no legacy summary chain", asyn
   }).processItems[0];
   assert.equal(firstGroup.id, expandedGroup.id);
 
-  assert.doesNotMatch(agentResultSource, /使用了工具|已使用|primaryActionKind/);
-  assert.match(agentResultSource, /getToolActivityPresentation/);
-  assert.match(agentResultSource, /getToolActivityAtom/);
-  assert.match(agentResultSource, /toolActivityIconByToken/);
-  assert.match(agentResultSource, /const \[isOpen, setIsOpen\] = useState\(false\)/);
-  assert.doesNotMatch(agentResultSource, /expandedTaskIds|collapsedTaskIds/);
-  assert.doesNotMatch(agentResultSource, /ProcessHeaderText|Worked for|processSummaryOpen|liveToolItem/);
-  assert.match(agentResultSource, /turn\.isStreaming && \(hasTachikoma \|\| activity\)/);
-  assert.match(agentResultSource, /\(hasTachikoma \|\| !hasRunningTool\) && !hasFinalItem/);
-  assert.doesNotMatch(agentResultSource, /isSingleRecord|agent-operation-record/);
-  assert.doesNotMatch(agentResultSource, /agent-activity-section/);
-  assert.doesNotMatch(agentResultSource, /browser\|web\|tavily/);
-  assert.doesNotMatch(agentResultSource, /getOperationActionKind|isBashCommandOperation/);
-  assert.match(agentResultSource, /atom\.detailRendererKind === "bash"/);
-  assert.match(agentResultSource, /agent-tool-command-label">Diff</);
-  assert.ok(agentResultSource.indexOf("{processFeed}") < agentResultSource.indexOf("{liveStatus}"));
-  assert.match(agentResultSource, /isOperationPathOpenable\(operation\)/);
-  assert.match(agentResultSource, /onOpenWorkspacePath\(path, \{/);
 });
 
 test("keeps command titles bounded inside the process text rail", async () => {

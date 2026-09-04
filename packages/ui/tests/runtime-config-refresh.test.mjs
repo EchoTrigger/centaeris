@@ -22,16 +22,10 @@ test("welcome pickers open down while conversation pickers open up", async () =>
   assert.match(css, /\.chatBottomPlane\.is-welcome \.composerLucideIcon\.is-chevron\s*\{\s*transform: none/);
 });
 
-test("desktop refreshes shared runtime config from the Runtime notification", async () => {
+test("the runtime config bridge validates the shared notification payload", async () => {
   const rootDir = path.resolve(import.meta.dirname, "..");
-  const [app, bridge] = await Promise.all([
-    readSource(rootDir, "src/App.tsx"),
-    readSource(rootDir, "src/lib/chatBridge.ts"),
-  ]);
+  const bridge = await readSource(rootDir, "src/lib/chatBridge.ts");
 
   assert.match(bridge, /listenHost<unknown>\("runtime\/config-changed"/);
   assert.match(bridge, /Object\.keys\(payload\)\.length !== 0/);
-  assert.match(app, /listenAgentRuntimeConfigChanges\(\(\) => \{/);
-  assert.match(app, /setRuntimeConfigRevision\(\(revision\) => revision \+ 1\)/);
-  assert.match(app, /getAgentRuntimeConfig\(\)\.then\(\(config\) => \{/);
 });

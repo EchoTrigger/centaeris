@@ -22,7 +22,7 @@ type VirtualMessageListProps = {
   latestUserMessageId: string | null;
   editableUserMessageId: string | null;
   onScroll: () => void;
-  onContentSizeChange: () => void;
+  onContentSizeChange: (totalSize: number) => void;
   onEditingPromptChange: (value: string) => void;
   onCancelEditingUserMessage: () => void;
   onSubmitEditedUserMessage: (messageId: string) => void;
@@ -229,7 +229,7 @@ export function VirtualMessageList({
   const totalSize = virtualizer.getTotalSize();
 
   useLayoutEffect(() => {
-    onContentSizeChange();
+    onContentSizeChange(totalSize);
   }, [onContentSizeChange, totalSize]);
 
   return (

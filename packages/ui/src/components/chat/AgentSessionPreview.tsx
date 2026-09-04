@@ -35,16 +35,16 @@ const updateAssistantTurn = (
     : message,
 );
 
-export function AgentSessionPreview({
+function AgentSessionPreviewLifecycle({
   sessionId,
   onOpenWorkspacePath,
-}: AgentSessionPreviewProps) {
+  onReload,
+}: AgentSessionPreviewProps & { onReload: () => void }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [status, setStatus] = useState<
     "loading" | "queued" | "running" | "done" | "error" | "cancelled"
   >("loading");
   const [error, setError] = useState("");
-  const [reloadVersion, setReloadVersion] = useState(0);
 
   useEffect(() => {
     let disposed = false;
@@ -134,7 +134,7 @@ export function AgentSessionPreview({
       disposed = true;
       closeStream?.();
     };
-  }, [reloadVersion, sessionId]);
+  }, [sessionId]);
 
   return (
     <div className="agentSessionPreview">
@@ -143,7 +143,7 @@ export function AgentSessionPreview({
         {error ? (
           <div className="summaryPanelHint is-error">
             {error}
-            <button type="button" onClick={() => setReloadVersion((value) => value + 1)}>重新加载</button>
+            <button type="button" onClick={onReload}>重新加载</button>
           </div>
         ) : null}
         {messages.map((message) => message.role === "user" ? (
@@ -162,5 +162,16 @@ export function AgentSessionPreview({
         <strong>Agent {status === "loading" ? "读取中" : status === "queued" ? "排队中" : status === "running" ? "运行中" : status === "done" ? "已完成" : status === "cancelled" ? "已取消" : "失败"}</strong>
       </div>
     </div>
+  );
+}
+
+export function AgentSessionPreview(props: AgentSessionPreviewProps) {
+  const [reloadVersion, setReloadVersion] = useState(0);
+  return (
+    <AgentSessionPreviewLifecycle
+      {...props}
+      key={`${props.sessionId}:${reloadVersion}`}
+      onReload={() => setReloadVersion((value) => value + 1)}
+    />
   );
 }
