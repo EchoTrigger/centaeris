@@ -45,6 +45,10 @@ fn ensure_user_data_layout_at(data_root: &Path) -> Result<(), String> {
             data_root.join("runtime").join("inputs"),
             "runtime input directory",
         ),
+        (
+            data_root.join("runtime").join("operation-receipts"),
+            "runtime operation receipt directory",
+        ),
         (data_root.join("plugins"), "plugins directory"),
         (
             data_root.join("skills").join("system"),
@@ -331,6 +335,10 @@ pub(crate) fn runtime_inputs_dir_path() -> PathBuf {
     runtime_dir_path().join("inputs")
 }
 
+pub(crate) fn runtime_operation_receipts_dir_path() -> PathBuf {
+    runtime_dir_path().join("operation-receipts")
+}
+
 fn ensure_dir(path: &Path, label: &str) -> Result<(), String> {
     if path.exists() && !path.is_dir() {
         return Err(format!(
@@ -394,6 +402,7 @@ mod tests {
         assert!(root.join("plugins").is_dir());
         assert!(root.join("skills").is_dir());
         assert!(root.join("skills").join("system").is_dir());
+        assert!(root.join("runtime").join("operation-receipts").is_dir());
         assert!(root.join("config.toml").is_file());
         assert_eq!(
             fs::read_dir(root.join("config"))

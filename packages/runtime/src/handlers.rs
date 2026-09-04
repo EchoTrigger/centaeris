@@ -72,8 +72,8 @@ pub(crate) fn handle_request(
         }
         RuntimeHostCommand::SessionCreate => {
             let payload = runtime_bridge::deserialize_request(request.payload)?;
-            let response = sessions::create(payload)
-                .map_err(|error| RuntimeHostError::new("session_failed", error))?;
+            let response = sessions::create_command(payload)
+                .map_err(|error| RuntimeHostError::new(error.code(), error.message()))?;
             serde_json::to_value(response).map_err(|error| {
                 RuntimeHostError::new("serialize_response_failed", error.to_string())
             })
@@ -326,7 +326,7 @@ pub(crate) fn handle_request(
         RuntimeHostCommand::AgentInput => {
             let payload = runtime_bridge::deserialize_request(request.payload)?;
             let response = agent_runtime::input(event_writer, payload)
-                .map_err(|error| RuntimeHostError::new("session_prompt_failed", error))?;
+                .map_err(|error| RuntimeHostError::new(error.code(), error.message()))?;
             serde_json::to_value(response).map_err(|error| {
                 RuntimeHostError::new("serialize_response_failed", error.to_string())
             })
@@ -757,6 +757,9 @@ pub(crate) fn handle_stateless_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime_rpc_transport::RuntimeServerClientHub;
+    use serde_json::json;
+    use std::fs;
 
     #[test]
     fn resource_settings_stores_do_not_wait_for_shared_runtime_host_state() {
@@ -767,5 +770,61 @@ mod tests {
         assert!(command_owns_store_lock(RuntimeHostCommand::SkillCatalog));
         assert!(!command_owns_store_lock(RuntimeHostCommand::SidecarStart));
         assert!(!command_owns_store_lock(RuntimeHostCommand::WorkspaceGet));
+    }
+
+    #[test]
+    fn session_create_operation_conflict_has_a_stable_domain_error_code() {
+        let guard = crate::message_log::test_env_mutex()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-session-create-handler-{}-{}",
+            std::process::id(),
+            centaeris_core::runtime::contracts::current_timestamp_ms()
+        ));
+        let workspace = root.join("workspace");
+        fs::create_dir_all(workspace.as_path()).expect("workspace");
+        let previous_data_dir = std::env::var_os("CENTAERIS_DESKTOP_DATA_DIR");
+        std::env::set_var("CENTAERIS_DESKTOP_DATA_DIR", &root);
+        let result = (|| {
+            let clients = Arc::new(RuntimeServerClientHub::default());
+            let (event_writer, _outbound) =
+                clients
+                    .connect()
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "runtime client hub rejected connection".to_string())?;
+            let mut state = RuntimeHostState::default();
+            let request = |title: &str| HostCommandRequest {
+                command: "session/new".to_string(),
+                payload: json!({
+                    "request": {
+                        "operationId": "handler-conflict-operation",
+                        "title": title,
+                        "cwd": workspace.to_string_lossy(),
+                    }
+                }),
+            };
+            handle_request(&mut state, request("first"), event_writer.clone())
+                .map_err(|error| error.to_string())?;
+            let error = handle_request(&mut state, request("second"), event_writer)
+                .expect_err("conflicting operationId must fail")
+                .to_runtime_rpc_error();
+            let domain_code = error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("code"))
+                .and_then(serde_json::Value::as_str);
+            if domain_code != Some("operation_id_conflict") {
+                return Err(format!("unexpected domain error data: {:?}", error.data));
+            }
+            Ok::<(), String>(())
+        })();
+        match previous_data_dir {
+            Some(value) => std::env::set_var("CENTAERIS_DESKTOP_DATA_DIR", value),
+            None => std::env::remove_var("CENTAERIS_DESKTOP_DATA_DIR"),
+        }
+        let _ = fs::remove_dir_all(root);
+        drop(guard);
+        result.expect("session/new handler conflict code");
     }
 }

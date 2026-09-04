@@ -9,6 +9,8 @@ const RUNTIME_SERVER_CONNECT_DELAY_MS = 100;
 const RUNTIME_SERVER_ENDPOINT_TIMEOUT_MS = 5_000;
 const RUNTIME_STALE_SERVER_SHUTDOWN_MS = 7_000;
 const RUNTIME_APP_EXIT_TIMEOUT_MS = 2_000;
+const RUNTIME_REQUEST_TIMEOUT_MS = 30_000;
+const MAX_ABANDONED_RUNTIME_REQUESTS = 1_024;
 const EXPECTED_CORE_PROTOCOL_VERSION = "1.0.0";
 const RUNTIME_DESCRIPTOR_FIELDS = new Set([
   "status",
@@ -29,6 +31,83 @@ const RUNTIME_DESCRIPTOR_FIELDS = new Set([
 const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 
 const sleep = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs));
+
+export const createRuntimeResponseTracker = ({
+  requestTimeoutMs = RUNTIME_REQUEST_TIMEOUT_MS,
+} = {}) => {
+  if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1) {
+    throw new Error("Runtime request timeout must be a positive integer");
+  }
+  const pending = new Map();
+  const abandoned = new Set();
+
+  const rememberAbandoned = (id) => {
+    abandoned.add(id);
+    while (abandoned.size > MAX_ABANDONED_RUNTIME_REQUESTS) {
+      abandoned.delete(abandoned.values().next().value);
+    }
+  };
+
+  const track = (id, metadata) => {
+    if (pending.has(id) || abandoned.has(id)) {
+      throw new Error(`Runtime request id is already tracked: ${id}`);
+    }
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        if (!pending.delete(id)) {
+          return;
+        }
+        rememberAbandoned(id);
+        const error = new Error(`Runtime request timed out with unknown outcome: ${metadata.command}`);
+        error.code = "runtime_request_timeout";
+        error.command = metadata.command;
+        error.outcomeUnknown = true;
+        reject(error);
+      }, requestTimeoutMs);
+      pending.set(id, {
+        ...metadata,
+        resolve,
+        reject,
+        timeoutId,
+      });
+    });
+  };
+
+  const take = (id) => {
+    const response = pending.get(id);
+    if (response) {
+      pending.delete(id);
+      clearTimeout(response.timeoutId);
+      return { state: "pending", response };
+    }
+    if (abandoned.delete(id)) {
+      return { state: "abandoned" };
+    }
+    return { state: "unknown" };
+  };
+
+  const reject = (id, error) => {
+    const response = pending.get(id);
+    if (!response) {
+      return false;
+    }
+    pending.delete(id);
+    clearTimeout(response.timeoutId);
+    response.reject(error);
+    return true;
+  };
+
+  const rejectAll = (error) => {
+    for (const [id, response] of pending) {
+      pending.delete(id);
+      clearTimeout(response.timeoutId);
+      response.reject(error);
+    }
+    abandoned.clear();
+  };
+
+  return { track, take, reject, rejectAll };
+};
 
 const runtimeExecutableBuildId = (executablePath) =>
   new Promise((resolve, reject) => {
@@ -178,13 +257,10 @@ export const createRuntimeHostTransport = ({
   let runtimeRestarting = false;
   let expectedBuildIdPromise = null;
   let nextRuntimeRequestId = 1;
-  const pendingHostRequests = new Map();
+  const runtimeResponses = createRuntimeResponseTracker();
 
   const rejectPendingHostRequests = (error) => {
-    for (const pending of pendingHostRequests.values()) {
-      pending.reject(error);
-    }
-    pendingHostRequests.clear();
+    runtimeResponses.rejectAll(error);
   };
 
   const emitRuntimeFailure = (message) => {
@@ -266,11 +342,14 @@ export const createRuntimeHostTransport = ({
       throw new Error("Runtime Server message must be a JSON-RPC response or notification");
     }
     const responseId = String(message.id);
-    const pending = pendingHostRequests.get(responseId);
-    if (!pending) {
+    const tracked = runtimeResponses.take(responseId);
+    if (tracked.state === "abandoned") {
+      return;
+    }
+    if (tracked.state === "unknown") {
       throw new Error(`Runtime Server response has no pending request: ${responseId}`);
     }
-    pendingHostRequests.delete(responseId);
+    const pending = tracked.response;
     if (hasResult) {
       pending.resolve(message.result);
       return;
@@ -458,13 +537,11 @@ export const createRuntimeHostTransport = ({
       method: command,
       params: payload ?? {},
     };
-    return new Promise((resolve, reject) => {
-      pendingHostRequests.set(id, { resolve, reject, command, group: metadata.group });
-      void enqueueSocketWrite(request, socket).catch((error) => {
-        pendingHostRequests.delete(id);
-        reject(error);
-      });
+    const response = runtimeResponses.track(id, { command, group: metadata.group });
+    void enqueueSocketWrite(request, socket).catch((error) => {
+      runtimeResponses.reject(id, error);
     });
+    return response;
   };
 
   const expectedBuildId = () => {

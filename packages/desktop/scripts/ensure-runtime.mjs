@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const hostRoot = path.resolve(import.meta.dirname, "..");
 const repoRoot = path.resolve(hostRoot, "..", "..");
@@ -26,12 +27,15 @@ const statMtimeMs = async (targetPath) => {
   }
 };
 
-const newerSourcesThan = async (binaryMtimeMs) => {
-  const newer = [];
-  const collectTree = async (rootDir) => {
+export const collectRustSourceFiles = async (
+  rootDir,
+  { excludedTopLevelDirectories = new Set() } = {},
+) => {
+  const files = [];
+  const collectTree = async (directory, isRoot) => {
     let entries;
     try {
-      entries = await fs.readdir(rootDir, { withFileTypes: true });
+      entries = await fs.readdir(directory, { withFileTypes: true });
     } catch (error) {
       if (error?.code === "ENOENT") {
         return;
@@ -39,17 +43,22 @@ const newerSourcesThan = async (binaryMtimeMs) => {
       throw error;
     }
     for (const entry of entries) {
-      const full = path.join(rootDir, entry.name);
+      const full = path.join(directory, entry.name);
       if (entry.isDirectory()) {
-        await collectTree(full);
-      } else if (entry.isFile() && entry.name.endsWith(".rs")) {
-        const stat = await fs.stat(full);
-        if (stat.mtimeMs > binaryMtimeMs) {
-          newer.push(full);
+        if (!isRoot || !excludedTopLevelDirectories.has(entry.name)) {
+          await collectTree(full, false);
         }
+      } else if (entry.isFile() && entry.name.endsWith(".rs")) {
+        files.push(full);
       }
     }
   };
+  await collectTree(rootDir, true);
+  return files.sort((left, right) => left.localeCompare(right, "en"));
+};
+
+const newerSourcesThan = async (binaryMtimeMs) => {
+  const newer = [];
   for (const manifest of [
     path.join(runtimeCrateRoot, "Cargo.toml"),
     path.join(coreRoot, "Cargo.toml"),
@@ -59,11 +68,17 @@ const newerSourcesThan = async (binaryMtimeMs) => {
       newer.push(manifest);
     }
   }
-  for (const srcRoot of [
-    path.join(runtimeCrateRoot, "src"),
-    path.join(coreRoot, "src"),
-  ]) {
-    await collectTree(srcRoot);
+  const sourceFiles = [
+    ...await collectRustSourceFiles(path.join(runtimeCrateRoot, "src"), {
+      excludedTopLevelDirectories: new Set(["bin"]),
+    }),
+    ...await collectRustSourceFiles(path.join(coreRoot, "src")),
+  ];
+  for (const sourceFile of sourceFiles) {
+    const stat = await fs.stat(sourceFile);
+    if (stat.mtimeMs > binaryMtimeMs) {
+      newer.push(sourceFile);
+    }
   }
   return newer;
 };
@@ -131,4 +146,6 @@ const main = async () => {
   console.log("[ensure-runtime] ok");
 };
 
-await main();
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await main();
+}

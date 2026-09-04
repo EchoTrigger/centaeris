@@ -4,7 +4,8 @@ import {
   compactConsumedStreamPayloads,
 } from "./streamPayloadCoalescing";
 
-type SendAgentInputRequest = {
+export type SendAgentInputRequest = {
+  operationId: string;
   sessionId?: string;
   message: string;
   imageData?: string | string[];
@@ -29,6 +30,8 @@ type SendAgentInputResponse = {
   agentRunId?: string;
   turnId?: string;
 };
+
+export const createRuntimeOperationId = (): string => crypto.randomUUID();
 
 type SendAgentSupplementRequest = {
   sessionId: string;
@@ -1115,6 +1118,7 @@ export const getSessionProjection = async (
 export const createSession = async (
   title: string,
   cwd: string,
+  operationId: string,
 ): Promise<SessionItem> => {
   if (!isNativeHostRuntime()) {
     throw new Error("native session is desktop-only in Rust mainline");
@@ -1124,6 +1128,7 @@ export const createSession = async (
   }
   return invokeHost<SessionItem>("session/new", {
     request: {
+      operationId,
       title,
       cwd,
     },
@@ -1231,6 +1236,7 @@ export const sendAgentInput = async (
     "session/prompt",
     {
       request: {
+        operationId: request.operationId,
         sessionId: request.sessionId,
         message: request.message,
         tailPolicy: request.tailPolicy,

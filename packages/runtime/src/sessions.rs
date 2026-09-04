@@ -2,10 +2,17 @@ use crate::runtime_rpc_transport::EventWriter;
 use crate::session_files::{
     SessionFileDiagnostic, SessionFileItem, SessionFiles, SessionMetadataPatch,
 };
-use crate::{agent_runs, agent_runtime, message_log, user_data_layout, workspaces};
+use crate::{
+    agent_runs, agent_runtime, message_log, operation_receipts, user_data_layout, workspaces,
+};
 use centaeris_core::runtime::contracts::current_timestamp_ms;
 use centaeris_core::session::store::SessionDataStorePort;
 use serde::{Deserialize, Serialize};
+use std::fmt::{Display, Formatter};
+use std::sync::{Mutex, OnceLock};
+
+const SESSION_CREATE_METHOD: &str = "session/new";
+static SESSION_CREATE_OPERATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -21,11 +28,67 @@ pub(crate) struct SessionListRequest {}
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct SessionDiagnosticsRequest {}
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct SessionCreateRequest {
     pub(crate) title: Option<String>,
     pub(crate) cwd: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SessionCreateCommandRequest {
+    #[serde(deserialize_with = "operation_receipts::deserialize_operation_id")]
+    pub(crate) operation_id: String,
+    pub(crate) title: Option<String>,
+    pub(crate) cwd: String,
+}
+
+#[derive(Debug)]
+pub(crate) struct SessionCreateCommandError {
+    code: &'static str,
+    message: String,
+}
+
+impl SessionCreateCommandError {
+    pub(crate) fn code(&self) -> &'static str {
+        self.code
+    }
+
+    pub(crate) fn message(&self) -> &str {
+        self.message.as_str()
+    }
+
+    fn failed(message: impl Into<String>) -> Self {
+        Self {
+            code: "session_failed",
+            message: message.into(),
+        }
+    }
+
+    fn conflict(operation_id: &str) -> Self {
+        Self {
+            code: "operation_id_conflict",
+            message: format!(
+                "operationId was already used for a different {SESSION_CREATE_METHOD} request: {operation_id}"
+            ),
+        }
+    }
+}
+
+impl Display for SessionCreateCommandError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message.as_str())
+    }
+}
+
+impl std::error::Error for SessionCreateCommandError {}
+
+impl From<String> for SessionCreateCommandError {
+    fn from(message: String) -> Self {
+        Self::failed(message)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,8 +126,8 @@ pub(crate) struct SessionReorderRequest {
     pub(crate) ordered_session_ids: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct SessionItemResponse {
     pub(crate) id: String,
     pub(crate) title: String,
@@ -132,6 +195,7 @@ pub(crate) fn diagnostics(
     session_files()?.diagnostics()
 }
 
+#[cfg(test)]
 pub(crate) fn create(request: SessionCreateRequest) -> Result<SessionItemResponse, String> {
     let cwd = workspaces::normalize_workspace_root_text(request.cwd.as_str())
         .ok_or_else(|| format!("session cwd must be an existing directory: {}", request.cwd))?;
@@ -140,6 +204,102 @@ pub(crate) fn create(request: SessionCreateRequest) -> Result<SessionItemRespons
         cwd.as_str(),
         current_timestamp_ms(),
     )?;
+    to_response(&item)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CanonicalSessionCreateRequest<'a> {
+    title: &'a str,
+    cwd: &'a str,
+}
+
+pub(crate) fn create_command(
+    request: SessionCreateCommandRequest,
+) -> Result<SessionItemResponse, SessionCreateCommandError> {
+    let _guard = SESSION_CREATE_OPERATION_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| SessionCreateCommandError::failed("session/new operation lock poisoned"))?;
+    let (title, cwd, request_digest) = canonical_session_create_request(&request)?;
+    if let Some(receipt) =
+        operation_receipts::read(SESSION_CREATE_METHOD, request.operation_id.as_str())?
+    {
+        if receipt.request_digest != request_digest {
+            return Err(SessionCreateCommandError::conflict(
+                request.operation_id.as_str(),
+            ));
+        }
+        return serde_json::from_value(receipt.result).map_err(|error| {
+            SessionCreateCommandError::failed(format!(
+                "decode persisted session/new result failed: {error}"
+            ))
+        });
+    }
+    let item =
+        create_session_for_command(request.operation_id.as_str(), title.as_str(), cwd.as_str())?;
+    if item.title != title || item.cwd != cwd || item.session_kind != "main" {
+        return Err(SessionCreateCommandError::conflict(
+            request.operation_id.as_str(),
+        ));
+    }
+    let response = to_response(&item)?;
+    operation_receipts::write(
+        SESSION_CREATE_METHOD,
+        request.operation_id.as_str(),
+        request_digest,
+        serde_json::to_value(&response).map_err(|error| {
+            SessionCreateCommandError::failed(format!(
+                "serialize session/new receipt result failed: {error}"
+            ))
+        })?,
+    )?;
+    Ok(response)
+}
+
+fn canonical_session_create_request(
+    request: &SessionCreateCommandRequest,
+) -> Result<(String, String, String), SessionCreateCommandError> {
+    let title = crate::session_files::normalize_title(request.title.as_deref());
+    let cwd = workspaces::normalize_workspace_root_text(request.cwd.as_str()).ok_or_else(|| {
+        SessionCreateCommandError::failed(format!(
+            "session cwd must be an existing directory: {}",
+            request.cwd
+        ))
+    })?;
+    let request_digest = operation_receipts::request_digest(&CanonicalSessionCreateRequest {
+        title: title.as_str(),
+        cwd: cwd.as_str(),
+    })?;
+    Ok((title, cwd, request_digest))
+}
+
+fn create_session_for_command(
+    operation_id: &str,
+    title: &str,
+    cwd: &str,
+) -> Result<SessionFileItem, SessionCreateCommandError> {
+    let session_id =
+        operation_receipts::deterministic_identity("session-", SESSION_CREATE_METHOD, operation_id);
+    session_files()?
+        .create_with_id(
+            session_id.as_str(),
+            Some(title),
+            cwd,
+            current_timestamp_ms(),
+        )
+        .map_err(Into::into)
+}
+
+#[cfg(test)]
+fn create_session_before_receipt_for_test(
+    request: &SessionCreateCommandRequest,
+) -> Result<SessionItemResponse, String> {
+    let (title, cwd, _) =
+        canonical_session_create_request(request).map_err(|error| error.to_string())?;
+    let item =
+        create_session_for_command(request.operation_id.as_str(), title.as_str(), cwd.as_str())
+            .map_err(|error| error.to_string())?;
     to_response(&item)
 }
 
@@ -426,19 +586,60 @@ mod tests {
     use crate::runtime_server::RuntimeClientKind;
     use centaeris_core::runtime::TurnControl;
     use std::fs;
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
+
+    fn with_session_create_test_env<T>(
+        label: &str,
+        test: impl FnOnce(&std::path::Path) -> Result<T, String>,
+    ) -> T {
+        let guard = message_log::test_env_mutex()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-{label}-{}-{}",
+            std::process::id(),
+            current_timestamp_ms()
+        ));
+        let workspace = root.join("workspace");
+        fs::create_dir_all(workspace.as_path()).expect("workspace");
+        let previous_data_dir = std::env::var_os("CENTAERIS_DESKTOP_DATA_DIR");
+        std::env::set_var("CENTAERIS_DESKTOP_DATA_DIR", &root);
+        let result = test(workspace.as_path());
+        match previous_data_dir {
+            Some(value) => std::env::set_var("CENTAERIS_DESKTOP_DATA_DIR", value),
+            None => std::env::remove_var("CENTAERIS_DESKTOP_DATA_DIR"),
+        }
+        let _ = fs::remove_dir_all(root);
+        drop(guard);
+        result.unwrap_or_else(|error| panic!("{label}: {error}"))
+    }
+
+    fn create_command_request(
+        operation_id: &str,
+        title: &str,
+        workspace: &std::path::Path,
+    ) -> SessionCreateCommandRequest {
+        serde_json::from_value(serde_json::json!({
+            "operationId": operation_id,
+            "title": title,
+            "cwd": workspace.to_string_lossy(),
+        }))
+        .expect("valid session/new command request")
+    }
 
     #[test]
     fn session_requests_reject_unknown_fields() {
         assert!(
-            serde_json::from_value::<SessionCreateRequest>(serde_json::json!({
+            serde_json::from_value::<SessionCreateCommandRequest>(serde_json::json!({
+                "operationId": "strict-fields-1",
                 "cwd": "D:/repo",
                 "banana": true
             }))
             .is_err()
         );
         assert!(
-            serde_json::from_value::<SessionCreateRequest>(serde_json::json!({
+            serde_json::from_value::<SessionCreateCommandRequest>(serde_json::json!({
+                "operationId": "strict-fields-2",
                 "workingDirectory": "D:/repo"
             }))
             .is_err()
@@ -467,6 +668,211 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn session_create_command_requires_a_bounded_opaque_operation_id() {
+        for value in [
+            serde_json::json!({"title": "missing", "cwd": "D:/repo"}),
+            serde_json::json!({"operationId": "", "cwd": "D:/repo"}),
+            serde_json::json!({"operationId": " leading", "cwd": "D:/repo"}),
+            serde_json::json!({"operationId": "path/segment", "cwd": "D:/repo"}),
+            serde_json::json!({"operationId": "x".repeat(129), "cwd": "D:/repo"}),
+        ] {
+            assert!(serde_json::from_value::<SessionCreateCommandRequest>(value).is_err());
+        }
+        assert!(
+            serde_json::from_value::<SessionCreateCommandRequest>(serde_json::json!({
+                "operationId": "session-new:client_01.2",
+                "cwd": "D:/repo"
+            }))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn duplicate_session_create_operation_returns_the_original_durable_session() {
+        with_session_create_test_env("session-create-operation", |workspace| {
+            let request = || {
+                create_command_request(
+                    "session-new-operation-1",
+                    "lost response fixture",
+                    workspace,
+                )
+            };
+            let committed_before_response_loss =
+                create_command(request()).map_err(|error| error.to_string())?;
+            let retried_after_reconnect =
+                create_command(request()).map_err(|error| error.to_string())?;
+            if retried_after_reconnect.id != committed_before_response_loss.id {
+                return Err("duplicate operationId created a second Session".to_string());
+            }
+
+            let reopened_items = SessionFiles::new(user_data_layout::sessions_dir_path()).list()?;
+            if reopened_items.len() != 1
+                || reopened_items[0].id != committed_before_response_loss.id
+            {
+                return Err(
+                    "duplicate operationId did not resolve to one durable Session".to_string(),
+                );
+            }
+            Ok::<(), String>(())
+        });
+    }
+
+    #[test]
+    fn duplicate_session_create_compares_normalized_request_payloads() {
+        with_session_create_test_env("session-create-normalized", |workspace| {
+            let first = create_command(create_command_request(
+                "normalized-operation",
+                "  normalized title  ",
+                workspace,
+            ))
+            .map_err(|error| error.to_string())?;
+            let second = create_command(create_command_request(
+                "normalized-operation",
+                "normalized title",
+                workspace.join(".").as_path(),
+            ))
+            .map_err(|error| error.to_string())?;
+            if first.id != second.id {
+                return Err("equivalent normalized payload did not replay".to_string());
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn duplicate_session_create_operation_rejects_a_different_normalized_payload() {
+        with_session_create_test_env("session-create-conflict", |workspace| {
+            create_command(create_command_request("same-operation", "first", workspace))
+                .map_err(|error| error.to_string())?;
+            let error = create_command(create_command_request(
+                "same-operation",
+                "second",
+                workspace,
+            ))
+            .expect_err("operationId reuse with a different payload must fail");
+            if error.code() != "operation_id_conflict" {
+                return Err(format!("unexpected conflict code: {}", error.code()));
+            }
+            if SessionFiles::new(user_data_layout::sessions_dir_path())
+                .list()?
+                .len()
+                != 1
+            {
+                return Err("conflicting operation created another Session".to_string());
+            }
+
+            let other_workspace = workspace
+                .parent()
+                .ok_or_else(|| "test workspace has no parent".to_string())?
+                .join("other-workspace");
+            fs::create_dir_all(other_workspace.as_path())
+                .map_err(|error| format!("create other workspace failed: {error}"))?;
+            create_command(create_command_request(
+                "same-operation-different-cwd",
+                "same title",
+                workspace,
+            ))
+            .map_err(|error| error.to_string())?;
+            let cwd_error = create_command(create_command_request(
+                "same-operation-different-cwd",
+                "same title",
+                other_workspace.as_path(),
+            ))
+            .expect_err("operationId reuse with a different cwd must fail");
+            if cwd_error.code() != "operation_id_conflict" {
+                return Err(format!(
+                    "unexpected cwd conflict code: {}",
+                    cwd_error.code()
+                ));
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn session_create_recovers_when_the_session_committed_before_its_receipt() {
+        with_session_create_test_env("session-create-crash-window", |workspace| {
+            let request = create_command_request("crash-window", "recovered", workspace);
+            let committed = create_session_before_receipt_for_test(&request)?;
+            let recovered = create_command(request).map_err(|error| error.to_string())?;
+            if recovered.id != committed.id {
+                return Err("crash recovery created a second Session".to_string());
+            }
+            if SessionFiles::new(user_data_layout::sessions_dir_path())
+                .list()?
+                .len()
+                != 1
+            {
+                return Err("crash recovery left more than one Session".to_string());
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn concurrent_duplicate_session_create_commits_once() {
+        with_session_create_test_env("session-create-concurrent", |workspace| {
+            let workspace = Arc::new(workspace.to_path_buf());
+            let barrier = Arc::new(Barrier::new(3));
+            let mut workers = Vec::new();
+            for _ in 0..2 {
+                let workspace = Arc::clone(&workspace);
+                let barrier = Arc::clone(&barrier);
+                workers.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    create_command(create_command_request(
+                        "concurrent-operation",
+                        "one Session",
+                        workspace.as_path(),
+                    ))
+                }));
+            }
+            barrier.wait();
+            let first = workers
+                .remove(0)
+                .join()
+                .map_err(|_| "first worker panicked")?
+                .map_err(|error| error.to_string())?;
+            let second = workers
+                .remove(0)
+                .join()
+                .map_err(|_| "second worker panicked")?
+                .map_err(|error| error.to_string())?;
+            if first.id != second.id {
+                return Err("concurrent duplicates returned different Sessions".to_string());
+            }
+            if SessionFiles::new(user_data_layout::sessions_dir_path())
+                .list()?
+                .len()
+                != 1
+            {
+                return Err("concurrent duplicate created multiple Sessions".to_string());
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn deleted_session_create_receipt_does_not_recreate_the_session() {
+        with_session_create_test_env("session-create-deleted", |workspace| {
+            let request = || create_command_request("deleted-operation", "deleted", workspace);
+            let created = create_command(request()).map_err(|error| error.to_string())?;
+            session_files()?.delete(created.id.as_str())?;
+            let replayed = create_command(request()).map_err(|error| error.to_string())?;
+            if replayed.id != created.id {
+                return Err("deleted operation did not return its original receipt".to_string());
+            }
+            if !SessionFiles::new(user_data_layout::sessions_dir_path())
+                .list()?
+                .is_empty()
+            {
+                return Err("replaying a deleted operation recreated the Session".to_string());
+            }
+            Ok(())
+        });
     }
 
     #[test]

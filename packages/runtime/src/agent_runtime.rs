@@ -6,7 +6,10 @@ use crate::runtime_server::{
     OwnerExitDisposition,
 };
 use crate::sqlite_store::SqliteRuntimeStore;
-use crate::{agent_runs, mcp, message_log, sessions, skills, user_data_layout, workspaces};
+use crate::{
+    agent_runs, mcp, message_log, operation_receipts, sessions, skills, user_data_layout,
+    workspaces,
+};
 use centaeris_core::execution::sandbox::{NetworkSandboxPolicy, SandboxPolicy};
 use centaeris_core::execution::{
     ExecutionCancellationProbe, ExecutionHostBinding, ExecutionHostMode,
@@ -49,6 +52,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -58,6 +62,8 @@ use std::time::Instant;
 static AGENT_RUN_COUNTER: AtomicU64 = AtomicU64::new(1);
 static AGENT_RUNTIME_STORE_ACTOR: OnceLock<Mutex<Option<AgentRuntimeStoreActorState>>> =
     OnceLock::new();
+static SESSION_PROMPT_OPERATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+const SESSION_PROMPT_METHOD: &str = "session/prompt";
 const RUNTIME_JOB_WAIT_POLL_MS: u64 = 500;
 const LIVE_TEXT_FLUSH_INTERVAL_MS: u64 = 75;
 
@@ -592,6 +598,8 @@ pub(crate) struct TranscriptProjectionRequest {
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AgentInputRequest {
+    #[serde(deserialize_with = "operation_receipts::deserialize_operation_id")]
+    pub(crate) operation_id: String,
     pub(crate) session_id: Option<String>,
     pub(crate) message: String,
     pub(crate) tail_policy: Option<String>,
@@ -641,8 +649,8 @@ pub(crate) struct TranscriptProjectionResponse {
     pub(crate) lines: Vec<HeadlessTranscriptLine>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct AgentInputResponse {
     pub(crate) session_id: String,
     pub(crate) agent_run_id: String,
@@ -677,31 +685,201 @@ pub(crate) fn project_session_events_to_transcript(
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct AgentInputCommandError {
+    code: &'static str,
+    message: String,
+}
+
+impl AgentInputCommandError {
+    pub(crate) fn code(&self) -> &'static str {
+        self.code
+    }
+
+    pub(crate) fn message(&self) -> &str {
+        self.message.as_str()
+    }
+
+    fn failed(message: impl Into<String>) -> Self {
+        Self {
+            code: "session_prompt_failed",
+            message: message.into(),
+        }
+    }
+
+    fn conflict(operation_id: &str) -> Self {
+        Self {
+            code: "operation_id_conflict",
+            message: format!(
+                "operationId was already used for a different {SESSION_PROMPT_METHOD} request: {operation_id}"
+            ),
+        }
+    }
+}
+
+impl Display for AgentInputCommandError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message.as_str())
+    }
+}
+
+impl std::error::Error for AgentInputCommandError {}
+
+impl From<String> for AgentInputCommandError {
+    fn from(message: String) -> Self {
+        Self::failed(message)
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CanonicalAgentInputRequest<'a> {
+    session_id: &'a str,
+    message: &'a str,
+    tail_policy: &'a str,
+    rewrite_target_message_id: Option<&'a str>,
+    rewrite_expected_tail_message_id: Option<&'a str>,
+    auto_continue_after_resume_wait: Option<bool>,
+    attachments: Vec<CanonicalLocalImageInputRequest<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CanonicalLocalImageInputRequest<'a> {
+    placeholder: &'a str,
+    local_path: &'a str,
+}
+
 pub(crate) fn input(
     event_writer: EventWriter,
     request: AgentInputRequest,
-) -> Result<AgentInputResponse, String> {
+) -> Result<AgentInputResponse, AgentInputCommandError> {
     let session_id = normalize_session_id(request.session_id.as_deref());
     let message = required_string(request.message.as_str(), "message")?;
     let rewrite_last_user_input = rewrite_last_user_input_from_request(&request)?;
     if rewrite_last_user_input.is_some() && !request.attachments.is_empty() {
-        return Err("rewriteLastUser does not support input images".to_string());
+        return Err(AgentInputCommandError::failed(
+            "rewriteLastUser does not support input images",
+        ));
     }
+    let tail_policy = if rewrite_last_user_input.is_some() {
+        "rewriteLastUser"
+    } else {
+        "append"
+    };
+    let canonical = CanonicalAgentInputRequest {
+        session_id: session_id.as_str(),
+        message: message.as_str(),
+        tail_policy,
+        rewrite_target_message_id: rewrite_last_user_input
+            .as_ref()
+            .map(|rewrite| rewrite.target_chat_message_id.as_str()),
+        rewrite_expected_tail_message_id: rewrite_last_user_input
+            .as_ref()
+            .map(|rewrite| rewrite.expected_tail_chat_message_id.as_str()),
+        auto_continue_after_resume_wait: request.auto_continue_after_resume_wait,
+        attachments: request
+            .attachments
+            .iter()
+            .map(|attachment| CanonicalLocalImageInputRequest {
+                placeholder: attachment.placeholder.as_str(),
+                local_path: attachment.local_path.as_str(),
+            })
+            .collect(),
+    };
+    let request_digest = operation_receipts::request_digest(&canonical)?;
+    let expected_response = AgentInputResponse {
+        session_id: session_id.clone(),
+        agent_run_id: operation_receipts::deterministic_identity(
+            "agent-run-",
+            SESSION_PROMPT_METHOD,
+            request.operation_id.as_str(),
+        ),
+        turn_id: operation_receipts::deterministic_identity(
+            "turn-",
+            SESSION_PROMPT_METHOD,
+            request.operation_id.as_str(),
+        ),
+        stream_items: Vec::new(),
+    };
+    let _guard = SESSION_PROMPT_OPERATION_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| AgentInputCommandError::failed("session/prompt operation lock poisoned"))?;
+    if let Some(receipt) =
+        operation_receipts::read(SESSION_PROMPT_METHOD, request.operation_id.as_str())?
+    {
+        if receipt.request_digest != request_digest {
+            return Err(AgentInputCommandError::conflict(
+                request.operation_id.as_str(),
+            ));
+        }
+        let response =
+            serde_json::from_value::<AgentInputResponse>(receipt.result).map_err(|error| {
+                AgentInputCommandError::failed(format!(
+                    "decode persisted session/prompt result failed: {error}"
+                ))
+            })?;
+        if response != expected_response {
+            return Err(AgentInputCommandError::failed(
+                "persisted session/prompt result identity mismatch",
+            ));
+        }
+        if message_log::project_agent_run(response.agent_run_id.as_str())?.is_some() {
+            return Ok(response);
+        }
+        return start_agent_input_from_receipt(
+            event_writer,
+            request,
+            response,
+            message,
+            rewrite_last_user_input,
+        );
+    }
+    let response = expected_response;
+    operation_receipts::write(
+        SESSION_PROMPT_METHOD,
+        request.operation_id.as_str(),
+        request_digest,
+        serde_json::to_value(&response).map_err(|error| {
+            AgentInputCommandError::failed(format!(
+                "serialize session/prompt receipt result failed: {error}"
+            ))
+        })?,
+    )?;
+    start_agent_input_from_receipt(
+        event_writer,
+        request,
+        response,
+        message,
+        rewrite_last_user_input,
+    )
+}
+
+fn start_agent_input_from_receipt(
+    event_writer: EventWriter,
+    request: AgentInputRequest,
+    response: AgentInputResponse,
+    message: String,
+    rewrite_last_user_input: Option<RewriteLastUserInput>,
+) -> Result<AgentInputResponse, AgentInputCommandError> {
     let agent_run = start_agent_run(StartAgentRunRequest {
         event_writer,
-        session_id: session_id.clone(),
+        session_id: response.session_id.clone(),
         message,
         rewrite_last_user_input,
         auto_continue_after_resume_wait: request.auto_continue_after_resume_wait,
         resume_from_turn_id: None,
         attachments: request.attachments,
+        requested_agent_run_id: Some(response.agent_run_id.clone()),
+        requested_turn_id: Some(response.turn_id.clone()),
     })?;
-    Ok(AgentInputResponse {
-        session_id,
-        agent_run_id: agent_run.agent_run_id,
-        turn_id: agent_run.turn_id,
-        stream_items: Vec::new(),
-    })
+    if agent_run.agent_run_id != response.agent_run_id || agent_run.turn_id != response.turn_id {
+        return Err(AgentInputCommandError::failed(
+            "session/prompt started with identities that differ from its durable receipt",
+        ));
+    }
+    Ok(response)
 }
 
 pub(crate) async fn compact_context(
@@ -922,6 +1100,8 @@ pub(crate) async fn question_answer_async(
         auto_continue_after_resume_wait: request.auto_continue_after_resume_wait,
         resume_from_turn_id: Some(resume_from_turn_id),
         attachments: Vec::new(),
+        requested_agent_run_id: None,
+        requested_turn_id: None,
     })
     .await?;
     Ok(AgentInputResponse {
@@ -940,6 +1120,8 @@ struct StartAgentRunRequest {
     auto_continue_after_resume_wait: Option<bool>,
     resume_from_turn_id: Option<String>,
     attachments: Vec<crate::local_attachments::LocalImageInputRequest>,
+    requested_agent_run_id: Option<String>,
+    requested_turn_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -988,10 +1170,15 @@ fn resolve_agent_runtime_from_binding(
 fn start_agent_run(mut request: StartAgentRunRequest) -> Result<StartedAgentRun, String> {
     let agent_runtime = resolve_agent_runtime(request.session_id.as_str())?;
     let started_at_ms = current_timestamp_ms();
-    let sequence = AGENT_RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let turn_id = new_turn_id();
+    let turn_id = request
+        .requested_turn_id
+        .clone()
+        .unwrap_or_else(new_turn_id);
     let started_turn_id = turn_id.clone();
-    let agent_run_id = format!("agent-run-{started_at_ms}-{sequence}");
+    let agent_run_id = request.requested_agent_run_id.clone().unwrap_or_else(|| {
+        let sequence = AGENT_RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("agent-run-{started_at_ms}-{sequence}")
+    });
     let started_agent_run_id = agent_run_id.clone();
     let handle = tokio::runtime::Handle::try_current()
         .map_err(|error| format!("session/prompt requires Tokio runtime: {error}"))?;
@@ -3289,6 +3476,113 @@ mod tests {
     use centaeris_core::model::ToolCallEnvelope;
     use std::collections::HashMap;
     use std::fs;
+    use std::time::Duration;
+
+    fn prompt_request(operation_id: &str, session_id: &str, message: &str) -> AgentInputRequest {
+        serde_json::from_value(serde_json::json!({
+            "operationId": operation_id,
+            "sessionId": session_id,
+            "message": message,
+        }))
+        .expect("session/prompt request")
+    }
+
+    fn prompt_event_writer(
+        viewer_id: &str,
+    ) -> (
+        Arc<crate::runtime_rpc_transport::RuntimeServerClientHub>,
+        EventWriter,
+        tokio::sync::mpsc::UnboundedReceiver<String>,
+    ) {
+        let clients = Arc::new(crate::runtime_rpc_transport::RuntimeServerClientHub::default());
+        let (event_writer, outbound) = clients
+            .connect()
+            .expect("connect prompt client")
+            .expect("runtime server accepts prompt client");
+        event_writer
+            .register_client(crate::runtime_server::RuntimeClientKind::Desktop, viewer_id)
+            .expect("register prompt client");
+        (clients, event_writer, outbound)
+    }
+
+    async fn stop_prompt_agent_run(event_writer: &EventWriter, response: &AgentInputResponse) {
+        let _ = cancel_agent_run(
+            event_writer.clone(),
+            agent_runs::AgentRunCancelRequest {
+                agent_run_id: Some(response.agent_run_id.clone()),
+                session_id: Some(response.session_id.clone()),
+                reason: Some("test_cleanup".to_string()),
+            },
+        );
+        for _ in 0..200 {
+            if event_writer
+                .active_agent_run(response.agent_run_id.as_str())
+                .expect("inspect active prompt AgentRun")
+                .is_none()
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("prompt AgentRun did not stop during test cleanup");
+    }
+
+    struct PromptTestEnvironment {
+        root: PathBuf,
+        workspace: PathBuf,
+        previous_data_dir: Option<std::ffi::OsString>,
+        previous_log_dir: Option<std::ffi::OsString>,
+        previous_db_path: Option<std::ffi::OsString>,
+    }
+
+    impl PromptTestEnvironment {
+        fn new(name: &str) -> Self {
+            let root = unique_test_dir(name);
+            let workspace = root.join("workspace");
+            fs::create_dir_all(workspace.as_path()).expect("create workspace");
+            let previous_data_dir = std::env::var_os("CENTAERIS_DESKTOP_DATA_DIR");
+            let previous_log_dir = std::env::var_os("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR");
+            let previous_db_path = std::env::var_os("CENTAERIS_AGENT_RUNTIME_DB_PATH");
+            std::env::set_var("CENTAERIS_DESKTOP_DATA_DIR", &root);
+            std::env::set_var("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR", root.join("sessions"));
+            std::env::set_var(
+                "CENTAERIS_AGENT_RUNTIME_DB_PATH",
+                root.join("runtime-state.sqlite3"),
+            );
+            Self {
+                root,
+                workspace,
+                previous_data_dir,
+                previous_log_dir,
+                previous_db_path,
+            }
+        }
+
+        fn create_session(&self, title: &str) -> Result<sessions::SessionItemResponse, String> {
+            sessions::create(sessions::SessionCreateRequest {
+                title: Some(title.to_string()),
+                cwd: self.workspace.to_string_lossy().to_string(),
+            })
+        }
+    }
+
+    impl Drop for PromptTestEnvironment {
+        fn drop(&mut self) {
+            match self.previous_data_dir.take() {
+                Some(value) => std::env::set_var("CENTAERIS_DESKTOP_DATA_DIR", value),
+                None => std::env::remove_var("CENTAERIS_DESKTOP_DATA_DIR"),
+            }
+            match self.previous_log_dir.take() {
+                Some(value) => std::env::set_var("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR", value),
+                None => std::env::remove_var("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR"),
+            }
+            match self.previous_db_path.take() {
+                Some(value) => std::env::set_var("CENTAERIS_AGENT_RUNTIME_DB_PATH", value),
+                None => std::env::remove_var("CENTAERIS_AGENT_RUNTIME_DB_PATH"),
+            }
+            fs::remove_dir_all(self.root.as_path()).ok();
+        }
+    }
 
     #[test]
     fn session_prompt_loop_preserves_model_retryability_metadata() {
@@ -3999,6 +4293,7 @@ mod tests {
     #[test]
     fn session_prompt_request_rejects_unknown_field() {
         let error = serde_json::from_value::<AgentInputRequest>(serde_json::json!({
+            "operationId": "prompt-operation-strict",
             "sessionId": "chat-strict",
             "message": "hello",
             "unexpectedField": true
@@ -4006,6 +4301,262 @@ mod tests {
         .expect_err("unknown field must fail loudly");
 
         assert!(error.to_string().contains("unexpectedField"));
+    }
+
+    #[test]
+    fn session_prompt_request_requires_operation_identity() {
+        let error = serde_json::from_value::<AgentInputRequest>(serde_json::json!({
+            "sessionId": "chat-strict",
+            "message": "hello"
+        }))
+        .expect_err("operationId must be required");
+
+        assert!(error.to_string().contains("operationId"));
+    }
+
+    #[test]
+    fn session_prompt_operation_identity_uses_the_shared_bounded_opaque_contract() {
+        for operation_id in [
+            "".to_string(),
+            " leading".to_string(),
+            "path/segment".to_string(),
+            "x".repeat(operation_receipts::MAX_OPERATION_ID_BYTES + 1),
+        ] {
+            let error = serde_json::from_value::<AgentInputRequest>(serde_json::json!({
+                "operationId": operation_id,
+                "sessionId": "chat-strict",
+                "message": "hello"
+            }))
+            .expect_err("invalid operationId must fail loudly");
+            assert!(error.to_string().contains("operationId"));
+        }
+
+        serde_json::from_value::<AgentInputRequest>(serde_json::json!({
+            "operationId": "session-prompt:client_01.2",
+            "sessionId": "chat-strict",
+            "message": "hello"
+        }))
+        .expect("valid operationId");
+    }
+
+    #[test]
+    fn duplicate_prompt_operation_while_running_returns_the_original_response_once() {
+        let guard = message_log::test_env_mutex()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let environment = PromptTestEnvironment::new("prompt-operation-running");
+        let runtime = tokio::runtime::Runtime::new().expect("prompt test runtime");
+        let result = runtime.block_on(async {
+            let session = environment.create_session("idempotent prompt")?;
+            let (_clients, event_writer, _outbound) = prompt_event_writer("prompt-running-viewer");
+            let first = input(
+                event_writer.clone(),
+                prompt_request("prompt-operation-running", session.id.as_str(), "hello"),
+            )
+            .map_err(|error| error.to_string())?;
+            let duplicate = input(
+                event_writer.clone(),
+                serde_json::from_value(serde_json::json!({
+                    "operationId": "prompt-operation-running",
+                    "sessionId": format!(" {} ", session.id),
+                    "message": " hello ",
+                    "tailPolicy": "append"
+                }))
+                .expect("normalized duplicate prompt request"),
+            );
+            stop_prompt_agent_run(&event_writer, &first).await;
+            let duplicate = duplicate.map_err(|error| error.to_string())?;
+            if duplicate.agent_run_id != first.agent_run_id || duplicate.turn_id != first.turn_id {
+                return Err("running duplicate did not return the original identities".to_string());
+            }
+            let messages = message_log::project_chat_messages(session.id.as_str())?;
+            let user_messages = messages
+                .iter()
+                .filter(|message| message.role == "user")
+                .collect::<Vec<_>>();
+            let runs = message_log::project_agent_runs_for_session(session.id.as_str())?;
+            if user_messages.len() != 1 || runs.len() != 1 {
+                return Err(format!(
+                    "running duplicate committed messages={} AgentRuns={}",
+                    user_messages.len(),
+                    runs.len()
+                ));
+            }
+            Ok::<(), String>(())
+        });
+        drop(runtime);
+        drop(environment);
+        drop(guard);
+        result.expect("running session/prompt replay");
+    }
+
+    #[test]
+    fn completed_prompt_operation_replays_after_response_loss_and_runtime_reopen() {
+        let guard = message_log::test_env_mutex()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let environment = PromptTestEnvironment::new("prompt-operation-reopen");
+        let runtime = tokio::runtime::Runtime::new().expect("prompt test runtime");
+        let result = runtime.block_on(async {
+            let session = environment.create_session("reopen prompt")?;
+            let (first_clients, first_writer, first_outbound) =
+                prompt_event_writer("prompt-first-viewer");
+            let committed_before_response_loss = input(
+                first_writer.clone(),
+                prompt_request("prompt-operation-reopen", session.id.as_str(), "hello"),
+            )
+            .map_err(|error| error.to_string())?;
+            stop_prompt_agent_run(&first_writer, &committed_before_response_loss).await;
+            drop(first_writer);
+            drop(first_outbound);
+            drop(first_clients);
+
+            let (_reopened_clients, reopened_writer, _reopened_outbound) =
+                prompt_event_writer("prompt-reopened-viewer");
+            let replayed = input(
+                reopened_writer.clone(),
+                prompt_request("prompt-operation-reopen", session.id.as_str(), "hello"),
+            )
+            .map_err(|error| error.to_string())?;
+            if replayed.agent_run_id != committed_before_response_loss.agent_run_id
+                || replayed.turn_id != committed_before_response_loss.turn_id
+            {
+                stop_prompt_agent_run(&reopened_writer, &replayed).await;
+                return Err(
+                    "reopened Runtime did not replay the original prompt receipt".to_string(),
+                );
+            }
+            let messages = message_log::project_chat_messages(session.id.as_str())?;
+            let runs = message_log::project_agent_runs_for_session(session.id.as_str())?;
+            if messages
+                .iter()
+                .filter(|message| message.role == "user")
+                .count()
+                != 1
+                || runs.len() != 1
+            {
+                return Err("reopened replay duplicated the prompt commit".to_string());
+            }
+            Ok::<(), String>(())
+        });
+        drop(runtime);
+        drop(environment);
+        drop(guard);
+        result.expect("reopen session/prompt replay");
+    }
+
+    #[test]
+    fn prompt_operation_recovers_when_the_receipt_committed_before_the_agent_run() {
+        let guard = message_log::test_env_mutex()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let environment = PromptTestEnvironment::new("prompt-operation-receipt-crash-window");
+        let runtime = tokio::runtime::Runtime::new().expect("prompt test runtime");
+        let result = runtime.block_on(async {
+            let session = environment.create_session("receipt crash window")?;
+            let operation_id = "prompt-operation-receipt-crash-window";
+            let request_digest = operation_receipts::request_digest(&CanonicalAgentInputRequest {
+                session_id: session.id.as_str(),
+                message: "hello",
+                tail_policy: "append",
+                rewrite_target_message_id: None,
+                rewrite_expected_tail_message_id: None,
+                auto_continue_after_resume_wait: None,
+                attachments: Vec::new(),
+            })?;
+            let expected = AgentInputResponse {
+                session_id: session.id.clone(),
+                agent_run_id: operation_receipts::deterministic_identity(
+                    "agent-run-",
+                    SESSION_PROMPT_METHOD,
+                    operation_id,
+                ),
+                turn_id: operation_receipts::deterministic_identity(
+                    "turn-",
+                    SESSION_PROMPT_METHOD,
+                    operation_id,
+                ),
+                stream_items: Vec::new(),
+            };
+            operation_receipts::write(
+                SESSION_PROMPT_METHOD,
+                operation_id,
+                request_digest,
+                serde_json::to_value(&expected).map_err(|error| error.to_string())?,
+            )?;
+
+            let (_clients, event_writer, _outbound) =
+                prompt_event_writer("prompt-receipt-crash-viewer");
+            let recovered = input(
+                event_writer.clone(),
+                prompt_request(operation_id, session.id.as_str(), "hello"),
+            )
+            .map_err(|error| error.to_string())?;
+            if recovered != expected {
+                stop_prompt_agent_run(&event_writer, &recovered).await;
+                return Err("receipt-only recovery changed prompt identities".to_string());
+            }
+            let messages = message_log::project_chat_messages(session.id.as_str())?;
+            let runs = message_log::project_agent_runs_for_session(session.id.as_str())?;
+            stop_prompt_agent_run(&event_writer, &recovered).await;
+            if messages
+                .iter()
+                .filter(|message| message.role == "user")
+                .count()
+                != 1
+                || runs.len() != 1
+            {
+                return Err("receipt-only recovery did not commit exactly one prompt".to_string());
+            }
+            Ok::<(), String>(())
+        });
+        drop(runtime);
+        drop(environment);
+        drop(guard);
+        result.expect("receipt-only session/prompt recovery");
+    }
+
+    #[test]
+    fn duplicate_prompt_operation_with_changed_payload_fails_as_a_conflict() {
+        let guard = message_log::test_env_mutex()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let environment = PromptTestEnvironment::new("prompt-operation-conflict");
+        let runtime = tokio::runtime::Runtime::new().expect("prompt test runtime");
+        let result = runtime.block_on(async {
+            let session = environment.create_session("conflicting prompt")?;
+            let (_clients, event_writer, _outbound) = prompt_event_writer("prompt-conflict-viewer");
+            let first = input(
+                event_writer.clone(),
+                prompt_request("prompt-operation-conflict", session.id.as_str(), "first"),
+            )
+            .map_err(|error| error.to_string())?;
+            let conflict = input(
+                event_writer.clone(),
+                prompt_request("prompt-operation-conflict", session.id.as_str(), "changed"),
+            );
+            stop_prompt_agent_run(&event_writer, &first).await;
+            let error = conflict.expect_err("changed payload must not reuse an operationId");
+            if error.code() != "operation_id_conflict" {
+                return Err(format!("conflict lacks stable classification: {error}"));
+            }
+            let messages = message_log::project_chat_messages(session.id.as_str())?;
+            let runs = message_log::project_agent_runs_for_session(session.id.as_str())?;
+            if messages
+                .iter()
+                .filter(|message| message.role == "user")
+                .count()
+                != 1
+                || runs.len() != 1
+            {
+                return Err("conflicting operation mutated the original prompt".to_string());
+            }
+            Ok::<(), String>(())
+        });
+        drop(runtime);
+        drop(environment);
+        drop(guard);
+        result.expect("conflicting session/prompt replay");
     }
 
     #[test]
@@ -4188,6 +4739,7 @@ mod tests {
     #[test]
     fn session_prompt_request_rejects_unknown_tail_policy() {
         let request = serde_json::from_value::<AgentInputRequest>(serde_json::json!({
+            "operationId": "prompt-operation-tail-policy",
             "sessionId": "chat-tail-policy",
             "message": "hello",
             "tailPolicy": "banana"
@@ -4202,6 +4754,7 @@ mod tests {
     #[test]
     fn session_prompt_request_rejects_rewrite_tail_policy_without_ids() {
         let request = serde_json::from_value::<AgentInputRequest>(serde_json::json!({
+            "operationId": "prompt-operation-rewrite-missing-ids",
             "sessionId": "chat-rewrite",
             "message": "hello",
             "tailPolicy": "rewriteLastUser"
@@ -4216,6 +4769,7 @@ mod tests {
     #[test]
     fn session_prompt_request_accepts_rewrite_tail_policy_with_ids() {
         let request = serde_json::from_value::<AgentInputRequest>(serde_json::json!({
+            "operationId": "prompt-operation-rewrite",
             "sessionId": "chat-rewrite",
             "message": "hello",
             "tailPolicy": "rewriteLastUser",

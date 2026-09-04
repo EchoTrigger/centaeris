@@ -87,6 +87,7 @@ const harness = vi.hoisted(() => ({
   questionProps: null as PendingQuestionHarnessProps | null,
   streams: [] as CapturedStream[],
   nextRunNumber: 1,
+  nextOperationNumber: 1,
   createSession: vi.fn(),
   sendAgentInput: vi.fn(),
   getAgentContextUsage: vi.fn(),
@@ -109,6 +110,11 @@ vi.mock("../src/lib/chatBridge", () => ({
   answerAgentQuestion: harness.answerAgentQuestion,
   cancelAgentRun: harness.cancelAgentRun,
   compactAgentContext: vi.fn(),
+  createRuntimeOperationId: () => {
+    const suffix = harness.nextOperationNumber.toString().padStart(12, "0");
+    harness.nextOperationNumber += 1;
+    return `00000000-0000-4000-8000-${suffix}`;
+  },
   createSession: harness.createSession,
   getAgentContextUsage: harness.getAgentContextUsage,
   getAgentRuntimeConfig: vi.fn(async () => runtimeConfig),
@@ -462,6 +468,7 @@ beforeEach(() => {
   harness.questionProps = null;
   harness.streams.length = 0;
   harness.nextRunNumber = 1;
+  harness.nextOperationNumber = 1;
   harness.createSession.mockReset();
   harness.sendAgentInput.mockReset();
   harness.answerAgentQuestion.mockReset();
@@ -550,6 +557,14 @@ test("a queued prompt is sent once after the active run reaches a terminal event
     "first prompt",
     "queued prompt",
   ]);
+  const operationIds = harness.sendAgentInput.mock.calls.map(
+    ([request]) => request.operationId,
+  );
+  expect(operationIds).toEqual([
+    expect.stringMatching(/^[0-9a-f-]{36}$/),
+    expect.stringMatching(/^[0-9a-f-]{36}$/),
+  ]);
+  expect(operationIds[1]).not.toBe(operationIds[0]);
 
   await act(async () => {
     renderer.update(
@@ -1265,6 +1280,7 @@ test("editing the durable tail submits an exact rewrite transaction", async () =
 
   expect(harness.sendAgentInput).toHaveBeenCalledTimes(2);
   expect(harness.sendAgentInput).toHaveBeenLastCalledWith({
+    operationId: expect.stringMatching(/^[0-9a-f-]{36}$/),
     sessionId: "one",
     message: "rewritten prompt",
     preferredLocale: "zh-CN",
@@ -1430,6 +1446,7 @@ test("a newly created session adopts ownership of its first prompt response", as
   expect(harness.createSession).toHaveBeenCalledWith(
     "create this session",
     "D:\\Workspace",
+    expect.stringMatching(/^[0-9a-f-]{36}$/),
   );
   expect(harness.sendAgentInput).toHaveBeenCalledWith(
     expect.objectContaining({

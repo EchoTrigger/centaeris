@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 import {
+  createRuntimeResponseTracker,
   requireRuntimeDescriptor,
   stopStaleRuntimeSocket,
 } from "./runtimeHostTransport.mjs";
@@ -68,4 +69,22 @@ test("stale Runtime replacement continues when app_exit never responds", async (
   });
 
   assert.equal(socket.destroyed, true);
+});
+
+test("Runtime request timeout reports an unknown outcome and consumes one late response", async () => {
+  const tracker = createRuntimeResponseTracker({ requestTimeoutMs: 5 });
+  const response = tracker.track("electron-1", {
+    command: "session/new",
+    group: "session",
+  });
+
+  await assert.rejects(
+    response,
+    (error) => error.code === "runtime_request_timeout"
+      && error.outcomeUnknown === true
+      && error.command === "session/new",
+  );
+  assert.deepEqual(tracker.take("electron-1"), { state: "abandoned" });
+  assert.deepEqual(tracker.take("electron-1"), { state: "unknown" });
+  assert.deepEqual(tracker.take("never-issued"), { state: "unknown" });
 });

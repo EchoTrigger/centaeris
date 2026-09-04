@@ -17,6 +17,7 @@ try {
         cargo fmt --all -- --check
         cargo check --workspace --locked
         cargo clippy --workspace --all-targets --locked -- -D warnings
+        cargo run --locked -p centaeris-runtime --bin centaeris-runtime-protocol-docs -- --check
 
         $coreTree = cargo tree --locked -p centaeris-core --edges normal,build,dev
         if ($LASTEXITCODE -ne 0) { throw "Core dependency tree failed" }

@@ -4327,6 +4327,7 @@ fn inline_image_placeholder_is_atomic_and_serializes_in_body_order() {
         },
         app.input.as_str(),
         app.draft_image_attachments.as_slice(),
+        "session-prompt:image-action",
     );
     assert_eq!(request["request"]["message"], "a[Image #2]b[Image #1]c");
     assert_eq!(
@@ -4345,6 +4346,47 @@ fn inline_image_placeholder_is_atomic_and_serializes_in_body_order() {
     assert_eq!(app.next_image_number, 1);
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
+}
+
+#[test]
+fn command_requests_keep_the_user_actions_operation_identity() {
+    let first = new_runtime_operation_id().expect("first operation identity");
+    let second = new_runtime_operation_id().expect("second operation identity");
+    assert_eq!(first.len(), 32);
+    assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert_ne!(first, second);
+
+    let session_request =
+        build_session_create_request("Session title", "D:/Workspace", "session-new:action-1");
+    assert_eq!(
+        session_request["request"]["operationId"],
+        "session-new:action-1"
+    );
+
+    let prompt_request = build_prompt_request(
+        &TuiSession {
+            id: "session-operation".to_string(),
+            title: String::new(),
+            updated_at: 0,
+            last_message: None,
+            cwd: "D:/Workspace".to_string(),
+            session_kind: TuiSessionKind::Main,
+            activity_state: TuiSessionActivityState::Inactive,
+            is_unread: false,
+            is_pinned: false,
+        },
+        "Prompt",
+        &[],
+        "session-prompt:action-1",
+    );
+    assert_eq!(
+        prompt_request["request"]["operationId"],
+        "session-prompt:action-1"
+    );
+    assert_eq!(
+        prompt_request.clone()["request"]["operationId"],
+        prompt_request["request"]["operationId"]
+    );
 }
 
 fn test_app(input: &str, workspace_root: PathBuf, _data_root: PathBuf) -> App {

@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
 use std::env;
+use std::fmt;
 use std::io::Read;
 #[cfg(unix)]
 use std::io::Write;
@@ -21,17 +22,112 @@ use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 
 const JSON_RPC_VERSION: &str = "2.0";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_ABANDONED_RUNTIME_REQUESTS: usize = 1_024;
+const RUNTIME_CONNECTION_LOST_CODE: &str = "runtime_connection_lost";
+const RUNTIME_REQUEST_NOT_SENT_CODE: &str = "runtime_request_not_sent";
+const RUNTIME_REQUEST_TIMEOUT_CODE: &str = "runtime_request_timeout";
+const RUNTIME_RESPONSE_CHANNEL_CLOSED_CODE: &str = "runtime_response_channel_closed";
+const RUNTIME_RPC_ERROR_CODE: &str = "runtime_rpc_error";
 const RUNTIME_EXE_ENV: &str = "CENTAERIS_RUNTIME_EXE";
 const RUNTIME_CONNECTION_CLOSED: &str = "Runtime Server connection closed";
 const RUNTIME_SERVER_STDERR_TAIL_CHARS: usize = 8_192;
 const SUPPORTED_CORE_PROTOCOL_VERSION: &str = "1.0.0";
-type PendingRuntimeResponses = Arc<Mutex<HashMap<String, mpsc::Sender<Result<Value, String>>>>>;
+enum PendingRuntimeResponse {
+    Waiting(mpsc::Sender<Result<Value, RuntimeRequestError>>),
+    Abandoned,
+}
+
+type PendingRuntimeResponses = Arc<Mutex<HashMap<String, PendingRuntimeResponse>>>;
 
 #[derive(Debug)]
 pub(crate) enum RuntimeEvent {
     SessionUpdate(Value),
     RuntimeConfigChanged,
     Error(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RuntimeRequestError {
+    code: String,
+    message: String,
+    outcome_unknown: bool,
+}
+
+impl RuntimeRequestError {
+    fn domain(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            outcome_unknown: false,
+        }
+    }
+
+    fn local(code: &'static str, message: impl Into<String>, outcome_unknown: bool) -> Self {
+        Self {
+            code: code.to_string(),
+            message: message.into(),
+            outcome_unknown,
+        }
+    }
+
+    fn request_not_sent(message: String) -> Self {
+        Self::local(RUNTIME_REQUEST_NOT_SENT_CODE, message, false)
+    }
+
+    fn connection_lost(message: impl Into<String>) -> Self {
+        Self::local(RUNTIME_CONNECTION_LOST_CODE, message, true)
+    }
+
+    fn timeout(method: &str) -> Self {
+        Self::local(
+            RUNTIME_REQUEST_TIMEOUT_CODE,
+            format!("runtime request timed out: {method}"),
+            true,
+        )
+    }
+
+    fn response_channel_closed() -> Self {
+        Self::local(
+            RUNTIME_RESPONSE_CHANNEL_CLOSED_CODE,
+            "runtime response channel closed",
+            true,
+        )
+    }
+
+    pub(crate) fn code(&self) -> &str {
+        self.code.as_str()
+    }
+
+    pub(crate) fn message(&self) -> &str {
+        self.message.as_str()
+    }
+
+    pub(crate) fn outcome_unknown(&self) -> bool {
+        self.outcome_unknown
+    }
+}
+
+impl fmt::Display for RuntimeRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.outcome_unknown() {
+            write!(
+                formatter,
+                "{} (code: {}; outcome unknown)",
+                self.message(),
+                self.code()
+            )
+        } else {
+            write!(formatter, "{} (code: {})", self.message(), self.code())
+        }
+    }
+}
+
+impl std::error::Error for RuntimeRequestError {}
+
+impl From<RuntimeRequestError> for String {
+    fn from(error: RuntimeRequestError) -> Self {
+        error.to_string()
+    }
 }
 
 pub(crate) struct RuntimeClient {
@@ -66,7 +162,7 @@ struct RuntimeInitializeDescriptor {
 }
 
 pub(crate) struct RuntimeResponse {
-    response_rx: mpsc::Receiver<Result<Value, String>>,
+    response_rx: mpsc::Receiver<Result<Value, RuntimeRequestError>>,
     id: String,
     method: String,
     pending: PendingRuntimeResponses,
@@ -132,7 +228,11 @@ impl RuntimeClient {
         })
     }
 
-    pub(crate) fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
+    pub(crate) fn request(
+        &mut self,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, RuntimeRequestError> {
         self.request_with_timeout(method, params, REQUEST_TIMEOUT)
     }
 
@@ -141,8 +241,9 @@ impl RuntimeClient {
         method: &str,
         params: Value,
         timeout: Duration,
-    ) -> Result<Value, String> {
-        self.request_async(method, params)?
+    ) -> Result<Value, RuntimeRequestError> {
+        self.request_async(method, params)
+            .map_err(RuntimeRequestError::request_not_sent)?
             .recv_timeout(method, timeout)
     }
 
@@ -156,11 +257,11 @@ impl RuntimeClient {
         }
         let id = format!("tui-{}", self.next_id);
         self.next_id = self.next_id.saturating_add(1);
-        let (tx, rx) = mpsc::channel::<Result<Value, String>>();
+        let (tx, rx) = mpsc::channel::<Result<Value, RuntimeRequestError>>();
         self.pending
             .lock()
             .map_err(|_| "runtime response table lock poisoned".to_string())?
-            .insert(id.clone(), tx);
+            .insert(id.clone(), PendingRuntimeResponse::Waiting(tx));
         if !self.is_connected() {
             let _ = self
                 .pending
@@ -323,36 +424,32 @@ fn descriptor_contains(values: &[String], required: &[&str]) -> bool {
 }
 
 impl RuntimeResponse {
-    pub(crate) fn try_recv(&self) -> Result<Option<Value>, String> {
+    pub(crate) fn try_recv(&self) -> Result<Option<Value>, RuntimeRequestError> {
         match self.response_rx.try_recv() {
             Ok(response) => response.map(Some),
             Err(mpsc::TryRecvError::Empty) if self.started_at.elapsed() < REQUEST_TIMEOUT => {
                 Ok(None)
             }
-            Err(mpsc::TryRecvError::Empty) => {
-                Err(format!("runtime request timed out: {}", self.method))
-            }
+            Err(mpsc::TryRecvError::Empty) => Err(RuntimeRequestError::timeout(&self.method)),
             Err(mpsc::TryRecvError::Disconnected) => {
-                Err("runtime response channel closed".to_string())
+                Err(RuntimeRequestError::response_channel_closed())
             }
         }
     }
 
-    fn recv_timeout(&self, method: &str, timeout: Duration) -> Result<Value, String> {
+    fn recv_timeout(&self, method: &str, timeout: Duration) -> Result<Value, RuntimeRequestError> {
         match self.response_rx.recv_timeout(timeout) {
             Ok(response) => response,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                Err(format!("runtime request timed out: {method}"))
-            }
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(RuntimeRequestError::timeout(method)),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                Err("runtime response channel closed".to_string())
+                Err(RuntimeRequestError::response_channel_closed())
             }
         }
     }
 
     #[cfg(test)]
     pub(crate) fn from_response_receiver(
-        response_rx: mpsc::Receiver<Result<Value, String>>,
+        response_rx: mpsc::Receiver<Result<Value, RuntimeRequestError>>,
     ) -> Self {
         Self {
             response_rx,
@@ -367,9 +464,29 @@ impl RuntimeResponse {
 impl Drop for RuntimeResponse {
     fn drop(&mut self) {
         if let Ok(mut pending) = self.pending.lock() {
-            pending.remove(self.id.as_str());
+            if matches!(
+                pending.remove(self.id.as_str()),
+                Some(PendingRuntimeResponse::Waiting(_))
+            ) {
+                remember_abandoned_response(&mut pending, self.id.as_str());
+            }
         }
     }
+}
+
+fn remember_abandoned_response(pending: &mut HashMap<String, PendingRuntimeResponse>, id: &str) {
+    let abandoned_count = pending
+        .values()
+        .filter(|response| matches!(response, PendingRuntimeResponse::Abandoned))
+        .count();
+    if abandoned_count >= MAX_ABANDONED_RUNTIME_REQUESTS {
+        if let Some(oldest) = pending.iter().find_map(|(id, response)| {
+            matches!(response, PendingRuntimeResponse::Abandoned).then(|| id.clone())
+        }) {
+            pending.remove(oldest.as_str());
+        }
+    }
+    pending.insert(id.to_string(), PendingRuntimeResponse::Abandoned);
 }
 
 fn fail_runtime_connection(
@@ -394,10 +511,18 @@ fn invalidate_runtime_connection(
     let message = message.into();
     let response_txs = pending
         .lock()
-        .map(|mut pending| pending.drain().map(|(_, tx)| tx).collect::<Vec<_>>())
+        .map(|mut pending| {
+            pending
+                .drain()
+                .filter_map(|(_, response)| match response {
+                    PendingRuntimeResponse::Waiting(tx) => Some(tx),
+                    PendingRuntimeResponse::Abandoned => None,
+                })
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     for response_tx in response_txs {
-        let _ = response_tx.send(Err(message.clone()));
+        let _ = response_tx.send(Err(RuntimeRequestError::connection_lost(message.clone())));
     }
     true
 }
@@ -650,23 +775,46 @@ fn handle_runtime_response(
         .get("id")
         .map(runtime_id_to_string)
         .ok_or_else(|| "runtime response id is required".to_string())?;
-    let tx = pending
+    let response = pending
         .lock()
         .map_err(|_| "runtime response table lock poisoned".to_string())?
-        .remove(id.as_str())
-        .ok_or_else(|| format!("runtime response has no pending request: {id}"))?;
+        .remove(id.as_str());
+    let Some(response) = response else {
+        return Err(format!("runtime response has no pending request: {id}"));
+    };
+    let PendingRuntimeResponse::Waiting(tx) = response else {
+        return Ok(());
+    };
     let result = if let Some(result) = message.get("result") {
         Ok(result.clone())
     } else {
-        Err(message
-            .get("error")
-            .and_then(|error| error.get("message"))
-            .and_then(Value::as_str)
-            .unwrap_or("runtime request failed")
-            .to_string())
+        Err(runtime_response_error(message)?)
     };
     tx.send(result)
         .map_err(|_| "runtime response receiver dropped".to_string())
+}
+
+fn runtime_response_error(message: &Value) -> Result<RuntimeRequestError, String> {
+    let error = message
+        .get("error")
+        .ok_or_else(|| "runtime response missing result or error".to_string())?;
+    error
+        .get("code")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "runtime error response missing numeric code".to_string())?;
+    let code = match error.get("data").and_then(|data| data.get("code")) {
+        Some(Value::String(code)) if !code.trim().is_empty() => code.as_str(),
+        Some(_) => {
+            return Err("runtime error response data.code must be a non-empty string".to_string())
+        }
+        None => RUNTIME_RPC_ERROR_CODE,
+    };
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|message| !message.trim().is_empty())
+        .ok_or_else(|| "runtime error response missing message".to_string())?;
+    Ok(RuntimeRequestError::domain(code, message))
 }
 
 fn request_frame(id: &str, method: &str, params: Value) -> Result<Value, String> {
@@ -923,8 +1071,14 @@ mod tests {
         let (first_tx, first_rx) = mpsc::channel();
         let (second_tx, second_rx) = mpsc::channel();
         let pending = Arc::new(Mutex::new(HashMap::from([
-            ("tui-1".to_string(), first_tx),
-            ("tui-2".to_string(), second_tx),
+            (
+                "tui-1".to_string(),
+                PendingRuntimeResponse::Waiting(first_tx),
+            ),
+            (
+                "tui-2".to_string(),
+                PendingRuntimeResponse::Waiting(second_tx),
+            ),
         ])));
         let connected = AtomicBool::new(true);
         let (event_tx, event_rx) = mpsc::channel();
@@ -942,13 +1096,17 @@ mod tests {
             first_rx
                 .recv_timeout(Duration::from_millis(50))
                 .expect("first response"),
-            Err(RUNTIME_CONNECTION_CLOSED.to_string())
+            Err(RuntimeRequestError::connection_lost(
+                RUNTIME_CONNECTION_CLOSED
+            ))
         );
         assert_eq!(
             second_rx
                 .recv_timeout(Duration::from_millis(50))
                 .expect("second response"),
-            Err(RUNTIME_CONNECTION_CLOSED.to_string())
+            Err(RuntimeRequestError::connection_lost(
+                RUNTIME_CONNECTION_CLOSED
+            ))
         );
         assert!(matches!(
             event_rx.recv_timeout(Duration::from_millis(50)).expect("disconnect event"),
@@ -972,7 +1130,7 @@ mod tests {
         let (response_tx, response_rx) = mpsc::channel();
         let pending = Arc::new(Mutex::new(HashMap::from([(
             "tui-eof".to_string(),
-            response_tx,
+            PendingRuntimeResponse::Waiting(response_tx),
         )])));
         let connected = Arc::new(AtomicBool::new(true));
         let (write_tx, _write_rx) = mpsc::channel();
@@ -990,7 +1148,9 @@ mod tests {
             response_rx
                 .recv_timeout(Duration::from_millis(250))
                 .expect("EOF response"),
-            Err(RUNTIME_CONNECTION_CLOSED.to_string())
+            Err(RuntimeRequestError::connection_lost(
+                RUNTIME_CONNECTION_CLOSED
+            ))
         );
         assert!(matches!(
             event_rx.recv_timeout(Duration::from_millis(250)).expect("EOF event"),
@@ -1106,12 +1266,12 @@ mod tests {
     }
 
     #[test]
-    fn dropped_async_response_removes_its_pending_request() {
+    fn dropped_async_response_marks_its_pending_request_abandoned() {
         let (response_tx, response_rx) = mpsc::channel();
         let (pending_tx, _pending_rx) = mpsc::channel();
         let pending = Arc::new(Mutex::new(HashMap::from([(
             "tui-1".to_string(),
-            pending_tx,
+            PendingRuntimeResponse::Waiting(pending_tx),
         )])));
         drop(response_tx);
         {
@@ -1123,7 +1283,85 @@ mod tests {
                 started_at: Instant::now(),
             };
         }
-        assert!(pending.lock().expect("pending lock").is_empty());
+        assert!(matches!(
+            pending.lock().expect("pending lock").get("tui-1"),
+            Some(PendingRuntimeResponse::Abandoned)
+        ));
+    }
+
+    #[test]
+    fn locally_abandoned_response_is_consumed_once_without_accepting_unknown_ids() {
+        let (_response_tx, response_rx) = mpsc::channel();
+        let (pending_tx, _pending_rx) = mpsc::channel();
+        let pending = Arc::new(Mutex::new(HashMap::from([(
+            "tui-1".to_string(),
+            PendingRuntimeResponse::Waiting(pending_tx),
+        )])));
+        let response = RuntimeResponse {
+            response_rx,
+            id: "tui-1".to_string(),
+            method: "session/new".to_string(),
+            pending: Arc::clone(&pending),
+            started_at: Instant::now(),
+        };
+
+        let timeout = response
+            .recv_timeout("session/new", Duration::from_millis(1))
+            .expect_err("request must time out");
+        assert_eq!(timeout.code(), RUNTIME_REQUEST_TIMEOUT_CODE);
+        assert!(timeout.message().contains("timed out"));
+        assert!(timeout.outcome_unknown());
+        assert_eq!(
+            timeout.to_string(),
+            "runtime request timed out: session/new (code: runtime_request_timeout; outcome unknown)"
+        );
+        drop(response);
+
+        let late = json!({ "jsonrpc": "2.0", "id": "tui-1", "result": {} });
+        assert!(handle_runtime_response(&late, &pending).is_ok());
+        assert!(handle_runtime_response(&late, &pending).is_err());
+        let unknown = json!({ "jsonrpc": "2.0", "id": "never-issued", "result": {} });
+        assert!(handle_runtime_response(&unknown, &pending).is_err());
+    }
+
+    #[test]
+    fn runtime_response_preserves_domain_error_code_separately_from_message() {
+        let (response_tx, response_rx) = mpsc::channel();
+        let pending = Arc::new(Mutex::new(HashMap::from([(
+            "tui-domain-error".to_string(),
+            PendingRuntimeResponse::Waiting(response_tx),
+        )])));
+        let response = RuntimeResponse {
+            response_rx,
+            id: "tui-domain-error".to_string(),
+            method: "session/prompt".to_string(),
+            pending: Arc::clone(&pending),
+            started_at: Instant::now(),
+        };
+        let message = json!({
+            "jsonrpc": "2.0",
+            "id": "tui-domain-error",
+            "error": {
+                "code": -32602,
+                "message": "session is already running an AgentRun",
+                "data": {
+                    "code": "session_agent_run_active"
+                }
+            }
+        });
+
+        handle_runtime_response(&message, &pending).expect("valid Runtime error response");
+        let error = response
+            .recv_timeout("session/prompt", Duration::from_millis(50))
+            .expect_err("request must expose Runtime domain error");
+
+        assert_eq!(error.code(), "session_agent_run_active");
+        assert_eq!(error.message(), "session is already running an AgentRun");
+        assert!(!error.outcome_unknown());
+        assert_eq!(
+            error.to_string(),
+            "session is already running an AgentRun (code: session_agent_run_active)"
+        );
     }
 
     #[test]

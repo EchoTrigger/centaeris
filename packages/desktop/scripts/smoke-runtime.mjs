@@ -227,7 +227,11 @@ const assertHostTransportReconnectsAfterRuntimeExit = async (tempRoot) => {
       request: { root: workspaceRoot },
     });
     const created = await transport.invokeCommand("session/new", {
-      request: { title: "transport reconnect smoke", cwd: workspaceRoot },
+      request: {
+        operationId: "smoke-runtime-transport-reconnect-session",
+        title: "transport reconnect smoke",
+        cwd: workspaceRoot,
+      },
     });
     server.kill();
     await waitForExit(server);
@@ -827,7 +831,10 @@ const main = async () => {
     let missingWorkingDirectoryError = null;
     try {
       await invoke(child, "session/new", {
-        request: { title: "missing workspace must fail" },
+        request: {
+          operationId: "smoke-runtime-missing-workspace-session",
+          title: "missing workspace must fail",
+        },
       });
     } catch (error) {
       missingWorkingDirectoryError = error;
@@ -951,6 +958,7 @@ const main = async () => {
 
     const workspaceSession = await invoke(child, "session/new", {
       request: {
+        operationId: "smoke-runtime-workspace-session",
         title: "workspace smoke session",
         cwd: workspaceRoot,
       },
@@ -984,6 +992,7 @@ const main = async () => {
     }
     const disposableSession = await invoke(child, "session/new", {
       request: {
+        operationId: "smoke-runtime-disposable-session",
         title: "delete smoke session",
         cwd: workspaceRoot,
       },
@@ -1144,6 +1153,7 @@ const main = async () => {
     );
     const agentInput = await invoke(child, "session/prompt", {
       request: {
+        operationId: "smoke-runtime-unconfigured-prompt",
         sessionId: workspaceSession.id,
         message: "Say hello",
       },
@@ -1176,6 +1186,7 @@ const main = async () => {
     try {
       const configuredSession = await invoke(child, "session/new", {
         request: {
+          operationId: "smoke-runtime-configured-session",
           title: "configured workspace smoke session",
           cwd: workspaceRoot,
         },
@@ -1240,6 +1251,7 @@ const main = async () => {
       }
       const configuredInput = await invoke(child, "session/prompt", {
         request: {
+          operationId: "smoke-runtime-configured-prompt",
           sessionId: configuredSession.id,
           message: "Say hello through configured key",
         },
@@ -1272,6 +1284,7 @@ const main = async () => {
 
       const recoverySession = await invoke(child, "session/new", {
         request: {
+          operationId: "smoke-runtime-recovery-session",
           title: "runtime crash recovery smoke session",
           cwd: workspaceRoot,
         },
@@ -1279,6 +1292,7 @@ const main = async () => {
       assertRecord(recoverySession, "runtime crash recovery session/new result");
       const recoveryInput = await invoke(child, "session/prompt", {
         request: {
+          operationId: "smoke-runtime-recovery-prompt",
           sessionId: recoverySession.id,
           message: "runtime crash recovery smoke",
         },

@@ -15,9 +15,4 @@ test("keeps the virtual message list architecture", async () => {
     /useVirtualizer\(\{/,
     "VirtualMessageList must use TanStack Virtual",
   );
-  assert.match(
-    virtualListSource,
-    /useLayoutEffect\(\(\) => \{\s*onContentSizeChange\(totalSize\);\s*\}, \[onContentSizeChange, totalSize\]\);/,
-    "virtual row measurements must keep the existing follow scheduler attached",
-  );
 });

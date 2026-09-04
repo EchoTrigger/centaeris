@@ -18,7 +18,7 @@
     "prebuild": "node ./scripts/ensure-electron.mjs",
     "build": "npm run build:runtime && node ./scripts/build-dist.mjs",
     "build:runtime": "cargo build --locked --release -p centaeris-runtime",
-    "check": "npm run check:syntax && node --test ./src/defaultWorkspace.test.mjs ./src/rendererSecurity.test.mjs ./src/runtimeHostTransport.test.mjs ./src/systemSkills.test.mjs ./src/tray.test.mjs ./scripts/check-javascript-syntax.test.mjs && node ./scripts/check-host-parity.mjs",
+    "check": "npm run check:syntax && node --test ./src/defaultWorkspace.test.mjs ./src/rendererSecurity.test.mjs ./src/runtimeHostTransport.test.mjs ./src/systemSkills.test.mjs ./src/tray.test.mjs ./scripts/check-javascript-syntax.test.mjs ./scripts/ensure-runtime.test.mjs && node ./scripts/check-host-parity.mjs",
     "check:syntax": "node ./scripts/check-javascript-syntax.mjs",
     "check:host-parity": "node ./scripts/check-host-parity.mjs",
     "check:dist-licenses": "node ./scripts/check-dist-licenses.mjs --dist \"./dist/Centaeris Desktop\"",
