@@ -63,7 +63,14 @@ runtime concepts, public contracts, development, and release verification.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+Issues are welcome for bug reports, natural-language reproduction steps,
+redacted logs, feature requests, and high-level design suggestions. External
+code, patches, documentation drafts, and other works for incorporation into
+the project are temporarily not accepted. Pull requests are limited to
+collaborators for maintainer development.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the temporary policy and plans for
+future contributions and commercial licensing.
 
 ## License
 
@@ -77,11 +84,5 @@ documentation in this repository are licensed under the
 The Centaeris name, logo, and official visual identity are not licensed under
 the AGPL, and the software license grants no trademark rights. Third-party
 materials remain under their stated licenses.
-
-Code contributions use the
-[Developer's Certificate of Origin 1.1](DCO). Contributors certify the DCO by
-adding a `Signed-off-by` trailer to each commit; see
-[CONTRIBUTING.md](CONTRIBUTING.md). The DCO does not transfer copyright or grant
-the project steward a separate right to relicense an external Contribution.
 
 Bundled font licenses are indexed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
