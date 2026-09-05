@@ -63,7 +63,13 @@ runtime concepts, public contracts, development, and release verification.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+Issues are welcome for bug reports, natural-language reproduction steps,
+redacted logs, feature requests, and high-level design suggestions. External
+code, patches, documentation drafts, and other works for incorporation into
+the project are temporarily not accepted. Pull requests are limited to
+collaborators for maintainer development.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution policy and license.
 
 ## License
 
