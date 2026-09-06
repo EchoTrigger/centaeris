@@ -904,6 +904,7 @@ fn final_event_includes_provider_prompt_cache_usage_when_available() {
     let generate_result = GenerateResult {
         content: "done".to_string(),
         tool_calls: vec![],
+        continuation_reasoning_content: None,
         reasoning_content: None,
         input_tokens: Some(100),
         total_tokens: Some(120),

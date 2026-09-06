@@ -211,6 +211,7 @@ mod tests {
         state.generate_result = Some(GenerateResult {
             content: String::new(),
             tool_calls: calls,
+            continuation_reasoning_content: None,
             reasoning_content: None,
             input_tokens: None,
             total_tokens: None,
@@ -299,6 +300,7 @@ mod tests {
                         args_json: "{}".to_string(),
                     },
                 ],
+                continuation_reasoning_content: None,
                 reasoning_content: None,
                 input_tokens: Some(600_000),
                 total_tokens: Some(600_120),

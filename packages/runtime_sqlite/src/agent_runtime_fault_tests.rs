@@ -164,6 +164,7 @@ fn model_response(content: &str, tool_calls: Vec<ToolCallEnvelope>) -> ModelClie
         generate_result: GenerateResult {
             content: content.to_string(),
             tool_calls,
+            continuation_reasoning_content: None,
             reasoning_content: None,
             input_tokens: None,
             total_tokens: None,

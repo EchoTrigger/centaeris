@@ -195,6 +195,16 @@ export type TaskChunk = {
   task: TaskResult;
 };
 
+// UI projection only; populated from reasoning records when the data path is wired.
+export type ReasoningChunk = {
+  id: string;
+  kind: "reasoning";
+  turnId?: string;
+  text: string;
+  status: "streaming" | "done" | "interrupted";
+  waterfall?: EventWaterfall;
+};
+
 export type SubagentChunk = {
   id: string;
   kind: "subagent";
@@ -214,10 +224,11 @@ export type EventWaterfall = {
 };
 
 export type AssistantExecutionTurn = {
+  liveRevision?: number;
   id: string;
   agentRunId?: string;
   chunks: Array<
-    NarrativeChunk | GuidedSupplementChunk | TaskChunk | SubagentChunk
+    NarrativeChunk | GuidedSupplementChunk | TaskChunk | SubagentChunk | ReasoningChunk
   >;
   finalAnswer: string;
   isStreaming: boolean;
@@ -321,6 +332,7 @@ export type AgentRunReplaySnapshot = {
 };
 
 export type AgentDisplayEntry =
+  | { kind: "reasoning"; chunk: ReasoningChunk }
   | {
     kind: "narrative";
     chunk: NarrativeChunk;
@@ -367,6 +379,7 @@ export type TranscriptToolGroupItem = {
 export type TranscriptToolLikeItem = TranscriptToolGroupItem;
 
 export type TranscriptItem =
+  | ReasoningChunk
   | TranscriptTextItem
   | {
     kind: "guidedSupplement";

@@ -204,3 +204,103 @@
   font-display: swap;
   unicode-range: U+F900-FAFF,U+FE10-FFEF;
 }
+
+/* Generated UI-label subsets; rebuild with build-ui-font-subsets.py. */
+@font-face {
+  font-family: "Noto Sans CJK SC";
+  src: url("./NotoSansCJKsc-ui-cjk-00.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  unicode-range: U+4E00,U+4E09,U+4E0A,U+4E0B,U+4E0D,U+4E0E,U+4E14,U+4E22,U+4E24,U+4E2A,U+4E2D,U+4E3A,U+4E3B,U+4E45,U+4E48,U+4E49,U+4E4B,U+4E86,U+4E8B,U+4E8C,U+4E8E,U+4E94,U+4E9B,U+4EA4,U+4EBA,U+4EC0,U+4EC5,U+4ECB,U+4ECD,U+4ECE,U+4ED6,U+4EE3,U+4EE4,U+4EE5,U+4EF6,U+4EFB,U+4EFD,U+4F17,U+4F1A,U+4F20,U+4F4D,U+4F4E,U+4F5C,U+4F60,U+4F7F,U+4F8B,U+4F9B,U+4FA7,U+4FDD,U+4FE1,U+4FEE,U+504F,U+505C,U+50CF,U+5141,U+5145,U+5148,U+5165,U+5168,U+516D,U+5173,U+5176,U+5177,U+5185,U+518D,U+5199,U+51B3,U+51ED,U+51FA,U+51FB,U+5206,U+5207,U+5212,U+5217,U+521A,U+521B,U+5220,U+5230,U+5236,U+5237,U+524D,U+5269,U+529B,U+529E,U+529F,U+52A0,U+52A1,U+52A8,U+52A9,U+5305,U+5316,U+5339,U+533A,U+534F,U+5355,U+5360,U+5373,U+5386,U+539F,U+53C2,U+53CA,U+53D1,U+53D6,U+53D7,U+53D8,U+53E3,U+53E5,U+53EA,U+53EF,U+53F0,U+53F2,U+53F3,U+53F7,U+5408,U+540C,U+540D,U+540E,U+542B,U+542F,U+5458,U+5468,U+547D,U+548C,U+54CD,U+5546;
+}
+
+@font-face {
+  font-family: "Noto Sans CJK SC";
+  src: url("./NotoSansCJKsc-ui-cjk-01.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  unicode-range: U+5668,U+56DB,U+56DE,U+56F4,U+56FE,U+5728,U+5730,U+573E,U+5740,U+5783,U+578B,U+586B,U+5883,U+589E,U+58F0,U+5904,U+5907,U+590D,U+5916,U+591A,U+5927,U+5929,U+5931,U+5934,U+5939,U+5951,U+597D,U+5982,U+59CB,U+59D3,U+5B50,U+5B57,U+5B58,U+5B83,U+5B89,U+5B8C,U+5B9A,U+5B9E,U+5BA1,U+5BB9,U+5BBD,U+5BC6,U+5BF9,U+5BFC,U+5C06,U+5C0F,U+5C11,U+5C1A,U+5C40,U+5C55,U+5C5E,U+5D4C,U+5DE5,U+5DE6,U+5DF1,U+5DF2;
+}
+
+@font-face {
+  font-family: "Noto Sans CJK SC";
+  src: url("./NotoSansCJKsc-ui-cjk-02.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  unicode-range: U+5E0C,U+5E26,U+5E2E,U+5E38,U+5E45,U+5E73,U+5E76,U+5E7B,U+5E93,U+5E94,U+5EA6,U+5EFA,U+5F00,U+5F02,U+5F03,U+5F0F,U+5F15,U+5F3A,U+5F52,U+5F53,U+5F55,U+5F71,U+5F84,U+5F85,U+5F97,U+5FAA,U+5FC5,U+5FD8,U+5FEB,U+6001,U+601D,U+6027,U+6062,U+606F,U+60C5,U+6210,U+6211,U+6216,U+6237,U+6240,U+624D,U+6253,U+6267,U+627E,U+628A,U+6295,U+62D6,U+62E9,U+62EC,U+6301,U+6302,U+6307,U+6309,U+6362,U+636E,U+6377,U+6388,U+6392,U+63A5,U+63A8,U+63CF,U+63D0,U+63D2,U+641C,U+643A,U+6458,U+64A4,U+64CD,U+652F,U+6536,U+6539,U+653E,U+6545,U+6548,U+6570,U+6574,U+6587,U+6599,U+65AD,U+65B0,U+65B9,U+65E0,U+65E5,U+65E7,U+65E9,U+65F6;
+}
+
+@font-face {
+  font-family: "Noto Sans CJK SC";
+  src: url("./NotoSansCJKsc-ui-cjk-03.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  unicode-range: U+660E,U+661F,U+662F,U+663E,U+666F,U+6682,U+66F4,U+66FF,U+6700,U+6709,U+670D,U+671B,U+671F,U+672A,U+672C,U+6743,U+6750,U+6761,U+6765,U+677E,U+677F,U+6781,U+6784,U+679C,U+67D3,U+67E5,U+6807,U+680F,U+6821,U+683C,U+6863,U+6876,U+68C0,U+6982,U+6A21,U+6B21,U+6B62,U+6B63,U+6B64,U+6B65,U+6BB5,U+6BCF,U+6C38,U+6C42,U+6C47,U+6CA1,U+6CD5,U+6D3B,U+6D41,U+6D4B,U+6D4F,U+6D88,U+6DFB;
+}
+
+@font-face {
+  font-family: "Noto Sans CJK SC";
+  src: url("./NotoSansCJKsc-ui-cjk-04.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  unicode-range: U+6E05,U+6E32,U+6E90,U+706F,U+70B9,U+7167,U+7247,U+7248,U+72B6,U+72EC,U+73AF,U+73B0,U+7406,U+751F,U+7528,U+7531,U+7533,U+754C,U+7559,U+7565;
+}
+
+@font-face {
+  font-family: "Noto Sans CJK SC";
+  src: url("./NotoSansCJKsc-ui-cjk-05.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  unicode-range: U+767B,U+767D,U+7684,U+76EE,U+76F8,U+770B,U+771F,U+77E5,U+7801,U+7814,U+786E,U+793A,U+79C1,U+79F0,U+79FB,U+7A0B,U+7A0D,U+7A3F,U+7A76,U+7A7A,U+7A97,U+7ACB,U+7AEF,U+7B14,U+7B26,U+7B2C,U+7B49,U+7B54,U+7B56,U+7B5B,U+7B7E,U+7B80,U+7BA1,U+7BB1,U+7BC7,U+7C7B,U+7CFB,U+7D20,U+7D22;
+}
+
+@font-face {
+  font-family: "Noto Sans CJK SC";
+  src: url("./NotoSansCJKsc-ui-cjk-06.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  unicode-range: U+7EA6,U+7EB2,U+7EBF,U+7EC4,U+7EC6,U+7EC7,U+7EC8,U+7ECF,U+7ED1,U+7ED3,U+7ED5,U+7ED9,U+7EDC,U+7EDF,U+7EE7,U+7EED,U+7F13,U+7F16,U+7F3A,U+7F51,U+7F6E,U+8003,U+8005,U+804A,U+804C,U+8054,U+805A,U+80CC,U+80FD,U+81EA,U+81F3,U+81F4,U+822A,U+822C,U+8272,U+8303,U+8349,U+83B7,U+83DC,U+85CF;
+}
+
+@font-face {
+  font-family: "Noto Sans CJK SC";
+  src: url("./NotoSansCJKsc-ui-cjk-07.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  unicode-range: U+884C,U+8865,U+8868,U+88AB,U+88C5,U+8981,U+89C1,U+89C6,U+89C8,U+89D2,U+89E6,U+8BA1,U+8BA2,U+8BA4,U+8BA9,U+8BAE,U+8BB0,U+8BB8,U+8BBA,U+8BBE,U+8BBF,U+8BC1,U+8BC4,U+8BC6,U+8BCD,U+8BD5,U+8BDD,U+8BE5,U+8BE6,U+8BEF,U+8BF4,U+8BF7,U+8BFB,U+8C03,U+8D1F,U+8D23,U+8D25,U+8D26,U+8D44,U+8D77,U+8D85,U+8DEF,U+8DF3;
+}
+
+@font-face {
+  font-family: "Noto Sans CJK SC";
+  src: url("./NotoSansCJKsc-ui-cjk-08.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  unicode-range: U+8EAB,U+8F6C,U+8F6E,U+8F7D,U+8F91,U+8F93,U+8FB9,U+8FBE,U+8FC7,U+8FD0,U+8FD1,U+8FD4,U+8FD8,U+8FD9,U+8FDB,U+8FDE,U+8FF0,U+8FFD,U+9000,U+9001,U+9002,U+9009,U+9012,U+901A,U+9047,U+9075,U+9080,U+90AE,U+90E8,U+90FD,U+914D,U+91CC,U+91CD,U+91CF,U+9274,U+94FE,U+9500,U+9519,U+952E,U+957F,U+95ED,U+95EE,U+95F4;
+}
+
+@font-face {
+  font-family: "Noto Sans CJK SC";
+  src: url("./NotoSansCJKsc-ui-cjk-09.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  unicode-range: U+9605,U+961F,U+9636,U+9644,U+9650,U+9664,U+968F,U+9690,U+969C,U+96C6,U+9700,U+975E,U+9762,U+9875,U+9876,U+9879,U+987B,U+987E,U+9884,U+9898,U+989D,U+9996,U+9A6C,U+9A8C,U+9AD8;
+}
+
+@font-face {
+  font-family: "Noto Sans CJK SC";
+  src: url("./NotoSansCJKsc-ui-cjk-10.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  unicode-range: U+9ED8;
+}

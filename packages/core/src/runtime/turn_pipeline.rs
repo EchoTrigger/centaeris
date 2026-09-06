@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+mod reasoning;
+use reasoning::ReasoningAttempt;
 
 use crate::model::prompt::{ModelCompactionSummaryCandidateRequest, PromptCompactionError};
 use crate::model::GenerateResult;
@@ -57,17 +59,44 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> ModelClientGenerateDriver<'
         purpose: ModelRequestPurposeV1,
         request: ModelClientRequest,
         observations: Vec<ModelObservationV1>,
-    ) -> Result<(), String> {
+    ) -> Result<Option<String>, String> {
         let Some(sink) = self.tool_safe_point else {
-            return Ok(());
+            return Ok(None);
         };
         let composition = self
             .composition_environment
             .ok_or_else(|| "model request durability requires agent composition".to_string())?
             .resolve_request(&request)?;
-        sink.commit(ToolSafePoint::ModelRequestStarted(
-            ModelRequestStartedV1::from_request(purpose, &request, observations, composition)?,
-        ))
+        let started =
+            ModelRequestStartedV1::from_request(purpose, &request, observations, composition)?;
+        let request_id = started.request_id().to_string();
+        sink.commit(ToolSafePoint::ModelRequestStarted(started))?;
+        Ok(Some(request_id))
+    }
+
+    fn commit_reasoning(
+        &self,
+        req: &GenerateDriverRequest,
+        request_id: Option<String>,
+        result: &GenerateResult,
+    ) -> Result<(), String> {
+        if let (Some(sink), Some(request_id), Some(text)) = (
+            self.tool_safe_point,
+            request_id,
+            result
+                .reasoning_content
+                .as_deref()
+                .filter(|text| !text.trim().is_empty()),
+        ) {
+            sink.commit(ToolSafePoint::ReasoningCompleted {
+                session_id: req.session_id.clone(),
+                turn_id: req.turn_id.clone(),
+                request_id,
+                text: text.to_string(),
+                status: "done".to_string(),
+            })?;
+        }
+        Ok(())
     }
 }
 
@@ -113,7 +142,7 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
                 prepared_prompt: req.prepared_prompt.clone(),
                 session_config,
             };
-            self.commit_model_request_started(
+            let request_id = self.commit_model_request_started(
                 ModelRequestPurposeV1::Main,
                 request.clone(),
                 req.observations.clone(),
@@ -123,6 +152,7 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
                 .generate(&request)
                 .await
                 .map_err(|error| GenerateDriverError::from_model_client(error, String::new()))?;
+            self.commit_reasoning(req, request_id, &response.generate_result)?;
             Ok(GenerateDriverOutcome {
                 generate_result: response.generate_result,
                 provider_attempts: response.provider_attempts,
@@ -152,7 +182,7 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
                 prepared_prompt: req.prepared_prompt.clone(),
                 session_config,
             };
-            self.commit_model_request_started(
+            let request_id = self.commit_model_request_started(
                 ModelRequestPurposeV1::Main,
                 request.clone(),
                 req.observations.clone(),
@@ -174,9 +204,44 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
                 process_state: RuntimeProcessState::Thinking,
             });
             let mut visible_stream_content = String::new();
+            let mut reasoning = ReasoningAttempt::new(self.tool_safe_point, req, request_id);
+            let mut reasoning_error = None;
             let response = self
                 .model_client
                 .generate_stream(&request, &mut |event| {
+                    if reasoning_error.is_some() {
+                        return;
+                    }
+                    if let ModelClientStreamEvent::Reasoning { text } = &event {
+                        if text.is_empty() {
+                            let restarted = reasoning.seal("interrupted").and_then(|()| {
+                                self.commit_model_request_started(
+                                    ModelRequestPurposeV1::Main,
+                                    request.clone(),
+                                    req.observations.clone(),
+                                )
+                            });
+                            match restarted {
+                                Ok(id) => {
+                                    reasoning = ReasoningAttempt::new(self.tool_safe_point, req, id)
+                                }
+                                Err(error) => {
+                                    reasoning_error = Some(error);
+                                    return;
+                                }
+                            }
+                        } else {
+                            reasoning.text.clone_from(text);
+                            if let Some(request_id) = &reasoning.request_id {
+                                sink(TurnUpdate::Reasoning {
+                                    session_id: req.session_id.clone(),
+                                    turn_id: req.turn_id.clone(),
+                                    request_id: request_id.clone(),
+                                    text: text.clone(),
+                                });
+                            }
+                        }
+                    }
                     match &event {
                         ModelClientStreamEvent::Token { content } if !content.is_empty() => {
                             visible_stream_content.push_str(content);
@@ -189,6 +254,12 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
                     forward_model_client_stream_event(req, sink, event);
                 })
                 .await;
+            if let Some(error) = reasoning_error {
+                return Err(error.into());
+            }
+            if response.is_err() {
+                reasoning.seal("interrupted")?;
+            }
             let response = response.map_err(|error| {
                 let output_token_limit =
                     error.provider_code.as_deref() == Some("incomplete_output_token_limit");
@@ -226,6 +297,15 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
                 }
                 error
             })?;
+            if let Some(text) = response
+                .generate_result
+                .reasoning_content
+                .as_ref()
+                .filter(|text| !text.trim().is_empty())
+            {
+                reasoning.text.clone_from(text);
+            }
+            reasoning.seal("done")?;
             Ok(GenerateDriverOutcome {
                 generate_result: response.generate_result,
                 provider_attempts: response.provider_attempts,
@@ -240,6 +320,7 @@ fn forward_model_client_stream_event(
     event: ModelClientStreamEvent,
 ) {
     match event {
+        ModelClientStreamEvent::Reasoning { .. } => {}
         ModelClientStreamEvent::RequestStart {
             message,
             process_state,

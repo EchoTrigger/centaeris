@@ -167,6 +167,7 @@ impl<T: JsonHttpTransport> OpenAiCompatibleModelClient<T> {
             generate_result: GenerateResult {
                 content,
                 tool_calls,
+                continuation_reasoning_content: reasoning_content.clone(),
                 reasoning_content,
                 input_tokens: usage.and_then(openai_compatible_input_tokens),
                 total_tokens: usage.and_then(|usage| usage.total_tokens),
@@ -204,13 +205,21 @@ impl<T: JsonHttpTransport> ModelClient for OpenAiCompatibleModelClient<T> {
             let mut stream_state = OpenAiCompatibleStreamState::default();
             let mut pending_completion_events = Vec::<ModelClientStreamEvent>::new();
             let mut attempt_has_visible_content = false;
+            let mut emitted_reasoning = String::new();
             let attempted =
                 execute_sse_with_retries(&self.transport, &http_request, &mut |event| {
                     let chunk = match event {
                         SseAttemptEvent::Start { attempt } => {
                             stream_state = OpenAiCompatibleStreamState::default();
                             pending_completion_events.clear();
+                            let had_reasoning = !emitted_reasoning.is_empty();
+                            emitted_reasoning.clear();
                             if attempt > 0 {
+                                if had_reasoning {
+                                    sink(ModelClientStreamEvent::Reasoning {
+                                        text: String::new(),
+                                    });
+                                }
                                 if attempt_has_visible_content {
                                     sink(ModelClientStreamEvent::ReplaceContent {
                                         content: String::new(),
@@ -237,6 +246,11 @@ impl<T: JsonHttpTransport> ModelClient for OpenAiCompatibleModelClient<T> {
                             };
                         }
                     };
+                    let reasoning = stream_state.reasoning_content.clone().unwrap_or_default();
+                    if reasoning != emitted_reasoning {
+                        emitted_reasoning.clone_from(&reasoning);
+                        sink(ModelClientStreamEvent::Reasoning { text: reasoning });
+                    }
                     for update in updates {
                         match update {
                             OpenAiCompatibleStreamUpdate::Status {

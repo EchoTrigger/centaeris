@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "./assets/fonts/noto-sans-cjk-sc.css";
+@import "./styles/typography.css";
 @import "./styles/chat.css";
 
 @font-face {
@@ -20,7 +21,6 @@
 
 @theme inline {
   --font-sans: var(--font-family);
-  --font-mono: "Google Sans Code", "Noto Sans CJK SC", "Cascadia Code", Consolas, monospace;
   --color-background: hsl(var(--background));
   --color-foreground: hsl(var(--foreground));
   --color-primary: hsl(var(--primary));
@@ -40,8 +40,6 @@
 
 :root {
   color-scheme: light;
-  --font-family: "Noto Sans CJK SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
-  --font-mono: "Google Sans Code", "Noto Sans CJK SC", "Cascadia Code", "SFMono-Regular", Consolas, monospace;
   --font-size-xs: 11px;
   --font-size-sm: 12px;
   --font-size-base: 13px;

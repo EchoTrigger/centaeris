@@ -90,6 +90,8 @@ impl Drop for ActiveAgentRunRegistration {
 }
 
 struct LiveTextAccumulator {
+    reasoning: Option<serde_json::Value>,
+    revision: u64,
     key: LiveTextJournalKey,
     journal_root: PathBuf,
     journal: Option<LiveTextJournal>,
@@ -102,6 +104,8 @@ struct LiveTextAccumulator {
 impl LiveTextAccumulator {
     fn new(session_id: String, turn_id: String, agent_run_id: String) -> Self {
         Self {
+            reasoning: None,
+            revision: 0,
             key: LiveTextJournalKey {
                 session_id,
                 turn_id,
@@ -119,6 +123,17 @@ impl LiveTextAccumulator {
     fn push(&mut self, payload: serde_json::Value) -> Result<Vec<serde_json::Value>, String> {
         let operation = live_text_operation_from_payload(&payload)?;
         match operation {
+            LiveTextOperation::Revision { .. } => {
+                return Err("revision is owned by the live accumulator".to_string())
+            }
+            LiveTextOperation::Reasoning { text } => {
+                let value: serde_json::Value =
+                    serde_json::from_str(&text).map_err(|error| error.to_string())?;
+                self.reasoning = (!value.is_null()).then_some(value);
+                self.pending_operations
+                    .push(LiveTextOperation::Reasoning { text });
+                self.pending_payloads.push(payload);
+            }
             LiveTextOperation::Append { text } => {
                 self.content.push_str(text.as_str());
                 if let Some(LiveTextOperation::Append { text: pending }) =
@@ -155,6 +170,10 @@ impl LiveTextAccumulator {
                 self.pending_payloads.clear();
                 self.pending_operations
                     .push(LiveTextOperation::Replace { text });
+                self.pending_operations.push(LiveTextOperation::Reasoning {
+                    text: serde_json::to_string(&self.reasoning)
+                        .map_err(|error| error.to_string())?,
+                });
                 self.pending_payloads.push(payload);
             }
         }
@@ -181,6 +200,7 @@ impl LiveTextAccumulator {
         let payloads = self.flush()?;
         self.seal()?;
         self.key.turn_id = turn_id;
+        self.reasoning = None;
         self.content = initial_content.to_string();
         if !initial_content.is_empty() {
             self.pending_operations.push(LiveTextOperation::Replace {
@@ -201,13 +221,32 @@ impl LiveTextAccumulator {
                 self.key.clone(),
             )?);
         }
+        self.revision = self
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| "live revision exhausted".to_string())?;
+        self.pending_operations.push(LiveTextOperation::Revision {
+            text: self.revision.to_string(),
+        });
         self.journal
             .as_mut()
             .expect("live text journal is initialized")
             .append(self.pending_operations.as_slice())?;
         self.pending_operations.clear();
         self.last_flush = Some(Instant::now());
-        Ok(std::mem::take(&mut self.pending_payloads))
+        let mut payloads = std::mem::take(&mut self.pending_payloads);
+        let Some(_payload) = payloads.pop() else {
+            return Ok(Vec::new());
+        };
+        Ok(vec![
+            centaeris_core::runtime::projection::project_live_model_snapshot(
+                self.key.session_id.clone(),
+                self.key.turn_id.clone(),
+                self.revision,
+                self.content.clone(),
+                self.reasoning.clone(),
+            )?,
+        ])
     }
 
     fn content(&self) -> &str {
@@ -241,7 +280,9 @@ fn is_live_text_payload(payload: &serde_json::Value) -> bool {
             .and_then(|event| event.get("type"))
             .and_then(serde_json::Value::as_str),
         Some("ModelTextDelta" | "ModelTextReplace")
-    )
+    ) || payload
+        .get("event")
+        .is_some_and(|event| event["type"] == "Reasoning" && event["status"] == "streaming")
 }
 
 fn live_text_operation_from_payload(
@@ -258,6 +299,7 @@ fn live_text_operation_from_payload(
         .get("payload")
         .ok_or_else(|| "live text payload is missing event.payload".to_string())?;
     match event_type {
+        "Reasoning" => Ok(LiveTextOperation::Reasoning { text: serde_json::to_string(&serde_json::json!({"blockId":body["blockId"],"requestId":body["requestId"],"text":body["text"]})).map_err(|error| error.to_string())? }),
         "ModelTextDelta" => Ok(LiveTextOperation::Append {
             text: body
                 .get("delta")
@@ -1735,6 +1777,29 @@ pub(crate) fn persist_agent_tool_safe_point(
     safe_point: ToolSafePoint,
 ) -> Result<(), String> {
     match safe_point {
+        ToolSafePoint::ReasoningCompleted {
+            session_id: source_session_id,
+            turn_id,
+            request_id,
+            text,
+            status,
+        } => {
+            if source_session_id != session_id {
+                return Err("reasoning safe point Session identity mismatch".to_string());
+            }
+            let payloads = run_message_log_blocking("persist reasoning block", || {
+                message_log::append_reasoning_block(
+                    session_id,
+                    &turn_id,
+                    agent_run_id,
+                    &request_id,
+                    &text,
+                    &status,
+                )
+            })?;
+            emit_annotated_agent_run_payloads(event_writer, agent_run_id, session_id, payloads)
+                .map(|_| ())
+        }
         ToolSafePoint::ModelRequestStarted(started) => {
             let compaction_update =
                 (started.purpose() == ModelRequestPurposeV1::Compaction).then(|| {
@@ -2565,6 +2630,21 @@ pub(crate) fn recover_unsealed_live_text_journals() -> Result<(), String> {
                 }
             };
 
+            if agent_run_is_active {
+                if let Some(reasoning) = &recovered.reasoning {
+                    let mut state = message_log::agent_run_session_state(
+                        &agent_run.session_id,
+                        &agent_run.agent_run_id,
+                    )?;
+                    if let Some(record) = state.recover_reasoning_snapshot(
+                        &recovered.key.turn_id,
+                        reasoning,
+                        current_timestamp_ms(),
+                    )? {
+                        message_log::append_agent_run_records(&agent_run.session_id, vec![record])?;
+                    }
+                }
+            }
             match assistant
                 .as_ref()
                 .and_then(|message| message.status.as_deref())

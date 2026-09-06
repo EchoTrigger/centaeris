@@ -53,6 +53,43 @@ Tool descriptions are limited to 4096 Unicode characters and 16384 UTF-8 bytes; 
 
 ## Model-request persistence and context
 
+`GenerateResult.reasoning_content` carries provider display text, including
+Responses summaries and Anthropic thinking text. It is not model history.
+`GenerateResult.continuation_reasoning_content` carries only adapter-approved
+plain-text continuation; Core uses this field when constructing assistant model
+semantics. OpenAI-compatible adapters preserve their existing continuation
+behavior. Provider signatures and opaque reasoning require their own contract
+and are not inferred from display text. Adapters emit full current-attempt
+`ModelClientStreamEvent::Reasoning` snapshots as text arrives. An empty snapshot
+marks a retry boundary; Core seals the previous partial block as `interrupted`
+and allocates a new request identity before forwarding the next attempt.
+
+Core allocates `requestId` once before a model call. A successful main call with
+nonblank display reasoning commits a `reasoning_block` before returning its
+result for tool execution or finalization. Its exact payload is `blockId`,
+`requestId`, `text`, and `status`; `blockId` is `reasoning:{requestId}`. The
+record must reference a prior main request in the same turn and AgentRun.
+The contract accepts sealed `done` or `interrupted` blocks; the completed-result
+path emits `done`; failures and cancellation seal received text as `interrupted`.
+Exact duplicate commits are idempotent;
+conflicting seals and records after the run terminal fail. No duration is inferred.
+Compaction requests do not produce display blocks, and these records never
+reconstruct model context. Desktop projects them as `Reasoning` events; both
+frontends restore their existing peer blocks from committed history. Core and
+both frontends consume `packages/core/tests/fixtures/reasoning_block.json`.
+
+Desktop coalesces body and reasoning into Core-projected `ModelSnapshot`
+notifications with a monotonic `revision`. Its live journal retains text deltas;
+`agent_run_stream_replay` returns `liveSnapshot` separately from durable `items`
+and `nextCursor`. Subscriptions fetch this snapshot after connecting. Recovery
+seals journaled reasoning through Core; a previously sealed block is not replaced
+by stale live data. `live_reasoning.json` is the shared snapshot fixture.
+
+Rust and hosted Python adapters consume the same synthetic protocol corpus at
+`packages/core/tests/fixtures/model_reasoning.json`. It covers JSON completion,
+stream completion, interruption, visible text separation, empty or opaque
+reasoning, malformed text, and tool calls. Schema versions remain unchanged.
+
 One `model_request_started` record owns the ordered observations for one request; standalone `model_observation` records are not supported. Storage-private content/manifest references must be hydrated before Core decodes the record and must not enter host history or streams. A local Session document consists of its `.jsonl` file and matching `.observations` directory; copy or back up both. Missing or corrupted content fails loudly.
 
 Automatic prompt compaction is driven by token pressure, not message count; explicit manual compaction remains available. There is no message-count truncation or ceiling. Requests use the full active projection, including any compaction summary/replay prefix, which remains pinned until the next compaction. Compaction preserves atomic tool groups. Compaction failure must not silently discard history, and the hard token budget can reject an oversized request. Reusable-prefix measurements describe projection stability, not a guarantee of a provider's cache-hit rate. The protocol remains v1 with no compatibility aliases.

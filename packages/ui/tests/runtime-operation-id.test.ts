@@ -14,8 +14,36 @@ vi.mock("../src/host/hostBridge", () => ({
 import {
   createRuntimeOperationId,
   createSession,
+  openAgentStream,
   sendAgentInput,
 } from "../src/lib/chatBridge";
+
+test("subscription restores a live snapshot without replaying durable items and ignores a closed reader", async () => {
+  vi.stubGlobal("window", { setTimeout: () => 1, clearTimeout: () => undefined });
+  const snapshot = { type: "runtime_event", event: { type: "ModelSnapshot", payload: { revision: 2, text: "answer", reasoning: null } } };
+  let resolveReplay!: (value: unknown) => void;
+  host.invoke.mockImplementation(() => new Promise((resolve) => { resolveReplay = resolve; }));
+  const receive = vi.fn();
+  const stream = openAgentStream("reconnect-run", receive);
+  try {
+    await vi.waitFor(() => expect(host.invoke).toHaveBeenCalled());
+    resolveReplay({ agentRunId: "reconnect-run", items: [{ type: "durable" }], liveSnapshot: snapshot });
+    await vi.waitFor(() => expect(receive).toHaveBeenCalledExactlyOnceWith(snapshot));
+    stream.close();
+    host.invoke.mockClear();
+    const closedReceive = vi.fn();
+    const closed = openAgentStream("closed-run", closedReceive);
+    await vi.waitFor(() => expect(host.invoke).toHaveBeenCalled());
+    closed.close();
+    resolveReplay({ items: [], liveSnapshot: snapshot });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(closedReceive).not.toHaveBeenCalled();
+  } finally {
+    stream.close();
+    vi.unstubAllGlobals();
+  }
+});
 
 beforeEach(() => {
   host.invoke.mockReset();

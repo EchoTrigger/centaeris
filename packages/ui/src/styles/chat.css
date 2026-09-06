@@ -560,6 +560,10 @@
   line-height: 1.35;
 }
 
+.agentProcessSectionHeading .markdown-content {
+  font-size: var(--font-size-stage);
+}
+
 .agentProcessLive {
   display: grid;
   gap: 8px;
@@ -618,6 +622,35 @@
 
 .agentGuidedSupplementBubble .markdown-content p {
   margin: 0;
+}
+
+.agentReasoning { min-width: 0; }
+.agentReasoningSummary {
+  width: 100%; min-width: 0;
+  display: flex; align-items: center; gap: 6px; padding: 2px 0;
+  border: 0; background: transparent;
+  color: var(--reasoning-label);
+  font: inherit; font-size: var(--font-size-process); cursor: pointer; text-align: left;
+}
+.agentReasoningSummary svg { width: 14px; height: 14px; flex: none; }
+.agentReasoningSummary svg:last-child { transition: transform 140ms ease; }
+.agentReasoningSummary .is-expanded { transform: rotate(180deg); }
+.agentReasoningSummary:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+.agentReasoningBody {
+  margin: 8px 0 8px 7px; padding-left: 16px;
+  border-left: 1px solid var(--outline-variant); overflow-wrap: anywhere;
+  max-height: min(360px, 50vh); overflow: auto; scrollbar-gutter: stable;
+}
+.agentReasoningBody, .agentReasoningBody * {
+  scrollbar-width: thin; scrollbar-color: var(--reasoning-scroll-thumb) transparent;
+}
+.agentReasoningBody:focus-visible { outline: 1px solid var(--outline); outline-offset: 3px; }
+.agentReasoningBody .markdown-content {
+  color: var(--reasoning-text);
+}
+.agentReasoningBody .markdown-content :is(code, a, .markdown-blockquote),
+.agentReasoningBody :is(.answerPathInlineButton, .answerPathLinkButton) {
+  color: inherit;
 }
 
 .agentStatusRow {
@@ -2525,8 +2558,9 @@ button.agent-tool-chip {
   width: 100%;
   max-width: 100%;
   min-width: 0;
-  font-size: var(--font-size-base);
-  line-height: 1.62;
+  font-family: var(--font-content);
+  font-size: var(--font-size-chat);
+  line-height: var(--line-height-chat);
   color: var(--on-surface);
   overflow: visible;
 }
@@ -2557,15 +2591,15 @@ button.agent-tool-chip {
 }
 
 .markdown-content h1 {
-  font-size: 20px;
+  font-size: var(--font-size-chat-h1);
 }
 
 .markdown-content h2 {
-  font-size: 17px;
+  font-size: var(--font-size-chat-h2);
 }
 
 .markdown-content h3 {
-  font-size: 15px;
+  font-size: var(--font-size-chat-h3);
 }
 
 .markdown-content p {
@@ -2630,7 +2664,7 @@ button.agent-tool-chip {
   color: #1f1f1f;
   padding: 1px 5px;
   font-family: var(--font-mono);
-  font-size: 0.92em;
+  font-size: var(--font-size-inline-code);
   white-space: break-spaces;
   overflow-wrap: anywhere;
 }
@@ -2663,7 +2697,7 @@ button.agent-tool-chip {
   padding: 10px 12px;
   border-radius: 8px;
   overflow-x: auto;
-  line-height: 1.55;
+  line-height: var(--line-height-code);
   max-width: 100%;
   min-width: 0;
   scrollbar-gutter: stable;
@@ -2675,7 +2709,7 @@ button.agent-tool-chip {
   background: transparent;
   padding: 0;
   border-radius: 0;
-  font-size: 12px;
+  font-size: var(--font-size-code);
   white-space: pre;
   overflow-wrap: normal;
 }

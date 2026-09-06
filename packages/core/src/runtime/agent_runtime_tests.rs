@@ -1101,6 +1101,7 @@ impl ModelClient for SubagentReadModelClient {
                     GenerateResult {
                         content: "subagent read completed".to_string(),
                         tool_calls: vec![],
+                        continuation_reasoning_content: None,
                         reasoning_content: None,
                         input_tokens: None,
                         total_tokens: None,
@@ -1152,6 +1153,7 @@ impl ModelClient for CompleteTurnTestModelClient {
                         String::new()
                     },
                     tool_calls,
+                    continuation_reasoning_content: None,
                     reasoning_content: None,
                     input_tokens: None,
                     total_tokens: None,
@@ -1248,6 +1250,7 @@ impl ModelClient for RuntimeJobWaitModelClient {
                         String::new()
                     },
                     tool_calls,
+                    continuation_reasoning_content: None,
                     reasoning_content: None,
                     input_tokens: None,
                     total_tokens: None,
@@ -1285,6 +1288,7 @@ impl AnswerNowBoundaryModelClient {
                     String::new()
                 },
                 tool_calls,
+                continuation_reasoning_content: None,
                 reasoning_content: None,
                 input_tokens: None,
                 total_tokens: None,
@@ -1409,6 +1413,7 @@ impl ModelClient for CompleteBatchModelClient {
                         "collect four independent facts".to_string()
                     },
                     tool_calls,
+                    continuation_reasoning_content: None,
                     reasoning_content: Some("one complete response boundary".to_string()),
                     input_tokens: Some(64),
                     total_tokens: Some(80),
@@ -1442,6 +1447,7 @@ impl StreamExecutionBoundaryModelClient {
                     String::new()
                 },
                 tool_calls,
+                continuation_reasoning_content: None,
                 reasoning_content: Some("complete the model response first".to_string()),
                 input_tokens: None,
                 total_tokens: None,
@@ -1472,6 +1478,14 @@ impl ModelClient for StreamExecutionBoundaryModelClient {
         sink: &'a mut (dyn FnMut(ModelClientStreamEvent) + Send),
     ) -> ModelClientFuture<'a, ModelClientResponse> {
         Box::pin(async move {
+            assert!(
+                request
+                    .prepared_prompt
+                    .messages
+                    .iter()
+                    .all(|message| message.reasoning_content.is_none()),
+                "display reasoning must not enter the next model request"
+            );
             let request_index = self.request_count.fetch_add(1, Ordering::SeqCst);
             if request_index == 0 {
                 sink(ModelClientStreamEvent::ToolCallReady {
@@ -1546,6 +1560,7 @@ impl NoToolSupplementBoundaryModelClient {
                     "final with newer constraint".to_string()
                 },
                 tool_calls: Vec::new(),
+                continuation_reasoning_content: None,
                 reasoning_content: None,
                 input_tokens: None,
                 total_tokens: None,
@@ -1868,6 +1883,7 @@ impl ModelClient for UnboundedToolLoopModelClient {
                         String::new()
                     },
                     tool_calls,
+                    continuation_reasoning_content: None,
                     reasoning_content: None,
                     input_tokens: Some(40_000),
                     total_tokens: Some(40_100),
@@ -2011,6 +2027,7 @@ impl ModelClient for OutputLimitRecoveryModelClient {
                     generate_result: GenerateResult {
                         content: "done".to_string(),
                         tool_calls: vec![],
+                        continuation_reasoning_content: None,
                         reasoning_content: None,
                         input_tokens: Some(10),
                         total_tokens: Some(11),
@@ -2692,6 +2709,7 @@ impl ModelClient for PromptCompactionModelClient {
                             request.prepared_prompt.messages[0].content.as_str(),
                         ),
                         tool_calls: vec![],
+                        continuation_reasoning_content: None,
                         reasoning_content: None,
                         input_tokens: None,
                         total_tokens: None,
@@ -2745,6 +2763,7 @@ impl AsyncGenerateDriver for TestPromptCompactionAsyncDriver {
                 generate_result: GenerateResult {
                     content: "test main response after model prompt compaction".to_string(),
                     tool_calls: vec![],
+                    continuation_reasoning_content: None,
                     reasoning_content: None,
                     input_tokens: None,
                     total_tokens: None,
@@ -2764,6 +2783,7 @@ impl AsyncGenerateDriver for TestPromptCompactionAsyncDriver {
             let generate_result = GenerateResult {
                 content: String::new(),
                 tool_calls: Vec::new(),
+                continuation_reasoning_content: None,
                 reasoning_content: None,
                 input_tokens: Some(i64::from(request.prompt_token_estimate)),
                 total_tokens: Some(i64::from(request.prompt_token_estimate)),
@@ -2845,6 +2865,7 @@ impl ModelClient for P7PromptCompactionModelClient {
                             request.prepared_prompt.messages[0].content.as_str(),
                         ),
                         tool_calls: vec![],
+                        continuation_reasoning_content: None,
                         reasoning_content: None,
                         input_tokens: Some(i64::from(request.context_token_estimate)),
                         total_tokens: Some(i64::from(
@@ -2863,6 +2884,7 @@ impl ModelClient for P7PromptCompactionModelClient {
                 generate_result: GenerateResult {
                     content: "p7 main response after compaction".to_string(),
                     tool_calls: vec![],
+                    continuation_reasoning_content: None,
                     reasoning_content: None,
                     input_tokens: Some(i64::from(request.context_token_estimate)),
                     total_tokens: Some(i64::from(
@@ -3016,6 +3038,7 @@ fn read_generate_result(call_id: &str, path: &str) -> GenerateResult {
             name: "read".to_string(),
             args_json: json!({ "path": path }).to_string(),
         }],
+        continuation_reasoning_content: None,
         reasoning_content: None,
         input_tokens: None,
         total_tokens: None,
@@ -3063,6 +3086,7 @@ async fn user_prompt_submit_hook_blocks_before_model_input_is_persisted() {
                 generate_result: GenerateResult {
                     content: "should not persist".to_string(),
                     tool_calls: vec![],
+                    continuation_reasoning_content: None,
                     reasoning_content: None,
                     input_tokens: None,
                     total_tokens: None,
@@ -3099,6 +3123,7 @@ async fn empty_final_response_fails_before_assistant_commit() {
                 generate_result: GenerateResult {
                     content: String::new(),
                     tool_calls: vec![],
+                    continuation_reasoning_content: None,
                     reasoning_content: Some("unfinished analysis".to_string()),
                     input_tokens: None,
                     total_tokens: None,
@@ -3253,6 +3278,7 @@ async fn mcp_dynamic_tool_uses_the_common_lifecycle_chain() {
                     name: "mcp_lifecycle_test".to_string(),
                     args_json: "{}".to_string(),
                 }],
+                continuation_reasoning_content: None,
                 reasoning_content: None,
                 input_tokens: None,
                 total_tokens: None,
@@ -3363,6 +3389,7 @@ async fn protected_root_recursive_delete_is_blocked_while_scoped_cleanup_execute
                 args_json: json!({ "command": "rm -rf build" }).to_string(),
             },
         ],
+        continuation_reasoning_content: None,
         reasoning_content: None,
         input_tokens: None,
         total_tokens: None,
@@ -3622,6 +3649,7 @@ async fn durable_tool_receipts_prevent_tool_and_post_hook_reexecution() {
             name: "stream_boundary_test_tool".to_string(),
             args_json: json!({ "value": "once" }).to_string(),
         }],
+        continuation_reasoning_content: None,
         reasoning_content: None,
         input_tokens: None,
         total_tokens: None,
@@ -3757,6 +3785,7 @@ async fn intent_without_receipt_reports_indeterminate_without_reexecuting_tool()
                     name: "stream_boundary_test_tool".to_string(),
                     args_json,
                 }],
+                continuation_reasoning_content: None,
                 reasoning_content: None,
                 input_tokens: None,
                 total_tokens: None,
@@ -3812,6 +3841,7 @@ async fn new_user_generate_preflight_pairs_interrupted_tool_intent_before_materi
         build_model_assistant_semantics(&GenerateResult {
             content: "Running the tool.".to_string(),
             tool_calls: vec![call],
+            continuation_reasoning_content: None,
             reasoning_content: None,
             input_tokens: None,
             total_tokens: None,
@@ -4013,6 +4043,7 @@ async fn corrupt_tool_receipt_source_identity_loud_fails() {
                     name: "stream_boundary_test_tool".to_string(),
                     args_json,
                 }],
+                continuation_reasoning_content: None,
                 reasoning_content: None,
                 input_tokens: None,
                 total_tokens: None,
@@ -4462,6 +4493,7 @@ async fn new_user_turn_closes_unpaired_tool_calls_in_assistant_order() {
                 args_json: json!({ "command": "echo third" }).to_string(),
             },
         ],
+        continuation_reasoning_content: None,
         reasoning_content: None,
         input_tokens: None,
         total_tokens: None,
@@ -4493,6 +4525,7 @@ async fn new_user_turn_closes_unpaired_tool_calls_in_assistant_order() {
                 generate_result: GenerateResult {
                     content: "Recovered from stale tool batch.".to_string(),
                     tool_calls: vec![],
+                    continuation_reasoning_content: None,
                     reasoning_content: None,
                     input_tokens: None,
                     total_tokens: None,
@@ -4555,6 +4588,7 @@ async fn new_user_turn_closes_unpaired_tool_call() {
                 name: "bash".to_string(),
                 args_json: json!({ "command": "apt-get update" }).to_string(),
             }],
+            continuation_reasoning_content: None,
             reasoning_content: None,
             input_tokens: None,
             total_tokens: None,
@@ -4577,6 +4611,7 @@ async fn new_user_turn_closes_unpaired_tool_call() {
                 generate_result: GenerateResult {
                     content: "Recovered from an interrupted tool call.".to_string(),
                     tool_calls: vec![],
+                    continuation_reasoning_content: None,
                     reasoning_content: None,
                     input_tokens: None,
                     total_tokens: None,
@@ -4964,6 +4999,31 @@ fn hash_model_message_prefix(
 }
 
 #[test]
+fn model_assistant_semantics_do_not_replay_display_reasoning() {
+    let result = GenerateResult {
+        content: "answer".to_string(),
+        tool_calls: vec![],
+        continuation_reasoning_content: None,
+        reasoning_content: Some("display summary without provider signatures".to_string()),
+        input_tokens: None,
+        total_tokens: None,
+        prompt_cache_hit_tokens: None,
+        prompt_cache_miss_tokens: None,
+    };
+    let ModelMessageSemanticsV1::Assistant {
+        reasoning_content, ..
+    } = build_model_assistant_semantics(&result)
+    else {
+        panic!("assistant expected")
+    };
+    assert!(reasoning_content.is_none());
+    assert!(
+        result.reasoning_content.is_some(),
+        "display result remains available"
+    );
+}
+
+#[test]
 fn model_assistant_semantics_preserve_empty_reasoning_content() {
     let generate_result = GenerateResult {
         content: String::new(),
@@ -4972,6 +5032,7 @@ fn model_assistant_semantics_preserve_empty_reasoning_content() {
             name: "bash".to_string(),
             args_json: "{\"command\":\"pwd\"}".to_string(),
         }],
+        continuation_reasoning_content: Some(String::new()),
         reasoning_content: Some(String::new()),
         input_tokens: None,
         total_tokens: None,
@@ -9153,6 +9214,7 @@ fn complete_turn_tool_rejects_success_status_with_error() {
             name: "complete_turn_test_tool".to_string(),
             args_json: "{}".to_string(),
         }],
+        continuation_reasoning_content: None,
         reasoning_content: None,
         input_tokens: None,
         total_tokens: None,
@@ -9196,6 +9258,7 @@ fn complete_turn_tool_rejects_call_and_tool_identity_mismatches() {
             name: "complete_turn_test_tool".to_string(),
             args_json: "{}".to_string(),
         }],
+        continuation_reasoning_content: None,
         reasoning_content: None,
         input_tokens: None,
         total_tokens: None,
@@ -9790,6 +9853,7 @@ async fn process_resume_probe(
                 generate_result: GenerateResult {
                     content: "resumed".to_string(),
                     tool_calls: vec![],
+                    continuation_reasoning_content: None,
                     reasoning_content: None,
                     input_tokens: None,
                     total_tokens: None,
@@ -10371,6 +10435,7 @@ async fn tool_failure_emits_only_tool_result_session_event() {
                         name: "read".to_string(),
                         args_json: json!({ "path": "missing.txt" }).to_string(),
                     }],
+                    continuation_reasoning_content: None,
                     reasoning_content: None,
                     input_tokens: None,
                     total_tokens: None,
@@ -10637,6 +10702,12 @@ fn canonical_model_request_record_embeds_ordered_observations() {
     .expect("model request boundary");
     let records = canonical_model_request_started_records("task-1", &started, 1)
         .expect("canonical model request records");
+    assert_eq!(
+        records[0].payload["requestId"],
+        canonical_model_request_started_records("task-1", &started, 99).unwrap()[0].payload
+            ["requestId"],
+        "host timestamp must not allocate the model request identity"
+    );
 
     assert_eq!(records.len(), 1);
     assert_eq!(
@@ -10809,4 +10880,281 @@ fn canonical_model_request_record_embeds_ordered_observations() {
     let projection = crate::session::reduce_events("chat-1", active_records.iter())
         .expect("terminal projection");
     assert!(!projection.is_compacting());
+}
+
+#[tokio::test]
+async fn query_loop_reasoning_commits_before_return_and_persistence_failure_stops_continuation() {
+    let prepared_prompt = crate::model::prepared_prompt::PreparedPromptV1::new(
+        None,
+        vec![crate::model::prepared_prompt::ModelMessageV1 {
+            message_id: "message:turn-safe-point:user".to_string(),
+            role: crate::model::prepared_prompt::ModelMessageRoleV1::User,
+            content: "continue".to_string(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            reasoning_content: None,
+        }],
+        vec![],
+        crate::tool::ModelToolChoice::None,
+        8_192,
+    )
+    .expect("valid prepared prompt");
+    let context_token_estimate = crate::model::prepared_prompt::estimate_text_tokens(
+        serde_json::to_string(&prepared_prompt.messages[0])
+            .expect("serialize prompt message")
+            .as_str(),
+    );
+    let request = GenerateDriverRequest {
+        session_id: "chat-safe-point".to_string(),
+        turn_id: "turn-safe-point".to_string(),
+        loop_index: 0,
+        provider_prompt_cache_key: None,
+        provider_prompt_cache_retention: None,
+        system_prompt_manifest_json: None,
+        compression_stats_json: None,
+        context_token_estimate,
+        observations: prepared_prompt
+            .messages
+            .iter()
+            .cloned()
+            .map(|message| ModelObservationV1::ContextMessage { message })
+            .collect(),
+        prepared_prompt,
+        live_content_prefix: String::new(),
+    };
+
+    for streaming in [false, true] {
+        for reject_reasoning in [false, true] {
+            let model_client = CompleteBatchModelClient {
+                request_count: AtomicUsize::new(0),
+                follow_up_tool_result_count: AtomicUsize::new(0),
+            };
+            let config_store = StaticModelSessionConfigStore {
+                config: Some(ModelSessionConfig::default()),
+            };
+            let commits = Mutex::new(Vec::new());
+            let mut commit = |safe_point| match safe_point {
+                ToolSafePoint::ModelRequestStarted(started) => {
+                    assert_eq!(model_client.request_count.load(Ordering::SeqCst), 0);
+                    commits
+                        .lock()
+                        .unwrap()
+                        .push(started.request_id().to_string());
+                    Ok(())
+                }
+                ToolSafePoint::ReasoningCompleted {
+                    session_id,
+                    turn_id,
+                    request_id,
+                    text,
+                    status,
+                } => {
+                    assert_eq!(model_client.request_count.load(Ordering::SeqCst), 1);
+                    assert_eq!(session_id, request.session_id);
+                    assert_eq!(turn_id, request.turn_id);
+                    assert_eq!(text, "one complete response boundary");
+                    assert_eq!(status, "done");
+                    assert_eq!(
+                        commits.lock().unwrap().as_slice(),
+                        std::slice::from_ref(&request_id)
+                    );
+                    commits.lock().unwrap().push(request_id);
+                    if reject_reasoning {
+                        Err("reasoning persistence failed".to_string())
+                    } else {
+                        Ok(())
+                    }
+                }
+                _ => Ok(()),
+            };
+            let safe_point = ToolSafePointDispatcher {
+                sink: Mutex::new(&mut commit),
+            };
+            let composition = empty_agent_composition_environment();
+            let driver = ModelClientGenerateDriver::new_with_tool_safe_point(
+                &model_client,
+                &config_store,
+                &safe_point,
+                &composition,
+            );
+            let result = if streaming {
+                driver
+                    .generate_next_with_sink_async(&request, &mut |_| {})
+                    .await
+            } else {
+                driver.generate_next_async(&request).await
+            };
+            assert_eq!(commits.lock().unwrap().len(), 2);
+            if reject_reasoning {
+                assert_eq!(result.unwrap_err().message, "reasoning persistence failed");
+            } else {
+                assert_eq!(result.unwrap().generate_result.tool_calls.len(), 4);
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct LiveReasoningModel {
+    mode: &'static str,
+}
+impl ModelClient for LiveReasoningModel {
+    fn generate<'a>(
+        &'a self,
+        _: &'a ModelClientRequest,
+    ) -> ModelClientFuture<'a, ModelClientResponse> {
+        Box::pin(async { panic!("expected stream") })
+    }
+    fn generate_stream<'a>(
+        &'a self,
+        _: &'a ModelClientRequest,
+        sink: &'a mut (dyn FnMut(ModelClientStreamEvent) + Send),
+    ) -> ModelClientFuture<'a, ModelClientResponse> {
+        Box::pin(async move {
+            sink(ModelClientStreamEvent::Reasoning {
+                text: "partial first".to_string(),
+            });
+            if self.mode == "cancel" {
+                return std::future::pending().await;
+            }
+            if self.mode == "failure" {
+                return Err(ModelClientError::new(
+                    ModelClientErrorKind::Network,
+                    "disconnected",
+                    false,
+                ));
+            }
+            sink(ModelClientStreamEvent::Reasoning {
+                text: String::new(),
+            });
+            sink(ModelClientStreamEvent::Reasoning {
+                text: "second attempt".to_string(),
+            });
+            Ok(ModelClientResponse {
+                generate_result: GenerateResult {
+                    content: "answer".to_string(),
+                    tool_calls: vec![],
+                    reasoning_content: (self.mode != "stream-only")
+                        .then(|| "second attempt".to_string()),
+                    continuation_reasoning_content: None,
+                    input_tokens: None,
+                    total_tokens: None,
+                    prompt_cache_hit_tokens: None,
+                    prompt_cache_miss_tokens: None,
+                },
+                provider_request_id: None,
+                provider_latency_ms: None,
+                provider_attempts: 2,
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn query_loop_live_reasoning_seals_failure_cancel_and_retry_without_mixing_attempts() {
+    let prepared_prompt = crate::model::prepared_prompt::PreparedPromptV1::new(
+        None,
+        vec![crate::model::prepared_prompt::ModelMessageV1 {
+            message_id: "message:turn-safe-point:user".to_string(),
+            role: crate::model::prepared_prompt::ModelMessageRoleV1::User,
+            content: "continue".to_string(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            reasoning_content: None,
+        }],
+        vec![],
+        crate::tool::ModelToolChoice::None,
+        8_192,
+    )
+    .expect("valid prepared prompt");
+    let context_token_estimate = crate::model::prepared_prompt::estimate_text_tokens(
+        serde_json::to_string(&prepared_prompt.messages[0])
+            .expect("serialize prompt message")
+            .as_str(),
+    );
+    let request = GenerateDriverRequest {
+        session_id: "chat-safe-point".to_string(),
+        turn_id: "turn-safe-point".to_string(),
+        loop_index: 0,
+        provider_prompt_cache_key: None,
+        provider_prompt_cache_retention: None,
+        system_prompt_manifest_json: None,
+        compression_stats_json: None,
+        context_token_estimate,
+        observations: prepared_prompt
+            .messages
+            .iter()
+            .cloned()
+            .map(|message| ModelObservationV1::ContextMessage { message })
+            .collect(),
+        prepared_prompt,
+        live_content_prefix: String::new(),
+    };
+
+    for mode in ["cancel", "failure", "retry", "stream-only"] {
+        let model = LiveReasoningModel { mode };
+        let config = StaticModelSessionConfigStore {
+            config: Some(ModelSessionConfig::default()),
+        };
+        let committed = Mutex::new(Vec::new());
+        let mut commit = |point| {
+            match point {
+                ToolSafePoint::ModelRequestStarted(started) => committed.lock().unwrap().push((
+                    started.request_id().to_string(),
+                    "request".to_string(),
+                    String::new(),
+                )),
+                ToolSafePoint::ReasoningCompleted {
+                    request_id,
+                    text,
+                    status,
+                    ..
+                } => committed.lock().unwrap().push((request_id, status, text)),
+                _ => {}
+            }
+            Ok(())
+        };
+        let dispatcher = ToolSafePointDispatcher {
+            sink: Mutex::new(&mut commit),
+        };
+        let composition = empty_agent_composition_environment();
+        let driver = ModelClientGenerateDriver::new_with_tool_safe_point(
+            &model,
+            &config,
+            &dispatcher,
+            &composition,
+        );
+        let mut updates = Vec::new();
+        let mut sink = |event| updates.push(event);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            driver.generate_next_with_sink_async(&request, &mut sink),
+        )
+        .await;
+        let records = committed.lock().unwrap();
+        assert_eq!(records[0].0, records[1].0);
+        assert_eq!(
+            (&records[1].1, &records[1].2),
+            (&"interrupted".to_string(), &"partial first".to_string())
+        );
+        if mode == "retry" || mode == "stream-only" {
+            assert!(result.unwrap().is_ok());
+            assert_eq!(records.len(), 4);
+            assert_ne!(records[0].0, records[2].0);
+            assert_eq!(records[2].0, records[3].0);
+            assert_eq!(
+                (&records[3].1, &records[3].2),
+                (&"done".to_string(), &"second attempt".to_string())
+            );
+        } else {
+            assert_eq!(records.len(), 2);
+            assert!(
+                mode == "cancel" && result.is_err()
+                    || mode == "failure" && result.unwrap().is_err()
+            );
+        }
+        assert!(updates.iter().any(
+            |event| matches!(event, TurnUpdate::Reasoning { text, .. } if text == "partial first")
+        ));
+    }
 }

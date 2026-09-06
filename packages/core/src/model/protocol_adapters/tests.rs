@@ -1,4 +1,5 @@
 use super::openai_responses::build_openai_responses_reasoning;
+mod reasoning;
 use super::{
     built_in_model_profile, built_in_model_profiles, built_in_model_providers,
     is_bounded_canonical_tool_name, AnthropicMessagesModelClient, AuthSpec, JsonHttpFuture,
@@ -2465,6 +2466,11 @@ async fn openai_compatible_client_projects_completed_tool_call_only() {
     assert_eq!(response.generate_result.input_tokens, Some(42));
     assert_eq!(response.generate_result.prompt_cache_hit_tokens, Some(40));
     assert_eq!(response.generate_result.prompt_cache_miss_tokens, Some(2));
+    assert!(events.iter().any(|event| matches!(event, ModelClientStreamEvent::Reasoning { text } if text == "inspect the manifest")));
+    let events: Vec<_> = events
+        .iter()
+        .filter(|event| !matches!(event, ModelClientStreamEvent::Reasoning { .. }))
+        .collect();
     assert_eq!(events.len(), 4);
     assert!(matches!(
         &events[0],
@@ -3390,7 +3396,7 @@ async fn openai_responses_client_builds_responses_request() {
     assert!(requests[0].body_json.contains("\"tool_choice\":\"auto\""));
     assert!(requests[0]
         .body_json
-        .contains("\"reasoning\":{\"effort\":\"high\"}"));
+        .contains("\"reasoning\":{\"effort\":\"high\",\"summary\":\"auto\"}"));
 }
 
 #[test]
@@ -3465,7 +3471,7 @@ async fn openai_responses_client_parses_message_and_tool_calls() {
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
         status_code: 200,
         headers: HashMap::from([("x-request-id".to_string(), "req_123".to_string())]),
-        body_json: "{\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"text\":\"Need to inspect the file first.\"}]},{\"type\":\"function_call\",\"call_id\":\"call_7\",\"name\":\"file_read\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"},{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"I will inspect the file.\"}]}],\"usage\":{\"input_tokens\":14,\"output_tokens\":9,\"input_tokens_details\":{\"cached_tokens\":6}}}".to_string(),
+        body_json: "{\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Need to inspect the file first.\"}]},{\"type\":\"function_call\",\"call_id\":\"call_7\",\"name\":\"file_read\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"},{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"I will inspect the file.\"}]}],\"usage\":{\"input_tokens\":14,\"output_tokens\":9,\"input_tokens_details\":{\"cached_tokens\":6}}}".to_string(),
     }));
     let client = OpenAiResponsesModelClient::new(ModelProviderRegistry::new(), transport);
     std::env::set_var("OPENAI_API_KEY", "test-openai-key");

@@ -879,14 +879,7 @@ pub fn canonical_model_request_started_records(
     if started.session_id.trim().is_empty() || started.turn_id.trim().is_empty() {
         return Err("canonical model request identity is required".to_string());
     }
-    let request_id = format!(
-        "model_request:{}:{}:{}:{}:{}",
-        started.session_id,
-        started.turn_id,
-        started.purpose.as_str(),
-        started.loop_index,
-        created_at_ms
-    );
+    let request_id = started.request_id.clone();
     Ok(vec![canonical_session_record(
         events::stable_session_event_id("model_request_started", &[request_id.as_str()]),
         SessionRecordType::ModelRequestStarted,
@@ -1220,7 +1213,9 @@ fn push_model_assistant_semantics_message(
     session: &mut SessionStateSnapshot,
     generate_result: &GenerateResult,
 ) {
-    if generate_result.tool_calls.is_empty() && generate_result.reasoning_content.is_none() {
+    if generate_result.tool_calls.is_empty()
+        && generate_result.continuation_reasoning_content.is_none()
+    {
         return;
     }
     message_handler.push_model_assistant_message(
@@ -1236,7 +1231,9 @@ fn ensure_model_assistant_semantics_message(
     session: &mut SessionStateSnapshot,
     generate_result: &GenerateResult,
 ) -> Result<bool, String> {
-    if generate_result.tool_calls.is_empty() && generate_result.reasoning_content.is_none() {
+    if generate_result.tool_calls.is_empty()
+        && generate_result.continuation_reasoning_content.is_none()
+    {
         return Ok(false);
     }
     let expected_semantics = build_model_assistant_semantics(generate_result);
@@ -1358,7 +1355,8 @@ fn generate_result_from_persisted_tool_batch(
                     args_json: call.args_json.clone(),
                 })
                 .collect(),
-            reasoning_content: reasoning_content.clone(),
+            continuation_reasoning_content: reasoning_content.clone(),
+            reasoning_content: None,
             input_tokens: None,
             total_tokens: None,
             prompt_cache_hit_tokens: None,
@@ -1370,7 +1368,7 @@ fn generate_result_from_persisted_tool_batch(
 
 fn build_model_assistant_semantics(generate_result: &GenerateResult) -> ModelMessageSemanticsV1 {
     ModelMessageSemanticsV1::Assistant {
-        reasoning_content: generate_result.reasoning_content.clone(),
+        reasoning_content: generate_result.continuation_reasoning_content.clone(),
         tool_calls: generate_result
             .tool_calls
             .iter()

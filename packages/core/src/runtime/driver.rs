@@ -667,6 +667,13 @@ pub struct TurnStepResult {
 
 pub enum ToolSafePoint {
     ModelRequestStarted(ModelRequestStartedV1),
+    ReasoningCompleted {
+        session_id: String,
+        turn_id: String,
+        request_id: String,
+        text: String,
+        status: String,
+    },
     ProviderUsage {
         turn_id: String,
         usage: ProviderTokenUsageV1,
@@ -734,6 +741,7 @@ pub enum ModelObservationV1 {
 
 #[derive(Debug, Clone)]
 pub struct ModelRequestStartedV1 {
+    pub(super) request_id: String,
     pub(super) purpose: ModelRequestPurposeV1,
     pub(super) session_id: String,
     pub(super) turn_id: String,
@@ -930,6 +938,7 @@ impl ModelRequestStartedV1 {
             );
         }
         Ok(Self {
+            request_id: format!("model_request:{}", crate::runtime::contracts::new_turn_id()),
             purpose,
             session_id: request.session_id.clone(),
             turn_id: request.turn_id.clone(),
@@ -948,6 +957,10 @@ impl ModelRequestStartedV1 {
 
     pub fn session_id(&self) -> &str {
         self.session_id.as_str()
+    }
+
+    pub fn request_id(&self) -> &str {
+        self.request_id.as_str()
     }
 
     pub fn turn_id(&self) -> &str {
@@ -1153,6 +1166,12 @@ impl From<String> for GenerateDriverError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnUpdate {
+    Reasoning {
+        session_id: String,
+        turn_id: String,
+        request_id: String,
+        text: String,
+    },
     ModelRequestStart {
         session_id: String,
         turn_id: String,
