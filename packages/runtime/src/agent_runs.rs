@@ -117,6 +117,7 @@ pub(crate) struct AgentRunListResponse {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct AgentRunStreamReplayResponse {
+    pub(crate) live_snapshot: Option<serde_json::Value>,
     pub(crate) agent_run_id: String,
     pub(crate) cwd: Option<String>,
     pub(crate) items: Vec<serde_json::Value>,
@@ -207,6 +208,27 @@ pub(crate) fn replay(
         request.limit,
     )?;
     Ok(AgentRunStreamReplayResponse {
+        live_snapshot: if find_agent_run(Some(request.agent_run_id.as_str()), None)?
+            .is_some_and(|run| !is_agent_run_terminal(run.status.as_str()))
+        {
+            crate::runtime_server::LiveTextJournal::read_snapshot(
+                crate::user_data_layout::runtime_live_text_journal_dir_path().as_path(),
+                request.agent_run_id.as_str(),
+            )?
+            .filter(|snapshot| snapshot.revision > 0)
+            .map(|snapshot| {
+                centaeris_core::runtime::projection::project_live_model_snapshot(
+                    snapshot.key.session_id,
+                    snapshot.key.turn_id,
+                    snapshot.revision,
+                    snapshot.content,
+                    snapshot.reasoning,
+                )
+            })
+            .transpose()?
+        } else {
+            None
+        },
         agent_run_id: replay.agent_run_id,
         cwd: replay.cwd,
         items: replay.items,

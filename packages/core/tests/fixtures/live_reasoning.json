@@ -1,0 +1,5 @@
+{
+  "blockId": "reasoning:model-request-1",
+  "requestId": "model-request-1",
+  "text": "核对 **input**\n\n保留 `code` 与 [来源](https://example.com)"
+}

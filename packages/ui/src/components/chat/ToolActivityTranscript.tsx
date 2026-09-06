@@ -11,12 +11,12 @@ import { useShallow } from "zustand/react/shallow";
 import {
   Bot,
   Copy,
-  FilePenLine,
-  FileText,
+  Globe,
   ListChecks,
   Plug,
+  Pencil,
   Search,
-  Terminal,
+  SquareTerminal,
   type LucideIcon,
 } from "lucide-react";
 import { readDesktopFilePreview } from "../../lib/workspaceBridge";
@@ -53,10 +53,10 @@ import type {
 const CodePreview = lazy(() => import("../CodePreview"));
 
 const toolActivityIconByToken: Record<ToolActivityIconToken, LucideIcon> = {
-  edit: FilePenLine,
-  command: Terminal,
-  webSearch: Search,
-  read: FileText,
+  edit: Pencil,
+  command: SquareTerminal,
+  webSearch: Globe,
+  read: Search,
   agent: Bot,
   taskOutput: ListChecks,
   externalTool: Plug,

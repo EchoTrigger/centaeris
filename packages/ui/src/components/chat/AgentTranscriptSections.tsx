@@ -8,6 +8,7 @@ import {
 } from "./chatRuntimeCore";
 import { useChatViewStore } from "./chatViewStore";
 import { TaskGroupTranscriptItem } from "./ToolActivityTranscript";
+import { ReasoningTranscript } from "./ReasoningTranscript";
 import type {
   AgentResultStreamProps,
   RuntimeActivity,
@@ -40,7 +41,12 @@ const renderProcessHeading = (
 const renderTranscriptItem = (
   entry: TranscriptItem,
   onOpenWorkspacePath: OpenWorkspacePath,
+  agentRunId: string | undefined,
 ) => {
+  if (entry.kind === "reasoning") {
+    return <ReasoningTranscript entry={entry} scopeId={agentRunId ?? entry.turnId ?? entry.id}
+      key={entry.id} onOpenWorkspacePath={onOpenWorkspacePath} />;
+  }
   if (entry.kind === "guidedSupplement") {
     return (
       <div
@@ -108,11 +114,15 @@ export const AgentProcessTranscript = memo(function AgentProcessTranscript({
     liveSubagentIds.size,
   );
   const hasTachikoma = tachikomaCount !== null;
+  const hasLiveReasoning = processTranscript.processItems.some(
+    (item) => item.kind === "reasoning" && item.status === "streaming",
+  );
   const activityLabel = runtimeEasterEgg(
     agentRunId,
     activity?.processState,
   ) ?? activity?.label ?? "";
   const liveStatus = isStreaming && (hasTachikoma || activity) &&
+    !(hasLiveReasoning && activity?.kind === "thinking") &&
     (hasTachikoma || !hasRunningTool) && !hasFinalItem ? (
     <div className="agentStatusRow">
       <div className="agentRunStatus" aria-live="polite">
@@ -146,7 +156,7 @@ export const AgentProcessTranscript = memo(function AgentProcessTranscript({
             {section.items.length > 0 ? (
               <div className="agent-inline-feed unified-feed agentProcessFeed">
                 {section.items.map((entry) =>
-                  renderTranscriptItem(entry, onOpenWorkspacePath)
+                  renderTranscriptItem(entry, onOpenWorkspacePath, agentRunId)
                 )}
               </div>
             ) : null}

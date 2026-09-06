@@ -231,7 +231,7 @@ pub(crate) struct ProjectedAgentContextState {
     pub(crate) is_compacting: bool,
 }
 
-fn agent_run_session_state(
+pub(crate) fn agent_run_session_state(
     session_id: &str,
     agent_run_id: &str,
 ) -> Result<centaeris_core::session::AgentRunSessionState, String> {
@@ -248,7 +248,7 @@ fn agent_run_session_state(
     Ok(state)
 }
 
-fn append_agent_run_records(
+pub(crate) fn append_agent_run_records(
     session_id: &str,
     records: Vec<SequencedSessionRecord>,
 ) -> Result<Vec<String>, String> {
@@ -474,6 +474,25 @@ pub(crate) fn append_provider_usage(
         append_agent_run_records(session_id, vec![record])?;
     }
     Ok(())
+}
+
+pub(crate) fn append_reasoning_block(
+    session_id: &str,
+    turn_id: &str,
+    agent_run_id: &str,
+    request_id: &str,
+    text: &str,
+    status: &str,
+) -> Result<Vec<Value>, String> {
+    let mut state = agent_run_session_state(session_id, agent_run_id)?;
+    let Some(record) =
+        state.record_reasoning_block(turn_id, request_id, text, status, current_timestamp_ms())?
+    else {
+        return Ok(Vec::new());
+    };
+    let event_id = record.event.event_id.clone();
+    append_agent_run_records(session_id, vec![record])?;
+    projected_stream_items_for_event_ids(session_id, agent_run_id, &[event_id])
 }
 
 pub(crate) fn append_checkpoint_ref(
@@ -1452,6 +1471,187 @@ mod tests {
         assert_eq!(projected[0].agent_run_id, "agent-run-healthy");
         assert!(corrupt_path.is_file());
 
+        match previous_data_dir {
+            Some(value) => std::env::set_var("CENTAERIS_DESKTOP_DATA_DIR", value),
+            None => std::env::remove_var("CENTAERIS_DESKTOP_DATA_DIR"),
+        }
+        match previous_sessions_dir {
+            Some(value) => std::env::set_var("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR", value),
+            None => std::env::remove_var("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR"),
+        }
+        fs::remove_dir_all(root).expect("remove root");
+    }
+
+    #[test]
+    fn reasoning_commit_round_trips_through_local_log_and_stream() {
+        let _guard = test_env_mutex()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-agent-run-projection-isolation-{}-{nonce}",
+            std::process::id()
+        ));
+        let sessions_dir = root.join("sessions");
+        let day_dir = sessions_dir.join("26").join("09").join("01");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(day_dir.as_path()).expect("session day directory");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory");
+        let previous_data_dir = std::env::var_os("CENTAERIS_DESKTOP_DATA_DIR");
+        let previous_sessions_dir = std::env::var_os("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR");
+        std::env::set_var("CENTAERIS_DESKTOP_DATA_DIR", &root);
+        std::env::set_var("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR", &sessions_dir);
+
+        let session_id = "session-agent-run-projection-healthy";
+        create_session_document(
+            day_dir.join(format!("{session_id}.jsonl")).as_path(),
+            SessionManifestV1::new(
+                session_id,
+                1,
+                centaeris_core::runtime::CORE_PROTOCOL_VERSION,
+            )
+            .expect("manifest"),
+            SessionMetadataV1 {
+                record_id: String::new(),
+                title: "healthy".to_string(),
+                cwd: workspace.to_string_lossy().to_string(),
+                session_kind: "main".to_string(),
+                parent_session_id: None,
+                runtime_job_id: None,
+                sort_order: Some(0),
+                is_pinned: false,
+                is_unread: false,
+            },
+        )
+        .map_err(CreateSessionDocumentError::into_string)
+        .expect("healthy session");
+        append_agent_run_started(session_id, "turn-healthy", "agent-run-healthy", "test", 2)
+            .expect("agent run");
+        let request = canonical_session_record(
+            "request-event".to_string(),
+            SessionRecordType::ModelRequestStarted,
+            session_id,
+            Some("turn-healthy".to_string()),
+            Some("agent-run-healthy".to_string()),
+            3,
+            test_model_request_payload(vec![], "request-1"),
+        )
+        .unwrap();
+        append_records(session_id, vec![request]).unwrap();
+        let emitted = append_reasoning_block(
+            session_id,
+            "turn-healthy",
+            "agent-run-healthy",
+            "request-1",
+            " inspect\n",
+            "done",
+        )
+        .unwrap();
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0]["event"]["type"], "Reasoning");
+        assert_eq!(emitted[0]["event"]["payload"]["text"], " inspect\n");
+        assert!(append_reasoning_block(
+            session_id,
+            "turn-healthy",
+            "agent-run-healthy",
+            "request-1",
+            " inspect\n",
+            "done"
+        )
+        .unwrap()
+        .is_empty());
+        assert!(append_reasoning_block(
+            session_id,
+            "turn-healthy",
+            "agent-run-healthy",
+            "request-1",
+            "changed",
+            "done"
+        )
+        .is_err());
+        let restored =
+            read_session_document(day_dir.join(format!("{session_id}.jsonl")).as_path()).unwrap();
+        assert_eq!(
+            restored
+                .records
+                .iter()
+                .filter(|record| record.event_type == SessionRecordType::ReasoningBlock)
+                .count(),
+            1
+        );
+        let replay = projected_stream_items_for_event_ids(
+            session_id,
+            "agent-run-healthy",
+            &[restored.records.last().unwrap().event_id.clone()],
+        )
+        .unwrap();
+        assert_eq!(replay, emitted);
+        let request = canonical_session_record(
+            "request-live".to_string(),
+            SessionRecordType::ModelRequestStarted,
+            session_id,
+            Some("turn-healthy".to_string()),
+            Some("agent-run-healthy".to_string()),
+            5,
+            test_model_request_payload(vec![], "request-live"),
+        )
+        .unwrap();
+        append_records(session_id, vec![request]).unwrap();
+        let thinking = json!({"blockId":"reasoning:request-live","requestId":"request-live","text":"partial thinking"});
+        let mut journal = crate::runtime_server::LiveTextJournal::create(
+            crate::user_data_layout::runtime_live_text_journal_dir_path().as_path(),
+            crate::runtime_server::LiveTextJournalKey {
+                session_id: session_id.into(),
+                turn_id: "turn-healthy".into(),
+                agent_run_id: "agent-run-healthy".into(),
+            },
+        )
+        .unwrap();
+        journal
+            .append(&[
+                crate::runtime_server::LiveTextOperation::Reasoning {
+                    text: thinking.to_string(),
+                },
+                crate::runtime_server::LiveTextOperation::Revision { text: "1".into() },
+            ])
+            .unwrap();
+        let live = crate::agent_runs::replay(crate::agent_runs::AgentRunStreamReplayRequest {
+            agent_run_id: "agent-run-healthy".into(),
+            cursor: None,
+            limit: Some(1),
+        })
+        .unwrap();
+        assert_eq!(
+            live.live_snapshot.unwrap()["event"]["payload"]["reasoning"],
+            thinking
+        );
+        drop(journal);
+        crate::agent_runtime::recover_unsealed_live_text_journals().unwrap();
+        let recovered =
+            read_session_document(day_dir.join(format!("{session_id}.jsonl")).as_path()).unwrap();
+        let partial = recovered
+            .records
+            .iter()
+            .find(|record| {
+                record.event_type == SessionRecordType::ReasoningBlock
+                    && record.payload["requestId"] == "request-live"
+            })
+            .unwrap();
+        assert_eq!(partial.payload["status"], "interrupted");
+        assert_eq!(partial.payload["text"], "partial thinking");
+        assert!(
+            crate::agent_runs::replay(crate::agent_runs::AgentRunStreamReplayRequest {
+                agent_run_id: "agent-run-healthy".into(),
+                cursor: None,
+                limit: Some(1),
+            })
+            .unwrap()
+            .live_snapshot
+            .is_none()
+        );
         match previous_data_dir {
             Some(value) => std::env::set_var("CENTAERIS_DESKTOP_DATA_DIR", value),
             None => std::env::remove_var("CENTAERIS_DESKTOP_DATA_DIR"),

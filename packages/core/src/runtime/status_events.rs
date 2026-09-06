@@ -54,6 +54,7 @@ mod tests {
                 name: "read".to_string(),
                 args_json: r#"{"input_ref":"input_1"}"#.to_string(),
             }],
+            continuation_reasoning_content: None,
             reasoning_content: None,
             input_tokens: None,
             total_tokens: None,

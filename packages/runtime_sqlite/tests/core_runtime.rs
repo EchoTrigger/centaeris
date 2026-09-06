@@ -71,6 +71,7 @@ impl ModelClient for FinalModelClient {
                 generate_result: GenerateResult {
                     content: "SQLite-backed runtime completed.".to_string(),
                     tool_calls: Vec::new(),
+                    continuation_reasoning_content: None,
                     reasoning_content: None,
                     input_tokens: Some(4),
                     total_tokens: Some(8),

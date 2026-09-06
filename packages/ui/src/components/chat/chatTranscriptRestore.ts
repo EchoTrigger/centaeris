@@ -16,13 +16,9 @@ import {
 import type {
   AssistantExecutionTurn,
   EventWaterfall,
-  GuidedSupplementChunk,
-  NarrativeChunk,
   NarrativeProjectionMeta,
-  SubagentChunk,
   SubagentResult,
   SubagentToolGroup,
-  TaskChunk,
   TaskResult,
   TaskStatus,
   TranscriptWaterfallSection,
@@ -635,6 +631,7 @@ export const applySessionEventToAssistantTurn = (
   if (getTerminalSessionEventStatus(event)) {
     return {
       ...turn,
+      chunks: turn.chunks.map((chunk) => chunk.kind === "reasoning" && chunk.status === "streaming" ? { ...chunk, status: "interrupted" } : chunk),
       isStreaming: false,
       activity: undefined,
       completedAtMs:
@@ -652,6 +649,46 @@ export const applySessionEventToAssistantTurn = (
   const payload = getEventPayload(event);
   const eventTurnId = getEventTurnId(event);
   switch (event.type) {
+    case "Reasoning": {
+      if (Object.keys(payload).sort().join("|") !== "blockId|requestId|status|text" ||
+          typeof payload.requestId !== "string" || !payload.requestId.trim() ||
+          payload.blockId !== `reasoning:${payload.requestId}` ||
+          typeof payload.text !== "string" || !payload.text.trim() ||
+          (payload.status !== "done" && payload.status !== "interrupted") || !eventTurnId) {
+        throw new Error("invalid committed reasoning block");
+      }
+        const existing = turn.chunks.find((chunk) => chunk.id === payload.blockId);
+        if (existing) {
+          if (existing.kind === "reasoning" && existing.turnId === eventTurnId && existing.status === "streaming") {
+            return { ...turn, chunks: turn.chunks.map((chunk) => chunk === existing ? { ...existing, text: payload.text as string, status: payload.status as "done" | "interrupted" } : chunk) };
+          }
+        if (existing.kind !== "reasoning" || existing.turnId !== eventTurnId || existing.text !== payload.text || existing.status !== payload.status) {
+          throw new Error("reasoning block terminal conflict");
+        }
+        return turn;
+      }
+      return { ...turn, chunks: [...turn.chunks, {
+        id: payload.blockId, kind: "reasoning", turnId: eventTurnId, text: payload.text, status: payload.status,
+      }] };
+    }
+    case "ModelSnapshot": {
+      if (Object.keys(payload).sort().join("|") !== "reasoning|revision|text" || typeof payload.revision !== "number" || !Number.isSafeInteger(payload.revision) || payload.revision < 1 || typeof payload.text !== "string" || !eventTurnId) throw new Error("invalid model snapshot");
+      if (!turn.isStreaming || payload.revision <= (turn.liveRevision ?? 0)) return turn;
+      let chunks = turn.chunks;
+      const value = payload.reasoning;
+      if (value !== null) {
+        if (typeof value !== "object" || Array.isArray(value)) throw new Error("invalid live reasoning");
+        const reason = value as Record<string, unknown>;
+        if (Object.keys(reason).sort().join("|") !== "blockId|requestId|text" || typeof reason.requestId !== "string" || !reason.requestId.trim() || reason.blockId !== `reasoning:${reason.requestId}` || typeof reason.text !== "string") throw new Error("invalid live reasoning");
+        const existing = chunks.find((chunk) => chunk.id === reason.blockId);
+        if (existing && (existing.kind !== "reasoning" || existing.turnId !== eventTurnId)) throw new Error("live reasoning identity conflict");
+        if (reason.text.trim() && (!existing || existing.kind === "reasoning" && existing.status === "streaming")) {
+          const next = { id: reason.blockId as string, kind: "reasoning" as const, turnId: eventTurnId, text: reason.text, status: "streaming" as const };
+          chunks = existing ? chunks.map((chunk) => chunk === existing ? next : chunk) : [...chunks, next];
+        }
+      }
+      return { ...turn, chunks, liveRevision: payload.revision, finalAnswer: payload.text };
+    }
     case "ModelTextDelta": {
       const delta = getEventPayloadRawString(payload, "delta");
       return delta ? { ...turn, finalAnswer: `${turn.finalAnswer}${delta}` } : turn;
@@ -774,7 +811,7 @@ export const applySessionEventToAssistantTurn = (
 };
 
 export const getChunkWaterfallSection = (
-  chunk: NarrativeChunk | GuidedSupplementChunk | TaskChunk | SubagentChunk,
+  chunk: AssistantExecutionTurn["chunks"][number],
 ): TranscriptWaterfallSection => {
   const waterfall =
     chunk.kind === "task"
@@ -802,7 +839,7 @@ export const getChunkWaterfallSection = (
 };
 
 export const getChunkWaterfallOrder = (
-  chunk: NarrativeChunk | GuidedSupplementChunk | TaskChunk | SubagentChunk,
+  chunk: AssistantExecutionTurn["chunks"][number],
 ): number => {
   const waterfall =
     chunk.kind === "task"
@@ -982,6 +1019,7 @@ export const applyPersistedAssistantStatusToTurn = (
     preserveAnswerOnError && Boolean(turn.finalAnswer.trim());
   const completedTurn = {
     ...turn,
+    chunks: turn.chunks.map((chunk) => chunk.kind === "reasoning" && chunk.status === "streaming" ? { ...chunk, status: "interrupted" as const } : chunk),
     isStreaming: false,
     activity: undefined,
   };

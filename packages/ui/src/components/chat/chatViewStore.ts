@@ -9,6 +9,8 @@ import type {
 type AssistantChatMessage = Extract<ChatMessage, { role: "assistant" }>;
 
 type ChatViewState = {
+  expandedReasoning: Record<string, boolean>;
+  toggleReasoning: (identity: string) => void;
   messageIds: string[];
   messageById: Record<string, ChatMessage>;
   turnById: Record<string, AssistantExecutionTurn>;
@@ -83,6 +85,13 @@ const normalizeMessages = (
 };
 
 export const useChatViewStore = create<ChatViewState>((set) => ({
+  expandedReasoning: {},
+  toggleReasoning: (identity) => set((state) => {
+    const expandedReasoning = { ...state.expandedReasoning };
+    if (expandedReasoning[identity]) delete expandedReasoning[identity];
+    else expandedReasoning[identity] = true;
+    return { expandedReasoning };
+  }),
   messageIds: [],
   messageById: {},
   turnById: {},
@@ -152,6 +161,7 @@ export const useChatViewStore = create<ChatViewState>((set) => ({
     }),
   clear: () =>
     set({
+      expandedReasoning: {},
       messageIds: [],
       messageById: {},
       turnById: {},

@@ -152,7 +152,8 @@ impl<T: JsonHttpTransport> AnthropicMessagesModelClient<T> {
             generate_result: GenerateResult {
                 content: extract_anthropic_text(parsed.content.as_slice()),
                 tool_calls,
-                reasoning_content: None,
+                continuation_reasoning_content: None,
+                reasoning_content: extract_anthropic_reasoning(parsed.content.as_slice())?,
                 input_tokens: usage.and_then(|item| item.input_tokens),
                 total_tokens: usage.and_then(|item| {
                     match (item.input_tokens, item.output_tokens) {
@@ -196,13 +197,21 @@ impl<T: JsonHttpTransport> ModelClient for AnthropicMessagesModelClient<T> {
             let mut stream_state = AnthropicMessagesStreamState::default();
             let mut pending_completion_events = Vec::<ModelClientStreamEvent>::new();
             let mut attempt_has_visible_content = false;
+            let mut emitted_reasoning = String::new();
             let attempted =
                 execute_sse_with_retries(&self.transport, &http_request, &mut |event| {
                     let chunk = match event {
                         SseAttemptEvent::Start { attempt } => {
                             stream_state = AnthropicMessagesStreamState::default();
                             pending_completion_events.clear();
+                            let had_reasoning = !emitted_reasoning.is_empty();
+                            emitted_reasoning.clear();
                             if attempt > 0 {
+                                if had_reasoning {
+                                    sink(ModelClientStreamEvent::Reasoning {
+                                        text: String::new(),
+                                    });
+                                }
                                 if attempt_has_visible_content {
                                     sink(ModelClientStreamEvent::ReplaceContent {
                                         content: String::new(),
@@ -229,6 +238,11 @@ impl<T: JsonHttpTransport> ModelClient for AnthropicMessagesModelClient<T> {
                             };
                         }
                     };
+                    let reasoning = stream_state.reasoning_snapshot();
+                    if reasoning != emitted_reasoning {
+                        emitted_reasoning.clone_from(&reasoning);
+                        sink(ModelClientStreamEvent::Reasoning { text: reasoning });
+                    }
                     for update in updates {
                         match update {
                             AnthropicMessagesStreamUpdate::Status {
@@ -407,6 +421,7 @@ pub(super) struct AnthropicErrorObject {
 pub(super) struct AnthropicMessagesStreamState {
     provider_request_id: Option<String>,
     content: String,
+    reasoning_by_index: HashMap<usize, String>,
     completed_tool_calls: Vec<ToolCallEnvelope>,
     tool_calls_by_index: HashMap<usize, AnthropicStreamToolCallState>,
     usage: Option<AnthropicUsage>,
@@ -635,6 +650,15 @@ pub(super) fn build_anthropic_tool_choice(
 }
 
 impl AnthropicMessagesStreamState {
+    fn reasoning_snapshot(&self) -> String {
+        let mut parts = self.reasoning_by_index.iter().collect::<Vec<_>>();
+        parts.sort_unstable_by_key(|(index, _)| **index);
+        parts
+            .into_iter()
+            .filter_map(|(_, text)| (!text.is_empty()).then_some(text.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
     fn truncated_tool_calls(&self) -> Vec<TruncatedToolCall> {
         self.tool_calls_by_index
             .values()
@@ -693,6 +717,12 @@ impl AnthropicMessagesStreamState {
                 let Some(content_block) = parsed.get("content_block") else {
                     return Ok(Vec::new());
                 };
+                if content_block.get("type").and_then(Value::as_str) == Some("thinking") {
+                    let text = anthropic_thinking_text(content_block)?;
+                    self.reasoning_by_index
+                        .insert(index as usize, text.to_string());
+                    return Ok(Vec::new());
+                }
                 if content_block.get("type").and_then(Value::as_str) != Some("tool_use") {
                     return Ok(Vec::new());
                 }
@@ -732,6 +762,21 @@ impl AnthropicMessagesStreamState {
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 match delta_type {
+                    "thinking_delta" => {
+                        let index = parsed.get("index").and_then(Value::as_u64);
+                        let text = anthropic_thinking_text(delta.expect("thinking delta"))?;
+                        let accumulated = index
+                            .and_then(|index| self.reasoning_by_index.get_mut(&(index as usize)))
+                            .ok_or_else(|| {
+                                ModelClientError::new(
+                                    ModelClientErrorKind::Provider,
+                                    "anthropic thinking delta has no matching block",
+                                    false,
+                                )
+                            })?;
+                        accumulated.push_str(text);
+                        Vec::new()
+                    }
                     "text_delta" => {
                         let text = delta
                             .and_then(|item| item.get("text"))
@@ -837,6 +882,11 @@ impl AnthropicMessagesStreamState {
             let _ = self.finish_tool_call(index);
         }
         let mut content = Vec::new();
+        let mut reasoning = self.reasoning_by_index.into_iter().collect::<Vec<_>>();
+        reasoning.sort_unstable_by_key(|(index, _)| *index);
+        for (_, thinking) in reasoning {
+            content.push(json!({"type": "thinking", "thinking": thinking}));
+        }
         if !self.content.is_empty() {
             content.push(json!({ "type": "text", "text": self.content }));
         }
@@ -857,6 +907,33 @@ impl AnthropicMessagesStreamState {
             usage: self.usage,
         }
     }
+}
+
+fn anthropic_thinking_text(block: &Value) -> Result<&str, ModelClientError> {
+    block
+        .get("thinking")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ModelClientError::new(
+                ModelClientErrorKind::Provider,
+                "anthropic thinking text is invalid",
+                false,
+            )
+        })
+}
+
+fn extract_anthropic_reasoning(content: &[Value]) -> Result<Option<String>, ModelClientError> {
+    let mut parts = Vec::new();
+    for block in content
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("thinking"))
+    {
+        let text = anthropic_thinking_text(block)?;
+        if !text.is_empty() {
+            parts.push(text);
+        }
+    }
+    Ok((!parts.is_empty()).then(|| parts.join("\n")))
 }
 
 pub(super) fn extract_anthropic_text(content: &[Value]) -> String {

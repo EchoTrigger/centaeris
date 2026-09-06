@@ -161,7 +161,8 @@ impl<T: JsonHttpTransport> OpenAiResponsesModelClient<T> {
                     parsed.output.as_deref(),
                 ),
                 tool_calls,
-                reasoning_content: extract_openai_responses_reasoning(parsed.output.as_deref()),
+                continuation_reasoning_content: None,
+                reasoning_content: extract_openai_responses_reasoning(parsed.output.as_deref())?,
                 input_tokens: parsed.usage.as_ref().and_then(|usage| usage.input_tokens),
                 total_tokens: parsed.usage.as_ref().and_then(|usage| {
                     usage
@@ -213,13 +214,21 @@ impl<T: JsonHttpTransport> ModelClient for OpenAiResponsesModelClient<T> {
             let mut stream_state = OpenAiResponsesStreamState::default();
             let mut pending_completion_events = Vec::<ModelClientStreamEvent>::new();
             let mut attempt_has_visible_content = false;
+            let mut emitted_reasoning = String::new();
             let attempted =
                 execute_sse_with_retries(&self.transport, &http_request, &mut |event| {
                     let chunk = match event {
                         SseAttemptEvent::Start { attempt } => {
                             stream_state = OpenAiResponsesStreamState::default();
                             pending_completion_events.clear();
+                            let had_reasoning = !emitted_reasoning.is_empty();
+                            emitted_reasoning.clear();
                             if attempt > 0 {
+                                if had_reasoning {
+                                    sink(ModelClientStreamEvent::Reasoning {
+                                        text: String::new(),
+                                    });
+                                }
                                 if attempt_has_visible_content {
                                     sink(ModelClientStreamEvent::ReplaceContent {
                                         content: String::new(),
@@ -246,6 +255,11 @@ impl<T: JsonHttpTransport> ModelClient for OpenAiResponsesModelClient<T> {
                             };
                         }
                     };
+                    let reasoning = stream_state.reasoning_snapshot();
+                    if reasoning != emitted_reasoning {
+                        emitted_reasoning.clone_from(&reasoning);
+                        sink(ModelClientStreamEvent::Reasoning { text: reasoning });
+                    }
                     for update in updates {
                         match update {
                             OpenAiResponsesStreamUpdate::Token { content } => {
@@ -444,6 +458,8 @@ pub(super) struct OpenAiResponsesRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(super) struct OpenAiResponsesReasoning {
     effort: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -505,6 +521,7 @@ pub(super) enum OpenAiResponsesToolChoice {
 
 #[derive(Debug, Default)]
 pub(super) struct OpenAiResponsesStreamState {
+    reasoning_parts: std::collections::BTreeMap<(u64, u64), String>,
     completed_response: Option<OpenAiResponsesResponse>,
     accumulated_output_text: String,
     tool_calls: Vec<ToolCallEnvelope>,
@@ -636,6 +653,7 @@ pub(super) fn build_openai_responses_reasoning(
     }
     Ok(Some(OpenAiResponsesReasoning {
         effort: effort.to_string(),
+        summary: (effort != "none").then(|| "auto".to_string()),
     }))
 }
 
@@ -673,6 +691,14 @@ pub(super) fn build_openai_responses_tool_choice(
 }
 
 impl OpenAiResponsesStreamState {
+    fn reasoning_snapshot(&self) -> String {
+        self.reasoning_parts
+            .values()
+            .filter(|text| !text.is_empty())
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
     fn truncated_tool_calls(&self) -> Vec<TruncatedToolCall> {
         let terminal_calls = self
             .completed_response
@@ -713,6 +739,39 @@ impl OpenAiResponsesStreamState {
             .and_then(Value::as_str)
             .unwrap_or_default();
         Ok(match event_type {
+            "response.reasoning_summary_text.delta" | "response.reasoning_summary_text.done" => {
+                let index = parsed
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .zip(parsed.get("summary_index").and_then(Value::as_u64))
+                    .ok_or_else(|| {
+                        ModelClientError::new(
+                            ModelClientErrorKind::Provider,
+                            "reasoning summary indices are invalid",
+                            false,
+                        )
+                    })?;
+                let delta = event_type.ends_with(".delta");
+                let text = parsed
+                    .get(if delta { "delta" } else { "text" })
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        ModelClientError::new(
+                            ModelClientErrorKind::Provider,
+                            "reasoning summary text is invalid",
+                            false,
+                        )
+                    })?;
+                if delta {
+                    self.reasoning_parts
+                        .entry(index)
+                        .or_default()
+                        .push_str(text);
+                } else {
+                    self.reasoning_parts.insert(index, text.to_string());
+                }
+                vec![]
+            }
             MODEL_PROVIDER_WAITING_STREAM_EVENT_TYPE => {
                 vec![OpenAiResponsesStreamUpdate::ProcessStatus {
                     message: None,
@@ -883,6 +942,17 @@ impl OpenAiResponsesStreamState {
                 vec![]
             }
             "response.completed" => {
+                if let Some(response) = parsed.get("response") {
+                    if let Some(text) = extract_openai_responses_reasoning(
+                        response
+                            .get("output")
+                            .and_then(Value::as_array)
+                            .map(Vec::as_slice),
+                    )? {
+                        self.reasoning_parts.clear();
+                        self.reasoning_parts.insert((0, 0), text);
+                    }
+                }
                 if let Some(response) = parsed.get("response").cloned() {
                     if let Ok(completed) =
                         serde_json::from_value::<OpenAiResponsesResponse>(response)
@@ -1028,7 +1098,9 @@ pub(super) fn extract_openai_responses_text(
     segments.join("\n")
 }
 
-pub(super) fn extract_openai_responses_reasoning(output: Option<&[Value]>) -> Option<String> {
+pub(super) fn extract_openai_responses_reasoning(
+    output: Option<&[Value]>,
+) -> Result<Option<String>, ModelClientError> {
     let mut segments = vec![];
     for item in output.unwrap_or(&[]) {
         let Some(map) = item.as_object() else {
@@ -1039,24 +1111,29 @@ pub(super) fn extract_openai_responses_reasoning(output: Option<&[Value]>) -> Op
         }
         if let Some(summary_items) = map.get("summary").and_then(Value::as_array) {
             for summary_item in summary_items {
-                if let Some(text) = summary_item.get("text").and_then(Value::as_str) {
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty() {
-                        segments.push(trimmed.to_string());
-                    }
+                if summary_item.get("type").and_then(Value::as_str) != Some("summary_text") {
+                    continue;
                 }
-            }
-        } else if let Some(text) = map.get("text").and_then(Value::as_str) {
-            let trimmed = text.trim();
-            if !trimmed.is_empty() {
-                segments.push(trimmed.to_string());
+                let text = summary_item
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        ModelClientError::new(
+                            ModelClientErrorKind::Provider,
+                            "openai responses reasoning summary text is invalid",
+                            false,
+                        )
+                    })?;
+                if !text.is_empty() {
+                    segments.push(text.to_string());
+                }
             }
         }
     }
     if segments.is_empty() {
-        None
+        Ok(None)
     } else {
-        Some(segments.join("\n"))
+        Ok(Some(segments.join("\n")))
     }
 }
 

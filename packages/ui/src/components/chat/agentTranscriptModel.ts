@@ -5,10 +5,6 @@ import {
 import type {
   AssistantExecutionTurn,
   AgentDisplayEntry,
-  GuidedSupplementChunk,
-  NarrativeChunk,
-  SubagentChunk,
-  TaskChunk,
   TaskResult,
   TranscriptItem,
   TranscriptProcessSection,
@@ -17,9 +13,7 @@ import type {
 } from "./types";
 
 const buildAgentDisplayEntries = (
-  chunks: Array<
-    NarrativeChunk | GuidedSupplementChunk | TaskChunk | SubagentChunk
-  >,
+  chunks: AssistantExecutionTurn["chunks"],
 ): AgentDisplayEntry[] => {
   const entries: AgentDisplayEntry[] = [];
   let pendingTasks: TaskResult[] = [];
@@ -42,6 +36,10 @@ const buildAgentDisplayEntries = (
       continue;
     }
     flushTasks();
+    if (chunk.kind === "reasoning") {
+      entries.push({ kind: "reasoning", chunk });
+      continue;
+    }
     if (chunk.kind === "guidedSupplement") {
       entries.push({
         kind: "guidedSupplement",
@@ -132,6 +130,10 @@ export const buildTranscriptProcessViewModel = (
   );
   const processItems: TranscriptItem[] = [];
   for (const entry of buildAgentDisplayEntries(waterfallChunks)) {
+    if (entry.kind === "reasoning") {
+      processItems.push(entry.chunk);
+      continue;
+    }
     if (entry.kind === "narrative") {
       processItems.push({
         kind: "assistantText",

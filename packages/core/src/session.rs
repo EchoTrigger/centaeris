@@ -30,6 +30,7 @@ use crate::tool::knowledge::KnowledgeLocatorV1;
 use crate::tool::layer::ToolResultState;
 use crate::tool::ModelToolChoice;
 
+mod reasoning;
 mod wire;
 
 pub use wire::{
@@ -115,6 +116,7 @@ pub enum SessionRecordType {
     ToolCall,
     ToolResult,
     ModelRequestStarted,
+    ReasoningBlock,
     ProviderUsage,
     PhaseEvent,
     ExternalEvidenceRef,
@@ -146,6 +148,7 @@ impl SessionRecordType {
             "tool_call",
             "tool_result",
             "model_request_started",
+            "reasoning_block",
             "provider_usage",
             "phase_event",
             "external_evidence_ref",
@@ -173,6 +176,7 @@ impl SessionRecordType {
             Self::ToolCall => "tool_call",
             Self::ToolResult => "tool_result",
             Self::ModelRequestStarted => "model_request_started",
+            Self::ReasoningBlock => "reasoning_block",
             Self::ProviderUsage => "provider_usage",
             Self::PhaseEvent => "phase_event",
             Self::ExternalEvidenceRef => "external_evidence_ref",
@@ -304,6 +308,7 @@ pub struct ActiveAgentRunExecution {
 
 #[derive(Debug, Clone)]
 pub struct AgentRunSessionState {
+    reasoning: reasoning::ReasoningLedger,
     session_id: String,
     agent_run_id: String,
     next: u64,
@@ -343,6 +348,7 @@ impl AgentRunSessionState {
             return Err("AgentRun Session state agentRunId is required".to_string());
         }
         Ok(Self {
+            reasoning: reasoning::ReasoningLedger::default(),
             session_id,
             agent_run_id,
             next: 0,
@@ -823,7 +829,9 @@ impl AgentRunSessionState {
     }
 
     fn track(&mut self, event: &SessionLogRecord, sequence: u64) -> Result<(), String> {
+        self.reasoning.apply(event)?;
         match event.event_type {
+            SessionRecordType::ReasoningBlock => {}
             SessionRecordType::AgentRunExecutionStarted => {
                 let execution_id = state_payload_string(&event.payload, "executionId")?;
                 if self.active_execution.is_some() {
@@ -1470,6 +1478,7 @@ pub fn session_record_projects_to_agent_run_stream(event_type: SessionRecordType
         | SessionRecordType::UserMessage
         | SessionRecordType::TurnSupplement
         | SessionRecordType::AssistantMessage
+        | SessionRecordType::ReasoningBlock
         | SessionRecordType::ToolCall
         | SessionRecordType::ToolResult
         | SessionRecordType::PhaseEvent
@@ -1533,6 +1542,14 @@ fn committed_runtime_projection(
                 "content": required_payload_string_allow_empty(payload_object, "modelMarkdown", record)?,
                 "artifactRefs": record.payload.get("artifactRefs").cloned().unwrap_or_else(|| Value::Array(vec![])),
             }),
+        ),
+        SessionRecordType::ReasoningBlock => (
+            "Reasoning",
+            required_payload_string(payload_object, "status", record)?,
+            RuntimeEventVisibility::User,
+            None,
+            None,
+            record.payload.clone(),
         ),
         SessionRecordType::PhaseEvent => (
             "Status",
@@ -1828,6 +1845,7 @@ pub enum ReducedAgentRunState {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionProjection {
+    reasoning: reasoning::ReasoningLedger,
     pub messages: BTreeMap<String, ReducedMessage>,
     pub tool_calls: BTreeMap<String, ReducedToolCall>,
     pub agent_runs: BTreeMap<String, ReducedAgentRun>,
@@ -1935,6 +1953,7 @@ pub fn validate_event_shape(event: &SessionLogRecord) -> Result<(), String> {
         SessionRecordType::ToolCall => validate_tool_call(event),
         SessionRecordType::ToolResult => validate_tool_result(event),
         SessionRecordType::ModelRequestStarted => validate_model_request_started(event),
+        SessionRecordType::ReasoningBlock => reasoning::validate_reasoning_block(event),
         SessionRecordType::ProviderUsage => validate_provider_usage(event),
         SessionRecordType::PhaseEvent => validate_phase_event(event),
         SessionRecordType::ExternalEvidenceRef => validate_external_evidence_ref(event),
@@ -2582,7 +2601,9 @@ pub fn reduce_event(
         ));
     }
 
+    projection.reasoning.apply(event)?;
     match event.event_type {
+        SessionRecordType::ReasoningBlock => {}
         SessionRecordType::AgentRunStarted => reduce_agent_run_started(projection, event)?,
         SessionRecordType::AgentRunExecutionStarted => {
             reduce_agent_run_execution_started(projection, event)?
@@ -4609,6 +4630,7 @@ fn validate_non_empty_string_array(
 
 #[cfg(test)]
 mod tests {
+    mod reasoning;
     use serde_json::json;
 
     use super::*;
@@ -6138,6 +6160,7 @@ mod tests {
             agent_run_id: Some("agent-run-1".to_string()),
             created_at_ms: 1,
             payload: json!({
+                "requestId": event_id,
                 "purpose": "main",
                 "agentComposition": { "compositionDigest": digest },
             }),

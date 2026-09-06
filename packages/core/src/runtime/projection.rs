@@ -45,8 +45,69 @@ fn live_event(
     }
 }
 
+pub fn project_live_model_snapshot(
+    session_id: String,
+    turn_id: String,
+    revision: u64,
+    text: String,
+    reasoning: Option<Value>,
+) -> Result<Value, String> {
+    if revision == 0 {
+        return Err("model snapshot revision must be positive".to_string());
+    }
+    if let Some(value) = &reasoning {
+        let fields = value
+            .as_object()
+            .ok_or_else(|| "reasoning snapshot must be an object".to_string())?;
+        if fields.len() != 3
+            || !fields.contains_key("blockId")
+            || !fields.contains_key("requestId")
+            || !fields.contains_key("text")
+        {
+            return Err("reasoning snapshot fields mismatch".to_string());
+        }
+        let request_id = value["requestId"]
+            .as_str()
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| "reasoning snapshot requestId is invalid".to_string())?;
+        if value["blockId"].as_str() != Some(format!("reasoning:{request_id}").as_str())
+            || !value["text"].is_string()
+        {
+            return Err("reasoning snapshot identity or text is invalid".to_string());
+        }
+    }
+    let id = format!("runtime:model_snapshot:{session_id}:{turn_id}:{revision}");
+    let mut event = live_event(
+        "ModelSnapshot",
+        session_id,
+        turn_id.clone(),
+        turn_id,
+        "running",
+        None,
+        None,
+        json!({"revision":revision,"text":text,"reasoning":reasoning}),
+    );
+    event.event_id = id;
+    project_runtime_event(&event)
+}
+
 pub fn project_turn_update(update: TurnUpdate) -> Result<Option<Value>, String> {
     let event = match update {
+        TurnUpdate::Reasoning {
+            session_id,
+            turn_id,
+            request_id,
+            text,
+        } => live_event(
+            "Reasoning",
+            session_id,
+            turn_id.clone(),
+            turn_id,
+            "streaming",
+            None,
+            None,
+            json!({"blockId":format!("reasoning:{request_id}"),"requestId":request_id,"text":text,"status":"streaming"}),
+        ),
         TurnUpdate::ModelRequestStart {
             session_id,
             turn_id,

@@ -15,6 +15,8 @@ pub struct LiveTextJournalKey {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LiveTextOperation {
+    Revision { text: String },
+    Reasoning { text: String },
     Append { text: String },
     Replace { text: String },
 }
@@ -23,12 +25,15 @@ pub enum LiveTextOperation {
 pub struct LiveTextJournal {
     path: PathBuf,
     file: File,
+    reasoning: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecoveredLiveText {
+    pub revision: u64,
     pub key: LiveTextJournalKey,
     pub content: String,
+    pub reasoning: Option<serde_json::Value>,
     path: PathBuf,
 }
 
@@ -51,6 +56,17 @@ struct JournalHeader {
 }
 
 impl LiveTextJournal {
+    pub fn read_snapshot(
+        root: &Path,
+        agent_run_id: &str,
+    ) -> Result<Option<RecoveredLiveText>, String> {
+        let id = required_file_identifier(agent_run_id, "agentRunId")?;
+        let path = root.join(format!("{id}.live"));
+        if !path.exists() {
+            return Ok(None);
+        }
+        read_journal_snapshot(path, true).map(Some)
+    }
     pub fn create(root: &Path, key: LiveTextJournalKey) -> Result<Self, String> {
         let key = normalize_key(key)?;
         fs::create_dir_all(root).map_err(|error| {
@@ -83,7 +99,11 @@ impl LiveTextJournal {
         file.sync_data().map_err(|error| {
             format!("sync live text journal {} failed: {error}", path.display())
         })?;
-        Ok(Self { path, file })
+        Ok(Self {
+            path,
+            file,
+            reasoning: None,
+        })
     }
 
     pub fn append(&mut self, operations: &[LiveTextOperation]) -> Result<(), String> {
@@ -91,7 +111,30 @@ impl LiveTextJournal {
             return Ok(());
         }
         for operation in operations {
-            write_operation(&mut self.file, operation)?;
+            if let LiveTextOperation::Reasoning { text } = operation {
+                let next: serde_json::Value =
+                    serde_json::from_str(text).map_err(|error| error.to_string())?;
+                let suffix = self.reasoning.as_ref().and_then(|previous| {
+                    if previous["blockId"] != next["blockId"]
+                        || previous["requestId"] != next["requestId"]
+                    {
+                        return None;
+                    }
+                    next["text"]
+                        .as_str()?
+                        .strip_prefix(previous["text"].as_str()?)
+                });
+                if let Some(suffix) = suffix {
+                    if !suffix.is_empty() {
+                        write_frame(&mut self.file, b't', suffix)?;
+                    }
+                } else {
+                    write_operation(&mut self.file, operation)?;
+                }
+                self.reasoning = (!next.is_null()).then_some(next);
+            } else {
+                write_operation(&mut self.file, operation)?;
+            }
         }
         self.file.sync_data().map_err(|error| {
             format!(
@@ -245,9 +288,15 @@ fn write_record<TValue: Serialize>(file: &mut File, value: &TValue) -> Result<()
 
 fn write_operation(file: &mut File, operation: &LiveTextOperation) -> Result<(), String> {
     let (kind, text) = match operation {
+        LiveTextOperation::Revision { text } => (b'V', text),
+        LiveTextOperation::Reasoning { text } => (b'T', text),
         LiveTextOperation::Append { text } => (b'A', text),
         LiveTextOperation::Replace { text } => (b'R', text),
     };
+    write_frame(file, kind, text)
+}
+
+fn write_frame(file: &mut File, kind: u8, text: &str) -> Result<(), String> {
     let byte_length =
         u32::try_from(text.len()).map_err(|_| "live text operation exceeds 4 GiB".to_string())?;
     file.write_all(&[kind])
@@ -257,6 +306,10 @@ fn write_operation(file: &mut File, operation: &LiveTextOperation) -> Result<(),
 }
 
 fn read_journal(path: PathBuf) -> Result<RecoveredLiveText, String> {
+    read_journal_snapshot(path, false)
+}
+
+fn read_journal_snapshot(path: PathBuf, committed_only: bool) -> Result<RecoveredLiveText, String> {
     let bytes = fs::read(path.as_path())
         .map_err(|error| format!("read live text journal {} failed: {error}", path.display()))?;
     let header_end = bytes
@@ -298,6 +351,9 @@ fn read_journal(path: PathBuf) -> Result<RecoveredLiveText, String> {
         ));
     }
     let mut content = String::new();
+    let mut revision = 0;
+    let mut reasoning: Option<serde_json::Value> = None;
+    let mut committed = (0, String::new(), None);
     let mut offset = header_end + 1;
     while bytes.len().saturating_sub(offset) >= 5 {
         let kind = bytes[offset];
@@ -323,6 +379,28 @@ fn read_journal(path: PathBuf) -> Result<RecoveredLiveText, String> {
             )
         })?;
         match kind {
+            b'V' => {
+                revision = text
+                    .parse::<u64>()
+                    .map_err(|error| format!("invalid live revision: {error}"))?;
+                if committed_only {
+                    committed = (revision, content.clone(), reasoning.clone());
+                }
+            }
+            b't' => {
+                let value = reasoning
+                    .as_mut()
+                    .ok_or_else(|| "reasoning delta without snapshot".to_string())?;
+                let previous = value["text"]
+                    .as_str()
+                    .ok_or_else(|| "reasoning snapshot text is invalid".to_string())?;
+                value["text"] = serde_json::Value::String(format!("{previous}{text}"));
+            }
+            b'T' => {
+                let value: serde_json::Value = serde_json::from_str(text)
+                    .map_err(|error| format!("invalid reasoning journal: {error}"))?;
+                reasoning = (!value.is_null()).then_some(value);
+            }
             b'A' => content.push_str(text),
             b'R' => content = text.to_string(),
             _ => {
@@ -334,7 +412,16 @@ fn read_journal(path: PathBuf) -> Result<RecoveredLiveText, String> {
         }
         offset = text_end;
     }
-    Ok(RecoveredLiveText { key, content, path })
+    if committed_only {
+        (revision, content, reasoning) = committed;
+    }
+    Ok(RecoveredLiveText {
+        revision,
+        key,
+        content,
+        reasoning,
+        path,
+    })
 }
 
 fn normalize_key(key: LiveTextJournalKey) -> Result<LiveTextJournalKey, String> {
@@ -380,6 +467,59 @@ mod tests {
             turn_id: "turn-1".to_string(),
             agent_run_id: "agent-run-1".to_string(),
         }
+    }
+
+    #[test]
+    fn reasoning_snapshots_recover_atomically_and_grow_linearly() {
+        let root = test_root("reasoning");
+        let mut journal = LiveTextJournal::create(&root, key()).unwrap();
+        let mut reasoning: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../core/tests/fixtures/live_reasoning.json"
+        ))
+        .unwrap();
+        for revision in 1..=128 {
+            reasoning["text"] = serde_json::Value::String("x".repeat(revision * 1024));
+            journal
+                .append(&[
+                    LiveTextOperation::Reasoning {
+                        text: reasoning.to_string(),
+                    },
+                    LiveTextOperation::Replace {
+                        text: format!("answer {revision}"),
+                    },
+                    LiveTextOperation::Revision {
+                        text: revision.to_string(),
+                    },
+                ])
+                .unwrap();
+        }
+        let snapshot = LiveTextJournal::read_snapshot(&root, "agent-run-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.revision, 128);
+        assert_eq!(snapshot.content, "answer 128");
+        assert_eq!(snapshot.reasoning, Some(reasoning));
+        journal
+            .append(&[LiveTextOperation::Replace {
+                text: "uncommitted answer".into(),
+            }])
+            .unwrap();
+        assert_eq!(
+            LiveTextJournal::read_snapshot(&root, "agent-run-1")
+                .unwrap()
+                .unwrap()
+                .content,
+            "answer 128"
+        );
+        assert!(
+            fs::metadata(&journal.path).unwrap().len() < 150_000,
+            "reasoning journal must retain deltas rather than every full snapshot"
+        );
+        journal.seal().unwrap();
+        assert!(LiveTextJournal::read_snapshot(&root, "agent-run-1")
+            .unwrap()
+            .is_none());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

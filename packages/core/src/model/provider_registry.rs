@@ -409,6 +409,10 @@ pub struct TruncatedToolCall {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelClientStreamEvent {
+    /// Full display snapshot for the current provider attempt; empty resets an attempt.
+    Reasoning {
+        text: String,
+    },
     RequestStart {
         message: Option<String>,
         process_state: RuntimeProcessState,

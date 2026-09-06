@@ -1,0 +1,1198 @@
+[
+  {
+    "id": "anthropic_thinking",
+    "protocol": "anthropic",
+    "response": {
+      "id": "msg",
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": " inspect ",
+          "signature": "opaque"
+        },
+        {
+          "type": "redacted_thinking",
+          "data": "secret"
+        },
+        {
+          "type": "thinking",
+          "thinking": "next\n",
+          "signature": "other"
+        },
+        {
+          "type": "text",
+          "text": "done"
+        }
+      ],
+      "stop_reason": "end_turn",
+      "usage": {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5
+      }
+    },
+    "frames": [
+      {
+        "type": "message_start",
+        "message": {
+          "id": "msg",
+          "usage": {
+            "input_tokens": 3,
+            "output_tokens": 2,
+            "total_tokens": 5
+          }
+        }
+      },
+      {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "thinking",
+          "thinking": "",
+          "signature": "opaque"
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "thinking_delta",
+          "thinking": " inspect "
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "signature_delta",
+          "signature": "opaque"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 0
+      },
+      {
+        "type": "content_block_start",
+        "index": 1,
+        "content_block": {
+          "type": "redacted_thinking",
+          "data": "secret"
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {
+          "type": "signature_delta",
+          "signature": "opaque"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 1
+      },
+      {
+        "type": "content_block_start",
+        "index": 2,
+        "content_block": {
+          "type": "thinking",
+          "thinking": "",
+          "signature": "other"
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 2,
+        "delta": {
+          "type": "thinking_delta",
+          "thinking": "next\n"
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 2,
+        "delta": {
+          "type": "signature_delta",
+          "signature": "opaque"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 2
+      },
+      {
+        "type": "content_block_start",
+        "index": 3,
+        "content_block": {
+          "type": "text",
+          "text": ""
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 3,
+        "delta": {
+          "type": "text_delta",
+          "text": "done"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 3
+      },
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "end_turn"
+        },
+        "usage": {
+          "input_tokens": 3,
+          "output_tokens": 2,
+          "total_tokens": 5
+        }
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "expectedReasoning": " inspect \nnext\n",
+    "invalid": false,
+    "expectedText": "done",
+    "expectedToolCount": 0
+  },
+  {
+    "id": "anthropic_omitted",
+    "protocol": "anthropic",
+    "response": {
+      "id": "msg",
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": "",
+          "signature": "opaque"
+        },
+        {
+          "type": "redacted_thinking",
+          "data": "secret"
+        },
+        {
+          "type": "text",
+          "text": "done"
+        }
+      ],
+      "stop_reason": "end_turn",
+      "usage": {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5
+      }
+    },
+    "frames": [
+      {
+        "type": "message_start",
+        "message": {
+          "id": "msg",
+          "usage": {
+            "input_tokens": 3,
+            "output_tokens": 2,
+            "total_tokens": 5
+          }
+        }
+      },
+      {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "thinking",
+          "thinking": "",
+          "signature": "opaque"
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "thinking_delta",
+          "thinking": ""
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "signature_delta",
+          "signature": "opaque"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 0
+      },
+      {
+        "type": "content_block_start",
+        "index": 1,
+        "content_block": {
+          "type": "redacted_thinking",
+          "data": "secret"
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {
+          "type": "signature_delta",
+          "signature": "opaque"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 1
+      },
+      {
+        "type": "content_block_start",
+        "index": 2,
+        "content_block": {
+          "type": "text",
+          "text": ""
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 2,
+        "delta": {
+          "type": "text_delta",
+          "text": "done"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 2
+      },
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "end_turn"
+        },
+        "usage": {
+          "input_tokens": 3,
+          "output_tokens": 2,
+          "total_tokens": 5
+        }
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "expectedReasoning": null,
+    "invalid": false,
+    "expectedText": "done",
+    "expectedToolCount": 0
+  },
+  {
+    "id": "anthropic_invalid",
+    "protocol": "anthropic",
+    "response": {
+      "id": "msg",
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": 42
+        },
+        {
+          "type": "text",
+          "text": "done"
+        }
+      ],
+      "stop_reason": "end_turn",
+      "usage": {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5
+      }
+    },
+    "frames": [
+      {
+        "type": "message_start",
+        "message": {
+          "id": "msg",
+          "usage": {
+            "input_tokens": 3,
+            "output_tokens": 2,
+            "total_tokens": 5
+          }
+        }
+      },
+      {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "thinking",
+          "thinking": ""
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "thinking_delta",
+          "thinking": 42
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "signature_delta",
+          "signature": "opaque"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 0
+      },
+      {
+        "type": "content_block_start",
+        "index": 1,
+        "content_block": {
+          "type": "text",
+          "text": ""
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {
+          "type": "text_delta",
+          "text": "done"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 1
+      },
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "end_turn"
+        },
+        "usage": {
+          "input_tokens": 3,
+          "output_tokens": 2,
+          "total_tokens": 5
+        }
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "expectedReasoning": null,
+    "invalid": true,
+    "expectedText": "done",
+    "expectedToolCount": 0
+  },
+  {
+    "id": "responses_summary",
+    "protocol": "responses",
+    "response": {
+      "id": "resp",
+      "status": "completed",
+      "output": [
+        {
+          "type": "reasoning",
+          "encrypted_content": "secret",
+          "summary": [
+            {
+              "type": "summary_text",
+              "text": " inspect "
+            },
+            {
+              "type": "summary_text",
+              "text": "next\n"
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "done"
+            }
+          ]
+        }
+      ],
+      "usage": {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5
+      }
+    },
+    "frames": [
+      {
+        "type": "response.reasoning_summary_text.delta",
+        "item_id": "rs_fixture",
+        "output_index": 0,
+        "summary_index": 0,
+        "delta": " inspect "
+      },
+      {
+        "type": "response.reasoning_summary_text.done",
+        "item_id": "rs_fixture",
+        "output_index": 0,
+        "summary_index": 0,
+        "text": " inspect "
+      },
+      {
+        "type": "response.reasoning_summary_text.delta",
+        "item_id": "rs_fixture",
+        "output_index": 0,
+        "summary_index": 1,
+        "delta": "next\n"
+      },
+      {
+        "type": "response.reasoning_summary_text.done",
+        "item_id": "rs_fixture",
+        "output_index": 0,
+        "summary_index": 1,
+        "text": "next\n"
+      },
+      {
+        "type": "response.output_text.delta",
+        "delta": "done"
+      },
+      {
+        "type": "response.completed",
+        "response": {
+          "id": "resp",
+          "status": "completed",
+          "output": [
+            {
+              "type": "reasoning",
+              "encrypted_content": "secret",
+              "summary": [
+                {
+                  "type": "summary_text",
+                  "text": " inspect "
+                },
+                {
+                  "type": "summary_text",
+                  "text": "next\n"
+                }
+              ]
+            },
+            {
+              "type": "message",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "done"
+                }
+              ]
+            }
+          ],
+          "usage": {
+            "input_tokens": 3,
+            "output_tokens": 2,
+            "total_tokens": 5
+          }
+        }
+      }
+    ],
+    "expectedReasoning": " inspect \nnext\n",
+    "invalid": false,
+    "expectedText": "done",
+    "expectedToolCount": 0,
+    "livePrefix": " inspect "
+  },
+  {
+    "id": "responses_opaque",
+    "protocol": "responses",
+    "response": {
+      "id": "resp",
+      "status": "completed",
+      "output": [
+        {
+          "type": "reasoning",
+          "encrypted_content": "secret",
+          "summary": [
+            {
+              "type": "opaque",
+              "text": "secret"
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "done"
+            }
+          ]
+        }
+      ],
+      "usage": {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5
+      }
+    },
+    "frames": [
+      {
+        "type": "response.output_text.delta",
+        "delta": "done"
+      },
+      {
+        "type": "response.completed",
+        "response": {
+          "id": "resp",
+          "status": "completed",
+          "output": [
+            {
+              "type": "reasoning",
+              "encrypted_content": "secret",
+              "summary": [
+                {
+                  "type": "opaque",
+                  "text": "secret"
+                }
+              ]
+            },
+            {
+              "type": "message",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "done"
+                }
+              ]
+            }
+          ],
+          "usage": {
+            "input_tokens": 3,
+            "output_tokens": 2,
+            "total_tokens": 5
+          }
+        }
+      }
+    ],
+    "expectedReasoning": null,
+    "invalid": false,
+    "expectedText": "done",
+    "expectedToolCount": 0
+  },
+  {
+    "id": "responses_invalid",
+    "protocol": "responses",
+    "response": {
+      "id": "resp",
+      "status": "completed",
+      "output": [
+        {
+          "type": "reasoning",
+          "encrypted_content": "secret",
+          "summary": [
+            {
+              "type": "summary_text",
+              "text": 42
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "done"
+            }
+          ]
+        }
+      ],
+      "usage": {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5
+      }
+    },
+    "frames": [
+      {
+        "type": "response.output_text.delta",
+        "delta": "done"
+      },
+      {
+        "type": "response.completed",
+        "response": {
+          "id": "resp",
+          "status": "completed",
+          "output": [
+            {
+              "type": "reasoning",
+              "encrypted_content": "secret",
+              "summary": [
+                {
+                  "type": "summary_text",
+                  "text": 42
+                }
+              ]
+            },
+            {
+              "type": "message",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "done"
+                }
+              ]
+            }
+          ],
+          "usage": {
+            "input_tokens": 3,
+            "output_tokens": 2,
+            "total_tokens": 5
+          }
+        }
+      }
+    ],
+    "expectedReasoning": null,
+    "invalid": true,
+    "expectedText": "done",
+    "expectedToolCount": 0
+  },
+  {
+    "id": "compatible",
+    "protocol": "compatible",
+    "response": {
+      "choices": [
+        {
+          "message": {
+            "content": "done",
+            "reasoning_content": " inspect "
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 3,
+        "completion_tokens": 2,
+        "total_tokens": 5
+      }
+    },
+    "frames": [
+      {
+        "choices": [
+          {
+            "delta": {
+              "reasoning_content": " inspect "
+            }
+          }
+        ]
+      },
+      {
+        "choices": [
+          {
+            "delta": {
+              "content": "done"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 3,
+          "completion_tokens": 2,
+          "total_tokens": 5
+        }
+      }
+    ],
+    "expectedReasoning": " inspect ",
+    "invalid": false,
+    "expectedText": "done",
+    "expectedToolCount": 0
+  },
+  {
+    "id": "anthropic_thinking_reasoning_only",
+    "protocol": "anthropic",
+    "response": {
+      "id": "msg",
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": " inspect ",
+          "signature": "opaque"
+        },
+        {
+          "type": "redacted_thinking",
+          "data": "secret"
+        },
+        {
+          "type": "thinking",
+          "thinking": "next\n",
+          "signature": "other"
+        }
+      ],
+      "stop_reason": "end_turn",
+      "usage": {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5
+      }
+    },
+    "frames": [
+      {
+        "type": "message_start",
+        "message": {
+          "id": "msg",
+          "usage": {
+            "input_tokens": 3,
+            "output_tokens": 2,
+            "total_tokens": 5
+          }
+        }
+      },
+      {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "thinking",
+          "thinking": "",
+          "signature": "opaque"
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "thinking_delta",
+          "thinking": " inspect "
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "signature_delta",
+          "signature": "opaque"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 0
+      },
+      {
+        "type": "content_block_start",
+        "index": 1,
+        "content_block": {
+          "type": "redacted_thinking",
+          "data": "secret"
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {
+          "type": "signature_delta",
+          "signature": "opaque"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 1
+      },
+      {
+        "type": "content_block_start",
+        "index": 2,
+        "content_block": {
+          "type": "thinking",
+          "thinking": "",
+          "signature": "other"
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 2,
+        "delta": {
+          "type": "thinking_delta",
+          "thinking": "next\n"
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 2,
+        "delta": {
+          "type": "signature_delta",
+          "signature": "opaque"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 2
+      },
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "end_turn"
+        }
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "expectedReasoning": " inspect \nnext\n",
+    "invalid": false,
+    "expectedText": "",
+    "expectedToolCount": 0
+  },
+  {
+    "id": "anthropic_thinking_tool",
+    "protocol": "anthropic",
+    "response": {
+      "id": "msg",
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": " inspect ",
+          "signature": "opaque"
+        },
+        {
+          "type": "redacted_thinking",
+          "data": "secret"
+        },
+        {
+          "type": "thinking",
+          "thinking": "next\n",
+          "signature": "other"
+        },
+        {
+          "type": "tool_use",
+          "id": "call-1",
+          "name": "read",
+          "input": {
+            "path": "a"
+          }
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5
+      }
+    },
+    "frames": [
+      {
+        "type": "message_start",
+        "message": {
+          "id": "msg",
+          "usage": {
+            "input_tokens": 3,
+            "output_tokens": 2,
+            "total_tokens": 5
+          }
+        }
+      },
+      {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "thinking",
+          "thinking": "",
+          "signature": "opaque"
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "thinking_delta",
+          "thinking": " inspect "
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "signature_delta",
+          "signature": "opaque"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 0
+      },
+      {
+        "type": "content_block_start",
+        "index": 1,
+        "content_block": {
+          "type": "redacted_thinking",
+          "data": "secret"
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {
+          "type": "signature_delta",
+          "signature": "opaque"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 1
+      },
+      {
+        "type": "content_block_start",
+        "index": 2,
+        "content_block": {
+          "type": "thinking",
+          "thinking": "",
+          "signature": "other"
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 2,
+        "delta": {
+          "type": "thinking_delta",
+          "thinking": "next\n"
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 2,
+        "delta": {
+          "type": "signature_delta",
+          "signature": "opaque"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 2
+      },
+      {
+        "type": "content_block_start",
+        "index": 3,
+        "content_block": {
+          "type": "tool_use",
+          "id": "call-1",
+          "name": "read",
+          "input": {
+            "path": "a"
+          }
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 3
+      },
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "tool_use"
+        }
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "expectedReasoning": " inspect \nnext\n",
+    "invalid": false,
+    "expectedText": "",
+    "expectedToolCount": 1
+  },
+  {
+    "id": "responses_summary_reasoning_only",
+    "protocol": "responses",
+    "response": {
+      "id": "resp",
+      "status": "completed",
+      "output": [
+        {
+          "type": "reasoning",
+          "encrypted_content": "secret",
+          "summary": [
+            {
+              "type": "summary_text",
+              "text": " inspect "
+            },
+            {
+              "type": "summary_text",
+              "text": "next\n"
+            }
+          ]
+        }
+      ],
+      "usage": {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5
+      }
+    },
+    "frames": [
+      {
+        "type": "response.reasoning_summary_text.delta",
+        "item_id": "rs_fixture",
+        "output_index": 0,
+        "summary_index": 0,
+        "delta": " inspect "
+      },
+      {
+        "type": "response.reasoning_summary_text.done",
+        "item_id": "rs_fixture",
+        "output_index": 0,
+        "summary_index": 0,
+        "text": " inspect "
+      },
+      {
+        "type": "response.reasoning_summary_text.delta",
+        "item_id": "rs_fixture",
+        "output_index": 0,
+        "summary_index": 1,
+        "delta": "next\n"
+      },
+      {
+        "type": "response.reasoning_summary_text.done",
+        "item_id": "rs_fixture",
+        "output_index": 0,
+        "summary_index": 1,
+        "text": "next\n"
+      },
+      {
+        "type": "response.completed",
+        "response": {
+          "id": "resp",
+          "status": "completed",
+          "output": [
+            {
+              "type": "reasoning",
+              "encrypted_content": "secret",
+              "summary": [
+                {
+                  "type": "summary_text",
+                  "text": " inspect "
+                },
+                {
+                  "type": "summary_text",
+                  "text": "next\n"
+                }
+              ]
+            }
+          ],
+          "usage": {
+            "input_tokens": 3,
+            "output_tokens": 2,
+            "total_tokens": 5
+          }
+        }
+      }
+    ],
+    "expectedReasoning": " inspect \nnext\n",
+    "invalid": false,
+    "expectedText": "",
+    "expectedToolCount": 0,
+    "livePrefix": " inspect "
+  },
+  {
+    "id": "responses_summary_tool",
+    "protocol": "responses",
+    "response": {
+      "id": "resp",
+      "status": "completed",
+      "output": [
+        {
+          "type": "reasoning",
+          "encrypted_content": "secret",
+          "summary": [
+            {
+              "type": "summary_text",
+              "text": " inspect "
+            },
+            {
+              "type": "summary_text",
+              "text": "next\n"
+            }
+          ]
+        },
+        {
+          "type": "function_call",
+          "call_id": "call-1",
+          "name": "read",
+          "arguments": "{\"path\":\"a\"}"
+        }
+      ],
+      "usage": {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5
+      }
+    },
+    "frames": [
+      {
+        "type": "response.reasoning_summary_text.delta",
+        "item_id": "rs_fixture",
+        "output_index": 0,
+        "summary_index": 0,
+        "delta": " inspect "
+      },
+      {
+        "type": "response.reasoning_summary_text.done",
+        "item_id": "rs_fixture",
+        "output_index": 0,
+        "summary_index": 0,
+        "text": " inspect "
+      },
+      {
+        "type": "response.reasoning_summary_text.delta",
+        "item_id": "rs_fixture",
+        "output_index": 0,
+        "summary_index": 1,
+        "delta": "next\n"
+      },
+      {
+        "type": "response.reasoning_summary_text.done",
+        "item_id": "rs_fixture",
+        "output_index": 0,
+        "summary_index": 1,
+        "text": "next\n"
+      },
+      {
+        "type": "response.completed",
+        "response": {
+          "id": "resp",
+          "status": "completed",
+          "output": [
+            {
+              "type": "reasoning",
+              "encrypted_content": "secret",
+              "summary": [
+                {
+                  "type": "summary_text",
+                  "text": " inspect "
+                },
+                {
+                  "type": "summary_text",
+                  "text": "next\n"
+                }
+              ]
+            },
+            {
+              "type": "function_call",
+              "call_id": "call-1",
+              "name": "read",
+              "arguments": "{\"path\":\"a\"}"
+            }
+          ],
+          "usage": {
+            "input_tokens": 3,
+            "output_tokens": 2,
+            "total_tokens": 5
+          }
+        }
+      }
+    ],
+    "expectedReasoning": " inspect \nnext\n",
+    "invalid": false,
+    "expectedText": "",
+    "expectedToolCount": 1,
+    "livePrefix": " inspect "
+  }
+]

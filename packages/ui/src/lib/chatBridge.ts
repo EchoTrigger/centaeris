@@ -202,6 +202,7 @@ export type AgentRunStreamReplayRequest = {
 };
 
 export type AgentRunStreamReplayResponse = {
+  liveSnapshot?: AgentStreamPayload | null;
   agentRunId: string;
   cwd?: string | null;
   items: AgentStreamPayload[];
@@ -1828,8 +1829,11 @@ export const openAgentStream = (
 
   retainDesktopStreamConsumer(normalizedAgentRunId);
   void ensureDesktopAgentStreamSubscription()
-    .then(() => {
+    .then(async () => {
+      if (closed) return;
       onOpen?.();
+      const replay = await replayAgentRunStream({ agentRunId: normalizedAgentRunId, limit: 1 });
+      if (!closed && replay.liveSnapshot) onMessage(replay.liveSnapshot);
     })
     .catch((error: unknown) => {
       onError?.(
