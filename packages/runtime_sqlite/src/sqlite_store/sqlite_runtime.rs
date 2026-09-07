@@ -8,9 +8,44 @@ use centaeris_core::session::store::{
 use rusqlite::{params, OptionalExtension};
 
 impl RuntimeStore for SqliteRuntimeStore {
+    fn list_runtime_job_waiters(
+        &self,
+        source_job_id: Option<&str>,
+        after: Option<&centaeris_core::session::store::RuntimeJobWaiterCursor>,
+        limit: usize,
+    ) -> Result<Vec<centaeris_core::session::store::RuntimeJobWaiter>, RuntimeStoreError> {
+        use centaeris_core::session::store::{RuntimeJobWaiter, RuntimeJobWaiterCursor};
+        self.with_conn(|conn| {
+            let checkpoint = after.map_or("", |cursor| cursor.checkpoint_id.as_str());
+            let call = after.map_or("", |cursor| cursor.tool_call_id.as_str());
+            let base = "SELECT checkpoint_id,tool_call_id,source_job_id,source_job_kind,session_id,agent_run_id FROM runtime_job_waiters WHERE (checkpoint_id,tool_call_id)>(?1,?2)";
+            let sql = match source_job_id {
+                Some(_) => format!("{base} AND source_job_id=?4 ORDER BY checkpoint_id,tool_call_id LIMIT ?3"),
+                None => format!("{base} ORDER BY checkpoint_id,tool_call_id LIMIT ?3"),
+            };
+            let mut statement = conn.prepare(&sql).map_err(|error| format!("prepare waiter lookup failed: {error}"))?;
+            let decode = |row: &rusqlite::Row<'_>| Ok(RuntimeJobWaiter {
+                cursor: RuntimeJobWaiterCursor { checkpoint_id: row.get(0)?, tool_call_id: row.get(1)? },
+                source_job_id: row.get(2)?, source_job_kind: row.get(3)?, session_id: row.get(4)?, agent_run_id: row.get(5)?,
+            });
+            let rows = match source_job_id {
+                Some(source) => statement.query_map(params![checkpoint, call, to_i64(limit)?, source], decode),
+                None => statement.query_map(params![checkpoint, call, to_i64(limit)?], decode),
+            }.map_err(|error| format!("query waiters failed: {error}"))?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(|error| format!("decode waiters failed: {error}"))
+        }).map_err(RuntimeStoreError::backend)
+    }
+
     fn save_checkpoint(&self, checkpoint: CheckpointRecord) -> Result<(), RuntimeStoreError> {
-        self.with_conn(|conn| save_checkpoint_conn(conn, &checkpoint))
-            .map_err(RuntimeStoreError::backend)
+        self.with_conn(|conn| {
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|error| format!("begin checkpoint save failed: {error}"))?;
+            save_checkpoint_conn(&tx, &checkpoint)?;
+            tx.commit()
+                .map_err(|error| format!("commit checkpoint save failed: {error}"))
+        })
+        .map_err(RuntimeStoreError::backend)
     }
 
     fn load_latest_checkpoint(
@@ -304,6 +339,7 @@ pub(super) fn save_checkpoint_conn(
     conn: &rusqlite::Connection,
     checkpoint: &CheckpointRecord,
 ) -> Result<(), String> {
+    let waiters = centaeris_core::session::store::runtime_job_waiters(checkpoint)?;
     if checkpoint.kind == CheckpointKindV1::Recovery {
         let inserted = conn
             .execute(
@@ -365,6 +401,16 @@ pub(super) fn save_checkpoint_conn(
         ],
     )
     .map_err(|err| format!("save checkpoint failed: {err}"))?;
+    conn.execute(
+        "DELETE FROM runtime_job_waiters WHERE checkpoint_id=?1",
+        params![&checkpoint.checkpoint_id],
+    )
+    .map_err(|error| format!("replace checkpoint waiters failed: {error}"))?;
+    for waiter in waiters {
+        conn.execute("INSERT INTO runtime_job_waiters(checkpoint_id,tool_call_id,source_job_id,source_job_kind,session_id,agent_run_id) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![&waiter.cursor.checkpoint_id, &waiter.cursor.tool_call_id, &waiter.source_job_id, &waiter.source_job_kind, &waiter.session_id, &waiter.agent_run_id])
+            .map_err(|error| format!("save checkpoint waiter failed: {error}"))?;
+    }
     Ok(())
 }
 

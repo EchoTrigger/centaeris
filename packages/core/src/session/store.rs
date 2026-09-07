@@ -8,6 +8,57 @@ use crate::session::reliability::{
 pub mod actor;
 pub use actor::RuntimeStoreActor;
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeJobWaiterCursor {
+    pub checkpoint_id: String,
+    pub tool_call_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeJobWaiter {
+    pub cursor: RuntimeJobWaiterCursor,
+    pub source_job_id: String,
+    pub source_job_kind: String,
+    pub session_id: String,
+    pub agent_run_id: String,
+}
+
+/// Derived index rows; stores persist these with their source checkpoint in the
+/// same transaction and delete them when that checkpoint is consumed.
+pub fn runtime_job_waiters(checkpoint: &CheckpointRecord) -> Result<Vec<RuntimeJobWaiter>, String> {
+    use crate::runtime::contracts::{CheckpointKindV1, RuntimeAwaitJobCheckpointV1};
+    if checkpoint.kind != CheckpointKindV1::Wait
+        || checkpoint.status != "waiting"
+        || checkpoint.done_reason.as_deref() != Some("runtime_job")
+    {
+        return Ok(Vec::new());
+    }
+    let wait: RuntimeAwaitJobCheckpointV1 = serde_json::from_str(&checkpoint.payload_json)
+        .map_err(|error| format!("invalid runtime job wait checkpoint: {error}"))?;
+    wait.validate()?;
+    if wait.turn_id != checkpoint.turn_id
+        || checkpoint.checkpoint_id.trim().is_empty()
+        || checkpoint.session_id.trim().is_empty()
+    {
+        return Err("runtime job wait checkpoint binding mismatch".to_string());
+    }
+    Ok(wait
+        .waits
+        .into_iter()
+        .map(|item| RuntimeJobWaiter {
+            cursor: RuntimeJobWaiterCursor {
+                checkpoint_id: checkpoint.checkpoint_id.clone(),
+                tool_call_id: item.tool_call_id,
+            },
+            source_job_id: item.job_id,
+            source_job_kind: item.job_kind,
+            session_id: checkpoint.session_id.clone(),
+            agent_run_id: wait.agent_run_id.clone(),
+        })
+        .collect())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeStoreError {
     Backend {
@@ -114,6 +165,12 @@ pub struct RuntimeJobWaitCheckpointCursor {
 }
 
 pub trait RuntimeStore {
+    fn list_runtime_job_waiters(
+        &self,
+        source_job_id: Option<&str>,
+        after: Option<&RuntimeJobWaiterCursor>,
+        limit: usize,
+    ) -> Result<Vec<RuntimeJobWaiter>, RuntimeStoreError>;
     fn save_checkpoint(&self, checkpoint: CheckpointRecord) -> Result<(), RuntimeStoreError>;
     fn load_latest_checkpoint(
         &self,

@@ -25,6 +25,7 @@ pub mod subagent;
 pub(crate) mod subagent_contracts;
 mod subagent_projection;
 mod subagent_runner;
+pub mod terminal_wait;
 mod text_preview;
 mod tool_batch_executor;
 mod tool_context_writer;

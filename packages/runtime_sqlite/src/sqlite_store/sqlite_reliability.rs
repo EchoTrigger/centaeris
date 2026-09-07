@@ -1065,13 +1065,6 @@ impl RuntimeJobOutboxPort for SqliteRuntimeStore {
             }
         })
     }
-
-    fn requeue_runtime_job_notifications(&self, published_before_ms: i64) -> Result<usize, String> {
-        self.with_conn(|conn| conn.execute(
-            "UPDATE runtime_job_outbox AS outbox SET published_at_ms=NULL,generation=generation+1 WHERE event_type='runtime_job.terminal' AND published_at_ms IS NOT NULL AND published_at_ms<=?1 AND EXISTS(SELECT 1 FROM runtime_jobs AS jobs WHERE jobs.job_id=outbox.job_id AND jobs.status IN('succeeded','failed','dead_lettered','cancelled'))",
-            params![published_before_ms],
-        ).map_err(|error| format!("requeue runtime job notifications failed: {error}")))
-    }
 }
 
 pub(super) fn upsert_runtime_job_outbox_event(

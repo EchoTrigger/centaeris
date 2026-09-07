@@ -238,6 +238,18 @@ const REQUIRED_TABLES: &[RequiredObject] = &[
         ",
     },
     RequiredObject {
+        name: "runtime_job_waiters",
+        sql: "CREATE TABLE runtime_job_waiters (
+            checkpoint_id TEXT NOT NULL REFERENCES checkpoints(checkpoint_id) ON DELETE CASCADE,
+            tool_call_id TEXT NOT NULL,
+            source_job_id TEXT NOT NULL,
+            source_job_kind TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            agent_run_id TEXT NOT NULL,
+            PRIMARY KEY(checkpoint_id,tool_call_id)
+        )",
+    },
+    RequiredObject {
         name: "runtime_events",
         sql: "
         CREATE TABLE runtime_events (
@@ -375,6 +387,10 @@ const REQUIRED_TABLES: &[RequiredObject] = &[
 ];
 
 const REQUIRED_INDEXES: &[RequiredObject] = &[
+    RequiredObject {
+        name: "idx_runtime_job_waiters_source",
+        sql: "CREATE INDEX idx_runtime_job_waiters_source ON runtime_job_waiters(source_job_id,checkpoint_id,tool_call_id)",
+    },
     RequiredObject {
         name: "idx_checkpoints_session_updated",
         sql: "CREATE INDEX idx_checkpoints_session_updated ON checkpoints(session_id, updated_at_ms DESC, checkpoint_id DESC)",
