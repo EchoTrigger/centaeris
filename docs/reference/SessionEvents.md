@@ -107,6 +107,7 @@ Session. `Stream` says whether the record is projected into AgentRun replay.
 | `agent_run_started` | turn + run | yes | `userObjective` |
 | `agent_run_execution_started` | turn + run | no | `executionId`, `authorizationDigest`, `recoveredFromCheckpointId` |
 | `agent_run_execution_ended` | turn + run | no | `executionId`, `outcome`, `reasonCode`, `retryable`, `lastCheckpointId`, `indeterminateToolCallIds` |
+| `agent_run_recovery_attempted` | turn + run | no | `attempt`, `checkpointId` |
 | `user_message` | turn + run | yes | `messageId`, `text`, `attachments` |
 | `turn_supplement` | turn + run | yes | `supplementId`, `messageId`, `message` |
 | `assistant_message` | turn + run | yes | `messageId`, `modelMarkdown`, `artifactRefs`, `status` |

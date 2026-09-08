@@ -30,7 +30,9 @@ const RETRYABLE_CONNECT_FAILURE_COOLDOWN: Duration = Duration::from_millis(250);
 const MAX_DISCOVERY_PAGES: usize = 256;
 
 mod transport;
-pub use transport::{bounded_stdio_transport, BoundedStdioTransport};
+pub use transport::{
+    bounded_io_transport, bounded_stdio_transport, BoundedIoTransport, BoundedStdioTransport,
+};
 
 type DynamicProvider = Arc<dyn DynamicToolProvider + Send + Sync>;
 

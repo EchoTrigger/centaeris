@@ -243,7 +243,7 @@ impl ExecutionHostRunner for TestExecutionHostRunner {
                 });
             }
         }
-        // ponytail: Core uses only short fixture commands; timeout and process-tree behavior stay in Host adapter tests.
+        // Core uses only short fixture commands; timeout and process-tree behavior stay in Host adapter tests.
         let program = if req.program == "bash" {
             self.bash_path.as_path()
         } else {

@@ -308,6 +308,8 @@ pub enum RuntimeJobOutboxPublishDisposition {
 }
 
 pub trait RuntimeJobOutboxPort {
+    /// Unacknowledged terminal deliveries remain pending across restarts. Once
+    /// acknowledged, elapsed time alone must not make a delivery pending again.
     fn list_pending_runtime_job_outbox(
         &self,
         limit: usize,
@@ -319,10 +321,6 @@ pub trait RuntimeJobOutboxPort {
         generation: u32,
         published_at_ms: TimestampMs,
     ) -> Result<RuntimeJobOutboxPublishDisposition, String>;
-    fn requeue_runtime_job_notifications(
-        &self,
-        published_before_ms: TimestampMs,
-    ) -> Result<usize, String>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

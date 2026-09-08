@@ -2745,8 +2745,7 @@ fn submit_mcp_credential(app: &mut App) -> Result<(), String> {
         .ok_or_else(|| "MCP credential prompt is not active".to_string())?;
     let token = token.to_string();
     ensure_runtime(app)?;
-    // ponytail: credential tests block input up to the declared startup timeout; add an
-    // async response state only if this becomes an observed interaction problem.
+    // Credential tests block input up to the declared startup timeout.
     let response = app
         .runtime
         .as_mut()

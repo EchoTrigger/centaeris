@@ -161,8 +161,7 @@ fn spill_tool_result(
         "outputByteLength": result.content.len(),
     }))
     .map_err(|error| format!("serialize tool result footer failed: {error}"))?;
-    // ponytail: V1 hands one complete buffer to the existing ExecutionHost filesystem
-    // contract; add a streaming spill operation when measured outputs exceed Host memory.
+    // The ExecutionHost filesystem contract receives one complete buffer.
     let mut bytes = prefix.into_bytes();
     bytes.extend_from_slice(result.content.as_bytes());
     bytes.extend_from_slice(format!("\n--- tool result metadata ---\n{footer}\n").as_bytes());

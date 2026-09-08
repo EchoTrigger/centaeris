@@ -108,6 +108,7 @@ pub trait SessionLogPort: Send + Sync {
 pub enum SessionRecordType {
     SessionMeta,
     AgentRunStarted,
+    AgentRunRecoveryAttempted,
     AgentRunExecutionStarted,
     AgentRunExecutionEnded,
     UserMessage,
@@ -140,6 +141,7 @@ impl SessionRecordType {
         &[
             "session_meta",
             "agent_run_started",
+            "agent_run_recovery_attempted",
             "agent_run_execution_started",
             "agent_run_execution_ended",
             "user_message",
@@ -168,6 +170,7 @@ impl SessionRecordType {
         match self {
             Self::SessionMeta => "session_meta",
             Self::AgentRunStarted => "agent_run_started",
+            Self::AgentRunRecoveryAttempted => "agent_run_recovery_attempted",
             Self::AgentRunExecutionStarted => "agent_run_execution_started",
             Self::AgentRunExecutionEnded => "agent_run_execution_ended",
             Self::UserMessage => "user_message",
@@ -306,6 +309,13 @@ pub struct ActiveAgentRunExecution {
     pub authorization_digest: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionRecoveryAttempt {
+    pub number: u64,
+    pub checkpoint_id: String,
+    pub started_at_ms: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentRunSessionState {
     reasoning: reasoning::ReasoningLedger,
@@ -332,6 +342,9 @@ pub struct AgentRunSessionState {
     active_execution: Option<ActiveAgentRunExecution>,
     ended_execution_ids: HashSet<String>,
     used_recovery_checkpoint_ids: HashSet<String>,
+    recovery_attempt: Option<ExecutionRecoveryAttempt>,
+    last_execution_ended_at_ms: Option<i64>,
+    latest_recovery_checkpoint_id: Option<String>,
 }
 
 impl AgentRunSessionState {
@@ -372,6 +385,9 @@ impl AgentRunSessionState {
             active_execution: None,
             ended_execution_ids: HashSet::new(),
             used_recovery_checkpoint_ids: HashSet::new(),
+            recovery_attempt: None,
+            last_execution_ended_at_ms: None,
+            latest_recovery_checkpoint_id: None,
         })
     }
 
@@ -441,6 +457,47 @@ impl AgentRunSessionState {
 
     pub fn has_used_recovery_checkpoint(&self, checkpoint_id: &str) -> bool {
         self.used_recovery_checkpoint_ids.contains(checkpoint_id)
+    }
+
+    /// Number of replacement Executions durably started from recovery checkpoints.
+    pub fn recovery_execution_count(&self) -> usize {
+        self.used_recovery_checkpoint_ids.len()
+    }
+
+    pub fn recovery_attempt(&self) -> Option<&ExecutionRecoveryAttempt> {
+        self.recovery_attempt.as_ref()
+    }
+
+    pub fn last_execution_ended_at_ms(&self) -> Option<i64> {
+        self.last_execution_ended_at_ms
+    }
+
+    pub fn latest_recovery_checkpoint_id(&self) -> Option<&str> {
+        self.latest_recovery_checkpoint_id.as_deref()
+    }
+
+    /// Reserve an attempt before preparing a replacement environment. The host
+    /// must durably append this record under its lease before doing that work.
+    pub fn reserve_execution_recovery(
+        &mut self,
+        turn_id: &str,
+        checkpoint_id: &str,
+        maximum_attempts: u64,
+        created_at_ms: i64,
+    ) -> Result<SequencedSessionRecord, String> {
+        let previous = self
+            .recovery_attempt
+            .as_ref()
+            .map_or(0, |attempt| attempt.number);
+        if previous >= maximum_attempts {
+            return Err("execution recovery attempt budget exhausted".to_string());
+        }
+        self.event_for_turn(
+            turn_id,
+            SessionRecordType::AgentRunRecoveryAttempted,
+            serde_json::json!({"attempt": previous + 1, "checkpointId": checkpoint_id}),
+            created_at_ms,
+        )
     }
 
     pub fn has_phase_turn(&self, turn_id: &str) -> bool {
@@ -832,6 +889,25 @@ impl AgentRunSessionState {
         self.reasoning.apply(event)?;
         match event.event_type {
             SessionRecordType::ReasoningBlock => {}
+            SessionRecordType::AgentRunRecoveryAttempted => {
+                let attempt = execution_recovery_attempt(event)?;
+                if self.active_execution.is_some()
+                    || self.last_execution_ended_at_ms.is_none()
+                    || !self
+                        .committed_checkpoint_ids
+                        .contains(&attempt.checkpoint_id)
+                    || attempt.number
+                        != self
+                            .recovery_attempt
+                            .as_ref()
+                            .map_or(0, |previous| previous.number)
+                            .checked_add(1)
+                            .ok_or("execution recovery attempt overflow")?
+                {
+                    return Err("execution recovery attempt binding mismatch".to_string());
+                }
+                self.recovery_attempt = Some(attempt);
+            }
             SessionRecordType::AgentRunExecutionStarted => {
                 let execution_id = state_payload_string(&event.payload, "executionId")?;
                 if self.active_execution.is_some() {
@@ -887,6 +963,7 @@ impl AgentRunSessionState {
                     return Err(format!("AgentRun Execution is not active: {execution_id}"));
                 }
                 self.active_execution = None;
+                self.last_execution_ended_at_ms = Some(event.created_at_ms);
                 self.ended_execution_ids.insert(execution_id.to_string());
             }
             SessionRecordType::AgentRunCompleted
@@ -995,6 +1072,7 @@ impl AgentRunSessionState {
                     ));
                 }
                 if state_payload_string(&event.payload, "kind")? == "recovery" {
+                    self.latest_recovery_checkpoint_id = Some(checkpoint_id.to_string());
                     self.tool_ledger_checkpointed = self.open_tool_call_ids().is_empty();
                 }
             }
@@ -1491,6 +1569,7 @@ pub fn session_record_projects_to_agent_run_stream(event_type: SessionRecordType
         | SessionRecordType::AgentRunFailed
         | SessionRecordType::AgentRunInterrupted => true,
         SessionRecordType::SessionMeta
+        | SessionRecordType::AgentRunRecoveryAttempted
         | SessionRecordType::AgentRunExecutionStarted
         | SessionRecordType::AgentRunExecutionEnded
         | SessionRecordType::ModelRequestStarted
@@ -1618,6 +1697,14 @@ fn committed_runtime_projection(
         ),
         SessionRecordType::AgentRunExecutionStarted => (
             "AgentRunExecutionStarted",
+            "running".to_string(),
+            RuntimeEventVisibility::Internal,
+            None,
+            None,
+            record.payload.clone(),
+        ),
+        SessionRecordType::AgentRunRecoveryAttempted => (
+            "AgentRunRecoveryAttempted",
             "running".to_string(),
             RuntimeEventVisibility::Internal,
             None,
@@ -1850,6 +1937,7 @@ pub struct SessionProjection {
     pub tool_calls: BTreeMap<String, ReducedToolCall>,
     pub agent_runs: BTreeMap<String, ReducedAgentRun>,
     pub agent_run_executions: BTreeMap<String, ReducedAgentRunExecution>,
+    recovery_attempts: BTreeMap<String, ExecutionRecoveryAttempt>,
     pub citations: BTreeMap<String, ReducedCitation>,
     pub artifacts: BTreeMap<String, ReducedArtifact>,
     pub artifact_order: Vec<String>,
@@ -1945,6 +2033,9 @@ pub fn validate_event_shape(event: &SessionLogRecord) -> Result<(), String> {
     match event.event_type {
         SessionRecordType::SessionMeta => validate_session_meta(event),
         SessionRecordType::AgentRunStarted => validate_agent_run_started(event),
+        SessionRecordType::AgentRunRecoveryAttempted => {
+            execution_recovery_attempt(event).map(|_| ())
+        }
         SessionRecordType::AgentRunExecutionStarted => validate_agent_run_execution_started(event),
         SessionRecordType::AgentRunExecutionEnded => validate_agent_run_execution_ended(event),
         SessionRecordType::UserMessage => validate_user_message(event),
@@ -2605,6 +2696,28 @@ pub fn reduce_event(
     match event.event_type {
         SessionRecordType::ReasoningBlock => {}
         SessionRecordType::AgentRunStarted => reduce_agent_run_started(projection, event)?,
+        SessionRecordType::AgentRunRecoveryAttempted => {
+            let run_id = required_event_agent_run_id(event)?;
+            let attempt = execution_recovery_attempt(event)?;
+            if projection
+                .agent_runs
+                .get(&run_id)
+                .is_none_or(|run| run.state != ReducedAgentRunState::Running)
+                || projection.agent_run_executions.values().any(|execution| {
+                    execution.agent_run_id == run_id && execution.outcome.is_none()
+                })
+                || attempt.number
+                    != projection
+                        .recovery_attempts
+                        .get(&run_id)
+                        .map_or(0, |previous| previous.number)
+                        .checked_add(1)
+                        .ok_or("execution recovery attempt overflow")?
+            {
+                return Err("execution recovery attempt is out of sequence".to_string());
+            }
+            projection.recovery_attempts.insert(run_id, attempt);
+        }
         SessionRecordType::AgentRunExecutionStarted => {
             reduce_agent_run_execution_started(projection, event)?
         }
@@ -3026,6 +3139,25 @@ fn validate_agent_run_started(event: &SessionLogRecord) -> Result<(), String> {
     require_exact_payload_fields(payload, &["userObjective"], event)?;
     required_payload_string(payload, "userObjective", event)?;
     Ok(())
+}
+
+fn execution_recovery_attempt(
+    event: &SessionLogRecord,
+) -> Result<ExecutionRecoveryAttempt, String> {
+    required_event_turn_id(event)?;
+    required_event_agent_run_id(event)?;
+    let payload = payload_object(event)?;
+    require_exact_payload_fields(payload, &["attempt", "checkpointId"], event)?;
+    let number = payload
+        .get("attempt")
+        .and_then(Value::as_u64)
+        .filter(|number| *number > 0)
+        .ok_or_else(|| "execution recovery attempt must be a positive integer".to_string())?;
+    Ok(ExecutionRecoveryAttempt {
+        number,
+        checkpoint_id: required_payload_string(payload, "checkpointId", event)?,
+        started_at_ms: event.created_at_ms,
+    })
 }
 
 fn validate_agent_run_execution_started(event: &SessionLogRecord) -> Result<(), String> {
@@ -6146,6 +6278,92 @@ mod tests {
             )
             .expect_err("checkpoint replacement loop must fail")
             .contains("already started"));
+    }
+
+    #[test]
+    fn recovery_execution_count_survives_session_replay_and_counts_distinct_replacements() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let checkpoint = |checkpoint_id: &str, updated_at_ms: i64| CheckpointRecord {
+            checkpoint_id: checkpoint_id.to_string(),
+            kind: crate::runtime::contracts::CheckpointKindV1::Recovery,
+            session_id: "session-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            status: "committed".to_string(),
+            done_reason: None,
+            updated_at_ms,
+            payload_json: "{}".to_string(),
+        };
+        let mut live = AgentRunSessionState::new("session-1", "agent-run-1").expect("live state");
+        let mut records = live
+            .start("turn-1", "recover once", Vec::new(), 1)
+            .expect("AgentRun start");
+        assert_eq!(live.recovery_execution_count(), 0);
+        records.push(
+            live.start_execution("turn-1", "execution-1", digest.as_str(), None, 2)
+                .expect("ordinary Execution start"),
+        );
+        assert_eq!(live.recovery_execution_count(), 0);
+        records.push(
+            live.checkpoint_ref(&checkpoint("checkpoint-1", 3))
+                .expect("first recovery checkpoint"),
+        );
+        records.push(
+            live.end_execution(
+                "turn-1",
+                "execution-1",
+                "lost",
+                "execution_environment_lost",
+                true,
+                Some("checkpoint-1"),
+                Vec::new(),
+                4,
+            )
+            .expect("ordinary Execution end"),
+        );
+        assert_eq!(live.recovery_execution_count(), 0);
+        for attempt in 1..=5 {
+            records.push(
+                live.reserve_execution_recovery("turn-1", "checkpoint-1", 5, 4 + attempt)
+                    .expect("reserve replacement preparation"),
+            );
+            assert_eq!(live.recovery_attempt().unwrap().number, attempt as u64);
+        }
+        assert!(live
+            .reserve_execution_recovery("turn-1", "checkpoint-1", 5, 10)
+            .is_err());
+        records.push(
+            live.start_execution(
+                "turn-1",
+                "execution-2",
+                digest.as_str(),
+                Some("checkpoint-1"),
+                10,
+            )
+            .expect("replacement Execution start"),
+        );
+        assert_eq!(live.recovery_execution_count(), 1);
+
+        let mut replayed =
+            AgentRunSessionState::new("session-1", "agent-run-1").expect("replayed state");
+        for record in records {
+            replayed.restore(record).expect("restore Session record");
+        }
+        assert_eq!(replayed.active_execution_id(), Some("execution-2"));
+        assert_eq!(replayed.recovery_execution_count(), 1);
+        assert_eq!(replayed.recovery_attempt().unwrap().number, 5);
+        assert!(replayed
+            .reserve_execution_recovery("turn-1", "checkpoint-1", 5, 11)
+            .is_err());
+
+        replayed
+            .checkpoint_ref(&checkpoint("checkpoint-2", 12))
+            .expect("different recovery checkpoint");
+        assert!(!replayed.has_used_recovery_checkpoint("checkpoint-2"));
+        assert_eq!(
+            replayed.recovery_execution_count(),
+            1,
+            "an unused different checkpoint must not reset the durable replacement count"
+        );
     }
 
     #[test]

@@ -327,8 +327,7 @@ fn render_inline_images(
     app: &mut App,
     transcript_view: &TranscriptView,
 ) {
-    // ponytail: resize in the frame loop; use ThreadProtocol only if measured redraw latency
-    // from large decoded images becomes visible.
+    // Images are resized in the frame loop.
     for image in &transcript_view.images {
         let Some(row) = image.row.checked_sub(app.transcript_scroll) else {
             continue;

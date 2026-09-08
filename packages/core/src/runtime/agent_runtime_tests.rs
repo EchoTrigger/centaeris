@@ -150,6 +150,28 @@ impl AgentRuntimeTestStore {
 }
 
 impl RuntimeStore for AgentRuntimeTestStore {
+    fn list_runtime_job_waiters(
+        &self,
+        source_job_id: Option<&str>,
+        after: Option<&crate::session::store::RuntimeJobWaiterCursor>,
+        limit: usize,
+    ) -> Result<Vec<crate::session::store::RuntimeJobWaiter>, RuntimeStoreError> {
+        let state = self.state().map_err(RuntimeStoreError::backend)?;
+        let mut waiters = Vec::new();
+        for checkpoint in &state.checkpoints {
+            waiters.extend(
+                crate::session::store::runtime_job_waiters(checkpoint)
+                    .map_err(RuntimeStoreError::backend)?,
+            );
+        }
+        waiters.retain(|waiter| {
+            source_job_id.is_none_or(|source| waiter.source_job_id == source)
+                && after.is_none_or(|cursor| &waiter.cursor > cursor)
+        });
+        waiters.sort_by(|a, b| a.cursor.cmp(&b.cursor));
+        waiters.truncate(limit);
+        Ok(waiters)
+    }
     fn save_checkpoint(&self, checkpoint: CheckpointRecord) -> Result<(), RuntimeStoreError> {
         let mut state = self.state().map_err(RuntimeStoreError::backend)?;
         state.checkpoints.retain(|existing| {
