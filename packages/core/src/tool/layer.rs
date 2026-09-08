@@ -17,7 +17,7 @@ use crate::model::prepared_prompt::{
 };
 use crate::session::external_context::ExternalContextStorePort;
 use crate::session::reliability::ResourceClaimStorePort;
-use crate::tool::inputs::{ResolvedInput, ResolvedInputState};
+use crate::tool::inputs::ResolvedInputState;
 use crate::tool::{
     canonicalize_tool_name, is_tool_concurrency_safe, list_tool_contracts, DynamicToolRegistry,
     ToolContract, ToolErrorInfo, ToolFailureKind, ToolTurnBehavior,
@@ -43,7 +43,8 @@ pub use providers::{
     DynamicToolProvider, DynamicToolProviderRequest, DynamicToolProviderResponse,
 };
 use read::ReadToolHandler;
-pub(crate) use result_capture::{tool_result_capture, MODEL_TOOL_RESULT_MAX_BYTES};
+pub(crate) use result_capture::tool_result_capture;
+pub use result_capture::MODEL_TOOL_RESULT_MAX_BYTES;
 pub use result_state::ToolResultState;
 use write::WriteToolHandler;
 
@@ -77,19 +78,6 @@ pub trait FileMutationCommitPort {
     fn commit_file_mutation(&self, request: FileMutationCommitRequest) -> Result<(), String>;
 }
 
-#[derive(Debug, Clone)]
-pub struct ResolvedInputReadRequest {
-    pub inputs: Vec<ResolvedInput>,
-    pub offset: Option<usize>,
-    pub limit: Option<usize>,
-    pub poll_args: Value,
-    pub tool_call_id: String,
-}
-
-pub trait ResolvedInputReaderPort {
-    fn read(&self, request: ResolvedInputReadRequest) -> Result<LocalToolOutput, String>;
-}
-
 #[derive(Clone)]
 pub struct ToolRuntimeContext {
     execution_host_binding: Option<Arc<ExecutionHostBinding>>,
@@ -102,7 +90,6 @@ pub struct ToolRuntimeContext {
     pub resource_claim_store: Option<Arc<dyn ResourceClaimStorePort + Send + Sync>>,
     pub resource_claim_ttl_ms: u64,
     pub file_mutation_commit_port: Option<Arc<dyn FileMutationCommitPort + Send + Sync>>,
-    pub resolved_input_reader: Option<Arc<dyn ResolvedInputReaderPort + Send + Sync>>,
     pub external_context_store: Option<Arc<dyn ExternalContextStorePort + Send + Sync>>,
     pub sandbox_policy: SandboxPolicy,
     pub resolved_input_manifest: Option<Arc<ResolvedInputState>>,
@@ -122,7 +109,6 @@ impl Default for ToolRuntimeContext {
             resource_claim_store: None,
             resource_claim_ttl_ms: DEFAULT_RESOURCE_CLAIM_TTL_MS,
             file_mutation_commit_port: None,
-            resolved_input_reader: None,
             external_context_store: None,
             sandbox_policy: SandboxPolicy::workspace_write_no_network("/workspace"),
             resolved_input_manifest: None,
@@ -161,10 +147,6 @@ impl std::fmt::Debug for ToolRuntimeContext {
             .field(
                 "file_mutation_commit_port_configured",
                 &self.file_mutation_commit_port.is_some(),
-            )
-            .field(
-                "resolved_input_reader_configured",
-                &self.resolved_input_reader.is_some(),
             )
             .field(
                 "external_context_store_configured",
@@ -346,14 +328,6 @@ impl ToolRuntimeContext {
         port: Arc<dyn FileMutationCommitPort + Send + Sync>,
     ) -> Self {
         self.file_mutation_commit_port = Some(port);
-        self
-    }
-
-    pub fn with_resolved_input_reader(
-        mut self,
-        port: Arc<dyn ResolvedInputReaderPort + Send + Sync>,
-    ) -> Self {
-        self.resolved_input_reader = Some(port);
         self
     }
 
@@ -791,14 +765,6 @@ impl ToolLayer {
         port: Arc<dyn FileMutationCommitPort + Send + Sync>,
     ) -> Self {
         self.runtime_context = self.runtime_context.with_file_mutation_commit_port(port);
-        self
-    }
-
-    pub fn with_resolved_input_reader(
-        mut self,
-        port: Arc<dyn ResolvedInputReaderPort + Send + Sync>,
-    ) -> Self {
-        self.runtime_context = self.runtime_context.with_resolved_input_reader(port);
         self
     }
 
