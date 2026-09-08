@@ -16,7 +16,7 @@ use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 fn oversize() -> io::Error {
@@ -24,7 +24,7 @@ fn oversize() -> io::Error {
 }
 
 /// Bounds each raw stdio line before the SDK buffers or decodes JSON.
-struct BoundedLines<R> {
+pub struct BoundedLines<R> {
     inner: R,
     bytes: usize,
     failed: bool,
@@ -78,6 +78,18 @@ pub struct BoundedStdioTransport {
     transport: AsyncRwTransport<RoleClient, BoundedLines<ChildStdout>, ChildStdin>,
 }
 
+/// The same raw-line budget for host-provided byte streams. The host owns
+/// transport lifecycle and remote process cancellation; MCP owns framing.
+pub type BoundedIoTransport<R, W> = AsyncRwTransport<RoleClient, BoundedLines<R>, W>;
+
+pub fn bounded_io_transport<R, W>(read: R, write: W) -> BoundedIoTransport<R, W>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    AsyncRwTransport::new_client(BoundedLines::new(read), write)
+}
+
 /// Spawns the already configured command with bounded stdout and kill-on-drop cleanup.
 pub fn bounded_stdio_transport(mut command: Command) -> io::Result<BoundedStdioTransport> {
     let mut child = command
@@ -96,7 +108,7 @@ pub fn bounded_stdio_transport(mut command: Command) -> io::Result<BoundedStdioT
         .ok_or_else(|| io::Error::other("MCP stdin missing"))?;
     Ok(BoundedStdioTransport {
         child,
-        transport: AsyncRwTransport::new_client(BoundedLines::new(stdout), stdin),
+        transport: bounded_io_transport(stdout, stdin),
     })
 }
 

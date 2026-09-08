@@ -681,8 +681,7 @@ fn run_local_command_with_timeout(
         let _ = child.wait();
         return Err(error);
     }
-    // ponytail: V1 buffers complete process output in memory; replace this with a
-    // streaming ToolResult sink when measured command output can exceed the Host budget.
+    // Complete process output is buffered in memory.
     let mut stdout_output = ReadOutput::default();
     let mut stderr_output = ReadOutput::default();
     let mut stdout_eof = false;

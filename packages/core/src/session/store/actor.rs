@@ -1,3 +1,4 @@
+use super::{RuntimeJobWaiter, RuntimeJobWaiterCursor};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc};
 use std::time::{Duration, Instant};
@@ -277,6 +278,25 @@ impl RuntimeStoreActor {
         .await
     }
 
+    pub async fn list_runtime_job_waiters(
+        &self,
+        source_job_id: Option<String>,
+        after: Option<RuntimeJobWaiterCursor>,
+        limit: usize,
+    ) -> Result<Vec<RuntimeJobWaiter>, RuntimeStoreError> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(
+            RuntimeStoreActorCommand::ListRuntimeJobWaiters {
+                source_job_id,
+                after,
+                limit,
+                reply: RuntimeStoreActorReply::Async(reply),
+            },
+            receiver,
+        )
+        .await
+    }
+
     pub async fn append_event(&self, event: RuntimeEvent) -> Result<(), RuntimeStoreError> {
         let (reply, receiver) = oneshot::channel();
         self.send(
@@ -457,6 +477,21 @@ impl RuntimeStoreActor {
 }
 
 impl RuntimeStore for RuntimeStoreActor {
+    fn list_runtime_job_waiters(
+        &self,
+        source_job_id: Option<&str>,
+        after: Option<&RuntimeJobWaiterCursor>,
+        limit: usize,
+    ) -> Result<Vec<RuntimeJobWaiter>, RuntimeStoreError> {
+        let source_job_id = source_job_id.map(str::to_string);
+        let after = after.cloned();
+        self.send_blocking(|reply| RuntimeStoreActorCommand::ListRuntimeJobWaiters {
+            source_job_id,
+            after,
+            limit,
+            reply,
+        })
+    }
     fn save_checkpoint(&self, checkpoint: CheckpointRecord) -> Result<(), RuntimeStoreError> {
         self.send_blocking(|reply| RuntimeStoreActorCommand::SaveCheckpoint { checkpoint, reply })
     }
@@ -1192,6 +1227,12 @@ enum RuntimeStoreActorCommand {
         limit: usize,
         reply: RuntimeStoreActorReply<Vec<CheckpointRecord>, RuntimeStoreError>,
     },
+    ListRuntimeJobWaiters {
+        source_job_id: Option<String>,
+        after: Option<RuntimeJobWaiterCursor>,
+        limit: usize,
+        reply: RuntimeStoreActorReply<Vec<RuntimeJobWaiter>, RuntimeStoreError>,
+    },
     AppendEvent {
         event: RuntimeEvent,
         reply: RuntimeStoreActorReply<(), RuntimeStoreError>,
@@ -1360,6 +1401,7 @@ impl RuntimeStoreActorCommand {
             Self::LoadCheckpointByTurn { .. } => "load_checkpoint_by_turn",
             Self::ListCheckpoints { .. } => "list_checkpoints",
             Self::ListWaitingRuntimeJobCheckpoints { .. } => "list_waiting_runtime_job_checkpoints",
+            Self::ListRuntimeJobWaiters { .. } => "list_runtime_job_waiters",
             Self::AppendEvent { .. } => "append_event",
             Self::AppendEventIdempotent { .. } => "append_event_idempotent",
             Self::ListEvents { .. } => "list_events",
@@ -1491,6 +1533,23 @@ async fn run_runtime_store_actor<S>(
                 reply.send(
                     run_store_operation(store.clone(), move |store| store.append_event(event))
                         .await,
+                );
+            }
+            RuntimeStoreActorCommand::ListRuntimeJobWaiters {
+                source_job_id,
+                after,
+                limit,
+                reply,
+            } => {
+                reply.send(
+                    run_store_operation(store.clone(), move |store| {
+                        store.list_runtime_job_waiters(
+                            source_job_id.as_deref(),
+                            after.as_ref(),
+                            limit,
+                        )
+                    })
+                    .await,
                 );
             }
             RuntimeStoreActorCommand::ListEvents {

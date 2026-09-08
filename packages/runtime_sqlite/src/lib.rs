@@ -633,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_terminal_runtime_job_notification_is_recoverable() {
+    fn sqlite_terminal_runtime_job_notification_survives_restart_until_acknowledged() {
         let db_path = temp_db_path("runtime_job_terminal_outbox");
         let store = SqliteRuntimeStore::new(&db_path).expect("create sqlite runtime store");
         store
@@ -662,21 +662,41 @@ mod tests {
         assert_eq!(pending[0].event_type, "runtime_job.terminal");
         assert_eq!(pending[0].generation, 0);
 
-        store
-            .mark_runtime_job_outbox_published("job-terminal", "runtime_job.terminal", 0, 250)
-            .expect("publish terminal notification");
+        drop(store);
+        let store = SqliteRuntimeStore::new(&db_path).expect("reopen after delivery interruption");
+        assert_eq!(store.list_pending_runtime_job_outbox(10).unwrap(), pending);
+        use centaeris_core::session::reliability::RuntimeJobOutboxPublishDisposition;
         assert_eq!(
             store
-                .requeue_runtime_job_notifications(250)
-                .expect("requeue dropped terminal notification"),
-            1
+                .mark_runtime_job_outbox_published("job-terminal", "runtime_job.terminal", 1, 250)
+                .unwrap(),
+            RuntimeJobOutboxPublishDisposition::Stale
         );
-        let requeued = store
+        assert_eq!(store.list_pending_runtime_job_outbox(10).unwrap(), pending);
+        assert_eq!(
+            store
+                .mark_runtime_job_outbox_published("job-terminal", "runtime_job.terminal", 0, 250)
+                .unwrap(),
+            RuntimeJobOutboxPublishDisposition::Published
+        );
+        drop(store);
+        let store = SqliteRuntimeStore::new(&db_path).expect("reopen after acknowledgement");
+        assert_eq!(
+            store
+                .mark_runtime_job_outbox_published(
+                    "job-terminal",
+                    "runtime_job.terminal",
+                    0,
+                    3_600_000
+                )
+                .unwrap(),
+            RuntimeJobOutboxPublishDisposition::AlreadyPublished
+        );
+        store.reclaim_expired_runtime_job_leases(3_600_000).unwrap();
+        assert!(store
             .list_pending_runtime_job_outbox(10)
-            .expect("load requeued terminal notification");
-        assert_eq!(requeued.len(), 1);
-        assert_eq!(requeued[0].event_type, "runtime_job.terminal");
-        assert_eq!(requeued[0].generation, 1);
+            .unwrap()
+            .is_empty());
 
         let _ = std::fs::remove_file(db_path);
     }
