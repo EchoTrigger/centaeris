@@ -1,3 +1,4 @@
+import { useTranslation } from "../../i18n";
 import { memo, useId } from "react";
 import { Brain, ChevronDown } from "lucide-react";
 import { MarkdownContent } from "./MarkdownContent";
@@ -16,18 +17,19 @@ export const ReasoningTranscript = memo(function ReasoningTranscript({
   const expanded = useChatViewStore((state) => Boolean(state.expandedReasoning[identity]));
   const toggle = useChatViewStore((state) => state.toggleReasoning);
   const bodyId = useId();
-  const label = entry.status === "streaming" ? "正在思考" : "思考";
+  const { t } = useTranslation();
+  const label = !expanded && entry.status === "streaming" ? t("reasoningTranscript.thinking") : t("reasoningTranscript.thoughts");
   return (
     <div className="agentReasoning" data-waterfall-section="process">
       <button type="button" className="agentReasoningSummary"
         aria-label={label}
         aria-expanded={expanded} aria-controls={bodyId} onClick={() => toggle(identity)}>
         <Brain aria-hidden="true" />
-        <span>{label}</span>
-        {!expanded && entry.status === "streaming" ? <span className="reasoningPreview" aria-hidden="true"><span className="reasoningPreviewText">{reasoningPreview(entry.text)}</span></span> : null}
+        <span className={!expanded && entry.status === "streaming" ? "statusShimmer" : undefined}>{label}</span>
+        {!expanded ? <span className="reasoningPreview" aria-hidden="true"><span className="reasoningPreviewText">{reasoningPreview(entry.text)}</span></span> : null}
         <ChevronDown className={expanded ? "is-expanded" : ""} aria-hidden="true" />
       </button>
-      {expanded ? <div id={bodyId} className="agentReasoningBody" role="region" aria-label="思考内容" tabIndex={0}>
+      {expanded ? <div id={bodyId} className="agentReasoningBody" role="region" aria-label={t("reasoningTranscript.thinkingContent")} tabIndex={0}>
         <MarkdownContent text={entry.text} onOpenWorkspacePath={onOpenWorkspacePath} />
       </div> : null}
     </div>

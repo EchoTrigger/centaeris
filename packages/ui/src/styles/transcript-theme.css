@@ -1,0 +1,29 @@
+/* Shared text hierarchy: readable content 14px, process details 13px. */
+:root[data-theme] :is(.markdown-content,.markdownContent,.workspaceUserMessage,.agentGuidedSupplementBubble,.user-message .message-bubble,.composer-prompt-input) {
+  font-size:14px; line-height:24px;
+}
+:root[data-theme] :is(.agentReasoningSummary,.agent-operation-summary,.agentRunStatus,.workspaceActivityGroup,.workspaceLiveStatus) {
+  color:var(--process-text); font-size:14px; line-height:20px;
+}
+:root[data-theme] :is(.agentReasoningBody .markdown-content,.workspaceReasoningBody .markdownContent,.agent-operation-body,.activityOperationBody,.activityOperationSummary,.activityOperationCommand,.activityOperationOutput,.activityOperationMeta,.activityOperationFooter,.agent-tool-bash-output,.agent-tool-bash-command,.agent-tool-bash-status,.agent-tool-command-label,.agent-tool-output-block,.agent-tool-node-action,.agent-tool-node-summary) {
+  color:var(--process-text); font-size:13px; line-height:21px;
+}
+:root[data-theme] :is(.agentReasoningBody,.workspaceReasoningBody) :is(p,li,code,pre,th,td,a) {
+  color:var(--process-text); font-size:13px; line-height:21px;
+}
+:root[data-theme] :is(.agent-operation-body,.activityOperationBody) :is(pre,code,th,td) {
+  color:var(--process-text); font-size:13px; line-height:21px;
+}
+:root[data-theme] :is(.reasoningPreview,.workspaceLiveStatusText,.workspaceLiveStatusElapsed,.agent-tool-bash-status,.agent-tool-command-label,.activityOperationMeta) { color:var(--process-text); }
+:root[data-theme] :is(.reasoningPreview,.workspaceLiveStatusElapsed,.activityOperationFooter) { font-size:13px; line-height:21px; }
+:root[data-theme] .workspaceComposer textarea { font-size:14px; line-height:24px; }
+:root[data-theme] :is(.agentReasoningSummary,.agent-operation-summary-toggle,button.workspaceActivityGroup,button.activityOperationSummary):hover { background:var(--surface-variant); }
+:root[data-theme] :is(.markdown-table,.markdownTable) :is(table,th,td) { font-size:13px; line-height:21px; }
+:root[data-theme] :is(.markdown-table,.markdownTable) :is(th,td) { white-space:normal; overflow-wrap:anywhere; }
+:root[data-theme] :is(.markdown-content,.markdownContent) pre { font-size:13px; line-height:21px; }
+:root[data-theme] :is(.agent-tool-bash-output,.agent-tool-output-block).is-error,
+:root[data-theme] .activityOperationOutput.isError { color:var(--error); }
+:root[data-theme] :is(.summaryCodePreviewDiffAdded,.activityDiffLine.isAdded) { background:var(--diff-add-bg); }
+:root[data-theme] :is(.summaryCodePreviewDiffRemoved,.activityDiffLine.isRemoved) { background:var(--diff-remove-bg); }
+:root[data-theme] .cm-selectionBackground { background:color-mix(in srgb,var(--primary-color) 25%,transparent); }
+:root[data-theme] :is(.markdown-content,.markdownContent) a { text-underline-offset:3px; }

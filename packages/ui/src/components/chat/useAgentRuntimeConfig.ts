@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   getAgentRuntimeConfig,
@@ -156,7 +157,7 @@ export const useAgentRuntimeConfig = ({
     const model = modelRuntimeDraft.model.trim();
     const providerId = modelRuntimeDraft.modelProviderId.trim();
     if (!model && !providerId) {
-      return "当前未配置全局模型";
+      return t("useAgentRuntimeConfig.noGlobalModelConfigured");
     }
     if (model && providerId) {
       return `${model} · ${providerId}`;

@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import type {
   AgentStreamPayload,
   SessionEvent,
@@ -26,7 +27,7 @@ import type {
 
 export const normalizePersistedContent = (raw: unknown): string => {
   if (typeof raw !== "string") {
-    throw new Error("session projection message content 必须是 string");
+    throw new Error(t("chatTranscriptRestore.sessionProjectionMessageContentMustBeAString"));
   }
   return raw.trim();
 };
@@ -58,7 +59,7 @@ export const getTerminalSessionEventStatus = (
     return "stopped";
   }
   throw new Error(
-    `AgentRunInterrupted 使用了不支持的 reasonType=${reasonType || "<missing>"}。`,
+    t("chatTranscriptRestore.agentruninterruptedUsedUnsupportedReasontypeValue", { value1: reasonType || "<missing>" }),
   );
 };
 
@@ -82,7 +83,7 @@ export const resolvePersistedTaskStatus = (value: unknown): TaskStatus => {
     case "error":
       return "error";
     default:
-      throw new Error(`session_event status 不支持: ${String(value ?? "<missing>")}`);
+      throw new Error(t("chatTranscriptRestore.unsupportedSessionEventStatusValue", { value1: String(value ?? "<missing>") }));
   }
 };
 
@@ -348,13 +349,13 @@ export const assertProjectionStreamPayloads = (
   rawItems.map((item, index) => {
     if (!isRecord(item)) {
       throw new Error(
-        `历史恢复失败：session projection task ${taskId} item ${index} 非法`,
+        t("chatTranscriptRestore.historyRecoveryFailedInvalidSessionProjectionTaskValueItem", { value1: taskId, value2: index }),
       );
     }
     const itemType = typeof item.type === "string" ? item.type : "";
     if (!isSupportedRestoreStreamPayloadType(itemType)) {
       throw new Error(
-        `历史恢复失败：session projection task ${taskId} item ${index} 不支持 stream payload type=${formatStreamPayloadType(itemType)}`,
+        t("chatTranscriptRestore.historyRecoveryFailedSessionProjectionTaskValueItemValue", { value1: taskId, value2: index, value3: formatStreamPayloadType(itemType) }),
       );
     }
     return item as AgentStreamPayload;
@@ -412,7 +413,7 @@ const resolveEventTaskId = (event: SessionEvent): string => {
   if (callId) {
     return callId;
   }
-  throw new Error(`session_event ${event.type || "<missing>"} 缺少 callId`);
+  throw new Error(t("chatTranscriptRestore.sessionEventValueIsMissingCallid", { value1: event.type || "<missing>" }));
 };
 
 const resolveEventStatus = (event: SessionEvent): TaskStatus =>
@@ -426,10 +427,10 @@ const buildTaskFromSessionEvent = (
   const taskId = resolveEventTaskId(event);
   const toolName = normalizeToolName(event.toolName);
   if (existingTask && existingTask.title !== toolName) {
-    throw new Error(`session_event ${event.type} toolName identity 不匹配`);
+    throw new Error(t("chatTranscriptRestore.sessionEventValueToolnameIdentityMismatch", { value1: event.type }));
   }
   if (event.type === "ToolResult" && !existingTask) {
-    throw new Error("ToolResult 没有匹配的 ToolCall");
+    throw new Error(t("chatTranscriptRestore.toolresultHasNoMatchingToolcall"));
   }
   const summary =
     getEventPayloadString(payload, "summary") ||
@@ -510,7 +511,7 @@ const buildSubagentToolGroupFromEvent = (
   }
   const title =
     getEventPayloadString(payload, "title") ||
-    "子任务工具执行";
+    t("chatTranscriptRestore.subtaskToolExecution");
   const summary =
     getEventPayloadString(payload, "summary") ||
     getEventPayloadString(payload, "message") ||
@@ -560,12 +561,12 @@ const buildSubagentFromSessionEvent = (
   const title =
     (!isToolGroupUpdate && getEventPayloadString(payload, "title")) ||
     existingSubagent?.title ||
-    "协作代理";
+    t("chatTranscriptRestore.collaboratingAgent");
   const summary =
     (!isToolGroupUpdate && getEventPayloadString(payload, "summary")) ||
     previewRecord(resultEnvelope, 180) ||
     existingSubagent?.summary ||
-    (status === "running" ? "正在处理子任务" : "子任务已更新");
+    (status === "running" ? t("chatTranscriptRestore.processingSubtask") : t("chatTranscriptRestore.subtaskUpdated"));
   const incomingDescription =
     !isToolGroupUpdate ? getEventPayloadString(payload, "description") || "" : "";
   const incomingDescriptionIsLifecycleSummary =
@@ -716,7 +717,7 @@ export const applySessionEventToAssistantTurn = (
     }
     case "PromptCompaction": {
       if (event.status !== "done") {
-        throw new Error("用户时间线只接受已提交的 PromptCompaction");
+        throw new Error(t("chatTranscriptRestore.theUserTimelineOnlyAcceptsCommittedPromptcompactionEvents"));
       }
       const sourceItemId = getSessionEventId(event);
       if (
@@ -771,7 +772,7 @@ export const applySessionEventToAssistantTurn = (
     case "ToolCall":
     case "ToolResult": {
       if (!event.toolName) {
-        throw new Error(`session_event ${event.type} 缺少 toolName`);
+        throw new Error(t("chatTranscriptRestore.sessionEventValueIsMissingToolname", { value1: event.type }));
       }
       const nextTurn = flushPersistedDraftAnswerToNarrative(turn, eventTurnId);
       const taskId = resolveEventTaskId(event);
@@ -943,7 +944,7 @@ export const buildAssistantTurnFromStreamItems = (
   for (const item of streamItems) {
     if (!isSupportedRestoreStreamPayloadType(item.type)) {
       throw new Error(
-        `历史恢复失败：不支持 stream payload type=${formatStreamPayloadType(item.type)}`,
+        t("chatTranscriptRestore.historyRecoveryFailedUnsupportedStreamPayloadTypeValue", { value1: formatStreamPayloadType(item.type) }),
       );
     }
 
@@ -968,7 +969,7 @@ export const buildAssistantTurnFromStreamItems = (
         (typeof item.message === "string" && item.message.trim()) ||
         (typeof item.content === "string" && item.content.trim()) ||
         (typeof item.text === "string" && item.text.trim()) ||
-        "处理异常";
+        t("chatRuntimeCore.processingError");
       turn = appendPersistedNarrative(turn, text, "error");
       continue;
     }
@@ -1046,8 +1047,8 @@ export const applyPersistedAssistantStatusToTurn = (
   }
   const errorText =
     fallback ||
-    (shouldPreserveFinalAnswer ? "处理异常" : turn.finalAnswer.trim()) ||
-    "处理异常";
+    (shouldPreserveFinalAnswer ? t("chatRuntimeCore.processingError") : turn.finalAnswer.trim()) ||
+    t("chatRuntimeCore.processingError");
   const baseTurn = shouldPreserveFinalAnswer
     ? completedTurn
     : {

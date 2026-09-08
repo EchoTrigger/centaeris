@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import {
   useCallback,
   type Dispatch,
@@ -349,9 +350,9 @@ export const useSessionViewHydrationController = ({
       };
       control.onStage("refreshCachedSession");
       const [sessionData, taskResponse] = await Promise.all([
-        readHydrationValue("读取历史会话", getSession(sessionId)),
+        readHydrationValue(t("useSessionViewHydrationController.loadingConversationHistory"), getSession(sessionId)),
         readHydrationValue(
-          "读取任务列表",
+          t("useSessionViewHydrationController.loadingTasks"),
           listAgentRuns({
             sessionId,
             includeTerminal: true,
@@ -367,7 +368,7 @@ export const useSessionViewHydrationController = ({
       const durableAgentRunIds = agentRuns.map((agentRun) => {
         const agentRunId = normalizeAgentRunId(agentRun.agentRunId);
         if (!agentRunId) {
-          throw new Error("历史恢复失败：任务列表包含空 agentRunId");
+          throw new Error(t("useSessionViewHydrationController.historyRecoveryFailedTaskListContainsAnEmptyAgentrunid"));
         }
         return agentRunId;
       });
@@ -390,7 +391,7 @@ export const useSessionViewHydrationController = ({
                 cachedEntry.verifiedReplayAgentRunIds,
             });
       if (replayDecision.kind === "fullReplay") {
-        console.info("会话缓存需要从 durable log 完整恢复", {
+        console.info(t("useSessionViewHydrationController.conversationCacheRequiresFullRecoveryFromTheDurableLog"), {
           sessionId,
           reason: replayDecision.reason,
         });
@@ -454,7 +455,7 @@ export const useSessionViewHydrationController = ({
         );
         if (!messageId) {
           throw new Error(
-            `缓存会话 ${sessionId} 增量恢复失败：task ${agentRunId} 缺少 assistant message`,
+            t("useSessionViewHydrationController.incrementalRecoveryOfCachedConversationValueFailedTaskValue", { value1: sessionId, value2: agentRunId }),
           );
         }
         for (const payload of snapshot.items) {
@@ -495,7 +496,7 @@ export const useSessionViewHydrationController = ({
         );
         if (!messageId) {
           throw new Error(
-            `缓存会话 ${sessionId} attach 失败：task ${agentRunId} 缺少 assistant message`,
+            t("useSessionViewHydrationController.unableToAttachCachedConversationValueTaskValueIs", { value1: sessionId, value2: agentRunId }),
           );
         }
         const seedPayloads =

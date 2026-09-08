@@ -3,18 +3,18 @@
   --font-family: "Noto Sans CJK SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   --font-content: var(--font-family);
   --font-mono: "Google Sans Code", "Noto Sans CJK SC", "Cascadia Code", "SFMono-Regular", Consolas, monospace;
-  --font-size-chat: 15px;
-  --line-height-chat: 1.72;
+  --font-size-chat: 14px;
+  --line-height-chat: 1.7142857143;
   --font-size-stage: 14px;
-  --font-size-process: 12px;
+  --font-size-process: 14px;
   --font-size-inline-code: 0.9em;
-  --font-size-code: 12px;
-  --line-height-code: 1.55;
+  --font-size-code: 13px;
+  --line-height-code: 1.6153846154;
   --font-size-chat-h1: 22px;
   --font-size-chat-h2: 18px;
   --font-size-chat-h3: 16px;
-  --reasoning-text: color-mix(in srgb, var(--on-surface) 15%, var(--on-surface-variant));
-  --reasoning-label: var(--on-surface-variant);
+  --reasoning-text: var(--process-text, #6b6b6b);
+  --reasoning-label: var(--process-text, #6b6b6b);
   --reasoning-scroll-thumb: color-mix(in srgb, var(--on-surface-variant) 40%, var(--surface-color));
 }
 .reasoningPreview { display: flex; justify-content: flex-end; flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; color: var(--reasoning-text); mask-image: linear-gradient(to right, transparent, black 18px); }

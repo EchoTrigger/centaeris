@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ConfirmAction } from "../ConfirmDialog";
 import {
@@ -116,7 +117,7 @@ export function useWorkspaceController({
       applyOwnedSnapshot(await getWorkspaceInfo(), revision);
     } catch (error) {
       if (isActionOwner(revision)) {
-        reportCatalogFailure(error, "重新加载工作区列表失败");
+        reportCatalogFailure(error, t("useWorkspaceController.unableToReloadWorkspaces"));
       }
     }
   }, [applyOwnedSnapshot, beginAction, isActionOwner, reportCatalogFailure]);
@@ -136,7 +137,7 @@ export function useWorkspaceController({
       return applyOwnedSnapshot(response.snapshot, revision);
     } catch (error) {
       if (revision === null || isActionOwner(revision)) {
-        reportCatalogFailure(error, "重置工作区列表失败");
+        reportCatalogFailure(error, t("useWorkspaceController.unableToResetWorkspaces"));
       }
       return false;
     }
@@ -150,7 +151,7 @@ export function useWorkspaceController({
       return applyOwnedSnapshot(nextSnapshot, revision);
     } catch (error) {
       if (isActionOwner(revision)) {
-        reportCatalogFailure(error, "打开工作区失败");
+        reportCatalogFailure(error, t("useWorkspaceController.unableToOpenWorkspace"));
       }
       return false;
     }
@@ -162,7 +163,7 @@ export function useWorkspaceController({
       return applyOwnedSnapshot(await activateWorkspaceRoot(root), revision);
     } catch (error) {
       if (isActionOwner(revision)) {
-        reportCatalogFailure(error, "切换工作区失败");
+        reportCatalogFailure(error, t("useWorkspaceController.unableToSwitchWorkspace"));
       }
       return false;
     }
@@ -188,7 +189,7 @@ export function useWorkspaceController({
         setGitStatusError("");
       } else {
         setGitStatus(null);
-        setGitStatusError(errorMessage(gitResult.reason, "Git 状态不可用"));
+        setGitStatusError(errorMessage(gitResult.reason, t("useWorkspaceController.gitStatusUnavailable")));
       }
       setGithubCliStatus(githubResult.status === "fulfilled" ? githubResult.value : null);
     });
