@@ -17,5 +17,5 @@
   --reasoning-label: var(--process-text, #6b6b6b);
   --reasoning-scroll-thumb: color-mix(in srgb, var(--on-surface-variant) 40%, var(--surface-color));
 }
-.reasoningPreview { display: flex; justify-content: flex-end; flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; color: var(--reasoning-text); mask-image: linear-gradient(to right, transparent, black 18px); }
-.reasoningPreviewText { margin-left: auto; flex: none; padding-left: 18px; }
+.reasoningPreview { display: flex; justify-content: flex-end; flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; color: var(--reasoning-text);  }
+.reasoningPreviewText { margin-left: 0; flex: none; min-width: 100%; width: max-content; text-align: left; }

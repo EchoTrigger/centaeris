@@ -17,7 +17,7 @@
 :root[data-theme] :is(.reasoningPreview,.workspaceLiveStatusText,.workspaceLiveStatusElapsed,.agent-tool-bash-status,.agent-tool-command-label,.activityOperationMeta) { color:var(--process-text); }
 :root[data-theme] :is(.reasoningPreview,.workspaceLiveStatusElapsed,.activityOperationFooter) { font-size:13px; line-height:21px; }
 :root[data-theme] .workspaceComposer textarea { font-size:14px; line-height:24px; }
-:root[data-theme] :is(.agentReasoningSummary,.agent-operation-summary-toggle,button.workspaceActivityGroup,button.activityOperationSummary):hover { background:var(--surface-variant); }
+:root[data-theme] :is(.agentReasoningSummary,.agent-operation-summary-toggle,button.workspaceActivityGroup,button.activityOperationSummary):hover { background:transparent; color:var(--on-surface); }
 :root[data-theme] :is(.markdown-table,.markdownTable) :is(table,th,td) { font-size:13px; line-height:21px; }
 :root[data-theme] :is(.markdown-table,.markdownTable) :is(th,td) { white-space:normal; overflow-wrap:anywhere; }
 :root[data-theme] :is(.markdown-content,.markdownContent) pre { font-size:13px; line-height:21px; }

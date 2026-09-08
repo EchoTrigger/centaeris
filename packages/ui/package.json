@@ -18,7 +18,8 @@
     "lint:unused": "npm --prefix ../.. run lint:unused",
     "preview": "vite preview",
     "test": "vitest run",
-    "typecheck": "node ./scripts/build.mjs --mode typecheck"
+    "typecheck": "node ./scripts/build.mjs --mode typecheck",
+    "test:browser": "playwright test --config tests/appearance.config.cjs"
   },
   "dependencies": {
     "@codemirror/commands": "6.10.3",
@@ -49,6 +50,7 @@
     "zustand": "5.0.14"
   },
   "devDependencies": {
+    "@playwright/test": "1.61.1",
     "@types/node": "24.12.2",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",

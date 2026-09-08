@@ -104,3 +104,16 @@ html, body { background: var(--surface-color); color: var(--on-surface); }
 @media (forced-colors: active) {
   :root[data-theme] { --surface-color: Canvas; --surface-variant: Canvas; --surface-container: Canvas; --on-surface:CanvasText; --process-text:CanvasText; --outline:ButtonText; --outline-variant:ButtonText; --primary-color:LinkText; }
 }
+
+::view-transition-old(root), ::view-transition-new(root) { animation:none; mix-blend-mode:normal; }
+::view-transition-new(root) { z-index:1; }
+.thinSidebarBrand { display:flex; align-items:center; justify-content:space-between; }
+.thinSidebarBrand strong { width:auto; min-width:0; }
+.themeToggle { display:flex; align-items:center; margin-right:12px; -webkit-app-region:no-drag; }
+.themeToggle button { border:0; background:transparent; color:var(--process-text); display:grid; place-items:center; width:28px; height:28px; border-radius:6px; cursor:pointer; }
+.themeToggle button:hover { color:var(--on-surface); }
+.themeToggle svg { width:16px; height:16px; }
+.themeToggleOptions { position:relative; width:16px; height:28px; display:grid; place-items:center; color:var(--process-text); }
+.themeToggleOptions select { position:absolute; inset:0; width:100%; opacity:0; cursor:pointer; }
+.themeToggleOptions svg { width:12px; pointer-events:none; }
+.themeToggle button:focus-visible, .themeToggleOptions:focus-within { outline:2px solid var(--primary-color); outline-offset:2px; }

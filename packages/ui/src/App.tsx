@@ -1,3 +1,4 @@
+import { ThemeToggle } from "./components/ThemeToggle";
 import { t } from "./i18n";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PanelLeft, PanelRight, X } from "lucide-react";
@@ -247,6 +248,7 @@ function App() {
     <div className={`thinAppShell ${isSidebarOpen ? "is-sidebar-open" : "is-sidebar-collapsed"}`}>
       <div className="thinSidebarBrand">
         <strong><img src="./centaeris-mark.png" alt="" />Centaeris</strong>
+        {isSidebarOpen ? <ThemeToggle /> : null}
       </div>
       <header className="nativeTitlebar">
         <div className="nativeTitlebarSafeArea">
@@ -260,6 +262,7 @@ function App() {
           >
             <PanelLeft aria-hidden="true" />
           </button>
+          {!isSidebarOpen ? <ThemeToggle /> : null}
           {!isFilePaneVisible && workspacePanel.tabs.length > 0 ? (
             <button
               type="button"

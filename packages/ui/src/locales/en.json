@@ -220,5 +220,7 @@
   "theme.label": "Theme",
   "theme.system": "System default",
   "theme.dark": "Dark theme",
-  "theme.light": "Light theme"
+  "theme.light": "Light theme",
+  "theme.switchLight": "Switch to light theme",
+  "theme.switchDark": "Switch to dark theme"
 }

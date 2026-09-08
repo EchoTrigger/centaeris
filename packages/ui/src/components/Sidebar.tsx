@@ -18,7 +18,6 @@ import type {
   WorkspaceOpenMode,
 } from "../lib/workspaceBridge";
 import { WorkspaceFilesPanel } from "./WorkspaceFilesPanel";
-import { ThemeSelector } from "./ThemeSelector";
 
 export type ResourceModalKind = "models" | "skills" | "plugins";
 
@@ -363,7 +362,6 @@ export function Sidebar({
         ) : null}
       </section>
 
-      <div className="sidebarTheme"><ThemeSelector /></div>
       <footer className="thinSidebarFooter">
         <button type="button" onClick={() => onOpenResource("models")}>
           <Cpu aria-hidden="true" /><span>Models</span>

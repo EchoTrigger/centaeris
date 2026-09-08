@@ -14,7 +14,7 @@ This repository contains the public runtime, local hosts, and user interfaces. I
 
 ## Appearance
 
-Choose **System default**, **Dark theme**, or **Light theme** with **Theme** at the bottom of the sidebar. System default is the initial choice. Manual choices persist on this device and override system changes. Replies and process headings use 14px; process details, code, and tables use 13px. Process headings and content share one gray in each theme.
+Use the sun/moon button at the top left to switch themes. Its adjacent menu offers **System default**, **Dark theme**, and **Light theme**. System default is the initial choice. Manual choices persist on this device and override system changes. Replies and process headings use 14px; process details, code, and tables use 13px. Process headings and content share one gray in each theme.
 
 ## Features
 

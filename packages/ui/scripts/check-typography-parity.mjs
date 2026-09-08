@@ -14,7 +14,7 @@ for (const name of ["typography.css", "status-shimmer.css", "theme.css", "transc
   const styles = await Promise.all(sources.map((source) => readFile(path.join(source, "styles", name), "utf8")));
   assert.equal(styles[0].replaceAll("\r\n", "\n"), styles[1].replaceAll("\r\n", "\n"), `Client ${name} styles differ`);
 }
-for (const name of ["theme.ts", "../public/theme-init.js"]) {
+for (const name of ["theme.ts", "useStreamPresentation.ts", "../public/theme-init.js"]) {
   const contents = await Promise.all(sources.map((source) => readFile(path.join(source, name), "utf8")));
   assert.equal(contents[0].replaceAll("\r\n", "\n"), contents[1].replaceAll("\r\n", "\n"), `Client ${name} logic differs`);
 }

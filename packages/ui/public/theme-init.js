@@ -13,7 +13,11 @@
     root.dataset.themePreference = preference;
     root.dataset.theme = resolved;
     root.style.colorScheme = resolved;
+    let meta = document.querySelector('meta[name="theme-color"]');
+    if (!meta) { meta = document.createElement("meta"); meta.name = "theme-color"; document.head.append(meta); }
+    meta.content = resolved === "dark" ? "#242424" : "#f5f5f4";
     root.style.backgroundColor = resolved === "dark" ? "#191919" : "#ffffff";
+    dispatchEvent(new Event("centaeris-theme-applied"));
   }
   apply();
   system.addEventListener("change", apply);
