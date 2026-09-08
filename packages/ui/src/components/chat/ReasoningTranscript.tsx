@@ -3,6 +3,7 @@ import { memo, useId } from "react";
 import { Brain, ChevronDown } from "lucide-react";
 import { MarkdownContent } from "./MarkdownContent";
 import { reasoningPreview } from "./reasoningPreview";
+import { useReasoningFollow } from "./useReasoningFollow";
 import { useChatViewStore } from "./chatViewStore";
 import type { AgentResultStreamProps, ReasoningChunk } from "./types";
 
@@ -17,6 +18,7 @@ export const ReasoningTranscript = memo(function ReasoningTranscript({
   const expanded = useChatViewStore((state) => Boolean(state.expandedReasoning[identity]));
   const toggle = useChatViewStore((state) => state.toggleReasoning);
   const bodyId = useId();
+  const bodyRef = useReasoningFollow(expanded, entry.status === "streaming");
   const { t } = useTranslation();
   const label = !expanded && entry.status === "streaming" ? t("reasoningTranscript.thinking") : t("reasoningTranscript.thoughts");
   return (
@@ -29,7 +31,7 @@ export const ReasoningTranscript = memo(function ReasoningTranscript({
         {!expanded ? <span className="reasoningPreview" aria-hidden="true"><span className="reasoningPreviewText">{reasoningPreview(entry.text)}</span></span> : null}
         <ChevronDown className={expanded ? "is-expanded" : ""} aria-hidden="true" />
       </button>
-      {expanded ? <div id={bodyId} className="agentReasoningBody" role="region" aria-label={t("reasoningTranscript.thinkingContent")} tabIndex={0}>
+      {expanded ? <div ref={bodyRef} id={bodyId} className="agentReasoningBody" role="region" aria-label={t("reasoningTranscript.thinkingContent")} tabIndex={0}>
         <MarkdownContent text={entry.text} onOpenWorkspacePath={onOpenWorkspacePath} />
       </div> : null}
     </div>

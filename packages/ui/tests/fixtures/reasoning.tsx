@@ -21,4 +21,12 @@ const previewTurn = longContent ? { ...turn, chunks: turn.chunks.map((chunk) =>
   chunk.kind === "reasoning" && chunk.id === "r1" ? { ...chunk,
     text: Array.from({ length: 30 }, (_, index) => `段落 ${index + 1}：核对 input，保留 **重点** 和 \`code\`。`).join("\n\n"),
   } : chunk) } : turn;
-createRoot(container).render(<AgentResultStream turn={previewTurn} />);
+const root = createRoot(container);
+root.render(<AgentResultStream turn={previewTurn} />);
+Object.assign(window, { reasoningFixture: {
+  liveSnapshot(_revision: number, text: string) {
+    root.render(<AgentResultStream turn={{ ...turn, isStreaming: true, chunks: [
+      { id: "r1", kind: "reasoning", text, status: "streaming" },
+    ] }} />);
+  },
+} });
