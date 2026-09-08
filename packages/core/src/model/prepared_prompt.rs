@@ -12,8 +12,8 @@ use crate::session::state::{
 use crate::tool::{ModelToolChoice, ModelToolDefinition};
 
 pub const PREPARED_PROMPT_SCHEMA: &str = "prepared_prompt.v1";
-pub const MODEL_INPUT_IMAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
-const MODEL_INPUT_IMAGE_MAX_PIXELS: u64 = 100_000_000;
+pub const MODEL_INPUT_IMAGE_MAX_BYTES: usize = 10 * 1024 * 1024;
+pub const MODEL_INPUT_IMAGE_MAX_PIXELS: u64 = 100_000_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -508,6 +508,25 @@ mod tests {
         inspect_model_input_image, project_session_messages_to_model_messages, ModelMessageRoleV1,
         ModelMessageV1, ModelToolCallV1, PreparedPromptV1,
     };
+
+    #[test]
+    fn image_byte_limit_is_ten_mib_inclusive() {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(1, 1)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .expect("PNG");
+        let mut bytes = bytes.into_inner();
+        bytes.resize(10 * 1024 * 1024, 0);
+        assert_eq!(
+            inspect_model_input_image(&bytes).expect("ten MiB accepted"),
+            ("image/png", 1, 1)
+        );
+        bytes.push(0);
+        assert_eq!(
+            inspect_model_input_image(&bytes).unwrap_err(),
+            "model_input_image_byte_length_invalid"
+        );
+    }
 
     #[test]
     fn image_inspection_accepts_png_jpeg_and_webp_headers() {

@@ -29,7 +29,9 @@ const MAX_MCP_RESULT_BYTES: usize = 256 * 1024;
 const RETRYABLE_CONNECT_FAILURE_COOLDOWN: Duration = Duration::from_millis(250);
 const MAX_DISCOVERY_PAGES: usize = 256;
 
+mod http_client;
 mod transport;
+pub use http_client::HttpMcpClient;
 pub use transport::{
     bounded_io_transport, bounded_stdio_transport, BoundedIoTransport, BoundedStdioTransport,
 };
@@ -559,6 +561,25 @@ fn project_result(
     protocol_version: &str,
     result: CallToolResult,
 ) -> Result<DynamicToolProviderResponse, String> {
+    let (content, projected, is_error) = project_content(result)?;
+    Ok(DynamicToolProviderResponse {
+        content,
+        details: json!({
+            "schema": "runtime.mcp_tool.result.v1",
+            "providerKind": "mcp",
+            "pluginName": plugin_name,
+            "serverId": server_id,
+            "sourceName": source_name,
+            "protocolVersion": protocol_version,
+            "result": projected,
+        }),
+        is_error,
+        facts: Vec::new(),
+        transition_reason: Some("mcp_tool_exec".to_string()),
+    })
+}
+
+fn project_content(result: CallToolResult) -> Result<(String, Value, bool), String> {
     let is_error = result.is_error.unwrap_or(false);
     let mut text = Vec::new();
     for content in result.content {
@@ -594,21 +615,7 @@ fn project_result(
         }
         _ => String::from_utf8(encoded).expect("JSON is UTF-8"),
     };
-    Ok(DynamicToolProviderResponse {
-        content,
-        details: json!({
-            "schema": "runtime.mcp_tool.result.v1",
-            "providerKind": "mcp",
-            "pluginName": plugin_name,
-            "serverId": server_id,
-            "sourceName": source_name,
-            "protocolVersion": protocol_version,
-            "result": projected,
-        }),
-        is_error,
-        facts: Vec::new(),
-        transition_reason: Some("mcp_tool_exec".to_string()),
-    })
+    Ok((content, projected, is_error))
 }
 
 #[cfg(test)]
@@ -896,6 +903,7 @@ mod tests {
                     .expect("call");
                 assert_eq!(response.content, "statute");
                 drop(provider);
+
                 server_task.abort();
                 let _ = server_task.await;
             });
@@ -1452,6 +1460,31 @@ mod tests {
                 );
                 drop(provider);
 
+                let host_client = HttpMcpClient::connect(
+                    &format!("http://{address}/mcp"),
+                    "test-secret",
+                    &[("x-host-call-id", "call-host")],
+                    Duration::from_secs(5),
+                )
+                .await
+                .expect("host client");
+                assert_eq!(host_client.tools()[0].name, "search_laws");
+                let result = host_client
+                    .call("search_laws", Map::new(), Duration::from_secs(5))
+                    .await
+                    .expect("host call");
+                assert_eq!(result.content, "statute");
+                assert!(result.facts.is_empty());
+                assert!(result.details.get("pluginName").is_none());
+                assert!(HttpMcpClient::connect(
+                    &format!("http://{address}/mcp"),
+                    "test-secret",
+                    &[("authorization", "forbidden")],
+                    Duration::from_secs(5)
+                )
+                .await
+                .is_err());
+                drop(host_client);
                 for path in ["unauthorized", "forbidden", "redirect"] {
                     let transport =
                         bounded_http_transport(format!("http://{address}/{path}").as_str(), None)
