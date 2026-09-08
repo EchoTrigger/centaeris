@@ -13,7 +13,8 @@ use crate::execution::{
 };
 use crate::tool::{ToolErrorInfo, ToolFailureKind};
 
-pub(crate) const MODEL_TOOL_RESULT_MAX_BYTES: usize = 50 * 1024;
+/// Maximum complete inline tool result before Core applies output capture.
+pub const MODEL_TOOL_RESULT_MAX_BYTES: usize = 50 * 1024;
 const MODEL_PREVIEW_EDGE_BYTES: usize = 24 * 1024;
 const CAPTURE_SCHEMA: &str = "temporary_tool_result_capture_v1";
 static CAPTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);

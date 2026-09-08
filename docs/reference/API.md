@@ -34,6 +34,16 @@ JSON, event, host-protocol, and Electron bridge fields use exact `camelCase`. Bu
 
 ## MCP contracts
 
+`centaeris_mcp::HttpMcpClient` is a plugin-independent HTTP client for host-owned
+registrations. It reuses protocol negotiation, bounded discovery/response parsing,
+and result projection. Hosts supply credentials and connection-scoped `x-` headers;
+model tool arguments must not configure headers. It does not fabricate plugin
+activation or citation facts, follow redirects, or retry ambiguous tool calls.
+The host owns catalog freezing, credential refresh, registration and cancellation.
+`tool::layer::MODEL_TOOL_RESULT_MAX_BYTES` exposes Core's existing inline-result
+budget so adapters can reject oversized results before capture without duplicating
+the numeric limit. Neither API contains platform material semantics.
+
 The declaration remains `mcp_servers_v1`. Every server requires `modelContractDigest`; every tool requires the exact model-visible `description` and `inputSchema` alongside its `sourceName` and canonical model name. Core validates the digest and builds the model catalog without connecting to the server. The adapter connects and discovers only on the first tool call, then rejects missing, extra, duplicate, or changed live tools. A contract mismatch is sticky for that activation; transport failures remain retryable. There is no discovery fallback or old-declaration alias.
 
 The package-catalog publisher validates every declared MCP contract offline before emitting a catalog. Missing fields or stale model-contract digests block catalog generation; file digests alone do not establish a valid tool contract. Generic package resolution freezes resource identities without repeating MCP semantic validation; runtime MCP loading remains strict. Image builds must run the catalog check explicitly before copying release assets.

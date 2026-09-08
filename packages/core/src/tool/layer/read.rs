@@ -8,7 +8,6 @@ use crate::tool::inputs::{
 };
 use crate::tool::{READ_MAX_BYTES, READ_MAX_LINES};
 use serde::Deserialize;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
@@ -154,17 +153,6 @@ impl LocalToolHandler for ReadToolHandler {
                 .to_local_error(self.name()))
             }
         };
-        if let Some(output) = execute_hosted_knowledge_read(
-            &target,
-            args.offset,
-            args.limit,
-            poll_args,
-            runtime_context,
-        )
-        .map_err(|error| error.to_local_error(self.name()))?
-        {
-            return Ok(output);
-        }
         match target {
             ReadTarget::InputRefs(input_refs) => input_refs
                 .into_iter()
@@ -197,115 +185,6 @@ impl LocalToolHandler for ReadToolHandler {
         }
         .map_err(|error| error.to_local_error(self.name()))
     }
-}
-
-fn execute_hosted_knowledge_read(
-    target: &ReadTarget,
-    offset: Option<usize>,
-    limit: Option<usize>,
-    poll_args: serde_json::Value,
-    runtime_context: &ToolRuntimeContext,
-) -> Result<Option<LocalToolOutput>, FileToolError> {
-    let input_refs = match target {
-        ReadTarget::Path(_) => return Ok(None),
-        ReadTarget::InputRef(input_ref) => vec![input_ref.as_str()],
-        ReadTarget::InputRefs(input_refs) => input_refs.iter().map(String::as_str).collect(),
-    };
-    let binding = runtime_context
-        .execution_host_binding()
-        .map_err(|message| FileToolError::new(FileToolErrorKind::Io, message))?;
-    if binding.mode() != crate::execution::ExecutionHostMode::Remote {
-        return Ok(None);
-    }
-    let state = runtime_context
-        .resolved_input_manifest
-        .as_ref()
-        .ok_or_else(|| {
-            FileToolError::new(
-                FileToolErrorKind::ResolvedInputRequired,
-                "read input_ref requires the resolved input manifest",
-            )
-        })?;
-    for input_ref in &input_refs {
-        state.declared_input_by_ref(input_ref).ok_or_else(|| {
-            FileToolError::new(
-                FileToolErrorKind::ResolvedInputRequired,
-                "read input_ref is not declared by this AgentRun",
-            )
-        })?;
-    }
-    let inputs = input_refs
-        .into_iter()
-        .map(|input_ref| state.resolve_input(input_ref).map_err(deferred_input_error))
-        .collect::<Result<Vec<_>, _>>()?;
-    let port = runtime_context
-        .resolved_input_reader
-        .as_ref()
-        .ok_or_else(|| {
-            FileToolError::new(
-                FileToolErrorKind::Io,
-                "authorized input_ref requires the hosted Knowledge pipeline",
-            )
-        })?;
-    let tool_call_id = runtime_context
-        .current_tool_call_id()
-        .map_err(|message| FileToolError::new(FileToolErrorKind::Io, message))?;
-    let output = port
-        .read(super::ResolvedInputReadRequest {
-            inputs,
-            offset,
-            limit,
-            poll_args,
-            tool_call_id,
-        })
-        .map_err(|message| FileToolError::new(FileToolErrorKind::Io, message))?;
-    promote_hosted_read_continuation(target, output)
-        .map(Some)
-        .map_err(|message| FileToolError::new(FileToolErrorKind::Io, message))
-}
-
-fn promote_hosted_read_continuation(
-    target: &ReadTarget,
-    mut output: LocalToolOutput,
-) -> Result<LocalToolOutput, String> {
-    let Some(next_offset) = output.details.get("nextOffset") else {
-        return Ok(output);
-    };
-    if next_offset.is_null() {
-        return Ok(output);
-    }
-    let next_offset = next_offset
-        .as_u64()
-        .ok_or_else(|| "hosted Read nextOffset must be a non-negative integer".to_string())?;
-    let input_ref = match target {
-        ReadTarget::InputRef(input_ref) => input_ref,
-        ReadTarget::Path(_) | ReadTarget::InputRefs(_) => {
-            return Err("hosted Read continuation requires one input_ref".to_string());
-        }
-    };
-    let input_ref =
-        serde_json::to_string(input_ref).map_err(|error| format!("encode input_ref: {error}"))?;
-    let call = format!("read(input_ref={input_ref}, offset={next_offset})");
-    let window = match (
-        output.details.get("pageStart").and_then(Value::as_u64),
-        output.details.get("pageEnd").and_then(Value::as_u64),
-    ) {
-        (Some(page_start), Some(page_end)) => format!("pages {page_start}-{page_end}"),
-        _ => match (
-            output.details.get("startLine").and_then(Value::as_u64),
-            output.details.get("endLine").and_then(Value::as_u64),
-        ) {
-            (Some(start_line), Some(end_line)) => {
-                format!("lines {start_line}-{end_line}")
-            }
-            _ => "a bounded window".to_string(),
-        },
-    };
-    output.content = format!(
-        "Read {window}; truncated. Continue with {call}.\n{}\nContinuation: {call}.",
-        output.content
-    );
-    Ok(output)
 }
 
 fn execute_directory_list(
@@ -1186,7 +1065,6 @@ mod tests {
         DeferredInputResolverPort, ResolvedInput, ResolvedInputManifest, ResolvedInputState,
         DECLARED_INPUT_SCHEMA, RESOLVED_INPUT_MANIFEST_SCHEMA, RESOLVED_INPUT_SCHEMA,
     };
-    use crate::tool::layer::{ResolvedInputReadRequest, ResolvedInputReaderPort};
     use serde_json::json;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -1406,28 +1284,6 @@ mod tests {
         }
     }
 
-    struct TestKnowledgePort {
-        reads: AtomicUsize,
-    }
-
-    impl ResolvedInputReaderPort for TestKnowledgePort {
-        fn read(&self, request: ResolvedInputReadRequest) -> Result<LocalToolOutput, String> {
-            self.reads.fetch_add(1, Ordering::SeqCst);
-            assert_eq!(request.inputs[0].input_ref, "input_1");
-            Ok(LocalToolOutput::success(
-                "knowledge text",
-                json!({
-                    "source": "knowledge",
-                    "startLine": 1,
-                    "endLine": 2000,
-                    "nextOffset": 2000,
-                    "pageStart": 1,
-                    "pageEnd": 40,
-                }),
-            ))
-        }
-    }
-
     impl DeferredInputResolverPort for TestDeferredResolver {
         fn resolve_deferred_input(
             &self,
@@ -1546,7 +1402,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_input_ref_uses_knowledge_and_rejects_its_virtual_path_alias() {
+    fn remote_input_ref_uses_execution_host_and_rejects_its_virtual_path_alias() {
         let input = test_input(b"remote source");
         let manifest = manifest_state(input.clone(), "agent_run_1", None, vec![input]);
         let workspace = std::env::temp_dir();
@@ -1560,28 +1416,22 @@ mod tests {
             .expect("remote execution host"),
         );
         let handler = ReadToolHandler::new();
-        let knowledge = Arc::new(TestKnowledgePort {
-            reads: AtomicUsize::new(0),
-        });
         let context = ToolRuntimeContext::default()
             .with_execution_host_binding(binding)
             .with_resolved_input_manifest(manifest)
-            .with_resolved_input_reader(knowledge.clone())
             .with_tool_invocation("call_1", "read");
 
-        let output = handler
+        let error = handler
             .invoke(
                 json!({"input_ref": "input_1"}).to_string().as_str(),
                 &context,
             )
-            .expect("remote inputRef must use Knowledge");
-        assert!(output.content.starts_with(
-            "Read pages 1-40; truncated. Continue with read(input_ref=\"input_1\", offset=2000).\nknowledge text"
-        ));
-        assert!(output
+            .expect_err(
+                "remote read must use the execution filesystem, not a hosted material adapter",
+            );
+        assert!(error
             .content
-            .ends_with("Continuation: read(input_ref=\"input_1\", offset=2000)."));
-        assert_eq!(knowledge.reads.load(Ordering::SeqCst), 1);
+            .contains("attachment must not reach the execution filesystem"));
 
         let error = handler
             .invoke(
