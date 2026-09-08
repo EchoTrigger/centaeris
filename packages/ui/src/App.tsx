@@ -248,7 +248,6 @@ function App() {
     <div className={`thinAppShell ${isSidebarOpen ? "is-sidebar-open" : "is-sidebar-collapsed"}`}>
       <div className="thinSidebarBrand">
         <strong><img src="./centaeris-mark.png" alt="" />Centaeris</strong>
-        {isSidebarOpen ? <ThemeToggle /> : null}
       </div>
       <header className="nativeTitlebar">
         <div className="nativeTitlebarSafeArea">
@@ -262,7 +261,7 @@ function App() {
           >
             <PanelLeft aria-hidden="true" />
           </button>
-          {!isSidebarOpen ? <ThemeToggle /> : null}
+          <ThemeToggle />
           {!isFilePaneVisible && workspacePanel.tabs.length > 0 ? (
             <button
               type="button"

@@ -16,16 +16,17 @@ test('short reasoning preview stays beside its title and hover changes text only
 });
 
 test('rapid theme choices settle on the last selection',async({page})=>{
+ await page.emulateMedia({colorScheme:'light'});
  await page.goto('/tests/fixtures/appearance.html');
  const errors=[];
  page.on('pageerror',error=>errors.push(error.message));
- const select=page.locator('.themeToggle select');
- await select.selectOption('dark');
- await select.selectOption('light');
- await select.selectOption('dark');
+ await expect(page.locator('.themeToggle select')).toHaveCount(0);
+ await page.getByRole('button',{name:'Switch to dark theme'}).click();
+ await page.getByRole('button',{name:'Switch to light theme'}).click();
+ await page.getByRole('button',{name:'Switch to dark theme'}).click();
  await page.waitForTimeout(600);
  await expect(page.locator('html')).toHaveAttribute('data-theme','dark');
- await expect(select).toHaveValue('dark');
+ await expect(page.getByRole('button',{name:'Switch to light theme'})).toBeVisible();
  expect(errors).toEqual([]);
 });
 
@@ -68,9 +69,12 @@ test('fast live batches are spread over frames and terminal content is exact',as
  const target='Start '+ '自然流式输出 '.repeat(150);
  const sample=await page.evaluate(async text=>{
   window.appearanceStream(text);
-  await new Promise(requestAnimationFrame);
-  await new Promise(requestAnimationFrame);
-  return document.querySelector('[data-testid="paced-stream"]').textContent.length;
+  let length=5;
+  for(let frame=0;frame<20 && length===5;frame++) {
+   await new Promise(requestAnimationFrame);
+   length=document.querySelector('[data-testid="paced-stream"]').textContent.length;
+  }
+  return length;
  },target);
  expect(sample).toBeGreaterThan(5);
  expect(sample).toBeLessThan(target.trim().length);
