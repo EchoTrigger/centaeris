@@ -14,6 +14,10 @@ workspace = true
 name = "centaeris_core"
 path = "src/lib.rs"
 
+[[example]]
+name = "model_image_contract"
+test = true
+
 [dependencies]
 base64.workspace = true
 centaeris-model-catalog.workspace = true
