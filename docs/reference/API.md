@@ -32,6 +32,16 @@ JSON, event, host-protocol, and Electron bridge fields use exact `camelCase`. Bu
 | Local Host protocol | `packages/runtime/src/host_protocol.rs`, `packages/runtime/src/runtime_command_registry.rs` |
 | Electron bridge | `packages/desktop/src/hostContract.mjs` |
 
+## Model input images
+
+`packages/core/src/model/prepared_prompt.rs` owns image inspection and limits:
+10 MiB (10,485,760 bytes) and 100,000,000 pixels per image, with positive
+dimensions and PNG/JPEG/WebP headers. Inspection does not fully decode pixels.
+The local host accepts PNG only and reuses Core inspection before saving an
+import; its per-message attachment count remains eight. `PreparedPromptV1`
+binds `inputImages` to user-message placeholders. The `model_image_contract`
+example generates checked-in fixtures consumed by Workspace contract tests.
+
 ## MCP contracts
 
 `centaeris_mcp::HttpMcpClient` is a plugin-independent HTTP client for host-owned
