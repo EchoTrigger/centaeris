@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import {
   lazy,
   Suspense,
@@ -72,14 +73,14 @@ const isMarkdownPath = (path: string | undefined): boolean => {
 
 function MarkdownPreview({ text }: { text: string }) {
   if (!text.trim()) {
-    return <div className="summaryPanelHint">文件为空。</div>;
+    return <div className="summaryPanelHint">{t("summaryPanel.theFileIsEmpty")}</div>;
   }
   return <div className="summaryMarkdownContent">{renderMarkdownNodes(text)}</div>;
 }
 
 function ImagePreview({ tab }: { tab: SummaryPanelTab }) {
   if (!tab.dataUrl) {
-    return <div className="summaryPanelHint is-error">图片预览缺少 data URL。</div>;
+    return <div className="summaryPanelHint is-error">{t("summaryPanel.imagePreviewIsMissingADataUrl")}</div>;
   }
   return (
     <div className="summaryImagePreview">
@@ -96,7 +97,7 @@ function ImagePreview({ tab }: { tab: SummaryPanelTab }) {
 
 function PdfPreview({ tab }: { tab: SummaryPanelTab }) {
   if (!tab.dataUrl) {
-    return <div className="summaryPanelHint is-error">PDF 预览缺少 data URL。</div>;
+    return <div className="summaryPanelHint is-error">{t("summaryPanel.pdfPreviewIsMissingADataUrl")}</div>;
   }
   return (
     <div className="summaryPdfPreview">
@@ -167,19 +168,19 @@ function DiffPanelFileRow({
         </button>
         {file.diffAvailable === false ? (
           <span className="summaryDiffFileReason">
-            {file.diffUnavailableReason || "不可审查"}
+            {file.diffUnavailableReason || t("summaryPanel.reviewUnavailable")}
           </span>
         ) : (
           <DiffStats added={file.added} removed={file.removed} compact />
         )}
         {onOpenWorkspacePath ? (
-          <Tooltip align="end" content="打开文件">
+          <Tooltip align="end" content={t("summaryPanel.openFile")}>
             <Button
               type="button"
               variant="workspace"
               size="workspaceIcon"
               className="summaryDiffOpenButton"
-              aria-label={`打开 ${file.path}`}
+              aria-label={t("toolActivityTranscript.openValue", { value1: file.path })}
               onClick={() => {
                 onOpenWorkspacePath(file.path, { taskId: file.taskId });
               }}
@@ -222,15 +223,15 @@ function DiffPanelPreview({
   );
 
   if (data.files.length === 0) {
-    return <div className="summaryPanelHint is-error">diff 面板没有可显示的文件。</div>;
+    return <div className="summaryPanelHint is-error">{t("summaryPanel.noFilesToDisplayInTheDiffPanel")}</div>;
   }
 
   return (
     <div className="summaryDiffPanel">
       <div className="summaryDiffPanelHeader">
         <div className="summaryDiffPanelHeading">
-          <strong>审查</strong>
-          <span>{data.files.length.toLocaleString()} 个文件</span>
+          <strong>{t("summaryPanel.review")}</strong>
+          <span>{data.files.length.toLocaleString()}{" "}{t("summaryPanel.files")}</span>
         </div>
         <DiffStats added={totals.added} removed={totals.removed} />
       </div>
@@ -238,10 +239,10 @@ function DiffPanelPreview({
         <div className="summaryDiffPreview">
           {selectedFile?.diffAvailable === false ? (
             <div className="summaryPanelHint">
-              {selectedFile.diffUnavailableReason || "该文件暂不支持 diff 审查。"}
+              {selectedFile.diffUnavailableReason || t("summaryPanel.diffReviewIsUnavailableForThisFile")}
             </div>
           ) : selectedFile ? (
-            <Suspense fallback={<div className="summaryPanelHint">正在加载 diff...</div>}>
+            <Suspense fallback={<div className="summaryPanelHint">{t("summaryPanel.loadingDiff")}</div>}>
               <CodePreview
                 content={selectedFile.diffPreview}
                 path={selectedFile.path}
@@ -250,7 +251,7 @@ function DiffPanelPreview({
             </Suspense>
           ) : null}
         </div>
-        <div className="summaryDiffFileList" aria-label="审查文件列表">
+        <div className="summaryDiffFileList" aria-label={t("summaryPanel.reviewFileList")}>
           {data.files.map((file) => (
             <DiffPanelFileRow
               file={file}
@@ -286,7 +287,7 @@ export function SummaryPanel({
     && (!isMarkdownPath(activeTab.path) || typeof activeTab.targetLine === "number");
 
   return (
-    <section className="summaryPanel" aria-label="右侧面板">
+    <section className="summaryPanel" aria-label={t("summaryPanel.rightPanel")}>
       {showTabStrip ? (
         <div className="summaryPanelTabStrip">
           <div className="summaryPanelTabs">
@@ -294,7 +295,7 @@ export function SummaryPanel({
               <button
                 type="button"
                 className={`summaryPanelTab ${activeTab?.id === tab.id ? "is-active" : ""}`}
-                aria-label={`打开 ${tab.path ?? tab.title}`}
+                aria-label={t("toolActivityTranscript.openValue", { value1: tab.path ?? tab.title })}
                 key={tab.id}
                 onClick={() => onSelectTab(tab.id)}
               >
@@ -303,7 +304,7 @@ export function SummaryPanel({
                   role="button"
                   tabIndex={0}
                   className="summaryPanelTabClose"
-                  aria-label={`关闭 ${tab.title}`}
+                  aria-label={t("summaryPanel.closeValue", { value1: tab.title })}
                   onClick={(event) => {
                     event.stopPropagation();
                     onCloseTab(tab.id);
@@ -321,14 +322,14 @@ export function SummaryPanel({
               </button>
             ))}
             {onAddSummaryTab ? (
-              <Tooltip content="打开概括">
+              <Tooltip content={t("summaryPanel.openSummary")}>
                 <Button
                   type="button"
                   variant="workspace"
                   size="chromeIcon"
                   className="summaryPanelTabAdd"
                   onClick={onAddSummaryTab}
-                  aria-label="打开概括"
+                  aria-label={t("summaryPanel.openSummary")}
                 >
                   <Plus className="summaryPanelIcon" aria-hidden="true" />
                 </Button>
@@ -336,12 +337,12 @@ export function SummaryPanel({
             ) : null}
           </div>
           {onCollapse ? (
-            <Tooltip align="end" content="收起右侧面板">
+            <Tooltip align="end" content={t("summaryPanel.collapseRightPanel")}>
               <button
                 type="button"
                 className="summaryPanelCollapse"
                 onClick={onCollapse}
-                aria-label="收起右侧面板"
+                aria-label={t("summaryPanel.collapseRightPanel")}
               >
                 <PanelRight className="summaryPanelIcon" aria-hidden="true" />
               </button>
@@ -355,7 +356,7 @@ export function SummaryPanel({
             <div className="summaryPanelTitleGroup">
               {activeTab.kind === "agent" ? (
                 <h1 className="agentSessionPanelBreadcrumb">
-                  <span>{activeTab.parentTitle || "主会话"}</span>
+                  <span>{activeTab.parentTitle || t("useWorkspacePanelController.mainConversation")}</span>
                   <span aria-hidden="true">/</span>
                   <strong>{activeTab.title}</strong>
                 </h1>
@@ -363,13 +364,13 @@ export function SummaryPanel({
               {activeTab.kind === "file" && activeTab.path ? <span>{activeTab.path}</span> : null}
               {activeTab.kind === "diffs" && activeTab.diffPanel ? <span>{activeTab.diffPanel.subtitle}</span> : null}
             </div>
-            <Tooltip align="end" content="更多">
+            <Tooltip align="end" content={t("summaryPanel.more")}>
               <Button
                 type="button"
                 variant="workspace"
                 size="workspaceIcon"
                 className="summaryPanelMore"
-                aria-label="更多"
+                aria-label={t("summaryPanel.more")}
               >
                 <Ellipsis className="summaryPanelIcon" aria-hidden="true" />
               </Button>
@@ -378,7 +379,7 @@ export function SummaryPanel({
           <div
             className={`summaryPanelBody ${shouldRenderFileAsCode || shouldRenderFileAsPdf ? "is-code" : ""} ${activeTab.kind === "diffs" ? "is-diff" : ""} ${activeTab.kind === "agent" ? "is-agent" : ""}`}
           >
-            {activeTab.loading ? <div className="summaryPanelHint">正在读取文件...</div> : null}
+            {activeTab.loading ? <div className="summaryPanelHint">{t("summaryPanel.loadingFile")}</div> : null}
             {activeTab.error ? <div className="summaryPanelHint is-error">{activeTab.error}</div> : null}
             {activeTab.kind === "diffs" ? (
               activeTab.diffPanel ? (
@@ -387,7 +388,7 @@ export function SummaryPanel({
                   onOpenWorkspacePath={onOpenWorkspacePath}
                 />
               ) : (
-                <div className="summaryPanelHint is-error">diff 面板数据缺失。</div>
+                <div className="summaryPanelHint is-error">{t("summaryPanel.diffPanelDataIsMissing")}</div>
               )
             ) : null}
             {activeTab.kind === "file" && !activeTab.loading && !activeTab.error ? (
@@ -398,7 +399,7 @@ export function SummaryPanel({
               ) : !shouldRenderFileAsCode ? (
                 <MarkdownPreview text={activeTab.content ?? ""} />
               ) : (
-                <Suspense fallback={<div className="summaryPanelHint">正在加载编辑器...</div>}>
+                <Suspense fallback={<div className="summaryPanelHint">{t("summaryPanel.loadingEditor")}</div>}>
                   <CodePreview content={activeTab.content ?? ""} path={activeTab.path} targetLine={activeTab.targetLine} targetEndLine={activeTab.targetEndLine} />
                 </Suspense>
               )

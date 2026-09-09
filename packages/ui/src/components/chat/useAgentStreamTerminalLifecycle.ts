@@ -1,6 +1,8 @@
+import { t } from "../../i18n";
 import { useCallback, type RefObject } from "react";
 import type { SessionEvent } from "../../lib/chatBridge";
 import type { UiSession } from "../../types/ui";
+import { applySessionEventToAssistantTurn } from "./chatTranscriptRestore";
 import {
   getTerminalSessionEventStatus,
   normalizeAgentRunId,
@@ -85,7 +87,7 @@ export const useAgentStreamTerminalLifecycle = ({
         finishAssistantStreamWithError(
           assistantMessageId,
           error instanceof Error ? error.message : String(error),
-          normalizeRuntimeActivity("协议错误", "summarizing"),
+          normalizeRuntimeActivity(t("useAgentStreamEventLifecycle.protocolError"), "summarizing"),
         );
         return true;
       }
@@ -97,8 +99,8 @@ export const useAgentStreamTerminalLifecycle = ({
       ) {
         finishAssistantStreamWithError(
           assistantMessageId,
-          "协议错误：终态 session_event 的 agentRunId 与活动 AgentRun 不匹配。",
-          normalizeRuntimeActivity("协议错误", "summarizing"),
+          t("useAgentStreamTerminalLifecycle.protocolErrorTerminalSessionEventAgentrunidDoesNotMatch"),
+          normalizeRuntimeActivity(t("useAgentStreamEventLifecycle.protocolError"), "summarizing"),
         );
         return true;
       }
@@ -106,9 +108,7 @@ export const useAgentStreamTerminalLifecycle = ({
         visibleActiveReplayRef.current = null;
       }
       updateAssistantTurn(assistantMessageId, (turn) => ({
-        ...turn,
-        isStreaming: false,
-        activity: undefined,
+        ...applySessionEventToAssistantTurn(turn, event),
         completedAtMs:
           typeof event.at === "number" && Number.isFinite(event.at)
             ? event.at

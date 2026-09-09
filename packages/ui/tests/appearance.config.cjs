@@ -1,0 +1,1 @@
+module.exports={testDir:'.',testMatch:'appearance.browser.cjs',use:{baseURL:'http://127.0.0.1:5117'},webServer:{command:'node ../../node_modules/vite/bin/vite.js --host 127.0.0.1 --port 5117',cwd:'..',url:'http://127.0.0.1:5117',reuseExistingServer:true}};

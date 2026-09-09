@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import {
   useCallback,
   type Dispatch,
@@ -138,8 +139,8 @@ export const useAgentStreamEventLifecycle = ({
         if (!toolName) {
           finishAssistantStreamWithError(
             assistantMessageId,
-            `协议错误：${event.type} 缺少 toolName。`,
-            normalizeRuntimeActivity("协议错误", "summarizing"),
+            t("useAgentStreamEventLifecycle.protocolErrorValueIsMissingToolname", { value1: event.type }),
+            normalizeRuntimeActivity(t("useAgentStreamEventLifecycle.protocolError"), "summarizing"),
             eventTurnId,
           );
           return;
@@ -163,8 +164,8 @@ export const useAgentStreamEventLifecycle = ({
           ) {
             finishAssistantStreamWithError(
               assistantMessageId,
-              "协议错误：ModelRequestStart 缺少有效的 purpose/contextTokenEstimate。",
-              normalizeRuntimeActivity("协议错误", "summarizing"),
+              t("useAgentStreamEventLifecycle.protocolErrorModelrequeststartIsMissingAValidPurposeContexttokenestimate"),
+              normalizeRuntimeActivity(t("useAgentStreamEventLifecycle.protocolError"), "summarizing"),
               eventTurnId,
             );
             return;
@@ -251,7 +252,7 @@ export const useAgentStreamEventLifecycle = ({
         const text =
           typeof payload.message === "string"
             ? payload.message.trim()
-            : "需要补充信息后继续执行。";
+            : t("useAgentStreamEventLifecycle.moreInformationIsNeededToContinue");
         const questionRequest = parsePendingQuestionRequest(
           payload.questionRequest,
         );
@@ -336,11 +337,11 @@ export const useAgentStreamEventLifecycle = ({
         const message =
           typeof payload.message === "string"
             ? payload.message
-            : "处理消息时发生错误。";
+            : t("useAgentStreamEventLifecycle.anErrorOccurredWhileProcessingTheMessage");
         finishAssistantStreamWithError(
           assistantMessageId,
           message,
-          normalizeRuntimeActivity("处理异常", "summarizing"),
+          normalizeRuntimeActivity(t("chatRuntimeCore.processingError"), "summarizing"),
         );
         return;
       }
@@ -351,8 +352,8 @@ export const useAgentStreamEventLifecycle = ({
           : "<missing>";
       finishAssistantStreamWithError(
         assistantMessageId,
-        `协议错误：不支持的 stream payload type=${payloadType}。`,
-        normalizeRuntimeActivity("协议错误", "summarizing"),
+        t("chatRuntimeModel.protocolErrorUnsupportedStreamPayloadTypeValue", { value1: payloadType }),
+        normalizeRuntimeActivity(t("useAgentStreamEventLifecycle.protocolError"), "summarizing"),
       );
     },
     [

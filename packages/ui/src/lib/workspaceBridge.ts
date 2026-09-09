@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { invokeHost, isNativeHostRuntime } from "../host/hostBridge";
 import { requireDevHostMock } from "./devHostMock";
 
@@ -133,7 +134,7 @@ const mockWorkspaceSnapshot: WorkspaceSnapshot = {
 };
 
 const mockWorkspaceFiles: Record<string, string> = {
-  "AGENTS.md": "# AGENTS.md\n\n本地开发约定示例。",
+  "AGENTS.md": t("workspaceBridge.agentsMdExampleLocalDevelopmentConventions"),
   "README.md": "# Centaeris\n\nWorkspace file preview is available in desktop mode.",
 };
 

@@ -10,8 +10,14 @@ const peerSource = process.argv[2];
 assert.ok(peerSource, "Pass the other client's src directory");
 const localSource = fileURLToPath(new URL("../src/", import.meta.url));
 const sources = [localSource, path.resolve(peerSource)];
-const styles = await Promise.all(sources.map((source) => readFile(path.join(source, "styles/typography.css"), "utf8")));
-assert.equal(styles[0].replaceAll("\r\n", "\n"), styles[1].replaceAll("\r\n", "\n"), "Client typography tokens differ");
+for (const name of ["typography.css", "status-shimmer.css", "theme.css", "transcript-theme.css"]) {
+  const styles = await Promise.all(sources.map((source) => readFile(path.join(source, "styles", name), "utf8")));
+  assert.equal(styles[0].replaceAll("\r\n", "\n"), styles[1].replaceAll("\r\n", "\n"), `Client ${name} styles differ`);
+}
+for (const name of ["theme.ts", "useStreamPresentation.ts", "../public/theme-init.js"]) {
+  const contents = await Promise.all(sources.map((source) => readFile(path.join(source, name), "utf8")));
+  assert.equal(contents[0].replaceAll("\r\n", "\n"), contents[1].replaceAll("\r\n", "\n"), `Client ${name} logic differs`);
+}
 const inventories = await Promise.all(sources.map(async (source) => {
   const directory = path.join(source, "assets/fonts");
   const names = (await readdir(directory)).sort();

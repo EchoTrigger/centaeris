@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import type { PendingQuestionState } from "./types";
 
 type PendingQuestionPanelProps = {
@@ -18,8 +19,8 @@ export function PendingQuestionPanel({
   return (
     <div className="pending-request-card pending-request-drawer">
       <div className="pending-request-header">
-        <span className="pending-request-title">等待补充信息</span>
-        <span className="pending-request-status">待回答</span>
+        <span className="pending-request-title">{t("chatPendingPanels.waitingForMoreInformation")}</span>
+        <span className="pending-request-status">{t("chatPendingPanels.awaitingAnswer")}</span>
       </div>
       <div className="pending-request-desc">
         {pendingQuestion.request.question}
@@ -45,7 +46,7 @@ export function PendingQuestionPanel({
       <textarea
         className="pending-request-command"
         value={pendingQuestion.answerText}
-        placeholder="可补充文字回答"
+        placeholder={t("chatPendingPanels.youCanAddAWrittenAnswer")}
         onChange={(event) => onTextChange(event.target.value)}
         disabled={pendingQuestion.submitting}
       />
@@ -59,7 +60,7 @@ export function PendingQuestionPanel({
           onClick={onSubmit}
           disabled={pendingQuestion.submitting}
         >
-          {pendingQuestion.submitting ? "提交中..." : "提交回答"}
+          {pendingQuestion.submitting ? t("chatPendingPanels.submitting") : t("chatPendingPanels.submitAnswer")}
         </button>
       </div>
     </div>

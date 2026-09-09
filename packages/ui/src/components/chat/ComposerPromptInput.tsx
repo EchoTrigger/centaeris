@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import {
   forwardRef,
   useCallback,
@@ -100,7 +101,7 @@ export const ComposerPromptInput = forwardRef<
         ref={textareaRef}
         id="message-input"
         value={value}
-        placeholder={isStreaming ? "追加补充，不中断当前执行" : "输入消息…"}
+        placeholder={isStreaming ? t("composerPromptInput.addInputWithoutInterruptingTheCurrentRun") : t("composerPromptInput.message")}
         rows={1}
         aria-controls={commandsExpanded ? "composer-slash-commands" : undefined}
         aria-expanded={commandsExpanded || mcpExpanded}
@@ -117,7 +118,7 @@ export const ComposerPromptInput = forwardRef<
       />
       <Tooltip
         align="end"
-        content={!hasInput && isStreaming ? "停止当前会话" : "发送"}
+        content={!hasInput && isStreaming ? t("composerPromptInput.stopThisConversation") : t("composerPromptInput.send")}
       >
         <Button
           type="button"
@@ -125,7 +126,7 @@ export const ComposerPromptInput = forwardRef<
           size="composerSend"
           className={`send-button ${!hasInput && isStreaming ? "is-stop" : ""}`}
           disabled={!hasInput && !isStreaming}
-          aria-label={!hasInput && isStreaming ? "停止当前会话" : "发送"}
+          aria-label={!hasInput && isStreaming ? t("composerPromptInput.stopThisConversation") : t("composerPromptInput.send")}
           onClick={() => {
             onAction();
             focus();

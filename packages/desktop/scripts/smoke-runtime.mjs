@@ -1302,7 +1302,9 @@ const main = async () => {
           event.eventName === "session/update" &&
           event.payload?.agentRunId === recoveryInput.agentRunId &&
           event.payload?.payload?.type === "runtime_event" &&
-          event.payload?.payload?.event?.type === "ModelTextDelta",
+          event.payload?.payload?.event?.type === "ModelSnapshot" &&
+          event.payload?.payload?.event?.payload?.text === "Hello from smoke" &&
+          event.payload?.payload?.event?.payload?.revision >= 1,
         "session/prompt live text before runtime crash",
       );
       await fs.rm(workspaceRoot, { recursive: true, force: true });

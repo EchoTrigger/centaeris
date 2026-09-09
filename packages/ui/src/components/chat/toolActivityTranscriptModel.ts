@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import { formatDuration } from "./agentDuration";
 import {
   compactText,
@@ -225,7 +226,7 @@ export const formatOperationInlineSummary = (
     : "";
   const description = inputDescription || undefined;
   if (isCommandOperation(operation) && description) {
-    return [description, durationText ? `已持续 ${durationText}` : undefined]
+    return [description, durationText ? t("toolActivityTranscriptModel.elapsedValue", { value1: durationText }) : undefined]
       .filter(Boolean)
       .join("，");
   }
@@ -246,7 +247,7 @@ export const formatOperationInlineSummary = (
     parts.push(metaText);
   }
   if (durationText) {
-    parts.push(`已持续 ${durationText}`);
+    parts.push(t("toolActivityTranscriptModel.elapsedValue", { value1: durationText }));
   }
   return parts.join("，");
 };

@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import { useEffect, useState } from "react";
 import {
   openAgentStream,
@@ -139,11 +140,11 @@ function AgentSessionPreviewLifecycle({
   return (
     <div className="agentSessionPreview">
       <div className="agentSessionPreviewMessages">
-        {status === "loading" ? <div className="summaryPanelHint">正在读取 Agent 会话...</div> : null}
+        {status === "loading" ? <div className="summaryPanelHint">{t("agentSessionPreview.loadingAgentConversation")}</div> : null}
         {error ? (
           <div className="summaryPanelHint is-error">
             {error}
-            <button type="button" onClick={onReload}>重新加载</button>
+            <button type="button" onClick={onReload}>{t("agentSessionPreview.reload")}</button>
           </div>
         ) : null}
         {messages.map((message) => message.role === "user" ? (
@@ -159,7 +160,7 @@ function AgentSessionPreviewLifecycle({
       </div>
       <div className={`agentSessionPreviewStatus is-${status}`} aria-live="polite">
         <span aria-hidden="true" />
-        <strong>Agent {status === "loading" ? "读取中" : status === "queued" ? "排队中" : status === "running" ? "运行中" : status === "done" ? "已完成" : status === "cancelled" ? "已取消" : "失败"}</strong>
+        <strong>Agent {status === "loading" ? t("agentSessionPreview.loading") : status === "queued" ? t("agentSessionPreview.queued") : status === "running" ? t("agentSessionPreview.running") : status === "done" ? t("agentSessionPreview.completed") : status === "cancelled" ? t("agentSessionPreview.cancelled") : t("agentSessionPreview.failed")}</strong>
       </div>
     </div>
   );

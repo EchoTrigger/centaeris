@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import { useCallback, useEffect, useRef, type RefObject } from "react";
 import { isNativeHostRuntime } from "../../host/hostBridge";
 import {
@@ -241,7 +242,7 @@ export const useChatPromptTransactions = ({
         return currentSession;
       }
       if (!workspaceRoot) {
-        throw new Error("请先选择真实工作区，再开始本地会话");
+        throw new Error(t("useChatPromptTransactions.selectAWorkspaceBeforeStartingALocalConversation"));
       }
       return toCreatedUiSession(
         await createSession(prompt, workspaceRoot, createRuntimeOperationId()),
@@ -292,7 +293,7 @@ export const useChatPromptTransactions = ({
       pendingResolvedSessionRef.current = {
         id: responseSessionId,
         title:
-          targetSession.title && targetSession.title !== "新会话"
+          targetSession.title && targetSession.title !== t("useChatPromptTransactions.newChat")
             ? targetSession.title
             : prompt,
         summary: prompt,
@@ -334,6 +335,11 @@ export const useChatPromptTransactions = ({
     const now = Date.now();
     updateAssistantTurn(active.assistantMessageId, (turn) => ({
       ...turn,
+      chunks: turn.chunks.map((chunk) =>
+        chunk.kind === "reasoning" && chunk.status === "streaming"
+          ? { ...chunk, status: "interrupted" }
+          : chunk,
+      ),
       isStreaming: false,
       activity: undefined,
       completedAtMs: now,
@@ -351,7 +357,7 @@ export const useChatPromptTransactions = ({
         updateAssistantTurn(active.assistantMessageId, (turn) =>
           appendNarrativeChunk(
             turn,
-            "停止请求未能写入后台任务状态。",
+            t("useChatPromptTransactions.theStopRequestCouldNotBeSavedToThe"),
             "error",
           ),
         );
@@ -386,7 +392,7 @@ export const useChatPromptTransactions = ({
             prompt,
             supplementAt,
           ),
-          normalizeRuntimeActivity("正在处理补充输入", "thinking"),
+          normalizeRuntimeActivity(t("useChatPromptTransactions.processingSupplementalInput"), "thinking"),
         ),
       );
       try {
@@ -674,7 +680,7 @@ export const useChatPromptTransactions = ({
           setEditingUserMessageId(messageId);
           setEditingPrompt(prompt);
           setRuntimeConfigError(
-            `编辑失败：${formatExecutionError(error)}`,
+            t("useChatPromptTransactions.editFailedValue", { value1: formatExecutionError(error) }),
           );
           return;
         }

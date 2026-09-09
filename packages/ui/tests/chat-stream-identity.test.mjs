@@ -137,7 +137,7 @@ test("restores each committed compaction as one chronological marker", () => {
   assert.equal(duplicate.chunks.length, 1);
   assert.throws(
     () => applySessionEventToAssistantTurn(restored, { ...event, status: "error" }),
-    /只接受已提交的 PromptCompaction/,
+    /only accepts committed PromptCompaction/,
   );
 });
 

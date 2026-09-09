@@ -1,3 +1,4 @@
+import { t } from "./i18n";
 import { Component, type ErrorInfo, type ReactNode } from "react";
 
 type AppErrorBoundaryProps = {
@@ -28,11 +29,9 @@ export class AppErrorBoundary extends Component<
     }
     return (
       <main className="appFatalError" role="alert">
-        <h1>界面暂时无法显示</h1>
-        <p>当前窗口遇到了渲染错误。重新载入可以恢复到最近保存的状态。</p>
-        <button type="button" onClick={() => window.location.reload()}>
-          重新载入
-        </button>
+        <h1>{t("appErrorBoundary.theInterfaceCouldNotBeDisplayed")}</h1>
+        <p>{t("appErrorBoundary.thisWindowEncounteredARenderingErrorReloadToRestore")}</p>
+        <button type="button" onClick={() => window.location.reload()}>{t("appErrorBoundary.reload")}</button>
       </main>
     );
   }

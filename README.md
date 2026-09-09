@@ -4,11 +4,17 @@
 
 # Centaeris
 
+English | [简体中文](README.zh-CN.md)
+
 Centaeris is a host-agnostic agent runtime framework written in Rust. Desktop,
 terminal, and hosted products use the same runtime contracts for sessions, model
 requests, tools, events, persistence, and durable continuation.
 
 This repository contains the public runtime, local hosts, and user interfaces. It does not contain first-party commercial packages, skills, hosted control-plane code, credentials, or customer data.
+
+## Appearance
+
+Use the sun/moon button immediately to the right of the left-sidebar toggle to switch between light and dark themes. Your choice persists on this device and overrides system changes. Before your first choice, the app follows the system appearance. Replies and process headings use 14px; process details, code, and tables use 13px. Process headings and content share one gray in each theme.
 
 ## Features
 
@@ -55,6 +61,13 @@ npm run gate --workspace centaeris-ui
 See [Windows setup](docs/getting-started/Windows.md) for the complete build and
 first-run paths. The runtime and tests do not require an installed package or
 Skill. Extensions are separate versioned assets.
+
+## Interface language
+
+The Desktop UI currently ships in English. Its `react-i18next` foundation and
+English resources live in `packages/ui/src/i18n.ts` and `packages/ui/src/locales/`.
+No incomplete language option is exposed. User content, model responses, commands,
+and protocol identifiers retain their original text.
 
 ## Documentation
 

@@ -45,9 +45,9 @@ test("the application root contains a render failure and offers recovery", async
       renderer = create(harness.rendered!);
     });
     const alert = renderer!.root.findByProps({ role: "alert" });
-    expect(alert.findByType("h1").children.join(" ")).toBe("界面暂时无法显示");
+    expect(alert.findByType("h1").children.join(" ")).toBe("The interface could not be displayed");
     const reloadButton = alert.findByType("button");
-    expect(reloadButton.children.join(" ")).toBe("重新载入");
+    expect(reloadButton.children.join(" ")).toBe("Reload");
     reloadButton.props.onClick();
     expect(reload).toHaveBeenCalledOnce();
   } finally {

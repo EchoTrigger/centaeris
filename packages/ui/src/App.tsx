@@ -1,3 +1,5 @@
+import { ThemeToggle } from "./components/ThemeToggle";
+import { t } from "./i18n";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PanelLeft, PanelRight, X } from "lucide-react";
 import { Sidebar, type ResourceModalKind } from "./components/Sidebar";
@@ -144,7 +146,7 @@ function App() {
         snapshot = workspaceResult.value;
         workspaceInitialization.applySnapshot(snapshot);
       } else if (workspaceInitialization.isCurrent()) {
-        reportWorkspaceCatalogFailure(workspaceResult.reason, "加载工作区列表失败");
+        reportWorkspaceCatalogFailure(workspaceResult.reason, t("app.unableToLoadWorkspaces"));
       }
       if (sessionResult.status === "fulfilled") {
         const preferredId = snapshot.workspaces.find(
@@ -152,7 +154,7 @@ function App() {
         )?.activeSessionId;
         sessionInitialization.applySessions(sessionResult.value, preferredId);
       } else if (sessionInitialization.isCurrent()) {
-        setHostError(errorMessage(sessionResult.reason, "加载会话失败"));
+        setHostError(errorMessage(sessionResult.reason, t("app.unableToLoadConversations")));
       }
       if (runtimeConfigRequestIdRef.current === runtimeConfigRequestId) {
         if (configResult.status === "fulfilled") {
@@ -185,7 +187,7 @@ function App() {
         }
       }).catch((error) => {
         if (!disposed && runtimeConfigRequestIdRef.current === requestId) {
-          setHostError(errorMessage(error, "加载模型配置失败"));
+          setHostError(errorMessage(error, t("app.unableToLoadModelConfiguration")));
         }
       });
     }).then((nextUnlisten) => {
@@ -195,7 +197,7 @@ function App() {
         unlisten = nextUnlisten;
       }
     }).catch((error) => {
-      if (!disposed) setHostError(errorMessage(error, "订阅模型配置失败"));
+      if (!disposed) setHostError(errorMessage(error, t("app.unableToSubscribeToModelConfiguration")));
     });
     return () => {
       disposed = true;
@@ -259,6 +261,7 @@ function App() {
           >
             <PanelLeft aria-hidden="true" />
           </button>
+          <ThemeToggle />
           {!isFilePaneVisible && workspacePanel.tabs.length > 0 ? (
             <button
               type="button"
@@ -353,7 +356,7 @@ function App() {
               <h1>
                 <span>{modalTitle}</span>
               </h1>
-              <button type="button" onClick={() => setActiveModal(null)} aria-label="关闭"><X aria-hidden="true" /></button>
+              <button type="button" onClick={() => setActiveModal(null)} aria-label={t("app.close")}><X aria-hidden="true" /></button>
             </header>
             <div className="resourceDialogBody">
               {activeModal === "models" ? (

@@ -24,7 +24,7 @@ test("renders session deletion confirmation inside the sidebar row", async () =>
   assert.match(sidebarSource, /!pendingSessionIdRef\.current/);
   assert.match(sidebarSource, /event\.currentTarget\.contains\(event\.relatedTarget\)/);
   assert.match(stylesSource, /\.thinSessionDeleteConfirm\s*\{/);
-  assert.match(stylesSource, /border-left: 3px solid #ef5650/);
+  assert.match(stylesSource, /border-left: 3px solid var\(--error\)/);
   assert.match(stylesSource, /\.thinSessionDeleteConfirm button \{[\s\S]*height: 29px/);
 });
 
@@ -43,7 +43,7 @@ test("keeps other destructive actions in the lightweight React dialog", async ()
   assert.match(confirmDialogSource, /getBoundingClientRect\(\)/);
   assert.match(confirmDialogSource, /onClick=\{cancelFromBackdrop\}/);
   assert.match(stylesSource, /\.confirmDialog::backdrop/);
-  assert.match(stylesSource, /background: rgba\(28, 30, 33, 0\.16\)/);
+  assert.match(stylesSource, /background: color-mix\(in srgb, var\(--on-surface\) 16%, transparent\)/);
 });
 
 test("renders the project picker with the flat in-app menu style", async () => {
@@ -61,6 +61,6 @@ test("renders the project picker with the flat in-app menu style", async () => {
   assert.match(sidebarSource, /closeOnOutsidePointer/);
   assert.match(sidebarSource, /event\.key === "Escape"/);
   assert.doesNotMatch(sidebarSource, /<select/);
-  assert.match(stylesSource, /\.thinWorkspaceSelectPanel \{[\s\S]*?border: 1px solid #dfe1e4;[\s\S]*?box-shadow: none/);
+  assert.match(stylesSource, /\.thinWorkspaceSelectPanel \{[\s\S]*?border: 1px solid var\(--outline-variant\);[\s\S]*?box-shadow: none/);
   assert.doesNotMatch(sidebarSource, /thinOpenWorkspaceButton|<FolderOpen/);
 });

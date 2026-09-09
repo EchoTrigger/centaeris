@@ -185,7 +185,7 @@
 }
 
 .assistant-message .message-avatar {
-  background: linear-gradient(135deg, #4285f4, #34a853, #fbbc05, #ea4335);
+  background: linear-gradient(135deg, var(--primary-color), var(--success), var(--warning), var(--error));
   color: white;
 }
 
@@ -206,8 +206,8 @@
 }
 
 .user-message .message-bubble {
-  background: #f2f6fb;
-  border: 1px solid #dfe8f3;
+  background: var(--surface-variant);
+  border: 1px solid var(--outline-variant);
   color: var(--on-surface);
   border-radius: 14px;
   padding: 9px 12px;
@@ -233,7 +233,7 @@
   justify-content: flex-end;
   gap: 10px;
   min-height: 22px;
-  color: rgba(15, 23, 42, 0.42);
+  color: var(--process-text);
   opacity: 0;
   pointer-events: none;
   transition: opacity 120ms ease;
@@ -263,13 +263,13 @@
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: rgba(15, 23, 42, 0.48);
+  color: var(--process-text);
   transition: background 120ms ease, color 120ms ease;
 }
 
 .user-message-icon-btn:hover {
-  background: rgba(15, 23, 42, 0.05);
-  color: rgba(15, 23, 42, 0.72);
+  background: color-mix(in srgb, var(--on-surface) 5%, transparent);
+  color: var(--on-surface);
 }
 
 .user-message-action-icon {
@@ -287,8 +287,8 @@
 
 .user-edit-bubble {
   padding: 14px 16px 12px;
-  background: #ffffff;
-  border: 1px solid rgba(15, 23, 42, 0.12);
+  background: var(--surface-color);
+  border: 1px solid var(--outline-variant);
   box-shadow: 0 18px 38px rgba(15, 23, 42, 0.09);
 }
 
@@ -322,18 +322,18 @@
 }
 
 .user-edit-secondary {
-  background: #ffffff;
-  border-color: rgba(15, 23, 42, 0.08);
-  color: rgba(15, 23, 42, 0.74);
+  background: var(--surface-color);
+  border-color: var(--outline-variant);
+  color: var(--on-surface);
 }
 
 .user-edit-primary {
-  background: #111827;
-  color: #ffffff;
+  background: var(--solid-surface);
+  color: var(--solid-text);
 }
 
 .user-edit-primary:disabled {
-  background: rgba(15, 23, 42, 0.18);
+  background: color-mix(in srgb, var(--on-surface) 18%, transparent);
   cursor: not-allowed;
 }
 
@@ -494,8 +494,8 @@
   height: 11px;
   flex: 0 0 auto;
   border-radius: 3px;
-  background: repeating-linear-gradient(90deg, #73d8b6 0 2px, transparent 2px 4px),
-    repeating-linear-gradient(#73d8b6 0 2px, transparent 2px 4px);
+  background: repeating-linear-gradient(90deg, var(--success) 0 2px, transparent 2px 4px),
+    repeating-linear-gradient(var(--success) 0 2px, transparent 2px 4px);
 }
 
 .agentSubagentTag.is-running .agentSubagentTagMark {
@@ -503,7 +503,7 @@
 }
 
 .agentSubagentTag.is-error .agentSubagentTagMark {
-  background: #c5221f;
+  background: var(--error);
 }
 
 .agentSubagentTagRole {
@@ -609,7 +609,7 @@
   max-width: min(640px, 78%);
   border-radius: 14px;
   padding: 9px 12px;
-  background: #f1f2f4;
+  background: var(--surface-variant);
   color: var(--on-surface);
   line-height: 1.55;
   overflow-wrap: anywhere;
@@ -685,18 +685,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: transparent;
-  background: linear-gradient(
-    105deg,
-    color-mix(in srgb, var(--on-surface-variant) 58%, transparent) 24%,
-    color-mix(in srgb, var(--on-surface) 92%, white 8%) 46%,
-    color-mix(in srgb, var(--on-surface-variant) 58%, transparent) 68%
-  );
-  background-size: 240% 100%;
-  background-clip: text;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: centaerisRunStatusWave 4s ease-in-out infinite;
+
 }
 
 .tachikomaCount {
@@ -722,16 +711,6 @@
   }
 }
 
-@keyframes centaerisRunStatusWave {
-  0% {
-    background-position: 120% 50%;
-  }
-
-  75%,
-  100% {
-    background-position: -120% 50%;
-  }
-}
 
 @keyframes centaerisThinkingPulse {
   0%,
@@ -814,14 +793,6 @@
   transform: rotate(45deg) translateY(-1px);
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .agentRunStatusText {
-    color: var(--on-surface-variant);
-    background: none;
-    -webkit-text-fill-color: currentColor;
-    animation: none;
-  }
-}
 
 .agent-operation-body {
   display: grid;
@@ -955,7 +926,7 @@ details.agent-tool-node > .agent-tool-node-summary {
   height: 20px;
   border: 1px solid color-mix(in srgb, var(--outline-variant) 70%, transparent 30%);
   border-radius: 6px;
-  background: color-mix(in srgb, #ffffff 86%, var(--surface-container) 14%);
+  background: color-mix(in srgb, var(--surface-color) 86%, var(--surface-container) 14%);
   padding: 0 7px;
   color: color-mix(in srgb, var(--on-surface) 76%, var(--on-surface-variant) 24%);
   font-size: 11px;
@@ -971,7 +942,7 @@ button.agent-tool-chip {
 
 .agent-tool-chip.is-clickable:hover {
   border-color: color-mix(in srgb, var(--primary-color) 32%, var(--outline-variant) 68%);
-  background: color-mix(in srgb, #ffffff 72%, var(--primary-container) 28%);
+  background: color-mix(in srgb, var(--surface-color) 72%, var(--primary-container) 28%);
   color: color-mix(in srgb, var(--primary-color) 72%, var(--on-surface) 28%);
 }
 
@@ -1009,7 +980,7 @@ button.agent-tool-chip {
   min-width: 0;
   border: none;
   border-radius: 8px;
-  background: color-mix(in srgb, var(--surface-container) 72%, #e8e8e8 28%);
+  background: color-mix(in srgb, var(--surface-container) 72%, var(--surface-container) 28%);
   padding: 8px 10px 7px;
   overflow: hidden;
 }
@@ -1091,7 +1062,7 @@ button.agent-tool-chip {
 .agent-tool-command-section.is-command {
   border: 1px solid color-mix(in srgb, var(--outline-variant) 54%, transparent 46%);
   border-radius: 6px;
-  background: color-mix(in srgb, var(--surface-container) 48%, #ffffff 52%);
+  background: color-mix(in srgb, var(--surface-container) 48%, var(--surface-color) 52%);
   overflow: hidden;
   max-width: 100%;
 }
@@ -1202,7 +1173,7 @@ button.agent-tool-chip {
 }
 
 .agent-tool-output-block.is-missing-diff {
-  color: #8a5a00;
+  color: var(--warning);
 }
 
 .agent-tool-diff-preview {
@@ -1212,7 +1183,7 @@ button.agent-tool-chip {
   border: 1px solid color-mix(in srgb, var(--outline-variant) 64%, transparent 36%);
   border-radius: 8px;
   overflow: hidden;
-  background: #ffffff;
+  background: var(--surface-color);
 }
 
 .agent-tool-empty-output {
@@ -1296,7 +1267,7 @@ button.agent-tool-chip {
   font-size: var(--font-size-xs);
   font-weight: 700;
   letter-spacing: 0.03em;
-  color: color-mix(in srgb, var(--on-surface-variant) 90%, #1e7a3e 10%);
+  color: color-mix(in srgb, var(--on-surface-variant) 90%, var(--success) 10%);
   text-transform: uppercase;
 }
 
@@ -1436,12 +1407,12 @@ button.agent-tool-chip {
 
 .question-inline-summary .pending-request-status.status-pending {
   border-color: rgba(26, 115, 232, 0.24);
-  color: #0b57d0;
+  color: var(--primary-color);
 }
 
 .question-inline-summary .pending-request-status.status-answered {
   border-color: rgba(52, 168, 83, 0.24);
-  color: #1e7a3e;
+  color: var(--success);
 }
 
 .question-inline-summary-text {
@@ -1593,13 +1564,13 @@ button.agent-tool-chip {
 }
 
 .inline-feed-status.is-error {
-  color: #c5221f;
+  color: var(--error);
   border-color: rgba(234, 67, 53, 0.28);
   background: rgba(234, 67, 53, 0.08);
 }
 
 .inline-feed-status.is-tool {
-  color: #0b57d0;
+  color: var(--primary-color);
   border-color: rgba(26, 115, 232, 0.26);
   background: rgba(26, 115, 232, 0.08);
 }
@@ -1626,7 +1597,7 @@ button.agent-tool-chip {
 
 .inline-tool-block.is-task-tool {
   border-color: rgba(26, 115, 232, 0.32);
-  background: color-mix(in srgb, var(--surface-color) 90%, #1a73e8 10%);
+  background: color-mix(in srgb, var(--surface-color) 90%, var(--primary-color) 10%);
 }
 
 .inline-tool-summary {
@@ -1666,7 +1637,7 @@ button.agent-tool-chip {
 
 .task-card.state-error {
   border-color: rgba(234, 67, 53, 0.3);
-  background: color-mix(in srgb, var(--surface-color) 90%, #ea4335 10%);
+  background: color-mix(in srgb, var(--surface-color) 90%, var(--error) 10%);
 }
 
 .task-card.state-running {
@@ -1708,13 +1679,13 @@ button.agent-tool-chip {
 }
 
 .task-card-status.done {
-  color: color-mix(in srgb, #1e7a3e 72%, var(--on-surface-variant) 28%);
-  background: color-mix(in srgb, #1e7a3e 8%, transparent 92%);
+  color: color-mix(in srgb, var(--success) 72%, var(--on-surface-variant) 28%);
+  background: color-mix(in srgb, var(--success) 8%, transparent 92%);
   border-color: transparent;
 }
 
 .task-card-status.error {
-  color: #c5221f;
+  color: var(--error);
   background: rgba(234, 67, 53, 0.1);
   border-color: rgba(234, 67, 53, 0.24);
 }
@@ -1751,7 +1722,7 @@ button.agent-tool-chip {
   border: 1px solid var(--outline-variant);
   border-radius: 10px;
   overflow: hidden;
-  background: rgba(15, 23, 42, 0.02);
+  background: color-mix(in srgb, var(--on-surface) 2%, transparent);
 }
 
 .event-feed-summary {
@@ -1780,7 +1751,7 @@ button.agent-tool-chip {
 
 .tool-timeline-error {
   font-size: var(--font-size-xs);
-  color: #c5221f;
+  color: var(--error);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -1793,7 +1764,7 @@ button.agent-tool-chip {
 .message-stream-group {
   border: 1px solid var(--outline-variant);
   border-radius: 10px;
-  background: rgba(15, 23, 42, 0.03);
+  background: color-mix(in srgb, var(--on-surface) 3%, transparent);
   overflow: hidden;
 }
 
@@ -1833,8 +1804,8 @@ button.agent-tool-chip {
 }
 
 .message-stream-segment.is-status {
-  background: rgba(15, 23, 42, 0.04);
-  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: color-mix(in srgb, var(--on-surface) 4%, transparent);
+  border: 1px solid var(--outline-variant);
 }
 
 .message-stream-segment.is-tool {
@@ -1845,19 +1816,19 @@ button.agent-tool-chip {
 .message-stream-segment.is-error {
   background: rgba(234, 67, 53, 0.08);
   border: 1px solid rgba(234, 67, 53, 0.2);
-  color: #c5221f;
+  color: var(--error);
 }
 
 .message-stream-segment.is-source {
   background: rgba(52, 168, 83, 0.1);
   border: 1px solid rgba(52, 168, 83, 0.2);
-  color: #1e7a3e;
+  color: var(--success);
 }
 
 .message-stream-segment.is-action_required {
   background: rgba(251, 188, 5, 0.12);
   border: 1px solid rgba(251, 188, 5, 0.24);
-  color: #8a5500;
+  color: var(--warning);
 }
 
 .message-stream-segment-text {
@@ -1922,7 +1893,7 @@ button.agent-tool-chip {
   border: 1px solid var(--outline-variant);
   border-radius: 14px;
   padding: 12px;
-  background: #ffffff;
+  background: var(--surface-color);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1964,17 +1935,17 @@ button.agent-tool-chip {
 
 .pending-request-status.status-approved {
   background: rgba(52, 168, 83, 0.12);
-  color: #34a853;
+  color: var(--success);
 }
 
 .pending-request-status.status-rejected {
   background: rgba(234, 67, 53, 0.12);
-  color: #ea4335;
+  color: var(--error);
 }
 
 .pending-request-status.status-running {
   background: rgba(251, 188, 5, 0.14);
-  color: #b26a00;
+  color: var(--warning);
 }
 
 .pending-request-desc {
@@ -2001,7 +1972,7 @@ button.agent-tool-chip {
   font-size: var(--font-size-xs);
   padding: 8px 10px;
   border-radius: 9px;
-  background: #f1f3f4;
+  background: var(--surface-variant);
   color: var(--on-surface);
   white-space: pre-wrap;
   max-height: 54px;
@@ -2065,7 +2036,7 @@ button.agent-tool-chip {
 
 .message-citation-chip {
   border: 1px solid var(--outline-variant);
-  background: rgba(15, 23, 42, 0.03);
+  background: color-mix(in srgb, var(--on-surface) 3%, transparent);
   color: var(--on-surface);
   border-radius: 999px;
   padding: 2px 9px;
@@ -2304,7 +2275,7 @@ button.agent-tool-chip {
   border: 0;
   background: transparent;
   border-radius: 0;
-  color: #0b57d0;
+  color: var(--primary-color);
   font-weight: 500;
   text-decoration: none;
   white-space: pre-wrap;
@@ -2318,15 +2289,15 @@ button.agent-tool-chip {
   gap: var(--spacing-sm);
   padding: var(--spacing-sm) var(--spacing-md);
   border-radius: var(--radius-md);
-  background: #eef3fd;
-  color: #1f2a44;
-  border: 1px solid #cddbf5;
+  background: var(--surface-variant);
+  color: var(--on-surface);
+  border: 1px solid var(--primary-color);
   margin: 0 0 var(--spacing-sm);
   font-size: var(--font-size-sm);
 }
 
 .medical-banner-icon {
-  color: #3b82f6;
+  color: var(--primary-color);
   font-size: 18px;
 }
 
@@ -2337,10 +2308,10 @@ button.agent-tool-chip {
 .answer-content code {
   font-family: var(--font-mono);
   font-size: 0.88em;
-  background: #eef0f4;
+  background: var(--surface-variant);
   padding: 0.1em 0.4em;
   border-radius: 4px;
-  border: 1px solid #d8dce6;
+  border: 1px solid var(--outline-variant);
 }
 
 .answer-content a {
@@ -2359,7 +2330,7 @@ button.agent-tool-chip {
 }
 
 .weather-card {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(245, 248, 252, 0.95) 100%);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--surface-color) 98%, transparent) 0%, color-mix(in srgb, var(--surface-color) 95%, transparent) 100%);
   border-radius: var(--radius-lg);
   padding: 18px 22px;
   box-shadow: 0 12px 28px rgba(15, 23, 42, 0.08);
@@ -2368,7 +2339,7 @@ button.agent-tool-chip {
   gap: 12px;
   min-width: 260px;
   max-width: 520px;
-  border: 1px solid rgba(15, 23, 42, 0.06);
+  border: 1px solid var(--outline-variant);
 }
 
 .weather-card.is-error {
@@ -2390,7 +2361,7 @@ button.agent-tool-chip {
 
 .weather-card-title-icon {
   font-size: 20px;
-  color: #5f6368;
+  color: var(--process-text);
 }
 
 .weather-card-title {
@@ -2426,7 +2397,7 @@ button.agent-tool-chip {
 
 .weather-card-condition-icon {
   font-size: 20px;
-  color: #5f6368;
+  color: var(--process-text);
 }
 
 .weather-card-meta {
@@ -2438,7 +2409,7 @@ button.agent-tool-chip {
 }
 
 .weather-card-meta-item {
-  background: rgba(15, 23, 42, 0.06);
+  background: color-mix(in srgb, var(--on-surface) 6%, transparent);
   padding: 4px 10px;
   border-radius: 999px;
 }
@@ -2450,7 +2421,7 @@ button.agent-tool-chip {
 }
 
 .weather-card-item {
-  background: rgba(255, 255, 255, 0.98);
+  background: color-mix(in srgb, var(--surface-color) 98%, transparent);
   border-radius: var(--radius-md);
   padding: 10px 12px;
   display: flex;
@@ -2475,7 +2446,7 @@ button.agent-tool-chip {
 
 .weather-card-item-icon {
   font-size: 18px;
-  color: #5f6368;
+  color: var(--process-text);
 }
 
 .weather-card-item-temp {
@@ -2498,7 +2469,7 @@ button.agent-tool-chip {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  color: #c5221f;
+  color: var(--error);
   font-size: 0.9rem;
 }
 
@@ -2627,7 +2598,7 @@ button.agent-tool-chip {
 }
 
 .markdown-content a {
-  color: #0b57d0;
+  color: var(--primary-color);
   text-decoration: none;
 }
 
@@ -2641,16 +2612,16 @@ button.agent-tool-chip {
   border: 0;
   background: transparent;
   padding: 0;
-  color: #0b57d0;
+  color: var(--primary-color);
   font: inherit;
   text-align: left;
   cursor: pointer;
 }
 
 .answerPathInlineButton code {
-  color: #0b57d0;
-  border-color: color-mix(in srgb, var(--primary-color) 24%, #d8dce6 76%);
-  background: color-mix(in srgb, #f1f3f4 72%, var(--primary-container) 28%);
+  color: var(--primary-color);
+  border-color: color-mix(in srgb, var(--primary-color) 24%, var(--outline-variant) 76%);
+  background: color-mix(in srgb, var(--surface-variant) 72%, var(--primary-container) 28%);
 }
 
 .answerPathInlineButton:hover code,
@@ -2660,8 +2631,8 @@ button.agent-tool-chip {
 
 .markdown-content code {
   border-radius: 5px;
-  background: #f1f3f4;
-  color: #1f1f1f;
+  background: var(--surface-variant);
+  color: var(--on-surface);
   padding: 1px 5px;
   font-family: var(--font-mono);
   font-size: var(--font-size-inline-code);
@@ -2680,8 +2651,8 @@ button.agent-tool-chip {
 
 .answer-content pre {
   margin: 0.4em 0 0.75em;
-  background: #f6f8fb;
-  border: 1px solid #e5e7eb;
+  background: var(--surface-variant);
+  border: 1px solid var(--outline-variant);
   padding: 0.75em 1em;
   border-radius: var(--radius-md);
   overflow-x: auto;
@@ -2692,8 +2663,8 @@ button.agent-tool-chip {
 
 .markdown-code-block {
   margin: 0;
-  background: #f6f8fb;
-  border: 1px solid #e5e7eb;
+  background: var(--surface-variant);
+  border: 1px solid var(--outline-variant);
   padding: 10px 12px;
   border-radius: 8px;
   overflow-x: auto;
@@ -2727,7 +2698,7 @@ button.agent-tool-chip {
   width: 100%;
   overflow-x: auto;
   padding: var(--spacing-sm);
-  background: #f4f6f9;
+  background: var(--surface-variant);
   border-radius: var(--radius-sm);
 }
 
@@ -2738,7 +2709,7 @@ button.agent-tool-chip {
 
 .mermaid-error {
   margin: 0 0 var(--spacing-sm);
-  background: #f4f6f9;
+  background: var(--surface-variant);
   padding: var(--spacing-sm);
   border-radius: var(--radius-sm);
 }
@@ -2765,7 +2736,7 @@ button.agent-tool-chip {
   box-sizing: border-box;
   white-space: normal;
   overscroll-behavior-x: contain;
-  background: #ffffff;
+  background: var(--surface-color);
 }
 
 .markdown-table table {
@@ -2788,7 +2759,7 @@ button.agent-tool-chip {
 
 .markdown-table::-webkit-scrollbar-thumb {
   background: color-mix(in srgb, var(--outline-variant) 76%, var(--on-surface-variant) 24%);
-  border: 3px solid #ffffff;
+  border: 3px solid var(--outline-variant);
   border-radius: 999px;
 }
 
@@ -2934,12 +2905,12 @@ button.agent-tool-chip {
   align-items: baseline;
   gap: 10px;
   padding: 0 18px;
-  color: #8b9097;
+  color: var(--process-text);
   font-family: var(--font-mono);
   font-size: 11px;
 }
 
-.emptyChatIdentity strong { color: #292c31; font-size: 18px; font-weight: 650; }
+.emptyChatIdentity strong { color: var(--on-surface); font-size: 18px; font-weight: 650; }
 
 .input-section {
   background: transparent;
@@ -2959,9 +2930,9 @@ button.agent-tool-chip {
   gap: var(--spacing-sm);
   padding: 8px 10px;
   margin-bottom: var(--spacing-sm);
-  border: 1px solid #e1e3e1;
+  border: 1px solid var(--outline-variant);
   border-radius: 8px;
-  background: #ffffff;
+  background: var(--surface-color);
   box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
 }
 
@@ -2990,7 +2961,7 @@ button.agent-tool-chip {
 .input-wrapper {
   display: flex;
   align-items: center;
-  background: #ffffff;
+  background: var(--surface-color);
   border: 1px solid var(--outline-variant);
   border-radius: 12px;
   min-height: 50px;
@@ -3001,9 +2972,9 @@ button.agent-tool-chip {
 }
 
 .input-wrapper:focus-within {
-  border-color: #c9d2da;
+  border-color: var(--outline-variant);
   box-shadow: 0 1px 2px rgba(20, 31, 43, 0.05), 0 0 0 3px rgba(47, 111, 237, 0.05);
-  background: #ffffff;
+  background: var(--surface-color);
 }
 
 .text-input-container {
@@ -3041,15 +3012,15 @@ button.agent-tool-chip {
 }
 
 #message-input::placeholder {
-  color: #919aa3;
+  color: var(--process-text);
 }
 
 .send-button {
   width: 34px;
   height: 34px;
   border: none;
-  background: #252a31;
-  color: #ffffff;
+  background: var(--solid-surface);
+  color: var(--solid-text);
   border-radius: 8px;
   display: flex;
   align-items: center;
@@ -3063,17 +3034,17 @@ button.agent-tool-chip {
 }
 
 .send-button:hover:not(:disabled) {
-  background: #15191e;
+  background: var(--solid-surface);
   box-shadow: none;
 }
 
 .send-button.is-stop {
-  background: #f2f4f6;
-  color: #24282d;
+  background: var(--surface-variant);
+  color: var(--on-surface);
 }
 
 .send-button.is-stop:hover:not(:disabled) {
-  background: #e7ebef;
+  background: var(--surface-variant);
 }
 
 .send-button:disabled {
@@ -3128,9 +3099,9 @@ button.agent-tool-chip {
 }
 
 .composer-chip.is-risk {
-  color: #8a4b00;
-  border-color: #f0c878;
-  background: #fff5dc;
+  color: var(--warning);
+  border-color: var(--warning);
+  background: var(--surface-variant);
 }
 
 .composerLucideIcon {
@@ -3187,9 +3158,9 @@ button.agent-tool-chip {
   z-index: 20;
   bottom: calc(100% + 3px);
   overflow: auto;
-  border: 1px solid #dfe1e4;
+  border: 1px solid var(--outline-variant);
   border-radius: 6px;
-  background: #fff;
+  background: var(--surface-color);
   box-shadow: none;
 }
 
@@ -3229,19 +3200,19 @@ button.agent-tool-chip {
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: #34373c;
+  color: var(--on-surface);
   text-align: left;
   cursor: pointer;
 }
 
 .composerPickerPanel button:hover,
 .composerPickerPanel button.is-selected {
-  background: #f0f1f2;
+  background: var(--surface-variant);
 }
 
 .composerPickerPanel button strong {
   overflow: hidden;
-  color: #3f4349;
+  color: var(--on-surface);
   font-size: 11px;
   font-weight: 520;
   line-height: 1.25;
@@ -3256,13 +3227,13 @@ button.agent-tool-chip {
 .composerPickerPanel section + section {
   margin-top: 3px;
   padding-top: 3px;
-  border-top: 1px solid #eceeef;
+  border-top: 1px solid var(--outline-variant);
 }
 
 .composerPickerGroupLabel {
   margin: 0;
   padding: 5px 7px 3px;
-  color: #959ba3;
+  color: var(--process-text);
   font-size: 9px;
   font-weight: 600;
   letter-spacing: 0.06em;
@@ -3275,7 +3246,7 @@ button.agent-tool-chip {
   height: 13px;
   display: grid;
   place-items: center;
-  color: #40454c;
+  color: var(--on-surface);
 }
 
 .composerPickerCheck svg {
@@ -3305,7 +3276,7 @@ button.agent-tool-chip {
   height: 15px;
   display: block;
   border-radius: 999px;
-  background: conic-gradient(#7568cf var(--context-used), #e4e5e7 0);
+  background: conic-gradient(var(--primary-color) var(--context-used), var(--surface-container) 0);
   mask: radial-gradient(circle, transparent 43%, #000 46%);
 }
 
@@ -3314,7 +3285,7 @@ button.agent-tool-chip {
   width: min(420px, calc(100vw - 32px));
   max-height: min(410px, calc(100vh - 110px));
   padding: 12px 14px;
-  color: #34373c;
+  color: var(--on-surface);
 }
 
 .contextWindowPanel header {
@@ -3323,18 +3294,18 @@ button.agent-tool-chip {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 10px;
-  color: #777d85;
+  color: var(--process-text);
   font-size: 12px;
 }
 
-.contextWindowPanel header strong { color: #656b73; font-weight: 550; }
+.contextWindowPanel header strong { color: var(--process-text); font-weight: 550; }
 
 .contextWindowBar {
   height: 6px;
   display: flex;
   overflow: hidden;
   border-radius: 999px;
-  background: #eceeef;
+  background: var(--surface-variant);
 }
 
 .contextWindowBar i { height: 100%; min-width: 1px; }
@@ -3357,33 +3328,33 @@ button.agent-tool-chip {
 }
 
 .contextWindowRows strong,
-.contextWindowRows small { color: #858b93; font-weight: 450; text-align: right; }
+.contextWindowRows small { color: var(--process-text); font-weight: 450; text-align: right; }
 
-.is-messages { background: #7568cf; }
-.is-system-tools { background: #d46b45; }
-.is-mcp-tools { background: #2f9b73; }
-.is-system-prompt { background: #d49a27; }
-.is-skills { background: #c76a9b; }
-.is-buffer { background: #c9cbcf; }
-.is-free { background: #eef0f1; }
+.is-messages { background: var(--primary-color); }
+.is-system-tools { background: var(--error); }
+.is-mcp-tools { background: var(--success); }
+.is-system-prompt { background: var(--warning); }
+.is-skills { background: var(--code-keyword); }
+.is-buffer { background: var(--surface-hover); }
+.is-free { background: var(--surface-variant); }
 
 .contextMcpTools {
   margin-top: 5px;
-  border-top: 1px solid #eceeef;
+  border-top: 1px solid var(--outline-variant);
   padding-top: 7px;
 }
 
 .contextMcpTools summary {
   display: flex;
   justify-content: space-between;
-  color: #555b63;
+  color: var(--process-text);
   font-size: 12px;
   cursor: pointer;
 }
 
-.contextMcpTools summary span { color: #8a9098; }
+.contextMcpTools summary span { color: var(--process-text); }
 .contextMcpTools > div { max-height: 140px; padding: 5px 2px 0 17px; overflow: auto; }
-.contextMcpTools p { display: flex; justify-content: space-between; gap: 12px; margin: 5px 0; color: #858b93; font-size: 11px; }
+.contextMcpTools p { display: flex; justify-content: space-between; gap: 12px; margin: 5px 0; color: var(--process-text); font-size: 11px; }
 .contextMcpTools p span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .contextMcpTools p strong { font-weight: 450; }
 .slashCommandPanel {
@@ -3394,9 +3365,9 @@ button.agent-tool-chip {
   left: -1px;
   max-height: min(280px, calc(100vh - 130px));
   overflow: hidden;
-  border: 1px solid #dfe1e4;
+  border: 1px solid var(--outline-variant);
   border-radius: 10px 10px 0 0;
-  background: #fff;
+  background: var(--surface-color);
   box-shadow: none;
 }
 
@@ -3411,8 +3382,8 @@ button.agent-tool-chip {
   justify-content: space-between;
   gap: 16px;
   padding: 0 10px;
-  border-bottom: 1px solid #eceeef;
-  color: #9298a0;
+  border-bottom: 1px solid var(--outline-variant);
+  color: var(--process-text);
   font-size: 9px;
   letter-spacing: 0.02em;
 }
@@ -3434,14 +3405,14 @@ button.agent-tool-chip {
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: #3d4248;
+  color: var(--on-surface);
   text-align: left;
   cursor: pointer;
 }
 
 .slashCommandPanel button:hover,
 .slashCommandPanel button.is-selected {
-  background: #f0f1f2;
+  background: var(--surface-variant);
 }
 
 .slashCommandPanel button:disabled {
@@ -3457,7 +3428,7 @@ button.agent-tool-chip {
 
 .slashCommandPanel button span {
   overflow: hidden;
-  color: #8d939b;
+  color: var(--process-text);
   font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3466,7 +3437,7 @@ button.agent-tool-chip {
 .slashCommandPanel p {
   margin: 0;
   padding: 13px 9px;
-  color: #959ba3;
+  color: var(--process-text);
   font-size: 11px;
 }
 
@@ -3475,7 +3446,7 @@ button.agent-tool-chip {
 }
 
 .mcpComposerPanel header > strong {
-  color: #555b63;
+  color: var(--process-text);
   font-size: 10px;
   font-weight: 600;
 }
@@ -3508,7 +3479,7 @@ button.agent-tool-chip {
 
 .mcpServerIdentity small {
   overflow: hidden;
-  color: #9298a0;
+  color: var(--process-text);
   font-size: 9px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3518,7 +3489,7 @@ button.agent-tool-chip {
   display: flex;
   align-items: center;
   gap: 5px;
-  color: #6f7780;
+  color: var(--process-text);
   font-size: 9px;
 }
 
@@ -3528,7 +3499,7 @@ button.agent-tool-chip {
 }
 
 .mcpServerStatus.is-needsConfiguration {
-  color: #2c67c7;
+  color: var(--primary-color);
 }
 
 .slashCommandPanel .mcpPanelBack {
@@ -3538,7 +3509,7 @@ button.agent-tool-chip {
   grid-template-columns: none;
   gap: 5px;
   padding: 2px 4px;
-  color: #626971;
+  color: var(--process-text);
   font-size: 10px;
 }
 
@@ -3556,7 +3527,7 @@ button.agent-tool-chip {
 .mcpConfigForm label {
   display: grid;
   gap: 5px;
-  color: #737a83;
+  color: var(--process-text);
   font-size: 10px;
 }
 
@@ -3564,25 +3535,25 @@ button.agent-tool-chip {
   width: 100%;
   height: 32px;
   box-sizing: border-box;
-  border: 1px solid #dfe2e5;
+  border: 1px solid var(--outline-variant);
   border-radius: 6px;
   outline: 0;
   padding: 0 9px;
-  background: #fafafa;
-  color: #31363c;
+  background: var(--surface-color);
+  color: var(--on-surface);
   font-family: var(--font-mono);
   font-size: 11px;
 }
 
 .mcpConfigForm input:focus {
-  border-color: #aeb5bd;
-  background: #fff;
+  border-color: var(--outline);
+  background: var(--surface-color);
 }
 
 .slashCommandPanel .mcpEndpoint {
   overflow: hidden;
   padding: 0;
-  color: #9a9fa6;
+  color: var(--process-text);
   font-family: var(--font-mono);
   font-size: 9px;
   text-overflow: ellipsis;
@@ -3590,7 +3561,7 @@ button.agent-tool-chip {
 }
 
 .slashCommandPanel .mcpPanelError {
-  color: #c5221f;
+  color: var(--error);
 }
 
 .mcpConfigActions {
@@ -3604,20 +3575,20 @@ button.agent-tool-chip {
   min-height: 28px;
   display: block;
   padding: 5px 9px;
-  background: #f0f1f2;
+  background: var(--surface-variant);
   font-size: 10px;
   text-align: center;
 }
 
 .slashCommandPanel .mcpConfigActions button.is-primary {
-  background: #30343a;
-  color: #fff;
+  background: var(--solid-surface);
+  color: var(--solid-text);
 }
 
 .composer-error {
   margin: 6px 4px 0;
   padding: 0;
-  color: #c5221f;
+  color: var(--error);
   font-size: 11px;
 }
 
@@ -3675,7 +3646,7 @@ button.agent-tool-chip {
   border: 1px solid var(--outline-variant);
   border-radius: 999px;
   padding: 3px 10px;
-  background: color-mix(in srgb, var(--surface-color) 92%, #1a73e8 8%);
+  background: color-mix(in srgb, var(--surface-color) 92%, var(--primary-color) 8%);
 }
 
 .resume-strategy-toggle input {
@@ -3684,12 +3655,12 @@ button.agent-tool-chip {
 
 .resume-strategy-hint {
   font-size: 11px;
-  color: #0b57d0;
+  color: var(--primary-color);
 }
 
 .resume-strategy-error {
   font-size: 11px;
-  color: #c5221f;
+  color: var(--error);
 }
 
 .runtime-settings-wrap {
@@ -3701,7 +3672,7 @@ button.agent-tool-chip {
 .runtime-settings-panel {
   border: 1px solid var(--outline-variant);
   border-radius: 14px;
-  background: color-mix(in srgb, var(--surface-color) 94%, #1a73e8 6%);
+  background: color-mix(in srgb, var(--surface-color) 94%, var(--primary-color) 6%);
   overflow: hidden;
 }
 
@@ -3737,7 +3708,7 @@ button.agent-tool-chip {
   display: grid;
   gap: 10px;
   padding: 0 12px 12px;
-  border-top: 1px dashed color-mix(in srgb, var(--outline-variant) 82%, #1a73e8 18%);
+  border-top: 1px dashed color-mix(in srgb, var(--outline-variant) 82%, var(--primary-color) 18%);
 }
 
 .runtime-settings-grid {
@@ -3763,7 +3734,7 @@ button.agent-tool-chip {
   min-width: 0;
   border: 1px solid var(--outline-variant);
   border-radius: 10px;
-  background: #ffffff;
+  background: var(--surface-color);
   color: var(--on-surface);
   padding: 8px 10px;
   font-size: var(--font-size-sm);
@@ -3775,7 +3746,7 @@ button.agent-tool-chip {
   min-width: 0;
   border: 1px solid var(--outline-variant);
   border-radius: 10px;
-  background: #ffffff;
+  background: var(--surface-color);
   color: var(--on-surface);
   padding: 8px 10px;
   font-size: var(--font-size-sm);
@@ -3808,7 +3779,7 @@ button.agent-tool-chip {
 .runtime-settings-save {
   border: 1px solid var(--outline-variant);
   border-radius: 999px;
-  background: #ffffff;
+  background: var(--surface-color);
   color: var(--on-surface);
   padding: 6px 12px;
   cursor: pointer;
@@ -3822,7 +3793,7 @@ button.agent-tool-chip {
 
 .provider-smoke-panel {
   margin-top: 8px;
-  background: color-mix(in srgb, var(--surface-color) 92%, #0f9d58 8%);
+  background: color-mix(in srgb, var(--surface-color) 92%, var(--success) 8%);
 }
 
 .provider-smoke-toolbar,
@@ -3839,9 +3810,9 @@ button.agent-tool-chip {
 }
 
 .provider-smoke-tool-meta span {
-  border: 1px solid color-mix(in srgb, var(--outline-variant) 76%, #0f9d58 24%);
+  border: 1px solid color-mix(in srgb, var(--outline-variant) 76%, var(--success) 24%);
   border-radius: 999px;
-  background: #ffffff;
+  background: var(--surface-color);
   color: var(--on-surface-variant);
   font-size: 11px;
   padding: 4px 8px;
@@ -3855,21 +3826,21 @@ button.agent-tool-chip {
 }
 
 .provider-smoke-empty {
-  background: color-mix(in srgb, #ffffff 86%, #0f9d58 14%);
+  background: color-mix(in srgb, var(--surface-color) 86%, var(--success) 14%);
   color: var(--on-surface-variant);
 }
 
 .provider-smoke-error {
-  background: color-mix(in srgb, #ffffff 84%, #c5221f 16%);
-  color: #9b1c18;
+  background: color-mix(in srgb, var(--surface-color) 84%, var(--error) 16%);
+  color: var(--error);
 }
 
 .provider-smoke-result {
   display: grid;
   gap: 8px;
-  border: 1px solid color-mix(in srgb, var(--outline-variant) 76%, #0f9d58 24%);
+  border: 1px solid color-mix(in srgb, var(--outline-variant) 76%, var(--success) 24%);
   border-radius: 14px;
-  background: #ffffff;
+  background: var(--surface-color);
   padding: 10px;
 }
 
@@ -3898,7 +3869,7 @@ button.agent-tool-chip {
   overflow: auto;
   margin: 0;
   border-radius: 10px;
-  background: color-mix(in srgb, var(--surface-container) 80%, #0f9d58 20%);
+  background: color-mix(in srgb, var(--surface-container) 80%, var(--success) 20%);
   color: var(--on-surface);
   font-size: 11px;
   line-height: 1.45;
@@ -3979,7 +3950,7 @@ button.agent-tool-chip {
 .clarification-option.selected {
   background: var(--primary-color);
   border-color: var(--primary-color);
-  color: #fff;
+  color: var(--solid-text);
 }
 
 .clarification-text-input {
@@ -4018,12 +3989,12 @@ button.agent-tool-chip {
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  background: #9aa0a6;
+  background: var(--surface-hover);
   transition: background 0.2s ease;
 }
 
 .pose-vision-dot.active {
-  background: #34a853;
+  background: var(--success);
 }
 
 .pose-vision-body {
@@ -4036,7 +4007,7 @@ button.agent-tool-chip {
   position: relative;
   width: 100%;
   aspect-ratio: 16 / 9;
-  background: #0f172a;
+  background: var(--solid-surface);
   border-radius: var(--radius-lg);
   overflow: hidden;
 }
@@ -4075,7 +4046,7 @@ button.agent-tool-chip {
 }
 
 .pose-vision-error {
-  color: #ea4335;
+  color: var(--error);
   font-size: var(--font-size-sm);
 }
 
@@ -4194,7 +4165,7 @@ button.agent-tool-chip {
 
 .pose-vision-event-item.risk {
   background: rgba(234, 67, 53, 0.12);
-  color: #ea4335;
-  border-left-color: #ea4335;
+  color: var(--error);
+  border-left-color: var(--primary-color);
   font-weight: 600;
 }

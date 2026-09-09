@@ -1,0 +1,114 @@
+/* Shared theme roles; the cross-client parity gate checks this file. */
+:root[data-theme] {
+  --surface-color: #ffffff;
+  --surface-variant: #f5f5f4;
+  --surface-container: #eeeeec;
+  --surface-hover: #e8e8e5;
+  --surface-active: #e2e2df;
+  --on-surface: #202428;
+  --process-text: #6b6b6b;
+  --on-surface-variant: var(--process-text);
+  --outline: #b8b8b4;
+  --outline-variant: #e2e2df;
+  --solid-surface: #252a31;
+  --solid-text: #ffffff;
+  --primary-color: #2469c7;
+  --primary-hover: #1856ae;
+  --error: #b42332;
+  --success: #287343;
+  --warning: #875d00;
+  --scrim: rgba(0, 0, 0, .22);
+  --code-keyword: #7041a5;
+  --code-string: #287343;
+  --code-number: #805618;
+  --diff-add-bg: #edf8ef;
+  --diff-remove-bg: #fff0f1;
+  --background: 0 0% 100%;
+  --foreground: 210 11% 14%;
+  --primary: 214 69% 46%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 60 5% 96%;
+  --secondary-foreground: 210 11% 14%;
+  --muted-foreground: 0 0% 42%;
+  --accent: 60 5% 92%;
+  --accent-foreground: 210 11% 14%;
+  --destructive: 354 67% 42%;
+  --destructive-foreground: 0 0% 100%;
+  --input: 60 3% 72%;
+  --ring: 214 69% 46%;
+  --status-shimmer-base: var(--process-text);
+  --status-shimmer-peak: var(--on-surface);
+}
+:root[data-theme="dark"] {
+  --surface-color: #191919;
+  --surface-variant: #242424;
+  --surface-container: #2c2c2c;
+  --surface-hover: #343434;
+  --surface-active: #3c3c3c;
+  --on-surface: #ededed;
+  --process-text: #a0a0a0;
+  --outline: #777777;
+  --outline-variant: #424242;
+  --solid-surface: #e0e0e0;
+  --solid-text: #191919;
+  --primary-color: #88b7ff;
+  --primary-hover: #b2d0ff;
+  --error: #ff919b;
+  --success: #85d69b;
+  --warning: #eac66b;
+  --scrim: rgba(0, 0, 0, .55);
+  --code-keyword: #d3acff;
+  --code-string: #85d69b;
+  --code-number: #eac66b;
+  --diff-add-bg: #1d3526;
+  --diff-remove-bg: #3b2428;
+  --background: 0 0% 10%;
+  --foreground: 0 0% 93%;
+  --primary: 216 100% 77%;
+  --primary-foreground: 0 0% 10%;
+  --secondary: 0 0% 14%;
+  --secondary-foreground: 0 0% 93%;
+  --muted-foreground: 0 0% 63%;
+  --accent: 0 0% 20%;
+  --accent-foreground: 0 0% 93%;
+  --destructive: 354 100% 78%;
+  --destructive-foreground: 0 0% 10%;
+  --input: 0 0% 47%;
+  --ring: 216 100% 77%;
+}
+:root[data-theme] {
+  --shell: var(--surface-variant);
+  --surface: var(--surface-color);
+  --border: var(--outline-variant);
+  --border-strong: var(--outline);
+  --text: var(--on-surface);
+  --muted: var(--process-text);
+  --danger: var(--error);
+  --reasoning-text: var(--process-text);
+  --reasoning-label: var(--process-text);
+  --color-border: var(--outline-variant);
+  --color-muted: var(--surface-variant);
+  --color-muted-foreground: var(--process-text);
+}
+html[data-theme] .confirmDialog::backdrop { background:var(--scrim); }
+html, body { background: var(--surface-color); color: var(--on-surface); }
+.themeSelector { display:flex; align-items:center; justify-content:space-between; gap:24px; min-height:64px; color:var(--on-surface); font-size:14px; }
+.themeSelectorControl { display:inline-flex; position:relative; flex:none; }
+.themeSelector select { appearance:none; min-width:144px; max-width:100%; min-height:34px; padding:6px 32px 6px 12px; border:1px solid var(--outline); border-radius:7px; background:var(--surface-color); color:inherit; font:inherit; cursor:pointer; }
+.themeSelector select:hover { background:var(--surface-variant); }
+.themeSelector select:focus-visible { outline:2px solid var(--primary-color); outline-offset:2px; }
+.themeSelectorControl svg { position:absolute; right:10px; top:50%; width:14px; height:14px; transform:translateY(-50%); color:var(--process-text); pointer-events:none; }
+.sidebarTheme { padding:4px 12px; }
+.sidebarTheme .themeSelector { min-height:40px; gap:8px; font-size:13px; flex-wrap:wrap; }
+.sidebarTheme .themeSelector select { min-width:0; width:140px; font-size:13px; }
+@media (forced-colors: active) {
+  :root[data-theme] { --surface-color: Canvas; --surface-variant: Canvas; --surface-container: Canvas; --on-surface:CanvasText; --process-text:CanvasText; --outline:ButtonText; --outline-variant:ButtonText; --primary-color:LinkText; }
+}
+
+::view-transition-old(root), ::view-transition-new(root) { animation:none; mix-blend-mode:normal; }
+::view-transition-new(root) { z-index:1; }
+.themeToggle { display:flex; align-items:center; margin:0 8px; -webkit-app-region:no-drag; }
+.themeToggle button { border:0; background:transparent; color:var(--process-text); display:grid; place-items:center; width:28px; height:28px; border-radius:6px; cursor:pointer; }
+.themeToggle button:hover { color:var(--on-surface); }
+.themeToggle svg { width:16px; height:16px; }
+.themeToggle button:focus-visible { outline:2px solid var(--primary-color); outline-offset:2px; }

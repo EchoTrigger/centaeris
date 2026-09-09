@@ -14,7 +14,7 @@ test("opens each durable Agent session once in the preview tab strip", async () 
   assert.match(panelSource, /agentTabs\.map\(\(tab\)/);
   assert.match(panelSource, /className="summaryPanelCollapse"/);
   assert.match(previewSource, /snapshot\.activeReplay\?\.status === "queued"/);
-  assert.match(previewSource, />重新加载<\/button>/);
+  assert.match(previewSource, /agentSessionPreview\.reload/);
   assert.doesNotMatch(runtimeCoreSource, /没有连上模型/);
 
   await assert.rejects(

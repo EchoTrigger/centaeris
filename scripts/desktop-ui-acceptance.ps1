@@ -18,6 +18,8 @@ try {
 
     Write-Host "[2/$stepCount] ui gate" -ForegroundColor Cyan
     npm run gate --workspace centaeris-ui
+    npx playwright install chromium
+    npm run test:browser --workspace centaeris-ui
 
     Write-Host "[3/$stepCount] electron check" -ForegroundColor Cyan
     npm run check --workspace @centaeris/electron-host

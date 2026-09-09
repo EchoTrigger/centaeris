@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import {
   getToolActivityDefinition,
   getToolActivitySummary,
@@ -32,21 +33,21 @@ export const getToolActivityAtom = (
   try {
     atomDefinition = getToolActivityDefinition(operation.toolName);
   } catch {
-    throw new Error(`不支持的工具 operation: ${operation.toolName || "<missing>"}`);
+    throw new Error(t("toolActivityModel.unsupportedToolOperationValue", { value1: operation.toolName || "<missing>" }));
   }
   if (operation.toolName === "bash") {
     if (operation.resultState && operation.kind !== "command") {
-      throw new Error(`工具 operation kind 不支持: bash/${operation.kind || "<missing>"}`);
+      throw new Error(t("toolActivityModel.unsupportedToolOperationKindBashValue", { value1: operation.kind || "<missing>" }));
     }
   } else if (operation.kind !== undefined) {
-    throw new Error(`工具 operation kind 不支持: ${operation.toolName}/${operation.kind}`);
+    throw new Error(t("chatToolRuntimeModel.unsupportedToolOperationKindValueValue", { value1: operation.toolName, value2: operation.kind }));
   }
   if (["write", "edit"].includes(operation.toolName) && operation.resultState) {
     if (isFailedResult(operation.resultState) && operation.diffPreview) {
-      throw new Error(`失败 ${operation.toolName} operation 不得携带 diffPreview`);
+      throw new Error(t("toolActivityModel.failedValueOperationMustNotIncludeDiffpreview", { value1: operation.toolName }));
     }
     if (!isFailedResult(operation.resultState) && !operation.diffPreview) {
-      throw new Error(`成功 ${operation.toolName} operation 缺少 diffPreview`);
+      throw new Error(t("toolActivityModel.successfulValueOperationIsMissingDiffpreview", { value1: operation.toolName }));
     }
   }
   return { ...atomDefinition, iconToken: atomDefinition.kind };

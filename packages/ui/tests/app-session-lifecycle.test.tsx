@@ -251,7 +251,7 @@ test("a mismatched delete response cannot clean local session state", async () =
 
   await act(async () => {
     await expect(getSidebarProps().onDeleteSession("session-a")).rejects.toThrow(
-      "删除会话响应身份不匹配",
+      "Delete response identity mismatch",
     );
   });
 

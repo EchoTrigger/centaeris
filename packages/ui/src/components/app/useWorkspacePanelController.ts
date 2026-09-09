@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import { useCallback, useMemo, useReducer, useRef } from "react";
 import type { UiSession } from "../../types/ui";
 import {
@@ -205,7 +206,7 @@ export function useWorkspacePanelController({
             ? error.message
             : typeof error === "string" && error.trim()
               ? error
-              : "读取文件失败",
+              : t("useWorkspacePanelController.unableToReadFile"),
         },
       });
     }
@@ -232,7 +233,7 @@ export function useWorkspacePanelController({
         title: title.trim() || child?.title || "Agent",
         sessionId: normalizedSessionId,
         parentSessionId,
-        parentTitle: parent?.title || currentSession?.title || "主会话",
+        parentTitle: parent?.title || currentSession?.title || t("useWorkspacePanelController.mainConversation"),
       },
     });
   }, []);
