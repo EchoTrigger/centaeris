@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { type RefObject, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, FileText, Image } from "lucide-react";
 import {
@@ -82,7 +83,7 @@ const renderFileEntry = (
         className={`workspaceFilesEntry workspaceFilesFileButton ${focused ? "is-focused" : ""}`}
         key={entry.path}
         ref={focused ? selectedRef : undefined}
-        aria-label={`打开 ${entry.path}`}
+        aria-label={t("toolActivityTranscript.openValue", { value1: entry.path })}
         onClick={() => onOpenFile?.(entry)}
       >
         {content}
@@ -158,7 +159,7 @@ export function WorkspaceFilesPanel({
         setState({
           tree: null,
           error:
-            error instanceof Error ? error.message : "读取工作区文件失败。",
+            error instanceof Error ? error.message : t("workspaceFilesPanel.unableToReadWorkspaceFiles"),
           loading: false,
         });
       });
@@ -184,23 +185,23 @@ export function WorkspaceFilesPanel({
   return (
     <section className="workspaceFilesPanel">
       <header className="workspaceFilesHeader">
-        <button type="button" className="workspaceFilesScope" aria-label="所有文件">
-          <span>所有文件</span>
+        <button type="button" className="workspaceFilesScope" aria-label={t("workspaceFilesPanel.allFiles")}>
+          <span>{t("workspaceFilesPanel.allFiles")}</span>
           <ChevronDown className="workspaceFilesScopeIcon" aria-hidden="true" />
         </button>
         {focusedLine ? (
-          <span className="workspaceFilesFocusLine">行 {focusedLine}</span>
+          <span className="workspaceFilesFocusLine">{t("workspaceFilesPanel.lines")}{" "}{focusedLine}</span>
         ) : null}
       </header>
       <div className="workspaceFilesBody">
         {state.loading ? (
-          <div className="workspaceFilesHint">正在读取工作区...</div>
+          <div className="workspaceFilesHint">{t("workspaceFilesPanel.loadingWorkspace")}</div>
         ) : null}
         {state.error ? (
           <div className="workspaceFilesHint is-error">{state.error}</div>
         ) : null}
         {!workspaceRoot && !state.loading && !state.error ? (
-          <div className="workspaceFilesEmpty">未打开工作区</div>
+          <div className="workspaceFilesEmpty">{t("workspaceFilesPanel.noWorkspaceOpen")}</div>
         ) : null}
         {state.tree ? (
           <>

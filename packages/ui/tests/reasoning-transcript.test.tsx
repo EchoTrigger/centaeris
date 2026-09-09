@@ -19,13 +19,16 @@ test("reasoning disclosure survives updates, completion and row remount without 
   act(() => { renderer = create(<AgentResultStream turn={turn} />); });
   expect(renderer.root.findAll((node) => node.props.className === "agentStatusRow")).toHaveLength(0);
   const button = () => renderer.root.findAllByType("button")[0];
-  expect(button().props["aria-label"]).toBe("正在思考");
+  expect(button().props["aria-label"]).toBe("Thinking");
+  expect(button().findAllByType("span")[0].props.className).toBe("statusShimmer");
+  expect(button().findAllByType("span")[0].children).toEqual(["Thinking"]);
   expect(renderer.root.findByProps({ className: "reasoningPreviewText" }).children).toEqual(["Inspect"]);
   expect(button().props["aria-expanded"]).toBe(false);
   expect(renderer.root.findAllByType("p")).toHaveLength(0);
   act(() => button().props.onClick());
   expect(button().props["aria-expanded"]).toBe(true);
-  expect(button().props["aria-label"]).toBe("正在思考");
+  expect(button().props["aria-label"]).toBe("Thoughts");
+  expect(button().findAllByType("span")[0].props.className).not.toBe("statusShimmer");
   expect(renderer.root.findAllByProps({ className: "reasoningPreviewText" })).toHaveLength(0);
   expect(renderer.root.find((node) => node.props.className === "agentReasoningBody").props.tabIndex).toBe(0);
   const updated: AssistantExecutionTurn = { ...turn, isStreaming: false, chunks: [
@@ -33,9 +36,11 @@ test("reasoning disclosure survives updates, completion and row remount without 
     { id: "r2", kind: "reasoning", text: "Separate", status: "interrupted" },
   ] };
   act(() => renderer.update(<AgentResultStream turn={updated} />));
-  expect(button().props["aria-label"]).toBe("思考");
+  expect(button().props["aria-label"]).toBe("Thoughts");
+  expect(renderer.root.findAllByType("button").map((item) => item.props["aria-label"])).toEqual(["Thoughts", "Thoughts"]);
   expect(renderer.root.findAllByType("button").map((item) => item.props["aria-expanded"])).toEqual([true, false]);
   expect(renderer.root.findByType("p").children).toEqual(["Inspect more"]);
+  expect(renderer.root.findByProps({ className: "reasoningPreviewText" }).children).toEqual(["Separate"]);
   act(() => renderer.unmount());
   act(() => { renderer = create(<AgentResultStream turn={updated} />); });
   expect(button().props["aria-expanded"]).toBe(true);
@@ -45,4 +50,6 @@ test("reasoning disclosure survives updates, completion and row remount without 
   expect(button().props["aria-expanded"]).toBe(true);
   act(() => button().props.onClick());
   expect(renderer.root.findAllByType("p")).toHaveLength(0);
+  expect(button().props["aria-label"]).toBe("Thoughts");
+  expect(renderer.root.findAllByProps({ className: "reasoningPreviewText" }).map((node) => node.children)).toEqual([["Inspect more"], ["Separate"]]);
 });

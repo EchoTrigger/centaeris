@@ -25,7 +25,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
-const MAX_MCP_RESULT_BYTES: usize = 256 * 1024;
 const RETRYABLE_CONNECT_FAILURE_COOLDOWN: Duration = Duration::from_millis(250);
 const MAX_DISCOVERY_PAGES: usize = 256;
 
@@ -599,9 +598,8 @@ fn project_content(result: CallToolResult) -> Result<(String, Value, bool), Stri
     });
     let encoded = serde_json::to_vec(&projected)
         .map_err(|error| format!("serialize MCP tool result failed: {error}"))?;
-    if encoded.len() > MAX_MCP_RESULT_BYTES {
-        return Err("MCP tool result exceeded 262144 bytes".to_string());
-    }
+    // The transport already bounds input. Preserve accepted results so Core can
+    // save the complete output and present a bounded continuation preview.
     let content = match (
         projected.get("text").and_then(Value::as_array),
         projected.get("structuredContent"),
@@ -851,6 +849,18 @@ mod tests {
             .expect("contract"),
             cancellation_probe: None,
         }
+    }
+
+    #[test]
+    fn large_text_result_reaches_core_capture_without_losing_bytes() {
+        let original = "界😀".repeat(50_000);
+        let (content, _, is_error) =
+            project_content(CallToolResult::success(vec![ContentBlock::text(
+                original.clone(),
+            )]))
+            .expect("large result must reach Core capture");
+        assert_eq!(content, original);
+        assert!(!is_error);
     }
 
     #[test]

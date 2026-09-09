@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { EditorState, RangeSetBuilder } from "@codemirror/state";
 import { EditorView, Decoration, drawSelection, highlightActiveLine, highlightActiveLineGutter, highlightSpecialChars, keymap, lineNumbers } from "@codemirror/view";
 import { defaultKeymap } from "@codemirror/commands";
-import { syntaxHighlighting, defaultHighlightStyle, bracketMatching, foldGutter } from "@codemirror/language";
+import { syntaxHighlighting, HighlightStyle, defaultHighlightStyle, bracketMatching, foldGutter } from "@codemirror/language";
 import { cpp } from "@codemirror/lang-cpp";
 import { css } from "@codemirror/lang-css";
 import { html } from "@codemirror/lang-html";
@@ -128,7 +128,7 @@ export function CodePreview({ content, path, targetLine, targetEndLine, variant 
       highlightActiveLine(),
       highlightActiveLineGutter(),
       bracketMatching(),
-      syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+      syntaxHighlighting(HighlightStyle.define(defaultHighlightStyle.specs.map((spec) => ({ ...spec, color: spec.color === "#085" || spec.color === "#164" ? "var(--code-string)" : spec.color === "#30a" || spec.color === "#708" ? "var(--code-keyword)" : spec.color === "#a40" ? "var(--code-number)" : "var(--on-surface)" }))), { fallback: true }),
       keymap.of(defaultKeymap),
       EditorState.readOnly.of(true),
       EditorView.editable.of(false),
@@ -138,30 +138,30 @@ export function CodePreview({ content, path, targetLine, targetEndLine, variant 
       EditorView.theme({
         "&": {
           height: "100%",
-          backgroundColor: "#ffffff",
-          color: "#24282d",
-          fontSize: "12px",
+          backgroundColor: "var(--surface-color)",
+          color: "var(--on-surface)",
+          fontSize: "13px",
         },
         ".cm-scroller": {
           fontFamily: "var(--font-mono)",
-          lineHeight: "19px",
+          lineHeight: "21px",
           overflow: "auto",
         },
         ".cm-content": {
           minHeight: "100%",
-          caretColor: "#24282d",
+          caretColor: "var(--on-surface)",
         },
         ".cm-gutters": {
-          backgroundColor: "#ffffff",
+          backgroundColor: "var(--surface-color)",
           borderRight: "1px solid color-mix(in srgb, var(--outline-variant) 58%, transparent)",
-          color: "#b8bec6",
+          color: "var(--process-text)",
         },
         ".cm-activeLine": {
-          backgroundColor: "#f7f9fb",
+          backgroundColor: "var(--surface-variant)",
         },
         ".cm-activeLineGutter": {
-          backgroundColor: "#f7f9fb",
-          color: "#8f97a1",
+          backgroundColor: "var(--surface-variant)",
+          color: "var(--process-text)",
         },
       }),
     ],

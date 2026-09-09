@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import { memo } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { CornerDownLeft } from "lucide-react";
@@ -59,7 +60,7 @@ const renderTranscriptItem = (
             className="agentGuidedSupplementIcon"
             aria-hidden="true"
           />
-          <span>已引导对话</span>
+          <span>{t("agentTranscriptSections.conversationRedirected")}</span>
         </div>
         <div className="agentGuidedSupplementBubble">
           <MarkdownContent
@@ -126,7 +127,7 @@ export const AgentProcessTranscript = memo(function AgentProcessTranscript({
     (hasTachikoma || !hasRunningTool) && !hasFinalItem ? (
     <div className="agentStatusRow">
       <div className="agentRunStatus" aria-live="polite">
-        <span className="agentRunStatusText">
+        <span className="agentRunStatusText statusShimmer">
           {hasTachikoma ? (
             <>
               Tachikoma{" "}
@@ -209,7 +210,7 @@ export const AgentSubagentTranscript = memo(function AgentSubagentTranscript({
     return null;
   }
   return (
-    <div className="agentSubagentTags" aria-label="Agent 会话">
+    <div className="agentSubagentTags" aria-label={t("agentTranscriptSections.agentConversation")}>
       {subagents.map((subagent) => (
         <SubagentTranscriptTag
           entry={subagent}

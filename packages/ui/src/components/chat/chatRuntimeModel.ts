@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import {
   getAgentContextUsage,
   getAgentRuntimeConfig,
@@ -274,7 +275,7 @@ const appendHistoryMessage = (
     const hasImage = Array.isArray(rawMessage.imageData)
       ? rawMessage.imageData.length > 0
       : Boolean(rawMessage.imageData);
-    const text = content || (hasImage ? "[图片消息]" : "");
+    const text = content || (hasImage ? t("chatRuntimeModel.imageMessage") : "");
     if (!text) {
       return;
     }
@@ -295,7 +296,7 @@ const appendHistoryMessage = (
       : "";
   const agentRunId = normalizeAgentRunId(rawMessage.agentRunId);
   if (!agentRunId) {
-    throw new Error(`历史消息 ${messageId} 缺少 agentRunId`);
+    throw new Error(t("chatRuntimeModel.historyMessageValueIsMissingAgentrunid", { value1: messageId }));
   }
   const taskSummary = agentRunsById.get(agentRunId);
   const taskStatus = normalizeAgentRunStatus(taskSummary?.status);
@@ -461,7 +462,7 @@ export const buildSeenSetsFromStreamPayloads = (
         typeof payload.type === "string" && payload.type.trim()
           ? payload.type.trim()
           : "<missing>";
-      throw new Error(`协议错误：不支持的 stream payload type=${payloadType}。`);
+      throw new Error(t("chatRuntimeModel.protocolErrorUnsupportedStreamPayloadTypeValue", { value1: payloadType }));
     }
     if (
       (payload.type === "runtime_event" || payload.type === "session_event") &&
@@ -549,7 +550,7 @@ export const buildRestoreTurn = (
       kind: "task",
       task: {
         id: pendingQuestionRequest.id,
-        title: "等待补充信息",
+        title: t("chatPendingPanels.waitingForMoreInformation"),
         summary: pendingQuestionRequest.question,
         status: "running",
         provider: "tool",
@@ -574,7 +575,7 @@ export const readHydrationValue = async <T,>(
   try {
     return await task;
   } catch (error) {
-    throw new Error(`${label}失败：${formatExecutionError(error)}`);
+    throw new Error(t("chatRuntimeModel.valueFailedValue", { value1: label, value2: formatExecutionError(error) }));
   }
 };
 
@@ -603,7 +604,7 @@ const defaultHydrationYield = (): Promise<void> => {
 
 const assertHydrationNotCancelled = (control?: HydrationControl): void => {
   if (control?.isCancelled?.()) {
-    throw new Error("历史恢复已取消");
+    throw new Error(t("chatRuntimeModel.historyRecoveryCancelled"));
   }
 };
 
@@ -640,11 +641,11 @@ export const replayAgentRunStreamFromCursor = async (
 ): Promise<AgentRunReplaySnapshot> => {
   const normalizedAgentRunId = normalizeAgentRunId(agentRunId);
   if (!normalizedAgentRunId) {
-    throw new Error("恢复任务流失败：agentRunId 为空");
+    throw new Error(t("chatRuntimeModel.unableToRestoreTaskStreamAgentrunidIsEmpty"));
   }
   if (!Number.isInteger(startCursor) || startCursor < 0) {
     throw new Error(
-      `恢复任务流 ${normalizedAgentRunId} 失败：cursor 非法 ${startCursor}`,
+      t("chatRuntimeModel.unableToRestoreTaskStreamValueInvalidCursorValue", { value1: normalizedAgentRunId, value2: startCursor }),
     );
   }
   let cursor = startCursor;
@@ -652,7 +653,7 @@ export const replayAgentRunStreamFromCursor = async (
   for (let page = 0; page < AGENT_RUN_STREAM_REPLAY_MAX_PAGES; page += 1) {
     const requestCursor = cursor;
     const response = await readHydrationValue(
-      `恢复任务流 ${normalizedAgentRunId}`,
+      t("chatRuntimeModel.restoringTaskStreamValue", { value1: normalizedAgentRunId }),
       replayAgentRunStream({
         agentRunId: normalizedAgentRunId,
         cursor: requestCursor,
@@ -662,7 +663,7 @@ export const replayAgentRunStreamFromCursor = async (
     const responseAgentRunId = normalizeAgentRunId(response.agentRunId);
     if (responseAgentRunId && responseAgentRunId !== normalizedAgentRunId) {
       throw new Error(
-        `恢复任务流 ${normalizedAgentRunId} 失败：响应 agentRunId 不一致 ${responseAgentRunId}`,
+        t("chatRuntimeModel.unableToRestoreTaskStreamValueResponseAgentrunidMismatch", { value1: normalizedAgentRunId, value2: responseAgentRunId }),
       );
     }
     const pageItems = normalizePersistedStreamPayloads(response.items);
@@ -688,13 +689,13 @@ export const replayAgentRunStreamFromCursor = async (
     }
     if (nextCursor <= requestCursor) {
       throw new Error(
-        `恢复任务流 ${normalizedAgentRunId} 失败：cursor 未前进 ${requestCursor} -> ${nextCursor}`,
+        t("chatRuntimeModel.unableToRestoreTaskStreamValueCursorDidNot", { value1: normalizedAgentRunId, value2: requestCursor, value3: nextCursor }),
       );
     }
     cursor = nextCursor;
   }
   throw new Error(
-    `恢复任务流 ${normalizedAgentRunId} 失败：超过 ${AGENT_RUN_STREAM_REPLAY_MAX_PAGES} 页`,
+    t("chatRuntimeModel.unableToRestoreTaskStreamValueExceededValuePages", { value1: normalizedAgentRunId, value2: AGENT_RUN_STREAM_REPLAY_MAX_PAGES }),
   );
 };
 
@@ -706,7 +707,7 @@ export const buildAgentRunSummaryMap = (
     const agentRunId = normalizeAgentRunId(agentRun.agentRunId);
     if (agentRunId) {
       if (byAgentRunId.has(agentRunId)) {
-        throw new Error(`历史恢复失败：session projection 重复 task ${agentRunId}`);
+        throw new Error(t("chatRuntimeModel.historyRecoveryFailedDuplicateSessionProjectionTaskValue", { value1: agentRunId }));
       }
       byAgentRunId.set(agentRunId, agentRun);
     }
@@ -719,15 +720,15 @@ export const assertSessionProjection = (
   sessionId: string,
 ): void => {
   if (!projection || typeof projection !== "object") {
-    throw new Error("历史恢复失败：session projection 为空");
+    throw new Error(t("chatRuntimeModel.historyRecoveryFailedSessionProjectionIsEmpty"));
   }
   if (projection.schemaVersion !== SESSION_PROJECTION_SCHEMA_VERSION) {
     throw new Error(
-      `历史恢复失败：session projection schema 不匹配 ${projection.schemaVersion}`,
+      t("chatRuntimeModel.historyRecoveryFailedSessionProjectionSchemaMismatchValue", { value1: projection.schemaVersion }),
     );
   }
   if (!projection.session || typeof projection.session !== "object") {
-    throw new Error("历史恢复失败：session projection 缺少 session");
+    throw new Error(t("chatRuntimeModel.historyRecoveryFailedSessionProjectionIsMissingSession"));
   }
   const projectionSessionId =
     typeof projection.session.id === "string"
@@ -735,14 +736,14 @@ export const assertSessionProjection = (
       : "";
   if (projectionSessionId !== sessionId) {
     throw new Error(
-      `历史恢复失败：session projection sessionId 不匹配 ${projectionSessionId}`,
+      t("chatRuntimeModel.historyRecoveryFailedSessionProjectionSessionidMismatchValue", { value1: projectionSessionId }),
     );
   }
   if (!Array.isArray(projection.agentRuns)) {
-    throw new Error("历史恢复失败：session projection 缺少 agentRuns");
+    throw new Error(t("chatRuntimeModel.historyRecoveryFailedSessionProjectionIsMissingAgentruns"));
   }
   if (!Array.isArray(projection.agentRunReplays)) {
-    throw new Error("历史恢复失败：session projection 缺少 agentRunReplays");
+    throw new Error(t("chatRuntimeModel.historyRecoveryFailedSessionProjectionIsMissingAgentrunreplays"));
   }
 };
 
@@ -754,26 +755,26 @@ export const buildProjectionReplaySnapshots = (
   projection.agentRunReplays.forEach((entry) => {
     const agentRunId = normalizeAgentRunId(entry.agentRunId);
     if (!agentRunId) {
-      throw new Error("历史恢复失败：session projection 包含空 agentRunId");
+      throw new Error(t("chatRuntimeModel.historyRecoveryFailedSessionProjectionContainsAnEmptyAgentrunid"));
     }
     if (snapshots.has(agentRunId)) {
-      throw new Error(`历史恢复失败：session projection 重复 replay ${agentRunId}`);
+      throw new Error(t("chatRuntimeModel.historyRecoveryFailedDuplicateSessionProjectionReplayValue", { value1: agentRunId }));
     }
     const replaySessionId =
       typeof entry.sessionId === "string" ? entry.sessionId.trim() : "";
     if (replaySessionId !== sessionId) {
       throw new Error(
-        `历史恢复失败：session projection replay ${agentRunId} sessionId 不匹配`,
+        t("chatRuntimeModel.historyRecoveryFailedSessionProjectionReplayValueSessionidMismatch", { value1: agentRunId }),
       );
     }
     if (!Number.isInteger(entry.nextCursor) || entry.nextCursor < 0) {
       throw new Error(
-        `历史恢复失败：session projection task ${agentRunId} cursor 非法`,
+        t("chatRuntimeModel.historyRecoveryFailedSessionProjectionTaskValueHasAn", { value1: agentRunId }),
       );
     }
     if (!Array.isArray(entry.items)) {
       throw new Error(
-        `历史恢复失败：session projection task ${agentRunId} items 非法`,
+        t("chatRuntimeModel.historyRecoveryFailedSessionProjectionTaskValueHasInvalid", { value1: agentRunId }),
       );
     }
     snapshots.set(agentRunId, {
@@ -795,26 +796,26 @@ export const buildProjectionReplaySnapshotsChunked = async (
     const entry = projection.agentRunReplays[index];
     const agentRunId = normalizeAgentRunId(entry.agentRunId);
     if (!agentRunId) {
-      throw new Error("历史恢复失败：session projection 包含空 agentRunId");
+      throw new Error(t("chatRuntimeModel.historyRecoveryFailedSessionProjectionContainsAnEmptyAgentrunid"));
     }
     if (snapshots.has(agentRunId)) {
-      throw new Error(`历史恢复失败：session projection 重复 replay ${agentRunId}`);
+      throw new Error(t("chatRuntimeModel.historyRecoveryFailedDuplicateSessionProjectionReplayValue", { value1: agentRunId }));
     }
     const replaySessionId =
       typeof entry.sessionId === "string" ? entry.sessionId.trim() : "";
     if (replaySessionId !== sessionId) {
       throw new Error(
-        `历史恢复失败：session projection replay ${agentRunId} sessionId 不匹配`,
+        t("chatRuntimeModel.historyRecoveryFailedSessionProjectionReplayValueSessionidMismatch", { value1: agentRunId }),
       );
     }
     if (!Number.isInteger(entry.nextCursor) || entry.nextCursor < 0) {
       throw new Error(
-        `历史恢复失败：session projection task ${agentRunId} cursor 非法`,
+        t("chatRuntimeModel.historyRecoveryFailedSessionProjectionTaskValueHasAn", { value1: agentRunId }),
       );
     }
     if (!Array.isArray(entry.items)) {
       throw new Error(
-        `历史恢复失败：session projection task ${agentRunId} items 非法`,
+        t("chatRuntimeModel.historyRecoveryFailedSessionProjectionTaskValueHasInvalid", { value1: agentRunId }),
       );
     }
     snapshots.set(agentRunId, {
@@ -834,26 +835,26 @@ export const buildSessionHydrationSnapshot = async (
 ): Promise<SessionHydrationSnapshot> => {
   const normalizedSessionId = sessionId.trim();
   if (!normalizedSessionId) {
-    throw new Error("历史恢复失败：sessionId 为空");
+    throw new Error(t("chatRuntimeModel.historyRecoveryFailedSessionidIsEmpty"));
   }
   assertHydrationNotCancelled(control);
   setHydrationStage(control, "fetchProjection");
   const [sessionProjection, agentState, runtimeConfig, usage] =
     await Promise.all([
       readHydrationValue(
-        "读取历史会话投影",
+        t("chatRuntimeModel.loadingHistoryConversationProjection"),
         getSessionProjection(normalizedSessionId),
       ),
       readHydrationValue(
-        "读取 agent 状态",
+        t("chatRuntimeModel.loadingAgentState"),
         getAgentState(normalizedSessionId, true),
       ),
       readHydrationValue(
-        "读取运行时配置",
+        t("chatRuntimeModel.loadingRuntimeConfiguration"),
         getAgentRuntimeConfig(),
       ),
       readHydrationValue(
-        "读取 context usage",
+        t("chatRuntimeModel.loadingContextUsage"),
         getAgentContextUsage(normalizedSessionId),
       ),
     ]);
@@ -875,18 +876,18 @@ export const buildSessionHydrationSnapshot = async (
     assertHydrationNotCancelled(control);
     const agentRunId = normalizeAgentRunId(agentRun.agentRunId);
     if (!agentRunId) {
-      throw new Error("历史恢复失败：session projection tasks 包含空 agentRunId");
+      throw new Error(t("chatRuntimeModel.historyRecoveryFailedSessionProjectionTasksContainAnEmpty"));
     }
     const agentRunSessionId =
       typeof agentRun.sessionId === "string" ? agentRun.sessionId.trim() : "";
     if (agentRunSessionId !== normalizedSessionId) {
       throw new Error(
-        `历史恢复失败：session projection task ${agentRunId} sessionId 不匹配`,
+        t("chatRuntimeModel.historyRecoveryFailedSessionProjectionTaskValueSessionidMismatch", { value1: agentRunId }),
       );
     }
     if (!replaySnapshotsByAgentRunId.has(agentRunId)) {
       throw new Error(
-        `历史恢复失败：session projection 缺少 task replay ${agentRunId}`,
+        t("chatRuntimeModel.historyRecoveryFailedSessionProjectionIsMissingTaskReplay", { value1: agentRunId }),
       );
     }
     projectedAgentRunIds.add(agentRunId);
@@ -896,7 +897,7 @@ export const buildSessionHydrationSnapshot = async (
     assertHydrationNotCancelled(control);
     if (!projectedAgentRunIds.has(replayAgentRunId)) {
       throw new Error(
-        `历史恢复失败：session projection replay ${replayAgentRunId} 缺少 task summary`,
+        t("chatRuntimeModel.historyRecoveryFailedSessionProjectionReplayValueIsMissing", { value1: replayAgentRunId }),
       );
     }
   }
@@ -904,7 +905,7 @@ export const buildSessionHydrationSnapshot = async (
   const replayRunAgentRunId = replayRun ? normalizeAgentRunId(replayRun.agentRunId) : "";
   if (replayRunAgentRunId && !replaySnapshotsByAgentRunId.has(replayRunAgentRunId)) {
     throw new Error(
-      `历史恢复失败：session projection 缺少 active task replay ${replayRunAgentRunId}`,
+      t("chatRuntimeModel.historyRecoveryFailedSessionProjectionIsMissingActiveTask", { value1: replayRunAgentRunId }),
     );
   }
   const replayItemsByAgentRunId = new Map(
@@ -986,7 +987,7 @@ export const buildSessionHydrationSnapshot = async (
       : null;
 
   if (activeReplay && !activeReplay.messageId) {
-    throw new Error(`恢复运行任务 ${activeReplay.agentRunId} 失败：缺少 assistant message`);
+    throw new Error(t("chatRuntimeModel.unableToRestoreActiveTaskValueAssistantMessageIs", { value1: activeReplay.agentRunId }));
   }
   assertHydrationNotCancelled(control);
 

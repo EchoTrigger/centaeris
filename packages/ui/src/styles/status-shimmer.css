@@ -1,0 +1,47 @@
+/* Keep both client copies identical; check-typography-parity.mjs verifies them. */
+:root {
+  --status-shimmer-base: #6b6b6b;
+  --status-shimmer-peak: var(--on-surface);
+}
+
+/* A theme can override these two roles without changing the animation. */
+:root[data-theme="dark"] {
+  --status-shimmer-base: #a0a0a0;
+  --status-shimmer-peak: #ededed;
+}
+
+.statusShimmer {
+  color: var(--status-shimmer-base);
+}
+
+@supports (background-clip: text) or (-webkit-background-clip: text) {
+  .statusShimmer {
+    background-color: var(--status-shimmer-base);
+    background-image: linear-gradient(105deg, var(--status-shimmer-base) 35%, var(--status-shimmer-peak) 50%, var(--status-shimmer-base) 65%);
+    background-repeat: no-repeat;
+    background-size: 240% 100%;
+    background-position: -120% 50%;
+    background-clip: text;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    /* One brief sweep; persistent status remains readable without ongoing motion. */
+    animation: statusShimmerSweep 4s ease-in-out 1;
+  }
+}
+
+@keyframes statusShimmerSweep {
+  from { background-position: 120% 50%; }
+  to { background-position: -120% 50%; }
+}
+
+@media (prefers-reduced-motion: reduce), (forced-colors: active) {
+  .statusShimmer {
+    background: none;
+    -webkit-text-fill-color: currentColor;
+    animation: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .statusShimmer { color: CanvasText; }
+}

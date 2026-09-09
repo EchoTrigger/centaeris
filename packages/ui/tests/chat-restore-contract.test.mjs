@@ -65,7 +65,7 @@ test("restores the chat runtime contract", async () => {
   assert.equal(runtimeCore.mapProcessStateToActivity(undefined), null);
   assert.throws(
     () => runtimeCore.mapProcessStateToActivity("unknown"),
-    /未知 runtime processState: unknown/,
+    /Unknown runtime processState: unknown/,
   );
   assert.deepEqual(runtimeCore.mapProcessStateToActivity("searching"), {
     kind: "thinking",
@@ -100,15 +100,15 @@ test("restores the chat runtime contract", async () => {
   );
   assert.throws(
     () => runtimeCore.mapProcessStateToActivity("banana"),
-    /未知 runtime processState: banana/,
+    /Unknown runtime processState: banana/,
   );
   assert.throws(
     () => restore.normalizePersistedContent([{ content: "banana" }]),
-    /message content 必须是 string/,
+    /message content must be a string/,
   );
   assert.throws(
     () => restore.resolvePersistedTaskStatus("completed"),
-    /session_event status 不支持: completed/,
+    /Unsupported session_event status: completed/,
   );
   assert.equal(
     runtimeCore.formatRuntimeModelError({ message: "resolve path failed: banana" }),
@@ -291,7 +291,7 @@ test("restores the chat runtime contract", async () => {
         "",
         0,
       ),
-    /ToolResult 缺少 callId/,
+    /ToolResult is missing callId/,
   );
   assert.throws(
     () =>
@@ -320,7 +320,7 @@ test("restores the chat runtime contract", async () => {
         "",
         0,
       ),
-    /payload\.operations 必须是 array/,
+    /payload\.operations must be an array/,
   );
   assert.throws(
     () =>
@@ -354,7 +354,7 @@ test("restores the chat runtime contract", async () => {
         "",
         0,
       ),
-    /toolName 必须是 canonical lower_snake_case/,
+    /toolName must use canonical lower_snake_case/,
   );
 
   const processSummaryDuplicateTurn = restore.buildAssistantTurnFromStreamItems(
@@ -571,7 +571,7 @@ test("restores the chat runtime contract", async () => {
         },
       },
     ),
-    /历史恢复已取消/,
+    /History recovery cancelled/,
   );
 
 });

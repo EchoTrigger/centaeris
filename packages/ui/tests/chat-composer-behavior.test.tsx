@@ -659,7 +659,7 @@ test("the prompt input caps its height and restores focus after its action", asy
 
   const sendButton = renderer.root
     .findAllByType("button")
-    .find((candidate) => candidate.props["aria-label"] === "发送");
+    .find((candidate) => candidate.props["aria-label"] === "Send");
   if (!sendButton) {
     throw new Error("Missing send button");
   }
@@ -709,13 +709,13 @@ test("runtime controls select exact models and reasoning modes", async () => {
 
   const modelTrigger = renderer.root.findByProps({ title: props.modelRuntimeSummary });
   await click(modelTrigger);
-  const modelList = renderer.root.findByProps({ "aria-label": "全局模型" });
+  const modelList = renderer.root.findByProps({ "aria-label": "Global models" });
   const modelOptions = modelList.findAllByProps({ role: "option" });
   expect(modelOptions).toHaveLength(2);
 
-  const reasoningTrigger = renderer.root.findByProps({ "aria-label": "思考强度" });
+  const reasoningTrigger = renderer.root.findByProps({ "aria-label": "Reasoning effort" });
   await click(reasoningTrigger);
-  expect(renderer.root.findAllByProps({ "aria-label": "全局模型" })).toHaveLength(0);
+  expect(renderer.root.findAllByProps({ "aria-label": "Global models" })).toHaveLength(0);
   expect(renderer.root.findAllByProps({
     className: "composerPickerPanel is-reasoning",
   })).toHaveLength(1);
@@ -725,11 +725,11 @@ test("runtime controls select exact models and reasoning modes", async () => {
   })).toHaveLength(0);
 
   await click(modelTrigger);
-  const reopenedModelList = renderer.root.findByProps({ "aria-label": "全局模型" });
+  const reopenedModelList = renderer.root.findByProps({ "aria-label": "Global models" });
   const reopenedModelOptions = reopenedModelList.findAllByProps({ role: "option" });
   await click(reopenedModelOptions[1]);
   expect(props.onModelSelect).toHaveBeenCalledWith(secondModel);
-  expect(renderer.root.findAllByProps({ "aria-label": "全局模型" })).toHaveLength(0);
+  expect(renderer.root.findAllByProps({ "aria-label": "Global models" })).toHaveLength(0);
 
   await click(reasoningTrigger);
   const reasoningList = renderer.root.findByProps({
