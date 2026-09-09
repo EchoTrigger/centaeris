@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import {
   hasNarrativeChunk,
   isPersistedAssistantErrorStatus,
@@ -252,10 +253,10 @@ const isAbandonableAssistantFailureText = (value: string): boolean => {
     "timed out",
     "timeout",
     "network",
-    "模型服务响应中断",
-    "模型服务端故障",
-    "模型服务排队中",
-    "模型服务鉴权失败",
+    t("chatAreaModel.modelResponseInterrupted"),
+    t("chatAreaModel.modelServiceError"),
+    t("chatAreaModel.modelServiceQueued"),
+    t("chatAreaModel.modelAuthenticationFailed"),
   ].some((needle) => normalized.includes(needle));
 };
 

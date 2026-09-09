@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import { memo, useMemo, type CSSProperties } from "react";
 import { Check, ChevronDown, Image } from "lucide-react";
 import type {
@@ -84,7 +85,7 @@ export const ComposerRuntimeControls = memo(function ComposerRuntimeControls({
     <>
       <div className="composerMetaRow">
         <div className="composerMetaGroup">
-          <span className="composer-chip composerImageIndicator" title="图片">
+          <span className="composer-chip composerImageIndicator" title={t("composerRuntimeControls.image")}>
             <Image className="composerLucideIcon" aria-hidden="true" />
           </span>
           <div className={`composerPicker model-chip ${activePanel === "model" ? "is-open" : ""}`}>
@@ -96,11 +97,11 @@ export const ComposerRuntimeControls = memo(function ComposerRuntimeControls({
               aria-expanded={activePanel === "model"}
               onClick={() => onTogglePanel("model")}
             >
-              <span>{activeModelIndex >= 0 ? (activeModel?.displayName || activeModel?.model) : "未配置模型"}</span>
+              <span>{activeModelIndex >= 0 ? (activeModel?.displayName || activeModel?.model) : t("composerRuntimeControls.noModelConfigured")}</span>
               <ChevronDown className="composerLucideIcon is-chevron" aria-hidden="true" />
             </button>
             {activePanel === "model" ? (
-              <div className="composerPickerPanel is-model" role="listbox" aria-label="全局模型">
+              <div className="composerPickerPanel is-model" role="listbox" aria-label={t("composerRuntimeControls.globalModels")}>
                 {modelGroups.map((group) => (
                   <section key={group.providerId}>
                     <p className="composerPickerGroupLabel">{group.providerName}</p>
@@ -135,7 +136,7 @@ export const ComposerRuntimeControls = memo(function ComposerRuntimeControls({
               <button
                 type="button"
                 className="composer-chip composerPickerTrigger"
-                aria-label="思考强度"
+                aria-label={t("composerRuntimeControls.reasoningEffort")}
                 aria-haspopup="listbox"
                 aria-expanded={activePanel === "reasoning"}
                 onClick={() => onTogglePanel("reasoning")}
@@ -144,7 +145,7 @@ export const ComposerRuntimeControls = memo(function ComposerRuntimeControls({
                 <ChevronDown className="composerLucideIcon is-chevron" aria-hidden="true" />
               </button>
               {activePanel === "reasoning" ? (
-                <div className="composerPickerPanel is-reasoning" role="listbox" aria-label="思考强度">
+                <div className="composerPickerPanel is-reasoning" role="listbox" aria-label={t("composerRuntimeControls.reasoningEffort")}>
                   {reasoningEfforts.map((effort) => {
                     const selected = effort === reasoningEffort;
                     return (

@@ -1,7 +1,10 @@
+@import "./styles/theme.css";
+@import "./styles/transcript-theme.css";
 @import "tailwindcss";
 @import "./assets/fonts/noto-sans-cjk-sc.css";
 @import "./styles/typography.css";
 @import "./styles/chat.css";
+@import "./styles/status-shimmer.css";
 
 @font-face {
   font-family: "Google Sans Code";
@@ -335,7 +338,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   gap: 6px;
   border: 1px solid var(--outline-variant);
   border-radius: 6px;
-  background: #fafcfc;
+  background: var(--surface-color);
 }
 
 .thinNewChatButton:hover {
@@ -380,7 +383,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .thinWorkspaceSelectTrigger:focus-visible {
-  border-color: #7aa7f8;
+  border-color: var(--primary-color);
   box-shadow: 0 0 0 1px #7aa7f8;
 }
 
@@ -395,7 +398,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   flex: 0 0 auto;
   width: 13px;
   height: 13px;
-  color: #7a8088;
+  color: var(--process-text);
 }
 
 .thinWorkspaceSelectPanel {
@@ -407,9 +410,9 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   max-height: min(278px, calc(100vh - 120px));
   overflow: auto;
   padding: 4px;
-  border: 1px solid #dfe1e4;
+  border: 1px solid var(--outline-variant);
   border-radius: 6px;
-  background: #fff;
+  background: var(--surface-color);
   box-shadow: none;
 }
 
@@ -424,7 +427,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: #3f4349;
+  color: var(--on-surface);
   font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 520;
@@ -433,7 +436,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 
 .thinWorkspaceSelectPanel button:hover,
 .thinWorkspaceSelectPanel button.is-selected {
-  background: #f0f1f2;
+  background: var(--surface-variant);
 }
 
 .thinWorkspaceSelectPanel button > span:last-child {
@@ -460,9 +463,9 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   gap: 6px;
   margin: 0 9px 9px;
   padding: 9px;
-  border: 1px solid #d9a0a0;
+  border: 1px solid var(--error);
   border-radius: 7px;
-  background: #fff7f7;
+  background: var(--surface-color);
   font-size: 11px;
 }
 
@@ -481,7 +484,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   flex: 1 1 50%;
   display: flex;
   flex-direction: column;
-  border-top: 1px solid #dedfe2;
+  border-top: 1px solid var(--outline-variant);
   overflow: hidden;
 }
 
@@ -495,7 +498,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   padding: 0 9px;
   border: 0;
   background: transparent;
-  color: #59606a;
+  color: var(--process-text);
   font-family: var(--font-mono);
   font-size: 10px;
   letter-spacing: 0.04em;
@@ -517,7 +520,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 
 .thinSectionHeader button:hover,
 .thinExplorerHeader:hover {
-  background: #e7e8ea;
+  background: var(--surface-container);
 }
 
 .thinSessionList {
@@ -537,7 +540,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 
 .thinSessionRow:hover,
 .thinSessionRow.is-active {
-  background: #e5e6e8;
+  background: var(--surface-container);
 }
 
 .thinSessionSelect {
@@ -561,12 +564,12 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .thinSessionDot.is-running {
-  background: #2f80ed;
+  background: var(--primary-color);
   box-shadow: 0 0 0 3px rgba(47, 128, 237, 0.12);
 }
 
 .thinSessionDot.is-unread {
-  background: #e6a100;
+  background: var(--warning);
 }
 
 .thinSessionCopy {
@@ -589,14 +592,14 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 
 .thinSessionCopy small {
   margin-top: 1px;
-  color: #888e96;
+  color: var(--process-text);
   font-size: 10px;
 }
 
 .thinPinnedIcon {
   width: 12px;
   height: 12px;
-  color: #7c8289;
+  color: var(--process-text);
 }
 
 .thinSessionActions {
@@ -623,7 +626,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .thinSessionActions button:hover:not(:disabled) {
-  background: #d7d9dc;
+  background: var(--surface-container);
 }
 
 .thinSessionActions button:disabled {
@@ -641,18 +644,18 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   gap: 5px;
   min-height: 49px;
   padding: 7px 6px 7px 10px;
-  border-left: 3px solid #ef5650;
-  background: #fff2f1;
+  border-left: 3px solid var(--error);
+  background: var(--surface-variant);
 }
 
 .thinSessionDeleteConfirm:hover {
-  background: #fff2f1;
+  background: var(--surface-variant);
 }
 
 .thinSessionDeleteConfirm > span {
   min-width: 0;
   overflow: hidden;
-  color: #302d2d;
+  color: var(--on-surface);
   font-size: var(--font-size-sm);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -681,14 +684,14 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .thinSessionDeleteConfirm button.is-delete {
-  border-color: #ef5650;
-  background: #ef5650;
-  color: #fff;
+  border-color: var(--error);
+  background: var(--error);
+  color: var(--solid-text);
 }
 
 .thinSessionDeleteConfirm button.is-delete:hover:not(:disabled) {
-  border-color: #da4742;
-  background: #da4742;
+  border-color: var(--error);
+  background: var(--error);
 }
 
 .thinSessionDeleteConfirm button:disabled {
@@ -708,10 +711,10 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   width: 100%;
   height: 31px;
   padding: 0 8px;
-  border: 1px solid #4f73ff;
+  border: 1px solid var(--primary-color);
   border-radius: 6px;
   outline: none;
-  background: #fff;
+  background: var(--surface-color);
   font: inherit;
 }
 
@@ -720,7 +723,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   flex: 1 1 50%;
   display: flex;
   flex-direction: column;
-  border-top: 1px solid #dedfe2;
+  border-top: 1px solid var(--outline-variant);
   overflow: hidden;
 }
 
@@ -743,8 +746,8 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   display: flex;
   align-items: center;
   justify-content: space-around;
-  border-top: 1px solid #dedfe2;
-  background: #f5f5f5;
+  border-top: 1px solid var(--outline-variant);
+  background: var(--surface-variant);
 }
 
 .thinSidebarFooter button {
@@ -756,13 +759,13 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: #59606a;
+  color: var(--process-text);
   font-size: 11px;
 }
 
 .thinSidebarFooter button:hover {
-  background: #e5e6e8;
-  color: #202124;
+  background: var(--surface-container);
+  color: var(--on-surface);
 }
 
 .thinSidebarFooter button:disabled {
@@ -772,7 +775,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 
 .thinEmptyText {
   padding: 12px 9px;
-  color: #8a9097;
+  color: var(--process-text);
   font-size: 11px;
 }
 
@@ -798,7 +801,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 .workspaceFilesRoot {
   padding: 3px 7px 6px;
   overflow: hidden;
-  color: #92979e;
+  color: var(--process-text);
   font-family: var(--font-mono);
   font-size: 9px;
   text-overflow: ellipsis;
@@ -841,14 +844,14 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 
 .workspaceFilesEntryLabel:hover,
 .workspaceFilesFileButton.is-focused .workspaceFilesEntryLabel {
-  background: #e5e6e8;
+  background: var(--surface-container);
 }
 
 .workspaceFilesEntryIcon {
   width: 13px;
   height: 13px;
   flex: 0 0 auto;
-  color: #858b92;
+  color: var(--process-text);
 }
 
 .workspaceFilesEntry.is-directory[open] > summary .workspaceFilesEntryIcon {
@@ -865,7 +868,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 .workspaceFilesHint,
 .workspaceFilesEmpty {
   padding: 10px 8px;
-  color: #8a9097;
+  color: var(--process-text);
   font-size: 11px;
 }
 
@@ -879,7 +882,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   flex: 1 1 auto;
   display: flex;
   overflow: hidden;
-  background: #fff;
+  background: var(--surface-color);
 }
 
 .thinChatColumn > .chat-container {
@@ -890,12 +893,12 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   width: min(560px, calc(100% - 64px));
   align-self: center;
   margin: 0 auto;
-  color: #42474e;
+  color: var(--on-surface);
 }
 
 .thinGetStarted h1 {
   margin: 0 0 10px;
-  color: #202124;
+  color: var(--on-surface);
   font-size: 22px;
   font-weight: 600;
 }
@@ -904,7 +907,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 .thinGetStarted ol {
   margin: 0;
   padding-left: 20px;
-  color: #737980;
+  color: var(--process-text);
 }
 
 .thinGetStarted li + li {
@@ -915,7 +918,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   padding: 0;
   border: 0;
   background: transparent;
-  color: #202124;
+  color: var(--on-surface);
   font-weight: 650;
 }
 
@@ -925,7 +928,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   min-width: 0;
   min-height: 0;
   border-left: 1px solid transparent;
-  background: #fff;
+  background: var(--surface-color);
   overflow: hidden;
   opacity: 0;
   transform: translateX(40px);
@@ -946,7 +949,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   flex-basis: clamp(380px, 38vw, 720px);
   width: clamp(380px, 38vw, 720px);
   min-width: 340px;
-  border-left-color: #dedfe2;
+  border-left-color: var(--on-surface);
   opacity: 1;
   transform: translateX(0);
   visibility: visible;
@@ -974,8 +977,8 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   display: flex;
   align-items: stretch;
   overflow: hidden;
-  border-bottom: 1px solid #dedfe2;
-  background: #f7f7f7;
+  border-bottom: 1px solid var(--outline-variant);
+  background: var(--surface-variant);
 }
 
 .summaryPanelTabs {
@@ -992,13 +995,13 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   display: grid;
   place-items: center;
   border: 0;
-  border-left: 1px solid #dedfe2;
+  border-left: 1px solid var(--outline-variant);
   border-radius: 0;
   background: transparent;
-  color: #656b73;
+  color: var(--process-text);
 }
 
-.summaryPanelCollapse:hover { background: #e9eaec; color: #202124; }
+.summaryPanelCollapse:hover { background: var(--surface-variant); color: var(--on-surface); }
 
 .summaryPanelTab {
   min-width: 0;
@@ -1008,16 +1011,16 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   gap: 6px;
   padding: 0 8px 0 11px;
   border: 0;
-  border-right: 1px solid #dedfe2;
+  border-right: 1px solid var(--outline-variant);
   border-bottom: 2px solid transparent;
-  background: #f7f7f7;
-  color: #656b73;
+  background: var(--surface-variant);
+  color: var(--process-text);
 }
 
 .summaryPanelTab.is-active {
-  border-bottom-color: #5d87d8;
-  background: #fff;
-  color: #202124;
+  border-bottom-color: var(--primary-color);
+  background: var(--surface-color);
+  color: var(--on-surface);
 }
 
 .summaryPanelTabTitle {
@@ -1037,7 +1040,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .summaryPanelTabClose:hover {
-  background: #e6e8ea;
+  background: var(--surface-container);
 }
 
 .summaryPanelIcon {
@@ -1052,7 +1055,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   justify-content: space-between;
   gap: 12px;
   padding: 6px 9px 6px 13px;
-  border-bottom: 1px solid #eceef0;
+  border-bottom: 1px solid var(--outline-variant);
 }
 
 .summaryPanelTitleGroup {
@@ -1075,7 +1078,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .summaryPanelTitleGroup span {
-  color: #8b9198;
+  color: var(--process-text);
   font-family: var(--font-mono);
   font-size: 9px;
 }
@@ -1110,7 +1113,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .agentSessionPanelBreadcrumb > strong {
-  color: #202124;
+  color: var(--on-surface);
   font-weight: 600;
 }
 
@@ -1138,8 +1141,8 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   margin: 0 0 24px auto;
   padding: 10px 13px;
   border-radius: 13px;
-  background: #f1f2f3;
-  color: #30343a;
+  background: var(--surface-variant);
+  color: var(--on-surface);
   font-size: 13px;
   line-height: 1.55;
   white-space: pre-wrap;
@@ -1156,8 +1159,8 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   gap: 8px;
   min-height: 42px;
   padding: 0 16px;
-  border-top: 1px solid #eceef0;
-  color: #737980;
+  border-top: 1px solid var(--outline-variant);
+  color: var(--process-text);
   font-size: 12px;
 }
 
@@ -1165,7 +1168,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #73d8b6;
+  background: var(--success);
 }
 
 .agentSessionPreviewStatus.is-loading > span,
@@ -1175,17 +1178,17 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .agentSessionPreviewStatus.is-error > span {
-  background: #c5221f;
+  background: var(--error);
 }
 
 .agentSessionPreviewStatus strong {
-  color: #4f555c;
+  color: var(--process-text);
   font-weight: 500;
 }
 
 .summaryPanelHint {
   padding: 16px;
-  color: #858b92;
+  color: var(--process-text);
 }
 
 .summaryPanelHint.is-error {
@@ -1197,22 +1200,22 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .summaryCodePreviewTargetLine {
-  background: #fff6d9 !important;
+  background: var(--surface-variant) !important;
 }
 
 .summaryCodePreviewDiffAdded {
-  background: #e9f7ee !important;
-  color: #137333 !important;
+  background: var(--surface-variant) !important;
+  color: var(--success) !important;
 }
 
 .summaryCodePreviewDiffRemoved {
-  background: #fdecec !important;
-  color: #b3261e !important;
+  background: var(--surface-variant) !important;
+  color: var(--error) !important;
 }
 
 .summaryCodePreviewDiffHunk,
 .summaryCodePreviewDiffMeta {
-  background: #eef4ff !important;
+  background: var(--surface-variant) !important;
 }
 
 .summaryMarkdownContent {
@@ -1233,9 +1236,9 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 .summaryMarkdownContent .markdown-code-block {
   overflow: auto;
   padding: 12px;
-  border: 1px solid #e3e5e8;
+  border: 1px solid var(--outline-variant);
   border-radius: 6px;
-  background: #f7f8f9;
+  background: var(--surface-variant);
 }
 
 .summaryMarkdownContent .markdown-table table {
@@ -1245,7 +1248,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 .summaryMarkdownContent .markdown-table th,
 .summaryMarkdownContent .markdown-table td {
   padding: 6px 9px;
-  border: 1px solid #dfe2e5;
+  border: 1px solid var(--outline-variant);
 }
 
 .summaryImagePreview,
@@ -1256,7 +1259,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   align-items: center;
   justify-content: center;
   padding: 18px;
-  background: #f5f6f7;
+  background: var(--surface-variant);
 }
 
 .summaryImageFrame img {
@@ -1284,15 +1287,15 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   display: grid;
   place-items: center;
   padding: 28px;
-  background: rgba(28, 30, 33, 0.42);
+  background: var(--scrim);
 }
 
 .resourceDialog,
 .renameDialog {
   overflow: hidden;
-  border: 1px solid #cfd2d7;
+  border: 1px solid var(--outline-variant);
   border-radius: 9px;
-  background: #fff;
+  background: var(--surface-color);
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.23);
 }
 
@@ -1309,7 +1312,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   align-items: center;
   justify-content: space-between;
   padding: 0 13px 0 18px;
-  border-bottom: 1px solid #dedfe2;
+  border-bottom: 1px solid var(--outline-variant);
 }
 
 .resourceDialogHeader h1 {
@@ -1333,7 +1336,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .resourceDialogHeader button:hover {
-  background: #eceeef;
+  background: var(--surface-variant);
 }
 
 .resourceDialogHeader svg {
@@ -1360,7 +1363,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .confirmDialog::backdrop {
-  background: rgba(28, 30, 33, 0.16);
+  background: color-mix(in srgb, var(--on-surface) 16%, transparent);
 }
 
 .confirmDialog h1 {
@@ -1405,14 +1408,14 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .confirmDialog button.is-confirm {
-  border-color: #efbaba;
+  border-color: var(--error);
   background: var(--surface-color);
-  color: #b5413b;
+  color: var(--error);
 }
 
 .confirmDialog button.is-confirm:hover {
-  border-color: #df918b;
-  background: #fff1f0;
+  border-color: var(--error);
+  background: var(--surface-variant);
 }
 
 .skillsDialogLayout {
@@ -1421,15 +1424,15 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   min-height: 0;
   display: grid;
   grid-template-columns: 246px minmax(0, 1fr);
-  color: #25282d;
+  color: var(--on-surface);
 }
 
 .skillsSidebar {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid #dedfe2;
-  background: #f8f8f8;
+  border-right: 1px solid var(--outline-variant);
+  background: var(--surface-variant);
 }
 
 .skillsSourceList {
@@ -1441,7 +1444,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 
 .skillsEmptySidebar,
 .skillsSourceEmpty {
-  color: #969da7;
+  color: var(--process-text);
   font-size: 11px;
 }
 
@@ -1470,7 +1473,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 .skillsSourceButton.is-active,
 .skillsSourceChildren button:hover,
 .skillsSourceChildren button.is-active {
-  background: #e8eaed;
+  background: var(--surface-variant);
 }
 
 .skillsSourceIcon {
@@ -1479,10 +1482,10 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   flex: 0 0 auto;
   display: grid;
   place-items: center;
-  border: 1px solid #d8dbe0;
+  border: 1px solid var(--outline-variant);
   border-radius: 6px;
-  background: #fff;
-  color: #707783;
+  background: var(--surface-color);
+  color: var(--process-text);
 }
 
 .skillsSourceIcon svg {
@@ -1511,7 +1514,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .skillsSourceCopy small {
-  color: #939aa4;
+  color: var(--process-text);
   font-size: 9px;
 }
 
@@ -1520,11 +1523,11 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   height: 6px;
   flex: 0 0 auto;
   border-radius: 999px;
-  background: #b9bec5;
+  background: var(--surface-hover);
 }
 
 .skillsSourceButton > i.is-enabled {
-  background: #44bd74;
+  background: var(--success);
 }
 
 .skillsSourceChildren {
@@ -1544,7 +1547,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: #555c66;
+  color: var(--process-text);
   font-size: 10px;
   text-align: left;
 }
@@ -1563,14 +1566,14 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .skillsSourceChildren .skillsItemLabel > svg {
-  color: #707783;
+  color: var(--process-text);
 }
 
 .skillsSourceChildren button svg {
   width: 11px;
   height: 11px;
   flex: 0 0 auto;
-  color: #3a9e66;
+  color: var(--success);
 }
 
 .skillsSourceEmpty {
@@ -1589,7 +1592,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   position: relative;
   display: flex;
   flex-direction: column;
-  background: #fff;
+  background: var(--surface-color);
 }
 
 .skillsToolbar {
@@ -1598,8 +1601,8 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   align-items: center;
   justify-content: space-between;
   padding: 0 13px 0 18px;
-  border-bottom: 1px solid #eceef0;
-  color: #9299a3;
+  border-bottom: 1px solid var(--outline-variant);
+  color: var(--process-text);
   font-size: 10px;
 }
 
@@ -1614,7 +1617,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .skillsToolbar button:hover {
-  background: #eef0f2;
+  background: var(--surface-variant);
 }
 
 .skillsToolbar svg {
@@ -1637,7 +1640,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   flex-direction: column;
   gap: 7px;
   padding: 30px;
-  color: #9299a4;
+  color: var(--process-text);
   text-align: center;
 }
 
@@ -1656,15 +1659,15 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   justify-content: center;
   gap: 6px;
   padding: 0 11px;
-  border: 1px solid #d2d5d9;
+  border: 1px solid var(--outline-variant);
   border-radius: 6px;
-  background: #fbfbfb;
-  color: #505761;
+  background: var(--surface-color);
+  color: var(--process-text);
 }
 
 .skillsDetailButtons button:hover,
 .skillsPathField button:hover {
-  background: #eceeef;
+  background: var(--surface-variant);
 }
 
 .skillsDetailButtons button svg,
@@ -1682,7 +1685,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 .skillsForm h2,
 .skillsDetail h2 {
   margin: 0;
-  color: #22262b;
+  color: var(--on-surface);
   font-size: 17px;
   font-weight: 650;
 }
@@ -1690,7 +1693,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 .skillsForm > p,
 .skillsDetailHeader p {
   margin: 7px 0 22px;
-  color: #767e89;
+  color: var(--process-text);
   font-size: 11px;
   line-height: 1.5;
 }
@@ -1703,7 +1706,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .skillsForm > label > span {
-  color: #666d76;
+  color: var(--process-text);
   font-size: 10px;
   font-weight: 620;
 }
@@ -1712,9 +1715,9 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   width: fit-content;
   display: flex;
   padding: 2px;
-  border: 1px solid #d8dbe0;
+  border: 1px solid var(--outline-variant);
   border-radius: 7px;
-  background: #f4f5f6;
+  background: var(--surface-variant);
 }
 
 .skillsSegmented button {
@@ -1723,13 +1726,13 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: #707782;
+  color: var(--process-text);
   font-size: 10px;
 }
 
 .skillsSegmented button.is-active {
-  background: #fff;
-  color: #25292f;
+  background: var(--surface-color);
+  color: var(--on-surface);
   box-shadow: 0 1px 3px rgba(20, 24, 30, 0.1);
 }
 
@@ -1747,7 +1750,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   min-width: 0;
   height: 35px;
   padding: 0 10px;
-  border: 1px solid #cfd3d8;
+  border: 1px solid var(--outline-variant);
   border-radius: 6px;
   outline: none;
   font-family: var(--font-mono);
@@ -1755,7 +1758,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .skillsPathField input:focus {
-  border-color: #699af1;
+  border-color: var(--primary-color);
   box-shadow: 0 0 0 1px #699af1;
 }
 
@@ -1765,7 +1768,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   gap: 6px;
   margin-top: 10px;
   overflow: hidden;
-  color: #9299a3;
+  color: var(--process-text);
   font-family: var(--font-mono);
   font-size: 9px;
   text-overflow: ellipsis;
@@ -1780,15 +1783,15 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 
 .skillsPrimaryButton {
   margin-top: 22px;
-  border-color: #2563eb;
-  background: #2563eb;
-  color: #fff;
+  border-color: var(--primary-color);
+  background: var(--primary-color);
+  color: var(--solid-text);
 }
 
 .skillsPrimaryButton:disabled {
-  border-color: #d7dae0;
-  background: #e6e8eb;
-  color: #9ca2ab;
+  border-color: var(--outline-variant);
+  background: var(--surface-container);
+  color: var(--process-text);
 }
 
 .skillsDetailHeader {
@@ -1797,7 +1800,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   justify-content: space-between;
   gap: 18px;
   padding-bottom: 20px;
-  border-bottom: 1px solid #eceef0;
+  border-bottom: 1px solid var(--outline-variant);
 }
 
 .skillsDetailHeader > div {
@@ -1807,7 +1810,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 .skillsEyebrow {
   display: block;
   margin-bottom: 6px;
-  color: #949ba5;
+  color: var(--process-text);
   font-size: 9px;
   letter-spacing: 0.055em;
   text-transform: uppercase;
@@ -1822,18 +1825,18 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   grid-template-columns: 82px minmax(0, 1fr);
   gap: 10px;
   padding: 8px 0;
-  border-bottom: 1px solid #f0f1f2;
+  border-bottom: 1px solid var(--outline-variant);
 }
 
 .skillsFacts dt {
-  color: #9299a3;
+  color: var(--process-text);
   font-size: 10px;
 }
 
 .skillsFacts dd {
   margin: 0;
   overflow-wrap: anywhere;
-  color: #4f5660;
+  color: var(--process-text);
   font-family: var(--font-mono);
   font-size: 9px;
 }
@@ -1846,29 +1849,29 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .skillsDetailButtons button.is-danger {
-  border-color: #efbaba;
-  color: #cc4747;
-  background: #fff;
+  border-color: var(--error);
+  color: var(--error);
+  background: var(--surface-color);
 }
 
 .skillsDiagnostic,
 .skillsError {
-  color: #68707a;
+  color: var(--process-text);
   font-size: 10px;
   line-height: 1.45;
 }
 
 .skillsDiagnostic {
   padding: 9px 10px;
-  border: 1px solid #dfe2e6;
+  border: 1px solid var(--outline-variant);
   border-radius: 6px;
-  background: #f7f8f9;
+  background: var(--surface-variant);
 }
 
 .skillsError {
   padding: 8px 13px;
-  border-top: 1px solid #dfe2e6;
-  background: #f7f8f9;
+  border-top: 1px solid var(--outline-variant);
+  background: var(--surface-variant);
 }
 
 .skillsBadges {
@@ -1881,29 +1884,29 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 .skillsBadges span,
 .skillsBadges code {
   padding: 4px 7px;
-  border: 1px solid #dfe2e6;
+  border: 1px solid var(--outline-variant);
   border-radius: 999px;
-  background: #f7f8f9;
-  color: #6c737d;
+  background: var(--surface-variant);
+  color: var(--process-text);
   font-size: 9px;
 }
 
 .skillsSkillPath {
   margin: 10px 0 15px;
   overflow-wrap: anywhere;
-  color: #9198a2;
+  color: var(--process-text);
   font-family: var(--font-mono);
   font-size: 9px;
 }
 
 .skillsMarkdown {
   padding-top: 16px;
-  border-top: 1px solid #eceef0;
+  border-top: 1px solid var(--outline-variant);
 }
 
 .skillsLoading {
   padding: 28px 0;
-  color: #949ba5;
+  color: var(--process-text);
   font-size: 11px;
 }
 
@@ -1928,8 +1931,8 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 .modelsProviderList {
   padding: 12px 9px;
   overflow: auto;
-  border-right: 1px solid #dedfe2;
-  background: #f8f8f8;
+  border-right: 1px solid var(--outline-variant);
+  background: var(--surface-variant);
 }
 
 .modelsProviderGroup + .modelsProviderGroup {
@@ -1952,7 +1955,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 .modelsProviderButton {
   min-height: 37px;
   padding: 0 10px;
-  color: #25282d;
+  color: var(--on-surface);
   font-size: 12px;
   font-weight: 600;
 }
@@ -1961,7 +1964,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 .modelsProviderButton.is-active,
 .modelsProviderModels button:hover,
 .modelsProviderModels button.is-selected {
-  background: #e9eaec;
+  background: var(--surface-variant);
 }
 
 .modelsConfiguredDot {
@@ -1969,7 +1972,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   height: 7px;
   flex: 0 0 auto;
   border-radius: 999px;
-  background: #38b96b;
+  background: var(--success);
 }
 
 .modelsProviderModels {
@@ -1980,7 +1983,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   min-height: 30px;
   padding: 0 8px;
   overflow: hidden;
-  color: #686e77;
+  color: var(--process-text);
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2020,7 +2023,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .modelsSectionHeading > span:first-child {
-  color: #8a919c;
+  color: var(--process-text);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.055em;
@@ -2028,7 +2031,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 
 .modelsSectionDescription {
   margin: -2px 0 12px;
-  color: #777e87;
+  color: var(--process-text);
   font-size: 11px;
   line-height: 1.45;
 }
@@ -2037,7 +2040,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  color: #9096a0;
+  color: var(--process-text);
   font-size: 11px;
 }
 
@@ -2045,15 +2048,15 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   width: 7px;
   height: 7px;
   border-radius: 999px;
-  background: #aeb4bc;
+  background: var(--surface-hover);
 }
 
 .modelsCredentialStatus.is-configured {
-  color: #26a75a;
+  color: var(--success);
 }
 
 .modelsCredentialStatus.is-configured i {
-  background: #43c977;
+  background: var(--success);
 }
 
 .modelsCredentialRow {
@@ -2068,13 +2071,13 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   align-items: center;
   gap: 8px;
   padding: 0 8px 0 11px;
-  border: 1px solid #cfd3d8;
+  border: 1px solid var(--outline-variant);
   border-radius: 6px;
-  background: #fff;
+  background: var(--surface-color);
 }
 
 .modelsKeyInput:focus-within {
-  border-color: #8275c7;
+  border-color: var(--primary-color);
   box-shadow: 0 0 0 1px #8275c7;
 }
 
@@ -2082,7 +2085,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 .modelsKeyInput button svg {
   width: 15px;
   height: 15px;
-  color: #9299a4;
+  color: var(--process-text);
 }
 
 .modelsKeyInput input {
@@ -2104,7 +2107,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .modelsKeyInput button:hover {
-  background: #f0f1f2;
+  background: var(--surface-variant);
 }
 
 .modelsLocalSave,
@@ -2113,22 +2116,22 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 .modelsActions button {
   min-height: 34px;
   padding: 0 12px;
-  border: 1px solid #d2d5d9;
+  border: 1px solid var(--outline-variant);
   border-radius: 6px;
-  background: #fbfbfb;
+  background: var(--surface-color);
 }
 
 .modelsLocalSave:disabled,
 .modelsActions button:disabled {
-  color: #a8adb5;
+  color: var(--process-text);
   opacity: 0.7;
 }
 
 .modelsDisconnect {
   margin-top: 10px;
-  border-color: #f0b3b3;
-  color: #d74747;
-  background: #fff;
+  border-color: var(--error);
+  color: var(--error);
+  background: var(--surface-color);
 }
 
 .modelsAddButton {
@@ -2136,7 +2139,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  color: #555c65;
+  color: var(--process-text);
   font-size: 11px;
 }
 
@@ -2158,27 +2161,27 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   justify-content: flex-end;
   gap: 7px;
   padding: 10px 18px;
-  border-top: 1px solid #dedfe2;
-  background: #fff;
+  border-top: 1px solid var(--outline-variant);
+  background: var(--surface-color);
 }
 
 .modelsActions button:hover,
 .modelsLocalSave:hover,
 .modelsAddButton:hover {
-  background: #eceeef;
+  background: var(--surface-variant);
 }
 
 .modelsActions .is-primary {
-  border-color: #6f63b8;
-  background: #6f63b8;
-  color: #fff;
+  border-color: var(--primary-color);
+  background: var(--primary-color);
+  color: var(--solid-text);
 }
 
 .resourceDialogMessage {
   min-width: 0;
   flex: 1;
   margin-right: auto;
-  color: #666d75;
+  color: var(--process-text);
   font-size: 11px;
 }
 
@@ -2196,7 +2199,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 .modelsTreeDivider {
   height: 1px;
   margin: 9px 10px;
-  background: #e1e3e6;
+  background: var(--surface-container);
 }
 
 .modelsProviderModels {
@@ -2218,12 +2221,12 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   justify-content: center;
   flex-direction: column;
   gap: 9px;
-  color: #777e87;
+  color: var(--process-text);
   font-size: 12px;
 }
 
 .modelsEmptyState strong {
-  color: #31353b;
+  color: var(--on-surface);
   font-size: 15px;
 }
 
@@ -2239,7 +2242,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   display: grid;
   place-items: center;
   padding: 42px;
-  background: rgba(28, 30, 33, .52);
+  background: var(--scrim);
 }
 
 .modelsProviderPickerDialog {
@@ -2248,9 +2251,9 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   display: flex;
   overflow: hidden;
   flex-direction: column;
-  border: 1px solid #d2d5d9;
+  border: 1px solid var(--outline-variant);
   border-radius: 10px;
-  background: #fff;
+  background: var(--surface-color);
   box-shadow: 0 24px 70px rgba(0, 0, 0, .28);
 }
 
@@ -2260,13 +2263,13 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   align-items: center;
   gap: 10px;
   padding: 0 12px 0 17px;
-  border-bottom: 1px solid #dedfe2;
+  border-bottom: 1px solid var(--outline-variant);
 }
 
 .modelsProviderPickerHeader > svg {
   width: 16px;
   height: 16px;
-  color: #949ba5;
+  color: var(--process-text);
 }
 
 .modelsProviderPickerHeader input {
@@ -2274,7 +2277,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   flex: 1;
   border: 0;
   outline: 0;
-  color: #2c3035;
+  color: var(--on-surface);
   font: inherit;
 }
 
@@ -2288,18 +2291,18 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   background: transparent;
 }
 
-.modelsProviderPickerHeader button:hover { background: #eceeef; }
+.modelsProviderPickerHeader button:hover { background: var(--surface-variant); }
 .modelsProviderPickerHeader button svg { width: 15px; height: 15px; }
 .modelsProviderPickerScroll { min-height: 0; padding: 22px; overflow: auto; }
 .modelsProviderPickerDialog .modelsProviderPicker { max-width: none; margin: 0; }
 .modelsProviderPickerDialog .modelsProviderCards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.modelsProviderPickerEmpty { padding: 40px 0; color: #8a919a; font-size: 12px; text-align: center; }
+.modelsProviderPickerEmpty { padding: 40px 0; color: var(--process-text); font-size: 12px; text-align: center; }
 
 .modelsProviderPicker section + section { margin-top: 23px; }
 
 .modelsProviderPicker h2 {
   margin: 0 0 9px;
-  color: #9298a0;
+  color: var(--process-text);
   font-size: 10px;
   font-weight: 700;
   letter-spacing: .065em;
@@ -2320,22 +2323,22 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   justify-content: center;
   gap: 4px;
   padding: 11px 13px;
-  border: 1px solid #d9dce0;
+  border: 1px solid var(--outline-variant);
   border-radius: 8px;
-  background: #fafafa;
-  color: #2c3035;
+  background: var(--surface-color);
+  color: var(--on-surface);
   text-align: left;
 }
 
 .modelsProviderCards button:hover:not(:disabled) {
-  border-color: #ada8d7;
-  background: #f6f5fa;
+  border-color: var(--primary-color);
+  background: var(--surface-variant);
 }
 
 .modelsProviderCards button:disabled { cursor: default; opacity: .54; }
 .modelsProviderCards strong { font-size: 12px; font-weight: 620; }
-.modelsProviderCards span, .modelsProviderCards small { color: #888f98; font-size: 10px; }
-.modelsProviderCards svg { width: 14px; height: 14px; position: absolute; right: 12px; color: #8e949c; }
+.modelsProviderCards span, .modelsProviderCards small { color: var(--process-text); font-size: 10px; }
+.modelsProviderCards svg { width: 14px; height: 14px; position: absolute; right: 12px; color: var(--process-text); }
 
 @media (max-width: 760px) {
   .modelsProviderPickerOverlay { padding: 18px; }
@@ -2361,7 +2364,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 
 .modelsProviderForm label > span,
 .modelsModelForm label > span {
-  color: #666d75;
+  color: var(--process-text);
   font-size: 12px;
   font-weight: 600;
 }
@@ -2373,9 +2376,9 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   width: 100%;
   height: 38px;
   padding: 0 11px;
-  border: 1px solid #cfd3d8;
+  border: 1px solid var(--outline-variant);
   border-radius: 6px;
-  background: #fff;
+  background: var(--surface-color);
   outline: 0;
 }
 
@@ -2383,7 +2386,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 .modelsProviderForm select:focus,
 .modelsModelForm input:focus,
 .modelsModelForm select:focus {
-  border-color: #8275c7;
+  border-color: var(--primary-color);
   box-shadow: 0 0 0 1px #8275c7;
 }
 
@@ -2396,7 +2399,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .modelsProviderForm small {
-  color: #969da7;
+  color: var(--process-text);
   font-size: 11px;
 }
 
@@ -2406,15 +2409,15 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   min-height: 31px;
   margin-top: 2px;
   padding: 0 12px;
-  border: 1px solid #d2d5d9;
+  border: 1px solid var(--outline-variant);
   border-radius: 6px;
-  background: #fff;
-  color: #555c65;
+  background: var(--surface-color);
+  color: var(--process-text);
 }
 
 .modelsDangerButton {
-  border-color: #f0b3b3;
-  color: #dc4545;
+  border-color: var(--error);
+  color: var(--error);
 }
 
 .modelsModelActions {
@@ -2428,9 +2431,9 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 
 .modelsTestButton.is-success,
 .modelsTestSummary.is-success {
-  border-color: #a8e8bc;
-  background: #e8fbef;
-  color: #16843e;
+  border-color: var(--success);
+  background: var(--surface-variant);
+  color: var(--success);
 }
 
 .modelsTestSummary {
@@ -2438,21 +2441,21 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   margin: 0 0 18px;
   padding: 9px 11px;
   border: 1px solid;
-  border-color: #dfe2e6;
+  border-color: var(--outline-variant);
   border-radius: 6px;
   font-size: 12px;
-  color: #68707a;
-  background: #f7f8f9;
+  color: var(--process-text);
+  background: var(--surface-variant);
 }
 
 .modelsDiagnostic {
   max-width: 900px;
   margin: 0 0 18px;
   padding: 9px 11px;
-  border: 1px solid #dfe2e6;
+  border: 1px solid var(--outline-variant);
   border-radius: 6px;
-  color: #68707a;
-  background: #f7f8f9;
+  color: var(--process-text);
+  background: var(--surface-variant);
   font-size: 12px;
 }
 
@@ -2478,13 +2481,13 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   display: flex;
   flex-direction: column;
   padding: 13px 10px;
-  border-right: 1px solid #dedfe2;
-  background: #f8f8f8;
+  border-right: 1px solid var(--outline-variant);
+  background: var(--surface-variant);
 }
 
 .pluginsDetailPane {
   overflow: auto;
-  background: #fff;
+  background: var(--surface-color);
 }
 
 .pluginsSearch {
@@ -2494,15 +2497,15 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   gap: 7px;
   margin-bottom: 10px;
   padding: 0 9px;
-  border: 1px solid #d4d7db;
+  border: 1px solid var(--outline-variant);
   border-radius: 6px;
-  background: #fff;
+  background: var(--surface-color);
 }
 
 .pluginsSearch svg {
   width: 14px;
   height: 14px;
-  color: #858b92;
+  color: var(--process-text);
 }
 
 .pluginsSearch input {
@@ -2511,7 +2514,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   border: 0;
   background: transparent;
   outline: 0;
-  color: #34383e;
+  color: var(--on-surface);
   font-size: 11px;
 }
 
@@ -2539,7 +2542,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 
 .pluginListItem:hover,
 .pluginListItem.is-active {
-  background: #e9eaec;
+  background: var(--surface-variant);
 }
 
 .pluginListCopy {
@@ -2550,7 +2553,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 .pluginListCopy strong {
   display: block;
   overflow: hidden;
-  color: #25282d;
+  color: var(--on-surface);
   font-size: 12px;
   font-weight: 600;
   text-overflow: ellipsis;
@@ -2562,20 +2565,20 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   height: 7px;
   flex: 0 0 auto;
   border-radius: 999px;
-  background: #b9bec5;
+  background: var(--surface-hover);
 }
 
 .pluginStatus.is-enabled {
-  background: #38b96b;
+  background: var(--success);
 }
 
 .pluginStatus.is-diagnostic {
-  background: #d9a441;
+  background: var(--warning);
 }
 
 .pluginsSidebarEmpty {
   padding: 10px;
-  color: #969da7;
+  color: var(--process-text);
   font-size: 10px;
 }
 
@@ -2589,7 +2592,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .pluginsReload:disabled {
-  color: #a8adb5;
+  color: var(--process-text);
   opacity: 0.7;
 }
 
@@ -2601,23 +2604,23 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   flex-direction: column;
   gap: 9px;
   padding: 30px;
-  color: #777e87;
+  color: var(--process-text);
   font-size: 12px;
   text-align: center;
 }
 
 .pluginsEmptyMain strong {
-  color: #31353b;
+  color: var(--on-surface);
   font-size: 15px;
 }
 
 .pluginsMessage {
   margin: 16px 27px 0;
   padding: 9px 10px;
-  border: 1px solid #dfe2e6;
+  border: 1px solid var(--outline-variant);
   border-radius: 6px;
-  background: #f7f8f9;
-  color: #68707a;
+  background: var(--surface-variant);
+  color: var(--process-text);
   font-size: 10px;
 }
 
@@ -2637,7 +2640,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   align-items: flex-start;
   gap: 18px;
   padding-bottom: 20px;
-  border-bottom: 1px solid #eceef0;
+  border-bottom: 1px solid var(--outline-variant);
 }
 
 .pluginDetailTitle h1,
@@ -2646,7 +2649,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .pluginDetailTitle h1 {
-  color: #22262b;
+  color: var(--on-surface);
   font-size: 17px;
   font-weight: 650;
 }
@@ -2654,7 +2657,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 .pluginDetailTitle p {
   max-width: 540px;
   margin-top: 7px;
-  color: #767e89;
+  color: var(--process-text);
   font-size: 11px;
   line-height: 1.5;
 }
@@ -2662,7 +2665,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 .pluginEyebrow {
   display: block;
   margin-bottom: 6px;
-  color: #949ba5;
+  color: var(--process-text);
   font-size: 9px;
   letter-spacing: 0.055em;
 }
@@ -2679,19 +2682,19 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   align-items: center;
   gap: 6px;
   padding: 0 11px;
-  border: 1px solid #d4d7db;
+  border: 1px solid var(--outline-variant);
   border-radius: 6px;
-  background: #fbfbfb;
-  color: #505761;
+  background: var(--surface-color);
+  color: var(--process-text);
   font-size: 11px;
 }
 
 .pluginsRevealButton:hover {
-  background: #eceeef;
+  background: var(--surface-variant);
 }
 
 .pluginsRemoveButton {
-  color: #8a4c4c;
+  color: var(--process-text);
 }
 
 .pluginsRevealButton svg {
@@ -2708,7 +2711,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   padding: 2px;
   border: 0;
   border-radius: 999px;
-  background: #c9cdd3;
+  background: var(--surface-hover);
   transition: background 120ms ease;
 }
 
@@ -2716,14 +2719,14 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: #fff;
+  background: var(--surface-color);
   box-shadow: 0 1px 2px rgba(30, 35, 42, 0.2);
   transform: translateX(0);
   transition: transform 120ms ease;
 }
 
 .resourceSwitch[aria-pressed="true"] {
-  background: #3478f6;
+  background: var(--primary-color);
 }
 
 .resourceSwitch span.is-on {
@@ -2737,17 +2740,17 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 .pluginsDiagnostic {
   margin: 14px 0 0;
   padding: 9px 10px;
-  border: 1px solid #e4d4ae;
+  border: 1px solid var(--warning);
   border-radius: 6px;
-  background: #fcf8ed;
-  color: #7a6634;
+  background: var(--surface-variant);
+  color: var(--process-text);
   font-size: 10px;
   line-height: 1.45;
 }
 
 .pluginsDetailLoading {
   padding: 22px 0 0;
-  color: #949ba5;
+  color: var(--process-text);
   font-size: 11px;
 }
 
@@ -2758,7 +2761,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 .pluginCapabilitySection h2,
 .pluginInfoHeading {
   margin: 0 0 7px;
-  color: #8a919c;
+  color: var(--process-text);
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.055em;
@@ -2772,7 +2775,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   gap: 10px;
   min-height: 42px;
   padding: 7px 0;
-  border-bottom: 1px solid #f0f1f2;
+  border-bottom: 1px solid var(--outline-variant);
 }
 
 .pluginCapabilityIcon {
@@ -2781,7 +2784,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   display: grid;
   flex: 0 0 auto;
   place-items: center;
-  color: #747b85;
+  color: var(--process-text);
 }
 
 .pluginCapabilityIcon svg {
@@ -2803,7 +2806,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 }
 
 .pluginCapabilityRow span {
-  color: #9299a3;
+  color: var(--process-text);
   font-family: var(--font-mono);
   font-size: 9px;
 }
@@ -2821,18 +2824,18 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   grid-template-columns: 88px minmax(0, 1fr);
   gap: 10px;
   padding: 8px 0;
-  border-bottom: 1px solid #f0f1f2;
+  border-bottom: 1px solid var(--outline-variant);
 }
 
 .pluginInfoList dt {
-  color: #9299a3;
+  color: var(--process-text);
   font-size: 10px;
 }
 
 .pluginInfoList dd {
   margin: 0;
   overflow-wrap: anywhere;
-  color: #4f5660;
+  color: var(--process-text);
   font-family: var(--font-mono);
   font-size: 9px;
 }
@@ -2851,10 +2854,10 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   align-items: center;
   gap: 12px;
   padding: 10px 11px;
-  border: 1px solid #efb8b2;
+  border: 1px solid var(--error);
   border-radius: 7px;
-  background: #fff1f0;
-  color: #82221a;
+  background: var(--surface-variant);
+  color: var(--error);
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.14);
 }
 
@@ -2885,8 +2888,8 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   bottom: calc(100% + 7px);
   padding: 4px 7px;
   border-radius: 4px;
-  background: #24272b;
-  color: #fff;
+  background: var(--solid-surface);
+  color: var(--solid-text);
   font-size: 10px;
   opacity: 0;
   pointer-events: none;

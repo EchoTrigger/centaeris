@@ -290,7 +290,7 @@ test("a hydration failure clears stale state and renders the session error", asy
   expect(sessionViewCacheStore.get("broken")).toBeNull();
   expect(useChatViewStore.getState().messageIds).toEqual([]);
   const alert = renderer!.root.findByProps({ role: "alert" });
-  expect(alert.findByType("h2").children.join(" ")).toBe("无法加载会话");
+  expect(alert.findByType("h2").children.join(" ")).toBe("Unable to load conversation");
   expect(alert.findByType("p").children.join(" ")).toContain(
     "projection unavailable",
   );

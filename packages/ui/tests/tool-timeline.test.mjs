@@ -54,14 +54,14 @@ test("normalizes the result operation without runtime title or non-bash kind", (
   );
   assert.throws(
     () => normalizeToolOperation({ ...read, title: "Read file" }),
-    /不支持旧 title/,
+    /does not support the old title field/,
   );
   assert.throws(
     () => normalizeToolOperation({ ...read, kind: "read" }),
-    /工具 operation kind 不支持: read\/read/,
+    /Unsupported tool operation kind: read\/read/,
   );
   assert.throws(
     () => normalizeToolOperation({ ...command, normalizedInput: undefined, kind: "read" }),
-    /工具 operation kind 不支持: bash\/read/,
+    /Unsupported tool operation kind: bash\/read/,
   );
 });

@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { type ReactNode } from "react";
 import { toPositiveInt } from "./chat/numberUtils";
 
@@ -103,7 +104,7 @@ const renderWorkspacePathInline = (
       type="button"
       key={key}
       className="answerPathInlineButton"
-      title={`打开 ${pathReference.path}${lineLabel}`}
+      title={t("markdownRenderer.openValueValue", { value1: pathReference.path, value2: lineLabel })}
       onClick={(event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -141,7 +142,7 @@ const renderMarkdownInline = (
             type="button"
             key={key}
             className="answerPathLinkButton"
-            title={`打开 ${pathReference.path}`}
+            title={t("toolActivityTranscript.openValue", { value1: pathReference.path })}
             onClick={(event) => {
               event.preventDefault();
               event.stopPropagation();

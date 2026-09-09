@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import {
   useCallback,
   useRef,
@@ -225,8 +226,8 @@ export const useAgentStreamController = ({
           }
           const detail =
             error instanceof Error && error.message.trim()
-              ? `连接中断：${error.message.trim()}`
-              : "连接中断，请重试。";
+              ? t("useAgentStreamController.connectionInterruptedValue", { value1: error.message.trim() })
+              : t("useAgentStreamController.connectionInterruptedPleaseTryAgain");
           finishAssistantStreamWithError(
             assistantMessageId,
             detail,

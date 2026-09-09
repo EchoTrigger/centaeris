@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import { memo, useLayoutEffect, type RefObject } from "react";
 import { Check, Copy, Pencil } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -80,17 +81,13 @@ const UserMessageRow = memo(function UserMessageRow({
               type="button"
               className="user-edit-secondary"
               onClick={onCancelEditingUserMessage}
-            >
-              取消
-            </button>
+            >{t("virtualMessageList.cancel")}</button>
             <button
               type="button"
               className="user-edit-primary"
               onClick={() => onSubmitEditedUserMessage(message.id)}
               disabled={!editingPrompt.trim()}
-            >
-              发送
-            </button>
+            >{t("composerPromptInput.send")}</button>
           </div>
         </div>
       ) : (
@@ -104,14 +101,14 @@ const UserMessageRow = memo(function UserMessageRow({
             <span className="user-message-time">
               {formatUserMessageTimestamp(message.timestamp)}
             </span>
-            <Tooltip content="复制">
+            <Tooltip content={t("virtualMessageList.copy")}>
               <Button
                 type="button"
                 variant="ghost"
                 size="icon"
                 className="user-message-icon-btn"
                 onClick={() => onCopyUserMessage(message.id, message.text)}
-                aria-label="复制"
+                aria-label={t("virtualMessageList.copy")}
               >
                 {isCopied ? (
                   <Check className="user-message-action-icon" aria-hidden="true" />
@@ -121,14 +118,14 @@ const UserMessageRow = memo(function UserMessageRow({
               </Button>
             </Tooltip>
             {canEdit ? (
-                  <Tooltip content="编辑">
+                  <Tooltip content={t("chatArea.edit")}>
                     <Button
                       type="button"
                       variant="ghost"
                       size="icon"
                       className="user-message-icon-btn"
                       onClick={() => onStartEditingUserMessage(message)}
-                      aria-label="编辑"
+                      aria-label={t("chatArea.edit")}
                     >
                       <Pencil
                         className="user-message-action-icon"

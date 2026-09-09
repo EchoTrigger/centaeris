@@ -680,6 +680,38 @@ test("stopping restores the queued prompt and cancels the active run once", asyn
   await act(async () => renderer.unmount());
 });
 
+test.each(["local stop", "AgentRunInterrupted"] as const)("%s seals live reasoning while preserving its content", async (ending) => {
+  vi.mocked(window.requestAnimationFrame).mockImplementation((callback) => window.setTimeout(() => callback(0), 0));
+  const renderer = await renderChat(session("one"));
+  await submitPrompt("first prompt");
+  await act(async () => { await vi.runOnlyPendingTimersAsync(); });
+  const stream = getStream(0);
+  await openStream(stream);
+  await act(async () => {
+    stream.onMessage({
+      type: "session_event", agentRunId: "run-1",
+      event: {
+        id: "reasoning-snapshot", type: "ModelSnapshot", visibility: "user", turnId: "turn-run-1", sessionId: "one", at: 90,
+        payload: { revision: 1, text: "Partial answer", reasoning: {
+          blockId: "reasoning:request-1", requestId: "request-1", text: "Inspect inputs",
+        } },
+      },
+    });
+    vi.advanceTimersByTime(20);
+    await flushAsyncWork();
+  });
+  expect(getAssistantTurn("run-1").chunks).toContainEqual(expect.objectContaining({ kind: "reasoning", status: "streaming" }));
+  await act(async () => {
+    if (ending === "local stop") getComposer().onComposerAction();
+    else stream.onMessage(terminalPayload("one", "run-1", ending, { reasonType: "cancelled" }));
+    await flushAsyncWork();
+  });
+  expect(getAssistantTurn("run-1").isStreaming).toBe(false);
+  expect(getAssistantTurn("run-1").finalAnswer).toBe("Partial answer");
+  expect(getAssistantTurn("run-1").chunks).toContainEqual(expect.objectContaining({ kind: "reasoning", status: "interrupted", text: "Inspect inputs" }));
+  await act(async () => renderer.unmount());
+});
+
 test("a late stream-open callback cannot revive a stopped run", async () => {
   const renderer = await renderChat(session("one"));
 
@@ -1701,7 +1733,7 @@ test("an unsupported stream payload fails closed and closes the active connectio
     .join("\n");
   expect(turn.isStreaming).toBe(false);
   expect(narrative).toContain(
-    "协议错误：不支持的 stream payload type=unsupported。",
+    "Protocol error: unsupported stream payload type=unsupported.",
   );
   expect(stream.close).toHaveBeenCalledTimes(1);
   expect(onAgentRunningChange.mock.calls).toEqual([

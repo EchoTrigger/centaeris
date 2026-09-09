@@ -1,4 +1,4 @@
-import { app, BrowserWindow, session, WebContentsView } from "electron";
+import { app, BrowserWindow, nativeTheme, session, WebContentsView } from "electron";
 import fs from "node:fs";
 import {
   createTrustedRendererPolicy,
@@ -110,8 +110,8 @@ export const createWindowShell = ({
           ? {
               titleBarStyle: "hidden",
               titleBarOverlay: {
-                color: "#f7f7f7",
-                symbolColor: "#202124",
+                color: nativeTheme.shouldUseDarkColors ? "#242424" : "#f5f5f4",
+                symbolColor: nativeTheme.shouldUseDarkColors ? "#ededed" : "#202428",
                 height: 36,
               },
             }
@@ -132,6 +132,13 @@ export const createWindowShell = ({
         sandbox: true,
         backgroundThrottling: false,
       },
+    });
+
+    mainWindow.webContents.on("did-change-theme-color", (_event, rawColor) => {
+      if (process.platform !== "win32" || !mainWindow || mainWindow.isDestroyed()) return;
+      const color = typeof rawColor === "string" ? rawColor.toLowerCase() : null;
+      if (color !== "#242424" && color !== "#f5f5f4") return;
+      mainWindow.setTitleBarOverlay({ color, symbolColor: color === "#242424" ? "#ededed" : "#202428", height: NATIVE_TITLEBAR_HEIGHT });
     });
 
     const packagedDistExists = fs.existsSync(packagedUiDistIndex);

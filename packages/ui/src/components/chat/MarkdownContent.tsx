@@ -1,3 +1,4 @@
+import { useStreamPresentation } from "../../useStreamPresentation";
 import { memo, useEffect, useMemo, useRef } from "react";
 import {
   renderMarkdownNodes,
@@ -97,7 +98,7 @@ const MarkdownBlock = memo(function MarkdownBlock({
 });
 
 export function MarkdownContent({
-  text,
+  text: sourceText,
   isStreaming = false,
   onOpenWorkspacePath,
 }: {
@@ -105,6 +106,7 @@ export function MarkdownContent({
   isStreaming?: boolean;
   onOpenWorkspacePath?: OpenWorkspacePathHandler;
 }) {
+  const text = useStreamPresentation(sourceText, isStreaming);
   const committedProjection = useRef(createMarkdownBlockProjection());
   const projection = useMemo(
     () =>

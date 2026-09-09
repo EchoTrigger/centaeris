@@ -201,7 +201,7 @@ test("opens a detail-free file operation with its exact source range", async () 
   });
 
   await click(renderer.root.findByType("summary"));
-  await click(renderer.root.findByProps({ "aria-label": "打开 src/App.tsx" }));
+  await click(renderer.root.findByProps({ "aria-label": "Open src/App.tsx" }));
   expect(onOpenWorkspacePath).toHaveBeenCalledWith("src/App.tsx", {
     startLine: 12,
     endLine: 24,

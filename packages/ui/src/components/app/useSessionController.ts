@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import { useCallback, useMemo, useRef, useState } from "react";
 import type { UiSession } from "../../types/ui";
 import {
@@ -153,7 +154,7 @@ export function useSessionController({
         target = fetched.find((session) => session.id === sessionId);
       } catch (error) {
         if (selectionEpochRef.current === selectionEpoch) {
-          inputsRef.current.reportError(errorMessage(error, "加载会话失败"));
+          inputsRef.current.reportError(errorMessage(error, t("app.unableToLoadConversations")));
         }
         return null;
       }
@@ -171,7 +172,7 @@ export function useSessionController({
         workspaceSnapshot = snapshot;
       } catch (error) {
         if (selectionEpochRef.current === selectionEpoch) {
-          inputsRef.current.reportError(errorMessage(error, "切换会话工作区失败"));
+          inputsRef.current.reportError(errorMessage(error, t("useSessionController.unableToSwitchTheConversationWorkspace")));
         }
         return null;
       }
@@ -201,7 +202,7 @@ export function useSessionController({
         items.map((session) => session.id === sessionId ? updated : session),
       ));
     } catch (error) {
-      inputsRef.current.reportError(errorMessage(error, "重命名会话失败"));
+      inputsRef.current.reportError(errorMessage(error, t("useSessionController.unableToRenameConversation")));
       throw error;
     }
   }, []);
@@ -210,10 +211,10 @@ export function useSessionController({
     try {
       const currentSessions = sessionsRef.current;
       const target = currentSessions.find((session) => session.id === sessionId);
-      if (!target) throw new Error(`删除目标会话不存在: ${sessionId}`);
+      if (!target) throw new Error(t("useSessionController.conversationToDeleteDoesNotExistValue", { value1: sessionId }));
       const response = await deleteSession(sessionId);
       if (response.deletedSessionId !== sessionId) {
-        throw new Error(`删除会话响应身份不匹配: ${response.deletedSessionId}`);
+        throw new Error(t("useSessionController.deleteResponseIdentityMismatchValue", { value1: response.deletedSessionId }));
       }
       const deletedIds = new Set(
         currentSessions
@@ -238,7 +239,7 @@ export function useSessionController({
       );
       return deletedIds;
     } catch (error) {
-      inputsRef.current.reportError(errorMessage(error, "删除会话失败"));
+      inputsRef.current.reportError(errorMessage(error, t("useSessionController.unableToDeleteConversation")));
       throw error;
     }
   }, [refresh]);

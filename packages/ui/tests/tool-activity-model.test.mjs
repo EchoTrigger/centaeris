@@ -83,15 +83,15 @@ test("keeps settled failures visible and never requires a fake edit diff", () =>
 
   assert.throws(
     () => getToolActivityPresentation([{ ...edit, diffPreview: undefined }]),
-    /成功 edit operation 缺少 diffPreview/,
+    /Successful edit operation is missing diffPreview/,
   );
   assert.throws(
     () => getToolActivityPresentation([{ ...write, diffPreview: undefined }]),
-    /成功 write operation 缺少 diffPreview/,
+    /Successful write operation is missing diffPreview/,
   );
   assert.throws(
     () => getToolActivityPresentation([{ ...failedEdit, diffPreview: "-not-applied" }]),
-    /失败 edit operation 不得携带 diffPreview/,
+    /Failed edit operation must not include diffPreview/,
   );
 });
 
@@ -101,17 +101,17 @@ test("uses exact toolName, presents canonical dynamic tools, and rejects damaged
   assert.equal(getToolActivityAtom(write).detailRendererKind, "diff");
   assert.throws(
     () => getToolActivityAtom({ ...read, kind: "read" }),
-    /工具 operation kind 不支持: read\/read/,
+    /Unsupported tool operation kind: read\/read/,
   );
   assert.throws(
     () => getToolActivityAtom({ ...command, kind: undefined }),
-    /工具 operation kind 不支持: bash\/<missing>/,
+    /Unsupported tool operation kind: bash\/<missing>/,
   );
   const dynamic = getToolActivityAtom(result("call-weather", "get_weather"));
   assert.equal(dynamic.kind, "externalTool");
   assert.equal(dynamic.title, "Ran external tools");
   assert.throws(
     () => getToolActivityAtom(result("call-bad", "GetWeather")),
-    /不支持的工具 operation: GetWeather/,
+    /Unsupported tool operation: GetWeather/,
   );
 });

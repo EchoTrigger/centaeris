@@ -51,11 +51,16 @@ pub(crate) fn seal_tool_result(
                 output_complete: true,
             };
             insert_capture(&mut result.details, &capture);
+            let head_end = previous_char_boundary(&result.content, MODEL_PREVIEW_EDGE_BYTES);
+            let tail_start = next_char_boundary(
+                &result.content,
+                result
+                    .content
+                    .len()
+                    .saturating_sub(MODEL_PREVIEW_EDGE_BYTES),
+            );
             result.content = format!(
-                "{preview}\n\n[Full tool result: {} | content starts at byte {} | {} bytes. Use read or bash tools to inspect it in sections.]",
-                path,
-                output_start_byte,
-                output_byte_length,
+                "Complete tool result saved. This is a partial preview, not the complete output.\nPreview byte ranges: 0..{head_end} and {tail_start}..{output_byte_length} (UTF-8 bytes, end exclusive).\n[Full tool result: {path} | content starts at byte {output_start_byte} | {output_byte_length} bytes.]\nContinue with read on this path using offset and limit; for a long single line, use bash to read byte ranges. Do not treat the omitted range as read.\n\n{preview}",
             );
         }
         Err(error) => {
@@ -356,6 +361,22 @@ mod tests {
         assert!(header.contains("Capture test"));
         assert!(header.contains(r#""command":"test""#));
         assert_eq!(&spilled.bytes[start..end], exact.as_bytes());
+        let restored = ToolRuntimeContext::with_cwd(workspace.clone())
+            .expect("restored context")
+            .with_session_id("capture_test_session")
+            .execution_host_binding()
+            .expect("restored binding")
+            .run_file_system_operation(
+                path.to_string_lossy(),
+                ExecutionFileSystemOperation::ReadFile {
+                    max_bytes: exact.len() + MODEL_TOOL_RESULT_MAX_BYTES,
+                },
+            )
+            .expect("saved result survives a new runtime context");
+        let ExecutionFileSystemOutput::ReadFile(restored) = restored else {
+            panic!("invalid restored read")
+        };
+        assert_eq!(&restored.bytes[start..end], exact.as_bytes());
         let mutation = binding
             .run_file_system_operation(
                 path.to_string_lossy(),
@@ -370,6 +391,9 @@ mod tests {
             mutation.kind,
             ExecutionFileSystemErrorKind::PermissionDenied
         );
+        assert!(sealed.content.starts_with("Complete tool result saved."));
+        assert!(sealed.content.contains("Preview byte ranges:"));
+        assert!(sealed.content.contains("end exclusive"));
         assert!(sealed.content.contains("Full tool result:"));
         assert!(sealed.content.len() <= MODEL_TOOL_RESULT_MAX_BYTES);
         fs::remove_file(path).expect("remove spill file");

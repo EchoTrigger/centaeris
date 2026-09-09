@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import {
   lazy,
   memo,
@@ -260,7 +261,7 @@ const renderToolOperationNode = ({
           <button
             type="button"
             className="agent-operation-summary agent-tool-node-summary is-path-link"
-            aria-label={`打开 ${path}`}
+            aria-label={t("toolActivityTranscript.openValue", { value1: path })}
             onClick={() =>
               onOpenWorkspacePath(path, {
                 startLine: operation.startLine,
@@ -377,7 +378,7 @@ export const TaskGroupTranscriptItem = memo(function TaskGroupTranscriptItem({
   const summary = (
     <div className="agent-operation-summary">
       <ActivityIcon className="agent-tool-node-icon" aria-hidden="true" />
-      <span className={`agent-operation-summary-text ${live ? "agentRunStatusText" : ""}`}>{liveText}</span>
+      <span className={`agent-operation-summary-text ${live ? "agentRunStatusText statusShimmer" : ""}`}>{liveText}</span>
       {presentation.expandable ? (
         <span
           className={`agent-operation-chevron ${isOpen ? "open" : ""}`}

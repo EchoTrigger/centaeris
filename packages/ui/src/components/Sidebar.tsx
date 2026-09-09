@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { useEffect, useRef, useState } from "react";
 import {
   Check,
@@ -239,7 +240,7 @@ export function Sidebar({
       </div>
       )}
 
-      <section className="thinSessionRegion" aria-label="会话">
+      <section className="thinSessionRegion" aria-label={t("sidebar.conversations")}>
         <div className="thinSectionHeader">
           <span>SESSIONS</span>
         </div>
@@ -303,7 +304,7 @@ export function Sidebar({
                       onKeyDown={(event) => {
                         if (event.key === "Escape") setRenameSessionId(null);
                       }}
-                      aria-label={`重命名 ${session.title}`}
+                      aria-label={t("sidebar.renameValue", { value1: session.title })}
                     />
                   </form>
                 );
@@ -326,12 +327,12 @@ export function Sidebar({
                     {session.isPinned ? <Pin className="thinPinnedIcon" aria-hidden="true" /> : null}
                   </button>
                   <div className="thinSessionActions">
-                    <button type="button" onClick={() => beginRename(session)} aria-label={`重命名 ${session.title}`}><Pencil aria-hidden="true" /></button>
+                    <button type="button" onClick={() => beginRename(session)} aria-label={t("sidebar.renameValue", { value1: session.title })}><Pencil aria-hidden="true" /></button>
                     <button
                       type="button"
-                      title="删除会话"
+                      title={t("sidebar.deleteConversation")}
                       onClick={() => { setRenameSessionId(null); setDeleteSessionId(session.id); }}
-                      aria-label={`删除 ${session.title}`}
+                      aria-label={t("sidebar.deleteValue", { value1: session.title })}
                     ><Trash2 aria-hidden="true" /></button>
                   </div>
                 </div>

@@ -227,7 +227,7 @@ test("a queued follow frame respects the user scrolling away", async () => {
 
   harness.scrollContainer.scrollTop = 100;
   await act(async () => list.onScroll());
-  expect(renderer.root.findAllByProps({ "aria-label": "回到最新" })).toHaveLength(1);
+  expect(renderer.root.findAllByProps({ "aria-label": "Jump to latest" })).toHaveLength(1);
 
   await act(async () => runAnimationFrames());
   expect(harness.scrollContainer.scrollTop).toBe(100);
@@ -242,7 +242,7 @@ test("content changes coalesce while jump-to-latest resumes following", async ()
   harness.scrollContainer.scrollTop = 100;
   await act(async () => list.onScroll());
 
-  const jumpButton = renderer.root.findByProps({ "aria-label": "回到最新" });
+  const jumpButton = renderer.root.findByProps({ "aria-label": "Jump to latest" });
   await act(async () => {
     jumpButton.props.onClick();
     list.onContentSizeChange();
@@ -250,7 +250,7 @@ test("content changes coalesce while jump-to-latest resumes following", async ()
   });
 
   expect(harness.frameCallbacks).toHaveLength(1);
-  expect(renderer.root.findAllByProps({ "aria-label": "回到最新" })).toHaveLength(0);
+  expect(renderer.root.findAllByProps({ "aria-label": "Jump to latest" })).toHaveLength(0);
   await act(async () => runAnimationFrames());
   expect(harness.scrollContainer.scrollTop).toBe(1_000);
 
@@ -275,7 +275,7 @@ test("switching sessions resumes following", async () => {
     );
   });
 
-  expect(renderer.root.findAllByProps({ "aria-label": "回到最新" })).toHaveLength(0);
+  expect(renderer.root.findAllByProps({ "aria-label": "Jump to latest" })).toHaveLength(0);
   expect(harness.frameCallbacks).toHaveLength(1);
   await act(async () => runAnimationFrames());
   expect(harness.scrollContainer.scrollTop).toBe(1_000);
@@ -292,7 +292,7 @@ test("direct submission resumes following before the new content is measured", a
   await act(async () => getComposerProps().onInputChange("hello"));
   await act(async () => getComposerProps().onSubmit());
 
-  expect(renderer.root.findAllByProps({ "aria-label": "回到最新" })).toHaveLength(0);
+  expect(renderer.root.findAllByProps({ "aria-label": "Jump to latest" })).toHaveLength(0);
 
   await act(async () => renderer.unmount());
 });

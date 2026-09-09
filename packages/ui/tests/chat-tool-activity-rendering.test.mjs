@@ -322,7 +322,7 @@ test("uses exact structured operations and leaves no legacy summary chain", () =
         toolName: "get-weather",
       })),
     }]),
-    /不支持的工具 operation: get-weather/,
+    /Unsupported tool operation: get-weather/,
   );
 
   const firstGroup = buildTranscriptProcessViewModel({
@@ -388,11 +388,9 @@ test("keeps command titles bounded inside the process text rail", async () => {
     /\.agent-tool-bash-scroll\s*\{[^}]*contain:\s*layout paint;/,
   );
   assert.doesNotMatch(chatStyles, /\.agent-tool-bash-scroll\s*\{[^}]*mask-image:/);
-  assert.match(
-    chatStyles,
-    /animation:\s*centaerisRunStatusWave 4s ease-in-out infinite;/,
-  );
-  assert.match(chatStyles, /0%\s*\{[^}]*background-position:\s*120% 50%;/);
-  assert.match(chatStyles, /75%,\s*\n\s*100%\s*\{[^}]*background-position:\s*-120% 50%;/);
+  const shimmerStyles = await readFile(new URL("../src/styles/status-shimmer.css", import.meta.url), "utf8");
+  assert.match(shimmerStyles, /animation:\s*statusShimmerSweep 4s ease-in-out 1;/);
+  assert.match(shimmerStyles, /prefers-reduced-motion: reduce/);
+  assert.match(shimmerStyles, /forced-colors: active/);
   assert.doesNotMatch(chatStyles, /agentProcessSummary|AgentProcessHeaderText/);
 });

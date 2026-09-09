@@ -61,7 +61,8 @@ vi.mock("@codemirror/view", () => {
 vi.mock("@codemirror/commands", () => ({ defaultKeymap: [] }));
 vi.mock("@codemirror/language", () => ({
   syntaxHighlighting: extension,
-  defaultHighlightStyle: {},
+  defaultHighlightStyle: { specs: [] },
+  HighlightStyle: { define: extension },
   bracketMatching: extension,
   foldGutter: extension,
 }));

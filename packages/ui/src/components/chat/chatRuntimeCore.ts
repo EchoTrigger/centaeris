@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import type {
   AgentContextUsageSummary,
   AgentRuntimeConfig,
@@ -60,13 +61,13 @@ export const formatUserMessageTimestamp = (timestamp?: number): string => {
     return `${hour}:${minute}`;
   }
   const weekdays = [
-    "星期日",
-    "星期一",
-    "星期二",
-    "星期三",
-    "星期四",
-    "星期五",
-    "星期六",
+    t("chatRuntimeCore.sunday"),
+    t("chatRuntimeCore.monday"),
+    t("chatRuntimeCore.tuesday"),
+    t("chatRuntimeCore.wednesday"),
+    t("chatRuntimeCore.thursday"),
+    t("chatRuntimeCore.friday"),
+    t("chatRuntimeCore.saturday"),
   ];
   return `${weekdays[date.getDay()]}${hour}:${minute}`;
 };
@@ -152,19 +153,19 @@ export const buildContextUsageTooltip = (
     return "";
   }
   const latest = contextUsage.latestUsage;
-  const lines = ["上下文占用"];
+  const lines = [t("chatRuntimeCore.contextUsage")];
   if (
     typeof contextUsage.usedTokens === "number" &&
     typeof contextUsage.maxContextTokens === "number"
   ) {
     lines.push(
-      `当前请求 ${formatTokenCount(contextUsage.usedTokens)} / ${formatTokenCount(contextUsage.maxContextTokens)}`,
+      t("chatRuntimeCore.currentRequestValueValue", { value1: formatTokenCount(contextUsage.usedTokens), value2: formatTokenCount(contextUsage.maxContextTokens) }),
     );
   }
   if (latest) {
     lines.push(
       "",
-      "最近完成的模型请求",
+      t("chatRuntimeCore.mostRecentCompletedModelRequest"),
       `total ${formatTokenCount(displayedTotalTokens(latest))}`,
       formatUsageInputLine(
         displayedInputTokens(latest),
@@ -233,7 +234,7 @@ export const compactText = (value: unknown, maxLength: number = 120): string => 
 export const formatExecutionError = (error: unknown): string => {
   const raw = error instanceof Error ? error.message : String(error ?? "");
   const normalized = raw.trim();
-  return normalized || "处理失败。";
+  return normalized || t("chatRuntimeCore.processingFailed");
 };
 
 export const formatRuntimeModelError = (payload: Record<string, unknown>): string => {
@@ -241,18 +242,18 @@ export const formatRuntimeModelError = (payload: Record<string, unknown>): strin
     typeof payload.message === "string" ? payload.message.trim() : "";
   const processState = normalizeRuntimeProcessState(payload.processState);
   if (processState === "provider_waiting") {
-    return "模型服务排队中或触发并发限制，请稍后继续。";
+    return t("chatRuntimeCore.theModelServiceIsQueuedOrHasReachedIts");
   }
   if (processState === "auth_failed") {
-    return "模型服务鉴权失败，请检查 API Key 或登录状态。";
+    return t("chatRuntimeCore.modelAuthenticationFailedCheckYourApiKeyOrSign");
   }
   if (processState === "provider_unavailable") {
-    return "模型服务端故障或过载，请稍后继续。";
+    return t("chatRuntimeCore.theModelServiceIsUnavailableOrOverloadedPleaseTry");
   }
   if (processState === "provider_interrupted") {
-    return "模型服务响应中断，通常是服务端排队、长连接或网关中断导致。";
+    return t("chatRuntimeCore.theModelResponseWasInterruptedPossiblyByServerQueuing");
   }
-  return formatExecutionError(new Error(text || "处理异常"));
+  return formatExecutionError(new Error(text || t("chatRuntimeCore.processingError")));
 };
 
 export const DEFAULT_RUNTIME_ACTIVITY: RuntimeActivity = {
@@ -357,10 +358,10 @@ export const mapProcessStateToActivity = (
   }
   const state = normalizeRuntimeProcessState(rawState);
   if (!state) {
-    throw new Error(`未知 runtime processState: ${rawState}`);
+    throw new Error(t("chatRuntimeCore.unknownRuntimeProcessstateValue", { value1: rawState }));
   }
   if (state === "unknown") {
-    throw new Error("未知 runtime processState: unknown");
+    throw new Error(t("chatRuntimeCore.unknownRuntimeProcessstateUnknown"));
   }
   if (NON_ACTIVITY_PROCESS_STATES.has(state)) {
     return null;

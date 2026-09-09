@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import {
   type CSSProperties,
   useCallback,
@@ -64,14 +65,14 @@ const COMPOSER_BOTTOM_GAP_PX = 18;
 const COMPOSER_SCROLL_GUTTER_PX = 18;
 
 const HYDRATION_STAGE_LABELS: Record<string, string> = {
-  fetchProjection: "读取会话投影",
-  reduceReplays: "归并任务回放",
-  reduceMessages: "归并历史消息",
-  finalizeSnapshot: "整理恢复快照",
-  applySnapshot: "应用会话视图",
-  refreshCachedSession: "校验会话缓存",
-  fetchDeltaReplays: "读取增量回放",
-  applyDeltaReplays: "应用增量回放",
+  fetchProjection: t("chatArea.loadingConversationProjection"),
+  reduceReplays: t("chatArea.mergingTaskReplay"),
+  reduceMessages: t("chatArea.mergingMessageHistory"),
+  finalizeSnapshot: t("chatArea.preparingRecoverySnapshot"),
+  applySnapshot: t("chatArea.applyingConversationView"),
+  refreshCachedSession: t("chatArea.validatingConversationCache"),
+  fetchDeltaReplays: t("chatArea.loadingIncrementalReplay"),
+  applyDeltaReplays: t("chatArea.applyingIncrementalReplay"),
 };
 
 type ChatViewMeta = {
@@ -686,22 +687,22 @@ export function ChatArea({
       {isPinnedSummaryOpen && shouldShowPinnedSummary ? (
         <section
           className={`pinnedSummaryCard ${isPinnedSummaryRetracting ? "is-retracting" : ""}`}
-          aria-label="摘要/状态"
+          aria-label={t("chatArea.summaryStatus")}
         >
           <header className="pinnedSummaryHeader">
-            <span>环境信息</span>
+            <span>{t("chatArea.environment")}</span>
           </header>
           <div className="pinnedSummaryRows">
             <div className="pinnedSummaryRow">
               <HardDrive className="pinnedSummaryIcon" aria-hidden="true" />
-              <span>本地</span>
-              <strong>{shouldShowWorkspaceLabel ? workspaceName : "未绑定工作区"}</strong>
+              <span>{t("chatArea.local")}</span>
+              <strong>{shouldShowWorkspaceLabel ? workspaceName : t("chatArea.noWorkspaceSelected")}</strong>
             </div>
             {gitStatus ? (
               <>
                 <div className="pinnedSummaryRow">
                   <FileText className="pinnedSummaryIcon" aria-hidden="true" />
-                  <span>变更</span>
+                  <span>{t("chatArea.changes")}</span>
                   <strong className="pinnedSummaryDiff">
                     <span className="is-added">+{gitStatus.totalAdded.toLocaleString()}</span>
                     <span className="is-removed">-{gitStatus.totalRemoved.toLocaleString()}</span>
@@ -709,7 +710,7 @@ export function ChatArea({
                 </div>
                 <div className="pinnedSummaryRow">
                   <GitBranch className="pinnedSummaryIcon" aria-hidden="true" />
-                  <span>分支</span>
+                  <span>{t("chatArea.branch")}</span>
                   <strong>{gitStatus.branch || "detached"}</strong>
                 </div>
               </>
@@ -717,24 +718,24 @@ export function ChatArea({
               <div className="pinnedSummaryRow">
                 <GitBranch className="pinnedSummaryIcon" aria-hidden="true" />
                 <span>Git</span>
-                <strong>{gitStatusError || "Git 状态未连接"}</strong>
+                <strong>{gitStatusError || t("chatArea.gitStatusDisconnected")}</strong>
               </div>
             )}
             <div className="pinnedSummaryRow">
               <CloudUpload className="pinnedSummaryIcon" aria-hidden="true" />
-              <span>提交或推送</span>
-              <strong>未连接</strong>
+              <span>{t("chatArea.commitOrPush")}</span>
+              <strong>{t("chatArea.disconnected")}</strong>
             </div>
             <div className="pinnedSummaryRow">
               <GitHubMarkIcon className="pinnedSummaryIcon" aria-hidden="true" />
               <span>GitHub CLI</span>
-              <strong>{githubCliStatus?.summary ?? "GitHub CLI 未检测"}</strong>
+              <strong>{githubCliStatus?.summary ?? t("chatArea.githubCliNotDetected")}</strong>
             </div>
           </div>
           <div className="pinnedSummaryDivider" />
           <div className="pinnedSummarySource">
-            <span>来源</span>
-            <p>暂无来源</p>
+            <span>{t("chatArea.sources")}</span>
+            <p>{t("chatArea.noSourcesYet")}</p>
           </div>
         </section>
       ) : null}
@@ -749,7 +750,7 @@ export function ChatArea({
               data-chat-view-mode="error"
               role="alert"
             >
-              <h2>无法加载会话</h2>
+              <h2>{t("chatArea.unableToLoadConversation")}</h2>
               <p>{sessionLoadError}</p>
             </section>
           ) : chatViewMode === "welcome" ? null : chatViewMode === "restoring" ? (
@@ -759,8 +760,8 @@ export function ChatArea({
             >
               <span>
                 {isHydratingSession
-                  ? `正在恢复会话${hydrationStage ? `：${HYDRATION_STAGE_LABELS[hydrationStage] || hydrationStage}` : ""}...`
-                  : "当前会话暂无消息"}
+                  ? t("chatArea.restoringConversationValue", { value1: hydrationStage ? `：${HYDRATION_STAGE_LABELS[hydrationStage] || hydrationStage}` : "" })
+                  : t("chatArea.noMessagesInThisConversationYet")}
               </span>
             </div>
           ) : (
@@ -788,8 +789,8 @@ export function ChatArea({
             type="button"
             className="jump-to-latest"
             onClick={handleJumpToLatest}
-            aria-label="回到最新"
-            title="回到最新"
+            aria-label={t("chatArea.jumpToLatest")}
+            title={t("chatArea.jumpToLatest")}
           >
             <ChevronDown aria-hidden="true" />
           </button>
@@ -824,13 +825,13 @@ export function ChatArea({
                   {queuedNextPrompt.trim()}
                 </div>
                 <div className="queuedNextPromptActions">
-                  <Tooltip content="编辑">
+                  <Tooltip content={t("chatArea.edit")}>
                     <Button
                       type="button"
                       variant="composerIcon"
                       size="composerIcon"
                       className="queuedNextPromptButton"
-                      aria-label="编辑排队输入"
+                      aria-label={t("chatArea.editQueuedInput")}
                       onClick={handleEditQueuedNextPrompt}
                     >
                       <Pencil
@@ -839,13 +840,13 @@ export function ChatArea({
                       />
                     </Button>
                   </Tooltip>
-                  <Tooltip align="end" content="马上追加">
+                  <Tooltip align="end" content={t("chatArea.sendNow")}>
                     <Button
                       type="button"
                       variant="composerIcon"
                       size="composerIcon"
                       className="queuedNextPromptButton"
-                      aria-label="马上追加排队输入"
+                      aria-label={t("chatArea.sendQueuedInputNow")}
                       onClick={handleSubmitQueuedNextPromptAsSupplement}
                     >
                       <CornerDownLeft

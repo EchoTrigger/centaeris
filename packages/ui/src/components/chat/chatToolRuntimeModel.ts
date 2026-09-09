@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import { toPositiveInt } from "./numberUtils";
 import { isRecord } from "./chatRuntimeCore";
 import type { ToolOperation } from "./types";
@@ -17,7 +18,7 @@ const TOOL_RESULT_STATES = new Set([
 const normalizeRequiredString = (value: unknown, field: string): string => {
   const normalized = typeof value === "string" ? value.trim() : "";
   if (!normalized) {
-    throw new Error(`ToolResult.payload.operations[] 缺少 ${field}`);
+    throw new Error(t("chatToolRuntimeModel.toolresultPayloadOperationsIsMissingValue", { value1: field }));
   }
   return normalized;
 };
@@ -29,25 +30,25 @@ const normalizeOptionalString = (value: unknown): string | undefined => {
 
 export const normalizeToolOperation = (raw: unknown): ToolOperation => {
   if (!isRecord(raw)) {
-    throw new Error("ToolResult.payload.operations[] 必须是 object");
+    throw new Error(t("chatToolRuntimeModel.toolresultPayloadOperationsMustBeAnObject"));
   }
   const callId = normalizeRequiredString(raw.callId, "callId");
   const toolName = normalizeToolName(raw.toolName);
   const status = normalizeRequiredString(raw.status, "status");
   const resultState = normalizeRequiredString(raw.resultState, "resultState");
   if (!TOOL_RESULT_STATES.has(resultState)) {
-    throw new Error(`ToolResult.payload.operations[] resultState 不支持: ${resultState}`);
+    throw new Error(t("chatToolRuntimeModel.unsupportedToolresultPayloadOperationsResultstateValue", { value1: resultState }));
   }
   if (Object.hasOwn(raw, "title")) {
-    throw new Error("ToolResult.payload.operations[] 不支持旧 title");
+    throw new Error(t("chatToolRuntimeModel.toolresultPayloadOperationsDoesNotSupportTheOldTitle"));
   }
   const kind = typeof raw.kind === "string" ? raw.kind.trim() : undefined;
   if (toolName === "bash") {
     if (kind !== "command") {
-      throw new Error(`工具 operation kind 不支持: ${toolName}/${kind || "<missing>"}`);
+      throw new Error(t("chatToolRuntimeModel.unsupportedToolOperationKindValueValue", { value1: toolName, value2: kind || "<missing>" }));
     }
   } else if (kind !== undefined) {
-    throw new Error(`工具 operation kind 不支持: ${toolName}/${kind}`);
+    throw new Error(t("chatToolRuntimeModel.unsupportedToolOperationKindValueValue", { value1: toolName, value2: kind }));
   }
   return {
     callId,
@@ -82,7 +83,7 @@ export const parseToolOperations = (
   expected: { callId: string; toolName: string },
 ): ToolOperation[] => {
   if (!Array.isArray(raw)) {
-    throw new Error("ToolResult.payload.operations 必须是 array");
+    throw new Error(t("chatToolRuntimeModel.toolresultPayloadOperationsMustBeAnArray"));
   }
   return raw.map((item) => {
     const operation = normalizeToolOperation(item);
@@ -90,7 +91,7 @@ export const parseToolOperations = (
       operation.callId !== expected.callId ||
       operation.toolName !== expected.toolName
     ) {
-      throw new Error("ToolResult.payload.operations[] identity 不匹配");
+      throw new Error(t("chatToolRuntimeModel.toolresultPayloadOperationsIdentityMismatch"));
     }
     return operation;
   });
@@ -112,9 +113,9 @@ export const toLineRange = (startLine?: number, endLine?: number): string => {
     return "";
   }
   if (!endLine || endLine === startLine) {
-    return `行 ${startLine}`;
+    return t("chatToolRuntimeModel.lineValue", { value1: startLine });
   }
-  return `行 ${startLine} 到 ${endLine}`;
+  return t("chatToolRuntimeModel.linesValueToValue", { value1: startLine, value2: endLine });
 };
 
 export const normalizeToolName = (value: unknown): string => {
@@ -122,7 +123,7 @@ export const normalizeToolName = (value: unknown): string => {
     typeof value !== "string" ||
     !/^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(value)
   ) {
-    throw new Error("toolName 必须是 canonical lower_snake_case");
+    throw new Error(t("chatToolRuntimeModel.toolnameMustUseCanonicalLowerSnakeCase"));
   }
   return value;
 };

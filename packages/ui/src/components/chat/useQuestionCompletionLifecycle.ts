@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import { useCallback, useEffect, useRef } from "react";
 import { answerAgentQuestion, type AgentStreamPayload } from "../../lib/chatBridge";
 import { appendNarrativeChunk } from "./chatAreaModel";
@@ -129,7 +130,7 @@ export const useQuestionCompletionLifecycle = ({
       answers.length === 0 &&
       !answerText
     ) {
-      setPendingQuestionError("请至少提供一个回答。");
+      setPendingQuestionError(t("useQuestionCompletionLifecycle.provideAtLeastOneAnswer"));
       return;
     }
 
@@ -153,8 +154,8 @@ export const useQuestionCompletionLifecycle = ({
     const now = Date.now();
     const userSummary =
       answers.length > 0
-        ? `回答：${answers.join("；")}${answerText ? `；${answerText}` : ""}`
-        : `回答：${answerText || "已提交"}`;
+        ? t("useQuestionCompletionLifecycle.answerValueValue", { value1: answers.join("；"), value2: answerText ? `；${answerText}` : "" })
+        : t("useQuestionCompletionLifecycle.answerValue", { value1: answerText || t("useQuestionCompletionLifecycle.submitted") });
     const userMessage: ChatMessage = {
       id: `user-question-${now}`,
       role: "user",
@@ -208,7 +209,7 @@ export const useQuestionCompletionLifecycle = ({
       updateAssistantTurn(assistantMessage.id, (turn) => {
         const withError = appendNarrativeChunk(
           turn,
-          "回答提交失败，请稍后重试。",
+          t("useQuestionCompletionLifecycle.unableToSubmitTheAnswerPleaseTryAgainLater"),
           "error",
         );
         return {
