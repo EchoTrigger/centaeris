@@ -225,6 +225,20 @@
       "scope": "sharedRuntime"
     },
     {
+      "name": "transcript/page",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "transcript/patches",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
       "name": "plugin/catalog_state",
       "operationKind": "read",
       "reconcileMethod": null,

@@ -15,6 +15,7 @@ use crate::session_projection;
 use crate::sessions;
 use crate::sidecars;
 use crate::skills;
+use crate::transcript_runtime;
 use crate::workspace_git;
 use crate::workspaces;
 use std::sync::{Arc, Mutex};
@@ -322,6 +323,22 @@ pub(crate) fn handle_request(
                 .map_err(|error| {
                     RuntimeHostError::new("serialize_response_failed", error.to_string())
                 })
+        }
+        RuntimeHostCommand::TranscriptPage => {
+            let payload = runtime_bridge::deserialize_request(request.payload)?;
+            let response = transcript_runtime::page(payload)
+                .map_err(|error| RuntimeHostError::new("transcript_page_failed", error))?;
+            serde_json::to_value(response).map_err(|error| {
+                RuntimeHostError::new("serialize_response_failed", error.to_string())
+            })
+        }
+        RuntimeHostCommand::TranscriptPatches => {
+            let payload = runtime_bridge::deserialize_request(request.payload)?;
+            let response = transcript_runtime::patches(payload)
+                .map_err(|error| RuntimeHostError::new("transcript_patch_failed", error))?;
+            serde_json::to_value(response).map_err(|error| {
+                RuntimeHostError::new("serialize_response_failed", error.to_string())
+            })
         }
         RuntimeHostCommand::AgentInput => {
             let payload = runtime_bridge::deserialize_request(request.payload)?;

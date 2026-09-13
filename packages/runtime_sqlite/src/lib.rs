@@ -28,7 +28,7 @@ mod sqlite_transcript;
 #[path = "sqlite_store/sqlite_turn_supplement.rs"]
 mod sqlite_turn_supplement;
 
-pub const STORE_SCHEMA_VERSION: i64 = 2;
+pub const STORE_SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug, Clone)]
 pub struct SqliteRuntimeStore {

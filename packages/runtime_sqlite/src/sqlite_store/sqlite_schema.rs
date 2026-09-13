@@ -68,15 +68,28 @@ struct ForwardMigration {
 
 // v1 is the initial schema. Add an exact n -> n+1 entry only when that
 // forward migration exists; missing paths fail without touching the store.
-const FORWARD_MIGRATIONS: &[ForwardMigration] = &[ForwardMigration {
-    from_version: 1,
-    to_version: 2,
-    apply: migrate_v1_to_v2,
-}];
+const FORWARD_MIGRATIONS: &[ForwardMigration] = &[
+    ForwardMigration {
+        from_version: 1,
+        to_version: 2,
+        apply: migrate_v1_to_v2,
+    },
+    ForwardMigration {
+        from_version: 2,
+        to_version: 3,
+        apply: migrate_v2_to_v3,
+    },
+];
 
 fn migrate_v1_to_v2(conn: &Connection) -> Result<(), String> {
     let mut ddl = String::new();
-    for table in TRANSCRIPT_TABLES {
+    for table in TRANSCRIPT_TABLES.iter().filter(|table| {
+        !matches!(
+            table.name,
+            "transcript_projection_current_generations"
+                | "transcript_projection_current_recoveries"
+        )
+    }) {
         ddl.push_str(table.sql);
         ddl.push_str(";\n");
     }
@@ -86,6 +99,13 @@ fn migrate_v1_to_v2(conn: &Connection) -> Result<(), String> {
     }
     conn.execute_batch(ddl.as_str())
         .map_err(|error| format!("create transcript read model schema failed: {error}"))
+}
+
+fn migrate_v2_to_v3(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(TRANSCRIPT_CURRENT_GENERATIONS_SQL)
+        .map_err(|error| format!("create transcript generation owner schema failed: {error}"))?;
+    conn.execute_batch(TRANSCRIPT_CURRENT_RECOVERIES_SQL)
+        .map_err(|error| format!("create transcript current recovery schema failed: {error}"))
 }
 
 fn apply_forward_migrations(conn: &Connection, current_version: i64) -> Result<(), String> {
@@ -406,6 +426,32 @@ const REQUIRED_TABLES: &[RequiredObject] = &[
     },
 ];
 
+const TRANSCRIPT_CURRENT_GENERATIONS_SQL: &str = "
+CREATE TABLE transcript_projection_current_generations (
+    session_id TEXT NOT NULL,
+    projection_version TEXT NOT NULL,
+    projection_generation TEXT NOT NULL,
+    source_high_water INTEGER NOT NULL,
+    PRIMARY KEY (session_id, projection_version),
+    FOREIGN KEY (session_id, projection_version, projection_generation)
+        REFERENCES transcript_projection_heads(session_id, projection_version, projection_generation)
+        ON DELETE CASCADE
+)";
+
+const TRANSCRIPT_CURRENT_RECOVERIES_SQL: &str = "
+CREATE TABLE transcript_projection_current_recoveries (
+    session_id TEXT NOT NULL,
+    projection_version TEXT NOT NULL,
+    projection_generation TEXT NOT NULL,
+    source_high_water INTEGER NOT NULL,
+    checkpoint_json TEXT NOT NULL,
+    frontier_json TEXT NOT NULL,
+    PRIMARY KEY (session_id, projection_version, projection_generation),
+    FOREIGN KEY (session_id, projection_version, projection_generation)
+        REFERENCES transcript_projection_heads(session_id, projection_version, projection_generation)
+        ON DELETE CASCADE
+)";
+
 const TRANSCRIPT_TABLES: &[RequiredObject] = &[
     RequiredObject {
         name: "transcript_projection_heads",
@@ -419,6 +465,14 @@ const TRANSCRIPT_TABLES: &[RequiredObject] = &[
             PRIMARY KEY (session_id, projection_version, projection_generation)
         )
         ",
+    },
+    RequiredObject {
+        name: "transcript_projection_current_generations",
+        sql: TRANSCRIPT_CURRENT_GENERATIONS_SQL,
+    },
+    RequiredObject {
+        name: "transcript_projection_current_recoveries",
+        sql: TRANSCRIPT_CURRENT_RECOVERIES_SQL,
     },
     RequiredObject {
         name: "transcript_block_identities",
@@ -864,7 +918,14 @@ mod tests {
                 .expect("transcript frontier table lookup")
                 .is_some()
         );
-        assert_eq!(schema_versions(&migrated).expect("versions"), vec![1, 2]);
+        assert!(object_sql(
+            &migrated,
+            "table",
+            "transcript_projection_current_generations"
+        )
+        .expect("transcript generation owner lookup")
+        .is_some());
+        assert_eq!(schema_versions(&migrated).expect("versions"), vec![1, 2, 3]);
         drop(migrated);
         fs::remove_dir_all(root).expect("cleanup");
     }

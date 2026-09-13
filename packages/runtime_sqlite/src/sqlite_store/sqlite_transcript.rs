@@ -1,11 +1,18 @@
 use super::*;
 use centaeris_core::session::transcript::{
-    assemble_transcript_page_from_newest, transcript_page_before_order, TranscriptBlockV1,
-    TranscriptPageReadRequestV1, TranscriptPageReadResultV1, TranscriptPersistentPageQueryWorkV1,
+    assemble_transcript_page_from_newest, transcript_page_before_order,
+    transcript_patch_read_result_serialized_bytes, validate_transcript_resume_cursor_read,
+    TranscriptBlockV1, TranscriptPageReadRequestV1, TranscriptPageReadResultV1,
+    TranscriptPatchReadRequestV1, TranscriptPatchReadResultV1, TranscriptPatchV1,
+    TranscriptPersistentPageQueryWorkV1, TranscriptPersistentPatchQueryWorkV1,
     TranscriptProjectionCheckpointV1, TranscriptProjectionCommitDispositionV1,
-    TranscriptProjectionCommitV1, TranscriptProjectionFrontierV1, TranscriptProjectionHeadV1,
-    TranscriptProjectionRecoveryV1, TranscriptProjectionStorePort, TranscriptResumeCursorV1,
-    TRANSCRIPT_PAGE_RESUME_CURSOR_MAX_COUNT, TRANSCRIPT_PROJECTION_VERSION_V1,
+    TranscriptProjectionCommitV1, TranscriptProjectionCurrentGenerationV1,
+    TranscriptProjectionFrontierV1, TranscriptProjectionGenerationRotationDispositionV1,
+    TranscriptProjectionGenerationRotationV1, TranscriptProjectionGenerationStorePortV1,
+    TranscriptProjectionHeadV1, TranscriptProjectionRecoveryV1, TranscriptProjectionStorePort,
+    TranscriptResumeCursorV1, TRANSCRIPT_PAGE_RESUME_CURSOR_MAX_COUNT,
+    TRANSCRIPT_PATCH_READ_MAX_PATCHES, TRANSCRIPT_PATCH_READ_SERIALIZED_MAX_BYTES,
+    TRANSCRIPT_PATCH_SCHEMA_V1, TRANSCRIPT_PROJECTION_VERSION_V1,
 };
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 
@@ -21,7 +28,13 @@ impl TranscriptProjectionStorePort for SqliteRuntimeStore {
         )?;
         let source_high_water =
             decimal_to_i64(commit.source_high_water.as_str(), "sourceHighWater")?;
-        let commit_json = serde_json::to_string(&commit)
+        // Recovery is a replaceable control-state slot at the projection head, not part of
+        // immutable patch history. Keeping it out of commit_json prevents repeated open-tool
+        // frontiers from multiplying with the number of source events.
+        let mut durable_commit = commit.clone();
+        durable_commit.checkpoint = None;
+        durable_commit.frontier = None;
+        let commit_json = serde_json::to_string(&durable_commit)
             .map_err(|error| format!("serialize transcript projection commit failed: {error}"))?;
         self.with_conn(|conn| {
             let transaction = conn
@@ -40,7 +53,7 @@ impl TranscriptProjectionStorePort for SqliteRuntimeStore {
                     .map_err(|error| {
                         format!("decode stored transcript projection commit failed: {error}")
                     })?;
-                if existing == commit {
+                if existing == durable_commit {
                     return Ok(TranscriptProjectionCommitDispositionV1::AlreadyApplied);
                 }
                 return Err(format!(
@@ -118,35 +131,22 @@ impl TranscriptProjectionStorePort for SqliteRuntimeStore {
                 let frontier_json = serde_json::to_string(frontier).map_err(|error| {
                     format!("serialize transcript projection frontier failed: {error}")
                 })?;
-                transaction
-                    .execute(
-                        "INSERT INTO transcript_projection_frontiers(frontier_ref,session_id,projection_version,projection_generation,source_high_water,frontier_json) VALUES(?1,?2,?3,?4,?5,?6)",
-                        params![
-                            frontier.frontier_ref.as_str(),
-                            commit.session_id.as_str(),
-                            commit.projection_version.as_str(),
-                            commit.projection_generation.as_str(),
-                            source_high_water,
-                            frontier_json
-                        ],
-                    )
-                    .map_err(|error| format!("save transcript projection frontier failed: {error}"))?;
                 let checkpoint_json = serde_json::to_string(checkpoint).map_err(|error| {
                     format!("serialize transcript projection checkpoint failed: {error}")
                 })?;
                 transaction
                     .execute(
-                        "INSERT INTO transcript_projection_checkpoints(session_id,projection_version,projection_generation,source_high_water,frontier_ref,checkpoint_json) VALUES(?1,?2,?3,?4,?5,?6)",
+                        "INSERT INTO transcript_projection_current_recoveries(session_id,projection_version,projection_generation,source_high_water,checkpoint_json,frontier_json) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(session_id,projection_version,projection_generation) DO UPDATE SET source_high_water=excluded.source_high_water,checkpoint_json=excluded.checkpoint_json,frontier_json=excluded.frontier_json",
                         params![
-                            commit.session_id.as_str(),
-                            commit.projection_version.as_str(),
-                            commit.projection_generation.as_str(),
+                            checkpoint.session_id.as_str(),
+                            checkpoint.projection_version.as_str(),
+                            checkpoint.projection_generation.as_str(),
                             source_high_water,
-                            frontier.frontier_ref.as_str(),
-                            checkpoint_json
+                            checkpoint_json,
+                            frontier_json
                         ],
                     )
-                    .map_err(|error| format!("save transcript projection checkpoint failed: {error}"))?;
+                    .map_err(|error| format!("save transcript current recovery failed: {error}"))?;
             }
             let changed = transaction
                 .execute(
@@ -322,14 +322,26 @@ impl TranscriptProjectionStorePort for SqliteRuntimeStore {
         require_nonempty(projection_generation, "projectionGeneration")?;
         let high_water = u64_to_i64(at_or_before_source_high_water, "checkpoint sourceHighWater")?;
         self.with_conn(|conn| {
-            let checkpoint_json = conn
+            let current = conn
+                .query_row(
+                    "SELECT checkpoint_json FROM transcript_projection_current_recoveries WHERE session_id=?1 AND projection_version=?2 AND projection_generation=?3 AND source_high_water<=?4",
+                    params![session_id, TRANSCRIPT_PROJECTION_VERSION_V1, projection_generation, high_water],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|error| format!("load transcript current checkpoint failed: {error}"))?;
+            let checkpoint_json = if current.is_some() {
+                current
+            } else {
+                conn
                 .query_row(
                     "SELECT checkpoint_json FROM transcript_projection_checkpoints WHERE session_id=?1 AND projection_version=?2 AND projection_generation=?3 AND source_high_water<=?4 ORDER BY source_high_water DESC LIMIT 1",
                     params![session_id, TRANSCRIPT_PROJECTION_VERSION_V1, projection_generation, high_water],
                     |row| row.get::<_, String>(0),
                 )
                 .optional()
-                .map_err(|error| format!("load transcript projection checkpoint failed: {error}"))?;
+                .map_err(|error| format!("load transcript projection checkpoint failed: {error}"))?
+            };
             checkpoint_json
                 .map(|json| {
                     let checkpoint: TranscriptProjectionCheckpointV1 = serde_json::from_str(&json)
@@ -351,14 +363,26 @@ impl TranscriptProjectionStorePort for SqliteRuntimeStore {
         require_nonempty(projection_generation, "projectionGeneration")?;
         let high_water = u64_to_i64(at_or_before_source_high_water, "checkpoint sourceHighWater")?;
         self.with_conn(|conn| {
-            let stored = conn
+            let current = conn
+                .query_row(
+                    "SELECT checkpoint_json,frontier_json FROM transcript_projection_current_recoveries WHERE session_id=?1 AND projection_version=?2 AND projection_generation=?3 AND source_high_water<=?4",
+                    params![session_id, TRANSCRIPT_PROJECTION_VERSION_V1, projection_generation, high_water],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(|error| format!("load transcript current recovery failed: {error}"))?;
+            let stored = if current.is_some() {
+                current
+            } else {
+                conn
                 .query_row(
                     "SELECT checkpoint.checkpoint_json,frontier.frontier_json FROM transcript_projection_checkpoints AS checkpoint JOIN transcript_projection_frontiers AS frontier ON frontier.frontier_ref=checkpoint.frontier_ref WHERE checkpoint.session_id=?1 AND checkpoint.projection_version=?2 AND checkpoint.projection_generation=?3 AND checkpoint.source_high_water<=?4 ORDER BY checkpoint.source_high_water DESC LIMIT 1",
                     params![session_id, TRANSCRIPT_PROJECTION_VERSION_V1, projection_generation, high_water],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                 )
                 .optional()
-                .map_err(|error| format!("load transcript projection recovery failed: {error}"))?;
+                .map_err(|error| format!("load transcript projection recovery failed: {error}"))?
+            };
             stored
                 .map(|(checkpoint_json, frontier_json)| {
                     let recovery = TranscriptProjectionRecoveryV1 {
@@ -379,6 +403,300 @@ impl TranscriptProjectionStorePort for SqliteRuntimeStore {
                     Ok(recovery)
                 })
                 .transpose()
+        })
+    }
+
+    fn load_transcript_patches(
+        &self,
+        request: TranscriptPatchReadRequestV1,
+    ) -> Result<TranscriptPatchReadResultV1, String> {
+        request.validate()?;
+        let after = decimal_to_i64(
+            request.after_source_high_water.as_str(),
+            "patch afterSourceHighWater",
+        )?;
+        let through = decimal_to_i64(
+            request.through_source_high_water.as_str(),
+            "patch throughSourceHighWater",
+        )?;
+        self.with_conn(|conn| {
+            let (head, invalidation_reason) = conn
+                .query_row(
+                    "SELECT source_high_water,invalidation_reason FROM transcript_projection_heads WHERE session_id=?1 AND projection_version=?2 AND projection_generation=?3",
+                    params![
+                        request.session_id.as_str(),
+                        request.projection_version.as_str(),
+                        request.projection_generation.as_str()
+                    ],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .optional()
+                .map_err(|error| format!("load transcript projection head failed: {error}"))?
+                .ok_or_else(|| "transcript projection head is missing".to_string())?;
+            if let Some(reason) = invalidation_reason {
+                return Err(format!("transcript projection is invalidated: {reason}"));
+            }
+            if through > head {
+                return Err("transcript patch throughSourceHighWater is not fully projected".to_string());
+            }
+
+            let mut statement = conn
+                .prepare(
+                    "SELECT commit_json FROM transcript_projection_commits INDEXED BY idx_transcript_projection_commits_session WHERE session_id=?1 AND projection_version=?2 AND projection_generation=?3 AND source_high_water>?4 AND source_high_water<=?5 ORDER BY source_high_water ASC,commit_id ASC",
+                )
+                .map_err(|error| format!("prepare transcript patch query failed: {error}"))?;
+            let rows = statement
+                .query_map(
+                    params![
+                        request.session_id.as_str(),
+                        request.projection_version.as_str(),
+                        request.projection_generation.as_str(),
+                        after,
+                        through
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|error| format!("query transcript projection commits failed: {error}"))?;
+
+            let mut patches = Vec::new();
+            let mut commit_rows_read = 0usize;
+            let mut has_more = false;
+            for row in rows {
+                commit_rows_read = commit_rows_read.saturating_add(1);
+                let commit_json = row.map_err(|error| {
+                    format!("decode transcript projection commit row failed: {error}")
+                })?;
+                let commit: TranscriptProjectionCommitV1 = serde_json::from_str(&commit_json)
+                    .map_err(|error| {
+                        format!("decode stored transcript projection commit failed: {error}")
+                    })?;
+                commit.validate()?;
+                let cursor = commit.resume_cursors.as_slice();
+                let [cursor] = cursor else {
+                    return Err(
+                        "transcript projection commit must contain exactly one resume cursor"
+                            .to_string(),
+                    );
+                };
+                let patch = TranscriptPatchV1 {
+                    schema: TRANSCRIPT_PATCH_SCHEMA_V1.to_string(),
+                    session_id: commit.session_id,
+                    projection_version: commit.projection_version,
+                    projection_generation: commit.projection_generation,
+                    source_high_water: commit.source_high_water,
+                    stream_id: cursor.stream_id.clone(),
+                    applied_cursor: cursor.cursor.clone(),
+                    upserts: commit.upserts.into_iter().map(|item| item.block).collect(),
+                    removals: Vec::new(),
+                };
+                patch.validate()?;
+                let mut candidate_patches = patches.clone();
+                candidate_patches.push(patch.clone());
+                let candidate = TranscriptPatchReadResultV1 {
+                    next_source_high_water: patch.source_high_water.clone(),
+                    patches: candidate_patches,
+                    has_more: false,
+                    work: TranscriptPersistentPatchQueryWorkV1 {
+                        commit_rows_read,
+                        raw_event_visits: 0,
+                    },
+                };
+                let candidate_bytes = transcript_patch_read_result_serialized_bytes(&candidate)?;
+                if candidate_bytes > TRANSCRIPT_PATCH_READ_SERIALIZED_MAX_BYTES
+                    && patches.is_empty()
+                {
+                    return Err("transcript patch cannot fit the patch read budget".to_string());
+                }
+                if patches.len() == TRANSCRIPT_PATCH_READ_MAX_PATCHES
+                    || candidate_bytes > TRANSCRIPT_PATCH_READ_SERIALIZED_MAX_BYTES
+                {
+                    has_more = true;
+                    break;
+                }
+                patches.push(patch);
+            }
+            let next_source_high_water = patches
+                .last()
+                .map(|patch| patch.source_high_water.clone())
+                .unwrap_or_else(|| request.after_source_high_water.clone());
+            let result = TranscriptPatchReadResultV1 {
+                patches,
+                next_source_high_water,
+                has_more,
+                work: TranscriptPersistentPatchQueryWorkV1 {
+                    commit_rows_read,
+                    raw_event_visits: 0,
+                },
+            };
+            result.validate(&request)?;
+            Ok(result)
+        })
+    }
+
+    fn load_transcript_resume_cursors(
+        &self,
+        session_id: &str,
+        projection_generation: &str,
+        at_or_before_source_high_water: u64,
+    ) -> Result<Vec<TranscriptResumeCursorV1>, String> {
+        require_nonempty(session_id, "sessionId")?;
+        require_nonempty(projection_generation, "projectionGeneration")?;
+        let high_water = u64_to_i64(
+            at_or_before_source_high_water,
+            "resume cursor sourceHighWater",
+        )?;
+        self.with_conn(|conn| {
+            let (head, invalidation_reason) = conn
+                .query_row(
+                    "SELECT source_high_water,invalidation_reason FROM transcript_projection_heads WHERE session_id=?1 AND projection_version=?2 AND projection_generation=?3",
+                    params![
+                        session_id,
+                        TRANSCRIPT_PROJECTION_VERSION_V1,
+                        projection_generation
+                    ],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .optional()
+                .map_err(|error| format!("load transcript projection head failed: {error}"))?
+                .ok_or_else(|| "transcript projection head is missing".to_string())?;
+            if let Some(reason) = invalidation_reason {
+                return Err(format!("transcript projection is invalidated: {reason}"));
+            }
+            if high_water > head {
+                return Err(
+                    "transcript resume cursor sourceHighWater is not fully projected".to_string(),
+                );
+            }
+            let cursors = load_resume_cursors(
+                conn,
+                session_id,
+                TRANSCRIPT_PROJECTION_VERSION_V1,
+                projection_generation,
+                high_water,
+            )?;
+            validate_transcript_resume_cursor_read(cursors.as_slice())?;
+            Ok(cursors)
+        })
+    }
+}
+
+impl TranscriptProjectionGenerationStorePortV1 for SqliteRuntimeStore {
+    fn load_current_transcript_projection_generation(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<TranscriptProjectionCurrentGenerationV1>, String> {
+        require_nonempty(session_id, "sessionId")?;
+        self.with_conn(|conn| {
+            let current = conn
+                .query_row(
+                    "SELECT projection_generation,source_high_water FROM transcript_projection_current_generations WHERE session_id=?1 AND projection_version=?2",
+                    params![session_id, TRANSCRIPT_PROJECTION_VERSION_V1],
+                    |row| {
+                        Ok(TranscriptProjectionCurrentGenerationV1 {
+                            session_id: session_id.to_string(),
+                            projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.to_string(),
+                            projection_generation: row.get(0)?,
+                            source_high_water: row.get::<_, i64>(1)?.to_string(),
+                        })
+                    },
+                )
+                .optional()
+                .map_err(|error| {
+                    format!("load current transcript projection generation failed: {error}")
+                })?;
+            if let Some(current) = &current {
+                current.validate()?;
+            }
+            Ok(current)
+        })
+    }
+
+    fn rotate_current_transcript_projection_generation(
+        &self,
+        rotation: TranscriptProjectionGenerationRotationV1,
+    ) -> Result<TranscriptProjectionGenerationRotationDispositionV1, String> {
+        rotation.validate()?;
+        let target = decimal_to_i64(
+            rotation.target_source_high_water.as_str(),
+            "generation targetSourceHighWater",
+        )?;
+        self.with_conn(|conn| {
+            let transaction = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| format!("begin transcript generation rotation failed: {error}"))?;
+            let next_head = transaction
+                .query_row(
+                    "SELECT source_high_water,invalidation_reason FROM transcript_projection_heads WHERE session_id=?1 AND projection_version=?2 AND projection_generation=?3",
+                    params![
+                        rotation.session_id.as_str(),
+                        rotation.projection_version.as_str(),
+                        rotation.next_generation.as_str()
+                    ],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .optional()
+                .map_err(|error| format!("load next transcript generation head failed: {error}"))?
+                .ok_or_else(|| "next transcript projection generation head is missing".to_string())?;
+            if next_head.0 != target || next_head.1.is_some() {
+                return Err(
+                    "next transcript projection generation is not complete and readable"
+                        .to_string(),
+                );
+            }
+            let current = transaction
+                .query_row(
+                    "SELECT projection_generation,source_high_water FROM transcript_projection_current_generations WHERE session_id=?1 AND projection_version=?2",
+                    params![rotation.session_id.as_str(), rotation.projection_version.as_str()],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .optional()
+                .map_err(|error| format!("load current transcript generation failed: {error}"))?;
+            if current.as_ref()
+                == Some(&(rotation.next_generation.clone(), target))
+            {
+                return Ok(TranscriptProjectionGenerationRotationDispositionV1::AlreadyApplied);
+            }
+            match (&rotation.expected_current_generation, current) {
+                (None, None) => {
+                    transaction
+                        .execute(
+                            "INSERT INTO transcript_projection_current_generations(session_id,projection_version,projection_generation,source_high_water) VALUES(?1,?2,?3,?4)",
+                            params![
+                                rotation.session_id.as_str(),
+                                rotation.projection_version.as_str(),
+                                rotation.next_generation.as_str(),
+                                target
+                            ],
+                        )
+                        .map_err(|error| format!("publish initial transcript generation failed: {error}"))?;
+                }
+                (Some(expected), Some((current_generation, _)))
+                    if expected == &current_generation =>
+                {
+                    let changed = transaction
+                        .execute(
+                            "UPDATE transcript_projection_current_generations SET projection_generation=?1,source_high_water=?2 WHERE session_id=?3 AND projection_version=?4 AND projection_generation=?5",
+                            params![
+                                rotation.next_generation.as_str(),
+                                target,
+                                rotation.session_id.as_str(),
+                                rotation.projection_version.as_str(),
+                                expected.as_str()
+                            ],
+                        )
+                        .map_err(|error| format!("rotate transcript generation failed: {error}"))?;
+                    if changed != 1 {
+                        return Err("transcript projection generation rotation conflict".to_string());
+                    }
+                }
+                _ => {
+                    return Err("transcript projection generation rotation conflict".to_string())
+                }
+            }
+            transaction
+                .commit()
+                .map_err(|error| format!("commit transcript generation rotation failed: {error}"))?;
+            Ok(TranscriptProjectionGenerationRotationDispositionV1::Applied)
         })
     }
 }

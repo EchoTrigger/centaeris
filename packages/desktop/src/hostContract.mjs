@@ -16,6 +16,8 @@ export const HOST_COMMANDS = new Map([
   ["_centaeris/session/project", { group: "session" }],
   ["_centaeris/session/update_metadata", { group: "session" }],
   ["_centaeris/session/reorder", { group: "session" }],
+  ["transcript/page", { group: "session" }],
+  ["transcript/patches", { group: "session" }],
 
   ["agent_state_get", { group: "agent-runtime" }],
   ["agent_context_usage_get", { group: "agent-runtime" }],

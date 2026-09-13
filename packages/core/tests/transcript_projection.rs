@@ -1,7 +1,7 @@
 use centaeris_core::session::transcript::{
-    TranscriptBlockBodyV1, TranscriptBlockStatusV1, TranscriptPagePolicyV1,
-    TranscriptPageReadRequestV1, TranscriptPageReadResultV1, TranscriptPatchReadRequestV1,
-    TranscriptPatchReadResultV1, TranscriptProjectionCheckpointV1,
+    TranscriptBlockBodyV1, TranscriptBlockStatusV1, TranscriptCheckpointRefsV1,
+    TranscriptPagePolicyV1, TranscriptPageReadRequestV1, TranscriptPageReadResultV1,
+    TranscriptPatchReadRequestV1, TranscriptPatchReadResultV1, TranscriptProjectionCheckpointV1,
     TranscriptProjectionCommitDispositionV1, TranscriptProjectionCommitV1,
     TranscriptProjectionFrontierV1, TranscriptProjectionHeadV1, TranscriptProjectionStorePort,
     TranscriptProjectionUpdateV1, TranscriptProjectorV1, TranscriptResumeCursorV1,
@@ -179,6 +179,93 @@ fn committed_tool_result_emits_a_revision_patch_at_the_original_order_key() {
 }
 
 #[test]
+fn oversized_text_and_tool_summary_project_to_stable_refs_without_stalling_the_page() {
+    let mut projector =
+        TranscriptProjectorV1::new("session-1".to_string(), "generation-1".to_string())
+            .expect("projector");
+    let user = record(
+        1,
+        "user_message",
+        "event-large-user",
+        json!({
+            "messageId": "message-large",
+            "text": "x".repeat(64 * 1024 + 1),
+            "attachments": []
+        }),
+    );
+    projector
+        .apply(&user, "session-jsonl.v1", "cursor-1")
+        .expect("large user text projects by reference");
+    let call = record(
+        2,
+        "tool_call",
+        "event-large-tool",
+        json!({
+            "callId": "call-large",
+            "toolName": "read",
+            "toolContractDigest": format!("sha256:{}", "a".repeat(64)),
+            "providerId": "builtin",
+            "normalizedInput": {"path": "README.md"},
+            "displayTarget": "README.md"
+        }),
+    );
+    projector
+        .apply(&call, "session-jsonl.v1", "cursor-2")
+        .expect("tool call");
+    let result = record(
+        3,
+        "tool_result",
+        "event-large-tool-result",
+        json!({
+            "callId": "call-large",
+            "toolName": "read",
+            "resultState": "successNoOutput",
+            "modelContent": "",
+            "fullOutputPath": null,
+            "outputStartByte": null,
+            "outputByteLength": 0,
+            "outputComplete": true,
+            "summary": "y".repeat(64 * 1024 + 1),
+            "operations": [],
+            "modelInputImages": [],
+            "latencyMs": 1
+        }),
+    );
+    projector
+        .apply(&result, "session-jsonl.v1", "cursor-3")
+        .expect("large tool result summary projects by reference");
+
+    let page = projector
+        .page_at(3, None, TranscriptPagePolicyV1::default())
+        .expect("oversized blocks remain pageable");
+    assert_eq!(page.blocks.len(), 2);
+    let TranscriptBlockBodyV1::UserText { content } = &page.blocks[0].body else {
+        panic!("first block must be user text")
+    };
+    assert_eq!(
+        content
+            .source_ref
+            .as_ref()
+            .map(|value| value.ref_id.as_str()),
+        Some("session-event:event-large-user:text")
+    );
+    let TranscriptBlockBodyV1::Tool {
+        summary,
+        summary_ref,
+        ..
+    } = &page.blocks[1].body
+    else {
+        panic!("second block must be a tool")
+    };
+    assert!(summary.is_none());
+    assert_eq!(
+        summary_ref.as_ref().map(|value| value.ref_id.as_str()),
+        Some("session-event:event-large-tool-result:summary")
+    );
+    assert!(page.older_cursor.is_none());
+}
+
+#[test]
 fn tombstone_invalidates_the_view_instead_of_attempting_partial_undo() {
     let mut projector =
         TranscriptProjectorV1::new("session-1".to_string(), "generation-1".to_string())
@@ -207,6 +294,62 @@ fn tombstone_invalidates_the_view_instead_of_attempting_partial_undo() {
     assert!(projector
         .page_at(101, None, TranscriptPagePolicyV1::default())
         .is_err());
+}
+
+#[test]
+fn committed_tombstone_persists_invalidation_without_an_invalid_recovery_checkpoint() {
+    let mut projector =
+        TranscriptProjectorV1::new("session-1".to_string(), "generation-1".to_string())
+            .expect("projector");
+    let store = RejectOnceStore::default();
+    let tombstone = record(
+        1,
+        "tombstone",
+        "event-tombstone",
+        json!({
+            "tombstoneId": "tombstone-1",
+            "targetEventIds": ["event-old"],
+            "reasonType": "rewrite"
+        }),
+    );
+
+    let error = projector
+        .apply_and_commit(
+            &tombstone,
+            "session-jsonl.v1",
+            "cursor-1",
+            "projection-commit-1",
+            Some(TranscriptCheckpointRefsV1 {
+                frontier_ref: "frontier-1".to_string(),
+                block_index_ref: "block-index-1".to_string(),
+            }),
+            &store,
+        )
+        .expect_err("first store write fails after preparing invalidation");
+    assert!(error.contains("injected commit failure"));
+
+    let update = projector
+        .apply_and_commit(
+            &tombstone,
+            "session-jsonl.v1",
+            "cursor-1",
+            "projection-commit-1",
+            Some(TranscriptCheckpointRefsV1 {
+                frontier_ref: "frontier-1".to_string(),
+                block_index_ref: "block-index-1".to_string(),
+            }),
+            &store,
+        )
+        .expect("retry persists invalidation");
+    assert!(matches!(
+        update,
+        TranscriptProjectionUpdateV1::ViewInvalidated { .. }
+    ));
+    let commits = store.commits.lock().expect("commits lock");
+    assert_eq!(commits.len(), 2);
+    assert_eq!(commits[1].invalidation_reason.as_deref(), Some("tombstone"));
+    assert!(commits[1].checkpoint.is_none());
+    assert!(commits[1].frontier.is_none());
 }
 
 #[test]

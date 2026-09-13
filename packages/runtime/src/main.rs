@@ -33,6 +33,7 @@ mod skills;
 use centaeris_runtime_sqlite as sqlite_store;
 mod subagent_scheduler;
 mod system_skills_deployment;
+mod transcript_runtime;
 mod user_config;
 mod user_data_layout;
 mod workspace_git;

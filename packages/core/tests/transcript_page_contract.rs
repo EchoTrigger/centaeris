@@ -20,6 +20,7 @@ fn tool_block(revision: u64, status: TranscriptBlockStatusV1) -> TranscriptBlock
             tool_name: "read".to_string(),
             status,
             summary: Some("Read the source".to_string()),
+            summary_ref: None,
             output_ref: None,
         },
     }

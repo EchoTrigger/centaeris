@@ -159,6 +159,7 @@ pub enum TranscriptBlockBodyV1 {
         tool_name: String,
         status: TranscriptBlockStatusV1,
         summary: Option<String>,
+        summary_ref: Option<TranscriptContentRefV1>,
         output_ref: Option<TranscriptContentRefV1>,
     },
     Notice {
@@ -210,11 +211,27 @@ impl TranscriptBlockV1 {
             TranscriptBlockBodyV1::Tool {
                 call_id,
                 tool_name,
+                summary,
+                summary_ref,
                 output_ref,
                 ..
             } => {
                 require_identifier(call_id, "transcript tool callId")?;
                 require_identifier(tool_name, "transcript toolName")?;
+                match (summary, summary_ref) {
+                    (Some(value), None)
+                        if value.len() <= TRANSCRIPT_PAGE_INLINE_CONTENT_MAX_BYTES => {}
+                    (None, Some(reference)) => reference.validate()?,
+                    (Some(_), None) => {
+                        return Err("transcript tool summary exceeds page budget".to_string())
+                    }
+                    _ => {
+                        return Err(
+                            "transcript tool summary must contain exactly one inline value or summaryRef"
+                                .to_string(),
+                        )
+                    }
+                }
                 if let Some(reference) = output_ref {
                     reference.validate()?;
                 }

@@ -3,6 +3,11 @@ use centaeris_core::runtime::contracts::{current_timestamp_ms, CheckpointRecord}
 use centaeris_core::runtime::event::RuntimeEventProjection;
 use centaeris_core::runtime::ModelRequestStartedV1;
 use centaeris_core::session::supplement::DurableTurnSupplement;
+use centaeris_core::session::transcript::{
+    parse_transcript_projection_source_envelope, parse_transcript_rebuild_ledger_fact,
+    TranscriptGenerationRebuildRequestV1, TranscriptProjectionPayloadRequirementV1,
+    TranscriptRebuildLedgerFactV1, TranscriptRebuildProjectionFactV1,
+};
 use centaeris_core::session::{
     active_session_records, canonical_session_record, parse_manifest, parse_wire_record,
     project_committed_session_record, reduce_events, session_record_projects_to_agent_run_stream,
@@ -13,7 +18,7 @@ use centaeris_core::tool::layer::ToolExecutionResult;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::Mutex;
@@ -1128,10 +1133,43 @@ pub(crate) struct TranscriptSourceSliceCursorV1 {
     next_sequence: u64,
 }
 
+impl TranscriptSourceSliceCursorV1 {
+    pub(crate) fn encode(&self) -> String {
+        format!("{}:{}", self.next_byte_offset, self.next_sequence)
+    }
+
+    pub(crate) fn decode(value: &str) -> Result<Self, String> {
+        let (offset, sequence) = value
+            .split_once(':')
+            .ok_or_else(|| "transcript source cursor is malformed".to_string())?;
+        if offset.is_empty() || sequence.is_empty() || sequence.contains(':') {
+            return Err("transcript source cursor is malformed".to_string());
+        }
+        let cursor = Self {
+            next_byte_offset: offset
+                .parse::<u64>()
+                .map_err(|_| "transcript source cursor byte offset is invalid".to_string())?,
+            next_sequence: sequence
+                .parse::<u64>()
+                .map_err(|_| "transcript source cursor sequence is invalid".to_string())?,
+        };
+        if cursor.next_sequence == 0 {
+            return Err("transcript source cursor sequence is invalid".to_string());
+        }
+        Ok(cursor)
+    }
+
+    pub(crate) fn next_sequence(&self) -> u64 {
+        self.next_sequence
+    }
+}
+
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub(crate) struct TranscriptSourceSliceV1 {
     pub(crate) records: Vec<SequencedSessionRecord>,
+    pub(crate) cursors_after_records: Vec<TranscriptSourceSliceCursorV1>,
+    pub(crate) source_bytes_after_records: Vec<usize>,
     pub(crate) source_bytes: usize,
     pub(crate) oversized_record: bool,
     pub(crate) source_eof: bool,
@@ -1184,6 +1222,8 @@ pub(crate) fn read_transcript_source_slice(
 
     let started = Instant::now();
     let mut records = Vec::new();
+    let mut cursors_after_records = Vec::new();
+    let mut source_bytes_after_records = Vec::new();
     let mut source_bytes = 0usize;
     let mut oversized_record = false;
     let mut source_eof = next_byte_offset == file_len;
@@ -1228,7 +1268,9 @@ pub(crate) fn read_transcript_source_slice(
             })?;
         let mut wires = vec![value];
         observation_cas::hydrate_wires(path, expected_session_id, wires.as_mut_slice())?;
-        let record = parse_wire_record(&wires.remove(0)).map_err(|error| error.to_string())?;
+        let record = parse_wire_record(&wires.remove(0)).map_err(|error| {
+            format!("decode transcript source sequence {next_sequence} failed: {error}")
+        })?;
         if record.sequence != next_sequence {
             return Err(format!(
                 "transcript source sequence gap: expected {next_sequence}, got {}",
@@ -1251,6 +1293,11 @@ pub(crate) fn read_transcript_source_slice(
             .checked_add(1)
             .ok_or_else(|| "transcript source sequence overflow".to_string())?;
         records.push(record);
+        cursors_after_records.push(TranscriptSourceSliceCursorV1 {
+            next_byte_offset,
+            next_sequence,
+        });
+        source_bytes_after_records.push(source_bytes);
         source_eof = next_byte_offset == file_len;
     }
     let next_cursor = (!source_eof).then_some(TranscriptSourceSliceCursorV1 {
@@ -1259,11 +1306,204 @@ pub(crate) fn read_transcript_source_slice(
     });
     Ok(TranscriptSourceSliceV1 {
         records,
+        cursors_after_records,
+        source_bytes_after_records,
         source_bytes,
         oversized_record,
         source_eof,
         next_cursor,
     })
+}
+
+pub(crate) fn transcript_source_high_water(
+    path: &Path,
+    expected_session_id: &str,
+) -> Result<u64, String> {
+    let _guard = lock_session_logs_for_read()?;
+    observation_cas::validate_session_log_path(path, expected_session_id)?;
+    let mut file = fs::File::open(path).map_err(|error| {
+        format!(
+            "open transcript source failed for {}: {error}",
+            path.display()
+        )
+    })?;
+    let file_len = file
+        .metadata()
+        .map_err(|error| format!("read transcript source metadata failed: {error}"))?
+        .len();
+    if file_len == 0 {
+        return Err("transcript source manifest is missing".to_string());
+    }
+    file.seek(SeekFrom::End(-1))
+        .map_err(|error| format!("seek transcript source tail failed: {error}"))?;
+    let mut tail = [0_u8; 1];
+    file.read_exact(&mut tail)
+        .map_err(|error| format!("read transcript source tail failed: {error}"))?;
+    if tail[0] != b'\n' {
+        return Err("transcript source has a truncated final line".to_string());
+    }
+
+    let line_end = file_len - 1;
+    let mut search_end = line_end;
+    let mut line_start = 0_u64;
+    while search_end > 0 {
+        let chunk_start = search_end.saturating_sub(8 * 1024);
+        let chunk_len = usize::try_from(search_end - chunk_start)
+            .map_err(|_| "transcript source tail chunk exceeds usize".to_string())?;
+        let mut chunk = vec![0_u8; chunk_len];
+        file.seek(SeekFrom::Start(chunk_start))
+            .map_err(|error| format!("seek transcript source tail chunk failed: {error}"))?;
+        file.read_exact(chunk.as_mut_slice())
+            .map_err(|error| format!("read transcript source tail chunk failed: {error}"))?;
+        if let Some(index) = chunk.iter().rposition(|byte| *byte == b'\n') {
+            line_start = chunk_start
+                .checked_add(index as u64)
+                .and_then(|value| value.checked_add(1))
+                .ok_or_else(|| "transcript source tail offset overflow".to_string())?;
+            break;
+        }
+        search_end = chunk_start;
+    }
+    file.seek(SeekFrom::Start(line_start))
+        .map_err(|error| format!("seek transcript source last line failed: {error}"))?;
+    let line_len = usize::try_from(line_end - line_start)
+        .map_err(|_| "transcript source last line exceeds usize".to_string())?;
+    let mut line = vec![0_u8; line_len];
+    file.read_exact(line.as_mut_slice())
+        .map_err(|error| format!("read transcript source last line failed: {error}"))?;
+    let value = serde_json::from_slice::<Value>(line.as_slice())
+        .map_err(|error| format!("decode transcript source last line failed: {error}"))?;
+    if line_start == 0 {
+        let manifest = parse_manifest(&value).map_err(|error| error.to_string())?;
+        if manifest.session_id != expected_session_id {
+            return Err("transcript source manifest sessionId mismatch".to_string());
+        }
+        return Ok(0);
+    }
+    if value.get("schemaVersion").and_then(Value::as_str)
+        != Some(centaeris_core::session::SESSION_EVENT_SCHEMA_VERSION)
+    {
+        return Err("transcript source last record schemaVersion is invalid".to_string());
+    }
+    let sequence = value
+        .get("sequence")
+        .and_then(Value::as_u64)
+        .filter(|sequence| *sequence > 0)
+        .ok_or_else(|| "transcript source last record sequence is invalid".to_string())?;
+    if value.get("sessionId").and_then(Value::as_str) != Some(expected_session_id) {
+        return Err("transcript source contains a cross-session record".to_string());
+    }
+    // Deliberately do not hydrate or validate the payload. This tail lookup owns
+    // only the source envelope waterline; projection validates the full record
+    // later inside its bounded source slice.
+    Ok(sequence)
+}
+
+pub(crate) fn scan_transcript_rebuild_ledger(
+    path: &Path,
+    request: &TranscriptGenerationRebuildRequestV1,
+    visitor: &mut dyn FnMut(TranscriptRebuildLedgerFactV1) -> Result<(), String>,
+) -> Result<(), String> {
+    scan_transcript_rebuild_wires(path, request, &mut |value, _, _| {
+        visitor(parse_transcript_rebuild_ledger_fact(value)?)
+    })
+}
+
+pub(crate) fn scan_transcript_rebuild_projection(
+    path: &Path,
+    request: &TranscriptGenerationRebuildRequestV1,
+    visitor: &mut dyn FnMut(TranscriptRebuildProjectionFactV1) -> Result<(), String>,
+) -> Result<(), String> {
+    scan_transcript_rebuild_wires(path, request, &mut |value, cursor, _| {
+        let envelope = parse_transcript_projection_source_envelope(value)?;
+        let fact = match envelope.transcript_payload_requirement()? {
+            TranscriptProjectionPayloadRequirementV1::FullRecord => {
+                let mut hydrated = vec![value.clone()];
+                observation_cas::hydrate_wires(
+                    path,
+                    request.session_id.as_str(),
+                    hydrated.as_mut_slice(),
+                )?;
+                TranscriptRebuildProjectionFactV1::FullRecord {
+                    record: parse_wire_record(&hydrated[0]).map_err(|error| error.to_string())?,
+                    stream_id: "session-jsonl.v1".to_string(),
+                    applied_cursor: cursor.to_string(),
+                }
+            }
+            TranscriptProjectionPayloadRequirementV1::EnvelopeOnly
+            | TranscriptProjectionPayloadRequirementV1::TombstoneRebuild => {
+                TranscriptRebuildProjectionFactV1::Envelope {
+                    envelope,
+                    stream_id: "session-jsonl.v1".to_string(),
+                    applied_cursor: cursor.to_string(),
+                }
+            }
+        };
+        visitor(fact)
+    })
+}
+
+fn scan_transcript_rebuild_wires(
+    path: &Path,
+    request: &TranscriptGenerationRebuildRequestV1,
+    visitor: &mut dyn FnMut(&Value, &str, u64) -> Result<(), String>,
+) -> Result<(), String> {
+    request.validate()?;
+    let target = request
+        .target_source_high_water
+        .parse::<u64>()
+        .map_err(|_| "transcript rebuild target sourceHighWater is invalid".to_string())?;
+    let _guard = lock_session_logs_for_read()?;
+    observation_cas::validate_session_log_path(path, request.session_id.as_str())?;
+    let file = fs::File::open(path)
+        .map_err(|error| format!("open transcript rebuild source failed: {error}"))?;
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    let manifest_bytes = reader
+        .read_line(&mut line)
+        .map_err(|error| format!("read transcript rebuild manifest failed: {error}"))?;
+    if manifest_bytes == 0 || !line.ends_with('\n') {
+        return Err("transcript rebuild source manifest is missing or truncated".to_string());
+    }
+    let manifest_value = serde_json::from_str::<Value>(line.trim_end_matches(['\r', '\n']))
+        .map_err(|error| format!("decode transcript rebuild manifest failed: {error}"))?;
+    let manifest = parse_manifest(&manifest_value).map_err(|error| error.to_string())?;
+    if manifest.session_id != request.session_id {
+        return Err("transcript rebuild source manifest sessionId mismatch".to_string());
+    }
+    let mut byte_offset = u64::try_from(manifest_bytes)
+        .map_err(|_| "transcript rebuild source offset overflow".to_string())?;
+    for expected_sequence in 1..=target {
+        line.clear();
+        let bytes = reader
+            .read_line(&mut line)
+            .map_err(|error| format!("read transcript rebuild source failed: {error}"))?;
+        if bytes == 0 || !line.ends_with('\n') {
+            return Err(
+                "transcript rebuild source did not reach targetSourceHighWater".to_string(),
+            );
+        }
+        byte_offset = byte_offset
+            .checked_add(
+                u64::try_from(bytes)
+                    .map_err(|_| "transcript rebuild source offset overflow".to_string())?,
+            )
+            .ok_or_else(|| "transcript rebuild source offset overflow".to_string())?;
+        let value = serde_json::from_str::<Value>(line.trim_end_matches(['\r', '\n'])).map_err(
+            |error| format!("decode transcript rebuild record {expected_sequence} failed: {error}"),
+        )?;
+        let envelope = parse_transcript_projection_source_envelope(&value)?;
+        if envelope.session_id != request.session_id || envelope.sequence != expected_sequence {
+            return Err("transcript rebuild source identity or sequence mismatch".to_string());
+        }
+        let cursor = TranscriptSourceSliceCursorV1 {
+            next_byte_offset: byte_offset,
+            next_sequence: expected_sequence.saturating_add(1),
+        }
+        .encode();
+        visitor(&value, cursor.as_str(), expected_sequence)?;
+    }
+    Ok(())
 }
 
 fn read_records_from_path(
@@ -1502,6 +1742,92 @@ mod tests {
         }
         assert!(slices >= 2);
         assert_eq!(sequences, (1..=130_u64).collect::<Vec<_>>());
+
+        let first = read_transcript_source_slice(&path, session_id, None)
+            .expect("read first bounded slice");
+        assert_eq!(first.records.len(), first.cursors_after_records.len());
+        assert_eq!(first.records.len(), first.source_bytes_after_records.len());
+        let committed_index = first.records.len() / 2;
+        let committed_sequence = first.records[committed_index].sequence;
+        let resumed = read_transcript_source_slice(
+            &path,
+            session_id,
+            Some(&first.cursors_after_records[committed_index]),
+        )
+        .expect("resume after an individual committed record");
+        assert_eq!(
+            resumed.records.first().map(|record| record.sequence),
+            Some(committed_sequence + 1)
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn transcript_source_high_water_reads_only_the_compacted_tail_envelope() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-transcript-high-water-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create root");
+        let session_id = "session-transcript-high-water";
+        let path = root.join(format!("{session_id}.jsonl"));
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .expect("create session log");
+        serde_json::to_writer(
+            &mut file,
+            &SessionManifestV1::new(session_id, 1, "test").expect("manifest"),
+        )
+        .expect("write manifest");
+        file.write_all(b"\n").expect("manifest newline");
+        serde_json::to_writer(
+            &mut file,
+            &json!({
+                "schemaVersion": "session.event.v1",
+                "eventVersion": 1,
+                "sequence": 1,
+                "type": "model_request_started",
+                "eventId": "event-compacted-tail",
+                "sessionId": session_id,
+                "turnId": "turn-1",
+                "agentRunId": "run-1",
+                "createdAtMs": 1,
+                "payload": {
+                    "observations": {
+                        "manifestDigest": format!("sha256:{}", "a".repeat(64))
+                    }
+                }
+            }),
+        )
+        .expect("write compacted tail envelope");
+        file.write_all(b"\n").expect("record newline");
+        file.sync_all().expect("sync log");
+        drop(file);
+
+        assert_eq!(
+            transcript_source_high_water(&path, session_id).expect("read envelope waterline"),
+            1
+        );
+        let request = TranscriptGenerationRebuildRequestV1 {
+            session_id: session_id.to_string(),
+            projection_generation: "generation-rebuild".to_string(),
+            target_source_high_water: "1".to_string(),
+            expected_current_generation: Some("generation-old".to_string()),
+        };
+        let mut facts = Vec::new();
+        scan_transcript_rebuild_ledger(&path, &request, &mut |fact| {
+            facts.push(fact);
+            Ok(())
+        })
+        .expect("ledger pass must not hydrate compacted observations");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].envelope.sequence, 1);
         fs::remove_dir_all(root).expect("cleanup");
     }
 

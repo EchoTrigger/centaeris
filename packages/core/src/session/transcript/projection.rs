@@ -432,13 +432,22 @@ impl TranscriptProjectorV1 {
         let expected_source_high_water = self.last_sequence;
         let mut candidate = self.clone();
         let update = candidate.apply_envelope(envelope, stream_id, applied_cursor)?;
-        let recovery = checkpoint_refs
-            .map(|refs| {
+        let recovery = match (&update, checkpoint_refs) {
+            (TranscriptProjectionUpdateV1::ViewInvalidated { .. }, Some(refs)) => {
                 refs.validate()?;
-                candidate
-                    .checkpoint_recovery(refs.frontier_ref.as_str(), refs.block_index_ref.as_str())
-            })
-            .transpose()?;
+                None
+            }
+            (TranscriptProjectionUpdateV1::ViewInvalidated { .. }, None) => None,
+            (_, refs) => refs
+                .map(|refs| {
+                    refs.validate()?;
+                    candidate.checkpoint_recovery(
+                        refs.frontier_ref.as_str(),
+                        refs.block_index_ref.as_str(),
+                    )
+                })
+                .transpose()?,
+        };
         store.commit_transcript_projection(TranscriptProjectionCommitV1 {
             commit_id: commit_id.to_string(),
             session_id: self.session_id.clone(),
@@ -489,13 +498,22 @@ impl TranscriptProjectorV1 {
                 (Vec::new(), Some(reason.clone()))
             }
         };
-        let recovery = checkpoint_refs
-            .map(|refs| {
+        let recovery = match (&update, checkpoint_refs) {
+            (TranscriptProjectionUpdateV1::ViewInvalidated { .. }, Some(refs)) => {
                 refs.validate()?;
-                candidate
-                    .checkpoint_recovery(refs.frontier_ref.as_str(), refs.block_index_ref.as_str())
-            })
-            .transpose()?;
+                None
+            }
+            (TranscriptProjectionUpdateV1::ViewInvalidated { .. }, None) => None,
+            (_, refs) => refs
+                .map(|refs| {
+                    refs.validate()?;
+                    candidate.checkpoint_recovery(
+                        refs.frontier_ref.as_str(),
+                        refs.block_index_ref.as_str(),
+                    )
+                })
+                .transpose()?,
+        };
         let commit = TranscriptProjectionCommitV1 {
             commit_id: commit_id.to_string(),
             session_id: self.session_id.clone(),
@@ -596,6 +614,12 @@ impl TranscriptProjectorV1 {
             SessionRecordType::ToolCall => {
                 let call_id = payload_string(payload, "callId")?;
                 let tool_name = payload_string(payload, "toolName")?;
+                let (summary, summary_ref) = bounded_text(
+                    event,
+                    "displayTarget",
+                    payload_string(payload, "displayTarget")?,
+                    1,
+                );
                 let block_id = format!("tool:{call_id}");
                 if self.tools.contains_key(call_id.as_str()) {
                     return Err("transcript projection duplicates tool callId".to_string());
@@ -608,7 +632,8 @@ impl TranscriptProjectorV1 {
                         call_id: call_id.clone(),
                         tool_name: tool_name.clone(),
                         status: TranscriptBlockStatusV1::Running,
-                        summary: Some(payload_string(payload, "displayTarget")?),
+                        summary,
+                        summary_ref,
                         output_ref: None,
                     },
                 };
@@ -662,6 +687,12 @@ impl TranscriptProjectorV1 {
                     byte_length: output_byte_length.to_string(),
                 });
                 self.tools.remove(call_id.as_str());
+                let (summary, summary_ref) = bounded_text(
+                    event,
+                    "summary",
+                    payload_string(payload, "summary")?,
+                    revision,
+                );
                 Some(TranscriptBlockV1 {
                     block_id: format!("tool:{call_id}"),
                     block_revision: revision.to_string(),
@@ -670,7 +701,8 @@ impl TranscriptProjectorV1 {
                         call_id,
                         tool_name,
                         status,
-                        summary: Some(payload_string(payload, "summary")?),
+                        summary,
+                        summary_ref,
                         output_ref,
                     },
                 })
@@ -761,14 +793,32 @@ fn text_content(
     text: String,
     revision: u64,
 ) -> TranscriptTextContentV1 {
+    let (inline, reference) = bounded_text(event, field, text, revision);
+    match (inline, reference) {
+        (Some(text), None) => TranscriptTextContentV1::inline(text),
+        (None, Some(reference)) => TranscriptTextContentV1::referenced(reference),
+        _ => unreachable!("bounded text has exactly one representation"),
+    }
+}
+
+fn bounded_text(
+    event: &SessionLogRecord,
+    field: &str,
+    text: String,
+    revision: u64,
+) -> (Option<String>, Option<TranscriptContentRefV1>) {
     if text.len() <= TRANSCRIPT_PAGE_INLINE_CONTENT_MAX_BYTES {
-        TranscriptTextContentV1::inline(text)
+        (Some(text), None)
     } else {
-        TranscriptTextContentV1::referenced(TranscriptContentRefV1 {
-            ref_id: format!("session-event:{}:{field}", event.event_id),
-            revision: revision.to_string(),
-            byte_length: text.len().to_string(),
-        })
+        let byte_length = text.len().to_string();
+        (
+            None,
+            Some(TranscriptContentRefV1 {
+                ref_id: format!("session-event:{}:{field}", event.event_id),
+                revision: revision.to_string(),
+                byte_length,
+            }),
+        )
     }
 }
 

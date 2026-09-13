@@ -71,6 +71,8 @@ macro_rules! runtime_commands {
             AgentRuntimeJobList, "agent_runtime_job_list", SharedRuntime, Read, SafeRetry, None;
             AgentStateGet, "agent_state_get", SharedRuntime, Read, SafeRetry, None;
             TranscriptProjection, "transcript/project", SharedRuntime, Read, SafeRetry, None;
+            TranscriptPage, "transcript/page", SharedRuntime, Read, SafeRetry, None;
+            TranscriptPatches, "transcript/patches", SharedRuntime, Read, SafeRetry, None;
             PluginCatalogState, "plugin/catalog_state", SharedRuntime, Read, SafeRetry, None;
             SkillSourceList, "skill/source/list", SharedRuntime, Read, SafeRetry, None;
             SkillSourceAdd, "skill/source/add", SharedRuntime, Creation, NoAutomaticRetry, Some("skill/source/list");
