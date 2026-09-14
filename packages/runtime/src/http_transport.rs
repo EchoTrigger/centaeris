@@ -267,6 +267,28 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
 
+    #[tokio::test]
+    async fn model_http_client_routes_socks5h_proxy_scheme_to_connector() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind unused proxy port");
+        let proxy_address = listener.local_addr().expect("proxy address");
+        drop(listener);
+        let client = reqwest::Client::builder()
+            .proxy(
+                reqwest::Proxy::all(format!("socks5h://{proxy_address}"))
+                    .expect("accept socks5h proxy scheme"),
+            )
+            .build()
+            .expect("build model HTTP client with socks5h proxy");
+        let error = client
+            .get("http://example.invalid")
+            .send()
+            .await
+            .expect_err("closed local proxy must reject the connection");
+        let message = format_reqwest_error("proxy request failed", error);
+
+        assert!(!message.contains("unsupported scheme socks5h"), "{message}");
+    }
+
     #[test]
     fn sse_decoder_handles_keep_alive_and_complete_data_events() {
         let mut events = Vec::new();
