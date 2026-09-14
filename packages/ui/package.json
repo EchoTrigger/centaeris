@@ -12,6 +12,7 @@
   "scripts": {
     "dev": "vite",
     "build": "node ./scripts/build.mjs --mode build",
+    "baseline:transcript": "node ./scripts/run-transcript-baseline.mjs",
     "gate": "node ./scripts/build.mjs --mode gate && npm run lint && vitest run",
     "lint": "npm --prefix ../.. run lint:ui",
     "lint:hooks": "npm --prefix ../.. run lint:hooks",

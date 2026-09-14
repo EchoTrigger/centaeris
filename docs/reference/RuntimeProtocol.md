@@ -160,7 +160,7 @@ The result has this exact field set:
 | `coreProtocolVersion` | Exact Core protocol version, currently `1.0.0`. |
 | `profileId` | Non-empty identity of the user-data profile. |
 | `storeId` | Non-empty identity of the Runtime store. |
-| `storeSchemaVersion` | Positive storage schema version, currently `1`. |
+| `storeSchemaVersion` | Positive storage schema version, currently `2`. |
 | `layoutSchemaVersion` | Positive user-data layout version, currently `1`. |
 
 The v1 descriptor publishes these arrays:

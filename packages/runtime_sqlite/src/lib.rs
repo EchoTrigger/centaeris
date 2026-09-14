@@ -23,10 +23,12 @@ mod sqlite_runtime;
 mod sqlite_schema;
 #[path = "sqlite_store/sqlite_transactions.rs"]
 mod sqlite_transactions;
+#[path = "sqlite_store/sqlite_transcript.rs"]
+mod sqlite_transcript;
 #[path = "sqlite_store/sqlite_turn_supplement.rs"]
 mod sqlite_turn_supplement;
 
-pub const STORE_SCHEMA_VERSION: i64 = 1;
+pub const STORE_SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Clone)]
 pub struct SqliteRuntimeStore {
@@ -1422,7 +1424,7 @@ mod tests {
             .expect("query history")
             .collect::<Result<Vec<_>, _>>()
             .expect("decode history");
-        assert_eq!(versions, vec![STORE_SCHEMA_VERSION]);
+        assert_eq!(versions, (1..=STORE_SCHEMA_VERSION).collect::<Vec<_>>());
         drop(conn);
         drop(SqliteRuntimeStore::new(&db_path).expect("reopen v1 fixture"));
         let _ = std::fs::remove_file(db_path);

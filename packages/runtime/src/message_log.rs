@@ -13,11 +13,12 @@ use centaeris_core::tool::layer::ToolExecutionResult;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::Mutex;
 use std::sync::{OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::Instant;
 
 mod observation_cas;
 
@@ -1119,6 +1120,152 @@ fn read_session_records_unlocked(session_id: &str) -> Result<Vec<SessionLogRecor
     read_records_from_path_unlocked(file_path.as_path(), Some(session_id))
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+// P1-B source adapter; the P1-C page scheduler will own the production cursor lifecycle.
+#[allow(dead_code)]
+pub(crate) struct TranscriptSourceSliceCursorV1 {
+    next_byte_offset: u64,
+    next_sequence: u64,
+}
+
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub(crate) struct TranscriptSourceSliceV1 {
+    pub(crate) records: Vec<SequencedSessionRecord>,
+    pub(crate) source_bytes: usize,
+    pub(crate) oversized_record: bool,
+    pub(crate) source_eof: bool,
+    pub(crate) next_cursor: Option<TranscriptSourceSliceCursorV1>,
+}
+
+#[allow(dead_code)]
+pub(crate) fn read_transcript_source_slice(
+    path: &Path,
+    expected_session_id: &str,
+    cursor: Option<&TranscriptSourceSliceCursorV1>,
+) -> Result<TranscriptSourceSliceV1, String> {
+    let _guard = lock_session_logs_for_read()?;
+    observation_cas::validate_session_log_path(path, expected_session_id)?;
+    let file = fs::File::open(path).map_err(|error| {
+        format!(
+            "open transcript source failed for {}: {error}",
+            path.display()
+        )
+    })?;
+    let file_len = file
+        .metadata()
+        .map_err(|error| format!("read transcript source metadata failed: {error}"))?
+        .len();
+    let mut reader = BufReader::new(file);
+    let mut manifest_line = String::new();
+    let manifest_bytes = reader
+        .read_line(&mut manifest_line)
+        .map_err(|error| format!("read transcript source manifest failed: {error}"))?;
+    if manifest_bytes == 0 || !manifest_line.ends_with('\n') {
+        return Err("transcript source manifest is missing or truncated".to_string());
+    }
+    let manifest_value = serde_json::from_str::<Value>(manifest_line.trim_end_matches('\n'))
+        .map_err(|error| format!("decode transcript source manifest failed: {error}"))?;
+    let manifest = parse_manifest(&manifest_value).map_err(|error| error.to_string())?;
+    if manifest.session_id != expected_session_id {
+        return Err("transcript source manifest sessionId mismatch".to_string());
+    }
+    let manifest_end = u64::try_from(manifest_bytes)
+        .map_err(|_| "transcript source manifest offset overflow".to_string())?;
+    let (mut next_byte_offset, mut next_sequence) = cursor
+        .map(|value| (value.next_byte_offset, value.next_sequence))
+        .unwrap_or((manifest_end, 1));
+    if next_byte_offset < manifest_end || next_byte_offset > file_len || next_sequence == 0 {
+        return Err("transcript source slice cursor is invalid".to_string());
+    }
+    reader
+        .seek(SeekFrom::Start(next_byte_offset))
+        .map_err(|error| format!("seek transcript source failed: {error}"))?;
+
+    let started = Instant::now();
+    let mut records = Vec::new();
+    let mut source_bytes = 0usize;
+    let mut oversized_record = false;
+    let mut source_eof = next_byte_offset == file_len;
+    while !source_eof
+        && records.len()
+            < centaeris_core::session::transcript::TRANSCRIPT_PROJECTION_SLICE_MAX_EVENTS
+    {
+        if !records.is_empty()
+            && started.elapsed().as_micros()
+                >= u128::from(
+                    centaeris_core::session::transcript::TRANSCRIPT_PROJECTION_SLICE_MAX_MICROS,
+                )
+        {
+            break;
+        }
+        let line_start = next_byte_offset;
+        let mut line = String::new();
+        let line_bytes = reader
+            .read_line(&mut line)
+            .map_err(|error| format!("read transcript source record failed: {error}"))?;
+        if line_bytes == 0 {
+            source_eof = true;
+            break;
+        }
+        if !line.ends_with('\n') {
+            return Err(format!(
+                "transcript source has a truncated record at sequence {next_sequence}"
+            ));
+        }
+        let would_exceed_bytes = source_bytes
+            .checked_add(line_bytes)
+            .ok_or_else(|| "transcript source byte count overflow".to_string())?
+            > centaeris_core::session::transcript::TRANSCRIPT_PROJECTION_SLICE_MAX_BYTES;
+        if would_exceed_bytes && !records.is_empty() {
+            next_byte_offset = line_start;
+            break;
+        }
+        oversized_record = would_exceed_bytes;
+        let value =
+            serde_json::from_str::<Value>(line.trim_end_matches('\n')).map_err(|error| {
+                format!("decode transcript source sequence {next_sequence} failed: {error}")
+            })?;
+        let mut wires = vec![value];
+        observation_cas::hydrate_wires(path, expected_session_id, wires.as_mut_slice())?;
+        let record = parse_wire_record(&wires.remove(0)).map_err(|error| error.to_string())?;
+        if record.sequence != next_sequence {
+            return Err(format!(
+                "transcript source sequence gap: expected {next_sequence}, got {}",
+                record.sequence
+            ));
+        }
+        if record.event.session_id != expected_session_id {
+            return Err("transcript source contains a cross-session record".to_string());
+        }
+        source_bytes = source_bytes
+            .checked_add(line_bytes)
+            .ok_or_else(|| "transcript source byte count overflow".to_string())?;
+        next_byte_offset = next_byte_offset
+            .checked_add(
+                u64::try_from(line_bytes)
+                    .map_err(|_| "transcript source record offset overflow".to_string())?,
+            )
+            .ok_or_else(|| "transcript source record offset overflow".to_string())?;
+        next_sequence = next_sequence
+            .checked_add(1)
+            .ok_or_else(|| "transcript source sequence overflow".to_string())?;
+        records.push(record);
+        source_eof = next_byte_offset == file_len;
+    }
+    let next_cursor = (!source_eof).then_some(TranscriptSourceSliceCursorV1 {
+        next_byte_offset,
+        next_sequence,
+    });
+    Ok(TranscriptSourceSliceV1 {
+        records,
+        source_bytes,
+        oversized_record,
+        source_eof,
+        next_cursor,
+    })
+}
+
 fn read_records_from_path(
     path: &Path,
     expected_session_id: Option<&str>,
@@ -1279,6 +1426,84 @@ mod tests {
     };
     use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn transcript_backfill_reader_resumes_in_bounded_forward_slices() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-transcript-slice-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create root");
+        let session_id = "session-transcript-slice";
+        let path = root.join(format!("{session_id}.jsonl"));
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .expect("create session log");
+        serde_json::to_writer(
+            &mut file,
+            &SessionManifestV1::new(session_id, 1, "test").expect("manifest"),
+        )
+        .expect("write manifest");
+        file.write_all(b"\n").expect("manifest newline");
+        for sequence in 1..=130_u64 {
+            let event = centaeris_core::session::parse_event(&json!({
+                "schemaVersion": "session.event.v1",
+                "eventVersion": 1,
+                "type": "user_message",
+                "eventId": format!("event-{sequence}"),
+                "sessionId": session_id,
+                "turnId": format!("turn-{sequence}"),
+                "agentRunId": format!("run-{sequence}"),
+                "createdAtMs": sequence,
+                "payload": {
+                    "messageId": format!("message-{sequence}"),
+                    "text": "bounded",
+                    "attachments": []
+                }
+            }))
+            .expect("event");
+            let wire = wire_record_value(&SequencedSessionRecord { sequence, event })
+                .expect("wire record");
+            serde_json::to_writer(&mut file, &wire).expect("write record");
+            file.write_all(b"\n").expect("record newline");
+        }
+        file.sync_all().expect("sync log");
+        drop(file);
+
+        let mut cursor = None;
+        let mut sequences = Vec::new();
+        let mut slices = 0;
+        loop {
+            let slice = read_transcript_source_slice(&path, session_id, cursor.as_ref())
+                .expect("read bounded slice");
+            assert!(!slice.records.is_empty());
+            assert!(
+                slice.records.len()
+                    <= centaeris_core::session::transcript::TRANSCRIPT_PROJECTION_SLICE_MAX_EVENTS
+            );
+            assert!(
+                slice.source_bytes
+                    <= centaeris_core::session::transcript::TRANSCRIPT_PROJECTION_SLICE_MAX_BYTES
+                    || slice.oversized_record
+            );
+            sequences.extend(slice.records.iter().map(|record| record.sequence));
+            slices += 1;
+            if slice.source_eof {
+                break;
+            }
+            cursor = slice.next_cursor;
+            assert!(cursor.is_some());
+        }
+        assert!(slices >= 2);
+        assert_eq!(sequences, (1..=130_u64).collect::<Vec<_>>());
+        fs::remove_dir_all(root).expect("cleanup");
+    }
 
     fn test_model_request_payload(observations: Vec<Value>, request_id: &str) -> Value {
         let digest = format!("sha256:{}", "a".repeat(64));

@@ -1358,6 +1358,113 @@ fn transcript_view_starts_at_the_live_bottom() {
 }
 
 #[test]
+fn transcript_golden_fixture_has_versioned_semantic_operations() {
+    let bytes = include_bytes!("../../../core/tests/fixtures/transcript_projection_v1/golden.json");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(bytes)),
+        "904971875d4f105d0a8ae735278017f3f6aab301549083ac3db7ce2f1568c8f7"
+    );
+    let fixture: Value = serde_json::from_slice(bytes).expect("transcript golden fixture");
+
+    assert_eq!(fixture["schema"], "transcript.golden.v1");
+    assert_eq!(fixture["fixtureRevision"], "2026-09-13.1");
+    assert_eq!(fixture["scenarioId"], "reasoning-tool-answer");
+    assert_eq!(
+        fixture["operations"]
+            .as_array()
+            .expect("operations")
+            .iter()
+            .filter_map(|operation| operation["kind"].as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "userText",
+            "reasoningReplace",
+            "toolStart",
+            "toolFinish",
+            "assistantTextReplace",
+            "terminal",
+        ]
+    );
+}
+
+#[test]
+#[ignore = "opt-in P0 baseline; run through scripts/transcript-baseline.ps1"]
+fn transcript_rendering_p0_baseline() {
+    let workspace = PathBuf::from("D:/workspace");
+    let samples = [100usize, 1_000, 10_000]
+        .into_iter()
+        .map(|size| {
+            let mut app = test_app("", workspace.clone(), workspace.clone());
+            app.transcript
+                .extend((0..size).map(|index| TranscriptLine::Summary(format!("line {index}"))));
+            let started_at = Instant::now();
+            let view = build_transcript_view(&app, 80);
+            let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+            let unchanged_redraw_started_at = Instant::now();
+            let unchanged_view = build_transcript_view(&app, 80);
+            json!({
+                "size": size,
+                "elapsedMs": elapsed_ms,
+                "unchangedRedrawElapsedMs": unchanged_redraw_started_at.elapsed().as_secs_f64() * 1000.0,
+                "inputItems": app.transcript.len(),
+                "renderedLines": view.lines.len(),
+                "paragraphLineCountCalls": view.lines.len(),
+                "unchangedRedrawParagraphLineCountCalls": unchanged_view.lines.len(),
+                "reportedRows": view.total_rows,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut boundary_app = test_app("", workspace.clone(), workspace.clone());
+    boundary_app
+        .transcript
+        .extend((0..70_000).map(|index| TranscriptLine::Summary(format!("row {index}"))));
+    let boundary_view = build_transcript_view(&boundary_app, 80);
+
+    let mut snapshot_app = test_app("", workspace.clone(), workspace);
+    let before = snapshot_app.transcript.len();
+    apply_session_event(
+        &mut snapshot_app,
+        &json!({
+            "id": "runtime:model_snapshot:session:turn:1",
+            "type": "ModelSnapshot",
+            "visibility": "user",
+            "payload": {
+                "revision": 1,
+                "text": "answer",
+                "reasoning": {
+                    "blockId": "reasoning:req-1",
+                    "requestId": "req-1",
+                    "text": "inspect"
+                }
+            }
+        }),
+        Some("agent-run-1"),
+    );
+    let snapshot_accepted = !snapshot_app.transcript[before..]
+        .iter()
+        .any(|line| matches!(line, TranscriptLine::Error(_)));
+
+    println!(
+        "{}",
+        serde_json::to_string(&json!({
+            "schema": "transcript.p0.tui.v1",
+            "samples": samples,
+            "u16Boundary": {
+                "inputItems": boundary_app.transcript.len(),
+                "reportedRows": boundary_view.total_rows,
+                "saturated": boundary_view.total_rows == u16::MAX,
+            },
+            "modelSnapshot": {
+                "accepted": snapshot_accepted,
+                "targetAccepted": true,
+            }
+        }))
+        .expect("serialize TUI transcript baseline")
+    );
+}
+
+#[test]
 fn resume_query_matches_id_or_title_prefix() {
     let session = TuiSession {
         id: "chat-12345-1".to_string(),

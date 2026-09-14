@@ -68,7 +68,25 @@ struct ForwardMigration {
 
 // v1 is the initial schema. Add an exact n -> n+1 entry only when that
 // forward migration exists; missing paths fail without touching the store.
-const FORWARD_MIGRATIONS: &[ForwardMigration] = &[];
+const FORWARD_MIGRATIONS: &[ForwardMigration] = &[ForwardMigration {
+    from_version: 1,
+    to_version: 2,
+    apply: migrate_v1_to_v2,
+}];
+
+fn migrate_v1_to_v2(conn: &Connection) -> Result<(), String> {
+    let mut ddl = String::new();
+    for table in TRANSCRIPT_TABLES {
+        ddl.push_str(table.sql);
+        ddl.push_str(";\n");
+    }
+    for index in TRANSCRIPT_INDEXES {
+        ddl.push_str(index.sql);
+        ddl.push_str(";\n");
+    }
+    conn.execute_batch(ddl.as_str())
+        .map_err(|error| format!("create transcript read model schema failed: {error}"))
+}
 
 fn apply_forward_migrations(conn: &Connection, current_version: i64) -> Result<(), String> {
     apply_forward_migrations_to(
@@ -169,11 +187,11 @@ fn create_migration_backup(
 
 fn create_schema(conn: &Connection) -> Result<(), String> {
     let mut ddl = String::new();
-    for table in REQUIRED_TABLES {
+    for table in REQUIRED_TABLES.iter().chain(TRANSCRIPT_TABLES) {
         ddl.push_str(table.sql);
         ddl.push_str(";\n");
     }
-    for index in REQUIRED_INDEXES {
+    for index in REQUIRED_INDEXES.iter().chain(TRANSCRIPT_INDEXES) {
         ddl.push_str(index.sql);
         ddl.push_str(";\n");
     }
@@ -183,15 +201,17 @@ fn create_schema(conn: &Connection) -> Result<(), String> {
     transaction
         .execute_batch(ddl.as_str())
         .map_err(|err| format!("create runtime sqlite schema failed: {err}"))?;
-    transaction
-        .execute(
-            "
-        INSERT INTO schema_migrations(version, applied_at_ms)
-        VALUES(?1, CAST(strftime('%s','now') AS INTEGER) * 1000)
-        ",
-            params![STORE_SCHEMA_VERSION],
-        )
-        .map_err(|err| format!("record schema version failed: {err}"))?;
+    for version in 1..=STORE_SCHEMA_VERSION {
+        transaction
+            .execute(
+                "
+            INSERT INTO schema_migrations(version, applied_at_ms)
+            VALUES(?1, CAST(strftime('%s','now') AS INTEGER) * 1000)
+            ",
+                params![version],
+            )
+            .map_err(|err| format!("record schema version failed: {err}"))?;
+    }
     transaction
         .commit()
         .map_err(|error| format!("commit runtime sqlite schema failed: {error}"))
@@ -386,6 +406,127 @@ const REQUIRED_TABLES: &[RequiredObject] = &[
     },
 ];
 
+const TRANSCRIPT_TABLES: &[RequiredObject] = &[
+    RequiredObject {
+        name: "transcript_projection_heads",
+        sql: "
+        CREATE TABLE transcript_projection_heads (
+            session_id TEXT NOT NULL,
+            projection_version TEXT NOT NULL,
+            projection_generation TEXT NOT NULL,
+            source_high_water INTEGER NOT NULL,
+            invalidation_reason TEXT,
+            PRIMARY KEY (session_id, projection_version, projection_generation)
+        )
+        ",
+    },
+    RequiredObject {
+        name: "transcript_block_identities",
+        sql: "
+        CREATE TABLE transcript_block_identities (
+            session_id TEXT NOT NULL,
+            projection_version TEXT NOT NULL,
+            projection_generation TEXT NOT NULL,
+            block_id TEXT NOT NULL,
+            order_source_sequence INTEGER NOT NULL,
+            order_ordinal INTEGER NOT NULL,
+            PRIMARY KEY (session_id, projection_version, projection_generation, block_id),
+            UNIQUE (session_id, projection_version, projection_generation, order_source_sequence, order_ordinal),
+            FOREIGN KEY (session_id, projection_version, projection_generation)
+                REFERENCES transcript_projection_heads(session_id, projection_version, projection_generation)
+                ON DELETE CASCADE
+        )
+        ",
+    },
+    RequiredObject {
+        name: "transcript_block_versions",
+        sql: "
+        CREATE TABLE transcript_block_versions (
+            session_id TEXT NOT NULL,
+            projection_version TEXT NOT NULL,
+            projection_generation TEXT NOT NULL,
+            block_id TEXT NOT NULL,
+            applied_source_sequence INTEGER NOT NULL,
+            block_revision INTEGER NOT NULL,
+            block_json TEXT NOT NULL,
+            PRIMARY KEY (session_id, projection_version, projection_generation, block_id, applied_source_sequence),
+            UNIQUE (session_id, projection_version, projection_generation, block_id, block_revision),
+            FOREIGN KEY (session_id, projection_version, projection_generation, block_id)
+                REFERENCES transcript_block_identities(session_id, projection_version, projection_generation, block_id)
+                ON DELETE CASCADE
+        )
+        ",
+    },
+    RequiredObject {
+        name: "transcript_resume_cursors",
+        sql: "
+        CREATE TABLE transcript_resume_cursors (
+            session_id TEXT NOT NULL,
+            projection_version TEXT NOT NULL,
+            projection_generation TEXT NOT NULL,
+            stream_id TEXT NOT NULL,
+            source_high_water INTEGER NOT NULL,
+            cursor TEXT NOT NULL,
+            PRIMARY KEY (session_id, projection_version, projection_generation, stream_id, source_high_water),
+            FOREIGN KEY (session_id, projection_version, projection_generation)
+                REFERENCES transcript_projection_heads(session_id, projection_version, projection_generation)
+                ON DELETE CASCADE
+        )
+        ",
+    },
+    RequiredObject {
+        name: "transcript_projection_frontiers",
+        sql: "
+        CREATE TABLE transcript_projection_frontiers (
+            frontier_ref TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            projection_version TEXT NOT NULL,
+            projection_generation TEXT NOT NULL,
+            source_high_water INTEGER NOT NULL,
+            frontier_json TEXT NOT NULL,
+            UNIQUE (session_id, projection_version, projection_generation, source_high_water),
+            FOREIGN KEY (session_id, projection_version, projection_generation)
+                REFERENCES transcript_projection_heads(session_id, projection_version, projection_generation)
+                ON DELETE CASCADE
+        )
+        ",
+    },
+    RequiredObject {
+        name: "transcript_projection_checkpoints",
+        sql: "
+        CREATE TABLE transcript_projection_checkpoints (
+            session_id TEXT NOT NULL,
+            projection_version TEXT NOT NULL,
+            projection_generation TEXT NOT NULL,
+            source_high_water INTEGER NOT NULL,
+            frontier_ref TEXT NOT NULL REFERENCES transcript_projection_frontiers(frontier_ref),
+            checkpoint_json TEXT NOT NULL,
+            PRIMARY KEY (session_id, projection_version, projection_generation, source_high_water),
+            FOREIGN KEY (session_id, projection_version, projection_generation)
+                REFERENCES transcript_projection_heads(session_id, projection_version, projection_generation)
+                ON DELETE CASCADE
+        )
+        ",
+    },
+    RequiredObject {
+        name: "transcript_projection_commits",
+        sql: "
+        CREATE TABLE transcript_projection_commits (
+            commit_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            projection_version TEXT NOT NULL,
+            projection_generation TEXT NOT NULL,
+            expected_source_high_water INTEGER NOT NULL,
+            source_high_water INTEGER NOT NULL,
+            commit_json TEXT NOT NULL,
+            FOREIGN KEY (session_id, projection_version, projection_generation)
+                REFERENCES transcript_projection_heads(session_id, projection_version, projection_generation)
+                ON DELETE CASCADE
+        )
+        ",
+    },
+];
+
 const REQUIRED_INDEXES: &[RequiredObject] = &[
     RequiredObject {
         name: "idx_runtime_job_waiters_source",
@@ -453,6 +594,29 @@ const REQUIRED_INDEXES: &[RequiredObject] = &[
     },
 ];
 
+const TRANSCRIPT_INDEXES: &[RequiredObject] = &[
+    RequiredObject {
+        name: "idx_transcript_block_identities_page",
+        sql: "CREATE INDEX idx_transcript_block_identities_page ON transcript_block_identities(session_id, projection_version, projection_generation, order_source_sequence DESC, order_ordinal DESC, block_id ASC)",
+    },
+    RequiredObject {
+        name: "idx_transcript_block_versions_waterline",
+        sql: "CREATE INDEX idx_transcript_block_versions_waterline ON transcript_block_versions(session_id, projection_version, projection_generation, block_id, applied_source_sequence DESC)",
+    },
+    RequiredObject {
+        name: "idx_transcript_resume_cursors_waterline",
+        sql: "CREATE INDEX idx_transcript_resume_cursors_waterline ON transcript_resume_cursors(session_id, projection_version, projection_generation, stream_id, source_high_water DESC)",
+    },
+    RequiredObject {
+        name: "idx_transcript_projection_checkpoints_waterline",
+        sql: "CREATE INDEX idx_transcript_projection_checkpoints_waterline ON transcript_projection_checkpoints(session_id, projection_version, projection_generation, source_high_water DESC)",
+    },
+    RequiredObject {
+        name: "idx_transcript_projection_commits_session",
+        sql: "CREATE INDEX idx_transcript_projection_commits_session ON transcript_projection_commits(session_id, projection_version, projection_generation, source_high_water ASC, commit_id ASC)",
+    },
+];
+
 pub(super) fn runtime_schema_user_table_count(conn: &Connection) -> Result<i64, String> {
     conn.query_row(
         "
@@ -471,6 +635,7 @@ pub(super) fn validate_schema_shape(conn: &Connection) -> Result<(), String> {
     for table_name in user_tables(conn)? {
         if REQUIRED_TABLES
             .iter()
+            .chain(TRANSCRIPT_TABLES)
             .all(|required| required.name != table_name)
         {
             return Err(format!("runtime sqlite unknown table: {table_name}"));
@@ -479,15 +644,16 @@ pub(super) fn validate_schema_shape(conn: &Connection) -> Result<(), String> {
     for index_name in user_indexes(conn)? {
         if REQUIRED_INDEXES
             .iter()
+            .chain(TRANSCRIPT_INDEXES)
             .all(|required| required.name != index_name)
         {
             return Err(format!("runtime sqlite unknown index: {index_name}"));
         }
     }
-    for table in REQUIRED_TABLES {
+    for table in REQUIRED_TABLES.iter().chain(TRANSCRIPT_TABLES) {
         validate_object_sql(conn, "table", table.name, table.sql)?;
     }
-    for index in REQUIRED_INDEXES {
+    for index in REQUIRED_INDEXES.iter().chain(TRANSCRIPT_INDEXES) {
         validate_object_sql(conn, "index", index.name, index.sql)?;
     }
     Ok(())
@@ -592,6 +758,7 @@ fn user_indexes(conn: &Connection) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SqliteRuntimeStore;
     use std::fs;
 
     fn failing_migration(conn: &Connection) -> Result<(), String> {
@@ -652,6 +819,53 @@ mod tests {
         assert_eq!(schema_versions(&conn).expect("versions"), vec![1]);
 
         drop(conn);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn v1_store_migrates_to_the_persistent_transcript_read_model() {
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-sqlite-transcript-migration-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("root");
+        let database_path = root.join("runtime.db");
+        let conn = Connection::open(&database_path).expect("database");
+        let mut ddl = String::new();
+        for table in REQUIRED_TABLES {
+            ddl.push_str(table.sql);
+            ddl.push_str(";\n");
+        }
+        for index in REQUIRED_INDEXES {
+            ddl.push_str(index.sql);
+            ddl.push_str(";\n");
+        }
+        conn.execute_batch(ddl.as_str()).expect("v1 schema");
+        conn.execute(
+            "INSERT INTO schema_migrations(version, applied_at_ms) VALUES(1, 1)",
+            [],
+        )
+        .expect("v1 history");
+        drop(conn);
+
+        drop(SqliteRuntimeStore::new(&database_path).expect("migrate v1 store"));
+        let migrated = Connection::open(&database_path).expect("migrated database");
+        assert!(
+            object_sql(&migrated, "table", "transcript_projection_heads")
+                .expect("transcript table lookup")
+                .is_some()
+        );
+        assert!(
+            object_sql(&migrated, "table", "transcript_projection_frontiers")
+                .expect("transcript frontier table lookup")
+                .is_some()
+        );
+        assert_eq!(schema_versions(&migrated).expect("versions"), vec![1, 2]);
+        drop(migrated);
         fs::remove_dir_all(root).expect("cleanup");
     }
 }
