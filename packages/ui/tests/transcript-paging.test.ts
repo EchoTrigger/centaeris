@@ -38,6 +38,16 @@ const page = (
   resumeCursors: [{ streamId: "session-jsonl.v1", cursor: "12" }],
 });
 
+test("long message materialization preserves a readable reference instead of a byte-count placeholder", () => {
+  const reference = { refId: "session-event:event-1:text", revision: "1", byteLength: "70000" };
+  const view = DesktopTranscriptView.open(page([
+    block("long-user", "1", "1", { kind: "userText", content: { sourceRef: reference } }),
+  ]));
+  const message = view.materializeMessages(false)[0];
+  expect(message.transcriptText).toEqual({ sessionId: "session-1", projectionGeneration: "generation-1", reference });
+  expect(message.role === "user" && message.text).toBe("");
+});
+
 test("paged Desktop view keeps late revisions and hides committed tail behind live overlay", () => {
   const view = DesktopTranscriptView.open(page([
     block("tool:call-8", "1", "8", {

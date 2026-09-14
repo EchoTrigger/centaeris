@@ -217,8 +217,14 @@ silently fall back to full client-side event projection.
 
 Oversized user, assistant, reasoning, notice, and tool-summary text is represented
 by a stable `session-event:<eventId>:<field>` content reference, so one large block
-cannot prevent a page cursor from advancing. The transcript page protocol does not
-yet define the separate bounded range-read method for those references.
+cannot prevent a page cursor from advancing. `transcript/content-range` reads both
+these references and `tool-output:<callId>` references using
+`transcript.content.range.read.v1`. Each response contains at most 64 KiB of UTF-8
+text and an exact continuation offset. Core validates the source event, visible
+field, revision and byte length; the host binds the read to the session and current
+projection generation. Clients automatically assemble referenced message text for
+normal Markdown rendering; tool details retain one range with backward/forward
+navigation instead of accumulating all previously read output.
 
 The local SQLite adapter keeps one replaceable current-recovery slot per session,
 projection version, and generation. That slot contains only the control frontier

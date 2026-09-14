@@ -51,14 +51,90 @@ impl TranscriptContentRangeReadRequestV1 {
         if self.max_bytes == 0 || self.max_bytes as usize > TRANSCRIPT_CONTENT_RANGE_MAX_BYTES {
             return Err("transcript content range maxBytes is invalid".to_string());
         }
-        if !self.ref_id.starts_with("tool-output:") {
-            return Err("transcript content range refId is unsupported".to_string());
-        }
-        if self.revision != "2" {
-            return Err("transcript content range revision is unsupported".to_string());
+        if let Some(call_id) = self.ref_id.strip_prefix("tool-output:") {
+            require_identifier(call_id, "transcript tool output callId")?;
+            if self.revision != "2" {
+                return Err("transcript content range revision is unsupported".to_string());
+            }
+        } else {
+            let (_, field) = self.event_reference()?;
+            let revision = if field == "summary" { "2" } else { "1" };
+            if self.revision != revision {
+                return Err("transcript content range revision is unsupported".to_string());
+            }
         }
         Ok(())
     }
+
+    pub fn event_reference(&self) -> Result<(&str, &str), String> {
+        let (event_id, field) = self
+            .ref_id
+            .strip_prefix("session-event:")
+            .and_then(|value| value.rsplit_once(':'))
+            .ok_or_else(|| "transcript content range refId is unsupported".to_string())?;
+        require_identifier(event_id, "transcript content eventId")?;
+        if !matches!(
+            field,
+            "text" | "modelMarkdown" | "displayTarget" | "summary" | "message"
+        ) {
+            return Err("transcript content range field is unsupported".to_string());
+        }
+        Ok((event_id, field))
+    }
+}
+
+/// Resolves only text actually exposed by the transcript projection. Hosts select the
+/// authorized source record; Core owns the reference, revision and field semantics.
+pub fn transcript_event_content_range(
+    request: &TranscriptContentRangeReadRequestV1,
+    event: &crate::session::SessionLogRecord,
+) -> Result<TranscriptContentRangeV1, String> {
+    use crate::session::SessionRecordType;
+    request.validate()?;
+    crate::session::validate_event_shape(event)?;
+    let (event_id, field) = request.event_reference()?;
+    let expected_field = match event.event_type {
+        SessionRecordType::UserMessage | SessionRecordType::ReasoningBlock => "text",
+        SessionRecordType::AssistantMessage => "modelMarkdown",
+        SessionRecordType::ToolCall => "displayTarget",
+        SessionRecordType::ToolResult => "summary",
+        SessionRecordType::PhaseEvent => "message",
+        _ => return Err("transcript source has no visible text".to_string()),
+    };
+    if event.session_id != request.session_id
+        || event.event_id != event_id
+        || field != expected_field
+    {
+        return Err("transcript content reference does not match its source".to_string());
+    }
+    let text = event
+        .payload
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "transcript source text is missing".to_string())?;
+    if text.len().to_string() != request.byte_length {
+        return Err("transcript content reference is stale".to_string());
+    }
+    let offset = request
+        .offset
+        .parse::<usize>()
+        .map_err(|_| "transcript offset exceeds usize")?;
+    let (end, content) = transcript_utf8_range(text, offset, request.max_bytes as usize)?;
+    let response = TranscriptContentRangeV1 {
+        schema: TRANSCRIPT_CONTENT_RANGE_SCHEMA_V1.to_string(),
+        session_id: request.session_id.clone(),
+        projection_version: request.projection_version.clone(),
+        projection_generation: request.projection_generation.clone(),
+        ref_id: request.ref_id.clone(),
+        revision: request.revision.clone(),
+        byte_length: request.byte_length.clone(),
+        start_offset: request.offset.clone(),
+        end_offset: end.to_string(),
+        content: content.to_string(),
+        has_more: end < text.len(),
+    };
+    response.validate()?;
+    Ok(response)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -160,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn content_range_request_is_strict_and_tool_output_scoped() {
+    fn content_range_request_rejects_unknown_fields_and_oversized_ranges() {
         let request = TranscriptContentRangeReadRequestV1 {
             schema: TRANSCRIPT_CONTENT_RANGE_REQUEST_SCHEMA_V1.to_string(),
             session_id: "session-1".to_string(),
@@ -174,10 +250,28 @@ mod tests {
         };
         request.validate().expect("valid request");
         let mut unsupported = request.clone();
-        unsupported.ref_id = "session-event:event-1:summary".to_string();
+        unsupported.ref_id = "session-event:event-1:privateField".to_string();
         assert!(unsupported.validate().is_err());
         let mut oversized = request;
         oversized.max_bytes = TRANSCRIPT_CONTENT_RANGE_MAX_BYTES as u32 + 1;
         assert!(oversized.validate().is_err());
+    }
+
+    #[test]
+    fn long_answer_reference_is_a_readable_content_range() {
+        let request = TranscriptContentRangeReadRequestV1 {
+            schema: TRANSCRIPT_CONTENT_RANGE_REQUEST_SCHEMA_V1.to_string(),
+            session_id: "session-1".to_string(),
+            projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.to_string(),
+            projection_generation: "generation-1".to_string(),
+            ref_id: "session-event:event:answer:modelMarkdown".to_string(),
+            revision: "1".to_string(),
+            byte_length: "70000".to_string(),
+            offset: "0".to_string(),
+            max_bytes: TRANSCRIPT_CONTENT_RANGE_MAX_BYTES as u32,
+        };
+        request
+            .validate()
+            .expect("projected answer reference must be readable");
     }
 }

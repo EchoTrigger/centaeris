@@ -240,11 +240,8 @@ const validatePatch = (patch: TranscriptPatchV1): void => {
   }
 };
 
-const referencedContentLabel = (reference: TranscriptContentRefV1): string =>
-  `[referenced content: ${reference.byteLength} bytes]`;
-
 const materializeText = (content: TranscriptTextContentV1): string =>
-  content.inlineContent ?? referencedContentLabel(content.sourceRef);
+  content.inlineContent ?? "";
 
 const isLiveStatus = (status: TranscriptBlockStatusV1): boolean =>
   status === "queued" || status === "running";
@@ -286,11 +283,14 @@ const materializeBlock = (
   projectionGeneration: string,
 ): ChatMessage => {
   const body = block.body;
+  const reference = body.kind === "tool" ? body.summaryRef : body.content.sourceRef;
+  const transcriptText = reference ? { sessionId, projectionGeneration, reference } : undefined;
   if (body.kind === "userText") {
     return {
       id: block.blockId,
       role: "user",
       text: materializeText(body.content),
+      transcriptText,
     };
   }
   const turn = emptyTurn(block.blockId, isLiveStatus(body.status));
@@ -312,11 +312,7 @@ const materializeBlock = (
       });
       break;
     case "tool": {
-      const summary =
-        body.summary ??
-        (body.summaryRef
-          ? referencedContentLabel(body.summaryRef)
-          : body.toolName);
+      const summary = body.summary ?? "";
       turn.chunks.push({
         id: block.blockId,
         kind: "task",
@@ -356,7 +352,7 @@ const materializeBlock = (
     default:
       body satisfies never;
   }
-  return { id: block.blockId, role: "assistant", turn };
+  return { id: block.blockId, role: "assistant", turn, transcriptText };
 };
 
 const incomingWins = (

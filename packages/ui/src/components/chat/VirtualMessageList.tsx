@@ -3,11 +3,11 @@ import { memo, useLayoutEffect, type RefObject } from "react";
 import { Check, Copy, Pencil } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { AgentResultStream } from "./AgentResultStream";
+import { useTranscriptText } from "./useTranscriptText";
 import {
   selectChatMessageById,
   selectChatMessageIds,
   selectChatMessageRoleById,
-  selectChatTurnByMessageId,
   useChatViewStore,
 } from "./chatViewStore";
 import { formatUserMessageTimestamp } from "./chatRuntimeModel";
@@ -65,7 +65,8 @@ const UserMessageRow = memo(function UserMessageRow({
   onCopyUserMessage: (messageId: string, text: string) => void;
   onStartEditingUserMessage: (message: ChatMessage & { role: "user" }) => void;
 }) {
-  const message = useChatViewStore(selectChatMessageById(messageId));
+  const storedMessage = useChatViewStore(selectChatMessageById(messageId));
+  const { message, status, loading } = useTranscriptText(storedMessage);
   if (!message || message.role !== "user") {
     return null;
   }
@@ -97,7 +98,7 @@ const UserMessageRow = memo(function UserMessageRow({
         <div className="user-message-stack">
           <div className="message-bubble">
             <div className="message-content">
-              <p>{message.text}</p>
+              {status}<p>{message.text}</p>
             </div>
           </div>
           <div className={`user-message-meta-row ${isCopied ? "is-copied" : ""}`}>
@@ -111,6 +112,7 @@ const UserMessageRow = memo(function UserMessageRow({
                 size="icon"
                 className="user-message-icon-btn"
                 onClick={() => onCopyUserMessage(message.id, message.text)}
+                disabled={loading}
                 aria-label={t("virtualMessageList.copy")}
               >
                 {isCopied ? (
@@ -120,7 +122,7 @@ const UserMessageRow = memo(function UserMessageRow({
                 )}
               </Button>
             </Tooltip>
-            {canEdit ? (
+            {canEdit && !loading ? (
                   <Tooltip content={t("chatArea.edit")}>
                     <Button
                       type="button"
@@ -153,15 +155,17 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   onOpenAgentSession?: VirtualMessageListProps["onOpenAgentSession"];
   onOpenWorkspacePath?: VirtualMessageListProps["onOpenWorkspacePath"];
 }) {
-  const turn = useChatViewStore(selectChatTurnByMessageId(messageId));
-  if (!turn) {
+  const storedMessage = useChatViewStore(selectChatMessageById(messageId));
+  const { message, status } = useTranscriptText(storedMessage);
+  if (!message || message.role !== "assistant") {
     return null;
   }
   return (
     <div className="message assistant-message">
       <div className="message-bubble">
+        {status}
         <AgentResultStream
-          turn={turn}
+          turn={message.turn}
           onOpenAgentSession={onOpenAgentSession}
           onOpenWorkspacePath={onOpenWorkspacePath}
         />

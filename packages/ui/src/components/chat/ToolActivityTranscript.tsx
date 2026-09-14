@@ -6,6 +6,7 @@ import {
   type ReactNode,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { useShallow } from "zustand/react/shallow";
@@ -23,7 +24,6 @@ import {
 import { readDesktopFilePreview } from "../../lib/workspaceBridge";
 import {
   loadTranscriptContentRange,
-  TRANSCRIPT_CONTENT_RANGE_BYTES,
 } from "./transcriptContentRanges";
 import { useChatViewStore } from "./chatViewStore";
 import {
@@ -86,16 +86,27 @@ const ToolResultOutput = ({ operation }: { operation: TimelineOperation }) => {
     ? "Loading complete output…"
     : operation.modelContent || operation.outputPreview || "";
   const [content, setContent] = useState(fallback);
+  const activeRead = useRef(0);
+  const [offsets, setOffsets] = useState(["0"]);
+  const [pageIndex, setPageIndex] = useState(0);
+  const [readError, setReadError] = useState(false);
+  const retryPage = useRef(0);
   const [nextOffset, setNextOffset] = useState("0");
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
 
   useEffect(() => {
+    const epoch = ++activeRead.current;
+    setOffsets(["0"]);
+    setPageIndex(0);
+    setReadError(false);
+    retryPage.current = 0;
     const reference = operation.transcriptContentRef;
     const sessionId = operation.transcriptSessionId;
     const projectionGeneration = operation.transcriptProjectionGeneration;
     if (reference && sessionId && projectionGeneration) {
       let active = true;
+      setContent("");
       setLoadingMore(true);
       setHasMore(false);
       setNextOffset("0");
@@ -107,10 +118,10 @@ const ToolResultOutput = ({ operation }: { operation: TimelineOperation }) => {
           setHasMore(page.hasMore);
         })
         .catch(() => {
-          if (active) setContent(operation.modelContent || operation.outputPreview || "");
+          if (active) setReadError(true);
         })
         .finally(() => { if (active) setLoadingMore(false); });
-      return () => { active = false; };
+      return () => { active = false; if (activeRead.current === epoch) activeRead.current++; };
     }
     const path = operation.fullOutputPath;
     const start = operation.outputStartByte;
@@ -147,38 +158,50 @@ const ToolResultOutput = ({ operation }: { operation: TimelineOperation }) => {
     operation.transcriptSessionId,
   ]);
 
-  async function loadMore() {
+  async function loadMore(targetIndex = pageIndex + 1) {
     const reference = operation.transcriptContentRef;
     const sessionId = operation.transcriptSessionId;
     const projectionGeneration = operation.transcriptProjectionGeneration;
-    if (!reference || !sessionId || !projectionGeneration || loadingMore || !hasMore) return;
+    if (!reference || !sessionId || !projectionGeneration || loadingMore) return;
+    const epoch = activeRead.current;
+    retryPage.current = targetIndex;
+    const offset = offsets[targetIndex] ?? nextOffset;
     setLoadingMore(true);
+    setReadError(false);
     try {
       const page = await loadTranscriptContentRange(
         { sessionId, projectionGeneration, reference },
-        nextOffset,
+        offset,
       );
-      setContent((current) => `${current}${page.content}`);
+      if (activeRead.current !== epoch) return;
+      setContent(page.content);
+      setOffsets((current) => { const next = [...current]; next[targetIndex] = offset; return next; });
+      setPageIndex(targetIndex);
       setNextOffset(page.endOffset);
       setHasMore(page.hasMore);
     } catch {
-      setHasMore(false);
+      if (activeRead.current === epoch) setReadError(true);
     } finally {
-      setLoadingMore(false);
+      if (activeRead.current === epoch) setLoadingMore(false);
     }
   }
 
-  if (!content && !loadingMore) return null;
+  if (!content && !loadingMore && !readError) return null;
   return (
     <>
       {content ? <pre className="agent-tool-bash-output">{content}</pre> : null}
+      {!content && loadingMore ? <span role="status">{t("transcriptText.loading")}</span> : null}
+      {readError ? <span role="alert">{t("transcriptText.failed")}
+        <button type="button" onClick={() => { void loadMore(retryPage.current); }}>{t("transcriptText.retry")}</button>
+      </span> : null}
+      {pageIndex > 0 ? <button type="button" disabled={loadingMore} onClick={() => { void loadMore(pageIndex - 1); }}>
+        {t("transcriptText.previousOutput")}
+      </button> : null}
       {hasMore ? (
         <button type="button" onClick={() => { void loadMore(); }} disabled={loadingMore}>
           {loadingMore
             ? t("toolActivityTranscript.loading")
-            : t("toolActivityTranscript.loadNextValueKiB", {
-                value1: TRANSCRIPT_CONTENT_RANGE_BYTES / 1024,
-              })}
+            : t("transcriptText.nextOutput")}
         </button>
       ) : null}
     </>
@@ -225,7 +248,7 @@ const renderOperationDetail = (
                   {formatFullCommandLine(command)}
                 </pre>
               ) : null}
-              {operation.modelContent || operation.outputPreview || operation.fullOutputPath ? (
+              {operation.modelContent || operation.outputPreview || operation.fullOutputPath || operation.transcriptContentRef ? (
                 <ToolResultOutput operation={operation} />
               ) : null}
               {operation.error ? (

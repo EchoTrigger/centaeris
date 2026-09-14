@@ -283,6 +283,7 @@ export const getOperationDetailState = (
       operation.outputPreview ||
       operation.modelContent ||
       operation.fullOutputPath ||
+      operation.transcriptContentRef ||
       operation.error,
     );
   const hasEditDetail =
@@ -292,6 +293,7 @@ export const getOperationDetailState = (
     atom.detailRendererKind !== "bash" &&
     Boolean(
       operation.fullOutputPath ||
+      operation.transcriptContentRef ||
       (atom.detailRendererKind !== "diff" &&
         (operation.modelContent || operation.outputPreview)),
     );

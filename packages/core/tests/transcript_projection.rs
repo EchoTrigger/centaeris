@@ -427,3 +427,61 @@ fn projector_restores_unsettled_tool_state_from_a_bounded_frontier() {
     assert!(duplicate.contains("no projected tool call"));
     assert_eq!(decoded.source_high_water, "100");
 }
+
+#[test]
+fn long_answer_reference_round_trips_exact_markdown_and_rejects_foreign_sources() {
+    use centaeris_core::session::transcript::*;
+    let text = format!("# Answer\n\n```text\n{}\n```\n", "字abc".repeat(20000));
+    let answer = record(
+        1,
+        "assistant_message",
+        "event:answer",
+        json!({
+            "messageId": "message:turn-1:assistant", "modelMarkdown": text,
+            "artifactRefs": [], "status": "done"
+        }),
+    );
+    let mut projector =
+        TranscriptProjectorV1::new("session-1".into(), "generation-1".into()).unwrap();
+    projector.apply(&answer, "session-jsonl.v1", "1").unwrap();
+    let page = projector
+        .page_at(1, None, TranscriptPagePolicyV1::default())
+        .unwrap();
+    let TranscriptBlockBodyV1::AssistantText { content, .. } = &page.blocks[0].body else {
+        panic!("answer")
+    };
+    let reference = content.source_ref.as_ref().unwrap();
+    let mut request = TranscriptContentRangeReadRequestV1 {
+        schema: TRANSCRIPT_CONTENT_RANGE_REQUEST_SCHEMA_V1.into(),
+        session_id: "session-1".into(),
+        projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.into(),
+        projection_generation: "generation-1".into(),
+        ref_id: reference.ref_id.clone(),
+        revision: reference.revision.clone(),
+        byte_length: reference.byte_length.clone(),
+        offset: "0".into(),
+        max_bytes: TRANSCRIPT_CONTENT_RANGE_MAX_BYTES as u32,
+    };
+    let mut recovered = String::new();
+    loop {
+        let part = transcript_event_content_range(&request, &answer.event).unwrap();
+        recovered.push_str(&part.content);
+        if !part.has_more {
+            break;
+        }
+        request.offset = part.end_offset;
+    }
+    assert_eq!(recovered, text);
+    let mut wrong = request.clone();
+    wrong.session_id = "foreign-session".into();
+    assert!(transcript_event_content_range(&wrong, &answer.event).is_err());
+    wrong = request.clone();
+    wrong.ref_id = "session-event:event:answer:text".into();
+    assert!(transcript_event_content_range(&wrong, &answer.event).is_err());
+    wrong = request.clone();
+    wrong.byte_length = "999999".into();
+    assert!(transcript_event_content_range(&wrong, &answer.event).is_err());
+    wrong = request;
+    wrong.revision = "2".into();
+    assert!(transcript_event_content_range(&wrong, &answer.event).is_err());
+}
