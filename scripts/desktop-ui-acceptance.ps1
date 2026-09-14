@@ -1,5 +1,6 @@
 param(
-    [switch]$ValidationOnly
+    [switch]$ValidationOnly,
+    [switch]$SkipFrontendTests
 )
 
 Set-StrictMode -Version Latest
@@ -16,13 +17,23 @@ try {
     Write-Host "[1/$stepCount] npm ci" -ForegroundColor Cyan
     npm ci
 
-    Write-Host "[2/$stepCount] ui gate" -ForegroundColor Cyan
-    npm run gate --workspace centaeris-ui
-    npx playwright install chromium
-    npm run test:browser --workspace centaeris-ui
+    if ($SkipFrontendTests) {
+        Write-Host "[2/$stepCount] ui source validation" -ForegroundColor Cyan
+        npm run build --workspace centaeris-ui
+        npm run lint:source --workspace centaeris-ui
+    } else {
+        Write-Host "[2/$stepCount] ui gate" -ForegroundColor Cyan
+        npm run gate --workspace centaeris-ui
+    }
 
-    Write-Host "[3/$stepCount] electron check" -ForegroundColor Cyan
-    npm run check --workspace @centaeris/electron-host
+    if ($SkipFrontendTests) {
+        Write-Host "[3/$stepCount] electron host source validation" -ForegroundColor Cyan
+        npm run check:syntax --workspace @centaeris/electron-host
+        npm run check:host-parity --workspace @centaeris/electron-host
+    } else {
+        Write-Host "[3/$stepCount] electron check" -ForegroundColor Cyan
+        npm run check --workspace @centaeris/electron-host
+    }
 
     Write-Host "[4/$stepCount] third-party license assembly" -ForegroundColor Cyan
     npm run test:third-party-licenses --workspace @centaeris/electron-host

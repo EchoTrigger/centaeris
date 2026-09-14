@@ -251,6 +251,7 @@ impl SessionDataStorePort for SqliteRuntimeStore {
                 "resource_claims",
                 "runtime_jobs",
                 "external_context_links",
+                "transcript_projection_heads",
             ] {
                 tx.execute(
                     format!("DELETE FROM {table} WHERE session_id = ?1").as_str(),

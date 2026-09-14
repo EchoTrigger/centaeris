@@ -1,3 +1,4 @@
+use centaeris_core::session::transcript::TranscriptBlockStatusV1;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -407,6 +408,50 @@ pub(crate) fn stable_tool_title(tool: &ToolTranscriptLine) -> String {
         ToolOutcome::Aborted => {
             format!("{} cancelled: {subject}", tool.action_kind.action_noun())
         }
+    }
+}
+
+pub(crate) fn transcript_page_tool_line(
+    call_id: &str,
+    tool_name: &str,
+    status: TranscriptBlockStatusV1,
+    summary: String,
+    output_byte_length: Option<&str>,
+) -> ToolTranscriptLine {
+    let running = matches!(
+        status,
+        TranscriptBlockStatusV1::Queued | TranscriptBlockStatusV1::Running
+    );
+    let interrupted = status == TranscriptBlockStatusV1::Interrupted;
+    let result_states = match status {
+        TranscriptBlockStatusV1::Completed if output_byte_length.is_some() => {
+            vec![ToolResultState::SuccessWithOutput]
+        }
+        TranscriptBlockStatusV1::Completed => vec![ToolResultState::SuccessNoOutput],
+        TranscriptBlockStatusV1::Failed => vec![ToolResultState::Failed],
+        TranscriptBlockStatusV1::Interrupted => vec![ToolResultState::Aborted],
+        TranscriptBlockStatusV1::Queued | TranscriptBlockStatusV1::Running => Vec::new(),
+    };
+    let result_blocks = output_byte_length
+        .map(|byte_length| ToolResultBlock::Text {
+            lines: vec![TextResultLine::Text(format!(
+                "Output stored by reference: {byte_length} bytes"
+            ))],
+        })
+        .into_iter()
+        .collect();
+    ToolTranscriptLine {
+        key: format!("tool_call:{call_id}"),
+        action_kind: tool_action_kind(tool_name),
+        subject: summary,
+        operations: Vec::new(),
+        result_blocks,
+        images: Vec::new(),
+        result_states,
+        interrupted,
+        running,
+        command: None,
+        description_title: false,
     }
 }
 

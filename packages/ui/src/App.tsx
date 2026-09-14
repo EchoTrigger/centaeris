@@ -78,7 +78,6 @@ function App() {
   const {
     workspaces,
     activeWorkspaceRoot,
-    activeWorkspace,
     catalogError: workspaceCatalogError,
     gitStatus,
     gitStatusError,
@@ -242,6 +241,11 @@ function App() {
       : "Plugins";
 
   const chatWorkspaceRoot = currentSession?.cwd ?? activeWorkspaceRoot;
+  const chatWorkspace = workspaces.find(
+    (workspace) => normalizeRoot(workspace.root) === normalizeRoot(chatWorkspaceRoot),
+  ) ?? null;
+  const chatUsesActiveWorkspace =
+    normalizeRoot(chatWorkspaceRoot) === normalizeRoot(activeWorkspaceRoot);
   const isFilePaneVisible = workspacePanel.isVisible;
 
   return (
@@ -300,7 +304,7 @@ function App() {
       <div className="thinWorkspaceShell">
         <div className="thinWorkspaceBody">
           <main className="thinChatColumn">
-            {!activeWorkspaceRoot ? (
+            {!chatWorkspaceRoot ? (
               <section className="thinGetStarted">
                 <h1>Get Started</h1>
                 <ol>
@@ -317,10 +321,10 @@ function App() {
               <ChatArea
                 currentSession={currentSession}
                 currentSessionId={currentSessionId}
-                workspaceName={activeWorkspace?.name ?? "Workspace"}
+                workspaceName={chatWorkspace?.name ?? "Workspace"}
                 workspaceRoot={chatWorkspaceRoot}
-                gitStatus={gitStatus}
-                gitStatusError={gitStatusError}
+                gitStatus={chatUsesActiveWorkspace ? gitStatus : null}
+                gitStatusError={chatUsesActiveWorkspace ? gitStatusError : ""}
                 githubCliStatus={githubCliStatus}
                 runtimeConfigRevision={runtimeConfigRevision}
                 onOpenWorkspacePath={workspacePanel.actions.openFilePath}

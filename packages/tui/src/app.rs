@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     env,
     error::Error,
     io::{self, Stdout},
@@ -43,6 +43,8 @@ use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
 
 mod commands;
+mod paging;
+mod session_transcript;
 mod theme;
 mod transcript;
 mod view;
@@ -61,6 +63,8 @@ use commands::{
     command_completion_suffix, command_exists, matching_commands, selected_matching_command,
     slash_command_name,
 };
+use paging::TranscriptPagingState;
+use session_transcript::*;
 use theme::theme;
 use transcript::{SubagentTranscriptLine, TranscriptLine};
 use view::*;
@@ -75,8 +79,10 @@ const INLINE_IMAGE_ROWS: u16 = 12;
 const IMAGE_PREVIEW_ZOOM_FACTOR: f32 = 1.5;
 const IMAGE_PREVIEW_MAX_ZOOM_STEPS: u8 = 8;
 const IMAGE_PREVIEW_RESIZE_SETTLE: Duration = Duration::from_millis(75);
-type TranscriptProjection = (HashMap<String, Vec<TranscriptLine>>, Vec<String>);
-
+const TRANSCRIPT_PROJECTION_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const TOOL_IMAGE_MAX_DECODED_PIXELS: u64 = 8_388_608;
+const TOOL_IMAGE_MAX_DECODED_BYTES: u64 = 32 * 1024 * 1024;
+const TOOL_IMAGE_CACHE_MAX_DECODED_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Debug)]
 struct AppConfig {
     workspace_root: PathBuf,
@@ -350,6 +356,8 @@ struct App {
     image_preview: Option<ImagePreview>,
     image_preview_area: Option<Rect>,
     inline_images: HashMap<String, StatefulProtocol>,
+    inline_image_cache_order: VecDeque<(String, u64)>,
+    inline_image_cache_bytes: u64,
     inline_image_errors: HashMap<String, String>,
     pending_esc_stop: bool,
     message: Option<String>,
@@ -368,8 +376,12 @@ struct App {
     session_picker_open: bool,
     active_session: Option<TuiSession>,
     transcript: Vec<TranscriptLine>,
-    transcript_scroll: u16,
-    transcript_max_scroll: u16,
+    transcript_paging: Option<TranscriptPagingState>,
+    transcript_history_len: usize,
+    transcript_revision: u64,
+    transcript_layout_cache: Option<TranscriptLayoutCache>,
+    transcript_scroll: u64,
+    transcript_max_scroll: u64,
     transcript_follow_bottom: bool,
     expanded_tool_groups: HashSet<String>,
     focused_tool_group: Option<String>,
@@ -465,9 +477,9 @@ struct ActiveAgentRun {
     status: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
 struct SessionRestore {
     transcript: Vec<TranscriptLine>,
+    transcript_paging: TranscriptPagingState,
     active_agent_runs: Vec<ActiveAgentRun>,
     replay_items: Vec<Value>,
 }
@@ -655,6 +667,8 @@ impl App {
             image_preview: None,
             image_preview_area: None,
             inline_images: HashMap::new(),
+            inline_image_cache_order: VecDeque::new(),
+            inline_image_cache_bytes: 0,
             inline_image_errors: HashMap::new(),
             pending_esc_stop: false,
             message: None,
@@ -673,6 +687,10 @@ impl App {
             session_picker_open: false,
             active_session: None,
             transcript: Vec::new(),
+            transcript_paging: None,
+            transcript_history_len: 0,
+            transcript_revision: 0,
+            transcript_layout_cache: None,
             transcript_scroll: 0,
             transcript_max_scroll: 0,
             transcript_follow_bottom: true,
@@ -754,11 +772,14 @@ fn run_event_loop(
         redraw |= drain_model_request(&mut app);
         redraw |= drain_runtime_events(&mut app);
         redraw |= drain_image_preview(&mut app);
-        materialize_assistant_prefix(&mut app);
+        if materialize_assistant_prefix(&mut app) {
+            invalidate_transcript_layout(&mut app);
+        }
         let now = Instant::now();
         redraw |= periodic_redraw_due(&app, last_draw_at, now);
         if redraw {
-            let transcript_view = build_transcript_view(&app, width);
+            let transcript_view = build_cached_transcript_view(&mut app, width);
+            cache_visible_transcript_images(&mut app, &transcript_view);
             terminal.draw(|frame| render(frame, &mut app, &transcript_view))?;
             redraw = false;
             last_draw_at = now;
@@ -1523,6 +1544,9 @@ fn handle_key(key: KeyEvent, app: &mut App) -> bool {
             app.transcript_scroll = 0;
             app.transcript_follow_bottom = false;
             app.focused_tool_group = None;
+            if let Err(error) = load_older_transcript_page(app) {
+                show_message(app, error);
+            }
             false
         }
         KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -2053,11 +2077,26 @@ fn handle_mouse(mouse: MouseEvent, app: &mut App) {
 }
 
 fn scroll_transcript(app: &mut App, delta: i32) {
-    let next = (i32::from(app.transcript_scroll) + delta)
-        .clamp(0, i32::from(app.transcript_max_scroll)) as u16;
+    if delta < 0 && app.transcript_scroll == 0 {
+        if let Err(error) = load_older_transcript_page(app) {
+            show_message(app, error);
+        }
+    }
+    let next = if delta.is_negative() {
+        app.transcript_scroll
+            .saturating_sub(u64::from(delta.unsigned_abs()))
+    } else {
+        app.transcript_scroll
+            .saturating_add(delta as u64)
+            .min(app.transcript_max_scroll)
+    };
     app.transcript_scroll = next;
     app.transcript_follow_bottom = next == app.transcript_max_scroll;
     app.focused_tool_group = None;
+}
+
+fn prepend_anchor_scroll(current: u64, previous_total_rows: u64, next_total_rows: u64) -> u64 {
+    current.saturating_add(next_total_rows.saturating_sub(previous_total_rows))
 }
 
 fn move_visible_tool_group_focus(app: &mut App, delta: isize) {
@@ -2099,6 +2138,7 @@ fn toggle_tool_group(app: &mut App, key: String) {
         app.expanded_tool_groups.insert(key.clone());
     }
     app.focused_tool_group = Some(key);
+    invalidate_transcript_layout(app);
 }
 
 /// Ctrl+G：调用 `$VISUAL`/`$EDITOR`/默认编辑器编辑当前输入，退出后读回。
@@ -2416,6 +2456,16 @@ fn handle_enter(app: &mut App) -> bool {
             app.show_help = false;
             app.show_state = false;
             app.selected_command = 0;
+            false
+        }
+        Some("/trim-history") => {
+            clear_composer(app);
+            let removed = release_loaded_transcript_history(app);
+            app.message = Some(if removed == 0 {
+                "No older loaded history to release".to_string()
+            } else {
+                format!("Released {removed} loaded history blocks")
+            });
             false
         }
         Some(name) if command_exists(name) => {
@@ -3372,7 +3422,11 @@ fn reset_to_welcome(app: &mut App) {
     app.process_state = RuntimeDisplayState::Idle;
     app.runtime_easter_egg = None;
     app.transcript.clear();
+    app.transcript_paging = None;
+    app.transcript_history_len = 0;
     app.inline_images.clear();
+    app.inline_image_cache_order.clear();
+    app.inline_image_cache_bytes = 0;
     app.inline_image_errors.clear();
     reset_transcript_view(app);
     app.tool_projection.clear();
@@ -4407,9 +4461,12 @@ fn activate_session(app: &mut App, session: TuiSession) -> Result<(), String> {
     }
     app.active_session = Some(session.clone());
     app.transcript = restore.transcript;
+    app.transcript_history_len = app.transcript.len();
+    app.transcript_paging = Some(restore.transcript_paging);
     app.inline_images.clear();
+    app.inline_image_cache_order.clear();
+    app.inline_image_cache_bytes = 0;
     app.inline_image_errors.clear();
-    cache_transcript_images(app);
     reset_transcript_view(app);
     clear_assistant_buffer(app);
     clear_composer(app);
@@ -4482,452 +4539,6 @@ fn tui_session_from_response(value: &Value) -> Result<TuiSession, String> {
     })
 }
 
-fn load_session_history(app: &mut App, session: &TuiSession) -> Result<SessionRestore, String> {
-    ensure_runtime(app)?;
-    attach_session_viewer(app, session.id.as_str())?;
-    let active_agent_runs = active_agent_runs(app, session.id.as_str())?;
-    let runtime = app
-        .runtime
-        .as_mut()
-        .ok_or_else(|| "runtime client is not connected".to_string())?;
-    let load_response = runtime.request(
-        "session/load",
-        json!({
-            "request": {
-                "sessionId": session.id.as_str(),
-            }
-        }),
-    )?;
-    let projection_response = runtime.request(
-        "_centaeris/session/project",
-        json!({
-            "request": {
-                "sessionId": session.id.as_str(),
-            }
-        }),
-    )?;
-    let transcript = transcript_from_session_restore_response(
-        session.id.as_str(),
-        &load_response,
-        &projection_response,
-    )?;
-    let replay_items = replay_active_agent_runs(app, &active_agent_runs)?;
-    Ok(SessionRestore {
-        transcript,
-        active_agent_runs,
-        replay_items,
-    })
-}
-
-fn attach_session_viewer(app: &mut App, session_id: &str) -> Result<(), String> {
-    let response = app
-        .runtime
-        .as_mut()
-        .ok_or_else(|| "runtime client is not connected".to_string())?
-        .request(
-            "_centaeris/session/agent-runs/attach",
-            json!({
-                "request": {
-                    "sessionId": session_id,
-                    "viewerId": tui_viewer_id(),
-                }
-            }),
-        )?;
-    let transition = response
-        .get("transitionReason")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            "_centaeris/session/agent-runs/attach response missing transitionReason".to_string()
-        })?;
-    if transition != "viewer_attached" {
-        return Err(format!(
-            "_centaeris/session/agent-runs/attach returned unsupported transitionReason: {transition}"
-        ));
-    }
-    Ok(())
-}
-
-fn active_agent_runs(app: &mut App, session_id: &str) -> Result<Vec<ActiveAgentRun>, String> {
-    let response = app
-        .runtime
-        .as_mut()
-        .ok_or_else(|| "runtime client is not connected".to_string())?
-        .request(
-            "_centaeris/session/agent-runs",
-            json!({
-                "request": {
-                    "sessionId": session_id,
-                    "includeTerminal": false,
-                }
-            }),
-        )?;
-    active_agent_runs_from_response(&response)
-}
-
-fn active_agent_runs_from_response(response: &Value) -> Result<Vec<ActiveAgentRun>, String> {
-    let agent_runs = response
-        .get("agentRuns")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "_centaeris/session/agent-runs response missing agentRuns".to_string())?;
-    let mut active_agent_runs = Vec::new();
-    for agent_run in agent_runs {
-        let status = agent_run
-            .get("status")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "_centaeris/session/agent-runs item missing status".to_string())?;
-        if !is_active_session_message_status(status) {
-            continue;
-        }
-        let agent_run_id = agent_run
-            .get("agentRunId")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                "_centaeris/session/agent-runs active item missing agentRunId".to_string()
-            })?;
-        active_agent_runs.push(ActiveAgentRun {
-            agent_run_id: agent_run_id.to_string(),
-            status: status.to_string(),
-        });
-    }
-    Ok(active_agent_runs)
-}
-
-fn replay_active_agent_runs(
-    app: &mut App,
-    active_agent_runs: &[ActiveAgentRun],
-) -> Result<Vec<Value>, String> {
-    let mut replay_items = Vec::new();
-    for agent_run in active_agent_runs {
-        let response = app
-            .runtime
-            .as_mut()
-            .ok_or_else(|| "runtime client is not connected".to_string())?
-            .request(
-                "_centaeris/session/agent-runs/replay",
-                json!({
-                    "request": {
-                        "agentRunId": agent_run.agent_run_id.as_str(),
-                    }
-                }),
-            )?;
-        let agent_run_id = response
-            .get("agentRunId")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                "_centaeris/session/agent-runs/replay response missing agentRunId".to_string()
-            })?;
-        if agent_run_id != agent_run.agent_run_id.as_str() {
-            return Err(format!(
-                "_centaeris/session/agent-runs/replay agentRunId mismatch: expected {}, got {agent_run_id}",
-                agent_run.agent_run_id
-            ));
-        }
-        let items = response
-            .get("items")
-            .and_then(Value::as_array)
-            .ok_or_else(|| {
-                "_centaeris/session/agent-runs/replay response missing items".to_string()
-            })?;
-        replay_items.extend(items.iter().cloned());
-    }
-    Ok(replay_items)
-}
-
-fn restore_active_agent_runs(app: &mut App, active_agent_runs: Vec<ActiveAgentRun>) {
-    app.active_agent_run_id = None;
-    app.active_agent_run_ids.clear();
-    app.completed_agent_run_ids.clear();
-    app.seen_subagent_ids.clear();
-    app.live_subagent_ids.clear();
-    app.agent_run_started_at = None;
-    app.tool_projection.clear();
-    app.pending_subagent_lines.clear();
-    app.active_tool_label = None;
-    app.tool_protocol_error = false;
-    app.process_state = RuntimeDisplayState::Idle;
-    app.runtime_easter_egg = None;
-
-    let Some(first) = active_agent_runs.first() else {
-        return;
-    };
-    app.active_agent_run_id = Some(first.agent_run_id.clone());
-    app.active_agent_run_ids = active_agent_runs
-        .iter()
-        .map(|agent_run| agent_run.agent_run_id.clone())
-        .collect::<HashSet<_>>();
-    app.agent_run_started_at = Some(Instant::now());
-    app.process_state = runtime_display_state_from_agent_run_status(first.status.as_str());
-}
-
-fn transcript_from_session_restore_response(
-    expected_session_id: &str,
-    load_response: &Value,
-    projection_response: &Value,
-) -> Result<Vec<TranscriptLine>, String> {
-    let messages = session_load_messages(expected_session_id, load_response)?;
-    let assistant_keys = messages
-        .iter()
-        .filter(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
-        .filter_map(message_agent_run_key)
-        .collect::<HashSet<_>>();
-    let (mut process_lines, process_order) =
-        process_lines_from_session_projection_response(expected_session_id, projection_response)?;
-
-    let mut transcript = Vec::new();
-    for message in messages {
-        let key = message_agent_run_key(message);
-        let role = message
-            .get("role")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "session/load message missing role".to_string())?;
-        let content = message
-            .get("content")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "session/load message missing content".to_string())?;
-        match role {
-            "user" => {
-                if !content.trim().is_empty() {
-                    transcript.push(TranscriptLine::User(content.to_string()));
-                }
-                if key
-                    .as_ref()
-                    .is_some_and(|key| !assistant_keys.contains(key.as_str()))
-                {
-                    append_process_lines(&mut transcript, key.as_ref(), &mut process_lines);
-                }
-            }
-            "assistant" => {
-                append_process_lines(&mut transcript, key.as_ref(), &mut process_lines);
-                if !content.trim().is_empty() {
-                    transcript.push(TranscriptLine::Summary(content.to_string()));
-                }
-            }
-            other => return Err(format!("session/load unsupported message role: {other}")),
-        }
-    }
-    for key in process_order {
-        append_process_lines(&mut transcript, Some(&key), &mut process_lines);
-    }
-    Ok(transcript)
-}
-
-fn session_load_messages<'a>(
-    expected_session_id: &str,
-    response: &'a Value,
-) -> Result<&'a Vec<Value>, String> {
-    let session_id = response
-        .get("id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "session/load response missing id".to_string())?;
-    if session_id != expected_session_id {
-        return Err(format!(
-            "session/load id mismatch: expected {expected_session_id}, got {session_id}"
-        ));
-    }
-    let messages = response
-        .get("messages")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "session/load response missing messages".to_string())?;
-    Ok(messages)
-}
-
-fn process_lines_from_session_projection_response(
-    expected_session_id: &str,
-    response: &Value,
-) -> Result<TranscriptProjection, String> {
-    let session_id = response
-        .get("session")
-        .and_then(|session| session.get("id"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| "_centaeris/session/project response missing session.id".to_string())?;
-    if session_id != expected_session_id {
-        return Err(format!(
-            "_centaeris/session/project id mismatch: expected {expected_session_id}, got {session_id}"
-        ));
-    }
-    let agent_run_replays = response
-        .get("agentRunReplays")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "_centaeris/session/project response missing agentRunReplays".to_string())?;
-    let mut by_key = HashMap::new();
-    let mut order = Vec::new();
-    for replay in agent_run_replays {
-        let session_id = replay
-            .get("sessionId")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "session/project agentRunReplay missing sessionId".to_string())?;
-        if session_id != expected_session_id {
-            return Err(format!(
-                "session/project agentRunReplay session mismatch: expected {expected_session_id}, got {session_id}"
-            ));
-        }
-        let status = replay
-            .get("status")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "session/project taskReplay missing status".to_string())?;
-        if is_active_session_message_status(status) {
-            continue;
-        }
-        let key = replay_agent_run_key(replay)?;
-        let items = replay
-            .get("items")
-            .and_then(Value::as_array)
-            .ok_or_else(|| "session/project taskReplay missing items".to_string())?;
-        let replay_lines = replay_process_lines(items)?;
-        if !replay_lines.is_empty() {
-            order.push(key.clone());
-            by_key.insert(key, replay_lines);
-        }
-    }
-    Ok((by_key, order))
-}
-
-fn replay_process_lines(items: &[Value]) -> Result<Vec<TranscriptLine>, String> {
-    let mut lines = Vec::new();
-    let mut tools = ToolProjection::default();
-    for item in items {
-        let payload_type = item
-            .get("type")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "session/project replay item missing type".to_string())?;
-        if payload_type != "session_event" {
-            return Err(format!(
-                "session/project unsupported replay payload: {payload_type}"
-            ));
-        }
-        let event = item
-            .get("event")
-            .ok_or_else(|| "session/project session_event missing event".to_string())?;
-        if event
-            .get("visibility")
-            .and_then(Value::as_str)
-            .is_some_and(|visibility| visibility != "user")
-        {
-            continue;
-        }
-        let event_type = event
-            .get("type")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "session/project session_event missing event.type".to_string())?;
-        let payload = event.get("payload").unwrap_or(&Value::Null);
-        match event_type {
-            "Status"
-                if payload.get("stage").and_then(Value::as_str)
-                    == Some("model_process_summary") =>
-            {
-                let message = raw_payload_string(payload, "message").ok_or_else(|| {
-                    "session/project Status(model_process_summary) missing payload.message"
-                        .to_string()
-                })?;
-                lines.push(TranscriptLine::Summary(message));
-            }
-            "TurnSupplement" => {
-                let message = raw_payload_string(payload, "message").ok_or_else(|| {
-                    "session/project TurnSupplement missing payload.message".to_string()
-                })?;
-                lines.push(TranscriptLine::Supplement(message));
-            }
-            "ToolCall" | "ToolResult" => {
-                let update = tools.apply_event(event_type, event, payload)?;
-                if let Some(tool) = update.started {
-                    lines.push(TranscriptLine::Tool(tool));
-                }
-                if let Some(tool) = update.settled {
-                    settle_replay_tool_line(&mut lines, tool)?;
-                }
-            }
-            "SubagentSpawned" | "SubagentProgress" | "SubagentToolGroup" | "SubagentResult"
-            | "SubagentFailed" | "SubagentCancelled" => {
-                if let Some(line) = subagent_transcript_line(event_type, payload) {
-                    lines.push(TranscriptLine::Subagent(line));
-                }
-            }
-            "Error" | "RuntimeError" => {
-                let message = raw_payload_string(payload, "message")
-                    .or_else(|| raw_payload_string(payload, "error"))
-                    .unwrap_or_else(|| event_type.to_string());
-                lines.push(TranscriptLine::Error(message));
-            }
-            "Status" | "Final" => {}
-            event_type if is_known_non_summary_replay_event(event_type) => {}
-            other => {
-                return Err(format!(
-                    "session/project unsupported session_event type: {other}"
-                ));
-            }
-        }
-    }
-    for tool in tools.seal() {
-        settle_replay_tool_line(&mut lines, tool)?;
-    }
-    Ok(lines)
-}
-
-fn settle_replay_tool_line(
-    lines: &mut [TranscriptLine],
-    tool: ToolTranscriptLine,
-) -> Result<(), String> {
-    let key = tool.key.clone();
-    let line = lines
-        .iter_mut()
-        .rev()
-        .find(|line| matches!(line, TranscriptLine::Tool(existing) if existing.key == key))
-        .ok_or_else(|| format!("session/project ToolResult missing ToolCall row: {key}"))?;
-    *line = TranscriptLine::Tool(tool);
-    Ok(())
-}
-
-fn is_known_non_summary_replay_event(event_type: &str) -> bool {
-    matches!(
-        event_type,
-        "ModelRequestStart"
-            | "ModelStatus"
-            | "ToolCallReady"
-            | "ToolProgress"
-            | "PromptCompaction"
-            | "QuestionRequired"
-    )
-}
-
-fn append_process_lines(
-    transcript: &mut Vec<TranscriptLine>,
-    key: Option<&String>,
-    process_lines: &mut HashMap<String, Vec<TranscriptLine>>,
-) {
-    if let Some(lines) = key.and_then(|key| process_lines.remove(key.as_str())) {
-        transcript.extend(lines);
-    }
-}
-
-fn message_agent_run_key(message: &Value) -> Option<String> {
-    let turn_id = message.get("turnId").and_then(Value::as_str)?;
-    let agent_run_id = message.get("agentRunId").and_then(Value::as_str)?;
-    Some(agent_run_key(turn_id, agent_run_id))
-}
-
-fn replay_agent_run_key(replay: &Value) -> Result<String, String> {
-    let turn_id = replay
-        .get("turnId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "session/project agentRunReplay missing turnId".to_string())?;
-    let agent_run_id = replay
-        .get("agentRunId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "session/project agentRunReplay missing agentRunId".to_string())?;
-    Ok(agent_run_key(turn_id, agent_run_id))
-}
-
-fn agent_run_key(turn_id: &str, agent_run_id: &str) -> String {
-    format!("{turn_id}\u{1f}{agent_run_id}")
-}
-
-fn is_active_session_message_status(status: &str) -> bool {
-    matches!(
-        status.trim(),
-        "running" | "queued" | "waiting_user" | "stalled"
-    )
-}
-
 fn session_matches_query(session: &TuiSession, query: &str) -> bool {
     let normalized_query = query.to_lowercase();
     session
@@ -4997,8 +4608,21 @@ fn drain_runtime_events(app: &mut App) -> bool {
     let mut changed = false;
     while let Some(event) = app.runtime.as_ref().and_then(RuntimeClient::try_recv_event) {
         changed = true;
+        invalidate_transcript_layout(app);
         match event {
-            RuntimeEvent::SessionUpdate(update) => apply_session_update(app, &update),
+            RuntimeEvent::SessionUpdate(update) => {
+                let committed = update
+                    .get("payload")
+                    .and_then(|payload| payload.get("type"))
+                    .and_then(Value::as_str)
+                    == Some("session_event");
+                apply_session_update(app, &update);
+                if committed {
+                    if let Err(error) = refresh_transcript_patches(app) {
+                        show_message(app, error);
+                    }
+                }
+            }
             RuntimeEvent::RuntimeConfigChanged => {
                 app.runtime_config_refresh_pending = true;
             }
@@ -5339,7 +4963,17 @@ fn apply_tool_event(app: &mut App, event_type: &str, event: &Value, payload: &Va
     app.active_tool_label = update.active_label;
 }
 
-fn cache_transcript_images(app: &mut App) {
+fn cache_visible_transcript_images(app: &mut App, view: &TranscriptView) {
+    let height = u64::from(app.transcript_area.map_or(24, |area| area.height));
+    let visible_keys = view
+        .images
+        .iter()
+        .filter(|image| {
+            image.row.saturating_add(u64::from(INLINE_IMAGE_ROWS)) >= app.transcript_scroll
+                && image.row <= app.transcript_scroll.saturating_add(height)
+        })
+        .map(|image| image.key.as_str())
+        .collect::<HashSet<_>>();
     let images = app
         .transcript
         .iter()
@@ -5348,6 +4982,7 @@ fn cache_transcript_images(app: &mut App) {
             _ => None,
         })
         .flatten()
+        .filter(|image| visible_keys.contains(image.key.as_str()))
         .cloned()
         .collect::<Vec<_>>();
     cache_tool_images(app, images.as_slice());
@@ -5361,8 +4996,22 @@ fn cache_tool_images(app: &mut App, images: &[ToolImage]) {
             continue;
         }
         match load_tool_image(app, image) {
-            Ok(protocol) => {
+            Ok((protocol, decoded_bytes)) => {
+                while app.inline_image_cache_bytes.saturating_add(decoded_bytes)
+                    > TOOL_IMAGE_CACHE_MAX_DECODED_BYTES
+                {
+                    let Some((oldest, bytes)) = app.inline_image_cache_order.pop_front() else {
+                        break;
+                    };
+                    app.inline_images.remove(oldest.as_str());
+                    app.inline_image_cache_bytes =
+                        app.inline_image_cache_bytes.saturating_sub(bytes);
+                }
                 app.inline_images.insert(image.key.clone(), protocol);
+                app.inline_image_cache_order
+                    .push_back((image.key.clone(), decoded_bytes));
+                app.inline_image_cache_bytes =
+                    app.inline_image_cache_bytes.saturating_add(decoded_bytes);
             }
             Err(error) => {
                 app.inline_image_errors.insert(image.key.clone(), error);
@@ -5371,7 +5020,7 @@ fn cache_tool_images(app: &mut App, images: &[ToolImage]) {
     }
 }
 
-fn load_tool_image(app: &mut App, image: &ToolImage) -> Result<StatefulProtocol, String> {
+fn load_tool_image(app: &mut App, image: &ToolImage) -> Result<(StatefulProtocol, u64), String> {
     ensure_runtime(app)?;
     let session_id = app
         .active_session
@@ -5393,7 +5042,10 @@ fn load_tool_image(app: &mut App, image: &ToolImage) -> Result<StatefulProtocol,
             }),
         )?;
     let decoded = decode_workspace_tool_image(response, app.workspace_root.as_str(), image)?;
-    Ok(app.image_picker.new_resize_protocol(decoded))
+    let decoded_bytes = u64::from(image.width_px)
+        .saturating_mul(u64::from(image.height_px))
+        .saturating_mul(4);
+    Ok((app.image_picker.new_resize_protocol(decoded), decoded_bytes))
 }
 
 fn decode_workspace_tool_image(
@@ -5413,6 +5065,13 @@ fn decode_workspace_tool_image(
         || response.byte_len != expected.byte_length
     {
         return Err("workspace image response does not match the ToolResult image".to_string());
+    }
+    let decoded_pixels = u64::from(expected.width_px).saturating_mul(u64::from(expected.height_px));
+    let decoded_bytes = decoded_pixels.saturating_mul(4);
+    if decoded_pixels > TOOL_IMAGE_MAX_DECODED_PIXELS
+        || decoded_bytes > TOOL_IMAGE_MAX_DECODED_BYTES
+    {
+        return Err("ToolResult image exceeds the decoded image budget".to_string());
     }
     let prefix = format!("data:{};base64,", expected.content_type);
     let encoded = response
@@ -5570,6 +5229,12 @@ fn reset_transcript_view(app: &mut App) {
     app.expanded_tool_groups.clear();
     app.focused_tool_group = None;
     app.tool_group_hit_regions.clear();
+    invalidate_transcript_layout(app);
+}
+
+fn invalidate_transcript_layout(app: &mut App) {
+    app.transcript_revision = app.transcript_revision.wrapping_add(1);
+    app.transcript_layout_cache = None;
 }
 
 fn replace_assistant_buffer(app: &mut App, content: String) {

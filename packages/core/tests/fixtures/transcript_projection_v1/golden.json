@@ -1,0 +1,19 @@
+{
+  "schema": "transcript.golden.v1",
+  "fixtureRevision": "2026-09-13.1",
+  "scenarioId": "reasoning-tool-answer",
+  "operations": [
+    { "kind": "userText", "blockId": "user:1", "revision": "1", "text": "Inspect the workspace" },
+    { "kind": "reasoningReplace", "blockId": "reasoning:req-1", "requestId": "req-1", "revision": "1", "text": "Checking files" },
+    { "kind": "toolStart", "blockId": "tool:call-1", "callId": "call-1", "revision": "1", "toolName": "read" },
+    { "kind": "toolFinish", "blockId": "tool:call-1", "callId": "call-1", "revision": "2", "resultState": "successWithOutput" },
+    { "kind": "assistantTextReplace", "blockId": "assistant:turn-1", "requestId": "req-1", "revision": "1", "text": "Inspection complete" },
+    { "kind": "terminal", "blockId": "run:1", "revision": "1", "status": "completed" }
+  ],
+  "expectedBlocks": [
+    { "blockId": "user:1", "kind": "userText", "lifecycle": "committed" },
+    { "blockId": "reasoning:req-1", "kind": "reasoning", "lifecycle": "committed" },
+    { "blockId": "tool:call-1", "kind": "tool", "lifecycle": "committed" },
+    { "blockId": "assistant:turn-1", "kind": "assistantText", "lifecycle": "committed" }
+  ]
+}
