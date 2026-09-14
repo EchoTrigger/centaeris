@@ -8,6 +8,9 @@ import {
 import { beforeEach, expect, test, vi } from "vitest";
 import type { DesktopFilePreviewReadResponse } from "../src/lib/workspaceBridge";
 import type {
+  TranscriptContentRangeV1,
+} from "../src/lib/chatBridge";
+import type {
   AssistantExecutionTurn,
   SubagentResult,
   TaskResult,
@@ -23,6 +26,7 @@ const harness = vi.hoisted(() => ({
   presentationUnmounts: 0,
   presentationStreamingStates: [] as boolean[],
   codePreviewRenders: 0,
+  loadTranscriptContentRange: vi.fn<(...args: unknown[]) => Promise<TranscriptContentRangeV1>>(),
   readDesktopFilePreview: vi.fn<
     (path: string) => Promise<DesktopFilePreviewReadResponse>
   >(),
@@ -30,6 +34,11 @@ const harness = vi.hoisted(() => ({
 
 vi.mock("../src/lib/workspaceBridge", () => ({
   readDesktopFilePreview: harness.readDesktopFilePreview,
+}));
+
+vi.mock("../src/components/chat/transcriptContentRanges", () => ({
+  loadTranscriptContentRange: harness.loadTranscriptContentRange,
+  TRANSCRIPT_CONTENT_RANGE_BYTES: 65536,
 }));
 
 vi.mock("../src/useStreamPresentation", () => ({
@@ -154,6 +163,35 @@ beforeEach(() => {
   harness.presentationStreamingStates.length = 0;
   harness.codePreviewRenders = 0;
   harness.readDesktopFilePreview.mockReset();
+  harness.loadTranscriptContentRange.mockReset();
+});
+
+test("paged tool output replaces retained text and can return to its previous range", async () => {
+  harness.loadTranscriptContentRange.mockImplementation(async (_identity, offset) => {
+    const start = Number(offset);
+    return {
+      schema: "transcript.content.range.v1", sessionId: "session-1",
+      projectionVersion: "transcript.projection.v1", projectionGeneration: "generation-1",
+      refId: "tool-output:call-1", revision: "2", byteLength: String(3 * 65536),
+      startOffset: String(start), endOffset: String(start + 65536),
+      content: (start === 0 ? "a" : "b").repeat(65536), hasMore: start + 65536 < 3 * 65536,
+    };
+  });
+  const task = makeTask({
+    transcriptContentRef: { refId: "tool-output:call-1", revision: "2", byteLength: String(3 * 65536) },
+    transcriptSessionId: "session-1", transcriptProjectionGeneration: "generation-1",
+    outputByteLength: 3 * 65536,
+  });
+  const renderer = await renderStream({ turn: makeTurn({ chunks: [{ id: "task", kind: "task", task }] }) });
+  await click(renderer.root.findByType("summary"));
+  await click(renderer.root.findAllByType("summary")[1]);
+  const output = () => renderer.root.findByProps({ className: "agent-tool-bash-output" }).children.join("");
+  expect(output()).toBe("a".repeat(65536));
+  await click(findText(renderer, "Next output"));
+  expect(output()).toBe("b".repeat(65536));
+  await click(findText(renderer, "Previous output"));
+  expect(output()).toBe("a".repeat(65536));
+  await act(async () => renderer.unmount());
 });
 
 test("defers complete Bash output until both activity levels are expanded", async () => {

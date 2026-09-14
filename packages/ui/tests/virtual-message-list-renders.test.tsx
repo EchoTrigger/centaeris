@@ -7,7 +7,6 @@ const harness = vi.hoisted(() => ({
   totalSize: 440,
   messageReads: new Map(),
   roleReads: new Map(),
-  turnReads: new Map(),
 }));
 
 const count = (reads: Map<string, number>, messageId: string) => {
@@ -28,6 +27,7 @@ vi.mock("@tanstack/react-virtual", () => ({
 vi.mock("../src/components/chat/chatViewStore", () => {
   const messages = {
     user: { id: "user", role: "user", text: "hello", timestamp: Date.now() },
+    assistant: { id: "assistant", role: "assistant", turn: { id: "turn", chunks: [], finalAnswer: "answer", isStreaming: false } },
   };
   return {
     selectChatMessageIds: () => ["user", "assistant"],
@@ -38,10 +38,6 @@ vi.mock("../src/components/chat/chatViewStore", () => {
     selectChatMessageRoleById: (messageId: string) => () => {
       count(harness.roleReads, messageId);
       return messageId === "user" ? "user" : "assistant";
-    },
-    selectChatTurnByMessageId: (messageId: string) => () => {
-      count(harness.turnReads, messageId);
-      return { id: "turn", messages: [] };
     },
     useChatViewStore: (selector: (state: unknown) => unknown) => selector({}),
   };
@@ -72,7 +68,6 @@ test("edit-only parent updates do not rerender the expensive assistant subtree",
   harness.assistantRenders = 0;
   harness.messageReads.clear();
   harness.roleReads.clear();
-  harness.turnReads.clear();
   const stable = () => {};
   const baseProps = {
     containerRef: createRef<HTMLDivElement>(),
@@ -102,7 +97,7 @@ test("edit-only parent updates do not rerender the expensive assistant subtree",
   });
 
   expect(harness.assistantRenders).toBe(1);
-  expect(harness.turnReads.get("assistant")).toBe(1);
+  expect(harness.messageReads.get("assistant")).toBe(1);
 
   await act(async () => {
     renderer!.update(
@@ -120,7 +115,7 @@ test("edit-only parent updates do not rerender the expensive assistant subtree",
 
   expect(harness.roleReads.get("assistant")).toBe(2);
   expect(harness.messageReads.get("user")).toBe(2);
-  expect(harness.turnReads.get("assistant")).toBe(1);
+  expect(harness.messageReads.get("assistant")).toBe(1);
   expect(harness.assistantRenders).toBe(1);
 
   await act(async () => renderer!.unmount());

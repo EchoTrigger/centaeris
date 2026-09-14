@@ -18,6 +18,7 @@ type Identity = Readonly<{
 const pages = new Map<string, TranscriptContentRangeV1>();
 const pageKeysByRef = new Map<string, string[]>();
 let cachedBytes = 0;
+let cacheEpoch = 0;
 const listeners = new Set<() => void>();
 
 function notify() {
@@ -83,6 +84,7 @@ function validate(page: TranscriptContentRangeV1, identity: Identity, offset: st
 }
 
 export async function loadTranscriptContentRange(identity: Identity, offset: string) {
+  const epoch = cacheEpoch;
   const key = pageKey(identity, offset);
   const cached = pages.get(key);
   if (cached) return cached;
@@ -97,11 +99,13 @@ export async function loadTranscriptContentRange(identity: Identity, offset: str
     offset,
     maxBytes: TRANSCRIPT_CONTENT_RANGE_BYTES,
   }), identity, offset);
+  if (epoch !== cacheEpoch) throw new Error("transcript content view was cleared");
   remember(key, identity, page);
   return page;
 }
 
 export function clearTranscriptContentRangeCache() {
+  cacheEpoch++;
   pages.clear();
   pageKeysByRef.clear();
   cachedBytes = 0;

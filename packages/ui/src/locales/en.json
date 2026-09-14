@@ -162,7 +162,6 @@
   "toolActivityModel.successfulValueOperationIsMissingDiffpreview": "Successful {{value1}} operation is missing diffPreview",
   "toolActivityTranscript.openValue": "Open {{value1}}",
   "toolActivityTranscript.loading": "Loading…",
-  "toolActivityTranscript.loadNextValueKiB": "Load next {{value1}} KiB",
   "toolActivityTranscriptModel.elapsedValue": "Elapsed {{value1}}",
   "useAgentRuntimeConfig.noGlobalModelConfigured": "No global model configured",
   "useAgentStreamController.connectionInterruptedValue": "Connection interrupted: {{value1}}",
@@ -228,5 +227,10 @@
   "theme.dark": "Dark theme",
   "theme.light": "Light theme",
   "theme.switchLight": "Switch to light theme",
-  "theme.switchDark": "Switch to dark theme"
+  "theme.switchDark": "Switch to dark theme",
+  "transcriptText.loading": "Loading content…",
+  "transcriptText.failed": "Unable to load content.",
+  "transcriptText.retry": "Retry",
+  "transcriptText.previousOutput": "Previous output",
+  "transcriptText.nextOutput": "Next output"
 }
