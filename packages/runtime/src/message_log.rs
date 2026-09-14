@@ -66,6 +66,7 @@ struct ToolOutputIndex {
     path: PathBuf,
     identity: SessionLogIdentity,
     by_call_id: HashMap<String, ToolOutputLocator>,
+    by_event_id: HashMap<String, (u64, usize)>,
 }
 
 pub(crate) fn read_transcript_tool_output_range(
@@ -241,6 +242,20 @@ fn indexed_tool_output_locator(
     path: &Path,
     call_id: &str,
 ) -> Result<ToolOutputLocator, String> {
+    with_transcript_content_index(session_id, path, |index| {
+        index
+            .by_call_id
+            .get(call_id)
+            .cloned()
+            .ok_or_else(|| "transcript tool output reference was not found".to_string())
+    })
+}
+
+fn with_transcript_content_index<T>(
+    session_id: &str,
+    path: &Path,
+    read: impl FnOnce(&ToolOutputIndex) -> Result<T, String>,
+) -> Result<T, String> {
     let identity = session_log_identity(path)?;
     let indexes = TOOL_OUTPUT_INDEX.get_or_init(|| RwLock::new(HashMap::new()));
     let mut indexes = indexes
@@ -250,17 +265,14 @@ fn indexed_tool_output_locator(
         .get(session_id)
         .filter(|index| index.path == path && index.identity == identity);
     if let Some(index) = current {
-        return index
-            .by_call_id
-            .get(call_id)
-            .cloned()
-            .ok_or_else(|| "transcript tool output reference was not found".to_string());
+        return read(index);
     }
     #[cfg(test)]
     TOOL_OUTPUT_INDEX_BUILD_COUNT.fetch_add(1, Ordering::Relaxed);
     let source =
         fs::File::open(path).map_err(|error| format!("open transcript source failed: {error}"))?;
     let mut by_call_id = HashMap::new();
+    let mut by_event_id = HashMap::new();
     let mut source = BufReader::new(source);
     let mut line = String::new();
     let mut record_offset = source
@@ -280,6 +292,13 @@ fn indexed_tool_output_locator(
             .ok_or_else(|| "transcript source has a truncated final line".to_string())?;
         let value = serde_json::from_str::<Value>(record)
             .map_err(|error| format!("decode transcript source failed: {error}"))?;
+        let envelope = parse_transcript_projection_source_envelope(&value)?;
+        if by_event_id
+            .insert(envelope.event_id, (record_offset, record.len()))
+            .is_some()
+        {
+            return Err("transcript source eventId is duplicated".to_string());
+        }
         let Some((indexed_call_id, locator)) =
             tool_output_locator(&value, record_offset, record.len())?
         else {
@@ -291,19 +310,48 @@ fn indexed_tool_output_locator(
         }
         record_offset = record_offset.saturating_add(bytes_read as u64);
     }
-    let locator = by_call_id
-        .get(call_id)
-        .cloned()
-        .ok_or_else(|| "transcript tool output reference was not found".to_string())?;
-    indexes.insert(
-        session_id.to_string(),
-        ToolOutputIndex {
-            path: path.to_path_buf(),
-            identity,
-            by_call_id,
-        },
-    );
-    Ok(locator)
+    let index = ToolOutputIndex {
+        path: path.to_path_buf(),
+        identity,
+        by_call_id,
+        by_event_id,
+    };
+    let result = read(&index);
+    indexes.insert(session_id.to_string(), index);
+    result
+}
+
+pub(crate) fn read_transcript_event_content(
+    request: &centaeris_core::session::transcript::TranscriptContentRangeReadRequestV1,
+) -> Result<centaeris_core::session::transcript::TranscriptContentRangeV1, String> {
+    let path = existing_session_log_file_path(&request.session_id)?;
+    let _guard = lock_session_logs_for_read()?;
+    read_transcript_event_content_at(&path, request)
+}
+
+fn read_transcript_event_content_at(
+    path: &Path,
+    request: &centaeris_core::session::transcript::TranscriptContentRangeReadRequestV1,
+) -> Result<centaeris_core::session::transcript::TranscriptContentRangeV1, String> {
+    let (event_id, _) = request.event_reference()?;
+    let (offset, length) = with_transcript_content_index(&request.session_id, path, |index| {
+        index
+            .by_event_id
+            .get(event_id)
+            .copied()
+            .ok_or_else(|| "transcript content source was not found".to_string())
+    })?;
+    let mut source = fs::File::open(path).map_err(|error| error.to_string())?;
+    source
+        .seek(SeekFrom::Start(offset))
+        .map_err(|error| error.to_string())?;
+    let mut bytes = vec![0; length];
+    source
+        .read_exact(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    let value = serde_json::from_slice::<Value>(&bytes).map_err(|error| error.to_string())?;
+    let record = parse_wire_record(&value).map_err(|error| error.to_string())?;
+    centaeris_core::session::transcript::transcript_event_content_range(request, &record.event)
 }
 
 fn refresh_tool_output_index_after_append(
@@ -312,6 +360,7 @@ fn refresh_tool_output_index_after_append(
     previous_identity: &SessionLogIdentity,
     next_identity: SessionLogIdentity,
     locators: Vec<(String, ToolOutputLocator)>,
+    event_locators: Vec<(String, (u64, usize))>,
 ) {
     let Some(indexes) = TOOL_OUTPUT_INDEX.get() else {
         return;
@@ -329,6 +378,7 @@ fn refresh_tool_output_index_after_append(
     for (call_id, locator) in locators {
         index.by_call_id.insert(call_id, locator);
     }
+    index.by_event_id.extend(event_locators);
     index.identity = next_identity;
 }
 
@@ -1379,10 +1429,13 @@ fn append_records_unlocked(
     let previous_identity = session_log_identity(file_path.as_path())?;
     let mut next_record_offset = previous_identity.byte_length;
     let mut appended_tool_outputs = Vec::new();
+    let mut appended_events = Vec::new();
     for wire in &wires {
         let record_length = serde_json::to_vec(wire)
             .map_err(|error| format!("serialize session record failed: {error}"))?
             .len();
+        let envelope = parse_transcript_projection_source_envelope(wire)?;
+        appended_events.push((envelope.event_id, (next_record_offset, record_length)));
         if let Some(locator) = tool_output_locator(wire, next_record_offset, record_length)? {
             appended_tool_outputs.push(locator);
         }
@@ -1415,6 +1468,7 @@ fn append_records_unlocked(
         &previous_identity,
         next_identity,
         appended_tool_outputs,
+        appended_events,
     );
     Ok(())
 }
@@ -2059,6 +2113,32 @@ mod tests {
             TOOL_OUTPUT_INDEX_BUILD_COUNT.load(Ordering::Relaxed) - builds_before,
             1,
             "a stable session log must not be rescanned for each output page"
+        );
+        let request = centaeris_core::session::transcript::TranscriptContentRangeReadRequestV1 {
+            schema: "transcript.content.range.read.v1".into(),
+            session_id: session_id.clone(),
+            projection_version: "transcript.projection.v1".into(),
+            projection_generation: "generation-1".into(),
+            ref_id: "session-event:event-tool-result:summary".into(),
+            revision: "2".into(),
+            byte_length: "14".into(),
+            offset: "0".into(),
+            max_bytes: 8,
+        };
+        let first_text = read_transcript_event_content_at(&path, &request).unwrap();
+        assert_eq!(first_text.content, "Read REA");
+        let second_text = read_transcript_event_content_at(
+            &path,
+            &centaeris_core::session::transcript::TranscriptContentRangeReadRequestV1 {
+                offset: first_text.end_offset,
+                ..request
+            },
+        )
+        .unwrap();
+        assert_eq!(second_text.content, "DME.md");
+        assert_eq!(
+            TOOL_OUTPUT_INDEX_BUILD_COUNT.load(Ordering::Relaxed) - builds_before,
+            1
         );
         fs::remove_file(path).expect("cleanup session log");
     }
