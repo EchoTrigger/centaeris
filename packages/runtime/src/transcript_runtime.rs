@@ -177,6 +177,9 @@ pub(crate) fn content_range(
     if current.projection_generation != request.projection_generation {
         return Err("transcript content range view is invalidated".to_string());
     }
+    if request.ref_id.starts_with("session-event:") {
+        return message_log::read_transcript_event_content(&request);
+    }
     let call_id = request
         .ref_id
         .strip_prefix("tool-output:")

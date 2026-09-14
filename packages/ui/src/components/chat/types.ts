@@ -40,7 +40,13 @@ export type ChatAreaProps = {
 
 export type ChatViewMode = "conversation" | "restoring" | "welcome";
 
-export type ChatMessage =
+export type TranscriptTextIdentity = Readonly<{
+  sessionId: string;
+  projectionGeneration: string;
+  reference: TranscriptContentRefV1;
+}>;
+
+export type ChatMessage = (
   | {
     id: string;
     role: "user";
@@ -52,7 +58,7 @@ export type ChatMessage =
     role: "assistant";
     turn: AssistantExecutionTurn;
     status?: string;
-  };
+  }) & { transcriptText?: TranscriptTextIdentity };
 
 export type TaskStatus = "running" | "done" | "error";
 
