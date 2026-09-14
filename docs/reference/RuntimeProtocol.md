@@ -250,10 +250,9 @@ authorization grant.
 | `_centaeris/session/answer_question` | `oneShotAction` | `noAutomaticRetry` | — |
 | `_centaeris/session/delete` | `identityMutation` | `noAutomaticRetry` | `session/list` |
 | `_centaeris/session/diagnostics` | `read` | `safeRetry` | — |
-| `_centaeris/session/project` | `read` | `safeRetry` | — |
 | `_centaeris/session/reorder` | `desiredStateWrite` | `noAutomaticRetry` | `session/list` |
 | `_centaeris/session/agent-runs` | `read` | `safeRetry` | — |
-| `_centaeris/session/agent-runs/replay` | `read` | `safeRetry` | — |
+| `_centaeris/session/agent-runs/live-snapshot` | `read` | `safeRetry` | — |
 | `_centaeris/session/agent-runs/attach` | `identityMutation` | `noAutomaticRetry` | — |
 | `_centaeris/session/agent-runs/detach` | `identityMutation` | `noAutomaticRetry` | — |
 | `_centaeris/session/agent-runs/detach-viewer` | `identityMutation` | `noAutomaticRetry` | — |

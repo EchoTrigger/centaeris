@@ -78,13 +78,6 @@
       "scope": "sharedRuntime"
     },
     {
-      "name": "_centaeris/session/project",
-      "operationKind": "read",
-      "reconcileMethod": null,
-      "retryPolicy": "safeRetry",
-      "scope": "sharedRuntime"
-    },
-    {
       "name": "_centaeris/session/reorder",
       "operationKind": "desiredStateWrite",
       "reconcileMethod": "session/list",
@@ -99,7 +92,7 @@
       "scope": "sharedRuntime"
     },
     {
-      "name": "_centaeris/session/agent-runs/replay",
+      "name": "_centaeris/session/agent-runs/live-snapshot",
       "operationKind": "read",
       "reconcileMethod": null,
       "retryPolicy": "safeRetry",

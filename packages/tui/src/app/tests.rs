@@ -1,4 +1,305 @@
 use super::*;
+use centaeris_core::session::transcript::{
+    TranscriptBlockBodyV1, TranscriptBlockStatusV1, TranscriptBlockV1, TranscriptOrderKeyV1,
+    TranscriptPageV1, TranscriptPatchV1, TranscriptResumeCursorV1, TranscriptTextContentV1,
+    TRANSCRIPT_PAGE_SCHEMA_V1, TRANSCRIPT_PATCH_SCHEMA_V1, TRANSCRIPT_PROJECTION_VERSION_V1,
+};
+
+fn transcript_test_block(
+    block_id: &str,
+    revision: u64,
+    source_sequence: u64,
+    body: TranscriptBlockBodyV1,
+) -> TranscriptBlockV1 {
+    TranscriptBlockV1 {
+        block_id: block_id.to_string(),
+        block_revision: revision.to_string(),
+        order_key: TranscriptOrderKeyV1 {
+            source_sequence: source_sequence.to_string(),
+            ordinal: 0,
+        },
+        body,
+    }
+}
+
+fn transcript_test_page(
+    blocks: Vec<TranscriptBlockV1>,
+    older_cursor: Option<&str>,
+) -> TranscriptPageV1 {
+    TranscriptPageV1 {
+        schema: TRANSCRIPT_PAGE_SCHEMA_V1.to_string(),
+        session_id: "session-paged".to_string(),
+        projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.to_string(),
+        projection_generation: "generation-paged".to_string(),
+        source_high_water: "12".to_string(),
+        blocks,
+        older_cursor: older_cursor.map(str::to_string),
+        has_older: older_cursor.is_some(),
+        resume_cursors: vec![TranscriptResumeCursorV1 {
+            stream_id: "session-jsonl.v1".to_string(),
+            cursor: "12".to_string(),
+        }],
+    }
+}
+
+#[test]
+fn transcript_paging_materializes_tail_then_prepends_at_the_fixed_waterline() {
+    let tail = transcript_test_page(
+        vec![
+            transcript_test_block(
+                "assistant-11",
+                1,
+                11,
+                TranscriptBlockBodyV1::AssistantText {
+                    content: TranscriptTextContentV1::inline("tail".to_string()),
+                    status: TranscriptBlockStatusV1::Completed,
+                },
+            ),
+            transcript_test_block(
+                "tool:call-12",
+                1,
+                12,
+                TranscriptBlockBodyV1::Tool {
+                    call_id: "call-12".to_string(),
+                    tool_name: "read_file".to_string(),
+                    status: TranscriptBlockStatusV1::Running,
+                    summary: Some("src/main.rs".to_string()),
+                    summary_ref: None,
+                    output_ref: None,
+                },
+            ),
+        ],
+        Some("before-11"),
+    );
+    let mut state = TranscriptPagingState::open(tail).expect("open tail page");
+
+    assert_eq!(state.source_high_water(), 12);
+    assert_eq!(state.older_cursor(), Some("before-11"));
+    assert_eq!(
+        state.materialize_history(false),
+        vec![
+            TranscriptLine::Summary("tail".to_string()),
+            TranscriptLine::Tool(crate::tool_projection::transcript_page_tool_line(
+                "call-12",
+                "read_file",
+                TranscriptBlockStatusV1::Running,
+                "src/main.rs".to_string(),
+                None,
+            )),
+        ]
+    );
+
+    let older = transcript_test_page(
+        vec![transcript_test_block(
+            "user-2",
+            1,
+            2,
+            TranscriptBlockBodyV1::UserText {
+                content: TranscriptTextContentV1::inline("earlier".to_string()),
+            },
+        )],
+        None,
+    );
+    state.apply_older_page(older).expect("prepend older page");
+
+    assert_eq!(state.older_cursor(), None);
+    assert_eq!(
+        state.materialize_history(false).first(),
+        Some(&TranscriptLine::User("earlier".to_string()))
+    );
+}
+
+#[test]
+fn transcript_paging_holds_new_committed_tail_behind_the_live_overlay() {
+    let mut state = TranscriptPagingState::open(transcript_test_page(
+        vec![transcript_test_block(
+            "tool:call-8",
+            1,
+            8,
+            TranscriptBlockBodyV1::Tool {
+                call_id: "call-8".to_string(),
+                tool_name: "exec_command".to_string(),
+                status: TranscriptBlockStatusV1::Running,
+                summary: Some("cargo test".to_string()),
+                summary_ref: None,
+                output_ref: None,
+            },
+        )],
+        None,
+    ))
+    .expect("open tail page");
+    state
+        .apply_patch(TranscriptPatchV1 {
+            schema: TRANSCRIPT_PATCH_SCHEMA_V1.to_string(),
+            session_id: "session-paged".to_string(),
+            projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.to_string(),
+            projection_generation: "generation-paged".to_string(),
+            source_high_water: "14".to_string(),
+            stream_id: "session-jsonl.v1".to_string(),
+            applied_cursor: "14".to_string(),
+            upserts: vec![
+                transcript_test_block(
+                    "tool:call-8",
+                    2,
+                    8,
+                    TranscriptBlockBodyV1::Tool {
+                        call_id: "call-8".to_string(),
+                        tool_name: "exec_command".to_string(),
+                        status: TranscriptBlockStatusV1::Completed,
+                        summary: Some("cargo test".to_string()),
+                        summary_ref: None,
+                        output_ref: None,
+                    },
+                ),
+                transcript_test_block(
+                    "assistant-14",
+                    1,
+                    14,
+                    TranscriptBlockBodyV1::AssistantText {
+                        content: TranscriptTextContentV1::inline("done".to_string()),
+                        status: TranscriptBlockStatusV1::Completed,
+                    },
+                ),
+            ],
+            removals: Vec::new(),
+        })
+        .expect("apply committed patch");
+
+    let while_live = state.materialize_history(true);
+    assert_eq!(while_live.len(), 1);
+    assert!(matches!(
+        &while_live[0],
+        TranscriptLine::Tool(tool) if !tool.running
+    ));
+    assert_eq!(
+        state.materialize_history(false).last(),
+        Some(&TranscriptLine::Summary("done".to_string()))
+    );
+}
+
+#[test]
+fn transcript_page_polling_freezes_generation_and_waterline_after_first_response() {
+    let mut requests = Vec::new();
+    let mut responses = vec![
+        json!({
+            "schema": "transcript.page.rpc.v1",
+            "projectionVersion": "transcript.projection.v1",
+            "projectionGeneration": "generation-paged",
+            "projectedSourceHighWater": "4",
+            "targetSourceHighWater": "12",
+            "targetReached": false,
+            "page": null
+        }),
+        json!({
+            "schema": "transcript.page.rpc.v1",
+            "projectionVersion": "transcript.projection.v1",
+            "projectionGeneration": "generation-paged",
+            "projectedSourceHighWater": "12",
+            "targetSourceHighWater": "12",
+            "targetReached": true,
+            "page": transcript_test_page(Vec::new(), None)
+        }),
+    ]
+    .into_iter();
+
+    let page = paging::request_transcript_page_with(
+        "session-paged",
+        None,
+        None,
+        None,
+        |request| {
+            requests.push(request);
+            responses
+                .next()
+                .ok_or_else(|| "unexpected request".to_string())
+        },
+        || {},
+    )
+    .expect("load projected tail page");
+
+    assert_eq!(page.source_high_water, "12");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["request"]["projectionGeneration"], Value::Null);
+    assert_eq!(requests[0]["request"]["sourceHighWater"], Value::Null);
+    assert_eq!(
+        requests[1]["request"]["projectionGeneration"],
+        "generation-paged"
+    );
+    assert_eq!(requests[1]["request"]["sourceHighWater"], "12");
+}
+
+#[test]
+fn transcript_patch_polling_applies_revisions_without_exposing_new_tail_during_live_run() {
+    let mut state = TranscriptPagingState::open(transcript_test_page(
+        vec![transcript_test_block(
+            "tool:call-8",
+            1,
+            8,
+            TranscriptBlockBodyV1::Tool {
+                call_id: "call-8".to_string(),
+                tool_name: "exec_command".to_string(),
+                status: TranscriptBlockStatusV1::Running,
+                summary: Some("cargo test".to_string()),
+                summary_ref: None,
+                output_ref: None,
+            },
+        )],
+        None,
+    ))
+    .expect("open tail page");
+    let patch = TranscriptPatchV1 {
+        schema: TRANSCRIPT_PATCH_SCHEMA_V1.to_string(),
+        session_id: "session-paged".to_string(),
+        projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.to_string(),
+        projection_generation: "generation-paged".to_string(),
+        source_high_water: "14".to_string(),
+        stream_id: "session-jsonl.v1".to_string(),
+        applied_cursor: "14".to_string(),
+        upserts: vec![transcript_test_block(
+            "tool:call-8",
+            2,
+            8,
+            TranscriptBlockBodyV1::Tool {
+                call_id: "call-8".to_string(),
+                tool_name: "exec_command".to_string(),
+                status: TranscriptBlockStatusV1::Completed,
+                summary: Some("cargo test".to_string()),
+                summary_ref: None,
+                output_ref: None,
+            },
+        )],
+        removals: Vec::new(),
+    };
+    let mut requests = Vec::new();
+
+    let changed = paging::request_transcript_patches_with(
+        &mut state,
+        |request| {
+            requests.push(request);
+            Ok(json!({
+                "schema": "transcript.patch.rpc.v1",
+                "projectionVersion": "transcript.projection.v1",
+                "projectionGeneration": "generation-paged",
+                "projectedSourceHighWater": "14",
+                "targetSourceHighWater": "14",
+                "targetReached": true,
+                "patches": [patch],
+                "nextSourceHighWater": "14",
+                "hasMore": false
+            }))
+        },
+        || {},
+    )
+    .expect("load transcript patches");
+
+    assert!(changed);
+    assert_eq!(requests[0]["request"]["afterSourceHighWater"], "12");
+    assert_eq!(state.current_source_high_water(), 14);
+    {
+        let lines = state.materialize_history(true);
+        assert!(matches!(&lines[0], TranscriptLine::Tool(tool) if !tool.running));
+    }
+}
 
 #[test]
 fn tui_uses_current_directory_as_default_workspace() {
@@ -1453,7 +1754,7 @@ fn transcript_rendering_p0_baseline() {
             "u16Boundary": {
                 "inputItems": boundary_app.transcript.len(),
                 "reportedRows": boundary_view.total_rows,
-                "saturated": boundary_view.total_rows == u16::MAX,
+                "saturated": boundary_view.total_rows == u64::from(u16::MAX),
             },
             "modelSnapshot": {
                 "accepted": snapshot_accepted,
@@ -1505,290 +1806,6 @@ fn session_response_maps_runtime_fields() {
     assert!(tui_session_from_response(&invalid)
         .expect_err("unknown activityState must loud-fail")
         .contains("unsupported session activityState"));
-}
-
-#[test]
-fn session_restore_rebuilds_tool_pairs_and_separates_assistant_lines() {
-    let load_response = json!({
-        "id": "chat-1",
-        "messages": [
-            {"role": "user", "content": "build", "turnId": "turn-1", "agentRunId": "agent-run-1"},
-            {"role": "assistant", "content": "done", "turnId": "turn-1", "agentRunId": "agent-run-1"}
-        ]
-    });
-    let projection_response = json!({
-        "activeAgentRunId": null,
-        "session": {"id": "chat-1"},
-        "agentRunReplays": [{
-            "sessionId": "chat-1",
-            "turnId": "turn-1",
-            "agentRunId": "agent-run-1",
-            "status": "succeeded",
-            "items": [
-                {
-                    "type": "session_event",
-                    "event": {
-                        "type": "ToolCall",
-                        "status": "running",
-                        "toolName": "bash",
-                        "visibility": "user",
-                        "payload": {"callId": "call-1"}
-                    }
-                },
-                {
-                    "type": "session_event",
-                    "event": {
-                        "type": "ToolResult",
-                        "status": "done",
-                        "toolName": "bash",
-                        "visibility": "user",
-                        "payload": {
-                            "callId": "call-1",
-                            "resultState": "successWithOutput",
-                            "operations": [{
-                                "callId": "call-1",
-                                "toolName": "bash",
-                                "kind": "command",
-                                "outputPreview": "raw output"
-                            }],
-                            "modelInputImages": []
-                        }
-                    }
-                },
-                {
-                    "type": "session_event",
-                    "event": {
-                        "type": "Status",
-                        "visibility": "user",
-                        "payload": {"stage": "model_process_summary", "message": "searched files"}
-                    }
-                },
-                {
-                    "type": "session_event",
-                    "event": {
-                        "type": "ToolCall",
-                        "status": "running",
-                        "toolName": "read",
-                        "visibility": "user",
-                        "payload": {"callId": "call-2"}
-                    }
-                },
-                {
-                    "type": "session_event",
-                    "event": {
-                        "type": "ToolResult",
-                        "status": "done",
-                        "toolName": "read",
-                        "visibility": "user",
-                        "payload": {
-                            "callId": "call-2",
-                            "resultState": "successWithOutput",
-                            "operations": [{
-                                "callId": "call-2",
-                                "toolName": "read",
-                                "path": "src/lib.rs",
-                                "startLine": 1,
-                                "endLine": 5,
-                                "totalLines": 5,
-                                "outputPreview": "source"
-                            }],
-                            "modelInputImages": []
-                        }
-                    }
-                },
-                {
-                    "type": "session_event",
-                    "event": {
-                        "type": "TurnSupplement",
-                        "visibility": "user",
-                        "payload": {"message": "再检查 tests"}
-                    }
-                },
-                {
-                    "type": "session_event",
-                    "event": {
-                        "type": "Final",
-                        "visibility": "user",
-                        "payload": {"content": "done"}
-                    }
-                }
-            ]
-        }]
-    });
-
-    let transcript =
-        transcript_from_session_restore_response("chat-1", &load_response, &projection_response)
-            .expect("restore");
-
-    assert!(matches!(
-        transcript.as_slice(),
-        [
-            TranscriptLine::User(user),
-            TranscriptLine::Tool(first),
-            TranscriptLine::Summary(summary),
-            TranscriptLine::Tool(second),
-            TranscriptLine::Supplement(supplement),
-            TranscriptLine::Summary(final_text),
-        ] if user == "build"
-            && first.key == "tool_call:call-1"
-            && summary == "searched files"
-            && second.key == "tool_call:call-2"
-            && supplement == "再检查 tests"
-            && final_text == "done"
-    ));
-}
-
-#[test]
-fn session_restore_skips_active_project_replay_for_live_replay_path() {
-    let load_response = json!({
-        "id": "chat-1",
-        "messages": [
-            {"role": "user", "content": "build", "turnId": "turn-1", "agentRunId": "agent-run-1"},
-            {"role": "assistant", "content": "", "turnId": "turn-1", "agentRunId": "agent-run-1", "status": "running"}
-        ]
-    });
-    let projection_response = json!({
-        "activeAgentRunId": "agent-run-1",
-        "session": {"id": "chat-1"},
-        "agentRunReplays": [{
-            "sessionId": "chat-1",
-            "turnId": "turn-1",
-            "agentRunId": "agent-run-1",
-            "status": "running",
-            "items": [{
-                "type": "session_event",
-                "event": {
-                    "type": "Status",
-                    "visibility": "user",
-                    "payload": {"stage": "model_process_summary", "message": "active summary"}
-                }
-            }]
-        }]
-    });
-
-    let transcript =
-        transcript_from_session_restore_response("chat-1", &load_response, &projection_response)
-            .expect("restore active session bash");
-
-    assert_eq!(transcript, vec![TranscriptLine::User("build".to_string())]);
-}
-
-#[test]
-fn restore_to_transcript_rebuilds_closed_tool_pairs_and_renders_markdown_final() {
-    let load_response = json!({
-        "id": "chat-1",
-        "messages": [
-            {"role": "user", "content": "build", "turnId": "turn-1", "agentRunId": "agent-run-1"},
-            {"role": "assistant", "content": "## Done\n\n- item **one**", "turnId": "turn-1", "agentRunId": "agent-run-1"}
-        ]
-    });
-    let projection_response = json!({
-        "activeAgentRunId": null,
-        "session": {"id": "chat-1"},
-        "agentRunReplays": [{
-            "sessionId": "chat-1",
-            "turnId": "turn-1",
-            "agentRunId": "agent-run-1",
-            "status": "succeeded",
-            "items": [
-                {
-                    "type": "session_event",
-                    "event": {
-                        "type": "ToolCall",
-                        "status": "running",
-                        "toolName": "bash",
-                        "visibility": "user",
-                        "payload": {"callId": "call-1"}
-                    }
-                },
-                {
-                    "type": "session_event",
-                    "event": {
-                        "type": "ToolResult",
-                        "status": "done",
-                        "toolName": "bash",
-                        "visibility": "user",
-                        "payload": {
-                            "callId": "call-1",
-                            "resultState": "successWithOutput",
-                            "operations": [{
-                                "callId": "call-1",
-                                "toolName": "bash",
-                                "kind": "command",
-                                "outputPreview": "output"
-                            }],
-                            "modelInputImages": []
-                        }
-                    }
-                },
-                {
-                    "type": "session_event",
-                    "event": {
-                        "type": "Status",
-                        "visibility": "user",
-                        "payload": {"stage": "model_process_summary", "message": "ran build"}
-                    }
-                },
-                {
-                    "type": "session_event",
-                    "event": {
-                        "type": "SubagentSpawned",
-                        "visibility": "user",
-                        "payload": {"subagentId": "agent-1", "title": "Helper", "parentTurnId": "turn-1"}
-                    }
-                },
-                {
-                    "type": "session_event",
-                    "event": {
-                        "type": "SubagentResult",
-                        "visibility": "user",
-                        "payload": {"subagentId": "agent-1", "title": "Helper", "summary": "checked", "parentTurnId": "turn-1"}
-                    }
-                },
-                {
-                    "type": "session_event",
-                    "event": {
-                        "type": "Final",
-                        "visibility": "user",
-                        "payload": {"content": "## Done\n\n- item **one**"}
-                    }
-                }
-            ]
-        }]
-    });
-
-    let transcript =
-        transcript_from_session_restore_response("chat-1", &load_response, &projection_response)
-            .expect("restore");
-    let mut app = test_app("", PathBuf::from("D:/workspace"), PathBuf::from("D:/data"));
-    app.transcript = transcript;
-    let lines = build_transcript_view(&app, 80).lines;
-    let rendered = lines
-        .iter()
-        .map(|line| {
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        rendered,
-        vec![
-            "│ build".to_string(),
-            String::new(),
-            "  Ran command ›".to_string(),
-            String::new(),
-            "  ran build".to_string(),
-            String::new(),
-            "  ↳ Helper".to_string(),
-            "  ↳ Helper: checked".to_string(),
-            "  ## Done".to_string(),
-            String::new(),
-            "  • item one".to_string(),
-            String::new(),
-        ]
-    );
 }
 
 #[test]
@@ -1994,38 +2011,6 @@ fn empty_question_answer_fails_without_clearing_pending_question() {
     assert!(app.pending_question.is_some());
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
-}
-
-#[test]
-fn session_restore_rejects_unknown_replay_event() {
-    let load_response = json!({
-        "id": "chat-1",
-        "messages": []
-    });
-    let projection_response = json!({
-        "activeAgentRunId": null,
-        "session": {"id": "chat-1"},
-        "agentRunReplays": [{
-            "sessionId": "chat-1",
-            "turnId": "turn-1",
-            "agentRunId": "agent-run-1",
-            "status": "succeeded",
-            "items": [{
-                "type": "session_event",
-                "event": {
-                    "type": "banana",
-                    "visibility": "user",
-                    "payload": {}
-                }
-            }]
-        }]
-    });
-
-    let error =
-        transcript_from_session_restore_response("chat-1", &load_response, &projection_response)
-            .expect_err("unknown event must fail");
-
-    assert!(error.contains("unsupported session_event type"));
 }
 
 #[test]
@@ -3324,6 +3309,52 @@ fn transcript_scroll_disables_and_restores_bottom_following() {
 }
 
 #[test]
+fn transcript_view_keeps_global_rows_beyond_u16_and_slices_the_viewport() {
+    let workspace = PathBuf::from("D:/workspace");
+    let mut app = test_app("", workspace.clone(), workspace);
+    app.transcript
+        .extend((0..40_000).map(|index| TranscriptLine::Summary(format!("row {index}"))));
+
+    let view = build_transcript_view(&app, 80);
+    let scroll = u64::from(u16::MAX) + 100;
+    let window = transcript_render_window(&view, scroll, 20);
+
+    assert!(view.total_rows > u64::from(u16::MAX));
+    assert!(window.lines.len() < view.lines.len());
+    assert!(scroll.saturating_sub(u64::from(window.local_scroll)) <= scroll);
+    assert!(u64::from(window.local_scroll) < scroll);
+}
+
+#[test]
+fn composer_input_redraw_reuses_the_transcript_layout() {
+    let workspace = PathBuf::from("D:/workspace");
+    let mut app = test_app("", workspace.clone(), workspace);
+    app.transcript
+        .push(TranscriptLine::Summary("stable history".to_string()));
+
+    let first = build_cached_transcript_view(&mut app, 80);
+    app.input.push('x');
+    let second = build_cached_transcript_view(&mut app, 80);
+
+    assert_eq!(first.lines, second.lines);
+    assert!(std::sync::Arc::ptr_eq(&first, &second));
+    assert_eq!(
+        app.transcript_layout_cache
+            .as_ref()
+            .expect("layout cache")
+            .rebuilds,
+        1
+    );
+}
+
+#[test]
+fn prepending_history_keeps_the_previous_top_row_anchored() {
+    assert_eq!(prepend_anchor_scroll(0, 80, 132), 52);
+    assert_eq!(prepend_anchor_scroll(17, 80, 132), 69);
+    assert_eq!(prepend_anchor_scroll(17, 132, 80), 17);
+}
+
+#[test]
 fn model_text_replace_discards_materialized_attempt_before_redraw() {
     let workspace = unique_test_dir("workspace-live-replace");
     let data_root = unique_test_dir("data-live-replace");
@@ -4544,6 +4575,10 @@ fn test_app(input: &str, workspace_root: PathBuf, _data_root: PathBuf) -> App {
         session_picker_open: false,
         active_session: None,
         transcript: Vec::new(),
+        transcript_paging: None,
+        transcript_history_len: 0,
+        transcript_revision: 0,
+        transcript_layout_cache: None,
         transcript_scroll: 0,
         transcript_max_scroll: 0,
         transcript_follow_bottom: true,

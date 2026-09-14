@@ -54,10 +54,9 @@ vi.mock("../src/lib/chatBridge", () => ({
   }),
   getAgentState: vi.fn(),
   getSession: vi.fn(),
-  getSessionProjection: vi.fn(),
   listAgentRuns: vi.fn(),
   openAgentStream: vi.fn(() => ({ close: vi.fn() })),
-  replayAgentRunStream: vi.fn(),
+  getAgentRunLiveSnapshot: vi.fn(),
   sendAgentInput: vi.fn(),
   sendAgentSupplement: vi.fn(),
   setAgentRuntimeConfig: vi.fn((input: Record<string, unknown>) => {

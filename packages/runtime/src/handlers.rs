@@ -11,7 +11,6 @@ use crate::runtime_config;
 use crate::runtime_garbage;
 use crate::runtime_ops;
 use crate::runtime_rpc_transport::EventWriter;
-use crate::session_projection;
 use crate::sessions;
 use crate::sidecars;
 use crate::skills;
@@ -91,14 +90,6 @@ pub(crate) fn handle_request(
             let payload = runtime_bridge::deserialize_request(request.payload)?;
             let response = sessions::delete(&event_writer, payload)
                 .map_err(|error| RuntimeHostError::new("session_failed", error))?;
-            serde_json::to_value(response).map_err(|error| {
-                RuntimeHostError::new("serialize_response_failed", error.to_string())
-            })
-        }
-        RuntimeHostCommand::SessionProjectionGet => {
-            let payload = runtime_bridge::deserialize_request(request.payload)?;
-            let response = session_projection::get(payload)
-                .map_err(|error| RuntimeHostError::new("session_projection_failed", error))?;
             serde_json::to_value(response).map_err(|error| {
                 RuntimeHostError::new("serialize_response_failed", error.to_string())
             })
@@ -376,9 +367,9 @@ pub(crate) fn handle_request(
                 RuntimeHostError::new("serialize_response_failed", error.to_string())
             })
         }
-        RuntimeHostCommand::AgentRunStreamReplay => {
+        RuntimeHostCommand::AgentRunLiveSnapshot => {
             let payload = runtime_bridge::deserialize_request(request.payload)?;
-            let response = agent_runs::replay(payload)
+            let response = agent_runs::live_snapshot(payload)
                 .map_err(|error| RuntimeHostError::new("agent_task_failed", error))?;
             serde_json::to_value(response).map_err(|error| {
                 RuntimeHostError::new("serialize_response_failed", error.to_string())

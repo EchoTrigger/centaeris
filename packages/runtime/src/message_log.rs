@@ -81,28 +81,6 @@ pub(crate) struct RewriteLastUserInputResult {
     pub(crate) tombstoned_count: usize,
 }
 
-#[derive(Debug)]
-pub(crate) struct ReplayResult {
-    pub(crate) agent_run_id: String,
-    pub(crate) cwd: Option<String>,
-    pub(crate) items: Vec<Value>,
-    pub(crate) next_cursor: Option<u64>,
-}
-
-#[derive(Debug)]
-pub(crate) struct ProjectedAgentRunReplay {
-    pub(crate) agent_run_id: String,
-    pub(crate) items: Vec<Value>,
-    pub(crate) next_cursor: u64,
-}
-
-#[derive(Debug)]
-pub(crate) struct ProjectedSessionLog {
-    pub(crate) messages: Vec<ProjectedChatMessage>,
-    pub(crate) agent_runs: Vec<ProjectedAgentRun>,
-    pub(crate) agent_run_replays: Vec<ProjectedAgentRunReplay>,
-}
-
 pub(crate) struct SessionDocument {
     pub(crate) manifest: SessionManifestV1,
     pub(crate) records: Vec<SessionLogRecord>,
@@ -648,25 +626,12 @@ pub(crate) fn project_agent_run_assistant(
         }))
 }
 
-pub(crate) fn project_session_log(session_id: &str) -> Result<ProjectedSessionLog, String> {
+pub(crate) fn project_session_agent_runs(
+    session_id: &str,
+) -> Result<Vec<ProjectedAgentRun>, String> {
     let session_id = required_string(session_id, "sessionId")?;
     let records = active_records(read_session_records(session_id.as_str())?.as_slice())?;
-    let messages = project_chat_messages_from_records(session_id.as_str(), records.as_slice())?;
-    let agent_runs = project_agent_runs_from_records(records.as_slice())?;
-    let mut agent_run_replays = Vec::with_capacity(agent_runs.len());
-    for agent_run in &agent_runs {
-        let items = agent_run_replay_items(records.as_slice(), agent_run)?;
-        agent_run_replays.push(ProjectedAgentRunReplay {
-            agent_run_id: agent_run.agent_run_id.clone(),
-            next_cursor: items.len() as u64,
-            items,
-        });
-    }
-    Ok(ProjectedSessionLog {
-        messages,
-        agent_runs,
-        agent_run_replays,
-    })
+    project_agent_runs_from_records(records.as_slice())
 }
 
 pub(crate) fn restore_runtime_snapshot(
@@ -771,31 +736,6 @@ pub(crate) fn project_agent_run(agent_run_id: &str) -> Result<Option<ProjectedAg
     Ok(project_agent_runs()?
         .into_iter()
         .find(|agent_run| agent_run.agent_run_id == agent_run_id))
-}
-
-pub(crate) fn replay_agent_run(
-    agent_run_id: &str,
-    cursor: Option<u64>,
-    limit: Option<usize>,
-) -> Result<ReplayResult, String> {
-    let agent_run_id = required_string(agent_run_id, "agentRunId")?;
-    let agent_run = project_agent_run(agent_run_id.as_str())?
-        .ok_or_else(|| format!("AgentRun not found: {agent_run_id}"))?;
-    let records = active_records(read_session_records(agent_run.session_id.as_str())?.as_slice())?;
-    let all_items = agent_run_replay_items(records.as_slice(), &agent_run)?;
-    let start = usize::try_from(cursor.unwrap_or(0))
-        .map_err(|_| "agent_run replay cursor is too large".to_string())?;
-    if start > all_items.len() {
-        return Err(format!("agent_run replay cursor is beyond tail: {start}"));
-    }
-    let limit = limit.unwrap_or(200).clamp(1, 1000);
-    let end = start.saturating_add(limit).min(all_items.len());
-    Ok(ReplayResult {
-        agent_run_id,
-        cwd: agent_run.cwd,
-        items: all_items[start..end].to_vec(),
-        next_cursor: (end < all_items.len()).then_some(end as u64),
-    })
 }
 
 pub(crate) fn terminal_agent_run_stream_projection(agent_run_id: &str) -> Result<Value, String> {
@@ -2169,12 +2109,11 @@ mod tests {
                 crate::runtime_server::LiveTextOperation::Revision { text: "1".into() },
             ])
             .unwrap();
-        let live = crate::agent_runs::replay(crate::agent_runs::AgentRunStreamReplayRequest {
-            agent_run_id: "agent-run-healthy".into(),
-            cursor: None,
-            limit: Some(1),
-        })
-        .unwrap();
+        let live =
+            crate::agent_runs::live_snapshot(crate::agent_runs::AgentRunLiveSnapshotRequest {
+                agent_run_id: "agent-run-healthy".into(),
+            })
+            .unwrap();
         assert_eq!(
             live.live_snapshot.unwrap()["event"]["payload"]["reasoning"],
             thinking
@@ -2194,10 +2133,8 @@ mod tests {
         assert_eq!(partial.payload["status"], "interrupted");
         assert_eq!(partial.payload["text"], "partial thinking");
         assert!(
-            crate::agent_runs::replay(crate::agent_runs::AgentRunStreamReplayRequest {
+            crate::agent_runs::live_snapshot(crate::agent_runs::AgentRunLiveSnapshotRequest {
                 agent_run_id: "agent-run-healthy".into(),
-                cursor: None,
-                limit: Some(1),
             })
             .unwrap()
             .live_snapshot

@@ -53,6 +53,11 @@ import { useSessionRequestOwnership } from "./useSessionRequestOwnership";
 import { useSessionViewHydrationController } from "./useSessionViewHydrationController";
 import { useChatPromptTransactions } from "./useChatPromptTransactions";
 import {
+  catchUpTranscriptPatches,
+  DesktopTranscriptView,
+  loadTranscriptPage,
+} from "./transcriptPaging";
+import {
   useAssistantTurnUpdateQueue,
   type AssistantTurnCommitOptions,
 } from "./useAssistantTurnUpdateQueue";
@@ -174,6 +179,9 @@ export function ChatArea({
     );
   const [runtimeConfigError, setRuntimeConfigError] = useState("");
   const [sessionLoadError, setSessionLoadError] = useState("");
+  const [transcriptHasOlder, setTranscriptHasOlder] = useState(false);
+  const [isLoadingOlderTranscript, setIsLoadingOlderTranscript] =
+    useState(false);
   const [pendingQuestion, setPendingQuestion] =
     useState<PendingQuestionState | null>(null);
   const [pendingQuestionError, setPendingQuestionError] = useState("");
@@ -199,6 +207,11 @@ export function ChatArea({
   const verifiedReplayAgentRunIdsRef = useRef<Set<string>>(new Set());
   const visibleSessionIdRef = useRef("");
   const visibleActiveReplayRef = useRef<CachedActiveReplay | null>(null);
+  const transcriptViewRef = useRef<DesktopTranscriptView | null>(null);
+  const transcriptHistoryMessageCountRef = useRef(0);
+  const transcriptPatchRefreshInFlightRef = useRef<Promise<void> | null>(null);
+  const transcriptPatchRefreshRequestedRef = useRef(false);
+  const olderTranscriptRequestRef = useRef<Promise<void> | null>(null);
   const currentSessionId =
     selectedSessionId === undefined
       ? currentSession?.id || ""
@@ -307,6 +320,62 @@ export function ChatArea({
     [commitMessagesToView],
   );
 
+  const syncTranscriptView = useCallback(() => {
+    const view = transcriptViewRef.current;
+    if (!view || visibleSessionIdRef.current !== view.sessionId) {
+      return;
+    }
+    const liveOverlayActive = Boolean(getActiveStream());
+    const historyMessages = view.materializeMessages(liveOverlayActive);
+    const suffix = messagesRef.current
+      .slice(transcriptHistoryMessageCountRef.current)
+      .filter(
+        (message) =>
+          liveOverlayActive ||
+          message.id.startsWith("assistant-restore-message-"),
+      );
+    transcriptHistoryMessageCountRef.current = historyMessages.length;
+    setTranscriptHasOlder(view.hasOlder);
+    setMessages([...historyMessages, ...suffix]);
+  }, [getActiveStream, setMessages]);
+
+  const scheduleTranscriptPatchRefresh = useCallback(() => {
+    transcriptPatchRefreshRequestedRef.current = true;
+    if (transcriptPatchRefreshInFlightRef.current) {
+      return;
+    }
+    const task = (async () => {
+      while (transcriptPatchRefreshRequestedRef.current) {
+        transcriptPatchRefreshRequestedRef.current = false;
+        const view = transcriptViewRef.current;
+        const expectedSessionId = visibleSessionIdRef.current;
+        if (!view || view.sessionId !== expectedSessionId) {
+          continue;
+        }
+        await catchUpTranscriptPatches(view);
+        if (
+          transcriptViewRef.current !== view ||
+          visibleSessionIdRef.current !== expectedSessionId
+        ) {
+          continue;
+        }
+        flushAssistantTurnUpdatesRef.current();
+        syncTranscriptView();
+      }
+    })()
+      .catch((error: unknown) => {
+        const detail =
+          error instanceof Error && error.message.trim()
+            ? error.message.trim()
+            : "unknown transcript update error";
+        setRuntimeConfigError(`Transcript update failed: ${detail}`);
+      })
+      .finally(() => {
+        transcriptPatchRefreshInFlightRef.current = null;
+      });
+    transcriptPatchRefreshInFlightRef.current = task;
+  }, [syncTranscriptView]);
+
   const { applyDurableTurnMessageIds } = useDurableTurnMessageIds({
     setMessages,
     getActiveStream,
@@ -395,6 +464,9 @@ export function ChatArea({
   });
   const rememberReplayPayloads = useCallback(
     (payloads: readonly AgentStreamPayload[]) => {
+      if (payloads.some((payload) => payload.type === "session_event")) {
+        queueMicrotask(scheduleTranscriptPatchRefresh);
+      }
       const patch = deriveReplayCursorPatch(payloads);
       if (Object.keys(patch).length === 0) {
         return;
@@ -411,7 +483,7 @@ export function ChatArea({
         sessionViewCacheStore.patchReplayCursors(visibleSessionId, patch);
       }
     },
-    [],
+    [scheduleTranscriptPatchRefresh],
   );
   const assistantTurnUpdates = useAssistantTurnUpdateQueue({
     messagesRef,
@@ -465,7 +537,10 @@ export function ChatArea({
         currentSessionId,
         messagesRef,
         visibleSessionIdRef,
+        transcriptViewRef,
+        transcriptHistoryMessageCountRef,
         setMessages,
+        setTranscriptHasOlder,
         setSessionLoadError,
         setEditingUserMessageId,
         setEditingPrompt,
@@ -498,6 +573,73 @@ export function ChatArea({
         preserveResolvedSessionIdRef,
       },
     });
+
+  useEffect(() => {
+    if (
+      !isHydratingSession &&
+      transcriptViewRef.current?.sessionId === currentSessionId
+    ) {
+      scheduleTranscriptPatchRefresh();
+    }
+  }, [
+    currentSessionId,
+    isHydratingSession,
+    scheduleTranscriptPatchRefresh,
+  ]);
+
+  const handleLoadOlderTranscript = useCallback(() => {
+    const view = transcriptViewRef.current;
+    const olderCursor = view?.olderCursor;
+    if (!view || !olderCursor || olderTranscriptRequestRef.current) {
+      return;
+    }
+    const expectedSessionId = view.sessionId;
+    const scrollElement = messagesContainerRef.current;
+    const previousScrollHeight = scrollElement?.scrollHeight ?? 0;
+    const previousScrollTop = scrollElement?.scrollTop ?? 0;
+    setIsLoadingOlderTranscript(true);
+    const task = loadTranscriptPage({
+      sessionId: view.sessionId,
+      projectionGeneration: view.projectionGeneration,
+      sourceHighWater: view.sourceHighWater,
+      olderCursor,
+    })
+      .then((page) => {
+        if (
+          transcriptViewRef.current !== view ||
+          visibleSessionIdRef.current !== expectedSessionId
+        ) {
+          return;
+        }
+        view.applyOlderPage(page);
+        syncTranscriptView();
+        requestAnimationFrame(() => {
+          if (
+            scrollElement &&
+            transcriptViewRef.current === view &&
+            visibleSessionIdRef.current === expectedSessionId
+          ) {
+            scrollElement.scrollTop =
+              previousScrollTop +
+              Math.max(0, scrollElement.scrollHeight - previousScrollHeight);
+          }
+        });
+      })
+      .catch((error: unknown) => {
+        const detail =
+          error instanceof Error && error.message.trim()
+            ? error.message.trim()
+            : "unknown transcript paging error";
+        setRuntimeConfigError(`Loading earlier messages failed: ${detail}`);
+      })
+      .finally(() => {
+        if (olderTranscriptRequestRef.current === task) {
+          olderTranscriptRequestRef.current = null;
+          setIsLoadingOlderTranscript(false);
+        }
+      });
+    olderTranscriptRequestRef.current = task;
+  }, [messagesContainerRef, syncTranscriptView]);
 
   const {
     sendPrompt,
@@ -767,6 +909,9 @@ export function ChatArea({
           ) : (
             <VirtualMessageList
               containerRef={messagesContainerRef}
+              hasOlder={transcriptHasOlder}
+              isLoadingOlder={isLoadingOlderTranscript}
+              onLoadOlder={handleLoadOlderTranscript}
               editingUserMessageId={editingUserMessageId}
               editingPrompt={editingPrompt}
               copiedUserMessageId={copiedUserMessageId}

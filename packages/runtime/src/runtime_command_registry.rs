@@ -50,10 +50,9 @@ macro_rules! runtime_commands {
             AgentQuestionAnswer, "_centaeris/session/answer_question", SharedRuntime, OneShotAction, NoAutomaticRetry, None;
             SessionDelete, "_centaeris/session/delete", SharedRuntime, IdentityMutation, NoAutomaticRetry, Some("session/list");
             SessionDiagnostics, "_centaeris/session/diagnostics", SharedRuntime, Read, SafeRetry, None;
-            SessionProjectionGet, "_centaeris/session/project", SharedRuntime, Read, SafeRetry, None;
             SessionReorder, "_centaeris/session/reorder", SharedRuntime, DesiredStateWrite, NoAutomaticRetry, Some("session/list");
             AgentRunList, "_centaeris/session/agent-runs", SharedRuntime, Read, SafeRetry, None;
-            AgentRunStreamReplay, "_centaeris/session/agent-runs/replay", SharedRuntime, Read, SafeRetry, None;
+            AgentRunLiveSnapshot, "_centaeris/session/agent-runs/live-snapshot", SharedRuntime, Read, SafeRetry, None;
             AgentRunAttach, "_centaeris/session/agent-runs/attach", SharedRuntime, IdentityMutation, NoAutomaticRetry, None;
             AgentRunDetach, "_centaeris/session/agent-runs/detach", SharedRuntime, IdentityMutation, NoAutomaticRetry, None;
             AgentRunDetachViewer, "_centaeris/session/agent-runs/detach-viewer", SharedRuntime, IdentityMutation, NoAutomaticRetry, None;

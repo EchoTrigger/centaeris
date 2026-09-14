@@ -3,6 +3,7 @@ import type {
   AgentContextUsageSummary,
   AgentRuntimeConfig,
   AgentStreamPayload,
+  TranscriptPageV1,
 } from "../../lib/chatBridge";
 import type { SessionReplayCursors } from "../../lib/sessionViewCache";
 import type {
@@ -312,6 +313,8 @@ export type AgentResultStreamProps = {
 
 export type SessionHydrationSnapshot = {
   messages: ChatMessage[];
+  transcriptPage?: TranscriptPageV1;
+  transcriptHistoryMessageCount?: number;
   runtimeConfig: AgentRuntimeConfig;
   contextUsage: AgentContextUsageSummary | null;
   resolvedAutoContinueAfterResumeWait: boolean | undefined;
@@ -324,11 +327,6 @@ export type SessionHydrationSnapshot = {
     status: string;
     seedPayloads: AgentStreamPayload[];
   } | null;
-};
-
-export type AgentRunReplaySnapshot = {
-  items: AgentStreamPayload[];
-  nextCursor: number;
 };
 
 export type AgentDisplayEntry =

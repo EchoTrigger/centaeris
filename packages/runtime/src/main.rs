@@ -26,7 +26,6 @@ mod runtime_server_transport;
 #[cfg(windows)]
 mod runtime_server_windows_security;
 mod session_files;
-mod session_projection;
 mod sessions;
 mod sidecars;
 mod skills;

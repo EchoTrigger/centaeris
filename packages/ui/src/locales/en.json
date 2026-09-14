@@ -187,6 +187,8 @@
   "useSessionViewHydrationController.unableToAttachCachedConversationValueTaskValueIs": "Unable to attach cached conversation {{value1}}: task {{value2}} is missing assistant message",
   "virtualMessageList.cancel": "Cancel",
   "virtualMessageList.copy": "Copy",
+  "virtualMessageList.loadEarlier": "Load earlier messages",
+  "virtualMessageList.loadingEarlier": "Loading earlier messages…",
   "markdownRenderer.openValueValue": "Open {{value1}}{{value2}}",
   "sidebar.conversations": "Conversations",
   "sidebar.renameValue": "Rename {{value1}}",
