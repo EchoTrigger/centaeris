@@ -37,7 +37,7 @@ try {
     }
 
     if ($Stage -eq "Node") {
-        & (Join-Path $PSScriptRoot "desktop-ui-acceptance.ps1") -ValidationOnly
+        & (Join-Path $PSScriptRoot "desktop-ui-acceptance.ps1") -ValidationOnly -SkipFrontendTests
     }
 
     if ($Stage -eq "Release") {

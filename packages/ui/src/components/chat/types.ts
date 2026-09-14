@@ -3,6 +3,8 @@ import type {
   AgentContextUsageSummary,
   AgentRuntimeConfig,
   AgentStreamPayload,
+  TranscriptContentRefV1,
+  TranscriptPageV1,
 } from "../../lib/chatBridge";
 import type { SessionReplayCursors } from "../../lib/sessionViewCache";
 import type {
@@ -130,6 +132,9 @@ export type TaskResult = {
   fullOutputPath?: string;
   outputStartByte?: number;
   outputByteLength?: number;
+  transcriptContentRef?: TranscriptContentRefV1;
+  transcriptSessionId?: string;
+  transcriptProjectionGeneration?: string;
   waterfall?: EventWaterfall;
 };
 
@@ -312,6 +317,8 @@ export type AgentResultStreamProps = {
 
 export type SessionHydrationSnapshot = {
   messages: ChatMessage[];
+  transcriptPage?: TranscriptPageV1;
+  transcriptHistoryMessageCount?: number;
   runtimeConfig: AgentRuntimeConfig;
   contextUsage: AgentContextUsageSummary | null;
   resolvedAutoContinueAfterResumeWait: boolean | undefined;
@@ -324,11 +331,6 @@ export type SessionHydrationSnapshot = {
     status: string;
     seedPayloads: AgentStreamPayload[];
   } | null;
-};
-
-export type AgentRunReplaySnapshot = {
-  items: AgentStreamPayload[];
-  nextCursor: number;
 };
 
 export type AgentDisplayEntry =
@@ -412,4 +414,7 @@ export type TimelineOperation = ToolOperation & {
   fullOutputPath?: string;
   outputStartByte?: number;
   outputByteLength?: number;
+  transcriptContentRef?: TranscriptContentRefV1;
+  transcriptSessionId?: string;
+  transcriptProjectionGeneration?: string;
 };

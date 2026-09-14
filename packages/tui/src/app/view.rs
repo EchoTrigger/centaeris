@@ -1,5 +1,6 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout};
+use std::sync::Arc;
 
 use super::*;
 
@@ -8,14 +9,53 @@ pub(super) const COMMAND_NAME_WIDTH: usize = 14;
 
 pub(super) struct TranscriptView {
     pub(super) lines: Vec<Line<'static>>,
-    pub(super) tool_group_rows: Vec<(String, u16)>,
+    line_start_rows: Vec<u64>,
+    pub(super) tool_group_rows: Vec<(String, u64)>,
     pub(super) images: Vec<TranscriptImagePlacement>,
-    pub(super) total_rows: u16,
+    pub(super) total_rows: u64,
 }
 
 pub(super) struct TranscriptImagePlacement {
-    key: String,
-    row: u16,
+    pub(super) key: String,
+    pub(super) row: u64,
+}
+
+pub(super) struct TranscriptRenderWindow {
+    pub(super) lines: Vec<Line<'static>>,
+    pub(super) local_scroll: u16,
+}
+
+pub(super) struct TranscriptLayoutCache {
+    width: u16,
+    revision: u64,
+    transcript_len: usize,
+    view: Arc<TranscriptView>,
+    pub(super) rebuilds: u64,
+}
+
+pub(super) fn build_cached_transcript_view(app: &mut App, width: u16) -> Arc<TranscriptView> {
+    if let Some(cache) = app.transcript_layout_cache.as_ref() {
+        if cache.width == width
+            && cache.revision == app.transcript_revision
+            && cache.transcript_len == app.transcript.len()
+        {
+            return Arc::clone(&cache.view);
+        }
+    }
+    let view = Arc::new(build_transcript_view(app, width));
+    let rebuilds = app
+        .transcript_layout_cache
+        .as_ref()
+        .map(|cache| cache.rebuilds.saturating_add(1))
+        .unwrap_or(1);
+    app.transcript_layout_cache = Some(TranscriptLayoutCache {
+        width,
+        revision: app.transcript_revision,
+        transcript_len: app.transcript.len(),
+        view: Arc::clone(&view),
+        rebuilds,
+    });
+    view
 }
 
 pub(super) fn render(frame: &mut Frame, app: &mut App, transcript_view: &TranscriptView) {
@@ -275,15 +315,18 @@ pub(super) fn render_transcript(
     app: &mut App,
     transcript_view: &TranscriptView,
 ) {
-    app.transcript_max_scroll = transcript_view.total_rows.saturating_sub(area.height);
+    app.transcript_max_scroll = transcript_view
+        .total_rows
+        .saturating_sub(u64::from(area.height));
     if app.transcript_follow_bottom {
         app.transcript_scroll = app.transcript_max_scroll;
     } else {
         app.transcript_scroll = app.transcript_scroll.min(app.transcript_max_scroll);
     }
+    let window = transcript_render_window(transcript_view, app.transcript_scroll, area.height);
     frame.render_widget(
-        Paragraph::new(transcript_view.lines.clone())
-            .scroll((app.transcript_scroll, 0))
+        Paragraph::new(window.lines)
+            .scroll((window.local_scroll, 0))
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -313,9 +356,11 @@ pub(super) fn render_transcript(
         .iter()
         .filter_map(|(key, row)| {
             let visible_row = row.checked_sub(app.transcript_scroll)?;
-            (visible_row < area.height).then(|| ToolGroupHitRegion {
+            (visible_row < u64::from(area.height)).then(|| ToolGroupHitRegion {
                 key: key.clone(),
-                row: area.y.saturating_add(visible_row),
+                row: area
+                    .y
+                    .saturating_add(u16::try_from(visible_row).unwrap_or(u16::MAX)),
             })
         })
         .collect();
@@ -332,9 +377,10 @@ fn render_inline_images(
         let Some(row) = image.row.checked_sub(app.transcript_scroll) else {
             continue;
         };
-        if row.saturating_add(INLINE_IMAGE_ROWS) > area.height {
+        if row.saturating_add(u64::from(INLINE_IMAGE_ROWS)) > u64::from(area.height) {
             continue;
         }
+        let row = u16::try_from(row).unwrap_or(u16::MAX);
         let image_area = Rect::new(
             area.x.saturating_add(2),
             area.y.saturating_add(row),
@@ -369,6 +415,34 @@ fn render_inline_images(
                 image_area,
             );
         }
+    }
+}
+
+pub(super) fn transcript_render_window(
+    transcript_view: &TranscriptView,
+    scroll: u64,
+    height: u16,
+) -> TranscriptRenderWindow {
+    if transcript_view.lines.is_empty() {
+        return TranscriptRenderWindow {
+            lines: Vec::new(),
+            local_scroll: 0,
+        };
+    }
+    let start = transcript_view
+        .line_start_rows
+        .partition_point(|row| *row <= scroll)
+        .saturating_sub(1);
+    let origin_row = transcript_view.line_start_rows[start];
+    let visible_end = scroll.saturating_add(u64::from(height)).saturating_add(1);
+    let end = transcript_view
+        .line_start_rows
+        .partition_point(|row| *row < visible_end)
+        .max(start.saturating_add(1))
+        .min(transcript_view.lines.len());
+    TranscriptRenderWindow {
+        lines: transcript_view.lines[start..end].to_vec(),
+        local_scroll: u16::try_from(scroll.saturating_sub(origin_row)).unwrap_or(u16::MAX),
     }
 }
 
@@ -462,16 +536,16 @@ pub(super) fn indent_assistant_lines(markdown: &mut [Line<'static>]) {
 ///
 /// 这些行仍是当前 provider attempt 的视觉投影，不写入 session history；
 /// `ModelTextReplace` 会撤销它们并从同一来源重绘。
-pub(super) fn materialize_assistant_prefix(app: &mut App) {
+pub(super) fn materialize_assistant_prefix(app: &mut App) -> bool {
     let Some(end) = app
         .assistant_buffer
         .rfind('\n')
         .map(|index| index.saturating_add(1))
     else {
-        return;
+        return false;
     };
     if end <= app.assistant_emitted_bytes {
-        return;
+        return false;
     }
     let source = app.assistant_buffer[app.assistant_emitted_bytes..end].to_string();
     let (_, in_code_block) = render_markdown_lines(
@@ -483,6 +557,7 @@ pub(super) fn materialize_assistant_prefix(app: &mut App) {
     app.assistant_emitted_bytes = end;
     app.assistant_tail_in_code_block = in_code_block;
     append_live_assistant_markdown(app, source, false);
+    true
 }
 
 pub(super) fn materialize_assistant_tail(app: &mut App, separator: bool) {
@@ -597,10 +672,12 @@ pub(super) fn build_transcript_view(app: &App, width: u16) -> TranscriptView {
 
     let mut tool_group_rows = Vec::with_capacity(tool_group_line_indices.len());
     let mut images = Vec::with_capacity(image_line_indices.len());
-    let mut total_rows = 0u16;
+    let mut line_start_rows = Vec::with_capacity(lines.len());
+    let mut total_rows = 0u64;
     let mut next_group = 0;
     let mut next_image = 0;
     for (line_index, line) in lines.iter().enumerate() {
+        line_start_rows.push(total_rows);
         while tool_group_line_indices
             .get(next_group)
             .is_some_and(|(_, index)| *index == line_index)
@@ -618,11 +695,14 @@ pub(super) fn build_transcript_view(app: &App, width: u16) -> TranscriptView {
             });
             next_image += 1;
         }
-        total_rows =
-            total_rows.saturating_add(paragraph_line_count(std::slice::from_ref(line), width));
+        total_rows = total_rows.saturating_add(u64::from(paragraph_line_count(
+            std::slice::from_ref(line),
+            width,
+        )));
     }
     TranscriptView {
         lines,
+        line_start_rows,
         tool_group_rows,
         images,
         total_rows,

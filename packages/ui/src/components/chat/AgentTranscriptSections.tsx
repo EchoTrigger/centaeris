@@ -1,4 +1,5 @@
 import { t } from "../../i18n";
+import { useStreamPresentation } from "../../useStreamPresentation";
 import { memo } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { CornerDownLeft } from "lucide-react";
@@ -224,23 +225,28 @@ export const AgentSubagentTranscript = memo(function AgentSubagentTranscript({
 
 export const AgentFinalAnswer = memo(function AgentFinalAnswer({
   finalItem,
+  isStreaming,
   onOpenWorkspacePath,
 }: {
   finalItem: TranscriptViewModel["finalItem"];
+  isStreaming: boolean;
   onOpenWorkspacePath: OpenWorkspacePath;
 }) {
+  const targetText = finalItem?.text ?? "";
+  const visibleText = useStreamPresentation(targetText, isStreaming);
   if (!finalItem) {
     return null;
   }
+  const presentationActive = isStreaming || visibleText !== targetText;
   return (
     <div
       className="agentAssistantAnswer answerMarkdownBlock"
-      data-waterfall-section={finalItem.waterfall?.section ?? "final"}
+      data-waterfall-section={finalItem?.waterfall?.section ?? "final"}
     >
       <div className="answer-content" key={finalItem.id}>
         <MarkdownContent
-          text={finalItem.text}
-          isStreaming={finalItem.phase === "streaming"}
+          text={visibleText}
+          isStreaming={presentationActive}
           onOpenWorkspacePath={onOpenWorkspacePath}
         />
       </div>

@@ -339,6 +339,7 @@ const assertHostTransportReplacesMismatchedRuntime = async (tempRoot) => {
 };
 
 const assertUnsupportedRuntimeStoreFailsBeforeListening = async (tempRoot, environment) => {
+  const unsupportedStoreVersion = 14;
   const failureRoot = path.join(tempRoot, "unsupported-runtime-store");
   const databasePath = path.join(failureRoot, "runtime", "runtime.sqlite3");
   await fs.mkdir(path.dirname(databasePath), { recursive: true });
@@ -347,7 +348,7 @@ const assertUnsupportedRuntimeStoreFailsBeforeListening = async (tempRoot, envir
     database.exec(`
       PRAGMA journal_mode = WAL;
       CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at_ms INTEGER NOT NULL);
-      INSERT INTO schema_migrations VALUES(14, 1);
+      INSERT INTO schema_migrations VALUES(${unsupportedStoreVersion}, 1);
     `);
   } finally {
     database.close();
@@ -372,9 +373,13 @@ const assertUnsupportedRuntimeStoreFailsBeforeListening = async (tempRoot, envir
     let stderr = "";
     child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
     const exit = await waitForExit(child);
+    const downgradeMatch = stderr.match(
+      /runtime sqlite refuses schema downgrade: store version (\d+), runtime version (\d+)/,
+    );
     if (exit.code === 0 || exit.signal !== null
       || !stderr.includes("runtime_server_store_init_failed")
-      || !stderr.includes("runtime sqlite refuses schema downgrade: store version 14, runtime version 1")) {
+      || Number(downgradeMatch?.[1]) !== unsupportedStoreVersion
+      || Number(downgradeMatch?.[2]) >= unsupportedStoreVersion) {
       fail(`unsupported Runtime store did not fail clearly at startup: ${stderr}`);
     }
     let unexpectedConnection = null;
@@ -1009,10 +1014,6 @@ const main = async () => {
     if (sessionsAfterDelete.some((session) => session.id === disposableSession.id)) {
       fail("deleted session remained in session/list");
     }
-    const sessionProjection = await invoke(child, "_centaeris/session/project", {
-      request: { sessionId: workspaceSession.id },
-    });
-    assertRecord(sessionProjection, "workspace session/project result");
     const sessionFileTree = await invoke(child, "workspace_file_tree", {
       request: {
         sessionId: workspaceSession.id,
@@ -1309,11 +1310,11 @@ const main = async () => {
       );
       await fs.rm(workspaceRoot, { recursive: true, force: true });
       await restartRuntimeServer();
-      const recoveryProjection = await invoke(child, "_centaeris/session/project", {
+      const recoverySessionState = await invoke(child, "session/load", {
         request: { sessionId: recoverySession.id },
       });
-      assertRecord(recoveryProjection, "runtime crash recovery session projection");
-      const recoveredAssistant = recoveryProjection.session?.messages?.find(
+      assertRecord(recoverySessionState, "runtime crash recovery session state");
+      const recoveredAssistant = recoverySessionState.messages?.find(
         (message) => message.role === "assistant" && message.agentRunId === recoveryInput.agentRunId,
       );
       if (
@@ -1324,12 +1325,15 @@ const main = async () => {
           `runtime restart did not seal the live assistant text as error: ${JSON.stringify(recoveredAssistant)}`,
         );
       }
-      const recoveredAgentRun = recoveryProjection.agentRuns?.find(
+      const recoveredAgentRuns = await invoke(child, "_centaeris/session/agent-runs", {
+        request: { sessionId: recoverySession.id, includeTerminal: true },
+      });
+      const recoveredAgentRun = recoveredAgentRuns.agentRuns?.find(
         (agentRun) => agentRun.agentRunId === recoveryInput.agentRunId,
       );
       if (
         recoveredAgentRun?.status !== "cancelled" ||
-        recoveryProjection.activeAgentRunId !== null
+        recoveredAgentRuns.agentRuns?.some((agentRun) => !["succeeded", "failed", "cancelled", "stopped"].includes(agentRun.status))
       ) {
         fail("runtime restart did not terminally cancel the interrupted AgentRun");
       }
@@ -1414,7 +1418,6 @@ const main = async () => {
             "workspace session/list",
             "workspace session/load",
             "workspace session/activate",
-            "workspace session/project",
             "workspace_file_tree with sessionId",
             "workspace_open_folder failure",
             "agent_runtime_config_get",

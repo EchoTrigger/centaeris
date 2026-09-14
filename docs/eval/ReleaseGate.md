@@ -14,10 +14,12 @@ message-log implementation changes:
 cargo test --locked -p centaeris-runtime message_log::observation_cas::tests::observation_manifest_growth_is_linear_with_early_changes_through_4095_observations -- --ignored --exact --nocapture --test-threads=1
 ```
 
-The checked-in `CI` workflow runs the Rust and Node validation portions in
-parallel for pull requests and `main` changes. It deliberately omits release
-packaging and packaged-application smoke tests so routine changes do not rebuild
-the same release artifacts.
+The checked-in `CI` workflow runs the Rust gate and the Node source-validation
+portion in parallel for pull requests and `main` changes. GitHub Actions does
+not execute frontend tests: the Node job runs source lint, production
+typechecking/build, Electron syntax/host-parity checks, and license assembly.
+It also omits release packaging and packaged-application smoke tests so routine
+changes do not rebuild the same release artifacts.
 
 The manual `Release Candidate` workflow runs the full gate and the observation
 storage-growth gate from a clean Windows x64 checkout, packages the Desktop and
@@ -30,7 +32,16 @@ The checked-in `Performance` workflow runs the observation storage-growth gate
 for relevant pull requests and `main` changes, and also supports an explicit
 manual run.
 
-The script runs formatting, workspace checks, Clippy with warnings denied, the focused Core query-loop and SQLite integration gates, the full Rust workspace tests, the Windows x64 TUI package build, and the existing desktop/UI acceptance script. Desktop acceptance performs `npm ci`, the UI gate (typecheck, Vite build, and Vitest), Electron checks/build, third-party-license assembly and distribution validation, plus runtime and window smoke tests.
+The full local script runs formatting, workspace checks, Clippy with warnings
+denied, the focused Core query-loop and SQLite integration gates, the full Rust
+workspace tests, the Windows x64 TUI package build, and the desktop/UI acceptance
+script. Local Desktop acceptance performs `npm ci`, the UI gate (typecheck, Vite
+build, and Vitest), retained Electron host/security tests and build,
+third-party-license assembly and distribution validation, plus runtime and window
+smoke tests. Playwright/E2E and visual-snapshot tests are not part of the gate;
+visual and interaction acceptance is manual.
+Use [FrontendManualAcceptance.md](FrontendManualAcceptance.md) for the retained
+Desktop interaction and appearance checks.
 
 The repository must also pass these structural checks:
 

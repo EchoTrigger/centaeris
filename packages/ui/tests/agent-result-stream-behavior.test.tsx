@@ -19,6 +19,9 @@ const harness = vi.hoisted(() => ({
   markdownUnmounts: 0,
   markdownStreamingStates: [] as Array<boolean | undefined>,
   markdownRendersByText: new Map<string, number>(),
+  presentationMounts: 0,
+  presentationUnmounts: 0,
+  presentationStreamingStates: [] as boolean[],
   codePreviewRenders: 0,
   readDesktopFilePreview: vi.fn<
     (path: string) => Promise<DesktopFilePreviewReadResponse>
@@ -27,6 +30,19 @@ const harness = vi.hoisted(() => ({
 
 vi.mock("../src/lib/workspaceBridge", () => ({
   readDesktopFilePreview: harness.readDesktopFilePreview,
+}));
+
+vi.mock("../src/useStreamPresentation", () => ({
+  useStreamPresentation(text: string, live: boolean) {
+    harness.presentationStreamingStates.push(live);
+    useEffect(() => {
+      harness.presentationMounts += 1;
+      return () => {
+        harness.presentationUnmounts += 1;
+      };
+    }, []);
+    return text;
+  },
 }));
 
 vi.mock("../src/components/chat/MarkdownContent", () => ({
@@ -133,6 +149,9 @@ beforeEach(() => {
   harness.markdownUnmounts = 0;
   harness.markdownStreamingStates.length = 0;
   harness.markdownRendersByText.clear();
+  harness.presentationMounts = 0;
+  harness.presentationUnmounts = 0;
+  harness.presentationStreamingStates.length = 0;
   harness.codePreviewRenders = 0;
   harness.readDesktopFilePreview.mockReset();
 });
@@ -333,6 +352,29 @@ test("stream completion preserves the final Markdown subtree", async () => {
 
   await act(async () => renderer.unmount());
   expect(harness.markdownUnmounts).toBe(1);
+});
+
+test("terminal text reuses the presentation mounted before the first live text", async () => {
+  const streamingTurn = makeTurn({ isStreaming: true });
+  const renderer = await renderStream({ turn: streamingTurn });
+  expect(harness.presentationMounts).toBe(1);
+  expect(harness.presentationStreamingStates).toEqual([true]);
+  expect(harness.markdownMounts).toBe(0);
+
+  await act(async () => {
+    renderer.update(<AgentResultStream turn={{
+      ...streamingTurn,
+      finalAnswer: "Terminal answer arrived with completion",
+      isStreaming: false,
+    }} />);
+  });
+
+  expect(harness.presentationMounts).toBe(1);
+  expect(harness.presentationUnmounts).toBe(0);
+  expect(harness.presentationStreamingStates).toEqual([true, false]);
+  expect(harness.markdownMounts).toBe(1);
+
+  await act(async () => renderer.unmount());
 });
 
 test("final answer deltas do not rerender an unchanged process transcript", async () => {

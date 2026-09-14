@@ -21,6 +21,10 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { readDesktopFilePreview } from "../../lib/workspaceBridge";
+import {
+  loadTranscriptContentRange,
+  TRANSCRIPT_CONTENT_RANGE_BYTES,
+} from "./transcriptContentRanges";
 import { useChatViewStore } from "./chatViewStore";
 import {
   formatFullCommandLine,
@@ -82,13 +86,38 @@ const ToolResultOutput = ({ operation }: { operation: TimelineOperation }) => {
     ? "Loading complete output…"
     : operation.modelContent || operation.outputPreview || "";
   const [content, setContent] = useState(fallback);
+  const [nextOffset, setNextOffset] = useState("0");
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   useEffect(() => {
+    const reference = operation.transcriptContentRef;
+    const sessionId = operation.transcriptSessionId;
+    const projectionGeneration = operation.transcriptProjectionGeneration;
+    if (reference && sessionId && projectionGeneration) {
+      let active = true;
+      setLoadingMore(true);
+      setHasMore(false);
+      setNextOffset("0");
+      void loadTranscriptContentRange({ sessionId, projectionGeneration, reference }, "0")
+        .then((page) => {
+          if (!active) return;
+          setContent(page.content);
+          setNextOffset(page.endOffset);
+          setHasMore(page.hasMore);
+        })
+        .catch(() => {
+          if (active) setContent(operation.modelContent || operation.outputPreview || "");
+        })
+        .finally(() => { if (active) setLoadingMore(false); });
+      return () => { active = false; };
+    }
     const path = operation.fullOutputPath;
     const start = operation.outputStartByte;
     const length = operation.outputByteLength;
     if (!path || start === undefined || length === undefined) {
       setContent(operation.modelContent || operation.outputPreview || "");
+      setHasMore(false);
       return;
     }
     let active = true;
@@ -113,9 +142,47 @@ const ToolResultOutput = ({ operation }: { operation: TimelineOperation }) => {
     operation.outputByteLength,
     operation.outputPreview,
     operation.outputStartByte,
+    operation.transcriptContentRef,
+    operation.transcriptProjectionGeneration,
+    operation.transcriptSessionId,
   ]);
 
-  return content ? <pre className="agent-tool-bash-output">{content}</pre> : null;
+  async function loadMore() {
+    const reference = operation.transcriptContentRef;
+    const sessionId = operation.transcriptSessionId;
+    const projectionGeneration = operation.transcriptProjectionGeneration;
+    if (!reference || !sessionId || !projectionGeneration || loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    try {
+      const page = await loadTranscriptContentRange(
+        { sessionId, projectionGeneration, reference },
+        nextOffset,
+      );
+      setContent((current) => `${current}${page.content}`);
+      setNextOffset(page.endOffset);
+      setHasMore(page.hasMore);
+    } catch {
+      setHasMore(false);
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
+  if (!content && !loadingMore) return null;
+  return (
+    <>
+      {content ? <pre className="agent-tool-bash-output">{content}</pre> : null}
+      {hasMore ? (
+        <button type="button" onClick={() => { void loadMore(); }} disabled={loadingMore}>
+          {loadingMore
+            ? t("toolActivityTranscript.loading")
+            : t("toolActivityTranscript.loadNextValueKiB", {
+                value1: TRANSCRIPT_CONTENT_RANGE_BYTES / 1024,
+              })}
+        </button>
+      ) : null}
+    </>
+  );
 };
 
 const renderOperationDetail = (
