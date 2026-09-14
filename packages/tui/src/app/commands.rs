@@ -42,6 +42,10 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         description: "Clear the terminal",
     },
     SlashCommand {
+        name: "/trim-history",
+        description: "Release loaded history and return to latest",
+    },
+    SlashCommand {
         name: "/help",
         description: "Show available commands",
     },

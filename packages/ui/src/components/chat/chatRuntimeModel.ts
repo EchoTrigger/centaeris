@@ -1,22 +1,17 @@
 import { t } from "../../i18n";
 import {
   getAgentContextUsage,
+  getAgentRunLiveSnapshot,
   getAgentRuntimeConfig,
   getAgentState,
-  getSessionProjection,
-  replayAgentRunStream,
+  listAgentRuns,
   type AgentStreamPayload,
   type AgentRunSummary,
   type SessionData,
-  type SessionProjectionData,
   type SessionEvent,
   type PendingQuestionSummary,
   type PersistedChatMessage,
 } from "../../lib/chatBridge";
-import {
-  deriveReplayCursorPatch,
-  type SessionReplayCursors,
-} from "../../lib/sessionViewCache";
 import type {
   AssistantExecutionTurn,
   ChatMessage,
@@ -26,7 +21,6 @@ import type {
   StreamSeenSets,
   SubagentChunk,
   TaskChunk,
-  AgentRunReplaySnapshot,
 } from "./types";
 import {
   DEFAULT_RUNTIME_ACTIVITY,
@@ -39,11 +33,13 @@ import {
 import {
   applyPersistedAssistantStatusToTurn,
   buildAssistantTurnFromStreamItems,
-  assertProjectionStreamPayloads,
   getSessionEventId,
   normalizePersistedContent,
-  normalizePersistedStreamPayloads,
 } from "./chatTranscriptRestore";
+import {
+  DesktopTranscriptView,
+  loadTranscriptPage,
+} from "./transcriptPaging";
 export {
   appendGuidedSupplementChunk,
   appendPersistedNarrative,
@@ -133,11 +129,6 @@ export const parsePendingQuestionRequest = (
     required: raw.required !== false,
   };
 };
-
-export const SESSION_PROJECTION_SCHEMA_VERSION = "session_projection.v1";
-export const AGENT_RUN_STREAM_REPLAY_PAGE_SIZE = 2_000;
-export const AGENT_RUN_STREAM_REPLAY_MAX_PAGES = 128;
-
 
 export const normalizeAgentRunId = (value: unknown): string =>
   typeof value === "string" ? value.trim() : "";
@@ -586,7 +577,6 @@ export type HydrationControl = {
 };
 
 const HYDRATION_MESSAGE_BATCH_SIZE = 12;
-const HYDRATION_REPLAY_BATCH_SIZE = 8;
 
 const defaultHydrationYield = (): Promise<void> => {
   if (
@@ -622,213 +612,6 @@ const setHydrationStage = (
   control?.onStage?.(stage);
 };
 
-export const nextReplayCursorFromPayloads = (
-  agentRunId: string,
-  items: readonly AgentStreamPayload[],
-  fallbackCursor: number,
-): number => {
-  const normalizedAgentRunId = normalizeAgentRunId(agentRunId);
-  const patch = deriveReplayCursorPatch(items);
-  return Math.max(
-    fallbackCursor,
-    normalizedAgentRunId ? (patch[normalizedAgentRunId] ?? fallbackCursor) : fallbackCursor,
-  );
-};
-
-export const replayAgentRunStreamFromCursor = async (
-  agentRunId: string,
-  startCursor: number,
-): Promise<AgentRunReplaySnapshot> => {
-  const normalizedAgentRunId = normalizeAgentRunId(agentRunId);
-  if (!normalizedAgentRunId) {
-    throw new Error(t("chatRuntimeModel.unableToRestoreTaskStreamAgentrunidIsEmpty"));
-  }
-  if (!Number.isInteger(startCursor) || startCursor < 0) {
-    throw new Error(
-      t("chatRuntimeModel.unableToRestoreTaskStreamValueInvalidCursorValue", { value1: normalizedAgentRunId, value2: startCursor }),
-    );
-  }
-  let cursor = startCursor;
-  const items: AgentStreamPayload[] = [];
-  for (let page = 0; page < AGENT_RUN_STREAM_REPLAY_MAX_PAGES; page += 1) {
-    const requestCursor = cursor;
-    const response = await readHydrationValue(
-      t("chatRuntimeModel.restoringTaskStreamValue", { value1: normalizedAgentRunId }),
-      replayAgentRunStream({
-        agentRunId: normalizedAgentRunId,
-        cursor: requestCursor,
-        limit: AGENT_RUN_STREAM_REPLAY_PAGE_SIZE,
-      }),
-    );
-    const responseAgentRunId = normalizeAgentRunId(response.agentRunId);
-    if (responseAgentRunId && responseAgentRunId !== normalizedAgentRunId) {
-      throw new Error(
-        t("chatRuntimeModel.unableToRestoreTaskStreamValueResponseAgentrunidMismatch", { value1: normalizedAgentRunId, value2: responseAgentRunId }),
-      );
-    }
-    const pageItems = normalizePersistedStreamPayloads(response.items);
-    if (pageItems.length === 0) {
-      return {
-        items,
-        nextCursor: cursor,
-      };
-    }
-    items.push(...pageItems);
-    cursor = nextReplayCursorFromPayloads(
-      normalizedAgentRunId,
-      pageItems,
-      requestCursor,
-    );
-    const nextCursor =
-      typeof response.nextCursor === "number" ? response.nextCursor : null;
-    if (nextCursor === null) {
-      return {
-        items,
-        nextCursor: cursor,
-      };
-    }
-    if (nextCursor <= requestCursor) {
-      throw new Error(
-        t("chatRuntimeModel.unableToRestoreTaskStreamValueCursorDidNot", { value1: normalizedAgentRunId, value2: requestCursor, value3: nextCursor }),
-      );
-    }
-    cursor = nextCursor;
-  }
-  throw new Error(
-    t("chatRuntimeModel.unableToRestoreTaskStreamValueExceededValuePages", { value1: normalizedAgentRunId, value2: AGENT_RUN_STREAM_REPLAY_MAX_PAGES }),
-  );
-};
-
-export const buildAgentRunSummaryMap = (
-  agentRuns: readonly AgentRunSummary[],
-): Map<string, AgentRunSummary> => {
-  const byAgentRunId = new Map<string, AgentRunSummary>();
-  agentRuns.forEach((agentRun) => {
-    const agentRunId = normalizeAgentRunId(agentRun.agentRunId);
-    if (agentRunId) {
-      if (byAgentRunId.has(agentRunId)) {
-        throw new Error(t("chatRuntimeModel.historyRecoveryFailedDuplicateSessionProjectionTaskValue", { value1: agentRunId }));
-      }
-      byAgentRunId.set(agentRunId, agentRun);
-    }
-  });
-  return byAgentRunId;
-};
-
-export const assertSessionProjection = (
-  projection: SessionProjectionData,
-  sessionId: string,
-): void => {
-  if (!projection || typeof projection !== "object") {
-    throw new Error(t("chatRuntimeModel.historyRecoveryFailedSessionProjectionIsEmpty"));
-  }
-  if (projection.schemaVersion !== SESSION_PROJECTION_SCHEMA_VERSION) {
-    throw new Error(
-      t("chatRuntimeModel.historyRecoveryFailedSessionProjectionSchemaMismatchValue", { value1: projection.schemaVersion }),
-    );
-  }
-  if (!projection.session || typeof projection.session !== "object") {
-    throw new Error(t("chatRuntimeModel.historyRecoveryFailedSessionProjectionIsMissingSession"));
-  }
-  const projectionSessionId =
-    typeof projection.session.id === "string"
-      ? projection.session.id.trim()
-      : "";
-  if (projectionSessionId !== sessionId) {
-    throw new Error(
-      t("chatRuntimeModel.historyRecoveryFailedSessionProjectionSessionidMismatchValue", { value1: projectionSessionId }),
-    );
-  }
-  if (!Array.isArray(projection.agentRuns)) {
-    throw new Error(t("chatRuntimeModel.historyRecoveryFailedSessionProjectionIsMissingAgentruns"));
-  }
-  if (!Array.isArray(projection.agentRunReplays)) {
-    throw new Error(t("chatRuntimeModel.historyRecoveryFailedSessionProjectionIsMissingAgentrunreplays"));
-  }
-};
-
-export const buildProjectionReplaySnapshots = (
-  projection: SessionProjectionData,
-  sessionId: string,
-): Map<string, AgentRunReplaySnapshot> => {
-  const snapshots = new Map<string, AgentRunReplaySnapshot>();
-  projection.agentRunReplays.forEach((entry) => {
-    const agentRunId = normalizeAgentRunId(entry.agentRunId);
-    if (!agentRunId) {
-      throw new Error(t("chatRuntimeModel.historyRecoveryFailedSessionProjectionContainsAnEmptyAgentrunid"));
-    }
-    if (snapshots.has(agentRunId)) {
-      throw new Error(t("chatRuntimeModel.historyRecoveryFailedDuplicateSessionProjectionReplayValue", { value1: agentRunId }));
-    }
-    const replaySessionId =
-      typeof entry.sessionId === "string" ? entry.sessionId.trim() : "";
-    if (replaySessionId !== sessionId) {
-      throw new Error(
-        t("chatRuntimeModel.historyRecoveryFailedSessionProjectionReplayValueSessionidMismatch", { value1: agentRunId }),
-      );
-    }
-    if (!Number.isInteger(entry.nextCursor) || entry.nextCursor < 0) {
-      throw new Error(
-        t("chatRuntimeModel.historyRecoveryFailedSessionProjectionTaskValueHasAn", { value1: agentRunId }),
-      );
-    }
-    if (!Array.isArray(entry.items)) {
-      throw new Error(
-        t("chatRuntimeModel.historyRecoveryFailedSessionProjectionTaskValueHasInvalid", { value1: agentRunId }),
-      );
-    }
-    snapshots.set(agentRunId, {
-      items: assertProjectionStreamPayloads(agentRunId, entry.items),
-      nextCursor: entry.nextCursor,
-    });
-  });
-  return snapshots;
-};
-
-export const buildProjectionReplaySnapshotsChunked = async (
-  projection: SessionProjectionData,
-  sessionId: string,
-  control?: HydrationControl,
-): Promise<Map<string, AgentRunReplaySnapshot>> => {
-  const snapshots = new Map<string, AgentRunReplaySnapshot>();
-  for (let index = 0; index < projection.agentRunReplays.length; index += 1) {
-    assertHydrationNotCancelled(control);
-    const entry = projection.agentRunReplays[index];
-    const agentRunId = normalizeAgentRunId(entry.agentRunId);
-    if (!agentRunId) {
-      throw new Error(t("chatRuntimeModel.historyRecoveryFailedSessionProjectionContainsAnEmptyAgentrunid"));
-    }
-    if (snapshots.has(agentRunId)) {
-      throw new Error(t("chatRuntimeModel.historyRecoveryFailedDuplicateSessionProjectionReplayValue", { value1: agentRunId }));
-    }
-    const replaySessionId =
-      typeof entry.sessionId === "string" ? entry.sessionId.trim() : "";
-    if (replaySessionId !== sessionId) {
-      throw new Error(
-        t("chatRuntimeModel.historyRecoveryFailedSessionProjectionReplayValueSessionidMismatch", { value1: agentRunId }),
-      );
-    }
-    if (!Number.isInteger(entry.nextCursor) || entry.nextCursor < 0) {
-      throw new Error(
-        t("chatRuntimeModel.historyRecoveryFailedSessionProjectionTaskValueHasAn", { value1: agentRunId }),
-      );
-    }
-    if (!Array.isArray(entry.items)) {
-      throw new Error(
-        t("chatRuntimeModel.historyRecoveryFailedSessionProjectionTaskValueHasInvalid", { value1: agentRunId }),
-      );
-    }
-    snapshots.set(agentRunId, {
-      items: assertProjectionStreamPayloads(agentRunId, entry.items),
-      nextCursor: entry.nextCursor,
-    });
-    if ((index + 1) % HYDRATION_REPLAY_BATCH_SIZE === 0) {
-      await yieldHydration(control);
-    }
-  }
-  return snapshots;
-};
-
 export const buildSessionHydrationSnapshot = async (
   sessionId: string,
   control?: HydrationControl,
@@ -839,11 +622,18 @@ export const buildSessionHydrationSnapshot = async (
   }
   assertHydrationNotCancelled(control);
   setHydrationStage(control, "fetchProjection");
-  const [sessionProjection, agentState, runtimeConfig, usage] =
+  const [transcriptPage, taskResponse, agentState, runtimeConfig, usage] =
     await Promise.all([
       readHydrationValue(
         t("chatRuntimeModel.loadingHistoryConversationProjection"),
-        getSessionProjection(normalizedSessionId),
+        loadTranscriptPage({ sessionId: normalizedSessionId }),
+      ),
+      readHydrationValue(
+        t("chatRuntimeModel.loadingAgentState"),
+        listAgentRuns({
+          sessionId: normalizedSessionId,
+          includeTerminal: false,
+        }),
       ),
       readHydrationValue(
         t("chatRuntimeModel.loadingAgentState"),
@@ -860,94 +650,55 @@ export const buildSessionHydrationSnapshot = async (
     ]);
 
   assertHydrationNotCancelled(control);
-  assertSessionProjection(sessionProjection, normalizedSessionId);
-  const sessionData = sessionProjection.session;
-  const agentRuns = sessionProjection.agentRuns;
-  const agentRunsById = buildAgentRunSummaryMap(agentRuns);
-  setHydrationStage(control, "reduceReplays");
-  await yieldHydration(control);
-  const replaySnapshotsByAgentRunId = await buildProjectionReplaySnapshotsChunked(
-    sessionProjection,
-    normalizedSessionId,
-    control,
-  );
-  const projectedAgentRunIds = new Set<string>();
+  const agentRuns = Array.isArray(taskResponse.agentRuns)
+    ? taskResponse.agentRuns
+    : [];
   for (const agentRun of agentRuns) {
-    assertHydrationNotCancelled(control);
-    const agentRunId = normalizeAgentRunId(agentRun.agentRunId);
-    if (!agentRunId) {
-      throw new Error(t("chatRuntimeModel.historyRecoveryFailedSessionProjectionTasksContainAnEmpty"));
-    }
-    const agentRunSessionId =
-      typeof agentRun.sessionId === "string" ? agentRun.sessionId.trim() : "";
-    if (agentRunSessionId !== normalizedSessionId) {
+    if (agentRun.sessionId.trim() !== normalizedSessionId) {
       throw new Error(
-        t("chatRuntimeModel.historyRecoveryFailedSessionProjectionTaskValueSessionidMismatch", { value1: agentRunId }),
-      );
-    }
-    if (!replaySnapshotsByAgentRunId.has(agentRunId)) {
-      throw new Error(
-        t("chatRuntimeModel.historyRecoveryFailedSessionProjectionIsMissingTaskReplay", { value1: agentRunId }),
-      );
-    }
-    projectedAgentRunIds.add(agentRunId);
-  }
-  await yieldHydration(control);
-  for (const replayAgentRunId of replaySnapshotsByAgentRunId.keys()) {
-    assertHydrationNotCancelled(control);
-    if (!projectedAgentRunIds.has(replayAgentRunId)) {
-      throw new Error(
-        t("chatRuntimeModel.historyRecoveryFailedSessionProjectionReplayValueIsMissing", { value1: replayAgentRunId }),
+        t("chatRuntimeModel.historyRecoveryFailedSessionProjectionTaskValueSessionidMismatch", {
+          value1: normalizeAgentRunId(agentRun.agentRunId),
+        }),
       );
     }
   }
   const replayRun = selectReplayAgentRun(agentRuns);
-  const replayRunAgentRunId = replayRun ? normalizeAgentRunId(replayRun.agentRunId) : "";
-  if (replayRunAgentRunId && !replaySnapshotsByAgentRunId.has(replayRunAgentRunId)) {
-    throw new Error(
-      t("chatRuntimeModel.historyRecoveryFailedSessionProjectionIsMissingActiveTask", { value1: replayRunAgentRunId }),
+  const replayRunAgentRunId = replayRun
+    ? normalizeAgentRunId(replayRun.agentRunId)
+    : "";
+  let seedPayloads: AgentStreamPayload[] = [];
+  if (replayRun && replayRunAgentRunId && isActiveAgentRun(replayRun)) {
+    setHydrationStage(control, "reduceReplays");
+    const replay = await readHydrationValue(
+      t("chatRuntimeModel.loadingAgentState"),
+      getAgentRunLiveSnapshot({
+        agentRunId: replayRunAgentRunId,
+      }),
     );
+    assertHydrationNotCancelled(control);
+    if (replay.agentRunId.trim() !== replayRunAgentRunId) {
+      throw new Error(
+        t("chatRuntimeModel.historyRecoveryFailedSessionProjectionReplayValueSessionidMismatch", {
+          value1: replayRunAgentRunId,
+        }),
+      );
+    }
+    seedPayloads = replay.liveSnapshot ? [replay.liveSnapshot] : [];
   }
-  const replayItemsByAgentRunId = new Map(
-    Array.from(replaySnapshotsByAgentRunId.entries()).map(
-      ([agentRunId, snapshot]) => [agentRunId, snapshot.items] as const,
-    ),
-  );
-  const replayCursorsByAgentRunId = Array.from(
-    replaySnapshotsByAgentRunId.entries(),
-  ).reduce<SessionReplayCursors>((acc, [agentRunId, snapshot]) => {
-    acc[agentRunId] = snapshot.nextCursor;
-    return acc;
-  }, {});
 
   setHydrationStage(control, "reduceMessages");
-  const historyMessages = await buildHistoryMessagesChunked(
-    "",
-    sessionData,
-    replayItemsByAgentRunId,
-    agentRunsById,
-    control,
-  );
   await yieldHydration(control);
-  const replayRunMessageId = replayRunAgentRunId
-    ? findAssistantHistoryMessageIdForAgentRun(sessionData, replayRunAgentRunId)
-    : null;
-  const replayRunItems = replayRunAgentRunId
-    ? (replayItemsByAgentRunId.get(replayRunAgentRunId) ?? [])
-    : [];
-  const shouldBuildDetachedReplayMessage = Boolean(
-    replayRun &&
-      replayRunAgentRunId &&
-      !replayRunMessageId &&
-      (replayRunItems.length > 0 || isActiveAgentRun(replayRun)),
+  const transcriptView = DesktopTranscriptView.open(transcriptPage);
+  const historyMessages = transcriptView.materializeMessages(
+    Boolean(replayRun && isActiveAgentRun(replayRun)),
   );
-  const detachedReplayMessage =
-    replayRun && replayRunAgentRunId && shouldBuildDetachedReplayMessage
-      ? buildAgentRunReplayMessage(replayRun, replayRunItems)
+  const activeMessage =
+    replayRun && replayRunAgentRunId && isActiveAgentRun(replayRun)
+      ? buildAgentRunReplayMessage(replayRun, seedPayloads)
       : null;
+
   setHydrationStage(control, "finalizeSnapshot");
   await yieldHydration(control);
-
   const fallbackAutoContinue = readAutoContinueAfterResumeWaitPreference();
   const resolvedAutoContinueAfterResumeWait =
     typeof runtimeConfig.autoContinueAfterResumeWait === "boolean"
@@ -962,41 +713,36 @@ export const buildSessionHydrationSnapshot = async (
     : null;
   const messages = [
     ...historyMessages,
-    ...(detachedReplayMessage ? [detachedReplayMessage] : []),
+    ...(activeMessage ? [activeMessage] : []),
     ...(restoreTurn && restoreMessageId
       ? [
-        {
-          id: restoreMessageId,
-          role: "assistant" as const,
-          turn: restoreTurn,
-        },
-      ]
+          {
+            id: restoreMessageId,
+            role: "assistant" as const,
+            turn: restoreTurn,
+          },
+        ]
       : []),
   ];
   const activeReplay =
-    replayRun &&
-      replayRunAgentRunId &&
-      isActiveAgentRun(replayRun)
+    replayRun && replayRunAgentRunId && activeMessage
       ? {
-        messageId:
-          replayRunMessageId || detachedReplayMessage?.id || "",
-        agentRunId: replayRunAgentRunId,
-        status: normalizeAgentRunStatus(replayRun.status),
-        seedPayloads: replayRunItems,
-      }
+          messageId: activeMessage.id,
+          agentRunId: replayRunAgentRunId,
+          status: normalizeAgentRunStatus(replayRun.status),
+          seedPayloads,
+        }
       : null;
-
-  if (activeReplay && !activeReplay.messageId) {
-    throw new Error(t("chatRuntimeModel.unableToRestoreActiveTaskValueAssistantMessageIs", { value1: activeReplay.agentRunId }));
-  }
   assertHydrationNotCancelled(control);
 
   return {
     messages,
+    transcriptPage,
+    transcriptHistoryMessageCount: historyMessages.length,
     runtimeConfig,
     contextUsage: usage,
     resolvedAutoContinueAfterResumeWait,
-    replayCursorsByAgentRunId,
+    replayCursorsByAgentRunId: {},
     pendingQuestionRequest,
     restoreMessageId,
     activeReplay,

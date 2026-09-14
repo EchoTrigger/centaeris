@@ -26,13 +26,13 @@ mod runtime_server_transport;
 #[cfg(windows)]
 mod runtime_server_windows_security;
 mod session_files;
-mod session_projection;
 mod sessions;
 mod sidecars;
 mod skills;
 use centaeris_runtime_sqlite as sqlite_store;
 mod subagent_scheduler;
 mod system_skills_deployment;
+mod transcript_runtime;
 mod user_config;
 mod user_data_layout;
 mod workspace_git;

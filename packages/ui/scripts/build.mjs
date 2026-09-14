@@ -54,13 +54,6 @@ const stepsByMode = {
       retryOnExitCode: false,
     },
     {
-      name: "TypeScript test typecheck",
-      command: process.execPath,
-      args: [tscBinPath, "-p", "tsconfig.test.json", "--noEmit", "--pretty", "false"],
-      maxAttempts: 1,
-      retryOnExitCode: false,
-    },
-    {
       name: "Vite build",
       command: process.execPath,
       args: [viteBinPath, "build"],

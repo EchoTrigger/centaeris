@@ -19,6 +19,7 @@ path = "src/main.rs"
 [dependencies]
 arboard.workspace = true
 base64.workspace = true
+centaeris-core.workspace = true
 crossterm.workspace = true
 getrandom.workspace = true
 image.workspace = true

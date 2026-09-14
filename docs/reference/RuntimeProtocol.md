@@ -160,7 +160,7 @@ The result has this exact field set:
 | `coreProtocolVersion` | Exact Core protocol version, currently `1.0.0`. |
 | `profileId` | Non-empty identity of the user-data profile. |
 | `storeId` | Non-empty identity of the Runtime store. |
-| `storeSchemaVersion` | Positive storage schema version, currently `1`. |
+| `storeSchemaVersion` | Positive storage schema version, currently `3`. |
 | `layoutSchemaVersion` | Positive user-data layout version, currently `1`. |
 
 The v1 descriptor publishes these arrays:
@@ -190,6 +190,41 @@ A packaged client also compares `buildId` with the SHA-256 digest of its bundled
 Runtime executable. A mismatch means another build owns the profile endpoint;
 the client must not continue against it.
 
+## Transcript page and committed patch reads
+
+`transcript/page` reads the persistent transcript read model. Its strict
+camelCase request contains `sessionId`, optional `projectionGeneration`,
+optional `sourceHighWater`, and optional `olderCursor`. The local Runtime owns
+the generation identity; an omitted generation selects the current local
+generation and a supplied value must match it exactly.
+
+An initial request without `sourceHighWater` captures the JSONL source tail as
+`targetSourceHighWater`. The response separately reports
+`projectedSourceHighWater` and `targetReached`; `page` is null while bounded
+background projection is catching up. Later page requests keep the original
+target so appends cannot move the initial view waterline.
+
+`transcript/patches` accepts `sessionId`, optional matching
+`projectionGeneration`, exclusive `afterSourceHighWater`, and optional frozen
+`throughSourceHighWater`. It returns committed patches in ascending source
+order plus `nextSourceHighWater` and `hasMore`. Reads come from projection
+commits and never revisit raw session events. Empty patches intentionally
+advance the cursor across committed events with no display change.
+
+Both responses include their projection version and generation. A tombstone or
+projection-generation change invalidates old cursors explicitly; it must not
+silently fall back to full client-side event projection.
+
+Oversized user, assistant, reasoning, notice, and tool-summary text is represented
+by a stable `session-event:<eventId>:<field>` content reference, so one large block
+cannot prevent a page cursor from advancing. The transcript page protocol does not
+yet define the separate bounded range-read method for those references.
+
+The local SQLite adapter keeps one replaceable current-recovery slot per session,
+projection version, and generation. That slot contains only the control frontier
+and unresolved tool blocks; immutable projection commits and block versions do not
+embed it. Historical checkpoint cadence remains a separate policy concern.
+
 ## Method registry
 
 The registry separates shared Runtime semantics from execution and native Host
@@ -215,10 +250,9 @@ authorization grant.
 | `_centaeris/session/answer_question` | `oneShotAction` | `noAutomaticRetry` | — |
 | `_centaeris/session/delete` | `identityMutation` | `noAutomaticRetry` | `session/list` |
 | `_centaeris/session/diagnostics` | `read` | `safeRetry` | — |
-| `_centaeris/session/project` | `read` | `safeRetry` | — |
 | `_centaeris/session/reorder` | `desiredStateWrite` | `noAutomaticRetry` | `session/list` |
 | `_centaeris/session/agent-runs` | `read` | `safeRetry` | — |
-| `_centaeris/session/agent-runs/replay` | `read` | `safeRetry` | — |
+| `_centaeris/session/agent-runs/live-snapshot` | `read` | `safeRetry` | — |
 | `_centaeris/session/agent-runs/attach` | `identityMutation` | `noAutomaticRetry` | — |
 | `_centaeris/session/agent-runs/detach` | `identityMutation` | `noAutomaticRetry` | — |
 | `_centaeris/session/agent-runs/detach-viewer` | `identityMutation` | `noAutomaticRetry` | — |
@@ -236,6 +270,9 @@ authorization grant.
 | `agent_runtime_job_list` | `read` | `safeRetry` | — |
 | `agent_state_get` | `read` | `safeRetry` | — |
 | `transcript/project` | `read` | `safeRetry` | — |
+| `transcript/page` | `read` | `safeRetry` | — |
+| `transcript/patches` | `read` | `safeRetry` | — |
+| `transcript/content-range` | `read` | `safeRetry` | — |
 | `plugin/catalog_state` | `read` | `safeRetry` | — |
 | `skill/source/list` | `read` | `safeRetry` | — |
 | `skill/source/add` | `creation` | `noAutomaticRetry` | `skill/source/list` |

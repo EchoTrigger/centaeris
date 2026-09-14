@@ -50,6 +50,37 @@
   height: 0;
 }
 
+.load-older-transcript {
+  position: sticky;
+  z-index: 2;
+  top: 8px;
+  display: block;
+  min-height: 30px;
+  margin: -36px auto 6px;
+  padding: 5px 12px;
+  border: 1px solid var(--outline-variant);
+  border-radius: 999px;
+  background: var(--surface-color);
+  color: var(--on-surface-variant);
+  font: inherit;
+  cursor: pointer;
+}
+
+.load-older-transcript:hover:not(:disabled) {
+  background: var(--surface-variant);
+  color: var(--on-surface);
+}
+
+.load-older-transcript:disabled {
+  cursor: wait;
+  opacity: 0.68;
+}
+
+.load-older-transcript:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
+}
+
 .jump-to-latest {
   position: absolute;
   z-index: 2;

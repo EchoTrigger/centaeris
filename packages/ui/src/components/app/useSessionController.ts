@@ -174,7 +174,6 @@ export function useSessionController({
         if (selectionEpochRef.current === selectionEpoch) {
           inputsRef.current.reportError(errorMessage(error, t("useSessionController.unableToSwitchTheConversationWorkspace")));
         }
-        return null;
       }
     }
     if (selectionEpochRef.current !== selectionEpoch) return null;

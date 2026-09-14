@@ -139,7 +139,7 @@ vi.mock("../src/lib/chatBridge", () => ({
       return { close };
     },
   ),
-  replayAgentRunStream: vi.fn(),
+  getAgentRunLiveSnapshot: vi.fn(),
   sendAgentInput: harness.sendAgentInput,
   sendAgentSupplement: vi.fn(),
   setAgentRuntimeConfig: vi.fn(async () => runtimeConfig),

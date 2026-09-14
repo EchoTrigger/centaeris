@@ -329,6 +329,7 @@ version = "1.0.0"
 dependencies = [
  "arboard",
  "base64 0.22.1",
+ "centaeris-core",
  "crossterm",
  "getrandom 0.4.3",
  "image",

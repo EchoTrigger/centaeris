@@ -27,6 +27,15 @@ use crate::session::reliability::{
     ScheduleRuntimeJobRequest, ScheduleRuntimeJobResult, StartRuntimeJobRequest,
     WakeRuntimeJobDisposition, WakeRuntimeJobRequest, YieldRuntimeJobRequest,
 };
+use crate::session::transcript::{
+    TranscriptPageReadRequestV1, TranscriptPageReadResultV1, TranscriptPatchReadRequestV1,
+    TranscriptPatchReadResultV1, TranscriptProjectionCheckpointV1,
+    TranscriptProjectionCommitDispositionV1, TranscriptProjectionCommitV1,
+    TranscriptProjectionCurrentGenerationV1, TranscriptProjectionGenerationRotationDispositionV1,
+    TranscriptProjectionGenerationRotationV1, TranscriptProjectionGenerationStorePortV1,
+    TranscriptProjectionHeadV1, TranscriptProjectionRecoveryV1, TranscriptProjectionStorePort,
+    TranscriptResumeCursorV1,
+};
 
 const RUNTIME_STORE_ACTOR_CHANNEL_CAPACITY: usize = 128;
 const RUNTIME_STORE_ACTOR_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
@@ -41,6 +50,8 @@ pub trait RuntimeStoreActorBackend:
     + SessionDataStorePort
     + AgentRuntimeSnapshotStorePort
     + ResourceClaimStorePort
+    + TranscriptProjectionStorePort
+    + TranscriptProjectionGenerationStorePortV1
     + Clone
     + Send
     + Sync
@@ -57,6 +68,8 @@ impl<T> RuntimeStoreActorBackend for T where
         + SessionDataStorePort
         + AgentRuntimeSnapshotStorePort
         + ResourceClaimStorePort
+        + TranscriptProjectionStorePort
+        + TranscriptProjectionGenerationStorePortV1
         + Clone
         + Send
         + Sync
@@ -370,6 +383,155 @@ impl RuntimeStoreActor {
         .await
     }
 
+    pub async fn commit_transcript_projection_async(
+        &self,
+        commit: TranscriptProjectionCommitV1,
+    ) -> Result<TranscriptProjectionCommitDispositionV1, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(
+            RuntimeStoreActorCommand::CommitTranscriptProjection {
+                commit,
+                reply: RuntimeStoreActorReply::Async(reply),
+            },
+            receiver,
+        )
+        .await
+    }
+
+    pub async fn load_transcript_projection_head_async(
+        &self,
+        session_id: impl Into<String>,
+        projection_generation: impl Into<String>,
+    ) -> Result<Option<TranscriptProjectionHeadV1>, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(
+            RuntimeStoreActorCommand::LoadTranscriptProjectionHead {
+                session_id: session_id.into(),
+                projection_generation: projection_generation.into(),
+                reply: RuntimeStoreActorReply::Async(reply),
+            },
+            receiver,
+        )
+        .await
+    }
+
+    pub async fn load_current_transcript_projection_generation_async(
+        &self,
+        session_id: impl Into<String>,
+    ) -> Result<Option<TranscriptProjectionCurrentGenerationV1>, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(
+            RuntimeStoreActorCommand::LoadCurrentTranscriptProjectionGeneration {
+                session_id: session_id.into(),
+                reply: RuntimeStoreActorReply::Async(reply),
+            },
+            receiver,
+        )
+        .await
+    }
+
+    pub async fn rotate_current_transcript_projection_generation_async(
+        &self,
+        rotation: TranscriptProjectionGenerationRotationV1,
+    ) -> Result<TranscriptProjectionGenerationRotationDispositionV1, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(
+            RuntimeStoreActorCommand::RotateCurrentTranscriptProjectionGeneration {
+                rotation,
+                reply: RuntimeStoreActorReply::Async(reply),
+            },
+            receiver,
+        )
+        .await
+    }
+
+    pub async fn load_transcript_page_async(
+        &self,
+        request: TranscriptPageReadRequestV1,
+    ) -> Result<TranscriptPageReadResultV1, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(
+            RuntimeStoreActorCommand::LoadTranscriptPage {
+                request,
+                reply: RuntimeStoreActorReply::Async(reply),
+            },
+            receiver,
+        )
+        .await
+    }
+
+    pub async fn load_latest_transcript_checkpoint_async(
+        &self,
+        session_id: impl Into<String>,
+        projection_generation: impl Into<String>,
+        at_or_before_source_high_water: u64,
+    ) -> Result<Option<TranscriptProjectionCheckpointV1>, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(
+            RuntimeStoreActorCommand::LoadLatestTranscriptCheckpoint {
+                session_id: session_id.into(),
+                projection_generation: projection_generation.into(),
+                at_or_before_source_high_water,
+                reply: RuntimeStoreActorReply::Async(reply),
+            },
+            receiver,
+        )
+        .await
+    }
+
+    pub async fn load_latest_transcript_recovery_async(
+        &self,
+        session_id: impl Into<String>,
+        projection_generation: impl Into<String>,
+        at_or_before_source_high_water: u64,
+    ) -> Result<Option<TranscriptProjectionRecoveryV1>, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(
+            RuntimeStoreActorCommand::LoadLatestTranscriptRecovery {
+                session_id: session_id.into(),
+                projection_generation: projection_generation.into(),
+                at_or_before_source_high_water,
+                reply: RuntimeStoreActorReply::Async(reply),
+            },
+            receiver,
+        )
+        .await
+    }
+
+    pub async fn load_transcript_patches_async(
+        &self,
+        request: TranscriptPatchReadRequestV1,
+    ) -> Result<TranscriptPatchReadResultV1, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(
+            RuntimeStoreActorCommand::LoadTranscriptPatches {
+                request,
+                reply: RuntimeStoreActorReply::Async(reply),
+            },
+            receiver,
+        )
+        .await
+    }
+
+    pub async fn load_transcript_resume_cursors_async(
+        &self,
+        session_id: impl Into<String>,
+        projection_generation: impl Into<String>,
+        at_or_before_source_high_water: u64,
+    ) -> Result<Vec<TranscriptResumeCursorV1>, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(
+            RuntimeStoreActorCommand::LoadTranscriptResumeCursors {
+                session_id: session_id.into(),
+                projection_generation: projection_generation.into(),
+                at_or_before_source_high_water,
+                reply: RuntimeStoreActorReply::Async(reply),
+            },
+            receiver,
+        )
+        .await
+    }
+
     async fn send<T, E>(
         &self,
         command: RuntimeStoreActorCommand,
@@ -571,6 +733,122 @@ impl RuntimeStore for RuntimeStoreActor {
             limit,
             offset,
             reply,
+        })
+    }
+}
+
+impl TranscriptProjectionStorePort for RuntimeStoreActor {
+    fn commit_transcript_projection(
+        &self,
+        commit: TranscriptProjectionCommitV1,
+    ) -> Result<TranscriptProjectionCommitDispositionV1, String> {
+        self.send_blocking(
+            |reply| RuntimeStoreActorCommand::CommitTranscriptProjection { commit, reply },
+        )
+    }
+
+    fn load_transcript_projection_head(
+        &self,
+        session_id: &str,
+        projection_generation: &str,
+    ) -> Result<Option<TranscriptProjectionHeadV1>, String> {
+        self.send_blocking(
+            |reply| RuntimeStoreActorCommand::LoadTranscriptProjectionHead {
+                session_id: session_id.to_string(),
+                projection_generation: projection_generation.to_string(),
+                reply,
+            },
+        )
+    }
+
+    fn load_transcript_page(
+        &self,
+        request: TranscriptPageReadRequestV1,
+    ) -> Result<TranscriptPageReadResultV1, String> {
+        self.send_blocking(|reply| RuntimeStoreActorCommand::LoadTranscriptPage { request, reply })
+    }
+
+    fn load_latest_transcript_checkpoint(
+        &self,
+        session_id: &str,
+        projection_generation: &str,
+        at_or_before_source_high_water: u64,
+    ) -> Result<Option<TranscriptProjectionCheckpointV1>, String> {
+        self.send_blocking(
+            |reply| RuntimeStoreActorCommand::LoadLatestTranscriptCheckpoint {
+                session_id: session_id.to_string(),
+                projection_generation: projection_generation.to_string(),
+                at_or_before_source_high_water,
+                reply,
+            },
+        )
+    }
+
+    fn load_latest_transcript_recovery(
+        &self,
+        session_id: &str,
+        projection_generation: &str,
+        at_or_before_source_high_water: u64,
+    ) -> Result<Option<TranscriptProjectionRecoveryV1>, String> {
+        self.send_blocking(
+            |reply| RuntimeStoreActorCommand::LoadLatestTranscriptRecovery {
+                session_id: session_id.to_string(),
+                projection_generation: projection_generation.to_string(),
+                at_or_before_source_high_water,
+                reply,
+            },
+        )
+    }
+
+    fn load_transcript_patches(
+        &self,
+        request: TranscriptPatchReadRequestV1,
+    ) -> Result<TranscriptPatchReadResultV1, String> {
+        self.send_blocking(|reply| RuntimeStoreActorCommand::LoadTranscriptPatches {
+            request,
+            reply,
+        })
+    }
+
+    fn load_transcript_resume_cursors(
+        &self,
+        session_id: &str,
+        projection_generation: &str,
+        at_or_before_source_high_water: u64,
+    ) -> Result<Vec<TranscriptResumeCursorV1>, String> {
+        self.send_blocking(
+            |reply| RuntimeStoreActorCommand::LoadTranscriptResumeCursors {
+                session_id: session_id.to_string(),
+                projection_generation: projection_generation.to_string(),
+                at_or_before_source_high_water,
+                reply,
+            },
+        )
+    }
+}
+
+impl TranscriptProjectionGenerationStorePortV1 for RuntimeStoreActor {
+    fn load_current_transcript_projection_generation(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<TranscriptProjectionCurrentGenerationV1>, String> {
+        self.send_blocking(|reply| {
+            RuntimeStoreActorCommand::LoadCurrentTranscriptProjectionGeneration {
+                session_id: session_id.to_string(),
+                reply,
+            }
+        })
+    }
+
+    fn rotate_current_transcript_projection_generation(
+        &self,
+        rotation: TranscriptProjectionGenerationRotationV1,
+    ) -> Result<TranscriptProjectionGenerationRotationDispositionV1, String> {
+        self.send_blocking(|reply| {
+            RuntimeStoreActorCommand::RotateCurrentTranscriptProjectionGeneration {
+                rotation,
+                reply,
+            }
         })
     }
 }
@@ -1389,6 +1667,49 @@ enum RuntimeStoreActorCommand {
         session_id: String,
         reply: RuntimeStoreActorReply<()>,
     },
+    CommitTranscriptProjection {
+        commit: TranscriptProjectionCommitV1,
+        reply: RuntimeStoreActorReply<TranscriptProjectionCommitDispositionV1>,
+    },
+    LoadTranscriptProjectionHead {
+        session_id: String,
+        projection_generation: String,
+        reply: RuntimeStoreActorReply<Option<TranscriptProjectionHeadV1>>,
+    },
+    LoadCurrentTranscriptProjectionGeneration {
+        session_id: String,
+        reply: RuntimeStoreActorReply<Option<TranscriptProjectionCurrentGenerationV1>>,
+    },
+    RotateCurrentTranscriptProjectionGeneration {
+        rotation: TranscriptProjectionGenerationRotationV1,
+        reply: RuntimeStoreActorReply<TranscriptProjectionGenerationRotationDispositionV1>,
+    },
+    LoadTranscriptPage {
+        request: TranscriptPageReadRequestV1,
+        reply: RuntimeStoreActorReply<TranscriptPageReadResultV1>,
+    },
+    LoadLatestTranscriptCheckpoint {
+        session_id: String,
+        projection_generation: String,
+        at_or_before_source_high_water: u64,
+        reply: RuntimeStoreActorReply<Option<TranscriptProjectionCheckpointV1>>,
+    },
+    LoadLatestTranscriptRecovery {
+        session_id: String,
+        projection_generation: String,
+        at_or_before_source_high_water: u64,
+        reply: RuntimeStoreActorReply<Option<TranscriptProjectionRecoveryV1>>,
+    },
+    LoadTranscriptPatches {
+        request: TranscriptPatchReadRequestV1,
+        reply: RuntimeStoreActorReply<TranscriptPatchReadResultV1>,
+    },
+    LoadTranscriptResumeCursors {
+        session_id: String,
+        projection_generation: String,
+        at_or_before_source_high_water: u64,
+        reply: RuntimeStoreActorReply<Vec<TranscriptResumeCursorV1>>,
+    },
 }
 
 impl RuntimeStoreActorCommand {
@@ -1443,6 +1764,19 @@ impl RuntimeStoreActorCommand {
             Self::LoadAgentRuntimeSnapshot { .. } => "load_agent_runtime_snapshot",
             Self::SaveAgentRuntimeSnapshot { .. } => "save_agent_runtime_snapshot",
             Self::DeleteSessionData { .. } => "delete_session_data",
+            Self::CommitTranscriptProjection { .. } => "commit_transcript_projection",
+            Self::LoadTranscriptProjectionHead { .. } => "load_transcript_projection_head",
+            Self::LoadCurrentTranscriptProjectionGeneration { .. } => {
+                "load_current_transcript_projection_generation"
+            }
+            Self::RotateCurrentTranscriptProjectionGeneration { .. } => {
+                "rotate_current_transcript_projection_generation"
+            }
+            Self::LoadTranscriptPage { .. } => "load_transcript_page",
+            Self::LoadLatestTranscriptCheckpoint { .. } => "load_latest_transcript_checkpoint",
+            Self::LoadLatestTranscriptRecovery { .. } => "load_latest_transcript_recovery",
+            Self::LoadTranscriptPatches { .. } => "load_transcript_patches",
+            Self::LoadTranscriptResumeCursors { .. } => "load_transcript_resume_cursors",
         }
     }
 }
@@ -1852,6 +2186,118 @@ async fn run_runtime_store_actor<S>(
                     .await,
                 );
             }
+            RuntimeStoreActorCommand::CommitTranscriptProjection { commit, reply } => {
+                reply.send(
+                    run_store_operation(store.clone(), move |store| {
+                        store.commit_transcript_projection(commit)
+                    })
+                    .await,
+                );
+            }
+            RuntimeStoreActorCommand::LoadTranscriptProjectionHead {
+                session_id,
+                projection_generation,
+                reply,
+            } => {
+                reply.send(
+                    run_store_operation(store.clone(), move |store| {
+                        store.load_transcript_projection_head(
+                            session_id.as_str(),
+                            projection_generation.as_str(),
+                        )
+                    })
+                    .await,
+                );
+            }
+            RuntimeStoreActorCommand::LoadCurrentTranscriptProjectionGeneration {
+                session_id,
+                reply,
+            } => {
+                reply.send(
+                    run_store_operation(store.clone(), move |store| {
+                        store.load_current_transcript_projection_generation(session_id.as_str())
+                    })
+                    .await,
+                );
+            }
+            RuntimeStoreActorCommand::RotateCurrentTranscriptProjectionGeneration {
+                rotation,
+                reply,
+            } => {
+                reply.send(
+                    run_store_operation(store.clone(), move |store| {
+                        store.rotate_current_transcript_projection_generation(rotation)
+                    })
+                    .await,
+                );
+            }
+            RuntimeStoreActorCommand::LoadTranscriptPage { request, reply } => {
+                reply.send(
+                    run_store_operation(store.clone(), move |store| {
+                        store.load_transcript_page(request)
+                    })
+                    .await,
+                );
+            }
+            RuntimeStoreActorCommand::LoadLatestTranscriptCheckpoint {
+                session_id,
+                projection_generation,
+                at_or_before_source_high_water,
+                reply,
+            } => {
+                reply.send(
+                    run_store_operation(store.clone(), move |store| {
+                        store.load_latest_transcript_checkpoint(
+                            session_id.as_str(),
+                            projection_generation.as_str(),
+                            at_or_before_source_high_water,
+                        )
+                    })
+                    .await,
+                );
+            }
+            RuntimeStoreActorCommand::LoadLatestTranscriptRecovery {
+                session_id,
+                projection_generation,
+                at_or_before_source_high_water,
+                reply,
+            } => {
+                reply.send(
+                    run_store_operation(store.clone(), move |store| {
+                        store.load_latest_transcript_recovery(
+                            session_id.as_str(),
+                            projection_generation.as_str(),
+                            at_or_before_source_high_water,
+                        )
+                    })
+                    .await,
+                );
+            }
+            RuntimeStoreActorCommand::LoadTranscriptPatches { request, reply } => {
+                reply.send(
+                    run_store_operation(store.clone(), move |store| {
+                        store.load_transcript_patches(request)
+                    })
+                    .await,
+                );
+            }
+            RuntimeStoreActorCommand::LoadTranscriptResumeCursors {
+                session_id,
+                projection_generation,
+                at_or_before_source_high_water,
+                reply,
+            } => {
+                reply.send(
+                    run_store_operation(store.clone(), move |store| {
+                        store.load_transcript_resume_cursors(
+                            session_id.as_str(),
+                            projection_generation.as_str(),
+                            at_or_before_source_high_water,
+                        )
+                    })
+                    .await,
+                );
+            }
         }
     }
 }
@@ -1888,6 +2334,13 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crate::session::store::RuntimeStore;
+    use crate::session::transcript::{
+        validate_transcript_resume_cursor_read, TranscriptPatchReadRequestV1,
+        TranscriptPatchReadResultV1, TranscriptProjectionCurrentGenerationV1,
+        TranscriptProjectionGenerationRotationDispositionV1,
+        TranscriptProjectionGenerationRotationV1, TranscriptProjectionGenerationStorePortV1,
+        TranscriptProjectionStorePort, TranscriptResumeCursorV1, TRANSCRIPT_PROJECTION_VERSION_V1,
+    };
 
     use super::{
         operation_deadline_expired, RuntimeStoreActor, RuntimeStoreActorCommand,
@@ -1903,6 +2356,176 @@ mod tests {
 
         assert!(!operation_deadline_expired(&meta, 31_000));
         assert!(operation_deadline_expired(&meta, 31_001));
+    }
+
+    #[test]
+    fn runtime_store_actor_proxies_the_complete_transcript_projection_store_port() {
+        fn assert_transcript_projection_store<T: TranscriptProjectionStorePort>() {}
+        fn assert_transcript_generation_store<T: TranscriptProjectionGenerationStorePortV1>() {}
+
+        assert_transcript_projection_store::<RuntimeStoreActor>();
+        assert_transcript_generation_store::<RuntimeStoreActor>();
+    }
+
+    #[tokio::test]
+    async fn runtime_store_actor_async_patch_read_uses_the_serial_actor_queue() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let actor = RuntimeStoreActor {
+            sender,
+            next_operation_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        };
+        let request = TranscriptPatchReadRequestV1 {
+            session_id: "chat-patches".to_string(),
+            projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.to_string(),
+            projection_generation: "generation-1".to_string(),
+            after_source_high_water: "8".to_string(),
+            through_source_high_water: "8".to_string(),
+        };
+        let task = tokio::spawn({
+            let actor = actor.clone();
+            let request = request.clone();
+            async move { actor.load_transcript_patches_async(request).await }
+        });
+
+        let envelope = receiver.recv().await.expect("receive transcript command");
+        assert_eq!(envelope.command.operation_kind(), "load_transcript_patches");
+        match envelope.command {
+            RuntimeStoreActorCommand::LoadTranscriptPatches {
+                request: actual,
+                reply,
+            } => {
+                assert_eq!(actual, request);
+                reply.send(Ok(TranscriptPatchReadResultV1 {
+                    patches: Vec::new(),
+                    next_source_high_water: "8".to_string(),
+                    has_more: false,
+                    work: Default::default(),
+                }));
+            }
+            _ => panic!("unexpected actor command"),
+        }
+
+        let result = task.await.expect("join patch read").expect("patch read");
+        result.validate(&request).expect("valid caught-up result");
+    }
+
+    #[tokio::test]
+    async fn runtime_store_actor_async_generation_owner_calls_use_the_serial_actor_queue() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let actor = RuntimeStoreActor {
+            sender,
+            next_operation_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        };
+        let load = tokio::spawn({
+            let actor = actor.clone();
+            async move {
+                actor
+                    .load_current_transcript_projection_generation_async("session-1")
+                    .await
+            }
+        });
+        let envelope = receiver.recv().await.expect("receive load current command");
+        assert_eq!(
+            envelope.command.operation_kind(),
+            "load_current_transcript_projection_generation"
+        );
+        match envelope.command {
+            RuntimeStoreActorCommand::LoadCurrentTranscriptProjectionGeneration {
+                session_id,
+                reply,
+            } => {
+                assert_eq!(session_id, "session-1");
+                reply.send(Ok(Some(TranscriptProjectionCurrentGenerationV1 {
+                    session_id,
+                    projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.to_string(),
+                    projection_generation: "generation-1".to_string(),
+                    source_high_water: "8".to_string(),
+                })));
+            }
+            _ => panic!("unexpected actor command"),
+        }
+        assert_eq!(
+            load.await
+                .expect("join load")
+                .expect("load current")
+                .expect("current")
+                .source_high_water,
+            "8"
+        );
+
+        let rotation = TranscriptProjectionGenerationRotationV1 {
+            session_id: "session-1".to_string(),
+            projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.to_string(),
+            expected_current_generation: Some("generation-1".to_string()),
+            next_generation: "generation-2".to_string(),
+            target_source_high_water: "8".to_string(),
+        };
+        let rotate = tokio::spawn({
+            let actor = actor.clone();
+            let rotation = rotation.clone();
+            async move {
+                actor
+                    .rotate_current_transcript_projection_generation_async(rotation)
+                    .await
+            }
+        });
+        let envelope = receiver.recv().await.expect("receive rotate command");
+        assert_eq!(
+            envelope.command.operation_kind(),
+            "rotate_current_transcript_projection_generation"
+        );
+        match envelope.command {
+            RuntimeStoreActorCommand::RotateCurrentTranscriptProjectionGeneration {
+                rotation: actual,
+                reply,
+            } => {
+                assert_eq!(actual, rotation);
+                reply.send(Ok(
+                    TranscriptProjectionGenerationRotationDispositionV1::Applied,
+                ));
+            }
+            _ => panic!("unexpected actor command"),
+        }
+        assert_eq!(
+            rotate.await.expect("join rotate").expect("rotate"),
+            TranscriptProjectionGenerationRotationDispositionV1::Applied
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_store_actor_async_resume_cursor_read_preserves_the_requested_waterline() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let actor = RuntimeStoreActor {
+            sender,
+            next_operation_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        };
+        let task = tokio::spawn(async move {
+            actor
+                .load_transcript_resume_cursors_async("session-1", "generation-1", 42)
+                .await
+        });
+
+        let envelope = receiver.recv().await.expect("receive cursor command");
+        match envelope.command {
+            RuntimeStoreActorCommand::LoadTranscriptResumeCursors {
+                session_id,
+                projection_generation,
+                at_or_before_source_high_water,
+                reply,
+            } => {
+                assert_eq!(session_id, "session-1");
+                assert_eq!(projection_generation, "generation-1");
+                assert_eq!(at_or_before_source_high_water, 42);
+                reply.send(Ok(vec![TranscriptResumeCursorV1 {
+                    stream_id: "run-1".to_string(),
+                    cursor: "cursor-42".to_string(),
+                }]));
+            }
+            _ => panic!("unexpected actor command"),
+        }
+
+        let cursors = task.await.expect("join cursor read").expect("cursor read");
+        validate_transcript_resume_cursor_read(&cursors).expect("bounded cursor result");
     }
 
     #[tokio::test]

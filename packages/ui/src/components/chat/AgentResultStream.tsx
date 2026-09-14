@@ -55,6 +55,7 @@ export function AgentResultStream({
         />
         <AgentFinalAnswer
           finalItem={finalItem}
+          isStreaming={isStreaming}
           onOpenWorkspacePath={onOpenWorkspacePath}
         />
       </div>

@@ -50,10 +50,9 @@ macro_rules! runtime_commands {
             AgentQuestionAnswer, "_centaeris/session/answer_question", SharedRuntime, OneShotAction, NoAutomaticRetry, None;
             SessionDelete, "_centaeris/session/delete", SharedRuntime, IdentityMutation, NoAutomaticRetry, Some("session/list");
             SessionDiagnostics, "_centaeris/session/diagnostics", SharedRuntime, Read, SafeRetry, None;
-            SessionProjectionGet, "_centaeris/session/project", SharedRuntime, Read, SafeRetry, None;
             SessionReorder, "_centaeris/session/reorder", SharedRuntime, DesiredStateWrite, NoAutomaticRetry, Some("session/list");
             AgentRunList, "_centaeris/session/agent-runs", SharedRuntime, Read, SafeRetry, None;
-            AgentRunStreamReplay, "_centaeris/session/agent-runs/replay", SharedRuntime, Read, SafeRetry, None;
+            AgentRunLiveSnapshot, "_centaeris/session/agent-runs/live-snapshot", SharedRuntime, Read, SafeRetry, None;
             AgentRunAttach, "_centaeris/session/agent-runs/attach", SharedRuntime, IdentityMutation, NoAutomaticRetry, None;
             AgentRunDetach, "_centaeris/session/agent-runs/detach", SharedRuntime, IdentityMutation, NoAutomaticRetry, None;
             AgentRunDetachViewer, "_centaeris/session/agent-runs/detach-viewer", SharedRuntime, IdentityMutation, NoAutomaticRetry, None;
@@ -71,6 +70,9 @@ macro_rules! runtime_commands {
             AgentRuntimeJobList, "agent_runtime_job_list", SharedRuntime, Read, SafeRetry, None;
             AgentStateGet, "agent_state_get", SharedRuntime, Read, SafeRetry, None;
             TranscriptProjection, "transcript/project", SharedRuntime, Read, SafeRetry, None;
+            TranscriptPage, "transcript/page", SharedRuntime, Read, SafeRetry, None;
+            TranscriptPatches, "transcript/patches", SharedRuntime, Read, SafeRetry, None;
+            TranscriptContentRange, "transcript/content-range", SharedRuntime, Read, SafeRetry, None;
             PluginCatalogState, "plugin/catalog_state", SharedRuntime, Read, SafeRetry, None;
             SkillSourceList, "skill/source/list", SharedRuntime, Read, SafeRetry, None;
             SkillSourceAdd, "skill/source/add", SharedRuntime, Creation, NoAutomaticRetry, Some("skill/source/list");

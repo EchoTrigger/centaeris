@@ -50,6 +50,9 @@ export const collectTimelineOperations = (
         fullOutputPath: task.fullOutputPath,
         outputStartByte: task.outputStartByte,
         outputByteLength: task.outputByteLength,
+        transcriptContentRef: task.transcriptContentRef,
+        transcriptSessionId: task.transcriptSessionId,
+        transcriptProjectionGeneration: task.transcriptProjectionGeneration,
       });
     }
   }

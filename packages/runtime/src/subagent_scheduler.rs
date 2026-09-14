@@ -299,8 +299,8 @@ fn agent_session_is_ready(
             binding.child_session_id, job.job_id
         ));
     }
-    let projection = message_log::project_session_log(binding.child_session_id.as_str())?;
-    Ok(projection.agent_runs.iter().any(|task| {
+    let agent_runs = message_log::project_session_agent_runs(binding.child_session_id.as_str())?;
+    Ok(agent_runs.iter().any(|task| {
         task.agent_run_id == job.job_id
             && task.turn_id == binding.child_turn_id
             && matches!(task.status.as_str(), "queued" | "running")

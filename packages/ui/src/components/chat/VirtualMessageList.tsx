@@ -22,6 +22,9 @@ type VirtualMessageListProps = {
   copiedUserMessageId: string | null;
   latestUserMessageId: string | null;
   editableUserMessageId: string | null;
+  hasOlder?: boolean;
+  isLoadingOlder?: boolean;
+  onLoadOlder?: () => void;
   onScroll: () => void;
   onContentSizeChange: (totalSize: number) => void;
   onEditingPromptChange: (value: string) => void;
@@ -211,6 +214,9 @@ const MessageRow = memo(function MessageRow({
 
 export function VirtualMessageList({
   containerRef,
+  hasOlder = false,
+  isLoadingOlder = false,
+  onLoadOlder,
   onContentSizeChange,
   onScroll,
   ...props
@@ -234,7 +240,29 @@ export function VirtualMessageList({
       className="messages-container uiRsMessagesContainer"
       ref={containerRef}
       onScroll={onScroll}
+      onWheel={(event) => {
+        if (
+          event.deltaY < 0 &&
+          event.currentTarget.scrollTop <= 0 &&
+          hasOlder &&
+          !isLoadingOlder
+        ) {
+          onLoadOlder?.();
+        }
+      }}
     >
+      {hasOlder ? (
+        <button
+          type="button"
+          className="load-older-transcript"
+          disabled={isLoadingOlder}
+          onClick={onLoadOlder}
+        >
+          {isLoadingOlder
+            ? t("virtualMessageList.loadingEarlier")
+            : t("virtualMessageList.loadEarlier")}
+        </button>
+      ) : null}
       <div
         style={{
           height: `${totalSize}px`,

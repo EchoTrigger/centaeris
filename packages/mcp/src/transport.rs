@@ -294,6 +294,36 @@ mod tests {
     use tokio::io::AsyncReadExt;
 
     #[tokio::test]
+    async fn mcp_http_client_routes_socks5h_proxy_scheme_to_connector() {
+        use std::error::Error as _;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind unused proxy port");
+        let proxy_address = listener.local_addr().expect("proxy address");
+        drop(listener);
+        let client = reqwest::Client::builder()
+            .proxy(
+                reqwest::Proxy::all(format!("socks5h://{proxy_address}"))
+                    .expect("accept socks5h proxy scheme"),
+            )
+            .build()
+            .expect("build MCP HTTP client with socks5h proxy");
+        let error = client
+            .get("http://example.invalid")
+            .send()
+            .await
+            .expect_err("closed local proxy must reject the connection");
+        let mut message = error.to_string();
+        let mut source = error.source();
+        while let Some(cause) = source {
+            message.push_str("; caused by: ");
+            message.push_str(&cause.to_string());
+            source = cause.source();
+        }
+
+        assert!(!message.contains("unsupported scheme socks5h"), "{message}");
+    }
+
+    #[tokio::test]
     async fn stdio_lines_bound_before_decode_and_reset_at_newline() {
         let bytes = vec![b'x'; MAX_TOOL_CONTRACT_BYTES];
         let mut reader = BoundedLines::new(bytes.as_slice());

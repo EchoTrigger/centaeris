@@ -216,14 +216,22 @@ pub(crate) fn rename(request: WorkspaceRenameRequest) -> Result<WorkspaceSnapsho
 }
 
 pub(crate) fn remove(request: WorkspaceRootRequest) -> Result<WorkspaceRemoveResponse, String> {
-    let root = resolve_cwd_from_request(request.root.as_str())?;
+    let root = catalog_workspace_root(request.root.as_str(), "workspaceRoot")
+        .map_err(|error| error.message())?;
     let root_key = normalized_workspace_root_key_from_path(root.as_path());
+    let root_identity = workspace_root_identity(root_key.as_str());
     let mut state = read_workspace_state()?;
     let previous_len = state.workspaces.len();
-    state
-        .workspaces
-        .retain(|item| !workspace_item_matches_root(item, root.as_path()));
-    if state.active_workspace_root.as_deref() == Some(root_key.as_str()) {
+    state.workspaces.retain(|item| {
+        item.root.as_deref().map(workspace_root_identity).as_deref() != Some(root_identity.as_str())
+    });
+    if state
+        .active_workspace_root
+        .as_deref()
+        .map(workspace_root_identity)
+        .as_deref()
+        == Some(root_identity.as_str())
+    {
         state.active_workspace_root = state
             .workspaces
             .iter()
@@ -428,10 +436,9 @@ fn validate_persisted_workspace_state(
                 "workspace catalog workspaces[{index}].root must be a string"
             ))
         })?;
-        let root =
-            canonical_workspace_root(raw_root, format!("workspaces[{index}].root").as_str())?;
+        let root = catalog_workspace_root(raw_root, format!("workspaces[{index}].root").as_str())?;
         let root_key = display_path(root.as_path());
-        if !roots.insert(root_key.clone()) {
+        if !roots.insert(workspace_root_identity(root_key.as_str())) {
             return Err(WorkspaceCatalogError::Corrupt(format!(
                 "workspace catalog contains duplicate root {root_key}"
             )));
@@ -468,9 +475,9 @@ fn validate_persisted_workspace_state(
         }
     }
     if let Some(raw_active_root) = state.active_workspace_root.as_deref() {
-        let active_root = canonical_workspace_root(raw_active_root, "activeWorkspaceRoot")?;
+        let active_root = catalog_workspace_root(raw_active_root, "activeWorkspaceRoot")?;
         let active_root_key = display_path(active_root.as_path());
-        if !roots.contains(active_root_key.as_str()) {
+        if !roots.contains(workspace_root_identity(active_root_key.as_str()).as_str()) {
             return Err(WorkspaceCatalogError::Corrupt(
                 "workspace catalog activeWorkspaceRoot is not in workspaces".to_string(),
             ));
@@ -480,7 +487,7 @@ fn validate_persisted_workspace_state(
     Ok(())
 }
 
-fn canonical_workspace_root(raw_root: &str, label: &str) -> Result<PathBuf, WorkspaceCatalogError> {
+fn catalog_workspace_root(raw_root: &str, label: &str) -> Result<PathBuf, WorkspaceCatalogError> {
     let trimmed = raw_root.trim();
     if trimmed.is_empty() {
         return Err(WorkspaceCatalogError::Corrupt(format!(
@@ -488,16 +495,30 @@ fn canonical_workspace_root(raw_root: &str, label: &str) -> Result<PathBuf, Work
         )));
     }
     let path = PathBuf::from(trimmed);
-    if !path.is_dir() {
+    if !path.is_absolute() {
         return Err(WorkspaceCatalogError::PathInvalid(format!(
-            "workspace catalog {label} is not an existing directory: {trimmed}"
+            "workspace catalog {label} is not an absolute path: {trimmed}"
         )));
     }
-    fs::canonicalize(path.as_path()).map_err(|error| {
-        WorkspaceCatalogError::PathInvalid(format!(
-            "canonicalize workspace catalog {label} failed: {error}"
-        ))
-    })
+    if path.is_dir() {
+        return fs::canonicalize(path.as_path()).map_err(|error| {
+            WorkspaceCatalogError::PathInvalid(format!(
+                "canonicalize workspace catalog {label} failed: {error}"
+            ))
+        });
+    }
+    Ok(path)
+}
+
+fn workspace_root_identity(root: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        root.to_lowercase()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        root.to_string()
+    }
 }
 
 fn validate_optional_non_empty(
@@ -1149,19 +1170,89 @@ mod tests {
     }
 
     #[test]
-    fn workspace_catalog_canonicalize_failure_is_not_resettable_corruption() {
+    fn missing_workspace_is_not_catalog_corruption() {
         let root = unique_temp_dir("catalog-invalid-root");
         let file_path = root.join("workspace.json");
         let missing_workspace = root.join("missing-workspace");
         write_workspace_fixture(file_path.as_path(), missing_workspace.as_path());
 
-        let error = read_persisted_workspace_state_at(file_path.as_path())
-            .expect_err("missing workspace rejected");
-        assert!(matches!(error, WorkspaceCatalogError::PathInvalid(_)));
+        let state = read_persisted_workspace_state_at(file_path.as_path())
+            .expect("missing workspace remains a valid catalog entry");
+        assert!(to_workspace_snapshot_response(false, &state)
+            .expect("workspace snapshot")
+            .workspaces
+            .is_empty());
         let reset_error = reset_corrupt_workspace_catalog_at(file_path.as_path())
-            .expect_err("path failure cannot be reset");
-        assert!(reset_error.starts_with(WORKSPACE_CATALOG_PATH_INVALID));
+            .expect_err("valid catalog cannot be reset as corrupt");
+        assert_eq!(
+            reset_error,
+            "workspace catalog reset is only allowed for JSON or schema corruption"
+        );
         assert!(file_path.is_file());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workspace_catalog_keeps_healthy_entries_when_a_saved_root_disappears() {
+        let root = unique_temp_dir("catalog-missing-entry");
+        let file_path = root.join("workspace.json");
+        let missing_workspace = root.join("missing-workspace");
+        let healthy_workspace = root.join("healthy-workspace");
+        fs::create_dir_all(missing_workspace.as_path()).expect("create missing workspace");
+        fs::create_dir_all(healthy_workspace.as_path()).expect("create healthy workspace");
+        fs::write(
+            file_path.as_path(),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "activeWorkspaceRoot": display_path(missing_workspace.as_path()),
+                "workspaces": [
+                    {
+                        "root": display_path(missing_workspace.as_path()),
+                        "displayName": "Missing",
+                        "activeSessionId": null,
+                        "activeSessionSelectedAtMs": null,
+                        "sortOrder": 0,
+                        "updatedAt": 1
+                    },
+                    {
+                        "root": display_path(healthy_workspace.as_path()),
+                        "displayName": "Healthy",
+                        "activeSessionId": null,
+                        "activeSessionSelectedAtMs": null,
+                        "sortOrder": 1,
+                        "updatedAt": 1
+                    }
+                ],
+                "updatedAt": 1
+            }))
+            .expect("encode workspace fixture"),
+        )
+        .expect("write workspace fixture");
+        fs::remove_dir_all(missing_workspace.as_path()).expect("delete saved workspace");
+
+        let state = read_persisted_workspace_state_at(file_path.as_path())
+            .expect("healthy workspace remains readable");
+        let snapshot = to_workspace_snapshot_response(false, &state).expect("workspace snapshot");
+
+        assert_eq!(
+            snapshot.active_workspace_root.as_deref(),
+            Some(
+                display_path(
+                    fs::canonicalize(healthy_workspace.as_path())
+                        .expect("canonical healthy workspace")
+                        .as_path(),
+                )
+                .as_str(),
+            )
+        );
+        assert_eq!(snapshot.workspaces.len(), 1);
+        assert_eq!(
+            snapshot.workspaces[0].root,
+            display_path(
+                fs::canonicalize(healthy_workspace.as_path())
+                    .expect("canonical healthy workspace")
+                    .as_path(),
+            )
+        );
         let _ = fs::remove_dir_all(root);
     }
 

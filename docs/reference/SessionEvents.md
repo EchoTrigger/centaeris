@@ -338,13 +338,12 @@ A durable replay item is:
 objects; `visibility` is `user` or `internal`. The complete allowed event-type
 set is owned by `packages/core/src/runtime/event.rs`.
 
-The decimal `session_event.cursor` is the zero-based index in that AgentRun's
-projected replay items. The replay request cursor is the same offset, not the
-Session record `sequence`. Omitted cursor starts at zero. The default page is
-200 items and the requested limit is clamped to 1 through 1000. A cursor beyond
-the replay tail fails. `nextCursor` is the next offset when more items remain;
-the full `session_projection.v1` reports the current replay length as each
-AgentRun's `nextCursor`.
+The decimal `session_event.cursor` is the stable zero-based position assigned
+while projecting an AgentRun's durable facts. It is not the Session record
+`sequence`. Transcript readers do not page these raw projections: they read the
+versioned `transcript.page.v1` display model and then apply
+`transcript.patch_set.v1` revisions. Active, uncommitted model text is recovered
+separately from the bounded live-text journal snapshot.
 
 Durable events are idempotent by `event.id`. Reconnect may replay an event a
 client already saw. Clients retain facts by identity and order; equal text in

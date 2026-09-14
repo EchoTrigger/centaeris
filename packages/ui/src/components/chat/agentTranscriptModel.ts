@@ -12,8 +12,25 @@ import type {
   TranscriptViewModel,
 } from "./types";
 
+export type TranscriptProjectionWork = {
+  waterfallFilterVisits: number;
+  inputChunkVisits: number;
+  displayEntryVisits: number;
+  sectionItemVisits: number;
+  taskSortComparisons: number;
+};
+
+export const createTranscriptProjectionWork = (): TranscriptProjectionWork => ({
+  waterfallFilterVisits: 0,
+  inputChunkVisits: 0,
+  displayEntryVisits: 0,
+  sectionItemVisits: 0,
+  taskSortComparisons: 0,
+});
+
 const buildAgentDisplayEntries = (
   chunks: AssistantExecutionTurn["chunks"],
+  work?: TranscriptProjectionWork,
 ): AgentDisplayEntry[] => {
   const entries: AgentDisplayEntry[] = [];
   let pendingTasks: TaskResult[] = [];
@@ -31,6 +48,7 @@ const buildAgentDisplayEntries = (
   };
 
   for (const chunk of chunks) {
+    if (work) work.inputChunkVisits += 1;
     if (chunk.kind === "task") {
       pendingTasks.push(chunk.task);
       continue;
@@ -85,6 +103,7 @@ const buildToolActivityItem = (
 
 const buildProcessSections = (
   items: TranscriptItem[],
+  work?: TranscriptProjectionWork,
 ): TranscriptProcessSection[] => {
   const sections: TranscriptProcessSection[] = [];
   let current: TranscriptProcessSection | null = null;
@@ -100,6 +119,7 @@ const buildProcessSections = (
   };
 
   for (const item of items) {
+    if (work) work.sectionItemVisits += 1;
     if (item.kind === "assistantText") {
       flushCurrent();
       current = {
@@ -124,12 +144,15 @@ const buildProcessSections = (
 
 export const buildTranscriptProcessViewModel = (
   turn: Pick<AssistantExecutionTurn, "chunks">,
+  work?: TranscriptProjectionWork,
 ): Pick<TranscriptViewModel, "processItems" | "processSections"> => {
-  const waterfallChunks = turn.chunks.filter(
-    (chunk) => getChunkWaterfallSection(chunk) !== "final",
-  );
+  const waterfallChunks = turn.chunks.filter((chunk) => {
+    if (work) work.waterfallFilterVisits += 1;
+    return getChunkWaterfallSection(chunk) !== "final";
+  });
   const processItems: TranscriptItem[] = [];
-  for (const entry of buildAgentDisplayEntries(waterfallChunks)) {
+  for (const entry of buildAgentDisplayEntries(waterfallChunks, work)) {
+    if (work) work.displayEntryVisits += 1;
     if (entry.kind === "reasoning") {
       processItems.push(entry.chunk);
       continue;
@@ -160,6 +183,7 @@ export const buildTranscriptProcessViewModel = (
       continue;
     }
     const orderedTasks = [...entry.tasks].sort((left, right) => {
+      if (work) work.taskSortComparisons += 1;
       const leftOrder = getChunkWaterfallOrder({
         id: left.id,
         kind: "task",
@@ -176,7 +200,7 @@ export const buildTranscriptProcessViewModel = (
   }
   return {
     processItems,
-    processSections: buildProcessSections(processItems),
+    processSections: buildProcessSections(processItems, work),
   };
 };
 

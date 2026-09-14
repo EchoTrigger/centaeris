@@ -107,24 +107,148 @@ export type SessionData = {
   messages?: PersistedChatMessage[];
 };
 
-export type SessionAgentRunReplayProjection = {
-  agentRunId: string;
-  sessionId: string;
-  turnId: string;
-  status: AgentRunStatus;
-  startedAtMs: number;
-  updatedAtMs: number;
-  completedAtMs?: number | null;
-  nextCursor: number;
-  items: AgentStreamPayload[];
+export type TranscriptBlockStatusV1 =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "interrupted";
+
+export const TRANSCRIPT_PROJECTION_VERSION_V1 = "transcript.projection.v1";
+
+export type TranscriptContentRefV1 = {
+  refId: string;
+  revision: string;
+  byteLength: string;
 };
 
-export type SessionProjectionData = {
-  schemaVersion: "session_projection.v1";
-  session: SessionData;
-  agentRuns: AgentRunSummary[];
-  agentRunReplays: SessionAgentRunReplayProjection[];
-  activeAgentRunId?: string | null;
+export type TranscriptTextContentV1 =
+  | { inlineContent: string; sourceRef?: never }
+  | { inlineContent?: never; sourceRef: TranscriptContentRefV1 };
+
+export type TranscriptBlockBodyV1 =
+  | { kind: "userText"; content: TranscriptTextContentV1 }
+  | {
+      kind: "assistantText";
+      content: TranscriptTextContentV1;
+      status: TranscriptBlockStatusV1;
+    }
+  | {
+      kind: "reasoning";
+      requestId: string;
+      content: TranscriptTextContentV1;
+      status: TranscriptBlockStatusV1;
+    }
+  | {
+      kind: "tool";
+      callId: string;
+      toolName: string;
+      status: TranscriptBlockStatusV1;
+      summary: string | null;
+      summaryRef: TranscriptContentRefV1 | null;
+      outputRef: TranscriptContentRefV1 | null;
+    }
+  | {
+      kind: "notice";
+      noticeType: string;
+      content: TranscriptTextContentV1;
+      status: TranscriptBlockStatusV1;
+    };
+
+export type TranscriptBlockV1 = {
+  blockId: string;
+  blockRevision: string;
+  orderKey: {
+    sourceSequence: string;
+    ordinal: number;
+  };
+  body: TranscriptBlockBodyV1;
+};
+
+export type TranscriptPageV1 = {
+  schema: "transcript.page.v1";
+  sessionId: string;
+  projectionVersion: "transcript.projection.v1";
+  projectionGeneration: string;
+  sourceHighWater: string;
+  blocks: TranscriptBlockV1[];
+  olderCursor: string | null;
+  hasOlder: boolean;
+  resumeCursors: Array<{ streamId: string; cursor: string }>;
+};
+
+export type TranscriptPatchV1 = {
+  schema: "transcript.patch.v1";
+  sessionId: string;
+  projectionVersion: "transcript.projection.v1";
+  projectionGeneration: string;
+  sourceHighWater: string;
+  streamId: string;
+  appliedCursor: string;
+  upserts: TranscriptBlockV1[];
+  removals: Array<{ blockId: string; blockRevision: string }>;
+};
+
+export type TranscriptPageRpcRequestV1 = {
+  sessionId: string;
+  projectionGeneration?: string;
+  sourceHighWater?: string;
+  olderCursor?: string;
+};
+
+export type TranscriptPageRpcResponseV1 = {
+  schema: "transcript.page.rpc.v1";
+  projectionVersion: "transcript.projection.v1";
+  projectionGeneration: string;
+  projectedSourceHighWater: string;
+  targetSourceHighWater: string;
+  targetReached: boolean;
+  page: TranscriptPageV1 | null;
+};
+
+export type TranscriptPatchRpcRequestV1 = {
+  sessionId: string;
+  projectionGeneration?: string;
+  afterSourceHighWater: string;
+  throughSourceHighWater?: string;
+};
+
+export type TranscriptPatchRpcResponseV1 = {
+  schema: "transcript.patch.rpc.v1";
+  projectionVersion: "transcript.projection.v1";
+  projectionGeneration: string;
+  projectedSourceHighWater: string;
+  targetSourceHighWater: string;
+  targetReached: boolean;
+  patches: TranscriptPatchV1[];
+  nextSourceHighWater: string;
+  hasMore: boolean;
+};
+
+export type TranscriptContentRangeRequestV1 = {
+  schema: "transcript.content.range.read.v1";
+  sessionId: string;
+  projectionVersion: "transcript.projection.v1";
+  projectionGeneration: string;
+  refId: string;
+  revision: string;
+  byteLength: string;
+  offset: string;
+  maxBytes: number;
+};
+
+export type TranscriptContentRangeV1 = {
+  schema: "transcript.content.range.v1";
+  sessionId: string;
+  projectionVersion: "transcript.projection.v1";
+  projectionGeneration: string;
+  refId: string;
+  revision: string;
+  byteLength: string;
+  startOffset: string;
+  endOffset: string;
+  content: string;
+  hasMore: boolean;
 };
 
 export type PendingQuestionSummary = {
@@ -195,18 +319,13 @@ export type AgentRunListResponse = {
   agentRuns: AgentRunSummary[];
 };
 
-export type AgentRunStreamReplayRequest = {
+export type AgentRunLiveSnapshotRequest = {
   agentRunId: string;
-  cursor?: number;
-  limit?: number;
 };
 
-export type AgentRunStreamReplayResponse = {
+export type AgentRunLiveSnapshotResponse = {
   liveSnapshot?: AgentStreamPayload | null;
   agentRunId: string;
-  cwd?: string | null;
-  items: AgentStreamPayload[];
-  nextCursor?: number | null;
 };
 
 export type AgentRunAttachRequest = {
@@ -1090,29 +1209,36 @@ export const listSessions = async (): Promise<SessionItem[]> => {
   });
 };
 
-export const getSession = async (
-  sessionId: string,
-): Promise<SessionData> => {
+export const getTranscriptPage = async (
+  request: TranscriptPageRpcRequestV1,
+): Promise<TranscriptPageRpcResponseV1> => {
   if (!isNativeHostRuntime()) {
-    throw new Error("native session is desktop-only in Rust mainline");
+    throw new Error("transcript pages are desktop-only in Rust mainline");
   }
-  return invokeHost<SessionData>("session/load", {
-    request: {
-      sessionId,
-    },
+  return invokeHost<TranscriptPageRpcResponseV1>("transcript/page", {
+    request,
   });
 };
 
-export const getSessionProjection = async (
-  sessionId: string,
-): Promise<SessionProjectionData> => {
+export const getTranscriptPatches = async (
+  request: TranscriptPatchRpcRequestV1,
+): Promise<TranscriptPatchRpcResponseV1> => {
   if (!isNativeHostRuntime()) {
-    throw new Error("native session projection is desktop-only in Rust mainline");
+    throw new Error("transcript patches are desktop-only in Rust mainline");
   }
-  return invokeHost<SessionProjectionData>("_centaeris/session/project", {
-    request: {
-      sessionId,
-    },
+  return invokeHost<TranscriptPatchRpcResponseV1>("transcript/patches", {
+    request,
+  });
+};
+
+export const getTranscriptContentRange = async (
+  request: TranscriptContentRangeRequestV1,
+): Promise<TranscriptContentRangeV1> => {
+  if (!isNativeHostRuntime()) {
+    throw new Error("transcript content ranges are desktop-only in Rust mainline");
+  }
+  return invokeHost<TranscriptContentRangeV1>("transcript/content-range", {
+    request,
   });
 };
 
@@ -1266,16 +1392,16 @@ export const listAgentRuns = async (
   });
 };
 
-export const replayAgentRunStream = async (
-  request: AgentRunStreamReplayRequest,
-): Promise<AgentRunStreamReplayResponse> => {
+export const getAgentRunLiveSnapshot = async (
+  request: AgentRunLiveSnapshotRequest,
+): Promise<AgentRunLiveSnapshotResponse> => {
   if (!isNativeHostRuntime()) {
     throw new Error(
-      "agent run stream replay is desktop-only in Rust mainline",
+      "agent run live snapshot is desktop-only in Rust mainline",
     );
   }
-  return invokeHost<AgentRunStreamReplayResponse>(
-    "_centaeris/session/agent-runs/replay",
+  return invokeHost<AgentRunLiveSnapshotResponse>(
+    "_centaeris/session/agent-runs/live-snapshot",
     {
       request,
     },
@@ -1832,8 +1958,8 @@ export const openAgentStream = (
     .then(async () => {
       if (closed) return;
       onOpen?.();
-      const replay = await replayAgentRunStream({ agentRunId: normalizedAgentRunId, limit: 1 });
-      if (!closed && replay.liveSnapshot) onMessage(replay.liveSnapshot);
+      const snapshot = await getAgentRunLiveSnapshot({ agentRunId: normalizedAgentRunId });
+      if (!closed && snapshot.liveSnapshot) onMessage(snapshot.liveSnapshot);
     })
     .catch((error: unknown) => {
       onError?.(

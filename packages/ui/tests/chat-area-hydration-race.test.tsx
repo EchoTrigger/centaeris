@@ -2,10 +2,10 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type {
   AgentRunListResponse,
+  AgentRunLiveSnapshotResponse,
   AgentRunSummary,
   AgentRuntimeConfig,
   AgentStreamPayload,
-  AgentRunStreamReplayResponse,
   SessionData,
 } from "../src/lib/chatBridge";
 import type { SessionHydrationSnapshot } from "../src/components/chat/types";
@@ -28,8 +28,8 @@ const harness = vi.hoisted(() => ({
   streams: [] as CapturedStream[],
   getSession: vi.fn<(sessionId: string) => Promise<SessionData>>(),
   listAgentRuns: vi.fn<() => Promise<AgentRunListResponse>>(),
-  replayAgentRunStream:
-    vi.fn<() => Promise<AgentRunStreamReplayResponse>>(),
+  getAgentRunLiveSnapshot:
+    vi.fn<() => Promise<AgentRunLiveSnapshotResponse>>(),
 }));
 
 const runtimeConfig: AgentRuntimeConfig = {
@@ -49,7 +49,6 @@ vi.mock("../src/lib/chatBridge", () => ({
   getAgentRuntimeConfig: vi.fn(async () => runtimeConfig),
   getAgentState: vi.fn(),
   getSession: harness.getSession,
-  getSessionProjection: vi.fn(),
   listAgentRuns: harness.listAgentRuns,
   openAgentStream: vi.fn(
     (
@@ -61,7 +60,7 @@ vi.mock("../src/lib/chatBridge", () => ({
       return { close };
     },
   ),
-  replayAgentRunStream: harness.replayAgentRunStream,
+  getAgentRunLiveSnapshot: harness.getAgentRunLiveSnapshot,
   sendAgentInput: vi.fn(),
   sendAgentSupplement: vi.fn(),
   setAgentRuntimeConfig: vi.fn(),
@@ -169,7 +168,7 @@ beforeEach(() => {
   harness.streams.length = 0;
   harness.getSession.mockReset();
   harness.listAgentRuns.mockReset();
-  harness.replayAgentRunStream.mockReset();
+  harness.getAgentRunLiveSnapshot.mockReset();
   harness.listAgentRuns.mockResolvedValue({ agentRuns: [] });
   sessionViewCacheStore.clear();
   useChatViewStore.getState().clear();
@@ -394,15 +393,8 @@ test("a seed replay event is not applied again when the live stream repeats it",
   await act(async () => renderer!.unmount());
 });
 
-test("a cached refresh resolving after a session switch cannot overwrite the visible view", async () => {
+test("a cached page refresh resolving after a session switch cannot overwrite the visible view", async () => {
   let renderer: ReactTestRenderer | null = null;
-  let resolveCachedSession: (value: SessionData) => void = () => {
-    throw new Error("cached session request was not started");
-  };
-  const cachedSession = new Promise<SessionData>((resolve) => {
-    resolveCachedSession = resolve;
-  });
-  harness.getSession.mockReturnValue(cachedSession);
   sessionViewCacheStore.write({
     sessionId: "cached",
     snapshot: {
@@ -426,6 +418,9 @@ test("a cached refresh resolving after a session switch cannot overwrite the vis
     );
   });
   expect(useChatViewStore.getState().messageIds).toEqual(["message-cached"]);
+  const cachedRequest = getHydrationRequest("cached");
+  expect(harness.getSession).not.toHaveBeenCalled();
+  expect(harness.getAgentRunLiveSnapshot).not.toHaveBeenCalled();
 
   await act(async () => {
     renderer!.update(
@@ -444,12 +439,8 @@ test("a cached refresh resolving after a session switch cannot overwrite the vis
   });
 
   await act(async () => {
-    resolveCachedSession({
-      id: "cached",
-      sessionKind: "main",
-      messages: [],
-    });
-    await cachedSession;
+    cachedRequest.resolve(makeSnapshot("cached-refresh"));
+    await cachedRequest.promise;
     await Promise.resolve();
   });
 
@@ -461,22 +452,10 @@ test("a cached refresh resolving after a session switch cannot overwrite the vis
   await act(async () => renderer!.unmount());
 });
 
-test("a cached snapshot without tool process data forces a full replay", async () => {
+test("a cached snapshot is refreshed through the bounded transcript page path", async () => {
   let renderer: ReactTestRenderer | null = null;
   const sessionId = "missing-tools";
   const agentRunId = "run-missing-tools";
-  harness.getSession.mockResolvedValue({
-    id: sessionId,
-    sessionKind: "main",
-    messages: [
-      {
-        id: `message-${sessionId}`,
-        role: "user",
-        content: `from ${sessionId}`,
-        createdAtMs: 1,
-      },
-    ],
-  });
   harness.listAgentRuns.mockResolvedValue({
     agentRuns: [makeAgentRun(sessionId, agentRunId)],
   });
@@ -521,7 +500,8 @@ test("a cached snapshot without tool process data forces a full replay", async (
     await Promise.resolve();
   });
 
-  expect(harness.replayAgentRunStream).not.toHaveBeenCalled();
+  expect(harness.getAgentRunLiveSnapshot).not.toHaveBeenCalled();
+  expect(harness.getSession).not.toHaveBeenCalled();
   expect(useChatViewStore.getState().messageIds).toEqual([
     "message-full-replay",
   ]);
@@ -529,161 +509,5 @@ test("a cached snapshot without tool process data forces a full replay", async (
     sessionViewCacheStore.get(sessionId)?.snapshot.messages.map(({ id }) => id),
   ).toEqual(["message-full-replay"]);
 
-  await act(async () => renderer?.unmount());
-});
-
-test("switching sessions during a delta replay batch prevents late cache patch and stream attach", async () => {
-  let renderer: ReactTestRenderer | null = null;
-  const sessionId = "batched";
-  const agentRunId = "run-batched";
-  const assistantMessageId = "assistant-batched";
-  const scheduledFrames: FrameRequestCallback[] = [];
-  Object.defineProperty(globalThis, "window", {
-    configurable: true,
-    value: {
-      localStorage: {
-        getItem: vi.fn(() => null),
-        setItem: vi.fn(),
-      },
-      requestAnimationFrame: vi.fn((callback: FrameRequestCallback) => {
-        scheduledFrames.push(callback);
-        return scheduledFrames.length;
-      }),
-      cancelAnimationFrame: vi.fn(),
-      setTimeout: globalThis.setTimeout.bind(globalThis),
-      clearTimeout: globalThis.clearTimeout.bind(globalThis),
-    },
-  });
-  harness.getSession.mockResolvedValue({
-    id: sessionId,
-    sessionKind: "main",
-    messages: [
-      {
-        id: `message-${sessionId}`,
-        role: "user",
-        content: `from ${sessionId}`,
-        createdAtMs: 1,
-      },
-      {
-        id: assistantMessageId,
-        role: "assistant",
-        content: "cached answer",
-        status: "running",
-        createdAtMs: 1,
-        agentRunId,
-        turnId: `turn-${agentRunId}`,
-      },
-    ],
-  });
-  harness.listAgentRuns.mockResolvedValue({
-    agentRuns: [makeAgentRun(sessionId, agentRunId, "running")],
-  });
-  const deltaItems: AgentStreamPayload[] = Array.from(
-    { length: 24 },
-    (_, cursor) => ({
-      type: "session_event",
-      agentRunId,
-      cursor,
-      event: {
-        id: `delta-${cursor}`,
-        type: "ModelTextDelta",
-        at: cursor + 10,
-        sessionId,
-        turnId: `turn-${agentRunId}`,
-        taskId: agentRunId,
-        parentTaskId: `turn-${agentRunId}`,
-        visibility: "user",
-        payload: { delta: String(cursor) },
-      },
-    }),
-  );
-  harness.replayAgentRunStream.mockResolvedValue({
-    agentRunId,
-    items: deltaItems,
-    nextCursor: null,
-  });
-  sessionViewCacheStore.write({
-    sessionId,
-    snapshot: {
-      messages: [
-        ...makeSnapshot(sessionId).messages,
-        {
-          id: assistantMessageId,
-          role: "assistant",
-          turn: {
-            id: `turn-${agentRunId}`,
-            agentRunId,
-            chunks: [
-              {
-                id: "cached-task",
-                kind: "task",
-                task: {
-                  id: "cached-task",
-                  title: "Cached tool",
-                  summary: "done",
-                  status: "done",
-                  provider: "tool",
-                },
-              },
-            ],
-            finalAnswer: "cached answer",
-            isStreaming: true,
-            startedAtMs: 1,
-          },
-        },
-      ],
-      contextUsage: null,
-      autoContinueAfterResumeWait: false,
-      pendingQuestion: null,
-      pendingQuestionError: "",
-      activeReplay: { messageId: assistantMessageId, agentRunId },
-    },
-    replayCursorsByAgentRunId: { [agentRunId]: 0 },
-    verifiedReplayAgentRunIds: [agentRunId],
-  });
-  const patchReplayCursors = vi.spyOn(
-    sessionViewCacheStore,
-    "patchReplayCursors",
-  );
-
-  await act(async () => {
-    renderer = create(
-      <ChatArea
-        currentSession={makeSession(sessionId)}
-        currentSessionId={sessionId}
-        workspaceName="Workspace"
-        workspaceRoot="D:\\Workspace"
-      />,
-    );
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-  expect(harness.replayAgentRunStream).toHaveBeenCalledTimes(1);
-  const patchCountAtBatchBoundary = patchReplayCursors.mock.calls.length;
-
-  await act(async () => {
-    renderer?.update(
-      <ChatArea
-        currentSession={makeSession("new")}
-        currentSessionId="new"
-        workspaceName="Workspace"
-        workspaceRoot="D:\\Workspace"
-      />,
-    );
-  });
-  await act(async () => {
-    for (const callback of scheduledFrames.splice(0)) {
-      callback(0);
-    }
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-
-  expect(patchReplayCursors).toHaveBeenCalledTimes(patchCountAtBatchBoundary);
-  expect(harness.streams).toHaveLength(0);
-  expect(useChatViewStore.getState().messageIds).toEqual([]);
-
-  patchReplayCursors.mockRestore();
   await act(async () => renderer?.unmount());
 });

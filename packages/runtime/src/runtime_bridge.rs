@@ -216,7 +216,10 @@ mod tests {
         );
         assert_eq!(response.profile_id, "profile-identity");
         assert_eq!(response.store_id, "store-identity");
-        assert_eq!(response.store_schema_version, 1);
+        assert_eq!(
+            response.store_schema_version,
+            crate::sqlite_store::STORE_SCHEMA_VERSION
+        );
         assert_eq!(response.layout_schema_version, 1);
     }
 

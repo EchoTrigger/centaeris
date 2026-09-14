@@ -935,9 +935,8 @@ pub(crate) async fn compact_context(
     {
         return Err("cannot compact context while an AgentRun is active".to_string());
     }
-    let projection = message_log::project_session_log(session_id.as_str())?;
-    let agent_run_id = projection
-        .agent_runs
+    let agent_runs = message_log::project_session_agent_runs(session_id.as_str())?;
+    let agent_run_id = agent_runs
         .iter()
         .max_by_key(|run| run.updated_at_ms)
         .map(|run| run.agent_run_id.clone())
@@ -2918,8 +2917,9 @@ fn materialize_spawned_agent_session_blocking(
             cwd.as_str(),
             readiness.at_ms,
         )?;
-        let projection = message_log::project_session_log(readiness.child_session_id.as_str())?;
-        if let Some(agent_run) = projection.agent_runs.first() {
+        let agent_runs =
+            message_log::project_session_agent_runs(readiness.child_session_id.as_str())?;
+        if let Some(agent_run) = agent_runs.first() {
             if agent_run.agent_run_id == readiness.runtime_job_id {
                 return Ok(());
             }
@@ -4127,11 +4127,11 @@ mod tests {
             {
                 return Err("child session binding mismatch".to_string());
             }
-            let projection = message_log::project_session_log("session-agent-research")?;
-            if projection.agent_runs.len() != 1
-                || projection.agent_runs[0].status != "running"
-                || projection.agent_runs[0].turn_id != "turn-child"
-                || projection.messages.len() != 1
+            let agent_runs = message_log::project_session_agent_runs("session-agent-research")?;
+            if agent_runs.len() != 1
+                || agent_runs[0].status != "running"
+                || agent_runs[0].turn_id != "turn-child"
+                || message_log::project_chat_messages("session-agent-research")?.len() != 1
             {
                 return Err("child transcript was not materialized once".to_string());
             }
@@ -4139,8 +4139,10 @@ mod tests {
                 "session-agent-research",
                 "subagent.run:research",
             )?;
-            let running = message_log::project_session_log("session-agent-research")?;
-            if running.agent_runs[0].status != "running" || running.messages.len() != 1 {
+            let running = message_log::project_session_agent_runs("session-agent-research")?;
+            if running[0].status != "running"
+                || message_log::project_chat_messages("session-agent-research")?.len() != 1
+            {
                 return Err("running transition duplicated the child transcript".to_string());
             }
             Ok::<(), String>(())

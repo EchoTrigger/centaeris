@@ -53,10 +53,8 @@ pub(crate) struct AgentRunListRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct AgentRunStreamReplayRequest {
+pub(crate) struct AgentRunLiveSnapshotRequest {
     pub(crate) agent_run_id: String,
-    pub(crate) cursor: Option<u64>,
-    pub(crate) limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,12 +114,9 @@ pub(crate) struct AgentRunListResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct AgentRunStreamReplayResponse {
+pub(crate) struct AgentRunLiveSnapshotResponse {
     pub(crate) live_snapshot: Option<serde_json::Value>,
     pub(crate) agent_run_id: String,
-    pub(crate) cwd: Option<String>,
-    pub(crate) items: Vec<serde_json::Value>,
-    pub(crate) next_cursor: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -199,40 +194,28 @@ pub(crate) fn idle_session_ids() -> Result<HashSet<String>, String> {
     Ok(session_ids)
 }
 
-pub(crate) fn replay(
-    request: AgentRunStreamReplayRequest,
-) -> Result<AgentRunStreamReplayResponse, String> {
-    let replay = message_log::replay_agent_run(
-        request.agent_run_id.as_str(),
-        request.cursor,
-        request.limit,
-    )?;
-    Ok(AgentRunStreamReplayResponse {
-        live_snapshot: if find_agent_run(Some(request.agent_run_id.as_str()), None)?
-            .is_some_and(|run| !is_agent_run_terminal(run.status.as_str()))
-        {
-            crate::runtime_server::LiveTextJournal::read_snapshot(
-                crate::user_data_layout::runtime_live_text_journal_dir_path().as_path(),
-                request.agent_run_id.as_str(),
-            )?
-            .filter(|snapshot| snapshot.revision > 0)
-            .map(|snapshot| {
-                centaeris_core::runtime::projection::project_live_model_snapshot(
-                    snapshot.key.session_id,
-                    snapshot.key.turn_id,
-                    snapshot.revision,
-                    snapshot.content,
-                    snapshot.reasoning,
-                )
-            })
-            .transpose()?
-        } else {
-            None
-        },
-        agent_run_id: replay.agent_run_id,
-        cwd: replay.cwd,
-        items: replay.items,
-        next_cursor: replay.next_cursor,
+pub(crate) fn live_snapshot(
+    request: AgentRunLiveSnapshotRequest,
+) -> Result<AgentRunLiveSnapshotResponse, String> {
+    let agent_run_id = required_string(request.agent_run_id.as_str(), "agentRunId")?;
+    let live_snapshot = crate::runtime_server::LiveTextJournal::read_snapshot(
+        crate::user_data_layout::runtime_live_text_journal_dir_path().as_path(),
+        agent_run_id.as_str(),
+    )?
+    .filter(|snapshot| snapshot.revision > 0)
+    .map(|snapshot| {
+        centaeris_core::runtime::projection::project_live_model_snapshot(
+            snapshot.key.session_id,
+            snapshot.key.turn_id,
+            snapshot.revision,
+            snapshot.content,
+            snapshot.reasoning,
+        )
+    })
+    .transpose()?;
+    Ok(AgentRunLiveSnapshotResponse {
+        live_snapshot,
+        agent_run_id,
     })
 }
 
@@ -726,7 +709,72 @@ fn required_string(raw: &str, field_name: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime_server::{LiveTextJournal, LiveTextJournalKey, LiveTextOperation};
     use crate::sessions;
+
+    #[test]
+    fn live_snapshot_reads_the_journal_without_opening_session_history() {
+        let guard = message_log::test_env_mutex()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_root = std::env::temp_dir().join(format!(
+            "centaeris-agent-run-live-snapshot-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let previous_data_dir = std::env::var_os("CENTAERIS_DESKTOP_DATA_DIR");
+        let previous_log_dir = std::env::var_os("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR");
+        std::env::set_var("CENTAERIS_DESKTOP_DATA_DIR", &temp_root);
+        std::env::set_var(
+            "CENTAERIS_MESSAGE_LOG_SESSIONS_DIR",
+            temp_root.join("session-history-must-not-be-read"),
+        );
+        let result = (|| {
+            let mut journal = LiveTextJournal::create(
+                crate::user_data_layout::runtime_live_text_journal_dir_path().as_path(),
+                LiveTextJournalKey {
+                    session_id: "session-live".to_string(),
+                    turn_id: "turn-live".to_string(),
+                    agent_run_id: "agent-run-live".to_string(),
+                },
+            )?;
+            journal.append(&[
+                LiveTextOperation::Replace {
+                    text: "bounded live tail".to_string(),
+                },
+                LiveTextOperation::Revision {
+                    text: "1".to_string(),
+                },
+            ])?;
+            let response = live_snapshot(AgentRunLiveSnapshotRequest {
+                agent_run_id: "agent-run-live".to_string(),
+            })?;
+            if response.agent_run_id != "agent-run-live"
+                || response
+                    .live_snapshot
+                    .as_ref()
+                    .and_then(|value| value.pointer("/event/payload/text"))
+                    .and_then(serde_json::Value::as_str)
+                    != Some("bounded live tail")
+            {
+                return Err("live snapshot response mismatch".to_string());
+            }
+            Ok::<(), String>(())
+        })();
+        match previous_data_dir {
+            Some(value) => std::env::set_var("CENTAERIS_DESKTOP_DATA_DIR", value),
+            None => std::env::remove_var("CENTAERIS_DESKTOP_DATA_DIR"),
+        }
+        match previous_log_dir {
+            Some(value) => std::env::set_var("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR", value),
+            None => std::env::remove_var("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR"),
+        }
+        std::fs::remove_dir_all(&temp_root).ok();
+        drop(guard);
+        result.expect("live snapshot should not require session history");
+    }
 
     #[test]
     fn viewer_registry_marks_detached_terminal_agent_run_unread_and_attach_clears_it() {

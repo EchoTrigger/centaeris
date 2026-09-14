@@ -12,6 +12,7 @@ pub mod reliability;
 pub mod state;
 pub mod store;
 pub mod supplement;
+pub mod transcript;
 
 use crate::execution::MAX_PUBLISHED_ARTIFACT_BYTES;
 use crate::model::prepared_prompt::{ModelMessageRoleV1, ModelMessageV1, PREPARED_PROMPT_SCHEMA};
@@ -2619,53 +2620,105 @@ fn active_tombstone_targets(
     expected_session_id: &str,
     events: &[&SessionLogRecord],
 ) -> Result<HashSet<String>, String> {
-    let mut prior_types = HashMap::<String, SessionRecordType>::new();
-    let mut targets = HashSet::new();
+    let mut ledger = ActiveTombstoneLedger::default();
     for event in events {
+        ledger.apply(expected_session_id, event)?;
+    }
+    Ok(ledger.targets)
+}
+
+#[derive(Default)]
+pub(crate) struct ActiveTombstoneLedger {
+    prior_types: HashMap<String, SessionRecordType>,
+    targets: HashSet<String>,
+}
+
+impl ActiveTombstoneLedger {
+    pub(crate) fn apply(
+        &mut self,
+        expected_session_id: &str,
+        event: &SessionLogRecord,
+    ) -> Result<(), String> {
         validate_event_shape(event)?;
-        if event.session_id != expected_session_id {
+        let tombstone_targets = if event.event_type == SessionRecordType::Tombstone {
+            required_payload_array(payload_object(event)?, "targetEventIds", event)?
+                .iter()
+                .map(|target| {
+                    target.as_str().map(str::to_string).ok_or_else(|| {
+                        format!(
+                            "session.event.v1 {} payload.targetEventIds must contain strings",
+                            event.event_id
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
+        self.apply_fact(
+            expected_session_id,
+            event.event_id.as_str(),
+            event.session_id.as_str(),
+            event.event_type,
+            tombstone_targets.as_slice(),
+        )
+    }
+
+    pub(crate) fn apply_fact(
+        &mut self,
+        expected_session_id: &str,
+        event_id: &str,
+        session_id: &str,
+        event_type: SessionRecordType,
+        tombstone_targets: &[String],
+    ) -> Result<(), String> {
+        if session_id != expected_session_id {
             return Err(format!(
                 "session.event.v1 cross-session event {} belongs to {} but expected {}",
-                event.event_id, event.session_id, expected_session_id
+                event_id, session_id, expected_session_id
             ));
         }
-        if prior_types.contains_key(event.event_id.as_str()) {
-            return Err(format!(
-                "session.event.v1 duplicate eventId: {}",
-                event.event_id
-            ));
+        if self.prior_types.contains_key(event_id) {
+            return Err(format!("session.event.v1 duplicate eventId: {event_id}"));
         }
-        if event.event_type == SessionRecordType::Tombstone {
-            for target in required_payload_array(payload_object(event)?, "targetEventIds", event)? {
-                let target = target.as_str().ok_or_else(|| {
-                    format!(
-                        "session.event.v1 {} payload.targetEventIds must contain strings",
-                        event.event_id
-                    )
-                })?;
-                let target_type = prior_types.get(target).ok_or_else(|| {
+        if event_type == SessionRecordType::Tombstone {
+            if tombstone_targets.is_empty() {
+                return Err(format!(
+                    "session.event.v1 {event_id} tombstone targets are required"
+                ));
+            }
+            for target in tombstone_targets {
+                let target_type = self.prior_types.get(target).ok_or_else(|| {
                     format!(
                         "session.event.v1 {} tombstone target must reference a prior event: {}",
-                        event.event_id, target
+                        event_id, target
                     )
                 })?;
                 if *target_type == SessionRecordType::Tombstone {
                     return Err(format!(
                         "session.event.v1 {} must not tombstone another tombstone",
-                        event.event_id
+                        event_id
                     ));
                 }
-                if !targets.insert(target.to_string()) {
+                if !self.targets.insert(target.to_string()) {
                     return Err(format!(
                         "session.event.v1 {} tombstone target is already inactive: {}",
-                        event.event_id, target
+                        event_id, target
                     ));
                 }
             }
+        } else if !tombstone_targets.is_empty() {
+            return Err(format!(
+                "session.event.v1 {event_id} non-tombstone must not carry tombstone targets"
+            ));
         }
-        prior_types.insert(event.event_id.clone(), event.event_type);
+        self.prior_types.insert(event_id.to_string(), event_type);
+        Ok(())
     }
-    Ok(targets)
+
+    pub(crate) fn is_inactive(&self, event_id: &str) -> bool {
+        self.targets.contains(event_id)
+    }
 }
 
 /// 增量 reduce：把单条事件应用到既有 projection（供 append 增量校验复用）。
