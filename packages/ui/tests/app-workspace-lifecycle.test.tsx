@@ -586,6 +586,30 @@ test("workspace catalog failures stay distinct from ordinary host errors", async
   await act(async () => renderer?.unmount());
 });
 
+test("a conversation remains accessible when its workspace directory is unavailable", async () => {
+  const emptySnapshot: WorkspaceSnapshot = {
+    activeWorkspaceRoot: null,
+    workspaces: [],
+    cancelled: false,
+  };
+  harness.initialSnapshot = emptySnapshot;
+  harness.workspaceInfoResult = emptySnapshot;
+  let renderer: ReactTestRenderer | null = null;
+  await act(async () => {
+    renderer = create(<App />);
+  });
+  expect(harness.chatProps).toBeNull();
+
+  await act(async () => {
+    getSidebarProps().onSelectSession("external");
+    await Promise.resolve();
+  });
+
+  expect(getSidebarProps().currentSessionId).toBe("external");
+  expect(getChatProps().currentSessionId).toBe("external");
+  await act(async () => renderer?.unmount());
+});
+
 test("an old Git status cannot overwrite the newly selected workspace", async () => {
   harness.deferGitStatus = true;
   let renderer: ReactTestRenderer | null = null;
