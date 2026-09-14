@@ -72,6 +72,7 @@ macro_rules! runtime_commands {
             TranscriptProjection, "transcript/project", SharedRuntime, Read, SafeRetry, None;
             TranscriptPage, "transcript/page", SharedRuntime, Read, SafeRetry, None;
             TranscriptPatches, "transcript/patches", SharedRuntime, Read, SafeRetry, None;
+            TranscriptContentRange, "transcript/content-range", SharedRuntime, Read, SafeRetry, None;
             PluginCatalogState, "plugin/catalog_state", SharedRuntime, Read, SafeRetry, None;
             SkillSourceList, "skill/source/list", SharedRuntime, Read, SafeRetry, None;
             SkillSourceAdd, "skill/source/add", SharedRuntime, Creation, NoAutomaticRetry, Some("skill/source/list");

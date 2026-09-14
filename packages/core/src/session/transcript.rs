@@ -1,4 +1,5 @@
 mod checkpoint;
+mod content_range;
 mod contract;
 mod frontier;
 mod index;
@@ -8,6 +9,7 @@ mod store;
 mod view;
 
 pub use checkpoint::*;
+pub use content_range::*;
 pub use contract::*;
 pub use frontier::*;
 pub use index::*;

@@ -16,18 +16,359 @@ use centaeris_core::session::{
 };
 use centaeris_core::tool::layer::ToolExecutionResult;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Mutex,
+};
 use std::sync::{OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 mod observation_cas;
 
 static SESSION_LOG_LOCK: OnceLock<RwLock<()>> = OnceLock::new();
+static TOOL_OUTPUT_INDEX: OnceLock<RwLock<HashMap<String, ToolOutputIndex>>> = OnceLock::new();
+#[cfg(test)]
+static TOOL_OUTPUT_INDEX_BUILD_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SessionLogIdentity {
+    byte_length: u64,
+    modified_at: SystemTime,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ToolOutputStorage {
+    Inline {
+        record_offset: u64,
+        record_length: usize,
+    },
+    Spill {
+        path: PathBuf,
+        content_start: u64,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ToolOutputLocator {
+    byte_length: u64,
+    complete: bool,
+    storage: ToolOutputStorage,
+}
+
+#[derive(Clone, Debug)]
+struct ToolOutputIndex {
+    path: PathBuf,
+    identity: SessionLogIdentity,
+    by_call_id: HashMap<String, ToolOutputLocator>,
+}
+
+pub(crate) fn read_transcript_tool_output_range(
+    session_id: &str,
+    call_id: &str,
+    expected_byte_length: u64,
+    offset: u64,
+    max_bytes: usize,
+) -> Result<(u64, String), String> {
+    if session_id.trim().is_empty() || call_id.trim().is_empty() {
+        return Err("transcript tool output identity is required".to_string());
+    }
+    let file_path = existing_session_log_file_path(session_id)?;
+    let _guard = lock_session_logs_for_read()?;
+    let locator = indexed_tool_output_locator(session_id, file_path.as_path(), call_id)?;
+    if locator.byte_length != expected_byte_length || !locator.complete {
+        return Err("transcript tool output reference is stale or incomplete".to_string());
+    }
+    if let ToolOutputStorage::Inline {
+        record_offset,
+        record_length,
+    } = locator.storage
+    {
+        let content = read_indexed_inline_tool_output(
+            file_path.as_path(),
+            call_id,
+            record_offset,
+            record_length,
+            expected_byte_length,
+        )?;
+        let offset = usize::try_from(offset)
+            .map_err(|_| "transcript tool output offset exceeds usize".to_string())?;
+        let (end, content) = centaeris_core::session::transcript::transcript_utf8_range(
+            content.as_str(),
+            offset,
+            max_bytes,
+        )?;
+        return Ok((end as u64, content.to_string()));
+    }
+    let ToolOutputStorage::Spill {
+        path,
+        content_start,
+    } = locator.storage
+    else {
+        unreachable!("inline tool output returned above")
+    };
+    let digest = Sha256::digest(session_id.as_bytes());
+    let digest_hex = format!("{digest:x}");
+    let root = std::env::temp_dir()
+        .join("agent-tool-results")
+        .join(&digest_hex[..24])
+        .canonicalize()
+        .map_err(|error| format!("resolve transcript tool output root failed: {error}"))?;
+    let path = path
+        .canonicalize()
+        .map_err(|error| format!("resolve transcript tool output failed: {error}"))?;
+    if !path.starts_with(root.as_path()) || !path.is_file() {
+        return Err("transcript tool output path escaped its session scope".to_string());
+    }
+    if offset > expected_byte_length {
+        return Err("transcript tool output offset exceeds byteLength".to_string());
+    }
+    read_utf8_file_range(
+        path.as_path(),
+        content_start,
+        expected_byte_length,
+        offset,
+        max_bytes,
+    )
+}
+
+fn session_log_identity(path: &Path) -> Result<SessionLogIdentity, String> {
+    let metadata =
+        fs::metadata(path).map_err(|error| format!("inspect transcript source failed: {error}"))?;
+    Ok(SessionLogIdentity {
+        byte_length: metadata.len(),
+        modified_at: metadata
+            .modified()
+            .map_err(|error| format!("inspect transcript source timestamp failed: {error}"))?,
+    })
+}
+
+fn tool_output_locator(
+    value: &Value,
+    record_offset: u64,
+    record_length: usize,
+) -> Result<Option<(String, ToolOutputLocator)>, String> {
+    if value.get("type").and_then(Value::as_str) != Some("tool_result") {
+        return Ok(None);
+    }
+    parse_wire_record(value).map_err(|error| error.to_string())?;
+    let payload = value.get("payload").expect("validated payload");
+    let call_id = payload
+        .get("callId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "transcript tool output callId is invalid".to_string())?;
+    let byte_length = payload
+        .get("outputByteLength")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "transcript tool output byteLength is invalid".to_string())?;
+    let complete = payload
+        .get("outputComplete")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "transcript tool output completeness is invalid".to_string())?;
+    let storage = match (
+        payload.get("fullOutputPath").and_then(Value::as_str),
+        payload.get("outputStartByte").and_then(Value::as_u64),
+    ) {
+        (Some(path), Some(content_start)) => ToolOutputStorage::Spill {
+            path: PathBuf::from(path),
+            content_start,
+        },
+        (None, None) => {
+            let content = payload
+                .get("modelContent")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "transcript tool output content is invalid".to_string())?;
+            if content.len() as u64 != byte_length {
+                return Err("transcript inline tool output length is invalid".to_string());
+            }
+            ToolOutputStorage::Inline {
+                record_offset,
+                record_length,
+            }
+        }
+        _ => return Err("transcript tool output spill identity is invalid".to_string()),
+    };
+    Ok(Some((
+        call_id.to_string(),
+        ToolOutputLocator {
+            byte_length,
+            complete,
+            storage,
+        },
+    )))
+}
+
+fn read_indexed_inline_tool_output(
+    path: &Path,
+    expected_call_id: &str,
+    record_offset: u64,
+    record_length: usize,
+    expected_byte_length: u64,
+) -> Result<String, String> {
+    let mut source =
+        fs::File::open(path).map_err(|error| format!("open transcript source failed: {error}"))?;
+    source
+        .seek(SeekFrom::Start(record_offset))
+        .map_err(|error| format!("seek transcript source failed: {error}"))?;
+    let mut bytes = vec![0; record_length];
+    source
+        .read_exact(bytes.as_mut_slice())
+        .map_err(|error| format!("read transcript source record failed: {error}"))?;
+    let value = serde_json::from_slice::<Value>(bytes.as_slice())
+        .map_err(|error| format!("decode transcript source record failed: {error}"))?;
+    parse_wire_record(&value).map_err(|error| error.to_string())?;
+    let payload = value.get("payload").expect("validated payload");
+    if payload.get("callId").and_then(Value::as_str) != Some(expected_call_id) {
+        return Err("transcript tool output index is stale".to_string());
+    }
+    let content = payload
+        .get("modelContent")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "transcript tool output content is invalid".to_string())?;
+    if content.len() as u64 != expected_byte_length {
+        return Err("transcript inline tool output length is invalid".to_string());
+    }
+    Ok(content.to_string())
+}
+
+fn indexed_tool_output_locator(
+    session_id: &str,
+    path: &Path,
+    call_id: &str,
+) -> Result<ToolOutputLocator, String> {
+    let identity = session_log_identity(path)?;
+    let indexes = TOOL_OUTPUT_INDEX.get_or_init(|| RwLock::new(HashMap::new()));
+    let mut indexes = indexes
+        .write()
+        .map_err(|_| "transcript tool output index lock is poisoned".to_string())?;
+    let current = indexes
+        .get(session_id)
+        .filter(|index| index.path == path && index.identity == identity);
+    if let Some(index) = current {
+        return index
+            .by_call_id
+            .get(call_id)
+            .cloned()
+            .ok_or_else(|| "transcript tool output reference was not found".to_string());
+    }
+    #[cfg(test)]
+    TOOL_OUTPUT_INDEX_BUILD_COUNT.fetch_add(1, Ordering::Relaxed);
+    let source =
+        fs::File::open(path).map_err(|error| format!("open transcript source failed: {error}"))?;
+    let mut by_call_id = HashMap::new();
+    let mut source = BufReader::new(source);
+    let mut line = String::new();
+    let mut record_offset = source
+        .read_line(&mut line)
+        .map_err(|error| format!("read transcript manifest failed: {error}"))?
+        as u64;
+    loop {
+        line.clear();
+        let bytes_read = source
+            .read_line(&mut line)
+            .map_err(|error| format!("read transcript source failed: {error}"))?;
+        if bytes_read == 0 {
+            break;
+        }
+        let record = line
+            .strip_suffix('\n')
+            .ok_or_else(|| "transcript source has a truncated final line".to_string())?;
+        let value = serde_json::from_str::<Value>(record)
+            .map_err(|error| format!("decode transcript source failed: {error}"))?;
+        let Some((indexed_call_id, locator)) =
+            tool_output_locator(&value, record_offset, record.len())?
+        else {
+            record_offset = record_offset.saturating_add(bytes_read as u64);
+            continue;
+        };
+        if by_call_id.insert(indexed_call_id, locator).is_some() {
+            return Err("transcript tool output callId is duplicated".to_string());
+        }
+        record_offset = record_offset.saturating_add(bytes_read as u64);
+    }
+    let locator = by_call_id
+        .get(call_id)
+        .cloned()
+        .ok_or_else(|| "transcript tool output reference was not found".to_string())?;
+    indexes.insert(
+        session_id.to_string(),
+        ToolOutputIndex {
+            path: path.to_path_buf(),
+            identity,
+            by_call_id,
+        },
+    );
+    Ok(locator)
+}
+
+fn refresh_tool_output_index_after_append(
+    session_id: &str,
+    path: &Path,
+    previous_identity: &SessionLogIdentity,
+    next_identity: SessionLogIdentity,
+    locators: Vec<(String, ToolOutputLocator)>,
+) {
+    let Some(indexes) = TOOL_OUTPUT_INDEX.get() else {
+        return;
+    };
+    let Ok(mut indexes) = indexes.write() else {
+        return;
+    };
+    let Some(index) = indexes.get_mut(session_id) else {
+        return;
+    };
+    if index.path != path || &index.identity != previous_identity {
+        indexes.remove(session_id);
+        return;
+    }
+    for (call_id, locator) in locators {
+        index.by_call_id.insert(call_id, locator);
+    }
+    index.identity = next_identity;
+}
+
+fn read_utf8_file_range(
+    path: &Path,
+    content_start: u64,
+    expected_byte_length: u64,
+    offset: u64,
+    max_bytes: usize,
+) -> Result<(u64, String), String> {
+    let requested = usize::try_from((expected_byte_length - offset).min(max_bytes as u64))
+        .map_err(|_| "transcript tool output range exceeds usize".to_string())?;
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("open transcript tool output failed: {error}"))?;
+    if file
+        .metadata()
+        .map_err(|error| format!("inspect transcript tool output failed: {error}"))?
+        .len()
+        < content_start.saturating_add(expected_byte_length)
+    {
+        return Err("transcript tool output ended before byteLength".to_string());
+    }
+    file.seek(SeekFrom::Start(content_start.saturating_add(offset)))
+        .map_err(|error| format!("seek transcript tool output failed: {error}"))?;
+    let mut bytes = vec![0_u8; requested];
+    file.read_exact(bytes.as_mut_slice())
+        .map_err(|error| format!("read transcript tool output failed: {error}"))?;
+    let valid_len = match std::str::from_utf8(bytes.as_slice()) {
+        Ok(_) => bytes.len(),
+        Err(error) if error.error_len().is_none() && error.valid_up_to() > 0 => error.valid_up_to(),
+        Err(_) => return Err("transcript tool output offset is not a UTF-8 boundary".to_string()),
+    };
+    bytes.truncate(valid_len);
+    let content = String::from_utf8(bytes)
+        .map_err(|_| "transcript tool output range is not UTF-8".to_string())?;
+    let end = offset
+        .checked_add(valid_len as u64)
+        .ok_or_else(|| "transcript tool output range overflow".to_string())?;
+    Ok((end, content))
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct ProjectedChatMessage {
@@ -1035,6 +1376,20 @@ fn append_records_unlocked(
         session_id,
         wires.as_mut_slice(),
     )?;
+    let previous_identity = session_log_identity(file_path.as_path())?;
+    let mut next_record_offset = previous_identity.byte_length;
+    let mut appended_tool_outputs = Vec::new();
+    for wire in &wires {
+        let record_length = serde_json::to_vec(wire)
+            .map_err(|error| format!("serialize session record failed: {error}"))?
+            .len();
+        if let Some(locator) = tool_output_locator(wire, next_record_offset, record_length)? {
+            appended_tool_outputs.push(locator);
+        }
+        next_record_offset = next_record_offset
+            .checked_add(record_length as u64 + 1)
+            .ok_or_else(|| "session log byte offset overflow".to_string())?;
+    }
     let mut file = OpenOptions::new()
         .append(true)
         .open(file_path.as_path())
@@ -1044,14 +1399,24 @@ fn append_records_unlocked(
                 file_path.display()
             )
         })?;
-    for wire in wires {
+    for wire in &wires {
         serde_json::to_writer(&mut file, &wire)
             .map_err(|error| format!("serialize session record failed: {error}"))?;
         file.write_all(b"\n")
             .map_err(|error| format!("append session record failed: {error}"))?;
     }
     file.sync_data()
-        .map_err(|error| format!("sync session log failed: {error}"))
+        .map_err(|error| format!("sync session log failed: {error}"))?;
+    drop(file);
+    let next_identity = session_log_identity(file_path.as_path())?;
+    refresh_tool_output_index_after_append(
+        session_id,
+        file_path.as_path(),
+        &previous_identity,
+        next_identity,
+        appended_tool_outputs,
+    );
+    Ok(())
 }
 
 fn read_session_records(session_id: &str) -> Result<Vec<SessionLogRecord>, String> {
@@ -1066,7 +1431,7 @@ fn read_session_records_unlocked(session_id: &str) -> Result<Vec<SessionLogRecor
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-// P1-B source adapter; the P1-C page scheduler will own the production cursor lifecycle.
+// Bounded source adapter; the transcript page scheduler owns the production cursor lifecycle.
 #[allow(dead_code)]
 pub(crate) struct TranscriptSourceSliceCursorV1 {
     next_byte_offset: u64,
@@ -1606,6 +1971,97 @@ mod tests {
     };
     use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn tool_output_range_reads_only_one_bounded_utf8_page_from_a_large_file() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "centaeris-tool-output-range-{}-{nonce}.log",
+            std::process::id()
+        ));
+        let mut file = fs::File::create(path.as_path()).expect("create large output");
+        file.write_all("a".repeat(64 * 1024 - 2).as_bytes())
+            .expect("write prefix");
+        file.write_all("世".as_bytes())
+            .expect("write utf8 boundary");
+        file.set_len(50 * 1024 * 1024)
+            .expect("extend sparse output");
+        drop(file);
+
+        let (end, content) = read_utf8_file_range(
+            path.as_path(),
+            0,
+            50 * 1024 * 1024,
+            0,
+            centaeris_core::session::transcript::TRANSCRIPT_CONTENT_RANGE_MAX_BYTES,
+        )
+        .expect("read bounded page");
+        assert_eq!(content.len(), 64 * 1024 - 2);
+        assert_eq!(end, 64 * 1024 - 2);
+        fs::remove_file(path).expect("cleanup large output");
+    }
+
+    #[test]
+    fn tool_output_locator_scans_a_stable_session_log_only_once() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let session_id = format!("session-tool-output-index-{nonce}");
+        let path = std::env::temp_dir().join(format!(
+            "centaeris-tool-output-index-{}-{nonce}.jsonl",
+            std::process::id()
+        ));
+        let event = centaeris_core::session::parse_event(&json!({
+            "schemaVersion": "session.event.v1",
+            "eventVersion": 1,
+            "type": "tool_result",
+            "eventId": "event-tool-result",
+            "sessionId": session_id,
+            "turnId": "turn-1",
+            "agentRunId": "run-1",
+            "createdAtMs": 1,
+            "payload": {
+                "callId": "call-1",
+                "toolName": "read_file",
+                "resultState": "successWithOutput",
+                "modelContent": "contents",
+                "fullOutputPath": null,
+                "outputStartByte": null,
+                "outputByteLength": 8,
+                "outputComplete": true,
+                "summary": "Read README.md",
+                "operations": [],
+                "modelInputImages": [],
+                "latencyMs": 1
+            }
+        }))
+        .expect("tool result event");
+        let wire = wire_record_value(&SequencedSessionRecord { sequence: 1, event })
+            .expect("tool result wire");
+        let mut file = fs::File::create(path.as_path()).expect("create session log");
+        file.write_all(b"{}\n").expect("write placeholder manifest");
+        serde_json::to_writer(&mut file, &wire).expect("write tool result");
+        file.write_all(b"\n").expect("write record newline");
+        file.sync_all().expect("sync session log");
+        drop(file);
+
+        let builds_before = TOOL_OUTPUT_INDEX_BUILD_COUNT.load(Ordering::Relaxed);
+        let first = indexed_tool_output_locator(session_id.as_str(), path.as_path(), "call-1")
+            .expect("first lookup");
+        let second = indexed_tool_output_locator(session_id.as_str(), path.as_path(), "call-1")
+            .expect("cached lookup");
+        assert_eq!(first, second);
+        assert_eq!(
+            TOOL_OUTPUT_INDEX_BUILD_COUNT.load(Ordering::Relaxed) - builds_before,
+            1,
+            "a stable session log must not be rescanned for each output page"
+        );
+        fs::remove_file(path).expect("cleanup session log");
+    }
 
     #[test]
     fn transcript_backfill_reader_resumes_in_bounded_forward_slices() {

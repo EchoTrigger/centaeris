@@ -1,6 +1,7 @@
 import {
   getTranscriptPage,
   getTranscriptPatches,
+  TRANSCRIPT_PROJECTION_VERSION_V1,
   type TranscriptBlockStatusV1,
   type TranscriptBlockV1,
   type TranscriptContentRefV1,
@@ -18,7 +19,6 @@ import type {
   TaskStatus,
 } from "./types";
 
-const TRANSCRIPT_PROJECTION_VERSION = "transcript.projection.v1";
 const TRANSCRIPT_PAGE_RPC_SCHEMA = "transcript.page.rpc.v1";
 const TRANSCRIPT_PATCH_RPC_SCHEMA = "transcript.patch.rpc.v1";
 const TRANSCRIPT_PROJECTION_POLL_MS = 50;
@@ -26,6 +26,7 @@ const TRANSCRIPT_PROJECTION_STALL_MAX_POLLS = 600;
 const MAX_U64 = 18_446_744_073_709_551_615n;
 const MAX_U32 = 4_294_967_295;
 const MAX_SAFE_UI_INTEGER = BigInt(Number.MAX_SAFE_INTEGER);
+const transcriptByteEncoder = new TextEncoder();
 
 type OrderedBlock = {
   block: TranscriptBlockV1;
@@ -154,7 +155,7 @@ const validateBlock = (block: TranscriptBlockV1): OrderedBlock => {
 const validatePage = (page: TranscriptPageV1): void => {
   if (
     page.schema !== "transcript.page.v1" ||
-    page.projectionVersion !== TRANSCRIPT_PROJECTION_VERSION
+    page.projectionVersion !== TRANSCRIPT_PROJECTION_VERSION_V1
   ) {
     throw new Error("transcript page identity is invalid");
   }
@@ -203,7 +204,7 @@ const validatePage = (page: TranscriptPageV1): void => {
 const validatePatch = (patch: TranscriptPatchV1): void => {
   if (
     patch.schema !== "transcript.patch.v1" ||
-    patch.projectionVersion !== TRANSCRIPT_PROJECTION_VERSION
+    patch.projectionVersion !== TRANSCRIPT_PROJECTION_VERSION_V1
   ) {
     throw new Error("transcript patch identity is invalid");
   }
@@ -279,7 +280,11 @@ const emptyTurn = (
   isStreaming,
 });
 
-const materializeBlock = (block: TranscriptBlockV1): ChatMessage => {
+const materializeBlock = (
+  block: TranscriptBlockV1,
+  sessionId: string,
+  projectionGeneration: string,
+): ChatMessage => {
   const body = block.body;
   if (body.kind === "userText") {
     return {
@@ -323,6 +328,11 @@ const materializeBlock = (block: TranscriptBlockV1): ChatMessage => {
           provider: "tool",
           outputByteLength: body.outputRef
             ? safeUiInteger(body.outputRef.byteLength, "outputRef.byteLength")
+            : undefined,
+          transcriptContentRef: body.outputRef ?? undefined,
+          transcriptSessionId: body.outputRef ? sessionId : undefined,
+          transcriptProjectionGeneration: body.outputRef
+            ? projectionGeneration
             : undefined,
           operations: [
             {
@@ -378,13 +388,19 @@ export class DesktopTranscriptView {
   private readonly baseHighWater: bigint;
   private readonly loadedBlockIds = new Set<string>();
   private readonly visibleBlocks = new Map<string, TranscriptBlockV1>();
+  private readonly visibleBlockBytes = new Map<string, number>();
+  private visibleBytes = 0;
   private readonly pendingOverrides = new Map<string, TranscriptBlockV1>();
+  private readonly postBaseOverrideIds = new Set<string>();
   private readonly materializedMessages = new Map<
     string,
     { block: TranscriptBlockV1; message: ChatMessage }
   >();
   private readonly orderByBlockId = new Map<string, string>();
   private readonly blockIdByOrder = new Map<string, string>();
+  private readonly tailBlockIds = new Set<string>();
+  private readonly tailOlderCursor: string | null;
+  private releaseRevision = 0;
   olderCursor: string | null;
 
   private constructor(page: TranscriptPageV1) {
@@ -398,6 +414,8 @@ export class DesktopTranscriptView {
     this.currentHighWater = this.baseHighWater;
     this.olderCursor = page.olderCursor;
     this.applyPage(page);
+    page.blocks.forEach((block) => this.tailBlockIds.add(block.blockId));
+    this.tailOlderCursor = page.olderCursor;
   }
 
   static open(page: TranscriptPageV1): DesktopTranscriptView {
@@ -411,6 +429,37 @@ export class DesktopTranscriptView {
 
   get currentSourceHighWater(): string {
     return this.currentHighWater.toString();
+  }
+
+  get currentReleaseRevision(): number {
+    return this.releaseRevision;
+  }
+
+  get managedContentBytes(): number {
+    return this.visibleBytes;
+  }
+
+  releaseLoadedHistory(): void {
+    this.releaseRevision += 1;
+    for (const blockId of [...this.visibleBlocks.keys()]) {
+      const block = this.visibleBlocks.get(blockId);
+      const sequence = block
+        ? parseDecimal(block.orderKey.sourceSequence, "transcript block sourceSequence")
+        : 0n;
+      if (!this.tailBlockIds.has(blockId)
+        && !this.postBaseOverrideIds.has(blockId)
+        && sequence <= this.baseHighWater) {
+        this.visibleBytes -= this.visibleBlockBytes.get(blockId) ?? 0;
+        this.visibleBlockBytes.delete(blockId);
+        this.visibleBlocks.delete(blockId);
+        this.loadedBlockIds.delete(blockId);
+        this.materializedMessages.delete(blockId);
+        const order = this.orderByBlockId.get(blockId);
+        if (order !== undefined) this.blockIdByOrder.delete(order);
+        this.orderByBlockId.delete(blockId);
+      }
+    }
+    this.olderCursor = this.tailOlderCursor;
   }
 
   applyOlderPage(page: TranscriptPageV1): void {
@@ -442,6 +491,9 @@ export class DesktopTranscriptView {
         this.loadedBlockIds.has(block.blockId) ||
         sourceSequence > this.baseHighWater
       ) {
+        if (sourceSequence <= this.baseHighWater) {
+          this.postBaseOverrideIds.add(block.blockId);
+        }
         this.loadedBlockIds.add(block.blockId);
         this.mergeBlock(this.visibleBlocks, block);
       } else {
@@ -476,7 +528,11 @@ export class DesktopTranscriptView {
         if (cached?.block === block) {
           return cached.message;
         }
-        const message = materializeBlock(block);
+        const message = materializeBlock(
+          block,
+          this.sessionId,
+          this.projectionGeneration,
+        );
         this.materializedMessages.set(block.blockId, { block, message });
         return message;
       });
@@ -514,7 +570,7 @@ export class DesktopTranscriptView {
   ): void {
     if (
       sessionId !== this.sessionId ||
-      projectionVersion !== TRANSCRIPT_PROJECTION_VERSION ||
+      projectionVersion !== TRANSCRIPT_PROJECTION_VERSION_V1 ||
       projectionGeneration !== this.projectionGeneration
     ) {
       throw new Error("transcript view identity mismatch");
@@ -548,6 +604,12 @@ export class DesktopTranscriptView {
     if (existing && !incomingWins(existing, block)) {
       return;
     }
+    if (target === this.visibleBlocks) {
+      this.visibleBytes -= this.visibleBlockBytes.get(block.blockId) ?? 0;
+      const bytes = transcriptByteEncoder.encode(JSON.stringify(block)).byteLength;
+      this.visibleBlockBytes.set(block.blockId, bytes);
+      this.visibleBytes += bytes;
+    }
     target.set(block.blockId, block);
   }
 }
@@ -557,7 +619,7 @@ const validatePageResponse = (
 ): void => {
   if (
     response.schema !== TRANSCRIPT_PAGE_RPC_SCHEMA ||
-    response.projectionVersion !== TRANSCRIPT_PROJECTION_VERSION
+    response.projectionVersion !== TRANSCRIPT_PROJECTION_VERSION_V1
   ) {
     throw new Error("transcript/page response identity is invalid");
   }
@@ -664,7 +726,7 @@ export const catchUpTranscriptPatchesWith = async (
     });
     if (
       response.schema !== TRANSCRIPT_PATCH_RPC_SCHEMA ||
-      response.projectionVersion !== TRANSCRIPT_PROJECTION_VERSION ||
+      response.projectionVersion !== TRANSCRIPT_PROJECTION_VERSION_V1 ||
       response.projectionGeneration !== view.projectionGeneration
     ) {
       throw new Error("transcript/patches response identity is invalid");

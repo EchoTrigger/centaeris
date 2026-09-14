@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use centaeris_core::session::transcript::{
     TranscriptBlockBodyV1, TranscriptBlockStatusV1, TranscriptPagePolicyV1, TranscriptPageV1,
     TranscriptPatchV1, TranscriptTextContentV1, TranscriptViewStateV1,
@@ -250,6 +252,8 @@ pub(super) struct TranscriptPagingState {
     base_source_high_water: u64,
     current_source_high_water: u64,
     older_cursor: Option<String>,
+    tail_block_ids: HashSet<String>,
+    tail_older_cursor: Option<String>,
 }
 
 impl TranscriptPagingState {
@@ -261,6 +265,12 @@ impl TranscriptPagingState {
             .parse::<u64>()
             .map_err(|_| "transcript page sourceHighWater is invalid".to_string())?;
         let older_cursor = page.older_cursor.clone();
+        let tail_older_cursor = older_cursor.clone();
+        let tail_block_ids = page
+            .blocks
+            .iter()
+            .map(|block| block.block_id.clone())
+            .collect();
         let view = TranscriptViewStateV1::open("tui-session-view".to_string(), page)?;
         Ok(Self {
             view,
@@ -269,6 +279,8 @@ impl TranscriptPagingState {
             base_source_high_water,
             current_source_high_water: base_source_high_water,
             older_cursor,
+            tail_block_ids,
+            tail_older_cursor,
         })
     }
 
@@ -315,6 +327,12 @@ impl TranscriptPagingState {
 
     pub(super) fn older_cursor(&self) -> Option<&str> {
         self.older_cursor.as_deref()
+    }
+
+    pub(super) fn release_loaded_history(&mut self) -> usize {
+        let removed = self.view.release_loaded_history(&self.tail_block_ids);
+        self.older_cursor = self.tail_older_cursor.clone();
+        removed
     }
 
     pub(super) fn materialize_history(&self, live_overlay_active: bool) -> Vec<TranscriptLine> {

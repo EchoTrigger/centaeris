@@ -107,6 +107,12 @@ fn transcript_paging_materializes_tail_then_prepends_at_the_fixed_waterline() {
         state.materialize_history(false).first(),
         Some(&TranscriptLine::User("earlier".to_string()))
     );
+    assert_eq!(state.release_loaded_history(), 1);
+    assert_eq!(state.older_cursor(), Some("before-11"));
+    assert_eq!(
+        state.materialize_history(false).first(),
+        Some(&TranscriptLine::Summary("tail".to_string()))
+    );
 }
 
 #[test]
@@ -1193,8 +1199,18 @@ fn command_table_has_no_aliases() {
     assert_eq!(
         names,
         vec![
-            "/new", "/resume", "/model", "/effort", "/state", "/stop", "/plugins", "/mcp",
-            "/clear", "/help", "/exit"
+            "/new",
+            "/resume",
+            "/model",
+            "/effort",
+            "/state",
+            "/stop",
+            "/plugins",
+            "/mcp",
+            "/clear",
+            "/trim-history",
+            "/help",
+            "/exit"
         ]
     );
 }
@@ -1689,8 +1705,8 @@ fn transcript_golden_fixture_has_versioned_semantic_operations() {
 }
 
 #[test]
-#[ignore = "opt-in P0 baseline; run through scripts/transcript-baseline.ps1"]
-fn transcript_rendering_p0_baseline() {
+#[ignore = "opt-in rendering baseline; run through scripts/transcript-baseline.ps1"]
+fn transcript_rendering_scale_baseline() {
     let workspace = PathBuf::from("D:/workspace");
     let samples = [100usize, 1_000, 10_000]
         .into_iter()
@@ -1749,7 +1765,7 @@ fn transcript_rendering_p0_baseline() {
     println!(
         "{}",
         serde_json::to_string(&json!({
-            "schema": "transcript.p0.tui.v1",
+            "schema": "transcript.rendering-baseline.tui.v1",
             "samples": samples,
             "u16Boundary": {
                 "inputItems": boundary_app.transcript.len(),
@@ -3876,6 +3892,42 @@ fn tool_result_execution_image_renders_inline_from_verified_workspace_bytes() {
 }
 
 #[test]
+fn tool_result_execution_image_rejects_decoded_content_over_budget() {
+    let workspace = unique_test_dir("workspace-oversized-tool-image");
+    let bytes = test_png_bytes();
+    let image = ToolImage {
+        key: "tool_image:oversized:0".to_string(),
+        path: "oversized.png".to_string(),
+        content_type: "image/png".to_string(),
+        sha256: format!("sha256:{:x}", Sha256::digest(bytes.as_slice())),
+        byte_length: bytes.len() as u64,
+        width_px: TOOL_IMAGE_MAX_DECODED_PIXELS as u32 + 1,
+        height_px: 1,
+    };
+    let error = decode_workspace_tool_image(
+        json!({
+            "root": display_path(workspace.as_path()),
+            "path": "oversized.png",
+            "name": "oversized.png",
+            "content": "",
+            "byteLen": bytes.len(),
+            "encoding": "base64",
+            "contentKind": "image",
+            "mimeType": "image/png",
+            "dataUrl": format!(
+                "data:image/png;base64,{}",
+                general_purpose::STANDARD.encode(bytes.as_slice())
+            )
+        }),
+        display_path(workspace.as_path()).as_str(),
+        &image,
+    )
+    .expect_err("oversized decoded image must be rejected before decoding");
+    assert!(error.contains("decoded image budget"));
+    let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[test]
 fn command_panel_rows_accept_mouse_clicks() {
     let workspace = PathBuf::from("D:/workspace");
     let mut app = test_app("/he", workspace.clone(), workspace);
@@ -4557,6 +4609,8 @@ fn test_app(input: &str, workspace_root: PathBuf, _data_root: PathBuf) -> App {
         image_preview: None,
         image_preview_area: None,
         inline_images: HashMap::new(),
+        inline_image_cache_order: VecDeque::new(),
+        inline_image_cache_bytes: 0,
         inline_image_errors: HashMap::new(),
         pending_esc_stop: false,
         message: None,

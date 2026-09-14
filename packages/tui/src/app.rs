@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     env,
     error::Error,
     io::{self, Stdout},
@@ -80,6 +80,9 @@ const IMAGE_PREVIEW_ZOOM_FACTOR: f32 = 1.5;
 const IMAGE_PREVIEW_MAX_ZOOM_STEPS: u8 = 8;
 const IMAGE_PREVIEW_RESIZE_SETTLE: Duration = Duration::from_millis(75);
 const TRANSCRIPT_PROJECTION_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const TOOL_IMAGE_MAX_DECODED_PIXELS: u64 = 8_388_608;
+const TOOL_IMAGE_MAX_DECODED_BYTES: u64 = 32 * 1024 * 1024;
+const TOOL_IMAGE_CACHE_MAX_DECODED_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Debug)]
 struct AppConfig {
     workspace_root: PathBuf,
@@ -353,6 +356,8 @@ struct App {
     image_preview: Option<ImagePreview>,
     image_preview_area: Option<Rect>,
     inline_images: HashMap<String, StatefulProtocol>,
+    inline_image_cache_order: VecDeque<(String, u64)>,
+    inline_image_cache_bytes: u64,
     inline_image_errors: HashMap<String, String>,
     pending_esc_stop: bool,
     message: Option<String>,
@@ -662,6 +667,8 @@ impl App {
             image_preview: None,
             image_preview_area: None,
             inline_images: HashMap::new(),
+            inline_image_cache_order: VecDeque::new(),
+            inline_image_cache_bytes: 0,
             inline_image_errors: HashMap::new(),
             pending_esc_stop: false,
             message: None,
@@ -772,6 +779,7 @@ fn run_event_loop(
         redraw |= periodic_redraw_due(&app, last_draw_at, now);
         if redraw {
             let transcript_view = build_cached_transcript_view(&mut app, width);
+            cache_visible_transcript_images(&mut app, &transcript_view);
             terminal.draw(|frame| render(frame, &mut app, &transcript_view))?;
             redraw = false;
             last_draw_at = now;
@@ -2450,6 +2458,16 @@ fn handle_enter(app: &mut App) -> bool {
             app.selected_command = 0;
             false
         }
+        Some("/trim-history") => {
+            clear_composer(app);
+            let removed = release_loaded_transcript_history(app);
+            app.message = Some(if removed == 0 {
+                "No older loaded history to release".to_string()
+            } else {
+                format!("Released {removed} loaded history blocks")
+            });
+            false
+        }
         Some(name) if command_exists(name) => {
             app.message = Some(format!(
                 "Command not connected yet in this welcome scaffold: {name}"
@@ -3407,6 +3425,8 @@ fn reset_to_welcome(app: &mut App) {
     app.transcript_paging = None;
     app.transcript_history_len = 0;
     app.inline_images.clear();
+    app.inline_image_cache_order.clear();
+    app.inline_image_cache_bytes = 0;
     app.inline_image_errors.clear();
     reset_transcript_view(app);
     app.tool_projection.clear();
@@ -4444,8 +4464,9 @@ fn activate_session(app: &mut App, session: TuiSession) -> Result<(), String> {
     app.transcript_history_len = app.transcript.len();
     app.transcript_paging = Some(restore.transcript_paging);
     app.inline_images.clear();
+    app.inline_image_cache_order.clear();
+    app.inline_image_cache_bytes = 0;
     app.inline_image_errors.clear();
-    cache_transcript_images(app);
     reset_transcript_view(app);
     clear_assistant_buffer(app);
     clear_composer(app);
@@ -4942,7 +4963,17 @@ fn apply_tool_event(app: &mut App, event_type: &str, event: &Value, payload: &Va
     app.active_tool_label = update.active_label;
 }
 
-fn cache_transcript_images(app: &mut App) {
+fn cache_visible_transcript_images(app: &mut App, view: &TranscriptView) {
+    let height = u64::from(app.transcript_area.map_or(24, |area| area.height));
+    let visible_keys = view
+        .images
+        .iter()
+        .filter(|image| {
+            image.row.saturating_add(u64::from(INLINE_IMAGE_ROWS)) >= app.transcript_scroll
+                && image.row <= app.transcript_scroll.saturating_add(height)
+        })
+        .map(|image| image.key.as_str())
+        .collect::<HashSet<_>>();
     let images = app
         .transcript
         .iter()
@@ -4951,6 +4982,7 @@ fn cache_transcript_images(app: &mut App) {
             _ => None,
         })
         .flatten()
+        .filter(|image| visible_keys.contains(image.key.as_str()))
         .cloned()
         .collect::<Vec<_>>();
     cache_tool_images(app, images.as_slice());
@@ -4964,8 +4996,22 @@ fn cache_tool_images(app: &mut App, images: &[ToolImage]) {
             continue;
         }
         match load_tool_image(app, image) {
-            Ok(protocol) => {
+            Ok((protocol, decoded_bytes)) => {
+                while app.inline_image_cache_bytes.saturating_add(decoded_bytes)
+                    > TOOL_IMAGE_CACHE_MAX_DECODED_BYTES
+                {
+                    let Some((oldest, bytes)) = app.inline_image_cache_order.pop_front() else {
+                        break;
+                    };
+                    app.inline_images.remove(oldest.as_str());
+                    app.inline_image_cache_bytes =
+                        app.inline_image_cache_bytes.saturating_sub(bytes);
+                }
                 app.inline_images.insert(image.key.clone(), protocol);
+                app.inline_image_cache_order
+                    .push_back((image.key.clone(), decoded_bytes));
+                app.inline_image_cache_bytes =
+                    app.inline_image_cache_bytes.saturating_add(decoded_bytes);
             }
             Err(error) => {
                 app.inline_image_errors.insert(image.key.clone(), error);
@@ -4974,7 +5020,7 @@ fn cache_tool_images(app: &mut App, images: &[ToolImage]) {
     }
 }
 
-fn load_tool_image(app: &mut App, image: &ToolImage) -> Result<StatefulProtocol, String> {
+fn load_tool_image(app: &mut App, image: &ToolImage) -> Result<(StatefulProtocol, u64), String> {
     ensure_runtime(app)?;
     let session_id = app
         .active_session
@@ -4996,7 +5042,10 @@ fn load_tool_image(app: &mut App, image: &ToolImage) -> Result<StatefulProtocol,
             }),
         )?;
     let decoded = decode_workspace_tool_image(response, app.workspace_root.as_str(), image)?;
-    Ok(app.image_picker.new_resize_protocol(decoded))
+    let decoded_bytes = u64::from(image.width_px)
+        .saturating_mul(u64::from(image.height_px))
+        .saturating_mul(4);
+    Ok((app.image_picker.new_resize_protocol(decoded), decoded_bytes))
 }
 
 fn decode_workspace_tool_image(
@@ -5016,6 +5065,13 @@ fn decode_workspace_tool_image(
         || response.byte_len != expected.byte_length
     {
         return Err("workspace image response does not match the ToolResult image".to_string());
+    }
+    let decoded_pixels = u64::from(expected.width_px).saturating_mul(u64::from(expected.height_px));
+    let decoded_bytes = decoded_pixels.saturating_mul(4);
+    if decoded_pixels > TOOL_IMAGE_MAX_DECODED_PIXELS
+        || decoded_bytes > TOOL_IMAGE_MAX_DECODED_BYTES
+    {
+        return Err("ToolResult image exceeds the decoded image budget".to_string());
     }
     let prefix = format!("data:{};base64,", expected.content_type);
     let encoded = response

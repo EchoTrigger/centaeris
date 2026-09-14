@@ -5,12 +5,13 @@ use std::time::Instant;
 
 use centaeris_core::session::transcript::{
     rebuild_transcript_generation_v1, TranscriptCheckpointRefsV1,
+    TranscriptContentRangeReadRequestV1, TranscriptContentRangeV1,
     TranscriptGenerationRebuildRequestV1, TranscriptGenerationRebuildSourcePortV1,
     TranscriptPagePolicyV1, TranscriptPageReadRequestV1, TranscriptPageV1,
     TranscriptPatchReadRequestV1, TranscriptPatchV1, TranscriptProjectionGenerationRotationV1,
     TranscriptProjectionGenerationStorePortV1, TranscriptProjectionStorePort,
     TranscriptProjectorV1, TranscriptRebuildLedgerFactV1, TranscriptRebuildProjectionFactV1,
-    TranscriptResumeCursorV1, TRANSCRIPT_PAGE_SCHEMA_V1,
+    TranscriptResumeCursorV1, TRANSCRIPT_CONTENT_RANGE_SCHEMA_V1, TRANSCRIPT_PAGE_SCHEMA_V1,
     TRANSCRIPT_PROJECTION_GENERATION_INVALIDATED, TRANSCRIPT_PROJECTION_SLICE_MAX_EVENTS,
     TRANSCRIPT_PROJECTION_SLICE_MAX_MICROS, TRANSCRIPT_PROJECTION_VERSION_V1,
 };
@@ -162,6 +163,47 @@ pub(crate) fn patches(
             },
         )?;
     }
+    Ok(response)
+}
+
+pub(crate) fn content_range(
+    request: TranscriptContentRangeReadRequestV1,
+) -> Result<TranscriptContentRangeV1, String> {
+    request.validate()?;
+    let store = agent_runtime::agent_runtime_store_actor()?;
+    let current = store
+        .load_current_transcript_projection_generation(request.session_id.as_str())?
+        .ok_or_else(|| "transcript content range view is unavailable".to_string())?;
+    if current.projection_generation != request.projection_generation {
+        return Err("transcript content range view is invalidated".to_string());
+    }
+    let call_id = request
+        .ref_id
+        .strip_prefix("tool-output:")
+        .expect("validated tool output ref");
+    let offset = parse_waterline(request.offset.as_str(), "content range offset")?;
+    let byte_length = parse_waterline(request.byte_length.as_str(), "content range byteLength")?;
+    let (end, content) = message_log::read_transcript_tool_output_range(
+        request.session_id.as_str(),
+        call_id,
+        byte_length,
+        offset,
+        request.max_bytes as usize,
+    )?;
+    let response = TranscriptContentRangeV1 {
+        schema: TRANSCRIPT_CONTENT_RANGE_SCHEMA_V1.to_string(),
+        session_id: request.session_id,
+        projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.to_string(),
+        projection_generation: request.projection_generation,
+        ref_id: request.ref_id,
+        revision: request.revision,
+        byte_length: byte_length.to_string(),
+        start_offset: offset.to_string(),
+        end_offset: end.to_string(),
+        content,
+        has_more: end < byte_length,
+    };
+    response.validate()?;
     Ok(response)
 }
 

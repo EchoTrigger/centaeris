@@ -58,6 +58,11 @@ import {
   loadTranscriptPage,
 } from "./transcriptPaging";
 import {
+  clearTranscriptContentRangeCache,
+  subscribeTranscriptContentRangeCache,
+  transcriptContentRangeCacheBytes,
+} from "./transcriptContentRanges";
+import {
   useAssistantTurnUpdateQueue,
   type AssistantTurnCommitOptions,
 } from "./useAssistantTurnUpdateQueue";
@@ -68,6 +73,7 @@ import type {
 } from "./types";
 const COMPOSER_BOTTOM_GAP_PX = 18;
 const COMPOSER_SCROLL_GUTTER_PX = 18;
+const TRANSCRIPT_MEMORY_WARNING_BYTES = 32 * 1024 * 1024;
 
 const HYDRATION_STAGE_LABELS: Record<string, string> = {
   fetchProjection: t("chatArea.loadingConversationProjection"),
@@ -180,6 +186,7 @@ export function ChatArea({
   const [runtimeConfigError, setRuntimeConfigError] = useState("");
   const [sessionLoadError, setSessionLoadError] = useState("");
   const [transcriptHasOlder, setTranscriptHasOlder] = useState(false);
+  const [transcriptManagedBytes, setTranscriptManagedBytes] = useState(0);
   const [isLoadingOlderTranscript, setIsLoadingOlderTranscript] =
     useState(false);
   const [pendingQuestion, setPendingQuestion] =
@@ -336,8 +343,22 @@ export function ChatArea({
       );
     transcriptHistoryMessageCountRef.current = historyMessages.length;
     setTranscriptHasOlder(view.hasOlder);
+    setTranscriptManagedBytes(
+      view.managedContentBytes + transcriptContentRangeCacheBytes(),
+    );
     setMessages([...historyMessages, ...suffix]);
   }, [getActiveStream, setMessages]);
+
+  useEffect(
+    () =>
+      subscribeTranscriptContentRangeCache(() => {
+        const view = transcriptViewRef.current;
+        setTranscriptManagedBytes(
+          (view?.managedContentBytes ?? 0) + transcriptContentRangeCacheBytes(),
+        );
+      }),
+    [],
+  );
 
   const scheduleTranscriptPatchRefresh = useCallback(() => {
     transcriptPatchRefreshRequestedRef.current = true;
@@ -594,6 +615,7 @@ export function ChatArea({
       return;
     }
     const expectedSessionId = view.sessionId;
+    const expectedReleaseRevision = view.currentReleaseRevision;
     const scrollElement = messagesContainerRef.current;
     const previousScrollHeight = scrollElement?.scrollHeight ?? 0;
     const previousScrollTop = scrollElement?.scrollTop ?? 0;
@@ -607,7 +629,8 @@ export function ChatArea({
       .then((page) => {
         if (
           transcriptViewRef.current !== view ||
-          visibleSessionIdRef.current !== expectedSessionId
+          visibleSessionIdRef.current !== expectedSessionId ||
+          view.currentReleaseRevision !== expectedReleaseRevision
         ) {
           return;
         }
@@ -640,6 +663,15 @@ export function ChatArea({
       });
     olderTranscriptRequestRef.current = task;
   }, [messagesContainerRef, syncTranscriptView]);
+
+  const handleReleaseTranscriptHistory = useCallback(() => {
+    const view = transcriptViewRef.current;
+    if (!view) return;
+    clearTranscriptContentRangeCache();
+    view.releaseLoadedHistory();
+    syncTranscriptView();
+    requestAnimationFrame(() => handleJumpToLatest());
+  }, [handleJumpToLatest, syncTranscriptView]);
 
   const {
     sendPrompt,
@@ -907,6 +939,15 @@ export function ChatArea({
               </span>
             </div>
           ) : (
+            <>
+            {transcriptManagedBytes >= TRANSCRIPT_MEMORY_WARNING_BYTES ? (
+              <div className="transcript-memory-warning" role="status">
+                <span>{t("chatArea.loadedConversationDataExceeds32MiB")}</span>
+                <button type="button" onClick={handleReleaseTranscriptHistory}>
+                  {t("chatArea.releaseHistoryAndReturnToLatest")}
+                </button>
+              </div>
+            ) : null}
             <VirtualMessageList
               containerRef={messagesContainerRef}
               hasOlder={transcriptHasOlder}
@@ -927,6 +968,7 @@ export function ChatArea({
               onStartEditingUserMessage={handleStartEditingUserMessage}
               onOpenWorkspacePath={onOpenWorkspacePath}
             />
+            </>
           )}
         </div>
         {!sessionLoadError && !isFollowingLatest && chatViewMode === "conversation" ? (

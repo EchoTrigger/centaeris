@@ -3,6 +3,7 @@ use centaeris_core::session::transcript::{
     TranscriptOrderKeyV1, TranscriptPagePolicyV1, TranscriptPatchV1, TranscriptTextContentV1,
     TranscriptViewStateV1, TRANSCRIPT_PATCH_SCHEMA_V1, TRANSCRIPT_PROJECTION_VERSION_V1,
 };
+use std::collections::HashSet;
 
 fn assistant_block(sequence: u64) -> TranscriptBlockV1 {
     TranscriptBlockV1 {
@@ -108,6 +109,66 @@ fn late_history_page_cannot_overwrite_a_newer_hidden_block_override() {
     ));
     assert_eq!(visible[1].block_id, "assistant:200");
     assert_eq!(view.applied_cursor("run-1"), Some("cursor-1000"));
+}
+
+#[test]
+fn releasing_loaded_history_keeps_tail_committed_additions_and_old_block_overrides() {
+    let mut index =
+        TranscriptBlockIndexV1::new("session-1".to_string(), "generation-1".to_string())
+            .expect("index");
+    index
+        .apply_committed(50, assistant_block(50))
+        .expect("old assistant");
+    index
+        .apply_committed(100, tool_block(1, TranscriptBlockStatusV1::Running))
+        .expect("tool call");
+    index
+        .apply_committed(200, assistant_block(200))
+        .expect("tail assistant");
+    let tail_policy = TranscriptPagePolicyV1 {
+        max_blocks: 1,
+        ..TranscriptPagePolicyV1::default()
+    };
+    let older_policy = TranscriptPagePolicyV1 {
+        max_blocks: 2,
+        ..TranscriptPagePolicyV1::default()
+    };
+    let tail = index.page_at(200, None, tail_policy).expect("tail page");
+    let older_cursor = tail.older_cursor.clone().expect("older cursor");
+    let older = index
+        .page_at(200, Some(older_cursor.as_str()), older_policy)
+        .expect("older page");
+    let mut view = TranscriptViewStateV1::open("view-1".to_string(), tail).expect("view");
+    view.apply_page(older.clone()).expect("load older page");
+    view.apply_patch(patch(
+        300,
+        "cursor-300",
+        vec![
+            tool_block(2, TranscriptBlockStatusV1::Completed),
+            assistant_block(300),
+        ],
+    ))
+    .expect("post-base patch");
+
+    let retained = HashSet::from(["assistant:200".to_string()]);
+    assert_eq!(view.release_loaded_history(&retained), 1);
+    assert_eq!(
+        view.visible_blocks()
+            .iter()
+            .map(|block| block.block_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["tool:call-1", "assistant:200", "assistant:300"]
+    );
+
+    view.apply_page(older).expect("reload older page");
+    assert_eq!(
+        view.visible_blocks()
+            .iter()
+            .find(|block| block.block_id == "tool:call-1")
+            .expect("tool override")
+            .block_revision,
+        "2"
+    );
 }
 
 #[test]

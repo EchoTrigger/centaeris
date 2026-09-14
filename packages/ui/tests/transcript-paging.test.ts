@@ -167,6 +167,60 @@ test("a block revision preserves unchanged message identities", () => {
   expect(after[1]).not.toBe(before[1]);
 });
 
+test("releasing loaded history keeps the tail and committed additions reloadable", () => {
+  const view = DesktopTranscriptView.open(page([
+    block("assistant-tail", "1", "12", {
+      kind: "assistantText",
+      content: { inlineContent: "tail" },
+      status: "completed",
+    }),
+  ], "before-tail"));
+  view.applyOlderPage(page([
+    block("user-old", "1", "1", {
+      kind: "userText",
+      content: { inlineContent: "old" },
+    }),
+    block("assistant-old-unmodified", "1", "2", {
+      kind: "assistantText",
+      content: { inlineContent: "old answer" },
+      status: "completed",
+    }),
+  ]));
+  view.applyPatch({
+    schema: "transcript.patch.v1",
+    sessionId: "session-1",
+    projectionVersion: "transcript.projection.v1",
+    projectionGeneration: "generation-1",
+    sourceHighWater: "13",
+    streamId: "session-jsonl.v1",
+    appliedCursor: "13",
+    upserts: [
+      block("user-old", "2", "1", {
+        kind: "userText",
+        content: { inlineContent: "revised old" },
+      }),
+      block("assistant-new", "1", "13", {
+        kind: "assistantText",
+        content: { inlineContent: "new" },
+        status: "completed",
+      }),
+    ],
+    removals: [],
+  });
+  const bytesBeforeRelease = view.managedContentBytes;
+
+  view.releaseLoadedHistory();
+
+  expect(view.materializeMessages(false).map((message) => message.id)).toEqual([
+    "user-old",
+    "assistant-tail",
+    "assistant-new",
+  ]);
+  expect(view.olderCursor).toBe("before-tail");
+  expect(view.managedContentBytes).toBeGreaterThan(0);
+  expect(view.managedContentBytes).toBeLessThan(bytesBeforeRelease);
+});
+
 test("page polling freezes the generation and source waterline", async () => {
   const requests: unknown[] = [];
   const responses: TranscriptPageRpcResponseV1[] = [

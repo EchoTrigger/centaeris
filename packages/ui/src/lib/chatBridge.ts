@@ -114,6 +114,8 @@ export type TranscriptBlockStatusV1 =
   | "failed"
   | "interrupted";
 
+export const TRANSCRIPT_PROJECTION_VERSION_V1 = "transcript.projection.v1";
+
 export type TranscriptContentRefV1 = {
   refId: string;
   revision: string;
@@ -220,6 +222,32 @@ export type TranscriptPatchRpcResponseV1 = {
   targetReached: boolean;
   patches: TranscriptPatchV1[];
   nextSourceHighWater: string;
+  hasMore: boolean;
+};
+
+export type TranscriptContentRangeRequestV1 = {
+  schema: "transcript.content.range.read.v1";
+  sessionId: string;
+  projectionVersion: "transcript.projection.v1";
+  projectionGeneration: string;
+  refId: string;
+  revision: string;
+  byteLength: string;
+  offset: string;
+  maxBytes: number;
+};
+
+export type TranscriptContentRangeV1 = {
+  schema: "transcript.content.range.v1";
+  sessionId: string;
+  projectionVersion: "transcript.projection.v1";
+  projectionGeneration: string;
+  refId: string;
+  revision: string;
+  byteLength: string;
+  startOffset: string;
+  endOffset: string;
+  content: string;
   hasMore: boolean;
 };
 
@@ -1199,6 +1227,17 @@ export const getTranscriptPatches = async (
     throw new Error("transcript patches are desktop-only in Rust mainline");
   }
   return invokeHost<TranscriptPatchRpcResponseV1>("transcript/patches", {
+    request,
+  });
+};
+
+export const getTranscriptContentRange = async (
+  request: TranscriptContentRangeRequestV1,
+): Promise<TranscriptContentRangeV1> => {
+  if (!isNativeHostRuntime()) {
+    throw new Error("transcript content ranges are desktop-only in Rust mainline");
+  }
+  return invokeHost<TranscriptContentRangeV1>("transcript/content-range", {
     request,
   });
 };

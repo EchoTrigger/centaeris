@@ -331,6 +331,14 @@ pub(crate) fn handle_request(
                 RuntimeHostError::new("serialize_response_failed", error.to_string())
             })
         }
+        RuntimeHostCommand::TranscriptContentRange => {
+            let payload = runtime_bridge::deserialize_request(request.payload)?;
+            let response = transcript_runtime::content_range(payload)
+                .map_err(|error| RuntimeHostError::new("transcript_content_range_failed", error))?;
+            serde_json::to_value(response).map_err(|error| {
+                RuntimeHostError::new("serialize_response_failed", error.to_string())
+            })
+        }
         RuntimeHostCommand::AgentInput => {
             let payload = runtime_bridge::deserialize_request(request.payload)?;
             let response = agent_runtime::input(event_writer, payload)

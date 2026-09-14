@@ -18,6 +18,7 @@ pub struct TranscriptViewStateV1 {
     known_order_by_id: HashMap<String, (u64, u32)>,
     known_id_by_order: HashMap<(u64, u32), String>,
     pending_overrides: HashMap<String, TranscriptBlockV1>,
+    post_base_override_ids: HashSet<String>,
     applied_cursors: BTreeMap<String, String>,
 }
 
@@ -41,6 +42,7 @@ impl TranscriptViewStateV1 {
             known_order_by_id: HashMap::new(),
             known_id_by_order: HashMap::new(),
             pending_overrides: HashMap::new(),
+            post_base_override_ids: HashSet::new(),
             applied_cursors: BTreeMap::new(),
         };
         state.apply_page_inner(page)?;
@@ -78,6 +80,35 @@ impl TranscriptViewStateV1 {
 
     pub fn applied_cursor(&self, stream_id: &str) -> Option<&str> {
         self.applied_cursors.get(stream_id).map(String::as_str)
+    }
+
+    pub fn release_loaded_history(&mut self, retained_block_ids: &HashSet<String>) -> usize {
+        let removable = self
+            .visible_blocks_by_id
+            .values()
+            .filter(|block| {
+                block
+                    .order_key
+                    .source_sequence_value()
+                    .is_ok_and(|sequence| {
+                        sequence <= self.base_high_water
+                            && !retained_block_ids.contains(block.block_id.as_str())
+                            && !self
+                                .post_base_override_ids
+                                .contains(block.block_id.as_str())
+                    })
+            })
+            .map(|block| block.block_id.clone())
+            .collect::<Vec<_>>();
+        for block_id in &removable {
+            self.loaded_block_ids.remove(block_id.as_str());
+            self.visible_blocks_by_id.remove(block_id.as_str());
+            if let Some(order) = self.known_order_by_id.remove(block_id.as_str()) {
+                self.visible_order.remove(&order);
+                self.known_id_by_order.remove(&order);
+            }
+        }
+        removable.len()
     }
 
     fn apply_page_inner(&mut self, page: TranscriptPageV1) -> Result<(), String> {
@@ -138,6 +169,9 @@ impl TranscriptViewStateV1 {
             if self.loaded_block_ids.contains(block.block_id.as_str())
                 || order_source > self.base_high_water
             {
+                if order_source <= self.base_high_water {
+                    self.post_base_override_ids.insert(block.block_id.clone());
+                }
                 self.loaded_block_ids.insert(block.block_id.clone());
                 self.merge_visible(block)?;
             } else {

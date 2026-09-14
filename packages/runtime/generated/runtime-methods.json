@@ -232,6 +232,13 @@
       "scope": "sharedRuntime"
     },
     {
+      "name": "transcript/content-range",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
       "name": "plugin/catalog_state",
       "operationKind": "read",
       "reconcileMethod": null,

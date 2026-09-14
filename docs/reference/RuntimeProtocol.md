@@ -272,6 +272,7 @@ authorization grant.
 | `transcript/project` | `read` | `safeRetry` | — |
 | `transcript/page` | `read` | `safeRetry` | — |
 | `transcript/patches` | `read` | `safeRetry` | — |
+| `transcript/content-range` | `read` | `safeRetry` | — |
 | `plugin/catalog_state` | `read` | `safeRetry` | — |
 | `skill/source/list` | `read` | `safeRetry` | — |
 | `skill/source/add` | `creation` | `noAutomaticRetry` | `skill/source/list` |

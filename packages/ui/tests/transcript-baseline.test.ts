@@ -5,7 +5,7 @@ import {
 } from "../src/components/chat/agentTranscriptModel";
 import type { AssistantExecutionTurn } from "../src/components/chat/types";
 
-const baseline = process.env.CENTAERIS_P0_BASELINE === "1" ? test : test.skip;
+const baseline = process.env.CENTAERIS_RENDERING_BASELINE === "1" ? test : test.skip;
 
 const generateChunks = (count: number): AssistantExecutionTurn["chunks"] =>
   Array.from({ length: count }, (_, index) => ({
@@ -23,7 +23,7 @@ const generateChunks = (count: number): AssistantExecutionTurn["chunks"] =>
     },
   }));
 
-baseline("desktop transcript P0 scale baseline", () => {
+baseline("desktop transcript rendering scale baseline", () => {
   const samples = [100, 1_000, 10_000].map((size) => {
     const chunks = generateChunks(size);
     const work = createTranscriptProjectionWork();
@@ -54,5 +54,7 @@ baseline("desktop transcript P0 scale baseline", () => {
     return { size, elapsedMs, work, tailElapsedMs, tailWork };
   });
 
-  console.log(JSON.stringify({ schema: "transcript.p0.desktop.v1", samples }));
+  console.log(
+    JSON.stringify({ schema: "transcript.rendering-baseline.desktop.v1", samples }),
+  );
 });

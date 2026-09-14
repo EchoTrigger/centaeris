@@ -10,7 +10,7 @@ const result = spawnSync(
   [vitest, "run", "tests/transcript-baseline.test.ts", "--reporter=verbose"],
   {
     cwd: packageRoot,
-    env: { ...process.env, CENTAERIS_P0_BASELINE: "1" },
+    env: { ...process.env, CENTAERIS_RENDERING_BASELINE: "1" },
     stdio: "inherit",
   },
 );

@@ -81,6 +81,23 @@ pub(super) fn load_older_transcript_page(app: &mut App) -> Result<bool, String> 
     Ok(true)
 }
 
+pub(super) fn release_loaded_transcript_history(app: &mut App) -> usize {
+    let removed = app
+        .transcript_paging
+        .as_mut()
+        .map_or(0, TranscriptPagingState::release_loaded_history);
+    if removed == 0 {
+        return 0;
+    }
+    sync_materialized_transcript_history(app);
+    app.inline_images.clear();
+    app.inline_image_cache_order.clear();
+    app.inline_image_cache_bytes = 0;
+    app.inline_image_errors.clear();
+    reset_transcript_view(app);
+    removed
+}
+
 pub(super) fn refresh_transcript_patches(app: &mut App) -> Result<bool, String> {
     let Some(mut paging_state) = app.transcript_paging.take() else {
         return Ok(false);

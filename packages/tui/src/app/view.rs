@@ -16,8 +16,8 @@ pub(super) struct TranscriptView {
 }
 
 pub(super) struct TranscriptImagePlacement {
-    key: String,
-    row: u64,
+    pub(super) key: String,
+    pub(super) row: u64,
 }
 
 pub(super) struct TranscriptRenderWindow {
