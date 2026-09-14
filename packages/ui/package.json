@@ -15,12 +15,12 @@
     "baseline:transcript": "node ./scripts/run-transcript-baseline.mjs",
     "gate": "node ./scripts/build.mjs --mode gate && npm run lint && vitest run",
     "lint": "npm --prefix ../.. run lint:ui",
+    "lint:source": "npm --prefix ../.. run lint:ui-source",
     "lint:hooks": "npm --prefix ../.. run lint:hooks",
     "lint:unused": "npm --prefix ../.. run lint:unused",
     "preview": "vite preview",
     "test": "vitest run",
-    "typecheck": "node ./scripts/build.mjs --mode typecheck",
-    "test:browser": "playwright test --config tests/appearance.config.cjs"
+    "typecheck": "node ./scripts/build.mjs --mode typecheck"
   },
   "dependencies": {
     "@codemirror/commands": "6.10.3",
@@ -51,7 +51,6 @@
     "zustand": "5.0.14"
   },
   "devDependencies": {
-    "@playwright/test": "1.61.1",
     "@types/node": "24.12.2",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
