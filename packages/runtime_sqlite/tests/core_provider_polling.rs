@@ -1,9 +1,9 @@
-use centaeris_core::execution::sandbox::{SandboxErr, SandboxPolicy, SandboxTransformRequest};
 use centaeris_core::execution::{
     ExecutionCancellationProbe, ExecutionFileSystemError, ExecutionFileSystemOutput,
     ExecutionFileSystemRequest, ExecutionHostBinding, ExecutionHostCommandOutput,
     ExecutionHostMode, ExecutionHostRunner, ExecutionHostStatus,
 };
+use centaeris_core::execution::{ExecutionCommandRequest, ExecutionError, ExecutionPolicy};
 use centaeris_core::extension::skills::SkillCatalogLoadConfig;
 use centaeris_core::model::provider_polling::{
     build_provider_poll_payload_ref, ProviderPollingRuntimePayload, ProviderPollingSchedulerConfig,
@@ -38,7 +38,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 struct NoopExecutionHostRunner;
 
 impl ExecutionHostRunner for NoopExecutionHostRunner {
-    fn status(&self, _policy: &SandboxPolicy) -> Result<ExecutionHostStatus, SandboxErr> {
+    fn status(&self, _policy: &ExecutionPolicy) -> Result<ExecutionHostStatus, ExecutionError> {
         panic!("provider polling test must not query execution host status")
     }
 
@@ -52,9 +52,9 @@ impl ExecutionHostRunner for NoopExecutionHostRunner {
     fn run_host_command(
         &self,
         _operation_id: Option<&str>,
-        _req: SandboxTransformRequest,
+        _req: ExecutionCommandRequest,
         _cancellation_probe: Option<&ExecutionCancellationProbe>,
-    ) -> Result<ExecutionHostCommandOutput, SandboxErr> {
+    ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
         panic!("provider polling test must not execute host commands")
     }
 }
@@ -65,7 +65,7 @@ fn tool_layer() -> ToolLayer {
         ExecutionHostMode::Local,
         Arc::new(NoopExecutionHostRunner),
         cwd.clone(),
-        SandboxPolicy::workspace_write_no_network(&cwd),
+        ExecutionPolicy::workspace_write_no_network(&cwd),
     )
     .expect("build provider polling execution host binding");
     ToolLayer::try_new_with_skill_catalog_config_dynamic_tool_registry_and_execution_host_binding(

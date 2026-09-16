@@ -120,12 +120,14 @@ fn generated_registry_manifest() -> Result<String, String> {
             })
         })
         .collect::<Vec<_>>();
-    serde_json::to_string_pretty(&serde_json::json!({
+    let mut manifest = serde_json::json!({
         "schema": "centaeris.runtime-method-registry.v1",
         "methods": methods,
-    }))
-    .map(|json| format!("{json}\n"))
-    .map_err(|error| format!("serialize Runtime method registry failed: {error}"))
+    });
+    manifest.sort_all_objects();
+    serde_json::to_string_pretty(&manifest)
+        .map(|json| format!("{json}\n"))
+        .map_err(|error| format!("serialize Runtime method registry failed: {error}"))
 }
 
 fn replace_generated_registry(document: &str) -> Result<String, String> {
@@ -204,6 +206,18 @@ mod tests {
     use super::{
         generated_registry, generated_registry_manifest, replace_generated_registry, COMMANDS,
     };
+
+    #[test]
+    fn generated_manifest_has_platform_independent_key_order() {
+        let manifest = generated_registry_manifest().unwrap();
+        assert!(manifest.starts_with("{\n  \"methods\":"));
+        let mut value: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+        value.sort_all_objects();
+        assert_eq!(
+            manifest,
+            format!("{}\n", serde_json::to_string_pretty(&value).unwrap())
+        );
+    }
 
     #[test]
     fn generated_registry_contains_every_command_once() {

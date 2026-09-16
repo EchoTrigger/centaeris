@@ -1385,11 +1385,6 @@ fn normalize_bash_path(raw: Option<&str>) -> Result<Option<String>, String> {
     let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
-    #[cfg(target_os = "windows")]
-    return centaeris_runtime::local_execution_host::resolve_bash_path(Some(PathBuf::from(value)))
-        .map(|path| Some(path.to_string_lossy().to_string()))
-        .map_err(|error| error.internal_debug_message());
-    #[cfg(not(target_os = "windows"))]
     {
         let path = PathBuf::from(value);
         if !path.is_absolute() {
@@ -1445,7 +1440,6 @@ mod tests {
     #[test]
     fn bash_path_requires_an_existing_absolute_file() {
         let current_exe = std::env::current_exe().expect("current executable");
-        #[cfg(not(target_os = "windows"))]
         assert_eq!(
             normalize_bash_path(Some(current_exe.to_string_lossy().as_ref()))
                 .expect("normalize executable"),
@@ -1457,21 +1451,6 @@ mod tests {
                     .to_string()
             )
         );
-        #[cfg(target_os = "windows")]
-        {
-            let bash = centaeris_runtime::local_execution_host::resolve_bash_path(None)
-                .expect("Git for Windows Bash is required by the Windows test gate");
-            assert_eq!(
-                normalize_bash_path(Some(bash.to_string_lossy().as_ref()))
-                    .expect("normalize Git Bash override"),
-                Some(bash.to_string_lossy().to_string())
-            );
-            assert!(
-                normalize_bash_path(Some(current_exe.to_string_lossy().as_ref()))
-                    .expect_err("non-Git Bash override must loud-fail")
-                    .contains("Git for Windows Bash")
-            );
-        }
         assert!(normalize_bash_path(Some("banana/bash.exe")).is_err());
     }
 

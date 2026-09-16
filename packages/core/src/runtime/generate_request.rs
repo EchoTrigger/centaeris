@@ -586,9 +586,7 @@ impl<
         }
         let mut projected = Vec::with_capacity(model_messages.len());
         let mut pending_tool_sources = Vec::<ModelInputImageSourceRefV1>::new();
-        for (index, (message, model_message)) in
-            messages.iter().zip(model_messages.into_iter()).enumerate()
-        {
+        for (index, (message, model_message)) in messages.iter().zip(model_messages).enumerate() {
             projected.push(model_message);
             if message.role == MessageRole::Tool {
                 if let Some(raw) = message

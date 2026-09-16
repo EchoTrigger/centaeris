@@ -10,7 +10,7 @@ use crate::{
     agent_runs, mcp, message_log, operation_receipts, sessions, skills, user_data_layout,
     workspaces,
 };
-use centaeris_core::execution::sandbox::{NetworkSandboxPolicy, SandboxPolicy};
+use centaeris_core::execution::NetworkPolicy;
 use centaeris_core::execution::{
     ExecutionCancellationProbe, ExecutionHostBinding, ExecutionHostMode,
 };
@@ -54,7 +54,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
@@ -1679,6 +1679,7 @@ pub(crate) fn build_agent_runtime(
         plugin_skill_sources,
         command_environment,
         lifecycle_hooks,
+        execution_readonly_roots,
     ) = native_plugin_activation
         .map(|activation| {
             (
@@ -1687,6 +1688,7 @@ pub(crate) fn build_agent_runtime(
                 activation.skill_sources,
                 activation.command_environment,
                 activation.lifecycle_hooks,
+                activation.execution_readonly_roots,
             )
         })
         .unwrap_or_else(|| {
@@ -1696,6 +1698,7 @@ pub(crate) fn build_agent_runtime(
                 Vec::new(),
                 HashMap::new(),
                 QueryLifecycleHookRuntime::empty(),
+                Vec::new(),
             )
         });
     let local_runner = Arc::new(
@@ -1708,18 +1711,33 @@ pub(crate) fn build_agent_runtime(
         .sources_config
         .sources
         .extend(plugin_skill_sources);
+    let mut execution_readonly_roots = execution_readonly_roots;
+    for source in &skill_catalog_config.sources_config.sources {
+        let path = PathBuf::from(&source.path);
+        if source.enabled
+            && path.is_dir()
+            && !path.starts_with(&cwd)
+            && source
+                .workspace_root
+                .as_ref()
+                .is_none_or(|root| Path::new(root) == cwd)
+            && !execution_readonly_roots.contains(&path)
+        {
+            execution_readonly_roots.push(path);
+        }
+    }
     let execution_host_binding = Arc::new(ExecutionHostBinding::new(
         ExecutionHostMode::Local,
         local_runner,
         cwd.clone(),
-        SandboxPolicy::workspace_write_no_network(cwd.as_path()),
+        crate::local_execution_policy::for_workspace(cwd.as_path(), &execution_readonly_roots),
     )?);
     let mut tool_layer = ToolLayer::try_new_with_skill_catalog_config_dynamic_tool_registry_and_execution_host_binding(
             skill_catalog_config,
             dynamic_tool_registry,
             execution_host_binding,
         )?
-        .with_network_policy(NetworkSandboxPolicy::PublicInternet)
+        .with_network_policy(NetworkPolicy::PublicInternet)
         .with_session_id(session_id)
         .with_execution_owner(execution_owner)
         .with_resource_claim_store(Arc::new(store.clone()));
@@ -3551,8 +3569,6 @@ fn required_string(raw: &str, field_name: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use centaeris_core::execution::sandbox::SandboxType;
-    use centaeris_core::execution::ExecutionHostRunner;
     use centaeris_core::model::ToolCallEnvelope;
     use std::collections::HashMap;
     use std::fs;
@@ -4787,35 +4803,6 @@ mod tests {
             model_wire_api_to_wire_api(runtime_config::CustomModelProviderApi::AnthropicMessages),
             WireApi::AnthropicMessages
         );
-    }
-
-    #[test]
-    fn desktop_execution_host_reports_its_platform_capability() {
-        let runner = centaeris_runtime::local_execution_host::LocalExecutionHostRunner::new(None)
-            .expect("local execution host");
-        let status = runner
-            .status(
-                &centaeris_core::execution::sandbox::SandboxPolicy::workspace_write_public_internet(
-                    std::env::current_dir().expect("current directory"),
-                ),
-            )
-            .expect("local status");
-        #[cfg(not(target_os = "windows"))]
-        assert_eq!(
-            status.kind,
-            centaeris_core::execution::ExecutionHostKind::SandboxedProcess
-        );
-        #[cfg(target_os = "windows")]
-        assert_eq!(
-            status.kind,
-            centaeris_core::execution::ExecutionHostKind::LocalProcess
-        );
-        #[cfg(target_os = "linux")]
-        assert_eq!(status.sandbox_type, SandboxType::LinuxBubblewrap);
-        #[cfg(target_os = "macos")]
-        assert_eq!(status.sandbox_type, SandboxType::MacOsSeatbelt);
-        #[cfg(target_os = "windows")]
-        assert_eq!(status.sandbox_type, SandboxType::HostProcess);
     }
 
     #[test]

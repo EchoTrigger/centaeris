@@ -7,14 +7,16 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
-use crate::execution::sandbox::{decode_process_output, SandboxAttempt, SandboxPolicySummary};
-use crate::execution::sandbox::{
-    SandboxErr, SandboxPolicy, SandboxTransformRequest, SandboxType, SandboxedProcessOutput,
-};
-
 mod filesystem;
-pub mod sandbox;
+mod policy;
+mod process;
+
+pub use policy::{ExecutionPolicy, FileSystemPolicy, NetworkPolicy};
+pub use process::{
+    decode_process_output, normalize_process_output, DecodedProcessOutput, ExecutionAttempt,
+    ExecutionCommandRequest, ExecutionError, ExecutionPolicySummary, ExecutionProcessOutput,
+    NormalizedProcessOutput, ProcessOutputDecodeSummary, RuntimeOutputDiagnostic,
+};
 
 pub use filesystem::{
     run_direct_execution_file_system_operation, run_policy_scoped_execution_file_system_operation,
@@ -54,7 +56,8 @@ pub enum ExecutionHostFailureKind {
     CommandFailed,
     TimedOut,
     Cancelled,
-    SandboxUnavailable,
+    PolicyUnavailable,
+    PermissionDenied,
     HostUnavailable,
 }
 
@@ -66,10 +69,10 @@ pub enum ExecutionHostMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExecutionHostStatus {
     pub kind: ExecutionHostKind,
-    pub sandbox_type: SandboxType,
+    pub policy_enforced: bool,
     pub health: ExecutionHostHealth,
     pub detail: Option<String>,
 }
@@ -77,7 +80,7 @@ pub struct ExecutionHostStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionHostCommandOutput {
-    pub process: SandboxedProcessOutput,
+    pub process: ExecutionProcessOutput,
     pub failure_kind: ExecutionHostFailureKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_state_changes: Vec<ExecutionInputStateChange>,
@@ -161,7 +164,7 @@ pub trait ExecutionHostRunner: Send + Sync {
         ExecutionHostKind::SandboxedProcess
     }
 
-    fn status(&self, policy: &SandboxPolicy) -> Result<ExecutionHostStatus, SandboxErr>;
+    fn status(&self, policy: &ExecutionPolicy) -> Result<ExecutionHostStatus, ExecutionError>;
 
     fn workspace_generation(&self) -> ExecutionWorkspaceGeneration {
         ExecutionWorkspaceGeneration::Unknown {
@@ -177,9 +180,9 @@ pub trait ExecutionHostRunner: Send + Sync {
     fn run_host_command(
         &self,
         operation_id: Option<&str>,
-        req: SandboxTransformRequest,
+        req: ExecutionCommandRequest,
         cancellation_probe: Option<&ExecutionCancellationProbe>,
-    ) -> Result<ExecutionHostCommandOutput, SandboxErr>;
+    ) -> Result<ExecutionHostCommandOutput, ExecutionError>;
 }
 
 #[cfg(test)]
@@ -189,17 +192,16 @@ struct TestExecutionHostRunner {
 
 #[cfg(test)]
 impl TestExecutionHostRunner {
-    fn new(explicit_bash_path: Option<PathBuf>) -> Result<Self, SandboxErr> {
+    fn new(explicit_bash_path: Option<PathBuf>) -> Result<Self, ExecutionError> {
         let explicit_bash_path = explicit_bash_path
             .or_else(|| std::env::var_os("CENTAERIS_TEST_BASH_PATH").map(PathBuf::from));
         if let Some(path) = explicit_bash_path.as_deref() {
             if !path.is_file() {
-                return Err(SandboxErr::Unavailable {
+                return Err(ExecutionError::HostUnavailable {
                     reason: format!(
                         "configured test Bash executable is unavailable: {}",
                         path.display()
                     ),
-                    sandbox_type: None,
                 });
             }
         }
@@ -215,8 +217,8 @@ impl ExecutionHostRunner for TestExecutionHostRunner {
         "bash"
     }
 
-    fn status(&self, _policy: &SandboxPolicy) -> Result<ExecutionHostStatus, SandboxErr> {
-        Ok(ExecutionHostStatus::transient_ready(test_sandbox_type()))
+    fn status(&self, _policy: &ExecutionPolicy) -> Result<ExecutionHostStatus, ExecutionError> {
+        Ok(ExecutionHostStatus::transient_ready(false))
     }
 
     fn run_file_system_operation(
@@ -229,18 +231,15 @@ impl ExecutionHostRunner for TestExecutionHostRunner {
     fn run_host_command(
         &self,
         _operation_id: Option<&str>,
-        req: SandboxTransformRequest,
+        req: ExecutionCommandRequest,
         cancellation_probe: Option<&ExecutionCancellationProbe>,
-    ) -> Result<ExecutionHostCommandOutput, SandboxErr> {
-        let sandbox_type = test_sandbox_type();
+    ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
+        let policy_enforced = false;
         if let Some(probe) = cancellation_probe {
             let reason =
                 probe().unwrap_or_else(|error| Some(format!("cancellation probe failed: {error}")));
             if let Some(reason) = reason {
-                return Err(SandboxErr::CancellationIndeterminate {
-                    reason,
-                    sandbox_type: Some(sandbox_type),
-                });
+                return Err(ExecutionError::CancellationIndeterminate { reason });
             }
         }
         // Core uses only short fixture commands; timeout and process-tree behavior stay in Host adapter tests.
@@ -254,24 +253,24 @@ impl ExecutionHostRunner for TestExecutionHostRunner {
             .current_dir(req.cwd.as_path())
             .envs(req.env.iter())
             .output()
-            .map_err(|error| SandboxErr::Io(format!("run Core test command failed: {error}")))?;
+            .map_err(|error| {
+                ExecutionError::Io(format!("run Core test command failed: {error}"))
+            })?;
         let stdout = decode_process_output(output.stdout.as_slice());
         let stderr = decode_process_output(output.stderr.as_slice());
         let exit_code = output.status.code();
         Ok(ExecutionHostCommandOutput {
-            process: SandboxedProcessOutput {
+            process: ExecutionProcessOutput {
                 exit_code,
                 stdout: stdout.text,
                 stderr: stderr.text,
                 stdout_decode: stdout.summary,
                 stderr_decode: stderr.summary,
                 timed_out: false,
-                attempt: SandboxAttempt {
-                    sandbox_type,
+                attempt: ExecutionAttempt {
                     transition_reason: "core_test_execution_host".to_string(),
-                    policy: SandboxPolicySummary {
-                        sandbox_type,
-                        enforced: sandbox_type != SandboxType::HostProcess,
+                    policy: ExecutionPolicySummary {
+                        enforced: policy_enforced,
                         network: req.policy.network,
                         workspace_root: req
                             .policy
@@ -293,39 +292,24 @@ impl ExecutionHostRunner for TestExecutionHostRunner {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
-fn test_sandbox_type() -> SandboxType {
-    SandboxType::LinuxBubblewrap
-}
-
-#[cfg(all(test, target_os = "macos"))]
-fn test_sandbox_type() -> SandboxType {
-    SandboxType::MacOsSeatbelt
-}
-
-#[cfg(all(test, target_os = "windows"))]
-fn test_sandbox_type() -> SandboxType {
-    SandboxType::OciContainer
-}
-
 impl ExecutionHostStatus {
-    pub fn transient_ready(sandbox_type: SandboxType) -> Self {
+    pub fn transient_ready(policy_enforced: bool) -> Self {
         Self {
             kind: ExecutionHostKind::SandboxedProcess,
-            sandbox_type,
+            policy_enforced,
             health: ExecutionHostHealth::Ready,
             detail: None,
         }
     }
 
     pub fn remote(
-        sandbox_type: SandboxType,
+        policy_enforced: bool,
         health: ExecutionHostHealth,
         detail: Option<String>,
     ) -> Self {
         Self {
             kind: ExecutionHostKind::RemoteHost,
-            sandbox_type,
+            policy_enforced,
             health,
             detail,
         }
@@ -351,6 +335,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn host_status_reports_enforcement_without_backend_identity() {
+        for enforced in [false, true] {
+            let status = ExecutionHostStatus::remote(enforced, ExecutionHostHealth::Ready, None);
+            let wire = serde_json::to_value(&status).unwrap();
+            assert_eq!(wire["policyEnforced"], enforced);
+            assert!(wire.get("sandboxType").is_none());
+            assert_eq!(
+                serde_json::from_value::<ExecutionHostStatus>(wire.clone()).unwrap(),
+                status
+            );
+            for field in ["sandboxType", "policy_enforced", "unknown"] {
+                let mut invalid = wire.clone();
+                invalid[field] = serde_json::json!("unexpected");
+                assert!(serde_json::from_value::<ExecutionHostStatus>(invalid).is_err());
+            }
+        }
+        assert!(
+            serde_json::from_str::<ExecutionHostFailureKind>("\"sandboxUnavailable\"").is_err()
+        );
+        assert_eq!(
+            serde_json::to_string(&ExecutionHostFailureKind::PolicyUnavailable).unwrap(),
+            "\"policyUnavailable\""
+        );
+    }
+
+    #[test]
     fn execution_host_kind_uses_exact_wire_values() {
         assert_eq!(
             serde_json::to_string(&ExecutionHostKind::LocalProcess).unwrap(),
@@ -366,9 +376,9 @@ mod tests {
             ExecutionHostKind::RemoteHost
         }
 
-        fn status(&self, _policy: &SandboxPolicy) -> Result<ExecutionHostStatus, SandboxErr> {
+        fn status(&self, _policy: &ExecutionPolicy) -> Result<ExecutionHostStatus, ExecutionError> {
             Ok(ExecutionHostStatus::remote(
-                SandboxType::OciContainer,
+                true,
                 ExecutionHostHealth::Ready,
                 None,
             ))
@@ -384,12 +394,11 @@ mod tests {
         fn run_host_command(
             &self,
             _operation_id: Option<&str>,
-            _req: SandboxTransformRequest,
+            _req: ExecutionCommandRequest,
             _cancellation_probe: Option<&ExecutionCancellationProbe>,
-        ) -> Result<ExecutionHostCommandOutput, SandboxErr> {
-            Err(SandboxErr::Unavailable {
+        ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
+            Err(ExecutionError::HostUnavailable {
                 reason: "test runner does not execute".to_string(),
-                sandbox_type: None,
             })
         }
     }
@@ -404,7 +413,7 @@ mod tests {
 
     #[test]
     fn execution_host_binding_uses_injected_remote_runner() {
-        let policy = SandboxPolicy::workspace_write_no_network(std::env::temp_dir());
+        let policy = ExecutionPolicy::workspace_write_no_network(std::env::temp_dir());
         let binding = ExecutionHostBinding::new(
             ExecutionHostMode::Remote,
             Arc::new(TestRemoteRunner),

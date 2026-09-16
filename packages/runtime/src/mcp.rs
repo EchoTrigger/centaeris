@@ -1,7 +1,7 @@
 use crate::{atomic_file, plugins, user_data_layout};
-use centaeris_core::extension::hooks::{
-    LifecycleHookEngineV1, LifecycleHookHandlerV1, LocalLifecycleHookCommandRunnerV1,
-};
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+use centaeris_core::extension::hooks::LocalLifecycleHookCommandRunnerV1;
+use centaeris_core::extension::hooks::{LifecycleHookEngineV1, LifecycleHookHandlerV1};
 use centaeris_core::extension::skills::{
     SkillSourceConfigV1, SkillSourceKindV1, SkillSourceScopeV1,
 };
@@ -115,6 +115,7 @@ pub(crate) struct NativePluginActivation {
     pub(crate) skill_sources: Vec<SkillSourceConfigV1>,
     pub(crate) command_environment: HashMap<String, String>,
     pub(crate) lifecycle_hooks: QueryLifecycleHookRuntime,
+    pub(crate) execution_readonly_roots: Vec<PathBuf>,
 }
 
 struct NativeHttpMcpConnector {
@@ -409,15 +410,16 @@ fn activation_from_descriptors(
     let snapshot = build_plugin_activation_snapshot(enabled_roots.as_slice())?;
     let command_environment = plugin_command_environment(cli_directories.as_slice())?;
     let hook_engine = LifecycleHookEngineV1::new(hook_handlers)?;
-    let lifecycle_hooks = QueryLifecycleHookRuntime::new(
-        hook_engine,
-        Arc::new(
-            LocalLifecycleHookCommandRunnerV1::with_environment_overrides(
-                command_environment.clone(),
-            ),
-        ),
-        None,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let hook_runner = Arc::new(crate::local_hook_runner::LocalHookRunner {
+        environment: command_environment.clone(),
+        readonly_roots: enabled_roots.clone(),
+    });
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let hook_runner = Arc::new(
+        LocalLifecycleHookCommandRunnerV1::with_environment_overrides(command_environment.clone()),
     );
+    let lifecycle_hooks = QueryLifecycleHookRuntime::new(hook_engine, hook_runner, None);
 
     Ok(NativePluginActivation {
         digest: snapshot.digest,
@@ -426,6 +428,7 @@ fn activation_from_descriptors(
         skill_sources,
         command_environment,
         lifecycle_hooks,
+        execution_readonly_roots: enabled_roots,
     })
 }
 

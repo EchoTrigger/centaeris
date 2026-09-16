@@ -323,6 +323,17 @@ fn runtime_dir_path() -> PathBuf {
     desktop_data_root_dir().join("runtime")
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn execution_private_paths() -> Vec<PathBuf> {
+    vec![
+        config_dir_path(),
+        secrets_dir_path(),
+        sessions_dir_path(),
+        runtime_dir_path(),
+        user_config_file_path(),
+    ]
+}
+
 pub(crate) fn plugins_dir_path() -> PathBuf {
     desktop_data_root_dir().join("plugins")
 }

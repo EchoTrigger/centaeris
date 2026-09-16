@@ -23,6 +23,10 @@ test("third-party license assembly is complete and deterministic", async () => {
     const secondIndex = await fs.readFile(path.join(second, "index.json"), "utf8");
     assert.equal(firstIndex, secondIndex);
     const index = JSON.parse(firstIndex);
+    const linux = path.join(temporaryRoot, "linux");
+    await writeThirdPartyLicenses(repoRoot, hostRoot, linux, ["centaeris-runtime"], false, "x86_64-unknown-linux-gnu");
+    const linuxIndex = JSON.parse(await fs.readFile(path.join(linux, "index.json"), "utf8"));
+    assert.ok(linuxIndex.packages.some((item) => item.name === "nono" && item.version === "0.75.0"), "Linux Runtime distribution must include nono's license");
     for (const key of [
       "npm:@radix-ui/react-compose-refs@1.1.2",
       "npm:@rolldown/binding-win32-x64-msvc@1.1.5",
@@ -42,8 +46,10 @@ test("third-party license assembly is complete and deterministic", async () => {
       tui,
       ["centaeris-runtime", "centaeris-tui"],
       false,
+      { "centaeris-runtime": "x86_64-unknown-linux-gnu", "centaeris-tui": "x86_64-pc-windows-msvc" },
     );
     const tuiIndex = JSON.parse(await fs.readFile(path.join(tui, "index.json"), "utf8"));
+    assert.ok(tuiIndex.packages.some((item) => item.name === "nono"), "TUI package includes the Linux Runtime license closure");
     assert.ok(tuiIndex.packages.every((item) => item.ecosystem === "rust"));
     for (const key of ["rust:ratatui@0.29.0", "rust:rmcp@3.1.4"]) {
       assert.ok(

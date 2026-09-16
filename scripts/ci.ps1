@@ -43,6 +43,7 @@ try {
     if ($Stage -eq "Release") {
         & (Join-Path $PSScriptRoot "desktop-ui-acceptance.ps1")
         & (Join-Path $PSScriptRoot "build-tui.ps1")
+        npm --prefix packages/desktop run smoke:tui-wsl
     }
 } finally {
     Pop-Location

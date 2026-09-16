@@ -5,12 +5,12 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::execution::sandbox::{FileSystemSandboxPolicy, NetworkSandboxPolicy, SandboxPolicy};
 use crate::execution::{
     classify_execution_host_failure, ExecutionCancellationProbe, ExecutionFileSystemErrorKind,
     ExecutionFileSystemOperation, ExecutionFileSystemOutput, ExecutionHostBinding,
     ExecutionHostFailureKind, ExecutionHostKind, ExecutionHostMode,
 };
+use crate::execution::{ExecutionPolicy, FileSystemPolicy, NetworkPolicy};
 use crate::extension::skills::{SkillCatalogLoadConfig, SkillIndex};
 use crate::model::prepared_prompt::{
     inspect_model_input_image, ExecutionModelInputImageRefV1, MODEL_INPUT_IMAGE_MAX_BYTES,
@@ -91,7 +91,7 @@ pub struct ToolRuntimeContext {
     pub resource_claim_ttl_ms: u64,
     pub file_mutation_commit_port: Option<Arc<dyn FileMutationCommitPort + Send + Sync>>,
     pub external_context_store: Option<Arc<dyn ExternalContextStorePort + Send + Sync>>,
-    pub sandbox_policy: SandboxPolicy,
+    pub sandbox_policy: ExecutionPolicy,
     pub resolved_input_manifest: Option<Arc<ResolvedInputState>>,
     pub resolved_input_root: Option<PathBuf>,
 }
@@ -110,7 +110,7 @@ impl Default for ToolRuntimeContext {
             resource_claim_ttl_ms: DEFAULT_RESOURCE_CLAIM_TTL_MS,
             file_mutation_commit_port: None,
             external_context_store: None,
-            sandbox_policy: SandboxPolicy::workspace_write_no_network("/workspace"),
+            sandbox_policy: ExecutionPolicy::workspace_write_no_network("/workspace"),
             resolved_input_manifest: None,
             resolved_input_root: None,
         }
@@ -203,7 +203,7 @@ impl ToolRuntimeContext {
         Ok(self)
     }
 
-    fn execution_host_policy(&self, mode: ExecutionHostMode) -> SandboxPolicy {
+    fn execution_host_policy(&self, mode: ExecutionHostMode) -> ExecutionPolicy {
         let mut policy = self.sandbox_policy.clone();
         result_capture::expose_local_capture_root(&mut policy, mode, self.session_id.as_deref());
         policy
@@ -352,7 +352,7 @@ impl ToolRuntimeContext {
         self
     }
 
-    pub fn with_network_policy(mut self, network_policy: NetworkSandboxPolicy) -> Self {
+    pub fn with_network_policy(mut self, network_policy: NetworkPolicy) -> Self {
         self.sandbox_policy.network = network_policy;
         self.refresh_execution_host_policy();
         self
@@ -418,7 +418,7 @@ impl ToolRuntimeContext {
         self.resource_claim_store.clone()
     }
 
-    pub fn sandbox_policy(&self) -> &SandboxPolicy {
+    pub fn sandbox_policy(&self) -> &ExecutionPolicy {
         &self.sandbox_policy
     }
 
@@ -469,11 +469,7 @@ impl ToolRuntimeContext {
     }
 }
 
-fn remap_sandbox_policy_root(
-    policy: &mut FileSystemSandboxPolicy,
-    previous_root: &Path,
-    cwd: &Path,
-) {
+fn remap_sandbox_policy_root(policy: &mut FileSystemPolicy, previous_root: &Path, cwd: &Path) {
     fn remap(path: &Path, previous_root: &Path, cwd: &Path) -> PathBuf {
         path.strip_prefix(previous_root)
             .map(|relative| cwd.join(relative))
@@ -716,7 +712,7 @@ impl ToolLayer {
         Ok(self)
     }
 
-    pub fn with_network_policy(mut self, network_policy: NetworkSandboxPolicy) -> Self {
+    pub fn with_network_policy(mut self, network_policy: NetworkPolicy) -> Self {
         self.runtime_context = self.runtime_context.with_network_policy(network_policy);
         self
     }
@@ -1642,7 +1638,12 @@ fn tool_error_from_execution_host_failure(
             "Execution host unavailable",
         )
         .with_retryable(true),
-        ExecutionHostFailureKind::SandboxUnavailable => ToolErrorInfo::new(
+        ExecutionHostFailureKind::PermissionDenied => ToolErrorInfo::new(
+            ToolFailureKind::PermissionDenied,
+            "execution policy denied the operation",
+            "Permission denied",
+        ),
+        ExecutionHostFailureKind::PolicyUnavailable => ToolErrorInfo::new(
             ToolFailureKind::SandboxUnavailable,
             "sandbox runtime is unavailable; check sandbox configuration",
             "Sandbox unavailable",

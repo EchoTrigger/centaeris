@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import net from "node:net";
 import { requireHostEventName } from "./hostContract.mjs";
+import { mapWslRequestPaths } from "./wslRequestPaths.mjs";
 
 const RUNTIME_SERVER_CONNECT_ATTEMPTS = 50;
 const RUNTIME_SERVER_CONNECT_DELAY_MS = 100;
@@ -233,6 +234,7 @@ export const createRuntimeHostTransport = ({
   isSmokeRun = false,
   environment = process.env,
   onRuntimeServerStarted,
+  bridge,
 }) => {
   if (!executablePath) {
     throw new Error("Runtime Host executable path is required");
@@ -407,6 +409,7 @@ export const createRuntimeHostTransport = ({
   };
 
   const connectSocket = (endpoint) =>
+    bridge ? bridge.connect(endpoint).then(attachSocket) :
     new Promise((resolve, reject) => {
       const socket = net.createConnection(endpoint);
       const rejectOnce = (error) => {
@@ -422,6 +425,7 @@ export const createRuntimeHostTransport = ({
     });
 
   const runtimeServerEndpoint = () =>
+    bridge ? bridge.endpoint() :
     new Promise((resolve, reject) => {
       const probe = spawn(executablePath, ["--runtime-server-endpoint"], {
         cwd,
@@ -464,6 +468,7 @@ export const createRuntimeHostTransport = ({
     });
 
   const startRuntimeServer = () => {
+    if (bridge) return bridge.start();
     const serverProcess = spawn(executablePath, ["--runtime-server"], {
       cwd,
       env: environment,
@@ -506,7 +511,7 @@ export const createRuntimeHostTransport = ({
         return await connectSocket(endpoint);
       } catch {
         runtimeServerStartFailure = null;
-        startRuntimeServer();
+        await startRuntimeServer();
       }
       let lastError = new Error("Runtime Server did not accept a connection");
       for (let attempt = 0; attempt < RUNTIME_SERVER_CONNECT_ATTEMPTS; attempt += 1) {
@@ -604,6 +609,7 @@ export const createRuntimeHostTransport = ({
   };
 
   const invokeCommand = async (command, payload, metadata = {}) => {
+    if (bridge?.toRuntimePath) payload = mapWslRequestPaths(command, payload, bridge.toRuntimePath);
     if (isShuttingDown && command !== "app_exit") {
       throw new Error("Runtime Server host connection is shutting down, command rejected");
     }

@@ -4,17 +4,13 @@ import { spawnSync } from "node:child_process";
 import * as ResEdit from "resedit";
 import { writeThirdPartyLicenses } from "./third-party-licenses.mjs";
 import { inspectSystemSkillsBundle } from "../src/systemSkills.mjs";
+import { runtimeArtifactPath, DESKTOP_RUNTIME_TARGET } from "../src/runtimeArtifact.mjs";
 
 const hostRoot = path.resolve(import.meta.dirname, "..");
 const repoRoot = path.resolve(hostRoot, "..", "..");
 const electronDist = path.join(hostRoot, "node_modules", "electron", "dist");
 const uiDist = path.join(repoRoot, "packages", "ui", "dist");
-const runtimeExecutable = path.join(
-  repoRoot,
-  "target",
-  "release",
-  "centaeris-runtime.exe",
-);
+const runtimeExecutable = runtimeArtifactPath(repoRoot, "release");
 const trayIconIco = path.join(hostRoot, "assets", "icon.ico");
 const trayIconIcns = path.join(hostRoot, "assets", "icon.icns");
 const outRoot = path.join(hostRoot, "dist");
@@ -63,6 +59,9 @@ await requirePath(trayIconIco, "Tray icon (ico)");
 
 await fs.rm(outRoot, { recursive: true, force: true });
 await fs.mkdir(appRoot, { recursive: true });
+await fs.mkdir(path.join(resourcesRoot, "runtime", "host"), { recursive: true });
+await fs.copyFile(path.join(repoRoot, "packages/runtime/host/wsl-bootstrap.sh"), path.join(resourcesRoot, "runtime/host/wsl-bootstrap.sh"));
+await fs.copyFile(path.join(repoRoot, "packages/runtime/host/wsl-request-paths.json"), path.join(resourcesRoot, "runtime/host/wsl-request-paths.json"));
 await fs.cp(electronDist, appRoot, { recursive: true });
 
 await fs.rm(path.join(appRoot, "resources", "default_app.asar"), {
@@ -117,12 +116,15 @@ await writeThirdPartyLicenses(
   repoRoot,
   hostRoot,
   path.join(appRoot, "THIRD_PARTY_LICENSES"),
+  ["centaeris-runtime"],
+  true,
+  DESKTOP_RUNTIME_TARGET,
 );
 
 await fs.mkdir(path.join(resourcesRoot, "bin"), { recursive: true });
 await fs.copyFile(
   runtimeExecutable,
-  path.join(resourcesRoot, "bin", "centaeris-runtime.exe"),
+  path.join(resourcesRoot, "bin", "centaeris-runtime"),
 );
 
 await fs.copyFile(trayIconIco, path.join(resourcesRoot, "icon.ico"));

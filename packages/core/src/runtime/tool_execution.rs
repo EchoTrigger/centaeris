@@ -239,6 +239,51 @@ impl ToolExecutionReceiptV1 {
     }
 }
 
+#[cfg(test)]
+mod execution_receipt_contract_tests {
+    use super::*;
+
+    #[test]
+    fn persisted_execution_receipt_preserves_existing_error_and_host_details() {
+        let details = serde_json::json!({
+            "executionHost": {"attempt": {"sandboxType": "gvisor"}},
+            "toolError": {"kind": "sandbox_unavailable"}
+        });
+        let stored_result = serde_json::json!({
+            "tool_call_id": "call_1", "tool_name": "bash", "status": "error",
+            "content": "sandbox unavailable", "details": details,
+            "error": {
+                "kind": "sandbox_unavailable", "model_message": "sandbox unavailable",
+                "user_message": "Sandbox unavailable", "diagnostic_id": null,
+                "retryable": true
+            },
+            "started_at_ms": 1, "completed_at_ms": 2, "latency_ms": 1,
+            "parallel_group": null, "transition_reason": "local_tool_exec_error"
+        });
+        let receipt: ToolExecutionReceiptV1 = serde_json::from_value(serde_json::json!({
+            "schema": TOOL_EXECUTION_RECEIPT_SCHEMA_V1,
+            "sessionId": "session_1", "turnId": "turn_1", "toolCallId": "call_1",
+            "sourceToolName": "bash", "argsDigest": "fixture_digest",
+            "effectiveArgsJson": "{}", "preHookContexts": [], "runPostHook": false,
+            "resultJson": stored_result.to_string()
+        }))
+        .expect("stored receipt envelope");
+        let result = receipt
+            .decode_result()
+            .expect("recover stored result without replay");
+        assert_eq!(
+            result.error.as_ref().unwrap().kind.as_str(),
+            "sandbox_unavailable"
+        );
+        assert_eq!(result.content, "sandbox unavailable");
+        assert_eq!(result.details, details);
+        assert_eq!(
+            serde_json::to_value(&result).unwrap()["error"]["kind"],
+            "sandbox_unavailable"
+        );
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PostToolHookIntentV1 {
