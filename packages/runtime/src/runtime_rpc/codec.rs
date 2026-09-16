@@ -57,6 +57,10 @@ impl RuntimeRpcCodecError {
     }
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "Preserve the existing by-value RPC error contract; allocation changes require separate measurement"
+)]
 pub fn decode_jsonl_frame(line: &str) -> Result<RuntimeRpcFrame, RuntimeRpcCodecError> {
     let trimmed = line.trim_end_matches(['\r', '\n']);
     if trimmed.trim().is_empty() {
@@ -160,6 +164,10 @@ fn response_id_from_object(object: &serde_json::Map<String, Value>) -> RuntimeRp
         .unwrap_or(RuntimeRpcId::Null)
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "Preserve the existing by-value RPC error contract; allocation changes require separate measurement"
+)]
 fn validate_jsonrpc_member(
     object: &serde_json::Map<String, Value>,
 ) -> Result<(), RuntimeRpcCodecError> {
@@ -176,6 +184,10 @@ fn validate_jsonrpc_member(
     }
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "Preserve the existing by-value RPC error contract; allocation changes require separate measurement"
+)]
 fn reject_non_json_rpc_sidecar_envelope(
     object: &serde_json::Map<String, Value>,
 ) -> Result<(), RuntimeRpcCodecError> {

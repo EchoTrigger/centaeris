@@ -9,16 +9,232 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use centaeris_core::execution::sandbox::{SandboxPolicy, SandboxTransformRequest, SandboxType};
-#[cfg(target_os = "windows")]
-use centaeris_core::execution::ExecutionHostKind;
 use centaeris_core::execution::ExecutionHostRunner;
+use centaeris_core::execution::{ExecutionCommandRequest, ExecutionPolicy};
 #[cfg(not(target_os = "windows"))]
 use centaeris_core::execution::{
     ExecutionFileSystemErrorKind, ExecutionFileSystemOperation, ExecutionFileSystemOutput,
     ExecutionFileSystemRequest,
 };
 use centaeris_runtime::local_execution_host::LocalExecutionHostRunner;
+
+#[test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn public_network_keeps_tcp_and_udp_available() {
+    use std::net::{TcpListener, UdpSocket};
+    let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+    let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+    udp.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let workspace = std::env::temp_dir().join(format!("centaeris-ip-{}", std::process::id()));
+    fs::create_dir_all(&workspace).unwrap();
+    let runner = LocalExecutionHostRunner::new_with_runtime_executable(
+        None,
+        PathBuf::from(env!("CARGO_BIN_EXE_centaeris-runtime")),
+    )
+    .unwrap();
+    let output = runner.run_host_command(None, ExecutionCommandRequest {
+        program: "python3".into(),
+        args: vec!["-c".into(), "import socket,sys; socket.create_connection(('127.0.0.1',int(sys.argv[1])),2).close(); socket.socket(socket.AF_INET,socket.SOCK_DGRAM).sendto(b'ok',('127.0.0.1',int(sys.argv[2])))".into(), tcp.local_addr().unwrap().port().to_string(), udp.local_addr().unwrap().port().to_string()],
+        cwd: workspace.clone(), env: Default::default(), timeout_ms: 5000,
+        policy: ExecutionPolicy::workspace_write_public_internet(&workspace),
+    }, None).unwrap();
+    fs::remove_dir_all(workspace).unwrap();
+    assert_eq!(
+        output.process.exit_code,
+        Some(0),
+        "{}",
+        output.process.stderr
+    );
+    let mut bytes = [0; 2];
+    assert_eq!(udp.recv(&mut bytes).unwrap(), 2);
+    assert_eq!(&bytes, b"ok");
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+#[ignore = "requires external DNS; exercised explicitly by macOS CI"]
+fn macos_public_network_resolves_dns() {
+    let workspace = std::env::temp_dir().join(format!("centaeris-dns-{}", std::process::id()));
+    fs::create_dir_all(&workspace).unwrap();
+    let runner = LocalExecutionHostRunner::new_with_runtime_executable(
+        None,
+        PathBuf::from(env!("CARGO_BIN_EXE_centaeris-runtime")),
+    )
+    .unwrap();
+    let output = runner.run_host_command(None, ExecutionCommandRequest {
+        program: "python3".into(),
+        args: vec!["-c".into(), "import socket; assert socket.getaddrinfo('example.com',443,type=socket.SOCK_STREAM)".into()],
+        cwd: workspace.clone(), env: Default::default(), timeout_ms: 15000,
+        policy: ExecutionPolicy::workspace_write_public_internet(&workspace),
+    }, None).unwrap();
+    fs::remove_dir_all(workspace).unwrap();
+    assert_eq!(
+        output.process.exit_code,
+        Some(0),
+        "{}",
+        output.process.stderr
+    );
+}
+
+#[test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn local_commands_cannot_connect_to_a_private_host_socket() {
+    use std::os::unix::net::{UnixListener, UnixStream};
+    let root = PathBuf::from("/tmp").join(format!(
+        "cn-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let workspace = root.join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    let socket = root.join("private.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let runner = LocalExecutionHostRunner::new_with_runtime_executable(
+        None,
+        PathBuf::from(env!("CARGO_BIN_EXE_centaeris-runtime")),
+    )
+    .unwrap();
+    let output = runner.run_host_command(None, ExecutionCommandRequest {
+        program: "python3".into(), args: vec!["-c".into(),
+            "import socket,sys\ntry:\n s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])\nexcept PermissionError: sys.exit(0)\nsys.exit(77)".into(), socket.to_string_lossy().into_owned()],
+        cwd: workspace.clone(), env: Default::default(), timeout_ms: 5000,
+        policy: ExecutionPolicy::workspace_write_public_internet(&workspace),
+    }, None).unwrap();
+    assert_eq!(
+        output.process.exit_code,
+        Some(0),
+        "{}",
+        output.process.stderr
+    );
+    assert!(listener.accept().is_err());
+    let parent_connection = UnixStream::connect(&socket).unwrap();
+    assert!(
+        listener.accept().is_ok(),
+        "the Runtime parent retains its own access"
+    );
+    drop(parent_connection);
+    drop(listener);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn stdin_hooks_can_write_output_before_reading_a_large_event() {
+    let workspace =
+        std::env::temp_dir().join(format!("centaeris-hook-duplex-{}", std::process::id()));
+    fs::create_dir_all(&workspace).unwrap();
+    let runner = LocalExecutionHostRunner::new_with_runtime_executable(
+        None,
+        PathBuf::from(env!("CARGO_BIN_EXE_centaeris-runtime")),
+    )
+    .unwrap();
+    let output = runner.run_command_with_stdin(ExecutionCommandRequest {
+        program: "python3".into(), args: vec!["-c".into(),
+            "import sys; sys.stdout.write('x'*200000); sys.stdout.flush(); data=sys.stdin.read(); sys.stderr.write(str(len(data)))".into()],
+        cwd: workspace.clone(), env: Default::default(), timeout_ms: 3000,
+        policy: ExecutionPolicy::workspace_write_no_network(&workspace),
+    }, &vec![b'a'; 200000]).unwrap();
+    fs::remove_dir_all(workspace).unwrap();
+    assert_eq!(output.process.exit_code, Some(0));
+    assert_eq!(output.process.stderr, "200000");
+}
+
+#[test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn stdin_hook_capture_is_bounded_while_preserving_total_byte_counts() {
+    let workspace =
+        std::env::temp_dir().join(format!("centaeris-hook-capture-{}", std::process::id()));
+    fs::create_dir_all(&workspace).unwrap();
+    let runner = LocalExecutionHostRunner::new_with_runtime_executable(
+        None,
+        PathBuf::from(env!("CARGO_BIN_EXE_centaeris-runtime")),
+    )
+    .unwrap();
+    let output = runner.run_command_with_stdin(ExecutionCommandRequest {
+        program: "python3".into(), args: vec!["-c".into(),
+            "import sys; sys.stdin.read(); sys.stdout.write('x'*200000); sys.stderr.write('y'*200000)".into()],
+        cwd: workspace.clone(), env: Default::default(), timeout_ms: 5000,
+        policy: ExecutionPolicy::workspace_write_no_network(&workspace),
+    }, b"input").unwrap();
+    fs::remove_dir_all(workspace).unwrap();
+    assert_eq!(output.process.exit_code, Some(0));
+    assert!(output.process.stdout.len() <= 65536);
+    assert!(output.process.stderr.len() <= 65536);
+    assert_eq!(output.process.stdout_decode.raw_byte_length, 200000);
+    assert_eq!(output.process.stderr_decode.raw_byte_length, 200000);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn owned_process_drop_stops_detached_descendants_and_denies_private_files() {
+    let root = std::env::temp_dir().join(format!(
+        "centaeris-owned-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(root.join("private"), "SECRET").unwrap();
+    let runner = LocalExecutionHostRunner::new_with_runtime_executable(
+        None,
+        PathBuf::from(env!("CARGO_BIN_EXE_centaeris-runtime")),
+    )
+    .unwrap();
+    let child = runner.spawn_owned_process(
+        "python3".into(), vec!["-c".into(),
+        "import os,time,pathlib\ntry:\n pathlib.Path('../private').read_text(); pathlib.Path('leaked').touch()\nexcept PermissionError: pass\nif os.fork()==0:\n os.setsid(); pathlib.Path('ready').touch(); time.sleep(1); pathlib.Path('escaped').touch()\nelse: time.sleep(20)".into()],
+        workspace.clone(), Default::default(), ExecutionPolicy::workspace_write_public_internet(&workspace)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !workspace.join("ready").exists() && Instant::now() < deadline {
+        sleep(Duration::from_millis(10));
+    }
+    let ready = workspace.join("ready").exists();
+    drop(child);
+    assert!(ready, "owned process must run before testing cleanup");
+    sleep(Duration::from_millis(1100));
+    assert!(!workspace.join("leaked").exists());
+    assert!(!workspace.join("escaped").exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn stdin_commands_share_the_filesystem_boundary_and_preserve_process_facts() {
+    let root = std::env::temp_dir().join(format!(
+        "centaeris-hook-input-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(root.join("private"), "SECRET").unwrap();
+    let runner = LocalExecutionHostRunner::new_with_runtime_executable(
+        None,
+        PathBuf::from(env!("CARGO_BIN_EXE_centaeris-runtime")),
+    )
+    .unwrap();
+    let output = runner.run_command_with_stdin(ExecutionCommandRequest {
+        program: "python3".to_string(),
+        args: vec!["-c".to_string(), "import json,sys,pathlib\nevent=json.load(sys.stdin)\nprint(event['message'])\ntry: pathlib.Path('../private').read_text()\nexcept PermissionError: print('DENIED',file=sys.stderr); sys.exit(7)\nsys.exit(77)".to_string()],
+        cwd: workspace.clone(), env: std::collections::HashMap::new(), timeout_ms: 5000,
+        policy: ExecutionPolicy::workspace_write_no_network(&workspace),
+    }, br#"{"message":"hook input"}"#).unwrap();
+    assert_eq!(output.process.exit_code, Some(7));
+    assert_eq!(output.process.stdout, "hook input\n");
+    assert_eq!(output.process.stderr, "DENIED\n");
+    assert_eq!(fs::read_to_string(root.join("private")).unwrap(), "SECRET");
+    fs::remove_dir_all(root).unwrap();
+}
 
 #[test]
 #[cfg(not(target_os = "windows"))]
@@ -32,20 +248,20 @@ fn production_runtime_helper_enforces_platform_sandbox_and_lifecycle() {
             .as_nanos()
     ));
     let workspace = root.join("workspace");
-    let protected = workspace.join(".centaeris");
+    let protected = root.join("protected-inputs");
+    fs::create_dir_all(&workspace).expect("create workspace directory");
     fs::create_dir_all(&protected).expect("create protected directory");
     fs::write(protected.join("secret.txt"), "SECRET").expect("write protected fixture");
     let outside = root.join("outside.txt");
     let allowed = workspace.join("allowed.txt");
     let background = workspace.join("background.txt");
     let background_escape = root.join("background-escape.txt");
-    // Linux may accept these writes inside its private /tmp; Host-side absence is the boundary.
-    let mut command = "(sleep 0.25; printf ESCAPED > ../background-escape.txt 2>/dev/null || true) & (sleep 0.5; printf BACKGROUND > background.txt) & printf ALLOWED > allowed.txt; printf OUTSIDE > ../outside.txt 2>/dev/null || true; whoami; cat .centaeris/secret.txt; if printf TAMPERED > .centaeris/secret.txt 2>/dev/null; then exit 76; fi; if printf TAMPERED > .centaeris/blocked.txt 2>/dev/null; then exit 71; fi".to_string();
+    let mut command = "(sleep 0.25; printf ESCAPED > ../background-escape.txt 2>/dev/null || true) & (sleep 0.5; printf BACKGROUND > background.txt) & printf ALLOWED > allowed.txt; printf OUTSIDE > ../outside.txt 2>/dev/null || true; whoami; cat ../protected-inputs/secret.txt; if printf TAMPERED > ../protected-inputs/secret.txt 2>/dev/null; then exit 76; fi; if printf TAMPERED > ../protected-inputs/blocked.txt 2>/dev/null; then exit 71; fi".to_string();
     command.push_str("; if exec 3<>/dev/tcp/1.1.1.1/53; then exit 72; fi");
-    command.push_str("; if test -S /var/run/docker.sock; then exit 74; fi");
     let capture_root = root.join("agent-tool-results").join("banana");
     let spill_path = capture_root.join("tool-result.log");
-    let mut policy = SandboxPolicy::workspace_write_no_network(workspace.clone());
+    let mut policy = ExecutionPolicy::workspace_write_no_network(workspace.clone());
+    policy.filesystem.read_only_roots.push(protected.clone());
     policy.filesystem.tmp_root = Some(capture_root.clone());
     policy.filesystem.read_only_roots.push(capture_root.clone());
     let runner = LocalExecutionHostRunner::new_with_runtime_executable(
@@ -56,7 +272,7 @@ fn production_runtime_helper_enforces_platform_sandbox_and_lifecycle() {
     let output = runner
         .run_host_command(
             None,
-            SandboxTransformRequest {
+            ExecutionCommandRequest {
                 program: "bash".to_string(),
                 args: vec!["-c".to_string(), command],
                 cwd: workspace.clone(),
@@ -69,16 +285,7 @@ fn production_runtime_helper_enforces_platform_sandbox_and_lifecycle() {
         .expect("run platform sandbox");
 
     assert_eq!(output.process.exit_code, Some(0), "{:#?}", output.process);
-    #[cfg(target_os = "linux")]
-    assert_eq!(
-        output.process.attempt.sandbox_type,
-        SandboxType::LinuxBubblewrap
-    );
-    #[cfg(target_os = "macos")]
-    assert_eq!(
-        output.process.attempt.sandbox_type,
-        SandboxType::MacOsSeatbelt
-    );
+    assert!(output.process.attempt.policy.enforced);
     assert_eq!(fs::read_to_string(&allowed).unwrap(), "ALLOWED");
     assert!(output.process.stdout.contains("SECRET"));
     assert_eq!(
@@ -146,7 +353,7 @@ fn production_runtime_helper_enforces_platform_sandbox_and_lifecycle() {
     let spill_bash = runner
         .run_host_command(
             None,
-            SandboxTransformRequest {
+            ExecutionCommandRequest {
                 program: "bash".to_string(),
                 args: vec![
                     "-c".to_string(),
@@ -180,7 +387,7 @@ fn production_runtime_helper_enforces_platform_sandbox_and_lifecycle() {
     let timed_output = runner
         .run_host_command(
             None,
-            SandboxTransformRequest {
+            ExecutionCommandRequest {
                 program: "bash".to_string(),
                 args: vec![
                     "-c".to_string(),
@@ -203,7 +410,7 @@ fn production_runtime_helper_enforces_platform_sandbox_and_lifecycle() {
     let cancellation = runner
         .run_host_command(
             None,
-            SandboxTransformRequest {
+            ExecutionCommandRequest {
                 program: "bash".to_string(),
                 args: vec![
                     "-c".to_string(),
@@ -233,7 +440,7 @@ fn production_runtime_helper_enforces_platform_sandbox_and_lifecycle() {
 
 #[test]
 #[cfg(target_os = "windows")]
-fn windows_host_process_reports_unsandboxed_and_executes_bash() {
+fn native_windows_execution_fails_without_running_bash() {
     let workspace = std::env::temp_dir().join(format!(
         "centaeris-runtime-windows-host-{}-{}",
         std::process::id(),
@@ -249,18 +456,17 @@ fn windows_host_process_reports_unsandboxed_and_executes_bash() {
     )
     .expect("create Windows host runner");
     let status = runner
-        .status(&SandboxPolicy::workspace_write_public_internet(
+        .status(&ExecutionPolicy::workspace_write_public_internet(
             workspace.clone(),
         ))
-        .expect("Windows host status");
-    assert_eq!(status.kind, ExecutionHostKind::LocalProcess);
-    assert_eq!(status.sandbox_type, SandboxType::HostProcess);
+        .expect_err("native Windows execution is unavailable");
+    assert!(status.internal_debug_message().contains("WSL2"));
 
     let marker = workspace.join("host-process-ran.txt");
     let output = runner
         .run_host_command(
             None,
-            SandboxTransformRequest {
+            ExecutionCommandRequest {
                 program: "bash".to_string(),
                 args: vec![
                     "-c".to_string(),
@@ -269,20 +475,71 @@ fn windows_host_process_reports_unsandboxed_and_executes_bash() {
                 cwd: workspace.clone(),
                 env: std::collections::HashMap::new(),
                 timeout_ms: 10_000,
-                policy: SandboxPolicy::workspace_write_public_internet(workspace.clone()),
+                policy: ExecutionPolicy::workspace_write_public_internet(workspace.clone()),
             },
             None,
         )
-        .expect("Windows HostProcess executes Git Bash without an OS sandbox");
-    assert_eq!(output.process.exit_code, Some(0));
+        .expect_err("must not execute Git Bash");
+    assert!(output.internal_debug_message().contains("WSL2"));
+    assert!(!marker.exists());
+    let error = runner
+        .run_file_system_operation(centaeris_core::execution::ExecutionFileSystemRequest {
+            operation_id: None,
+            cwd: workspace.clone(),
+            policy: ExecutionPolicy::workspace_write_public_internet(workspace.clone()),
+            model_path: "host-process-ran.txt".into(),
+            operation: centaeris_core::execution::ExecutionFileSystemOperation::WriteFile {
+                content: b"RAN".to_vec(),
+                expected_file_hash: None,
+                create_only: true,
+            },
+        })
+        .expect_err("native Windows filesystem fallback must be unavailable");
     assert_eq!(
-        output.process.attempt.sandbox_type,
-        SandboxType::HostProcess
+        error.kind,
+        centaeris_core::execution::ExecutionFileSystemErrorKind::HostUnavailable
     );
-    assert!(!output.process.attempt.policy.enforced);
-    assert_eq!(
-        fs::read_to_string(marker).expect("read Windows host marker"),
-        "RAN"
-    );
+    assert!(!marker.exists());
+
     fs::remove_dir_all(workspace).expect("remove Windows host workspace");
+}
+
+#[test]
+#[cfg(windows)]
+fn native_windows_runtime_requires_wsl() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_centaeris-runtime"))
+        .arg("--runtime-server-endpoint")
+        .output()
+        .expect("start native Runtime");
+    assert!(
+        !output.status.success(),
+        "native Windows execution must be unavailable"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("WSL2"));
+}
+
+// Capability probing launches the production binary, not the Rust test harness.
+#[test]
+#[cfg(unix)]
+fn desktop_execution_host_reports_its_platform_capability() {
+    let runner = centaeris_runtime::local_execution_host::LocalExecutionHostRunner::new_with_runtime_executable(
+        None, std::path::PathBuf::from(env!("CARGO_BIN_EXE_centaeris-runtime")),
+    )
+        .expect("local execution host");
+    let status = runner
+        .status(
+            &centaeris_core::execution::ExecutionPolicy::workspace_write_public_internet(
+                std::env::current_dir().expect("current directory"),
+            ),
+        )
+        .expect("local status");
+    #[cfg(not(target_os = "windows"))]
+    assert_eq!(
+        status.kind,
+        centaeris_core::execution::ExecutionHostKind::SandboxedProcess
+    );
+    #[cfg(target_os = "linux")]
+    assert!(status.policy_enforced);
+    #[cfg(target_os = "macos")]
+    assert!(status.policy_enforced);
 }

@@ -25,6 +25,7 @@ export const createLocalShellActions = ({
   getMainWindow,
   getHomePath,
   invokeRustHostCommand,
+  runtimePaths,
 }) => {
   if (typeof getRequestWindow !== "function") {
     throw new Error("local shell actions require getRequestWindow");
@@ -58,7 +59,7 @@ export const createLocalShellActions = ({
     );
     if (request.mode === "defaultDirectory") {
       return activateWorkspaceRoot(
-        await ensureDefaultWorkspaceDirectory(getHomePath()),
+        runtimePaths ? await runtimePaths.defaultWorkspace() : await ensureDefaultWorkspaceDirectory(getHomePath()),
       );
     }
     if (request.mode !== "customPath") {
@@ -71,6 +72,7 @@ export const createLocalShellActions = ({
       title: "Open Folder",
       properties: ["openDirectory"],
     };
+    if (runtimePaths) options.defaultPath = runtimePaths.toDesktopPath(await runtimePaths.defaultWorkspace());
     const owner = requestWindow ?? getMainWindow();
     const result = owner
       ? await dialog.showOpenDialog(owner, options)
@@ -95,7 +97,7 @@ export const createLocalShellActions = ({
     if (!root) {
       throw new Error("workspace_reveal_folder requires request.root");
     }
-    const errorMessage = await shell.openPath(root);
+    const errorMessage = await shell.openPath(runtimePaths ? runtimePaths.toDesktopPath(root) : root);
     if (errorMessage) {
       throw new Error(`workspace_reveal_folder failed: ${errorMessage}`);
     }
@@ -116,11 +118,12 @@ export const createLocalShellActions = ({
     if (sourceRef?.kind !== "local_path") {
       throw new Error("plugin_reveal_source_ref only supports local_path source refs");
     }
-    const sourcePath =
+    let sourcePath =
       typeof sourceRef.path === "string" ? sourceRef.path.trim() : "";
     if (!sourcePath) {
       throw new Error("plugin_reveal_source_ref requires source_ref.path");
     }
+    if (runtimePaths) sourcePath = runtimePaths.toDesktopPath(sourcePath);
     if (!fs.existsSync(sourcePath)) {
       throw new Error(`plugin_reveal_source_ref path does not exist: ${sourcePath}`);
     }
@@ -204,7 +207,7 @@ export const createLocalShellActions = ({
     if (!selectedPath) {
       throw new Error("skill_select_source_path did not return a path");
     }
-    return { cancelled: false, path: selectedPath };
+    return { cancelled: false, path: runtimePaths ? runtimePaths.toRuntimePath(selectedPath) : selectedPath };
   };
 
   const revealSkillSource = async (payload) => {
@@ -226,11 +229,12 @@ export const createLocalShellActions = ({
     if (sourceRef?.kind !== "local_path") {
       throw new Error("skill_reveal_source only supports local_path source refs");
     }
-    const sourcePath =
+    let sourcePath =
       typeof sourceRef.path === "string" ? sourceRef.path.trim() : "";
     if (!sourcePath) {
       throw new Error("skill_reveal_source requires source_ref.path");
     }
+    if (runtimePaths) sourcePath = runtimePaths.toDesktopPath(sourcePath);
     if (!fs.existsSync(sourcePath)) {
       throw new Error(`skill_reveal_source path does not exist: ${sourcePath}`);
     }

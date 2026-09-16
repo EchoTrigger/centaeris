@@ -23,7 +23,7 @@ use super::{
     bash_local_tool_output, extract_string_arg, parse_tool_args, LocalToolError, LocalToolHandler,
     LocalToolOutput, ToolRuntimeContext, EXECUTION_CANCELLATION_INDETERMINATE,
 };
-use crate::execution::sandbox::{normalize_process_output, SandboxErr};
+use crate::execution::{normalize_process_output, ExecutionError};
 use crate::execution::{ExecutionHostFailureKind, ExecutionHostMode, MAX_EXECUTION_TIMEOUT_MS};
 #[cfg(test)]
 use crate::session::reliability::{
@@ -197,14 +197,14 @@ fn bash_execution_host_error_result(
     timeout_ms: u64,
     execution_host_mode: ExecutionHostMode,
     phase: &str,
-    err: &SandboxErr,
+    err: &ExecutionError,
 ) -> LocalToolOutput {
     let raw_detail = err.internal_debug_message();
     let diagnostic_id = execution_host_diagnostic_id(phase, raw_detail.as_str());
     let tool_failure_kind = execution_host_tool_failure_kind(err);
     let mut output = bash_local_tool_output(json!({
         "schema": "bash_result_v1",
-        "executed": false,
+        "executed": if err.is_cancellation_indeterminate() { Value::Null } else { Value::Bool(false) },
         "command": command,
         "bashDialect": bash_dialect,
         "cwd": cwd,
@@ -233,7 +233,7 @@ fn bash_execution_host_error_result(
             "modelMessage": err.model_visible_message(),
             "userMessage": err.user_visible_message(),
             "diagnosticId": diagnostic_id,
-            "retryable": matches!(
+            "retryable": !err.is_cancellation_indeterminate() && matches!(
                 tool_failure_kind,
                 ToolFailureKind::SandboxUnavailable
                     | ToolFailureKind::HostUnavailable
@@ -246,27 +246,25 @@ fn bash_execution_host_error_result(
     output
 }
 
-fn execution_host_tool_failure_kind(err: &SandboxErr) -> ToolFailureKind {
+fn execution_host_tool_failure_kind(err: &ExecutionError) -> ToolFailureKind {
     match err {
-        SandboxErr::Denied { .. } => ToolFailureKind::PermissionDenied,
-        SandboxErr::Unavailable {
-            sandbox_type: None, ..
-        } => ToolFailureKind::HostUnavailable,
-        SandboxErr::Unavailable { .. } => ToolFailureKind::SandboxUnavailable,
-        SandboxErr::CancellationIndeterminate { .. } => ToolFailureKind::HostUnavailable,
-        SandboxErr::Io(_) => ToolFailureKind::HostUnavailable,
+        ExecutionError::Denied { .. } => ToolFailureKind::PermissionDenied,
+        ExecutionError::HostUnavailable { .. } => ToolFailureKind::HostUnavailable,
+        ExecutionError::PolicyUnavailable { .. } => ToolFailureKind::SandboxUnavailable,
+        ExecutionError::CancellationIndeterminate { .. } => ToolFailureKind::HostUnavailable,
+        ExecutionError::Io(_) => ToolFailureKind::HostUnavailable,
     }
 }
 
-fn execution_host_failure_kind(err: &SandboxErr) -> ExecutionHostFailureKind {
+fn execution_host_failure_kind(err: &ExecutionError) -> ExecutionHostFailureKind {
     match err {
-        SandboxErr::Denied { .. } => ExecutionHostFailureKind::SandboxUnavailable,
-        SandboxErr::Unavailable {
-            sandbox_type: None, ..
-        } => ExecutionHostFailureKind::HostUnavailable,
-        SandboxErr::Unavailable { .. } => ExecutionHostFailureKind::SandboxUnavailable,
-        SandboxErr::CancellationIndeterminate { .. } => ExecutionHostFailureKind::HostUnavailable,
-        SandboxErr::Io(_) => ExecutionHostFailureKind::HostUnavailable,
+        ExecutionError::Denied { .. } => ExecutionHostFailureKind::PermissionDenied,
+        ExecutionError::HostUnavailable { .. } => ExecutionHostFailureKind::HostUnavailable,
+        ExecutionError::PolicyUnavailable { .. } => ExecutionHostFailureKind::PolicyUnavailable,
+        ExecutionError::CancellationIndeterminate { .. } => {
+            ExecutionHostFailureKind::HostUnavailable
+        }
+        ExecutionError::Io(_) => ExecutionHostFailureKind::HostUnavailable,
     }
 }
 
@@ -428,10 +426,80 @@ mod tests {
     }
 
     #[test]
+    fn denied_execution_reports_permission_denied_in_host_result() {
+        let error = ExecutionError::Denied {
+            reason: "outside authorized scope".into(),
+        };
+        let output = bash_execution_host_error_result(
+            "printf should-not-run",
+            "bash",
+            ".",
+            1_000,
+            ExecutionHostMode::Remote,
+            "run",
+            &error,
+        );
+        assert_eq!(
+            output.details["executionHost"]["failureKind"],
+            "permissionDenied"
+        );
+        assert_eq!(output.details["toolError"]["kind"], "permission_denied");
+        assert_eq!(output.details["executed"], false);
+    }
+
+    #[test]
+    fn execution_error_contract_preserves_denial_and_unknown_outcomes() {
+        let cases = [
+            (
+                ExecutionError::Denied {
+                    reason: "outside authorized scope".into(),
+                },
+                "permission_denied",
+                false,
+            ),
+            (
+                ExecutionError::CancellationIndeterminate {
+                    reason: "termination not confirmed".into(),
+                },
+                "host_unavailable",
+                true,
+            ),
+            (
+                ExecutionError::Io("private native diagnostic".into()),
+                "host_unavailable",
+                false,
+            ),
+        ];
+        for (error, kind, unknown) in cases {
+            let output = bash_execution_host_error_result(
+                "printf should-not-run",
+                "bash",
+                ".",
+                1_000,
+                ExecutionHostMode::Remote,
+                "run",
+                &error,
+            );
+            assert_eq!(output.details["toolError"]["kind"], kind);
+            assert_eq!(error.is_cancellation_indeterminate(), unknown);
+            if unknown {
+                assert_eq!(output.details["toolError"]["retryable"], false);
+                assert!(output.details["executed"].is_null());
+                assert_eq!(
+                    output.transition_reason,
+                    EXECUTION_CANCELLATION_INDETERMINATE
+                );
+            }
+            assert!(!error
+                .model_visible_message()
+                .contains("private native diagnostic"));
+        }
+    }
+
+    #[test]
     fn remote_host_unavailable_is_a_structured_bash_failure() {
-        let error = SandboxErr::Unavailable {
+        let error = ExecutionError::HostUnavailable {
             reason: "execution service stopped".to_string(),
-            sandbox_type: None,
         };
         let output = bash_execution_host_error_result(
             "printf should-not-run",
@@ -454,10 +522,9 @@ mod tests {
     }
 
     #[test]
-    fn identified_sandbox_unavailable_refuses_to_degrade() {
-        let error = SandboxErr::Unavailable {
+    fn identified_policy_unavailable_refuses_to_degrade() {
+        let error = ExecutionError::PolicyUnavailable {
             reason: "backend stopped".to_string(),
-            sandbox_type: Some(crate::execution::sandbox::SandboxType::Gvisor),
         };
         let output = bash_execution_host_error_result(
             "printf should-not-run",

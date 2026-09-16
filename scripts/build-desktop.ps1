@@ -8,9 +8,9 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $uiDir = Join-Path $repoRoot "packages/ui"
 $electronDir = Join-Path $repoRoot "packages/desktop"
-$releaseRuntime = Join-Path $repoRoot "target/release/centaeris-runtime.exe"
+$releaseRuntime = Join-Path $repoRoot "target/wsl/release/centaeris-runtime"
 $desktopDist = Join-Path $electronDir "dist/Centaeris Desktop"
-$packagedRuntime = Join-Path $desktopDist "resources/bin/centaeris-runtime.exe"
+$packagedRuntime = Join-Path $desktopDist "resources/bin/centaeris-runtime"
 $centaerisExe = Join-Path $desktopDist "Centaeris Desktop.exe"
 $uiIndex = Join-Path $repoRoot "packages/ui/dist/index.html"
 

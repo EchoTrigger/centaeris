@@ -1,65 +1,49 @@
+mod isolation;
+mod process_scope;
+pub(super) use process_scope::ProcessScope;
+
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use centaeris_core::execution::sandbox::{
-    NetworkSandboxPolicy, SandboxErr, SandboxPolicy, SandboxType,
-};
+use centaeris_core::execution::{ExecutionError, ExecutionPolicy};
 
 use super::{CompletionMarker, PreparedSandboxCommand};
 
 static MARKER_NONCE: AtomicU64 = AtomicU64::new(0);
 
-pub(super) fn sandbox_type() -> SandboxType {
-    SandboxType::LinuxBubblewrap
+pub(super) fn policy_enforced() -> bool {
+    true
 }
 
-pub(super) fn ensure_available() -> Result<PathBuf, SandboxErr> {
-    let path = find_on_path("bwrap").ok_or_else(|| SandboxErr::Unavailable {
-        reason: "bubblewrap is required for local execution on Linux".to_string(),
-        sandbox_type: Some(sandbox_type()),
-    })?;
-    let status = Command::new(path.as_path())
-        .args([
-            "--unshare-user",
-            "--unshare-pid",
-            "--as-pid-1",
-            "--unshare-net",
-            "--unshare-ipc",
-            "--unshare-uts",
-            "--new-session",
-            "--die-with-parent",
-            "--ro-bind",
-            "/",
-            "/",
-            "--proc",
-            "/proc",
-            "--dev",
-            "/dev",
-            "--tmpfs",
-            "/tmp",
-            "--tmpfs",
-            "/var/tmp",
-            "--tmpfs",
-            "/run",
-            "--",
-            "/bin/true",
-        ])
+pub(super) fn check_available(
+    runtime: &Path,
+    policy: &ExecutionPolicy,
+) -> Result<(), ExecutionError> {
+    let mut prepared = prepare_command(
+        runtime,
+        Path::new("/usr/bin/true"),
+        &[],
+        &policy.filesystem.workspace_root,
+        &std::collections::HashMap::new(),
+        policy,
+        false,
+    )?;
+    let status = prepared
+        .command
         .status()
-        .map_err(|error| SandboxErr::Unavailable {
-            reason: format!("start bubblewrap capability probe failed: {error}"),
-            sandbox_type: Some(sandbox_type()),
+        .map_err(|error| ExecutionError::PolicyUnavailable {
+            reason: format!("nono capability probe failed: {error}"),
         })?;
     if !status.success() {
-        return Err(SandboxErr::Unavailable {
-            reason: "bubblewrap capability probe failed".to_string(),
-            sandbox_type: Some(sandbox_type()),
+        return Err(ExecutionError::PolicyUnavailable {
+            reason: "nono capability probe failed".to_string(),
         });
     }
-    Ok(path)
+    Ok(())
 }
 
 pub(super) fn prepare_command(
@@ -68,93 +52,54 @@ pub(super) fn prepare_command(
     args: &[String],
     cwd: &Path,
     env_overrides: &std::collections::HashMap<String, String>,
-    policy: &SandboxPolicy,
+    policy: &ExecutionPolicy,
     preserve_background: bool,
-) -> Result<PreparedSandboxCommand, SandboxErr> {
-    if matches!(policy.network, NetworkSandboxPolicy::Allowlist { .. }) {
-        return Err(SandboxErr::Unavailable {
-            reason: "local Linux sandbox does not support network allowlists".to_string(),
-            sandbox_type: Some(sandbox_type()),
-        });
-    }
-    super::materialize_denied_paths(policy, sandbox_type())?;
-    let bwrap = ensure_available()?;
-    let mut command = Command::new(bwrap);
-    command
-        .args([
-            "--unshare-user",
-            "--unshare-pid",
-            "--as-pid-1",
-            "--unshare-ipc",
-            "--unshare-uts",
-            "--unshare-cgroup-try",
-            "--new-session",
-            "--die-with-parent",
-        ])
-        .args(matches!(policy.network, NetworkSandboxPolicy::Disabled).then_some("--unshare-net"))
-        .args(["--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev"])
-        .args(["--tmpfs", "/tmp", "--tmpfs", "/var/tmp", "--tmpfs", "/run"]);
-
-    for root in &policy.filesystem.read_only_roots {
-        if !policy.filesystem.writable_roots.contains(root) {
-            command.arg("--ro-bind").arg(root).arg(root);
-        }
-    }
-    for root in &policy.filesystem.writable_roots {
-        command.arg("--bind").arg(root).arg(root);
-    }
-    for path in &policy.filesystem.denied_write_paths {
-        if path.exists() {
-            command.arg("--ro-bind").arg(path).arg(path);
-        }
-    }
-    for path in &policy.filesystem.denied_read_paths {
-        if path.is_dir() {
-            command
-                .arg("--tmpfs")
-                .arg(path)
-                .arg("--remount-ro")
-                .arg(path);
-        } else if path.is_file() {
-            command.arg("--ro-bind").arg("/dev/null").arg(path);
-        }
-    }
-
+) -> Result<PreparedSandboxCommand, ExecutionError> {
+    let scope = ProcessScope::new()?;
     let completion = if preserve_background {
-        let completion = create_completion_marker()?;
-        command
-            .arg("--bind")
-            .arg(completion.root.as_path())
-            .arg(completion.root.as_path());
-        Some(completion)
+        Some(create_completion_marker()?)
     } else {
         None
     };
-
-    command.arg("--chdir").arg(cwd).arg("--");
-    if let Some(completion) = completion.as_ref() {
+    let sandbox = isolation::prepare(
+        policy,
+        program,
+        runtime_executable,
+        &scope.scratch,
+        completion.as_ref().map(|marker| marker.root.as_path()),
+    )?;
+    let mut command = if let Some(completion) = &completion {
+        let mut command = Command::new(runtime_executable);
         command
-            .arg(runtime_executable)
             .arg("--local-sandbox-supervisor")
-            .arg(completion.path.as_path())
+            .arg(&completion.path)
             .arg("--")
             .arg(program)
             .args(args);
+        command
     } else {
-        command.arg(program).args(args);
-    }
+        let mut command = Command::new(program);
+        command.args(args);
+        command
+    };
     command.current_dir(cwd).envs(env_overrides);
+    for key in ["TMPDIR", "TMP", "TEMP"] {
+        command.env(key, &scope.scratch);
+    }
+    scope.attach(&mut command)?;
+    isolation::attach(&mut command, sandbox);
     Ok(PreparedSandboxCommand {
         command,
         completion,
         stdin_input: None,
+        scope: Some(scope),
     })
 }
 
-fn create_completion_marker() -> Result<CompletionMarker, SandboxErr> {
+fn create_completion_marker() -> Result<CompletionMarker, ExecutionError> {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| SandboxErr::Io(format!("system clock is invalid: {error}")))?
+        .map_err(|error| ExecutionError::Io(format!("system clock is invalid: {error}")))?
         .as_nanos();
     let nonce = MARKER_NONCE.fetch_add(1, Ordering::Relaxed);
     let root = env::temp_dir().join(format!(
@@ -162,11 +107,11 @@ fn create_completion_marker() -> Result<CompletionMarker, SandboxErr> {
         std::process::id()
     ));
     fs::create_dir(&root).map_err(|error| {
-        SandboxErr::Io(format!("create sandbox supervisor state failed: {error}"))
+        ExecutionError::Io(format!("create sandbox supervisor state failed: {error}"))
     })?;
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).map_err(|error| {
-        SandboxErr::Io(format!("protect sandbox supervisor state failed: {error}"))
+        ExecutionError::Io(format!("protect sandbox supervisor state failed: {error}"))
     })?;
     Ok(CompletionMarker {
         path: root.join("shell-exit"),
@@ -176,15 +121,15 @@ fn create_completion_marker() -> Result<CompletionMarker, SandboxErr> {
     })
 }
 
-fn find_on_path(name: &str) -> Option<PathBuf> {
-    env::var_os("PATH").and_then(|path| {
-        env::split_paths(&path)
-            .map(|directory| directory.join(name))
-            .find(|candidate| candidate.is_file())
-    })
-}
-
 pub(crate) fn run_supervisor(arguments: &[String]) -> Result<i32, String> {
+    // Become the reaper before starting user code. cgroup ownership, rather
+    // than a PID namespace or process group, handles forced termination.
+    if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
+        return Err(format!(
+            "configure command reaper: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
     let mut secret = String::new();
     std::io::stdin()
         .read_line(&mut secret)

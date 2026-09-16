@@ -1,12 +1,13 @@
 use centaeris_core::runtime::contracts::current_timestamp_ms;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use centaeris_runtime::local_execution_host::LocalOwnedProcess as OsChild;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child as OsChild, Command, ExitStatus, Stdio};
-
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+use std::process::Child as OsChild;
+use std::process::ExitStatus;
 
 #[derive(Default)]
 pub(crate) struct SidecarStoreState {
@@ -79,14 +80,6 @@ pub(crate) struct SidecarSummary {
     pub(crate) exit_code: Option<i32>,
 }
 
-fn configure_sidecar_command(_command: &mut Command) {
-    #[cfg(target_os = "windows")]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        _command.creation_flags(CREATE_NO_WINDOW);
-    }
-}
-
 pub(crate) fn start(
     sidecar_store: &mut SidecarStoreState,
     request: SidecarStartRequest,
@@ -104,20 +97,27 @@ pub(crate) fn start(
     let workspace_root_text = workspace_root.to_string_lossy().to_string();
     let cwd_text = Some(cwd.to_string_lossy().to_string());
 
-    let mut command_builder = Command::new(command_text);
-    configure_sidecar_command(&mut command_builder);
-    command_builder.args(&args);
-    command_builder.current_dir(cwd.as_path());
-    if let Some(env_map) = request.env.clone() {
-        for (key, value) in env_map {
-            command_builder.env(key, value);
-        }
-    }
-    command_builder.stdin(Stdio::null());
-    command_builder.stdout(Stdio::null());
-    command_builder.stderr(Stdio::null());
-
-    let spawn_result = command_builder.spawn();
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let spawn_result: Result<OsChild, String> = {
+        let _ = (&args, &cwd, &request.env);
+        Err("Native Windows sidecars are unavailable; use WSL2.".into())
+    };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let spawn_result = (|| {
+        let runner = centaeris_runtime::local_execution_host::LocalExecutionHostRunner::new(None)
+            .map_err(|e| e.internal_debug_message())?;
+        let mut policy = crate::local_execution_policy::for_workspace(&workspace_root, &[]);
+        policy.filesystem.workspace_root = cwd.clone();
+        runner
+            .spawn_owned_process(
+                command_text.to_string(),
+                args.clone(),
+                cwd.clone(),
+                request.env.clone().unwrap_or_default(),
+                policy,
+            )
+            .map_err(|e| e.internal_debug_message())
+    })();
     let sidecar_name = request.name.unwrap_or_else(|| command_text.to_string());
 
     match spawn_result {

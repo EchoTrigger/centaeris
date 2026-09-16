@@ -32,12 +32,12 @@ virtual environment, or bundle hosted-product services.
 
 ```powershell
 npm ci
-cargo build --locked -p centaeris-runtime
+node packages/desktop/scripts/ensure-runtime.mjs --profile debug
 npm run dev --workspace centaeris-ui
 npm run dev --workspace @centaeris/electron-host
 ```
 
-The default development Runtime is `target/debug/centaeris-runtime.exe`.
+The default development Runtime is `target/wsl/debug/centaeris-runtime` on Windows.
 `CENTAERIS_RUNTIME_EXE` may select an explicit build. Missing or incompatible
 Runtime binaries fail.
 

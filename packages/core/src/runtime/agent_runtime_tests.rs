@@ -859,11 +859,11 @@ impl crate::execution::ExecutionHostRunner for HostProcessTestRunner {
 
     fn status(
         &self,
-        _policy: &crate::execution::sandbox::SandboxPolicy,
-    ) -> Result<crate::execution::ExecutionHostStatus, crate::execution::sandbox::SandboxErr> {
+        _policy: &crate::execution::ExecutionPolicy,
+    ) -> Result<crate::execution::ExecutionHostStatus, crate::execution::ExecutionError> {
         Ok(crate::execution::ExecutionHostStatus {
             kind: crate::execution::ExecutionHostKind::LocalProcess,
-            sandbox_type: crate::execution::sandbox::SandboxType::HostProcess,
+            policy_enforced: false,
             health: crate::execution::ExecutionHostHealth::Ready,
             detail: None,
         })
@@ -882,9 +882,9 @@ impl crate::execution::ExecutionHostRunner for HostProcessTestRunner {
     fn run_host_command(
         &self,
         _operation_id: Option<&str>,
-        _request: crate::execution::sandbox::SandboxTransformRequest,
+        _request: crate::execution::ExecutionCommandRequest,
         _cancellation_probe: Option<&crate::execution::ExecutionCancellationProbe>,
-    ) -> Result<crate::execution::ExecutionHostCommandOutput, crate::execution::sandbox::SandboxErr>
+    ) -> Result<crate::execution::ExecutionHostCommandOutput, crate::execution::ExecutionError>
     {
         unreachable!("permission preview must not execute the host command")
     }
@@ -896,7 +896,7 @@ fn host_process_test_tool_layer(workspace_root: &Path) -> ToolLayer {
             crate::execution::ExecutionHostMode::Local,
             std::sync::Arc::new(HostProcessTestRunner),
             workspace_root.to_path_buf(),
-            crate::execution::sandbox::SandboxPolicy::workspace_write_no_network(workspace_root),
+            crate::execution::ExecutionPolicy::workspace_write_no_network(workspace_root),
         )
         .expect("host process test binding"),
     );

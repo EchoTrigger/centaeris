@@ -8,6 +8,9 @@ mod handlers;
 mod host_protocol;
 mod http_transport;
 mod local_attachments;
+mod local_execution_policy;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod local_hook_runner;
 mod mcp;
 mod message_log;
 mod operation_receipts;
@@ -39,7 +42,21 @@ mod workspace_git;
 mod workspaces;
 
 fn main() {
+    #[cfg(unix)]
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    #[cfg(target_os = "macos")]
+    if arguments
+        .first()
+        .is_some_and(|arg| arg == "--local-macos-launcher")
+    {
+        if let Err(error) =
+            centaeris_runtime::local_execution_host::run_macos_launcher(&arguments[1..])
+        {
+            eprintln!("centaeris macOS launcher failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     #[cfg(target_os = "linux")]
     if arguments.first().map(String::as_str) == Some("--local-sandbox-supervisor") {
         match centaeris_runtime::local_execution_host::run_linux_supervisor(&arguments[1..]) {
@@ -60,16 +77,6 @@ fn main() {
             }
         }
     }
-    #[cfg(target_os = "windows")]
-    if arguments == ["--windows-host-launcher"] {
-        match centaeris_runtime::local_execution_host::run_windows_host_launcher() {
-            Ok(exit_code) => std::process::exit(exit_code),
-            Err(error) => {
-                eprintln!("centaeris Windows host launcher failed: {error}");
-                std::process::exit(1);
-            }
-        }
-    }
     if let Err(error) = run() {
         eprintln!("centaeris Runtime Host failed: {}", error);
         std::process::exit(1);
@@ -77,6 +84,12 @@ fn main() {
 }
 
 fn run() -> Result<(), errors::RuntimeHostError> {
+    if cfg!(windows) {
+        return Err(errors::RuntimeHostError::new(
+            "unsupported_execution_environment",
+            "Native Windows Runtime is unavailable; use the Linux Runtime in WSL2.",
+        ));
+    }
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -90,6 +103,14 @@ fn run() -> Result<(), errors::RuntimeHostError> {
     }
     if arguments == ["--runtime-server"] {
         return runtime.block_on(runtime_server_transport::run_server());
+    }
+    #[cfg(target_os = "linux")]
+    if arguments == ["--runtime-server-connect"] {
+        let result = runtime.block_on(runtime_server_transport::relay_stdio());
+        // Tokio's blocking stdin read cannot be cancelled when the server
+        // disconnects. The short-lived relay must not wait for it on shutdown.
+        runtime.shutdown_background();
+        return result;
     }
     if !arguments.is_empty() {
         return Err(errors::RuntimeHostError::new(

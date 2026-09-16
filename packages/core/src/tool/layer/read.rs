@@ -1053,9 +1053,7 @@ fn file_content_hash_for_bytes(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::execution::sandbox::{
-        SandboxErr, SandboxPolicy, SandboxTransformRequest, SandboxType,
-    };
+    use crate::execution::{ExecutionCommandRequest, ExecutionError, ExecutionPolicy};
     use crate::execution::{
         ExecutionFileSystemError, ExecutionFileSystemErrorKind, ExecutionFileSystemRequest,
         ExecutionHostCommandOutput, ExecutionHostHealth, ExecutionHostRunner, ExecutionHostStatus,
@@ -1256,9 +1254,9 @@ mod tests {
     struct TestRemoteRunner;
 
     impl ExecutionHostRunner for TestRemoteRunner {
-        fn status(&self, _policy: &SandboxPolicy) -> Result<ExecutionHostStatus, SandboxErr> {
+        fn status(&self, _policy: &ExecutionPolicy) -> Result<ExecutionHostStatus, ExecutionError> {
             Ok(ExecutionHostStatus::remote(
-                SandboxType::OciContainer,
+                true,
                 ExecutionHostHealth::Ready,
                 None,
             ))
@@ -1277,9 +1275,9 @@ mod tests {
         fn run_host_command(
             &self,
             _operation_id: Option<&str>,
-            _request: SandboxTransformRequest,
+            _request: ExecutionCommandRequest,
             _cancellation_probe: Option<&crate::execution::ExecutionCancellationProbe>,
-        ) -> Result<ExecutionHostCommandOutput, SandboxErr> {
+        ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
             unreachable!("attachment read must not invoke Bash")
         }
     }
@@ -1411,7 +1409,7 @@ mod tests {
                 crate::execution::ExecutionHostMode::Remote,
                 Arc::new(TestRemoteRunner),
                 workspace.clone(),
-                SandboxPolicy::workspace_write_no_network(workspace),
+                ExecutionPolicy::workspace_write_no_network(workspace),
             )
             .expect("remote execution host"),
         );

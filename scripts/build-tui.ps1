@@ -8,9 +8,9 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $tuiDir = Join-Path $repoRoot "packages/tui"
 $tuiReleaseTarget = Join-Path $repoRoot "target/tui-release"
-$releaseTarget = Join-Path $repoRoot "target/release"
+$releaseTarget = Join-Path $repoRoot "target/wsl/release"
 $tuiBinary = Join-Path $tuiReleaseTarget "centa.exe"
-$runtimeBinary = Join-Path $releaseTarget "centaeris-runtime.exe"
+$runtimeBinary = Join-Path $releaseTarget "centaeris-runtime"
 $distRoot = Join-Path $tuiDir "dist/centaeris"
 
 function Assert-CommandAvailable {
@@ -131,24 +131,26 @@ Invoke-Checked "tui release build" "cargo.exe" @(
     (Join-Path $tuiDir "Cargo.toml")
 ) $repoRoot
 
-Invoke-Checked "runtime release build" "cargo.exe" @(
-    "build",
-    "--release",
-    "--locked",
-    "--manifest-path",
-    (Join-Path $repoRoot "packages/runtime/Cargo.toml")
+Invoke-Checked "WSL runtime release build" "node.exe" @(
+    (Join-Path $repoRoot "packages/desktop/scripts/ensure-runtime.mjs"),
+    "--profile", "release"
 ) $repoRoot
 
 Assert-PathExists $tuiBinary "TUI release binary"
 Assert-PathExists $runtimeBinary "Rust release runtime"
 
+$resolvedDistRoot = [System.IO.Path]::GetFullPath($distRoot)
+$resolvedRepoPrefix = [System.IO.Path]::GetFullPath($repoRoot).TrimEnd('\') + '\'
+if (-not $resolvedDistRoot.StartsWith($resolvedRepoPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "TUI distribution path is outside the repository: $resolvedDistRoot"
+}
 if (Test-Path -LiteralPath $distRoot) {
     Remove-Item -LiteralPath $distRoot -Recurse -Force
 }
 New-Item -ItemType Directory -Path $distRoot -Force | Out-Null
 
 $tuiName = "centa.exe"
-$runtimeName = "centaeris-runtime.exe"
+$runtimeName = "centaeris-runtime"
 Copy-Item -LiteralPath $tuiBinary -Destination (Join-Path $distRoot $tuiName)
 Copy-Item -LiteralPath $runtimeBinary -Destination (Join-Path $distRoot $runtimeName)
 Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE") -Destination (Join-Path $distRoot "LICENSE.centaeris.txt")
@@ -161,7 +163,8 @@ Invoke-Checked "third-party license assembly" "node.exe" @(
     (Join-Path $distRoot "THIRD_PARTY_LICENSES"),
     "centaeris-runtime",
     "centaeris-tui",
-    "--rust-only"
+    "--rust-only",
+    "--wsl-runtime"
 ) $repoRoot
 
 if ($systemSkillsBundle) {

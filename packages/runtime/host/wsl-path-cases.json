@@ -1,0 +1,48 @@
+[
+  {
+    "input": "\\\\wsl.localhost\\Ubuntu-24.04\\home\\user\\项目 one",
+    "linux": "/home/user/项目 one"
+  },
+  {
+    "input": "\\\\wsl$\\Ubuntu-24.04\\home\\user\\repo",
+    "linux": "/home/user/repo"
+  },
+  {
+    "input": "\\\\?\\UNC\\wsl.localhost\\Ubuntu-24.04\\home\\user\\repo",
+    "linux": "/home/user/repo"
+  },
+  {
+    "input": "/home/user/a/../repo",
+    "linux": "/home/user/repo"
+  },
+  {
+    "input": "D:\\Images\\测试.png",
+    "importSource": true,
+    "linux": "/mnt/d/Images/测试.png"
+  },
+  {
+    "input": "\\\\?\\D:\\Images\\测试.png",
+    "importSource": true,
+    "linux": "/mnt/d/Images/测试.png"
+  },
+  {
+    "input": "/mnt/d/repo",
+    "error": true
+  },
+  {
+    "input": "D:\\repo",
+    "error": true
+  },
+  {
+    "input": "\\\\wsl.localhost\\Debian\\home\\user",
+    "error": true
+  },
+  {
+    "input": "relative/path",
+    "error": true
+  },
+  {
+    "input": "/home/a\u0000b",
+    "error": true
+  }
+]
