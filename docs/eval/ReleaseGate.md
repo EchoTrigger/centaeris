@@ -6,6 +6,20 @@ A public release requires the full local gate below to pass from a clean clone:
 .\scripts\ci.ps1
 ```
 
+Windows Desktop/TUI build and acceptance now require a configured WSL2
+Ubuntu 24.04 environment, a working systemd user session and the pinned Rust
+toolchain inside WSL. See [local execution setup](../architecture/LocalExecution.md).
+The checked-in remote Release Candidate runner has not yet been provisioned
+or revalidated for that change; its previous Windows-only release evidence
+does not certify the new Desktop artifact.
+
+The `macOS Runtime` workflow tests nono execution on Apple Silicon and Intel.
+The first run found a private Unix-socket access gap on both architectures.
+The fix passed execution and DNS tests on both architectures; corrections to
+the subsequent capability and SSE regression tests passed in run `34966224952`
+on both architectures. Adding the workflow does not establish a
+supported macOS release platform. It adds no browser CI suite.
+
 The 4,095-observation storage-growth stress test is intentionally excluded from
 the normal test suite. Run it once for a release candidate, or when the Runtime
 message-log implementation changes:
@@ -38,7 +52,8 @@ workspace tests, the Windows x64 TUI package build, and the desktop/UI acceptanc
 script. Local Desktop acceptance performs `npm ci`, the UI gate (typecheck, Vite
 build, and Vitest), retained Electron host/security tests and build,
 third-party-license assembly and distribution validation, plus runtime and window
-smoke tests. Playwright/E2E and visual-snapshot tests are not part of the gate;
+smoke tests, plus Desktop/TUI coexistence, persistence and sandboxed sidecar
+acceptance in WSL2. Playwright/E2E and visual-snapshot tests are not part of the gate;
 visual and interaction acceptance is manual.
 Use [FrontendManualAcceptance.md](FrontendManualAcceptance.md) for the retained
 Desktop interaction and appearance checks.

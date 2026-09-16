@@ -2,6 +2,7 @@ use centaeris_core::model::{
     JsonHttpFuture, JsonHttpRequest, JsonHttpResponse, JsonHttpTransport,
     MODEL_PROVIDER_WAITING_STREAM_EVENT_TYPE,
 };
+use futures::StreamExt;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -50,7 +51,7 @@ async fn execute_sse_async(
     on_data: &mut (dyn FnMut(String) + Send),
 ) -> Result<JsonHttpResponse, String> {
     let sse_idle_timeout_ms = request.sse_idle_timeout_ms.max(1);
-    let mut response = send_sse_headers(client, request).await?;
+    let response = send_sse_headers(client, request).await?;
     let status_code = response.status().as_u16();
     let headers = response_headers(&response);
     if status_code >= 400 {
@@ -67,26 +68,47 @@ async fn execute_sse_async(
             body_json,
         });
     }
-    let mut decoder = SseDecoder::default();
-
-    loop {
-        let next_chunk =
-            tokio::time::timeout(Duration::from_millis(sse_idle_timeout_ms), response.chunk())
+    read_sse_chunks(
+        futures::stream::try_unfold(response, |mut response| async move {
+            let bytes = response
+                .chunk()
                 .await
-                .map_err(|_| format!("read SSE chunk idle timeout after {sse_idle_timeout_ms}ms"))?
                 .map_err(|error| format_reqwest_error("read SSE chunk failed", error))?;
-        let Some(bytes) = next_chunk else {
-            break;
-        };
-        decoder.push(bytes.as_ref(), on_data)?;
-    }
-    decoder.finish(on_data)?;
+            Ok(bytes.map(|bytes| (bytes, response)))
+        }),
+        sse_idle_timeout_ms,
+        on_data,
+    )
+    .await?;
 
     Ok(JsonHttpResponse {
         status_code,
         headers,
         body_json: String::new(),
     })
+}
+
+async fn read_sse_chunks<B: AsRef<[u8]>>(
+    chunks: impl futures::Stream<Item = Result<B, String>>,
+    sse_idle_timeout_ms: u64,
+    on_data: &mut (dyn FnMut(String) + Send),
+) -> Result<(), String> {
+    let mut decoder = SseDecoder::default();
+    futures::pin_mut!(chunks);
+
+    loop {
+        let next_chunk =
+            tokio::time::timeout(Duration::from_millis(sse_idle_timeout_ms), chunks.next())
+                .await
+                .map_err(|_| {
+                    format!("read SSE chunk idle timeout after {sse_idle_timeout_ms}ms")
+                })?;
+        let Some(bytes) = next_chunk else {
+            break;
+        };
+        decoder.push(bytes?.as_ref(), on_data)?;
+    }
+    decoder.finish(on_data)
 }
 
 async fn send_with_total_timeout(
@@ -346,12 +368,64 @@ mod tests {
         assert!(decoder.finish(&mut |_| {}).is_err());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn sse_timeout_is_idle_based_and_resets_on_keep_alive_chunks() {
+        let started = tokio::time::Instant::now();
+        let chunks = std::collections::VecDeque::from([
+            ": keep-alive\n\n",
+            ": keep-alive\n\n",
+            ": keep-alive\n\n",
+            "data: done\n\ndata: [DONE]\n\n",
+        ]);
+        let mut events = Vec::new();
+        read_sse_chunks(
+            futures::stream::unfold(chunks, |mut chunks| async move {
+                let next = chunks.pop_front()?;
+                tokio::time::sleep(Duration::from_millis(60)).await;
+                Some((Ok(next), chunks))
+            }),
+            150,
+            &mut |event| events.push(event),
+        )
+        .await
+        .expect("each chunk resets the idle timeout");
+        assert_eq!(started.elapsed(), Duration::from_millis(240));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.contains(MODEL_PROVIDER_WAITING_STREAM_EVENT_TYPE))
+                .count(),
+            3
+        );
+        assert_eq!(events.last().map(String::as_str), Some("done"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sse_timeout_expires_when_the_next_chunk_is_idle() {
+        let started = tokio::time::Instant::now();
+        let error = read_sse_chunks(
+            futures::stream::once(async {
+                tokio::time::sleep(Duration::from_millis(151)).await;
+                Ok("data: late\n\n")
+            }),
+            150,
+            &mut |_| {},
+        )
+        .await
+        .expect_err("an idle stream must time out");
+        assert_eq!(started.elapsed(), Duration::from_millis(150));
+        assert_eq!(error, "read SSE chunk idle timeout after 150ms");
+    }
+
+    #[tokio::test]
+    async fn sse_http_delivers_keep_alive_and_terminal_events() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local SSE server");
         let address = listener.local_addr().expect("local SSE address");
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept SSE request");
+            stream
+                .set_nodelay(true)
+                .expect("disable test-server buffering");
             let mut request_bytes = [0_u8; 4096];
             let _ = stream.read(&mut request_bytes).expect("read SSE request");
             stream
@@ -361,13 +435,11 @@ mod tests {
                 .expect("write SSE headers");
             stream.flush().expect("flush SSE headers");
             for _ in 0..3 {
-                thread::sleep(Duration::from_millis(60));
                 stream
                     .write_all(b": keep-alive\n\n")
                     .expect("write keep-alive");
                 stream.flush().expect("flush keep-alive");
             }
-            thread::sleep(Duration::from_millis(60));
             stream
                 .write_all(
                     b"data: {\"id\":\"done\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
@@ -379,8 +451,8 @@ mod tests {
             method: "POST".to_string(),
             url: format!("http://{address}/chat/completions"),
             headers: HashMap::from([("content-type".to_string(), "application/json".to_string())]),
-            timeout_ms: 50,
-            sse_idle_timeout_ms: 150,
+            timeout_ms: 5000,
+            sse_idle_timeout_ms: 5000,
             max_retries: 0,
             retry_backoff_ms: 0,
             body_json: "{}".to_string(),
@@ -391,7 +463,7 @@ mod tests {
             events.push(event)
         })
         .await
-        .expect("keep-alive chunks should reset the idle timeout");
+        .expect("deliver keep-alive and terminal events over HTTP");
         server.join().expect("join local SSE server");
 
         assert_eq!(response.status_code, 200);

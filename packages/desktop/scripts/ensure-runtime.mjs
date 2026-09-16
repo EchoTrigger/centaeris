@@ -2,6 +2,8 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { runtimeArtifactPath } from "../src/runtimeArtifact.mjs";
+import { buildWslRuntime } from "./build-wsl-runtime.mjs";
 
 const hostRoot = path.resolve(import.meta.dirname, "..");
 const repoRoot = path.resolve(hostRoot, "..", "..");
@@ -13,8 +15,7 @@ const checkOnly = args.includes("--check");
 const profileIndex = args.indexOf("--profile");
 const profileArg = profileIndex === -1 ? undefined : args[profileIndex + 1];
 const profile = profileArg && profileArg !== "release" ? "debug" : "release";
-const binaryName = `centaeris-runtime${process.platform === "win32" ? ".exe" : ""}`;
-const binaryPath = path.join(repoRoot, "target", profile, binaryName);
+const binaryPath = runtimeArtifactPath(repoRoot, profile);
 
 const statMtimeMs = async (targetPath) => {
   try {
@@ -60,6 +61,9 @@ export const collectRustSourceFiles = async (
 const newerSourcesThan = async (binaryMtimeMs) => {
   const newer = [];
   for (const manifest of [
+    path.join(repoRoot, "Cargo.lock"),
+    path.join(repoRoot, "Cargo.toml"),
+    path.join(repoRoot, "rust-toolchain.toml"),
     path.join(runtimeCrateRoot, "Cargo.toml"),
     path.join(coreRoot, "Cargo.toml"),
   ]) {
@@ -84,6 +88,7 @@ const newerSourcesThan = async (binaryMtimeMs) => {
 };
 
 const runBuild = () => {
+  if (process.platform === "win32") return buildWslRuntime(repoRoot, profile);
   const buildArgs = ["build", "--locked"];
   if (profile === "release") {
     buildArgs.push("--release");

@@ -5,6 +5,8 @@ import { requireHostCommand } from "./hostContract.mjs";
 import { registerHostIpc } from "./hostIpc.mjs";
 import { createLocalShellActions } from "./localShellActions.mjs";
 import { createRuntimeHostTransport } from "./runtimeHostTransport.mjs";
+import { createWslRuntimeBridge } from "./wslRuntimeBridge.mjs";
+import { runtimeArtifactPath } from "./runtimeArtifact.mjs";
 import { createTrayController } from "./tray.mjs";
 import { createWindowShell } from "./windowShell.mjs";
 
@@ -25,8 +27,8 @@ const UI_DEV_SERVER_URL =
 const RUNTIME_EXE =
   process.env.CENTAERIS_RUNTIME_EXE ||
   (app.isPackaged
-    ? path.join(process.resourcesPath, "bin", "centaeris-runtime.exe")
-    : path.join(REPO_ROOT, "target", "debug", "centaeris-runtime.exe"));
+    ? path.join(process.resourcesPath, "bin", "centaeris-runtime")
+    : runtimeArtifactPath(REPO_ROOT, "debug"));
 const RUNTIME_CWD = app.isPackaged ? path.dirname(RUNTIME_EXE) : REPO_ROOT;
 const TRAY_ICON_FILE = process.platform === "darwin" ? "icon.icns" : "icon.ico";
 const TRAY_ICON_PATH = app.isPackaged
@@ -36,6 +38,10 @@ const IS_SMOKE_RUN = process.env.CENTAERIS_ELECTRON_SMOKE === "1";
 let isQuitting = false;
 let appExitStarted = false;
 let runtimeHostTransport = null;
+const runtimeBridge = process.platform === "win32" ? createWslRuntimeBridge({
+  executablePath: RUNTIME_EXE,
+  distribution: process.env.CENTAERIS_WSL_DISTRIBUTION || "Ubuntu-24.04",
+}) : undefined;
 
 const windowShell = createWindowShell({
   preloadPath: PRELOAD_PATH,
@@ -54,6 +60,7 @@ const windowShell = createWindowShell({
 runtimeHostTransport = createRuntimeHostTransport({
   executablePath: RUNTIME_EXE,
   cwd: RUNTIME_CWD,
+  bridge: runtimeBridge,
   emitHostEvent: windowShell.emitHostEvent,
   isAppReady: () => app.isReady(),
   isQuitting: () => isQuitting,
@@ -71,6 +78,7 @@ const localShellActions = createLocalShellActions({
   getMainWindow: windowShell.getMainWindow,
   getHomePath: () => app.getPath("home"),
   invokeRustHostCommand: runtimeHostTransport.invokeCommand,
+  runtimePaths: runtimeBridge,
 });
 
 const requestAppExit = async () => {

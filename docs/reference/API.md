@@ -12,6 +12,34 @@ Core constants and contract implementations are the source of truth for runtime 
 - `packages/core/src/extension/` for extension contracts;
 - `packages/core/src/tool/` for model-visible tool contracts.
 
+Execution contracts are exported from `centaeris_core::execution`:
+`policy.rs` defines `ExecutionPolicy`, `FileSystemPolicy`, and `NetworkPolicy`;
+`process.rs` defines `ExecutionCommandRequest`, `ExecutionError`,
+`ExecutionProcessOutput`, `ExecutionAttempt`, and `ExecutionPolicySummary`.
+`ExecutionHostRunner` continues to own the command/file dispatch boundary.
+Concrete isolation backends are Host implementation details.
+
+Host status reports `policyEnforced`; process policy summaries report `enforced`.
+Neither status nor process attempts/summaries accept `sandboxType`.
+The Host failure categories distinguish `permissionDenied`, `policyUnavailable`,
+and `hostUnavailable`; the corresponding durable tool error remains
+`permission_denied`, `sandbox_unavailable`, or `host_unavailable`.
+`sandbox_unavailable` is the existing generic isolation-failure category, not
+a concrete backend identity. Its canonical spelling is retained because tool
+execution receipts deserialize `ToolErrorInfo` during recovery.
+Unknown cancellation outcomes preserve the existing recovery transition,
+report `executed: null`, and set `toolError.retryable` to false.
+The removed Rust module/type names and old `ExecutionHostFailureKind` value
+`sandboxUnavailable` have no aliases. Execution policy field meanings are unchanged.
+
+Stored result details remain historical JSON facts, not deserialized Host
+command outputs; the enclosing receipt's typed tool error keeps its canonical
+shape. This migration does not rewrite Session history or replay old tools.
+New Host exchanges require the current strict shape; update Host
+consumers with Core rather than mixing versions. See the
+[execution contract decision](../architecture/ExecutionHostContract.md) for
+ownership and the remaining local isolation migration.
+
 `packages/runtime/src/host_protocol.rs` owns the local Host protocol identity,
 and `packages/runtime/src/runtime_command_registry.rs` owns its method registry.
 See [Runtime protocol](RuntimeProtocol.md) for the stable boundary and

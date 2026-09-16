@@ -969,12 +969,10 @@ impl AgentRunSessionState {
             }
             SessionRecordType::AgentRunCompleted
             | SessionRecordType::AgentRunFailed
-            | SessionRecordType::AgentRunInterrupted => {
-                if self.active_execution.is_some() {
-                    return Err(
-                        "AgentRun terminal requires the active Execution to end".to_string()
-                    );
-                }
+            | SessionRecordType::AgentRunInterrupted
+                if self.active_execution.is_some() =>
+            {
+                return Err("AgentRun terminal requires the active Execution to end".to_string());
             }
             SessionRecordType::AssistantMessage => {
                 let message_id = state_payload_string(&event.payload, "messageId")?;
@@ -1029,24 +1027,24 @@ impl AgentRunSessionState {
                     return Err(format!("duplicate committed phase event: {turn_id}"));
                 }
             }
-            SessionRecordType::ModelRequestStarted => {
-                if state_payload_string(&event.payload, "purpose")? == "main" {
-                    let digest = event
-                        .payload
-                        .pointer("/agentComposition/compositionDigest")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| {
-                            "model request agent composition digest is missing".to_string()
-                        })?;
-                    match self.agent_composition_digest.as_deref() {
-                        Some(existing) if existing != digest => {
-                            return Err(
-                                "model request changes immutable AgentRun composition".to_string()
-                            )
-                        }
-                        Some(_) => {}
-                        None => self.agent_composition_digest = Some(digest.to_string()),
+            SessionRecordType::ModelRequestStarted
+                if state_payload_string(&event.payload, "purpose")? == "main" =>
+            {
+                let digest = event
+                    .payload
+                    .pointer("/agentComposition/compositionDigest")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        "model request agent composition digest is missing".to_string()
+                    })?;
+                match self.agent_composition_digest.as_deref() {
+                    Some(existing) if existing != digest => {
+                        return Err(
+                            "model request changes immutable AgentRun composition".to_string()
+                        )
                     }
+                    Some(_) => {}
+                    None => self.agent_composition_digest = Some(digest.to_string()),
                 }
             }
             SessionRecordType::ProviderUsage => {

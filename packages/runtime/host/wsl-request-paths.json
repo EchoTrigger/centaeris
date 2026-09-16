@@ -1,0 +1,30 @@
+{
+  "workspace_activate": {
+    "fields": [
+      "root"
+    ]
+  },
+  "session/new": {
+    "fields": [
+      "cwd"
+    ]
+  },
+  "skill/source/add": {
+    "fields": [
+      "path",
+      "workspaceRoot"
+    ]
+  },
+  "sidecar_start": {
+    "fields": [
+      "workspaceRoot",
+      "cwd"
+    ]
+  },
+  "plugin/install": {
+    "fields": [
+      "sourcePath"
+    ],
+    "importSource": true
+  }
+}

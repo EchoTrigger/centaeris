@@ -1165,6 +1165,10 @@ impl From<String> for GenerateDriverError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Keep the existing by-value event representation; boxing requires a separate measured API change"
+)]
 pub enum TurnUpdate {
     Reasoning {
         session_id: String,

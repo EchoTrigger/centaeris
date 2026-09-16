@@ -2,9 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use centaeris_core::execution::sandbox::{
-    SandboxErr, SandboxPolicy, SandboxTransformRequest, SandboxType,
-};
+use centaeris_core::execution::{ExecutionCommandRequest, ExecutionError, ExecutionPolicy};
 use centaeris_core::execution::{
     ExecutionFileSystemError, ExecutionFileSystemOutput, ExecutionFileSystemRequest,
     ExecutionHostBinding, ExecutionHostCommandOutput, ExecutionHostHealth, ExecutionHostKind,
@@ -46,10 +44,10 @@ impl ExecutionHostRunner for FaultTestRunner {
         ExecutionHostKind::LocalProcess
     }
 
-    fn status(&self, _policy: &SandboxPolicy) -> Result<ExecutionHostStatus, SandboxErr> {
+    fn status(&self, _policy: &ExecutionPolicy) -> Result<ExecutionHostStatus, ExecutionError> {
         Ok(ExecutionHostStatus {
             kind: ExecutionHostKind::LocalProcess,
-            sandbox_type: SandboxType::HostProcess,
+            policy_enforced: false,
             health: ExecutionHostHealth::Ready,
             detail: None,
         })
@@ -65,9 +63,9 @@ impl ExecutionHostRunner for FaultTestRunner {
     fn run_host_command(
         &self,
         _operation_id: Option<&str>,
-        _request: SandboxTransformRequest,
+        _request: ExecutionCommandRequest,
         _cancellation_probe: Option<&centaeris_core::execution::ExecutionCancellationProbe>,
-    ) -> Result<ExecutionHostCommandOutput, SandboxErr> {
+    ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
         unreachable!("fault tests do not execute host commands")
     }
 }
@@ -200,7 +198,7 @@ fn tool_layer(workspace_root: &std::path::Path, registry: Arc<DynamicToolRegistr
                 ExecutionHostMode::Local,
                 Arc::new(FaultTestRunner),
                 workspace_root.to_path_buf(),
-                SandboxPolicy::workspace_write_no_network(workspace_root),
+                ExecutionPolicy::workspace_write_no_network(workspace_root),
             )
             .expect("create fault test execution host binding"),
         ),

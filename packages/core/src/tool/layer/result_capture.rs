@@ -132,7 +132,8 @@ fn spill_tool_result(
                 .contains(&capture_root)
         {
             return Err(
-                "Local spill root is not predeclared as read-only by the SandboxPolicy".to_string(),
+                "Local spill root is not predeclared as read-only by the ExecutionPolicy"
+                    .to_string(),
             );
         }
         if !spill_policy
@@ -193,7 +194,7 @@ fn spill_tool_result(
 }
 
 pub(super) fn expose_local_capture_root(
-    policy: &mut crate::execution::sandbox::SandboxPolicy,
+    policy: &mut crate::execution::ExecutionPolicy,
     mode: ExecutionHostMode,
     session_id: Option<&str>,
 ) {
@@ -419,7 +420,7 @@ mod tests {
         fs::create_dir_all(workspace.as_path()).expect("create workspace");
         let binding = ExecutionHostBinding::new_test_local(
             workspace.clone(),
-            crate::execution::sandbox::SandboxPolicy::workspace_write_no_network(&workspace),
+            crate::execution::ExecutionPolicy::workspace_write_no_network(&workspace),
         )
         .expect("execution binding");
 

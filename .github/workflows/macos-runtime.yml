@@ -1,0 +1,50 @@
+name: macOS Runtime
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'packages/core/**'
+      - 'packages/runtime/**'
+      - 'packages/runtime_sqlite/**'
+      - 'packages/mcp/**'
+      - 'packages/model-catalog/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/macos-runtime.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  runtime:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Check locked toolchain and formatting
+        run: |
+          rustc --version
+          uname -m
+          cargo fmt --all -- --check
+      - name: Check Runtime and Core
+        run: |
+          cargo check --locked -p centaeris-runtime --all-targets
+          cargo clippy --locked -p centaeris-runtime --all-targets -- -D warnings
+          cargo test --locked -p centaeris-core query_loop
+          cargo test --locked -p centaeris-runtime-sqlite --test core_runtime
+      - name: Exercise actual nono processes and file helpers
+        run: cargo test --locked -p centaeris-runtime --test local_execution_sandbox -- --nocapture
+      - name: Verify public-network DNS through macOS services
+        run: cargo test --locked -p centaeris-runtime --test local_execution_sandbox macos_public_network_resolves_dns -- --ignored --exact --nocapture
+      - name: Run Runtime regressions
+        run: cargo test --locked -p centaeris-runtime

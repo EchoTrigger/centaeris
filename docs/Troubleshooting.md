@@ -1,10 +1,11 @@
 # Troubleshooting
 
-## Git Bash is unavailable
+## WSL2 Runtime is unavailable
 
-Install or repair Git for Windows and confirm its Bash executable is available.
-The Windows Local Runtime does not fall back to WSL, PowerShell, or `cmd` for
-model shell execution.
+Check the selected distribution and its systemd user session using the
+[local execution setup](architecture/LocalExecution.md). Both Windows clients
+require the Linux Runtime and a Linux workspace. Native Windows Runtime
+execution has been removed.
 
 ## Desktop build says the application is running
 

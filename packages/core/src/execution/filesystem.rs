@@ -6,8 +6,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::execution::sandbox::SandboxPolicy;
-use crate::execution::sandbox::{SandboxErr, SandboxTransformRequest};
+use crate::execution::ExecutionPolicy;
+use crate::execution::{ExecutionCommandRequest, ExecutionError};
 
 use super::{
     ExecutionCancellationProbe, ExecutionHostCommandOutput, ExecutionHostKind, ExecutionHostMode,
@@ -19,7 +19,7 @@ pub struct ExecutionHostBinding {
     mode: ExecutionHostMode,
     runner: Arc<dyn ExecutionHostRunner>,
     cwd: PathBuf,
-    policy: SandboxPolicy,
+    policy: ExecutionPolicy,
     operation_scope: Option<String>,
     cancellation_probe: Option<Arc<ExecutionCancellationProbe>>,
 }
@@ -40,7 +40,7 @@ impl ExecutionHostBinding {
         mode: ExecutionHostMode,
         runner: Arc<dyn ExecutionHostRunner>,
         cwd: PathBuf,
-        policy: SandboxPolicy,
+        policy: ExecutionPolicy,
     ) -> Result<Self, String> {
         let cwd = match mode {
             ExecutionHostMode::Local => {
@@ -88,7 +88,7 @@ impl ExecutionHostBinding {
         self.cwd.as_path()
     }
 
-    pub(crate) fn policy(&self) -> &SandboxPolicy {
+    pub(crate) fn policy(&self) -> &ExecutionPolicy {
         &self.policy
     }
 
@@ -116,7 +116,7 @@ impl ExecutionHostBinding {
         args: Vec<String>,
         env: std::collections::HashMap<String, String>,
         timeout_ms: u64,
-    ) -> Result<ExecutionHostCommandOutput, SandboxErr> {
+    ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
         let stable_env = env.iter().collect::<std::collections::BTreeMap<_, _>>();
         let operation_id = self.stable_operation_id(
             "process",
@@ -124,7 +124,7 @@ impl ExecutionHostBinding {
         );
         self.runner.run_host_command(
             operation_id.as_deref(),
-            SandboxTransformRequest {
+            ExecutionCommandRequest {
                 program,
                 args,
                 cwd: self.cwd.clone(),
@@ -136,7 +136,7 @@ impl ExecutionHostBinding {
         )
     }
 
-    pub(crate) fn with_policy(&self, policy: SandboxPolicy) -> Self {
+    pub(crate) fn with_policy(&self, policy: ExecutionPolicy) -> Self {
         Self {
             mode: self.mode,
             runner: self.runner.clone(),
@@ -168,7 +168,7 @@ impl ExecutionHostBinding {
         }
     }
 
-    pub(crate) fn with_cwd(&self, cwd: PathBuf, policy: SandboxPolicy) -> Result<Self, String> {
+    pub(crate) fn with_cwd(&self, cwd: PathBuf, policy: ExecutionPolicy) -> Result<Self, String> {
         let binding = Self::new(self.mode, self.runner.clone(), cwd, policy)?;
         Ok(Self {
             operation_scope: self.operation_scope.clone(),
@@ -178,7 +178,7 @@ impl ExecutionHostBinding {
     }
 
     #[cfg(test)]
-    pub(crate) fn new_test_local(cwd: PathBuf, policy: SandboxPolicy) -> Result<Self, String> {
+    pub(crate) fn new_test_local(cwd: PathBuf, policy: ExecutionPolicy) -> Result<Self, String> {
         let runner = Arc::new(
             super::TestExecutionHostRunner::new(None)
                 .map_err(|error| error.internal_debug_message())?,
@@ -209,7 +209,7 @@ fn validate_execution_model_path(model_path: &str) -> Result<(), ExecutionFileSy
 pub struct ExecutionFileSystemRequest {
     pub operation_id: Option<String>,
     pub cwd: PathBuf,
-    pub policy: SandboxPolicy,
+    pub policy: ExecutionPolicy,
     pub model_path: String,
     pub operation: ExecutionFileSystemOperation,
 }
@@ -401,7 +401,7 @@ enum FileSystemScope {
 impl FileSystemScope {
     fn new(
         mode: FileSystemScopeMode,
-        policy: &SandboxPolicy,
+        policy: &ExecutionPolicy,
         cwd: &Path,
         mutation: bool,
     ) -> Result<Self, ExecutionFileSystemError> {
@@ -998,9 +998,9 @@ mod tests {
     }
 
     impl ExecutionHostRunner for CancellationAwareRunner {
-        fn status(&self, _policy: &SandboxPolicy) -> Result<ExecutionHostStatus, SandboxErr> {
+        fn status(&self, _policy: &ExecutionPolicy) -> Result<ExecutionHostStatus, ExecutionError> {
             Ok(ExecutionHostStatus::remote(
-                crate::execution::sandbox::SandboxType::OciContainer,
+                true,
                 ExecutionHostHealth::Ready,
                 None,
             ))
@@ -1016,17 +1016,14 @@ mod tests {
         fn run_host_command(
             &self,
             operation_id: Option<&str>,
-            _req: SandboxTransformRequest,
+            _req: ExecutionCommandRequest,
             cancellation_probe: Option<&ExecutionCancellationProbe>,
-        ) -> Result<ExecutionHostCommandOutput, SandboxErr> {
+        ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
             assert!(operation_id.is_some());
             let reason = cancellation_probe.expect("cancellation probe")()
                 .expect("probe result")
                 .expect("cancellation reason");
-            Err(SandboxErr::Unavailable {
-                reason,
-                sandbox_type: None,
-            })
+            Err(ExecutionError::HostUnavailable { reason })
         }
     }
 
@@ -1051,7 +1048,7 @@ mod tests {
         ExecutionFileSystemRequest {
             operation_id: None,
             cwd: cwd.to_path_buf(),
-            policy: SandboxPolicy::workspace_write_no_network(cwd),
+            policy: ExecutionPolicy::workspace_write_no_network(cwd),
             model_path: model_path.into(),
             operation,
         }
@@ -1100,7 +1097,7 @@ mod tests {
             ExecutionHostMode::Remote,
             Arc::new(CancellationAwareRunner),
             cwd.clone(),
-            SandboxPolicy::workspace_write_no_network(cwd.clone()),
+            ExecutionPolicy::workspace_write_no_network(cwd.clone()),
         )
         .expect("execution binding")
         .with_operation_scope(Some("call_1".to_string()))
@@ -1112,7 +1109,7 @@ mod tests {
             .run_command("bash".to_string(), vec![], HashMap::new(), 1_000)
             .expect_err("test runner returns the forwarded cancellation reason");
 
-        let SandboxErr::Unavailable { reason, .. } = error else {
+        let ExecutionError::HostUnavailable { reason, .. } = error else {
             panic!("expected unavailable error");
         };
         assert_eq!(reason, "agent_run_cancel_requested");
@@ -1196,19 +1193,19 @@ mod tests {
         let parent = temp_directory("policy-scoped");
         let cwd = parent.join("workspace");
         let additional = parent.join("additional");
-        fs::create_dir_all(cwd.join(".centaeris")).expect("create protected directory");
+        fs::create_dir_all(cwd.join("project-files")).expect("create project directory");
         fs::create_dir_all(&additional).expect("create additional root");
-        fs::write(cwd.join(".centaeris/secret.txt"), b"secret").expect("write secret");
+        fs::write(cwd.join("project-files/example.txt"), b"secret").expect("write secret");
         fs::write(additional.join("allowed.txt"), b"allowed").expect("write additional file");
         fs::write(parent.join("outside.txt"), b"outside").expect("write outside file");
 
         let ExecutionFileSystemOutput::ReadFile(metadata) =
             run_policy_scoped_execution_file_system_operation(request(
                 cwd.as_path(),
-                ".centaeris/secret.txt",
+                "project-files/example.txt",
                 ExecutionFileSystemOperation::ReadFile { max_bytes: 1024 },
             ))
-            .expect("workspace metadata must remain readable")
+            .expect("ordinary project files must remain readable")
         else {
             panic!("expected read output");
         };
@@ -1217,19 +1214,19 @@ mod tests {
         let ExecutionFileSystemOutput::WriteFile(_) =
             run_policy_scoped_execution_file_system_operation(request(
                 cwd.as_path(),
-                ".centaeris/secret.txt",
+                "project-files/example.txt",
                 ExecutionFileSystemOperation::WriteFile {
                     content: b"tampered".to_vec(),
                     expected_file_hash: Some(metadata.file_hash),
                     create_only: false,
                 },
             ))
-            .expect("workspace metadata must remain writable")
+            .expect("ordinary project files must remain writable")
         else {
             panic!("expected write output");
         };
         assert_eq!(
-            fs::read(cwd.join(".centaeris/secret.txt")).expect("read updated metadata"),
+            fs::read(cwd.join("project-files/example.txt")).expect("read updated project file"),
             b"tampered"
         );
 

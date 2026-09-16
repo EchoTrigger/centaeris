@@ -28,5 +28,4 @@ ratatui-image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync"] }
 unicode-width = "=0.2.0"

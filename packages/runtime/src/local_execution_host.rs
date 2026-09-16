@@ -10,45 +10,25 @@ use std::time::{Duration, Instant};
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(target_os = "windows")]
-mod windows;
-
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod nono_policy;
 #[cfg(target_os = "linux")]
 use linux as platform;
 #[cfg(target_os = "macos")]
 use macos as platform;
-#[cfg(target_os = "windows")]
-use windows as platform;
-
-#[cfg(target_os = "windows")]
-pub use windows::run_windows_host_launcher;
-
 #[cfg(unix)]
 use std::os::unix::{io::AsRawFd, process::CommandExt};
-#[cfg(target_os = "windows")]
-use std::os::windows::{io::AsRawHandle, process::CommandExt};
-
-#[cfg(target_os = "windows")]
-use windows_sys::Win32::{
-    Foundation::{CloseHandle, ERROR_BROKEN_PIPE, ERROR_PIPE_NOT_CONNECTED, HANDLE},
-    System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-        SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    },
-    System::Pipes::PeekNamedPipe,
-};
-
 const EXIT_STDIO_GRACE: Duration = Duration::from_millis(100);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
-use centaeris_core::execution::sandbox::{
-    decode_process_output, SandboxAttempt, SandboxErr, SandboxPolicy, SandboxPolicySummary,
-    SandboxTransformRequest, SandboxType, SandboxedProcessOutput,
+#[cfg(any(target_os = "macos", test))]
+const POLICY_HANDSHAKE: &[u8] = b"centaeris-nono-applied\n";
+use centaeris_core::execution::{
+    decode_process_output, ExecutionAttempt, ExecutionCommandRequest, ExecutionError,
+    ExecutionPolicy, ExecutionPolicySummary, ExecutionProcessOutput,
 };
 
-#[cfg(not(target_os = "windows"))]
 use centaeris_core::execution::run_direct_execution_file_system_operation;
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(test)]
 use centaeris_core::execution::run_policy_scoped_execution_file_system_operation;
 use centaeris_core::execution::{
     classify_execution_host_failure, ExecutionCancellationProbe, ExecutionFileSystemError,
@@ -57,9 +37,7 @@ use centaeris_core::execution::{
 };
 use sha2::{Digest, Sha256};
 
-#[cfg(not(target_os = "windows"))]
 const LOCAL_FILESYSTEM_FRAME_LIMIT_BYTES: usize = 64 * 1024 * 1024;
-#[cfg(not(target_os = "windows"))]
 const LOCAL_FILESYSTEM_TIMEOUT_MS: u64 = 60_000;
 #[derive(Debug, Clone)]
 pub struct LocalExecutionHostRunner {
@@ -71,6 +49,8 @@ pub struct LocalExecutionHostRunner {
 }
 
 struct PreparedSandboxCommand {
+    #[cfg(target_os = "linux")]
+    scope: Option<linux::ProcessScope>,
     command: Command,
     completion: Option<CompletionMarker>,
     stdin_input: Option<Vec<u8>>,
@@ -83,31 +63,94 @@ struct CompletionMarker {
     secret: String,
 }
 
+impl Drop for CompletionMarker {
+    fn drop(&mut self) {
+        cleanup_completion_marker(self);
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub fn run_linux_supervisor(arguments: &[String]) -> Result<i32, String> {
     linux::run_supervisor(arguments)
 }
 
+#[cfg(target_os = "macos")]
+pub fn run_macos_launcher(arguments: &[String]) -> Result<(), String> {
+    macos::run_launcher(arguments)
+}
+
 impl LocalExecutionHostRunner {
-    pub fn new(explicit_bash_path: Option<PathBuf>) -> Result<Self, SandboxErr> {
-        let runtime_executable = env::current_exe().map_err(|error| SandboxErr::Unavailable {
-            reason: format!("resolve local Runtime executable failed: {error}"),
-            sandbox_type: Some(platform::sandbox_type()),
-        })?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn spawn_owned_process(
+        &self,
+        program: String,
+        args: Vec<String>,
+        cwd: PathBuf,
+        mut environment: HashMap<String, String>,
+        policy: ExecutionPolicy,
+    ) -> Result<LocalOwnedProcess, ExecutionError> {
+        environment.extend(self.environment_overrides.clone());
+        let req = ExecutionCommandRequest {
+            program,
+            args,
+            cwd,
+            env: environment,
+            policy,
+            timeout_ms: 0,
+        };
+        validate_local_policy(&req.cwd, &req.policy)?;
+        let program = self.resolve_program(&req)?;
+        let mut prepared = platform::prepare_command(
+            &self.runtime_executable,
+            &program,
+            &req.args,
+            &req.cwd,
+            &req.env,
+            &req.policy,
+            false,
+        )?;
+        prepared
+            .command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        configure_local_process(&mut prepared.command);
+        #[cfg(target_os = "linux")]
+        let scope = prepared
+            .scope
+            .take()
+            .ok_or_else(|| ExecutionError::PolicyUnavailable {
+                reason: "owned Linux process requires a lifecycle scope".to_string(),
+            })?;
+        let child = prepared
+            .command
+            .spawn()
+            .map_err(|e| ExecutionError::Io(e.to_string()))?;
+        Ok(LocalOwnedProcess {
+            child,
+            #[cfg(target_os = "linux")]
+            scope,
+        })
+    }
+
+    pub fn new(explicit_bash_path: Option<PathBuf>) -> Result<Self, ExecutionError> {
+        let runtime_executable =
+            env::current_exe().map_err(|error| ExecutionError::PolicyUnavailable {
+                reason: format!("resolve local Runtime executable failed: {error}"),
+            })?;
         Self::new_with_runtime_executable(explicit_bash_path, runtime_executable)
     }
 
     pub fn new_with_runtime_executable(
         explicit_bash_path: Option<PathBuf>,
         runtime_executable: PathBuf,
-    ) -> Result<Self, SandboxErr> {
+    ) -> Result<Self, ExecutionError> {
         if !runtime_executable.is_file() {
-            return Err(SandboxErr::Unavailable {
+            return Err(ExecutionError::PolicyUnavailable {
                 reason: format!(
                     "local Runtime executable is unavailable: {}",
                     runtime_executable.display()
                 ),
-                sandbox_type: Some(platform::sandbox_type()),
             });
         }
         Ok(Self {
@@ -120,31 +163,53 @@ impl LocalExecutionHostRunner {
     }
 
     #[cfg(test)]
-    pub fn new_embedded_test(explicit_bash_path: Option<PathBuf>) -> Result<Self, SandboxErr> {
+    pub fn new_embedded_test(explicit_bash_path: Option<PathBuf>) -> Result<Self, ExecutionError> {
         let mut runner = Self::new(explicit_bash_path)?;
         runner.embedded_test = true;
         Ok(runner)
     }
 
-    pub fn bash_description(&self) -> &'static str {
-        if cfg!(target_os = "windows") {
-            "bash (Git for Windows)"
-        } else {
-            "bash"
+    fn resolve_program(&self, req: &ExecutionCommandRequest) -> Result<PathBuf, ExecutionError> {
+        if req.program == "bash" {
+            return Ok(self.bash_path.clone());
         }
+        let requested = Path::new(&req.program);
+        if requested.is_absolute() {
+            return Ok(requested.to_path_buf());
+        }
+        if requested.components().count() > 1 {
+            return Ok(req.cwd.join(requested));
+        }
+        let search = req
+            .env
+            .get("PATH")
+            .map(std::ffi::OsString::from)
+            .or_else(|| env::var_os("PATH"));
+        search
+            .and_then(|paths| {
+                env::split_paths(&paths)
+                    .map(|root| root.join(requested))
+                    .find(|path| path.is_file())
+            })
+            .ok_or_else(|| ExecutionError::HostUnavailable {
+                reason: format!("execution program not found: {}", req.program),
+            })
+    }
+
+    pub fn bash_description(&self) -> &'static str {
+        "bash"
     }
 
     pub fn with_environment_overrides(
         mut self,
         environment_overrides: HashMap<String, String>,
-    ) -> Result<Self, SandboxErr> {
+    ) -> Result<Self, ExecutionError> {
         if environment_overrides
             .iter()
             .any(|(key, value)| key.is_empty() || key.contains(['\0', '=']) || value.contains('\0'))
         {
-            return Err(SandboxErr::Unavailable {
+            return Err(ExecutionError::PolicyUnavailable {
                 reason: "local execution environment override is invalid".to_string(),
-                sandbox_type: Some(platform::sandbox_type()),
             });
         }
         self.environment_overrides = environment_overrides;
@@ -153,20 +218,36 @@ impl LocalExecutionHostRunner {
 
     fn run_command(
         &self,
-        mut req: SandboxTransformRequest,
+        req: ExecutionCommandRequest,
         cancellation_probe: Option<&ExecutionCancellationProbe>,
-    ) -> Result<ExecutionHostCommandOutput, SandboxErr> {
+    ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
+        self.run_command_input(req, cancellation_probe, None)
+    }
+
+    /// Feed a hook event while draining output. Each captured stream keeps at
+    /// most 64 KiB; decode summaries retain the original byte counts.
+    pub fn run_command_with_stdin(
+        &self,
+        req: ExecutionCommandRequest,
+        input: &[u8],
+    ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
+        self.run_command_input(req, None, Some(input))
+    }
+
+    fn run_command_input(
+        &self,
+        mut req: ExecutionCommandRequest,
+        cancellation_probe: Option<&ExecutionCancellationProbe>,
+        input: Option<&[u8]>,
+    ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
         req.env.extend(self.environment_overrides.clone());
-        let program = if req.program == "bash" {
-            self.bash_path.clone()
-        } else {
-            PathBuf::from(req.program.as_str())
-        };
+        let program = self.resolve_program(&req)?;
         validate_local_policy(req.cwd.as_path(), &req.policy)?;
         #[cfg(test)]
-        let preserve_background = !self.embedded_test || cfg!(target_os = "windows");
+        let preserve_background = !self.embedded_test;
         #[cfg(not(test))]
         let preserve_background = true;
+        let preserve_background = preserve_background && input.is_none();
         let mut prepared = platform::prepare_command(
             self.runtime_executable.as_path(),
             program.as_path(),
@@ -176,12 +257,15 @@ impl LocalExecutionHostRunner {
             &req.policy,
             preserve_background,
         )?;
-        let stdin_input = prepared.stdin_input.take().or_else(|| {
-            prepared
-                .completion
-                .as_ref()
-                .map(|completion| format!("{}\n", completion.secret).into_bytes())
-        });
+        let stdin_input = input
+            .map(<[u8]>::to_vec)
+            .or_else(|| prepared.stdin_input.take())
+            .or_else(|| {
+                prepared
+                    .completion
+                    .as_ref()
+                    .map(|completion| format!("{}\n", completion.secret).into_bytes())
+            });
         prepared
             .command
             .stdin(if stdin_input.is_some() {
@@ -193,26 +277,31 @@ impl LocalExecutionHostRunner {
             .stderr(Stdio::piped());
         configure_local_process(&mut prepared.command);
 
-        let sandbox_type = platform::sandbox_type();
+        let policy_enforced = platform::policy_enforced();
 
         let output = run_local_command_with_timeout(
             &mut prepared.command,
             req.timeout_ms,
             cancellation_probe,
             prepared.completion.as_ref(),
-            sandbox_type,
-            stdin_input.as_deref(),
+            stdin_input.as_deref().map(|bytes| ProcessInput {
+                bytes,
+                output_limit: input.map(|_| 64 * 1024),
+            }),
+            #[cfg(target_os = "linux")]
+            prepared.scope.take(),
+            #[cfg(target_os = "macos")]
+            true,
         )?;
-        let policy = policy_summary(&req.policy, sandbox_type);
-        let process = SandboxedProcessOutput {
+        let policy = policy_summary(&req.policy, policy_enforced);
+        let process = ExecutionProcessOutput {
             exit_code: output.exit_code,
             stdout: output.stdout,
             stderr: output.stderr,
             stdout_decode: output.stdout_decode,
             stderr_decode: output.stderr_decode,
             timed_out: output.timed_out,
-            attempt: SandboxAttempt {
-                sandbox_type,
+            attempt: ExecutionAttempt {
                 transition_reason: platform_transition_reason().to_string(),
                 policy,
             },
@@ -232,27 +321,70 @@ impl LocalExecutionHostRunner {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub struct LocalOwnedProcess {
+    child: std::process::Child,
+    #[cfg(target_os = "linux")]
+    scope: linux::ProcessScope,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl LocalOwnedProcess {
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+    pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.child.try_wait()
+    }
+    pub fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        self.child.wait()
+    }
+    pub fn kill(&mut self) -> std::io::Result<()> {
+        #[cfg(target_os = "linux")]
+        return self
+            .scope
+            .terminate()
+            .map_err(|e| std::io::Error::other(e.internal_debug_message()));
+        #[cfg(target_os = "macos")]
+        {
+            if unsafe { libc::kill(-(self.child.id() as i32), libc::SIGKILL) } == 0 {
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Drop for LocalOwnedProcess {
+    fn drop(&mut self) {
+        if self.kill().is_ok() {
+            let _ = self.child.wait();
+        }
+    }
+}
+
 impl ExecutionHostRunner for LocalExecutionHostRunner {
     fn bash_description(&self) -> &'static str {
         self.bash_description()
     }
 
     fn kind(&self) -> ExecutionHostKind {
-        if cfg!(target_os = "windows") {
-            ExecutionHostKind::LocalProcess
-        } else {
-            ExecutionHostKind::SandboxedProcess
-        }
+        ExecutionHostKind::SandboxedProcess
     }
 
-    fn status(&self, policy: &SandboxPolicy) -> Result<ExecutionHostStatus, SandboxErr> {
+    fn status(&self, policy: &ExecutionPolicy) -> Result<ExecutionHostStatus, ExecutionError> {
         validate_local_policy(policy.filesystem.workspace_root.as_path(), policy)?;
-        #[cfg(target_os = "windows")]
-        platform::validate_policy(policy)?;
-        platform::ensure_available()?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        platform::check_available(&self.runtime_executable, policy)?;
         Ok(ExecutionHostStatus {
             kind: self.kind(),
-            sandbox_type: platform::sandbox_type(),
+            policy_enforced: platform::policy_enforced(),
             health: ExecutionHostHealth::Ready,
             detail: Some(format!("bash={}", self.bash_path.display())),
         })
@@ -268,28 +400,20 @@ impl ExecutionHostRunner for LocalExecutionHostRunner {
                 .map_err(filesystem_sandbox_error)?;
             return run_policy_scoped_execution_file_system_operation(request);
         }
-        #[cfg(target_os = "windows")]
-        {
-            validate_local_policy(request.cwd.as_path(), &request.policy)
-                .map_err(filesystem_sandbox_error)?;
-            run_policy_scoped_execution_file_system_operation(request)
-        }
-        #[cfg(not(target_os = "windows"))]
         self.run_file_system_helper(request)
     }
 
     fn run_host_command(
         &self,
         _operation_id: Option<&str>,
-        req: SandboxTransformRequest,
+        req: ExecutionCommandRequest,
         cancellation_probe: Option<&ExecutionCancellationProbe>,
-    ) -> Result<ExecutionHostCommandOutput, SandboxErr> {
+    ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
         self.run_command(req, cancellation_probe)
     }
 }
 
 impl LocalExecutionHostRunner {
-    #[cfg(not(target_os = "windows"))]
     fn run_file_system_helper(
         &self,
         request: ExecutionFileSystemRequest,
@@ -330,8 +454,14 @@ impl LocalExecutionHostRunner {
             LOCAL_FILESYSTEM_TIMEOUT_MS,
             None,
             None,
-            platform::sandbox_type(),
-            Some(input.as_slice()),
+            Some(ProcessInput {
+                bytes: input.as_slice(),
+                output_limit: None,
+            }),
+            #[cfg(target_os = "linux")]
+            prepared.scope.take(),
+            #[cfg(target_os = "macos")]
+            true,
         )
         .map_err(filesystem_sandbox_error)?;
         if output.timed_out || output.exit_code != Some(0) {
@@ -354,9 +484,9 @@ impl LocalExecutionHostRunner {
     }
 }
 
-fn filesystem_sandbox_error(error: SandboxErr) -> ExecutionFileSystemError {
+fn filesystem_sandbox_error(error: ExecutionError) -> ExecutionFileSystemError {
     let kind = match error {
-        SandboxErr::Denied { .. } => {
+        ExecutionError::Denied { .. } => {
             centaeris_core::execution::ExecutionFileSystemErrorKind::PermissionDenied
         }
         _ => centaeris_core::execution::ExecutionFileSystemErrorKind::HostUnavailable,
@@ -365,7 +495,6 @@ fn filesystem_sandbox_error(error: SandboxErr) -> ExecutionFileSystemError {
         .with_diagnostic(error.internal_debug_message())
 }
 
-#[cfg(not(target_os = "windows"))]
 pub fn run_file_system_helper() -> Result<(), String> {
     let mut input = Vec::new();
     std::io::stdin()
@@ -383,40 +512,31 @@ pub fn run_file_system_helper() -> Result<(), String> {
         .map_err(|error| format!("encode local filesystem sandbox response failed: {error}"))
 }
 
-pub fn resolve_bash_path(explicit_bash_path: Option<PathBuf>) -> Result<PathBuf, SandboxErr> {
-    #[cfg(target_os = "windows")]
-    return windows::resolve_git_bash_path(explicit_bash_path);
-
-    #[cfg(not(target_os = "windows"))]
+pub fn resolve_bash_path(explicit_bash_path: Option<PathBuf>) -> Result<PathBuf, ExecutionError> {
     if let Some(path) = explicit_bash_path {
-        return executable_file(path.as_path()).ok_or_else(|| SandboxErr::Unavailable {
+        return executable_file(path.as_path()).ok_or_else(|| ExecutionError::HostUnavailable {
             reason: format!(
                 "configured Bash executable is unavailable: {}",
                 path.display()
             ),
-            sandbox_type: None,
         });
     }
 
-    #[cfg(not(target_os = "windows"))]
     {
         if let Some(path) = executable_file(Path::new("/bin/bash")).or_else(|| find_on_path("bash"))
         {
             return Ok(path);
         }
-        Err(SandboxErr::Unavailable {
+        Err(ExecutionError::HostUnavailable {
             reason: "Bash is required but no Bash executable was found".to_string(),
-            sandbox_type: None,
         })
     }
 }
 
-#[cfg(not(target_os = "windows"))]
 fn executable_file(path: &Path) -> Option<PathBuf> {
     path.is_file().then(|| path.to_path_buf())
 }
 
-#[cfg(not(target_os = "windows"))]
 fn find_on_path(name: &str) -> Option<PathBuf> {
     env::var_os("PATH").and_then(|path| {
         env::split_paths(&path)
@@ -425,10 +545,9 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
     })
 }
 
-fn policy_summary(policy: &SandboxPolicy, sandbox_type: SandboxType) -> SandboxPolicySummary {
-    SandboxPolicySummary {
-        sandbox_type,
-        enforced: sandbox_type != SandboxType::HostProcess,
+fn policy_summary(policy: &ExecutionPolicy, policy_enforced: bool) -> ExecutionPolicySummary {
+    ExecutionPolicySummary {
+        enforced: policy_enforced,
         network: policy.network.clone(),
         workspace_root: policy
             .filesystem
@@ -442,33 +561,27 @@ fn policy_summary(policy: &SandboxPolicy, sandbox_type: SandboxType) -> SandboxP
     }
 }
 
-fn validate_local_policy(cwd: &Path, policy: &SandboxPolicy) -> Result<(), SandboxErr> {
+fn validate_local_policy(cwd: &Path, policy: &ExecutionPolicy) -> Result<(), ExecutionError> {
     policy
         .network
         .validate()
-        .map_err(|reason| SandboxErr::Denied {
-            reason,
-            sandbox_type: platform::sandbox_type(),
-        })?;
+        .map_err(|reason| ExecutionError::Denied { reason })?;
     let canonical_cwd = cwd
         .canonicalize()
-        .map_err(|error| SandboxErr::Unavailable {
+        .map_err(|error| ExecutionError::PolicyUnavailable {
             reason: format!("canonicalize local sandbox working directory failed: {error}"),
-            sandbox_type: Some(platform::sandbox_type()),
         })?;
     let canonical_workspace = policy
         .filesystem
         .workspace_root
         .canonicalize()
-        .map_err(|error| SandboxErr::Unavailable {
+        .map_err(|error| ExecutionError::PolicyUnavailable {
             reason: format!("canonicalize local sandbox workspace failed: {error}"),
-            sandbox_type: Some(platform::sandbox_type()),
         })?;
     if canonical_cwd != canonical_workspace {
-        return Err(SandboxErr::Denied {
+        return Err(ExecutionError::Denied {
             reason: "local sandbox working directory must equal the policy workspace root"
                 .to_string(),
-            sandbox_type: platform::sandbox_type(),
         });
     }
     if std::iter::once(&policy.filesystem.workspace_root)
@@ -484,9 +597,8 @@ fn validate_local_policy(cwd: &Path, policy: &SandboxPolicy) -> Result<(), Sandb
         )
         .any(|path| !path.is_absolute())
     {
-        return Err(SandboxErr::Denied {
+        return Err(ExecutionError::Denied {
             reason: "local sandbox policy paths must be absolute".to_string(),
-            sandbox_type: platform::sandbox_type(),
         });
     }
     materialize_temporary_root(policy)?;
@@ -498,123 +610,85 @@ fn validate_local_policy(cwd: &Path, policy: &SandboxPolicy) -> Result<(), Sandb
         .chain(policy.filesystem.tmp_root.iter())
     {
         if !root.is_dir() {
-            return Err(SandboxErr::Denied {
+            return Err(ExecutionError::Denied {
                 reason: format!(
                     "local sandbox filesystem root is not an existing directory: {}",
                     root.display()
                 ),
-                sandbox_type: platform::sandbox_type(),
             });
         }
     }
     Ok(())
 }
 
-fn materialize_temporary_root(policy: &SandboxPolicy) -> Result<(), SandboxErr> {
+fn materialize_temporary_root(policy: &ExecutionPolicy) -> Result<(), ExecutionError> {
     let Some(root) = policy.filesystem.tmp_root.as_deref() else {
         return Ok(());
     };
     let configured_temp =
         env::temp_dir()
             .canonicalize()
-            .map_err(|error| SandboxErr::Unavailable {
+            .map_err(|error| ExecutionError::PolicyUnavailable {
                 reason: format!("canonicalize local temporary directory failed: {error}"),
-                sandbox_type: Some(platform::sandbox_type()),
             })?;
     let mut ancestor = root.to_path_buf();
     while !ancestor.exists() {
         if !ancestor.pop() {
-            return Err(SandboxErr::Denied {
+            return Err(ExecutionError::Denied {
                 reason: format!(
                     "local sandbox temporary root is invalid: {}",
                     root.display()
                 ),
-                sandbox_type: platform::sandbox_type(),
             });
         }
     }
-    let canonical_ancestor = ancestor
-        .canonicalize()
-        .map_err(|error| SandboxErr::Unavailable {
-            reason: format!("canonicalize local sandbox temporary root failed: {error}"),
-            sandbox_type: Some(platform::sandbox_type()),
-        })?;
+    let canonical_ancestor =
+        ancestor
+            .canonicalize()
+            .map_err(|error| ExecutionError::PolicyUnavailable {
+                reason: format!("canonicalize local sandbox temporary root failed: {error}"),
+            })?;
     if canonical_ancestor == configured_temp || canonical_ancestor.starts_with(&configured_temp) {
         std::fs::create_dir_all(root).map_err(|error| {
-            SandboxErr::Io(format!(
+            ExecutionError::Io(format!(
                 "create local sandbox temporary root failed: {error}"
             ))
         })?;
     } else {
-        return Err(SandboxErr::Denied {
+        return Err(ExecutionError::Denied {
             reason: "local sandbox temporary root must remain within the configured OS temporary directory".to_string(),
-            sandbox_type: platform::sandbox_type(),
+
         });
     }
-    let canonical_root = root
-        .canonicalize()
-        .map_err(|error| SandboxErr::Unavailable {
-            reason: format!("canonicalize materialized sandbox temporary root failed: {error}"),
-            sandbox_type: Some(platform::sandbox_type()),
-        })?;
+    let canonical_root =
+        root.canonicalize()
+            .map_err(|error| ExecutionError::PolicyUnavailable {
+                reason: format!("canonicalize materialized sandbox temporary root failed: {error}"),
+            })?;
     if canonical_root == configured_temp
         || !canonical_root.starts_with(&configured_temp)
         || !canonical_root.is_dir()
     {
-        return Err(SandboxErr::Denied {
+        return Err(ExecutionError::Denied {
             reason: "local sandbox temporary root must be an exact child directory of the configured OS temporary directory".to_string(),
-            sandbox_type: platform::sandbox_type(),
-        });
-    }
-    Ok(())
-}
 
-#[cfg(not(target_os = "windows"))]
-fn materialize_denied_paths(
-    policy: &SandboxPolicy,
-    sandbox_type: SandboxType,
-) -> Result<(), SandboxErr> {
-    for path in policy
-        .filesystem
-        .denied_read_paths
-        .iter()
-        .chain(policy.filesystem.denied_write_paths.iter())
-    {
-        if !path.exists()
-            && path.file_name().and_then(|name| name.to_str()) == Some(".centaeris")
-            && path.parent() == Some(policy.filesystem.workspace_root.as_path())
-        {
-            std::fs::create_dir(path).map_err(|error| {
-                SandboxErr::Io(format!(
-                    "create protected workspace metadata directory failed: {error}"
-                ))
-            })?;
-        }
-        if !path.exists() {
-            return Err(SandboxErr::Denied {
-                reason: format!("denied sandbox path does not exist: {}", path.display()),
-                sandbox_type,
-            });
-        }
+        });
     }
     Ok(())
 }
 
 fn platform_transition_reason() -> &'static str {
-    match platform::sandbox_type() {
-        SandboxType::LinuxBubblewrap => "linux_bubblewrap",
-        SandboxType::MacOsSeatbelt => "macos_seatbelt",
-        SandboxType::HostProcess => "windows_git_bash_host",
-        _ => unreachable!("local platform sandbox type"),
+    #[cfg(target_os = "linux")]
+    {
+        "linux_nono"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "macos_nono"
     }
 }
 
 fn configure_local_process(command: &mut Command) {
-    #[cfg(target_os = "windows")]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
     #[cfg(unix)]
     command.process_group(0);
 }
@@ -623,9 +697,15 @@ struct CapturedProcessOutput {
     exit_code: Option<i32>,
     stdout: String,
     stderr: String,
-    stdout_decode: centaeris_core::execution::sandbox::ProcessOutputDecodeSummary,
-    stderr_decode: centaeris_core::execution::sandbox::ProcessOutputDecodeSummary,
+    stdout_decode: centaeris_core::execution::ProcessOutputDecodeSummary,
+    stderr_decode: centaeris_core::execution::ProcessOutputDecodeSummary,
     timed_out: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ProcessInput<'a> {
+    bytes: &'a [u8],
+    output_limit: Option<usize>,
 }
 
 fn run_local_command_with_timeout(
@@ -633,57 +713,68 @@ fn run_local_command_with_timeout(
     timeout_ms: u64,
     cancellation_probe: Option<&ExecutionCancellationProbe>,
     completion: Option<&CompletionMarker>,
-    sandbox_type: SandboxType,
-    stdin_input: Option<&[u8]>,
-) -> Result<CapturedProcessOutput, SandboxErr> {
-    #[cfg(target_os = "windows")]
-    let process_job = WindowsProcessJob::new()?;
+    stdin_input: Option<ProcessInput<'_>>,
+    #[cfg(target_os = "linux")] scope: Option<linux::ProcessScope>,
+    #[cfg(target_os = "macos")] policy_handshake: bool,
+) -> Result<CapturedProcessOutput, ExecutionError> {
     let mut child = command
         .spawn()
-        .map_err(|error| SandboxErr::Io(format!("spawn local command failed: {error}")))?;
-    #[cfg(target_os = "windows")]
-    if let Err(error) = process_job.assign(&child) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(error);
-    }
-    if let Some(input) = stdin_input {
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| SandboxErr::Io("local process stdin was not captured".to_string()))?;
-        if let Err(error) = stdin.write_all(input) {
-            #[cfg(target_os = "windows")]
-            let _ = terminate_windows_process_job(&mut child, &process_job, completion);
-            #[cfg(unix)]
-            terminate_process_tree(&mut child);
-            let _ = child.wait();
-            return Err(SandboxErr::Io(format!(
-                "write local process input failed: {error}"
-            )));
-        }
-    }
+        .map_err(|error| ExecutionError::Io(format!("spawn local command failed: {error}")))?;
+    // Feed input concurrently with output draining: a hook may write more
+    // than a pipe buffer before it starts reading its event.
+    let stdin_writer = if let Some(input) = stdin_input {
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            ExecutionError::Io("local process stdin was not captured".to_string())
+        })?;
+        let bytes = input.bytes.to_vec();
+        Some(std::thread::spawn(move || stdin.write_all(&bytes)))
+    } else {
+        None
+    };
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| SandboxErr::Io("local process stdout was not captured".to_string()))?;
+        .ok_or_else(|| ExecutionError::Io("local process stdout was not captured".to_string()))?;
     let stderr = child
         .stderr
         .take()
-        .ok_or_else(|| SandboxErr::Io("local process stderr was not captured".to_string()))?;
+        .ok_or_else(|| ExecutionError::Io("local process stderr was not captured".to_string()))?;
     let mut stdout = stdout;
     let mut stderr = stderr;
     #[cfg(unix)]
     if let Err(error) =
         configure_nonblocking_output(&stdout).and_then(|_| configure_nonblocking_output(&stderr))
     {
-        terminate_process_tree(&mut child);
+        {
+            #[cfg(target_os = "linux")]
+            if let Some(scope) = &scope {
+                scope.terminate()?;
+            }
+            terminate_process_tree(&mut child);
+        }
         let _ = child.wait();
         return Err(error);
     }
-    // Complete process output is buffered in memory.
-    let mut stdout_output = ReadOutput::default();
-    let mut stderr_output = ReadOutput::default();
+    let limit = stdin_input.and_then(|input| input.output_limit);
+    #[cfg(target_os = "macos")]
+    let stdout_limit = limit.map(|limit| {
+        limit
+            + if policy_handshake {
+                POLICY_HANDSHAKE.len()
+            } else {
+                0
+            }
+    });
+    #[cfg(not(target_os = "macos"))]
+    let stdout_limit = limit;
+    let mut stdout_output = ReadOutput {
+        limit: stdout_limit,
+        ..Default::default()
+    };
+    let mut stderr_output = ReadOutput {
+        limit,
+        ..Default::default()
+    };
     let mut stdout_eof = false;
     let mut stderr_eof = false;
     let mut last_output_at = None;
@@ -705,15 +796,19 @@ fn run_local_command_with_timeout(
             } else {
                 drain_available_output(&mut stderr, &mut stderr_output)?
             };
-            Ok::<_, SandboxErr>((stdout_drain, stderr_drain))
+            Ok::<_, ExecutionError>((stdout_drain, stderr_drain))
         })();
         let (stdout_drain, stderr_drain) = match drain_result {
             Ok(drains) => drains,
             Err(error) => {
-                #[cfg(target_os = "windows")]
-                let _ = terminate_windows_process_job(&mut child, &process_job, completion);
                 #[cfg(unix)]
-                terminate_process_tree(&mut child);
+                {
+                    #[cfg(target_os = "linux")]
+                    if let Some(scope) = &scope {
+                        scope.terminate()?;
+                    }
+                    terminate_process_tree(&mut child);
+                }
                 let _ = child.wait();
                 return Err(error);
             }
@@ -739,7 +834,7 @@ fn run_local_command_with_timeout(
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    return Err(SandboxErr::Io(format!(
+                    return Err(ExecutionError::Io(format!(
                         "poll local command status failed: {error}"
                     )))
                 }
@@ -752,14 +847,16 @@ fn run_local_command_with_timeout(
                     Err(error) => Some(format!("cancellation probe failed: {error}")),
                 };
                 if let Some(reason) = cancellation_reason {
-                    #[cfg(target_os = "windows")]
-                    let termination =
-                        terminate_cancelled_process(&mut child, &process_job, completion);
                     #[cfg(unix)]
-                    let termination = terminate_cancelled_process(&mut child);
-                    return Err(SandboxErr::CancellationIndeterminate {
+                    let termination = {
+                        #[cfg(target_os = "linux")]
+                        if let Some(scope) = &scope {
+                            scope.terminate()?;
+                        }
+                        terminate_cancelled_process(&mut child)
+                    };
+                    return Err(ExecutionError::CancellationIndeterminate {
                         reason: format!("{reason}; {termination}"),
-                        sandbox_type: Some(sandbox_type),
                     });
                 }
             }
@@ -768,27 +865,53 @@ fn run_local_command_with_timeout(
             let quiet_since = last_output_at
                 .filter(|output_at| *output_at > exit_at)
                 .unwrap_or(exit_at);
-            if (stdout_eof && stderr_eof) || now.duration_since(quiet_since) >= EXIT_STDIO_GRACE {
+            let input_finished = stdin_writer
+                .as_ref()
+                .is_none_or(|writer| writer.is_finished());
+            if input_finished
+                && ((stdout_eof && stderr_eof)
+                    || now.duration_since(quiet_since) >= EXIT_STDIO_GRACE)
+            {
                 break (child_exit_code.flatten(), false);
             }
         }
         if now >= deadline {
-            #[cfg(target_os = "windows")]
-            terminate_windows_process_job(&mut child, &process_job, completion)?;
             #[cfg(unix)]
-            terminate_process_tree(&mut child);
+            {
+                #[cfg(target_os = "linux")]
+                if let Some(scope) = &scope {
+                    scope.terminate()?;
+                }
+                terminate_process_tree(&mut child);
+            }
             if child_exit_code.is_none() {
                 child.wait().map_err(|error| {
-                    SandboxErr::Io(format!("wait for timed out local command failed: {error}"))
+                    ExecutionError::Io(format!("wait for timed out local command failed: {error}"))
                 })?;
             }
             break (None, true);
         }
         sleep(PROCESS_POLL_INTERVAL);
     };
-    #[cfg(target_os = "windows")]
+    #[cfg(target_os = "linux")]
     if !timed_out {
-        process_job.allow_children_to_outlive_job()?;
+        if let Some(scope) = scope {
+            scope.reap_in_background(child);
+        }
+    }
+    if let Some(writer) = stdin_writer.filter(|writer| writer.is_finished()) {
+        let result = writer
+            .join()
+            .map_err(|_| ExecutionError::Io("local stdin writer panicked".into()))?;
+        if !timed_out {
+            result.map_err(|error| {
+                ExecutionError::Io(format!("write local process input failed: {error}"))
+            })?;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if policy_handshake {
+        strip_policy_handshake(&mut stdout_output)?;
     }
     let stdout = stdout_output;
     let stderr = stderr_output;
@@ -812,12 +935,12 @@ fn run_local_command_with_timeout(
     })
 }
 
-fn read_completion_marker(marker: &CompletionMarker) -> Result<Option<i32>, SandboxErr> {
+fn read_completion_marker(marker: &CompletionMarker) -> Result<Option<i32>, ExecutionError> {
     let value = match std::fs::read_to_string(marker.path.as_path()) {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
-            return Err(SandboxErr::Io(format!(
+            return Err(ExecutionError::Io(format!(
                 "read sandbox supervisor completion failed: {error}"
             )))
         }
@@ -848,7 +971,7 @@ fn completion_digest(secret: &str, exit_code: i32) -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn completion_secret() -> Result<String, SandboxErr> {
+fn completion_secret() -> Result<String, ExecutionError> {
     let mut bytes = [0u8; 32];
     #[cfg(unix)]
     {
@@ -856,45 +979,10 @@ fn completion_secret() -> Result<String, SandboxErr> {
         std::fs::File::open("/dev/urandom")
             .and_then(|mut file| file.read_exact(&mut bytes))
             .map_err(|error| {
-                SandboxErr::Io(format!("generate completion secret failed: {error}"))
+                ExecutionError::Io(format!("generate completion secret failed: {error}"))
             })?;
     }
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
-}
-
-#[cfg(target_os = "windows")]
-fn terminate_cancelled_process(
-    child: &mut std::process::Child,
-    job: &WindowsProcessJob,
-    completion: Option<&CompletionMarker>,
-) -> String {
-    match terminate_windows_process_job(child, job, completion) {
-        Ok(()) => match child.wait() {
-            Ok(_) => "local process tree termination completed".to_string(),
-            Err(error) => format!("local process tree terminated but wait failed: {error}"),
-        },
-        Err(error) => format!(
-            "local process tree termination could not be verified: {}",
-            error.internal_debug_message()
-        ),
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn terminate_windows_process_job(
-    child: &mut std::process::Child,
-    job: &WindowsProcessJob,
-    completion: Option<&CompletionMarker>,
-) -> Result<(), SandboxErr> {
-    if let Some(completion) = completion {
-        platform::terminate(completion)?;
-    }
-    job.terminate()?;
-    let _ = child.wait();
-    if let Some(completion) = completion {
-        cleanup_completion_marker(completion);
-    }
-    Ok(())
 }
 
 #[cfg(unix)]
@@ -914,96 +1002,34 @@ fn terminate_process_tree(child: &mut std::process::Child) {
     }
 }
 
-#[cfg(target_os = "windows")]
-struct WindowsProcessJob(HANDLE);
-
-#[cfg(target_os = "windows")]
-impl WindowsProcessJob {
-    fn new() -> Result<Self, SandboxErr> {
-        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-        if handle.is_null() {
-            return Err(SandboxErr::Io(format!(
-                "create local process job failed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        let job = Self(handle);
-        job.set_kill_on_close(true)?;
-        Ok(job)
-    }
-
-    fn assign(&self, child: &std::process::Child) -> Result<(), SandboxErr> {
-        self.assign_handle(child.as_raw_handle() as HANDLE)
-    }
-
-    fn assign_handle(&self, process: HANDLE) -> Result<(), SandboxErr> {
-        let assigned = unsafe { AssignProcessToJobObject(self.0, process) };
-        if assigned == 0 {
-            return Err(SandboxErr::Io(format!(
-                "assign local process to job failed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        Ok(())
-    }
-
-    fn terminate(&self) -> Result<(), SandboxErr> {
-        if unsafe { TerminateJobObject(self.0, 1) } == 0 {
-            return Err(SandboxErr::Io(format!(
-                "terminate local process job failed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        Ok(())
-    }
-
-    fn allow_children_to_outlive_job(&self) -> Result<(), SandboxErr> {
-        self.set_kill_on_close(false)
-    }
-
-    fn set_kill_on_close(&self, enabled: bool) -> Result<(), SandboxErr> {
-        let mut limits = unsafe { std::mem::zeroed::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() };
-        limits.BasicLimitInformation.LimitFlags = if enabled {
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        } else {
-            0
-        };
-        let configured = unsafe {
-            SetInformationJobObject(
-                self.0,
-                JobObjectExtendedLimitInformation,
-                std::ptr::from_ref(&limits).cast(),
-                std::mem::size_of_val(&limits) as u32,
-            )
-        };
-        if configured == 0 {
-            return Err(SandboxErr::Io(format!(
-                "configure local process job failed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        Ok(())
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl Drop for WindowsProcessJob {
-    fn drop(&mut self) {
-        unsafe { CloseHandle(self.0) };
-    }
-}
-
 #[derive(Default)]
 struct ReadOutput {
     bytes: Vec<u8>,
     total_bytes: usize,
+    limit: Option<usize>,
 }
 
 impl ReadOutput {
     fn append(&mut self, input: &[u8]) {
         self.total_bytes = self.total_bytes.saturating_add(input.len());
-        self.bytes.extend_from_slice(input);
+        let remaining = self
+            .limit
+            .map_or(input.len(), |limit| limit.saturating_sub(self.bytes.len()));
+        self.bytes
+            .extend_from_slice(&input[..input.len().min(remaining)]);
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn strip_policy_handshake(output: &mut ReadOutput) -> Result<(), ExecutionError> {
+    if !output.bytes.starts_with(POLICY_HANDSHAKE) {
+        return Err(ExecutionError::PolicyUnavailable {
+            reason: "macOS launcher did not confirm nono enforcement".into(),
+        });
+    }
+    output.bytes.drain(..POLICY_HANDSHAKE.len());
+    output.total_bytes = output.total_bytes.saturating_sub(POLICY_HANDSHAKE.len());
+    Ok(())
 }
 
 #[derive(Default)]
@@ -1013,13 +1039,13 @@ struct OutputDrain {
 }
 
 #[cfg(unix)]
-fn configure_nonblocking_output(reader: &impl AsRawFd) -> Result<(), SandboxErr> {
+fn configure_nonblocking_output(reader: &impl AsRawFd) -> Result<(), ExecutionError> {
     let file_descriptor = reader.as_raw_fd();
     let flags = unsafe { libc::fcntl(file_descriptor, libc::F_GETFL) };
     if flags < 0
         || unsafe { libc::fcntl(file_descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
     {
-        return Err(SandboxErr::Io(format!(
+        return Err(ExecutionError::Io(format!(
             "configure local process output failed: {}",
             std::io::Error::last_os_error()
         )));
@@ -1031,7 +1057,7 @@ fn configure_nonblocking_output(reader: &impl AsRawFd) -> Result<(), SandboxErr>
 fn drain_available_output(
     reader: &mut (impl Read + AsRawFd),
     output: &mut ReadOutput,
-) -> Result<OutputDrain, SandboxErr> {
+) -> Result<OutputDrain, ExecutionError> {
     let mut drain = OutputDrain::default();
     let mut chunk = [0u8; 8 * 1024];
     loop {
@@ -1047,7 +1073,7 @@ fn drain_available_output(
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) => {
-                return Err(SandboxErr::Io(format!(
+                return Err(ExecutionError::Io(format!(
                     "read local process output failed: {error}"
                 )))
             }
@@ -1056,62 +1082,13 @@ fn drain_available_output(
     Ok(drain)
 }
 
-#[cfg(target_os = "windows")]
-fn drain_available_output(
-    reader: &mut (impl Read + AsRawHandle),
-    output: &mut ReadOutput,
-) -> Result<OutputDrain, SandboxErr> {
-    let mut drain = OutputDrain::default();
-    let mut chunk = [0u8; 8 * 1024];
-    loop {
-        let mut available_bytes = 0u32;
-        let peeked = unsafe {
-            PeekNamedPipe(
-                reader.as_raw_handle() as HANDLE,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null_mut(),
-                &mut available_bytes,
-                std::ptr::null_mut(),
-            )
-        };
-        if peeked == 0 {
-            let error = std::io::Error::last_os_error();
-            if matches!(
-                error.raw_os_error(),
-                Some(code) if code == ERROR_BROKEN_PIPE as i32 || code == ERROR_PIPE_NOT_CONNECTED as i32
-            ) {
-                drain.eof = true;
-                break;
-            }
-            return Err(SandboxErr::Io(format!(
-                "inspect local process output failed: {error}"
-            )));
-        }
-        if available_bytes == 0 {
-            break;
-        }
-        let read_capacity = chunk.len().min(available_bytes as usize);
-        let read = reader.read(&mut chunk[..read_capacity]).map_err(|error| {
-            SandboxErr::Io(format!("read local process output failed: {error}"))
-        })?;
-        if read == 0 {
-            drain.eof = true;
-            break;
-        }
-        drain.bytes_read = drain.bytes_read.saturating_add(read);
-        output.append(&chunk[..read]);
-    }
-    Ok(drain)
-}
-
 #[cfg(test)]
-fn read_all_output(mut reader: impl Read) -> Result<ReadOutput, SandboxErr> {
+fn read_all_output(mut reader: impl Read) -> Result<ReadOutput, ExecutionError> {
     let mut output = ReadOutput::default();
     let mut chunk = [0u8; 8 * 1024];
     loop {
         let read = reader.read(&mut chunk).map_err(|error| {
-            SandboxErr::Io(format!("read local process output failed: {error}"))
+            ExecutionError::Io(format!("read local process output failed: {error}"))
         })?;
         if read == 0 {
             break;
@@ -1123,6 +1100,76 @@ fn read_all_output(mut reader: impl Read) -> Result<ReadOutput, SandboxErr> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn policy_handshake_is_required_and_removed_before_decoding_output() {
+        let mut output = ReadOutput::default();
+        output.append(POLICY_HANDSHAKE);
+        output.append(&[0xff, 0xfe, b'O', 0, b'K', 0]);
+        strip_policy_handshake(&mut output).unwrap();
+        assert_eq!(decode_process_output(&output.bytes).text, "OK");
+        assert_eq!(output.total_bytes, 6);
+        let mut missing = ReadOutput::default();
+        missing.append(b"startup failed");
+        assert!(matches!(
+            strip_policy_handshake(&mut missing),
+            Err(ExecutionError::PolicyUnavailable { .. })
+        ));
+    }
+    #[test]
+    fn abandoned_completion_marker_removes_only_its_owned_control_files() {
+        let root = env::temp_dir().join(format!(
+            "centaeris-abandoned-marker-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let marker = CompletionMarker {
+            path: root.join("exit"),
+            control_path: Some(root.join("control")),
+            root: root.clone(),
+            secret: "test-only".into(),
+        };
+        std::fs::write(&marker.path, "0").unwrap();
+        std::fs::write(marker.control_path.as_ref().unwrap(), "stop").unwrap();
+        drop(marker);
+        let removed = !root.exists();
+        if !removed {
+            std::fs::remove_dir_all(root).unwrap();
+        }
+        assert!(
+            removed,
+            "failed command preparation must not leak supervisor state"
+        );
+    }
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn missing_denied_paths_never_create_workspace_directories() {
+        let workspace = std::env::temp_dir().join(format!(
+            "centaeris-missing-deny-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&workspace).unwrap();
+        let missing = workspace.join(".centaeris");
+        let mut policy = ExecutionPolicy::workspace_write_no_network(&workspace);
+        policy.filesystem.denied_read_paths.push(missing.clone());
+        let runner = LocalExecutionHostRunner::new(None).unwrap();
+        let result = runner.status(&policy);
+        let created = missing.exists();
+        std::fs::remove_dir_all(&workspace).unwrap();
+        assert!(
+            !created,
+            "validation must not create a reserved workspace directory"
+        );
+        assert!(result.is_err());
+    }
+
     use super::*;
     use centaeris_core::execution::ExecutionHostFailureKind;
     use std::io::Cursor;
@@ -1131,7 +1178,7 @@ mod tests {
     fn explicit_missing_bash_path_fails_loudly() {
         let error = resolve_bash_path(Some(PathBuf::from("banana/missing/bash")))
             .expect_err("missing Bash path must fail");
-        assert!(matches!(error, SandboxErr::Unavailable { .. }));
+        assert!(matches!(error, ExecutionError::HostUnavailable { .. }));
     }
 
     #[test]
@@ -1189,7 +1236,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir(&workspace).expect("create workspace");
-        let mut policy = SandboxPolicy::workspace_write_no_network(&workspace);
+        let mut policy = ExecutionPolicy::workspace_write_no_network(&workspace);
         policy
             .filesystem
             .read_only_roots
@@ -1197,7 +1244,7 @@ mod tests {
 
         let error = validate_local_policy(&workspace, &policy)
             .expect_err("missing declared root must loud-fail");
-        assert!(matches!(error, SandboxErr::Denied { .. }));
+        assert!(matches!(error, ExecutionError::Denied { .. }));
         std::fs::remove_dir_all(workspace).expect("remove workspace");
     }
 
@@ -1212,12 +1259,12 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir(&workspace).expect("create workspace");
-        let mut policy = SandboxPolicy::workspace_write_no_network(&workspace);
+        let mut policy = ExecutionPolicy::workspace_write_no_network(&workspace);
         policy.filesystem.tmp_root = Some(env::temp_dir());
 
         let error = validate_local_policy(&workspace, &policy)
             .expect_err("the whole OS temporary directory must loud-fail");
-        assert!(matches!(error, SandboxErr::Denied { .. }));
+        assert!(matches!(error, ExecutionError::Denied { .. }));
         std::fs::remove_dir_all(workspace).expect("remove workspace");
     }
 
@@ -1237,13 +1284,13 @@ mod tests {
         let error = runner
             .run_host_command(
                 None,
-                SandboxTransformRequest {
+                ExecutionCommandRequest {
                     program: "bash".to_string(),
                     args: vec!["-c".to_string(), "printf RAN > must-not-exist".to_string()],
                     cwd: workspace.clone(),
                     env: std::collections::HashMap::new(),
                     timeout_ms: 1_000,
-                    policy: SandboxPolicy::workspace_write_with_network_allowlist(
+                    policy: ExecutionPolicy::workspace_write_with_network_allowlist(
                         &workspace,
                         vec!["example.com".to_string()],
                     ),
@@ -1252,12 +1299,11 @@ mod tests {
             )
             .expect_err("unsupported allowlist must loud-fail");
 
-        assert!(matches!(error, SandboxErr::Unavailable { .. }));
+        assert!(matches!(error, ExecutionError::PolicyUnavailable { .. }));
         assert!(!marker.exists());
         std::fs::remove_dir_all(workspace).expect("remove workspace");
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn background_process_inheriting_output_returns_after_parent_shell_exits() {
         let marker_path = env::temp_dir().join(format!(
@@ -1288,8 +1334,11 @@ mod tests {
             5_000,
             None,
             None,
-            platform::sandbox_type(),
             None,
+            #[cfg(target_os = "linux")]
+            None,
+            #[cfg(target_os = "macos")]
+            false,
         )
         .expect("background command must return after the parent shell exits");
 
@@ -1309,7 +1358,6 @@ mod tests {
         std::fs::remove_file(marker_path).expect("remove background marker");
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn foreground_shell_and_its_process_group_stop_at_command_timeout() {
         let mut command = Command::new(resolve_bash_path(None).expect("resolve Bash"));
@@ -1326,8 +1374,11 @@ mod tests {
             250,
             None,
             None,
-            platform::sandbox_type(),
             None,
+            #[cfg(target_os = "linux")]
+            None,
+            #[cfg(target_os = "macos")]
+            false,
         )
         .expect("foreground command must terminate at deadline");
 
@@ -1335,7 +1386,6 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn cancellation_terminates_an_in_flight_local_process() {
         let mut command = Command::new(resolve_bash_path(None).expect("resolve Bash"));
@@ -1353,8 +1403,11 @@ mod tests {
             30_000,
             Some(&cancellation_probe),
             None,
-            platform::sandbox_type(),
             None,
+            #[cfg(target_os = "linux")]
+            None,
+            #[cfg(target_os = "macos")]
+            false,
         ) {
             Ok(_) => panic!("cancelled process must not report a completed tool result"),
             Err(error) => error,

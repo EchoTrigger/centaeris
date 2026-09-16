@@ -138,7 +138,8 @@ impl ToolErrorInfo {
     ) -> Self {
         let kind = match failure_kind {
             "timed_out" | "timedOut" => ToolFailureKind::TimedOut,
-            "sandbox_unavailable" | "sandboxUnavailable" => ToolFailureKind::SandboxUnavailable,
+            "policyUnavailable" => ToolFailureKind::SandboxUnavailable,
+            "permissionDenied" => ToolFailureKind::PermissionDenied,
             "host_unavailable" | "hostUnavailable" => ToolFailureKind::HostUnavailable,
             "invalid_input" | "invalidInput" => ToolFailureKind::InvalidInput,
             "command_failed" | "commandFailed" if exit_code != Some(0) => {
@@ -169,6 +170,10 @@ impl ToolErrorInfo {
             ToolFailureKind::SandboxUnavailable => (
                 "sandbox unavailable; refusing to degrade to an unsandboxed process".to_string(),
                 "Sandbox unavailable".to_string(),
+            ),
+            ToolFailureKind::PermissionDenied => (
+                "execution policy denied the operation".to_string(),
+                "Permission denied".to_string(),
             ),
             ToolFailureKind::InvalidInput => (
                 "tool input is invalid; revise the tool arguments and retry".to_string(),
@@ -339,4 +344,20 @@ fn tool_error_diagnostic_id(raw_message: &str) -> String {
     let mut hasher = DefaultHasher::new();
     raw_message.hash(&mut hasher);
     format!("tool_error:{:016x}", hasher.finish())
+}
+
+#[cfg(test)]
+mod execution_contract_tests {
+    use super::*;
+
+    #[test]
+    fn host_contract_errors_map_to_canonical_durable_tool_errors() {
+        let unavailable =
+            ToolErrorInfo::from_execution_host_failure("policyUnavailable", None, false);
+        assert_eq!(unavailable.kind, ToolFailureKind::SandboxUnavailable);
+        let denied = ToolErrorInfo::from_execution_host_failure("permissionDenied", None, false);
+        assert_eq!(denied.kind, ToolFailureKind::PermissionDenied);
+        assert!(!denied.retryable);
+        assert_eq!(denied.user_message, "Permission denied");
+    }
 }
