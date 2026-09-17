@@ -53,14 +53,15 @@ with `runtime_sqlite`; private Core tests use narrow fakes.
 The Local Runtime executes against the user's selected working directory.
 `ExecutionHost` file identities are opaque to Core. Hosts enforce their own
 platform process boundary and translate results back into canonical tool
-receipts. Windows Desktop and TUI connect to a Linux Runtime in WSL2, where nono and
-Host-owned cgroups enforce execution and lifetime boundaries. Native Windows
-Runtime execution is unavailable.
+receipts. Windows Desktop and TUI run a native Windows Runtime that executes
+host commands through Git for Windows Bash; Linux and macOS run the same Runtime
+natively. The local Host claims no OS sandbox and reports that policy is not
+enforced.
 
 Core's execution policy and process contracts are independent of concrete
 isolation backends. Hosts report whether policy is enforced and explicit error
-categories. The [ExecutionHost contract decision](ExecutionHostContract.md)
-records local Linux/WSL2 acceptance and the macOS Runtime CI results.
+categories. The [ExecutionHost contract](ExecutionHostContract.md) records the
+current native local Host and the macOS Runtime CI results.
 
 Process shutdown is owned by the Host and Runtime lifecycle. Closing the last
 local client must not leave an unowned Runtime or child process consuming work.

@@ -6,28 +6,6 @@ import path from "node:path";
 const licenseName = /^(?:license|licence|copying|copyright|notice)(?:[._-]|$)/i;
 
 const fallbacks = new Map([
-  ["rust:nono@0.75.0", {
-    commit: "46867b2fd073e324d13448304e80d3a5725e9788",
-    file: "third_party_license_fallbacks/rust/nono-0.75.0/LICENSE",
-    sha256: "7310e9389f298b89bb2f90ac4b6081ed5b6a1c4a7b8547df5d52966a57cb0929",
-    sourceUrl: "https://raw.githubusercontent.com/nolabs-ai/nono/46867b2fd073e324d13448304e80d3a5725e9788/LICENSE",
-  }],
-  // cms's published README explicitly offers Apache-2.0; its package omits
-  // the text. Use the standard Apache text shipped at the same source commit.
-  ["rust:cms@0.2.3", {
-    commit: "5821a21553509dbd03eae593b0a1fad4e2083d4e",
-    file: "third_party_license_fallbacks/rust/cms-0.2.3/LICENSE-APACHE",
-    sha256: "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
-    sourceUrl: "https://raw.githubusercontent.com/RustCrypto/formats/5821a21553509dbd03eae593b0a1fad4e2083d4e/der/LICENSE-APACHE",
-  }],
-  ...["bundle", "crypto", "merkle", "rekor", "trust-root", "tsa", "tuf", "types", "verify"].map((name) => [
-    `rust:sigstore-${name}@0.11.0`, {
-      commit: "ef17cacdbd357befea4c1c768ef02ed9bf52672c",
-      file: "third_party_license_fallbacks/rust/sigstore-0.11.0/LICENSE",
-      sha256: "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
-      sourceUrl: "https://raw.githubusercontent.com/prefix-dev/sigstore-rust/ef17cacdbd357befea4c1c768ef02ed9bf52672c/LICENSE",
-    },
-  ]),
   [
     "npm:@radix-ui/react-compose-refs@1.1.2",
     {

@@ -3,7 +3,6 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runtimeArtifactPath } from "../src/runtimeArtifact.mjs";
-import { buildWslRuntime } from "./build-wsl-runtime.mjs";
 
 const hostRoot = path.resolve(import.meta.dirname, "..");
 const repoRoot = path.resolve(hostRoot, "..", "..");
@@ -88,7 +87,6 @@ const newerSourcesThan = async (binaryMtimeMs) => {
 };
 
 const runBuild = () => {
-  if (process.platform === "win32") return buildWslRuntime(repoRoot, profile);
   const buildArgs = ["build", "--locked"];
   if (profile === "release") {
     buildArgs.push("--release");

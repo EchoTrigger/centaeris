@@ -35,7 +35,6 @@ pub const MAX_PUBLISHED_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ExecutionHostKind {
-    SandboxedProcess,
     LocalProcess,
     RemoteHost,
 }
@@ -161,7 +160,7 @@ pub trait ExecutionHostRunner: Send + Sync {
     }
 
     fn kind(&self) -> ExecutionHostKind {
-        ExecutionHostKind::SandboxedProcess
+        ExecutionHostKind::LocalProcess
     }
 
     fn status(&self, policy: &ExecutionPolicy) -> Result<ExecutionHostStatus, ExecutionError>;
@@ -295,7 +294,7 @@ impl ExecutionHostRunner for TestExecutionHostRunner {
 impl ExecutionHostStatus {
     pub fn transient_ready(policy_enforced: bool) -> Self {
         Self {
-            kind: ExecutionHostKind::SandboxedProcess,
+            kind: ExecutionHostKind::LocalProcess,
             policy_enforced,
             health: ExecutionHostHealth::Ready,
             detail: None,
@@ -366,7 +365,12 @@ mod tests {
             serde_json::to_string(&ExecutionHostKind::LocalProcess).unwrap(),
             "\"localProcess\""
         );
+        assert_eq!(
+            serde_json::to_string(&ExecutionHostKind::RemoteHost).unwrap(),
+            "\"remoteHost\""
+        );
         assert!(serde_json::from_str::<ExecutionHostKind>("\"banana\"").is_err());
+        assert!(serde_json::from_str::<ExecutionHostKind>("\"sandboxedProcess\"").is_err());
     }
 
     struct TestRemoteRunner;
