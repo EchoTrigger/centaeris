@@ -8,15 +8,13 @@ import readline from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import { createRuntimeHostTransport } from "../src/runtimeHostTransport.mjs";
 
-if (process.platform === "win32") throw new Error("Use smoke:wsl or smoke:tui-wsl on Windows; native Runtime execution requires Linux or macOS.");
-
 const hostRoot = path.resolve(import.meta.dirname, "..");
 const repoRoot = path.resolve(hostRoot, "..", "..");
 const defaultRuntimeExe = path.join(
   repoRoot,
   "target",
   "release",
-  "centaeris-runtime",
+  "centaeris-runtime.exe",
 );
 const runtimeExe = process.env.CENTAERIS_ELECTRON_SMOKE_RUNTIME_EXE || defaultRuntimeExe;
 const REQUEST_TIMEOUT_MS = 30_000;
