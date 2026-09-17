@@ -18,16 +18,14 @@
     "prebuild": "node ./scripts/ensure-electron.mjs",
     "build": "npm run build:runtime && node ./scripts/build-dist.mjs",
     "build:runtime": "node ./scripts/ensure-runtime.mjs",
-    "check": "npm run check:syntax && node --test ./src/defaultWorkspace.test.mjs ./src/rendererSecurity.test.mjs ./src/runtimeHostTransport.test.mjs ./src/wslPaths.test.mjs ./src/wslRuntimeBridge.test.mjs ./src/wslRequestPaths.test.mjs ./src/systemSkills.test.mjs ./src/tray.test.mjs ./src/windowTheme.test.mjs ./scripts/check-javascript-syntax.test.mjs ./scripts/ensure-runtime.test.mjs && node ./scripts/check-host-parity.mjs",
+    "check": "npm run check:syntax && node --test ./src/defaultWorkspace.test.mjs ./src/rendererSecurity.test.mjs ./src/runtimeHostTransport.test.mjs ./src/systemSkills.test.mjs ./src/tray.test.mjs ./src/windowTheme.test.mjs ./scripts/check-javascript-syntax.test.mjs ./scripts/ensure-runtime.test.mjs && node ./scripts/check-host-parity.mjs",
     "check:syntax": "node ./scripts/check-javascript-syntax.mjs",
     "check:host-parity": "node ./scripts/check-host-parity.mjs",
     "check:dist-licenses": "node ./scripts/check-dist-licenses.mjs --dist \"./dist/Centaeris Desktop\"",
     "test:third-party-licenses": "node --test ./scripts/third-party-licenses.test.mjs",
-    "smoke:runtime": "node ./scripts/ensure-runtime.mjs && node ./scripts/smoke-wsl-runtime.mjs",
-    "smoke:tui-wsl": "node ./scripts/smoke-tui-wsl.mjs",
+    "smoke:runtime": "node ./scripts/ensure-runtime.mjs && node ./scripts/smoke-runtime.mjs",
     "presmoke:window": "node ./scripts/ensure-electron.mjs",
-    "smoke:window": "node ./scripts/build-dist.mjs && node ./scripts/smoke-window.mjs",
-    "smoke:wsl": "node ./scripts/smoke-wsl-runtime.mjs"
+    "smoke:window": "node ./scripts/build-dist.mjs && node ./scripts/smoke-window.mjs"
   },
   "devDependencies": {
     "electron": "42.10.1",

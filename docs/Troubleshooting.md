@@ -1,11 +1,11 @@
 # Troubleshooting
 
-## WSL2 Runtime is unavailable
+## Git Bash is unavailable
 
-Check the selected distribution and its systemd user session using the
-[local execution setup](architecture/LocalExecution.md). Both Windows clients
-require the Linux Runtime and a Linux workspace. Native Windows Runtime
-execution has been removed.
+Windows host execution requires a verified Git for Windows Bash. Check that Git
+for Windows is installed and that `bash.exe` is discoverable, following the
+[local execution setup](architecture/LocalExecution.md). A missing or unverified
+Bash fails explicitly instead of running an unsandboxed fallback.
 
 ## Desktop build says the application is running
 

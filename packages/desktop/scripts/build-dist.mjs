@@ -59,9 +59,6 @@ await requirePath(trayIconIco, "Tray icon (ico)");
 
 await fs.rm(outRoot, { recursive: true, force: true });
 await fs.mkdir(appRoot, { recursive: true });
-await fs.mkdir(path.join(resourcesRoot, "runtime", "host"), { recursive: true });
-await fs.copyFile(path.join(repoRoot, "packages/runtime/host/wsl-bootstrap.sh"), path.join(resourcesRoot, "runtime/host/wsl-bootstrap.sh"));
-await fs.copyFile(path.join(repoRoot, "packages/runtime/host/wsl-request-paths.json"), path.join(resourcesRoot, "runtime/host/wsl-request-paths.json"));
 await fs.cp(electronDist, appRoot, { recursive: true });
 
 await fs.rm(path.join(appRoot, "resources", "default_app.asar"), {
@@ -124,7 +121,7 @@ await writeThirdPartyLicenses(
 await fs.mkdir(path.join(resourcesRoot, "bin"), { recursive: true });
 await fs.copyFile(
   runtimeExecutable,
-  path.join(resourcesRoot, "bin", "centaeris-runtime"),
+  path.join(resourcesRoot, "bin", "centaeris-runtime.exe"),
 );
 
 await fs.copyFile(trayIconIco, path.join(resourcesRoot, "icon.ico"));

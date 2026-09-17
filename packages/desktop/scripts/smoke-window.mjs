@@ -1,12 +1,9 @@
-import { execFile, spawn } from "node:child_process";
-import { promisify } from "node:util";
+import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { createWslRuntimeBridge } from "../src/wslRuntimeBridge.mjs";
-import { toLinuxPath, toWindowsPath } from "../src/wslPaths.mjs";
 
 const hostRoot = path.resolve(import.meta.dirname, "..");
 const defaultElectronExe = path.join(
@@ -21,9 +18,8 @@ const runtimeExe = path.join(
   path.dirname(electronExe),
   "resources",
   "bin",
-  "centaeris-runtime",
+  "centaeris-runtime.exe",
 );
-const wslDistribution = process.env.CENTAERIS_WSL_DISTRIBUTION || "Ubuntu-24.04";
 const CONNECT_TIMEOUT_MS = 30_000;
 const EVALUATE_TIMEOUT_MS = 20_000;
 const PROCESS_TIMEOUT_MS = 30_000;
@@ -76,19 +72,6 @@ const resolveRuntimeServerEndpoint = (runtimeDataDir) =>
   });
 
 const assertRuntimeServerExited = async (runtimeDataDir) => {
-  if (process.platform === "win32") {
-    const bridge = createWslRuntimeBridge({ executablePath: runtimeExe, distribution: wslDistribution,
-      environment: { ...process.env, CENTAERIS_WSL_DATA_DIR: runtimeDataDir } });
-    await bridge.endpoint();
-    try {
-      const socket = await bridge.connect();
-      socket.destroy();
-    } catch (error) {
-      if (/runtime_connect_failed/.test(error.message)) return;
-      throw error;
-    }
-    fail("Runtime Server still accepts connections after the idle cleanup window");
-  }
   const endpoint = await resolveRuntimeServerEndpoint(runtimeDataDir);
   const connected = await new Promise((resolve, reject) => {
     const socket = net.createConnection(endpoint);
@@ -379,7 +362,6 @@ const verifySecondLaunchActivatesPrimaryInstance = async ({
         ...process.env,
         CENTAERIS_ELECTRON_SMOKE: "1",
         CENTAERIS_DESKTOP_DATA_DIR: runtimeDataDir,
-        CENTAERIS_WSL_DATA_DIR: runtimeDataDir,
         CENTAERIS_PROVIDER_POLLING_HOST_ENABLED: "false",
         CENTAERIS_RUNTIME_GC_HOST_ENABLED: "false",
         CENTAERIS_SUBAGENT_SCHEDULER_HOST_ENABLED: "false",
@@ -433,7 +415,6 @@ const runPackagedWindow = async ({
         ...process.env,
         CENTAERIS_ELECTRON_SMOKE: "1",
         CENTAERIS_DESKTOP_DATA_DIR: runtimeDataDir,
-        CENTAERIS_WSL_DATA_DIR: runtimeDataDir,
         CENTAERIS_PROVIDER_POLLING_HOST_ENABLED: "false",
         CENTAERIS_RUNTIME_GC_HOST_ENABLED: "false",
         CENTAERIS_SUBAGENT_SCHEDULER_HOST_ENABLED: "false",
@@ -819,25 +800,12 @@ const main = async () => {
   const tempRoot = await fs.mkdtemp(
     path.join(os.tmpdir(), "centaeris-electron-window-smoke-"),
   );
-  // Start the distribution before crossing its UNC mount. WSL's startup
-  // /tmp view can differ from the systemd execution namespace.
-  const linuxHome = process.platform === "win32"
-    ? (await promisify(execFile)("wsl.exe", ["--distribution", wslDistribution,
-      "--exec", "printenv", "HOME"], { windowsHide: true, timeout: 30000 })).stdout.trim()
-    : null;
-  const linuxRoot = linuxHome ? await fs.mkdtemp(
-    `${toWindowsPath(linuxHome, wslDistribution)}\\centaeris-window-`,
-  ) : tempRoot;
-  const dataPath = path.join(linuxRoot, "runtime-data");
-  const workspacePath = path.join(linuxRoot, "workspace");
+  const dataPath = path.join(tempRoot, "runtime-data");
+  const workspacePath = path.join(tempRoot, "workspace");
   await fs.mkdir(dataPath, { recursive: true });
   await fs.mkdir(workspacePath, { recursive: true });
-  const runtimeDataDir = process.platform === "win32" ? toLinuxPath(dataPath, wslDistribution) : dataPath;
-  const workspaceRoot = process.platform === "win32" ? toLinuxPath(workspacePath, wslDistribution) : workspacePath;
-  if (process.platform === "win32") {
-    await promisify(execFile)("wsl.exe", ["--distribution", wslDistribution,
-      "--exec", "test", "-d", workspaceRoot], { windowsHide: true, timeout: 30000 });
-  }
+  const runtimeDataDir = dataPath;
+  const workspaceRoot = workspacePath;
   let runtimeCleanupWaited = false;
 
   try {
@@ -907,7 +875,6 @@ const main = async () => {
           tempRoot,
           checked: {
             renderer: true,
-            bridge: true,
             nativeWindowChrome: true,
             thinWorkspaceShell: true,
             singleInstanceActivation: true,
@@ -934,7 +901,6 @@ const main = async () => {
       await delay(RUNTIME_SERVER_IDLE_CLEANUP_MS);
     }
     await fs.rm(tempRoot, { recursive: true, force: true });
-    if (linuxRoot !== tempRoot) await fs.rm(linuxRoot, { recursive: true, force: true });
   }
 };
 

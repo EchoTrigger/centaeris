@@ -6,81 +6,57 @@ use std::process::{Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "linux")]
-mod linux;
-#[cfg(target_os = "macos")]
-mod macos;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-mod nono_policy;
-#[cfg(target_os = "linux")]
-use linux as platform;
-#[cfg(target_os = "macos")]
-use macos as platform;
+#[cfg(unix)]
+mod unix;
+#[cfg(target_os = "windows")]
+mod windows;
 #[cfg(unix)]
 use std::os::unix::{io::AsRawFd, process::CommandExt};
+#[cfg(target_os = "windows")]
+use std::os::windows::{io::AsRawHandle, process::CommandExt};
+#[cfg(unix)]
+use unix as platform;
+#[cfg(target_os = "windows")]
+use windows as platform;
+#[cfg(target_os = "windows")]
+pub use windows::run_windows_host_launcher;
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, ERROR_BROKEN_PIPE, ERROR_PIPE_NOT_CONNECTED, HANDLE},
+    System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    },
+    System::Pipes::PeekNamedPipe,
+};
 const EXIT_STDIO_GRACE: Duration = Duration::from_millis(100);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
-#[cfg(any(target_os = "macos", test))]
-const POLICY_HANDSHAKE: &[u8] = b"centaeris-nono-applied\n";
 use centaeris_core::execution::{
     decode_process_output, ExecutionAttempt, ExecutionCommandRequest, ExecutionError,
     ExecutionPolicy, ExecutionPolicySummary, ExecutionProcessOutput,
 };
 
-use centaeris_core::execution::run_direct_execution_file_system_operation;
-#[cfg(test)]
 use centaeris_core::execution::run_policy_scoped_execution_file_system_operation;
 use centaeris_core::execution::{
     classify_execution_host_failure, ExecutionCancellationProbe, ExecutionFileSystemError,
     ExecutionFileSystemOutput, ExecutionFileSystemRequest, ExecutionHostCommandOutput,
     ExecutionHostHealth, ExecutionHostKind, ExecutionHostRunner, ExecutionHostStatus,
 };
-use sha2::{Digest, Sha256};
 
-const LOCAL_FILESYSTEM_FRAME_LIMIT_BYTES: usize = 64 * 1024 * 1024;
-const LOCAL_FILESYSTEM_TIMEOUT_MS: u64 = 60_000;
 #[derive(Debug, Clone)]
 pub struct LocalExecutionHostRunner {
     bash_path: PathBuf,
     runtime_executable: PathBuf,
     environment_overrides: HashMap<String, String>,
-    #[cfg(test)]
-    embedded_test: bool,
 }
 
 struct PreparedSandboxCommand {
-    #[cfg(target_os = "linux")]
-    scope: Option<linux::ProcessScope>,
     command: Command,
-    completion: Option<CompletionMarker>,
     stdin_input: Option<Vec<u8>>,
 }
 
-struct CompletionMarker {
-    root: PathBuf,
-    path: PathBuf,
-    control_path: Option<PathBuf>,
-    secret: String,
-}
-
-impl Drop for CompletionMarker {
-    fn drop(&mut self) {
-        cleanup_completion_marker(self);
-    }
-}
-
-#[cfg(target_os = "linux")]
-pub fn run_linux_supervisor(arguments: &[String]) -> Result<i32, String> {
-    linux::run_supervisor(arguments)
-}
-
-#[cfg(target_os = "macos")]
-pub fn run_macos_launcher(arguments: &[String]) -> Result<(), String> {
-    macos::run_launcher(arguments)
-}
-
 impl LocalExecutionHostRunner {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn spawn_owned_process(
         &self,
         program: String,
@@ -100,37 +76,53 @@ impl LocalExecutionHostRunner {
         };
         validate_local_policy(&req.cwd, &req.policy)?;
         let program = self.resolve_program(&req)?;
-        let mut prepared = platform::prepare_command(
-            &self.runtime_executable,
-            &program,
-            &req.args,
-            &req.cwd,
-            &req.env,
-            &req.policy,
-            false,
-        )?;
-        prepared
-            .command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        configure_local_process(&mut prepared.command);
-        #[cfg(target_os = "linux")]
-        let scope = prepared
-            .scope
-            .take()
-            .ok_or_else(|| ExecutionError::PolicyUnavailable {
-                reason: "owned Linux process requires a lifecycle scope".to_string(),
-            })?;
-        let child = prepared
-            .command
-            .spawn()
-            .map_err(|e| ExecutionError::Io(e.to_string()))?;
-        Ok(LocalOwnedProcess {
-            child,
-            #[cfg(target_os = "linux")]
-            scope,
-        })
+        #[cfg(unix)]
+        {
+            let mut prepared = platform::prepare_command(
+                &self.runtime_executable,
+                &program,
+                &req.args,
+                &req.cwd,
+                &req.env,
+                &req.policy,
+                false,
+            )?;
+            prepared
+                .command
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            configure_local_process(&mut prepared.command);
+            let child = prepared
+                .command
+                .spawn()
+                .map_err(|e| ExecutionError::Io(e.to_string()))?;
+            Ok(LocalOwnedProcess { child })
+        }
+        #[cfg(target_os = "windows")]
+        {
+            // Sidecar programs are not necessarily Git Bash, so they run as a
+            // direct host process owned by a kill-on-close job.
+            let job = WindowsProcessJob::new()?;
+            let mut command = Command::new(program.as_path());
+            command
+                .args(req.args.as_slice())
+                .current_dir(req.cwd.as_path())
+                .envs(req.env.iter())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            configure_local_process(&mut command);
+            let mut child = command
+                .spawn()
+                .map_err(|e| ExecutionError::Io(e.to_string()))?;
+            if let Err(error) = job.assign(&child) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+            Ok(LocalOwnedProcess { child, job })
+        }
     }
 
     pub fn new(explicit_bash_path: Option<PathBuf>) -> Result<Self, ExecutionError> {
@@ -157,16 +149,7 @@ impl LocalExecutionHostRunner {
             bash_path: resolve_bash_path(explicit_bash_path)?,
             runtime_executable,
             environment_overrides: HashMap::new(),
-            #[cfg(test)]
-            embedded_test: false,
         })
-    }
-
-    #[cfg(test)]
-    pub fn new_embedded_test(explicit_bash_path: Option<PathBuf>) -> Result<Self, ExecutionError> {
-        let mut runner = Self::new(explicit_bash_path)?;
-        runner.embedded_test = true;
-        Ok(runner)
     }
 
     fn resolve_program(&self, req: &ExecutionCommandRequest) -> Result<PathBuf, ExecutionError> {
@@ -185,15 +168,34 @@ impl LocalExecutionHostRunner {
             .get("PATH")
             .map(std::ffi::OsString::from)
             .or_else(|| env::var_os("PATH"));
-        search
-            .and_then(|paths| {
-                env::split_paths(&paths)
-                    .map(|root| root.join(requested))
-                    .find(|path| path.is_file())
-            })
-            .ok_or_else(|| ExecutionError::HostUnavailable {
-                reason: format!("execution program not found: {}", req.program),
-            })
+        if let Some(paths) = search.as_deref() {
+            let roots = env::split_paths(paths).collect::<Vec<_>>();
+            if let Some(found) = roots
+                .iter()
+                .map(|root| root.join(requested))
+                .find(|path| path.is_file())
+            {
+                return Ok(found);
+            }
+            #[cfg(target_os = "windows")]
+            for extension in windows_executable_extensions() {
+                if let Some(found) = roots.iter().find_map(|root| {
+                    let candidate = root.join(format!("{}{extension}", req.program));
+                    candidate.is_file().then_some(candidate)
+                }) {
+                    return Ok(found);
+                }
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            // Windows resolves extension-less names such as `node` to `node.exe`.
+            Ok(PathBuf::from(&req.program))
+        }
+        #[cfg(not(target_os = "windows"))]
+        Err(ExecutionError::HostUnavailable {
+            reason: format!("execution program not found: {}", req.program),
+        })
     }
 
     pub fn bash_description(&self) -> &'static str {
@@ -243,11 +245,7 @@ impl LocalExecutionHostRunner {
         req.env.extend(self.environment_overrides.clone());
         let program = self.resolve_program(&req)?;
         validate_local_policy(req.cwd.as_path(), &req.policy)?;
-        #[cfg(test)]
-        let preserve_background = !self.embedded_test;
-        #[cfg(not(test))]
-        let preserve_background = true;
-        let preserve_background = preserve_background && input.is_none();
+        let preserve_background = input.is_none();
         let mut prepared = platform::prepare_command(
             self.runtime_executable.as_path(),
             program.as_path(),
@@ -259,13 +257,7 @@ impl LocalExecutionHostRunner {
         )?;
         let stdin_input = input
             .map(<[u8]>::to_vec)
-            .or_else(|| prepared.stdin_input.take())
-            .or_else(|| {
-                prepared
-                    .completion
-                    .as_ref()
-                    .map(|completion| format!("{}\n", completion.secret).into_bytes())
-            });
+            .or_else(|| prepared.stdin_input.take());
         prepared
             .command
             .stdin(if stdin_input.is_some() {
@@ -283,15 +275,10 @@ impl LocalExecutionHostRunner {
             &mut prepared.command,
             req.timeout_ms,
             cancellation_probe,
-            prepared.completion.as_ref(),
             stdin_input.as_deref().map(|bytes| ProcessInput {
                 bytes,
                 output_limit: input.map(|_| 64 * 1024),
             }),
-            #[cfg(target_os = "linux")]
-            prepared.scope.take(),
-            #[cfg(target_os = "macos")]
-            true,
         )?;
         let policy = policy_summary(&req.policy, policy_enforced);
         let process = ExecutionProcessOutput {
@@ -321,14 +308,12 @@ impl LocalExecutionHostRunner {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub struct LocalOwnedProcess {
     child: std::process::Child,
-    #[cfg(target_os = "linux")]
-    scope: linux::ProcessScope,
+    #[cfg(target_os = "windows")]
+    job: WindowsProcessJob,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl LocalOwnedProcess {
     pub fn id(&self) -> u32 {
         self.child.id()
@@ -340,12 +325,7 @@ impl LocalOwnedProcess {
         self.child.wait()
     }
     pub fn kill(&mut self) -> std::io::Result<()> {
-        #[cfg(target_os = "linux")]
-        return self
-            .scope
-            .terminate()
-            .map_err(|e| std::io::Error::other(e.internal_debug_message()));
-        #[cfg(target_os = "macos")]
+        #[cfg(unix)]
         {
             if unsafe { libc::kill(-(self.child.id() as i32), libc::SIGKILL) } == 0 {
                 return Ok(());
@@ -357,10 +337,13 @@ impl LocalOwnedProcess {
                 Err(error)
             }
         }
+        #[cfg(target_os = "windows")]
+        self.job
+            .terminate()
+            .map_err(|e| std::io::Error::other(e.internal_debug_message()))
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl Drop for LocalOwnedProcess {
     fn drop(&mut self) {
         if self.kill().is_ok() {
@@ -375,12 +358,11 @@ impl ExecutionHostRunner for LocalExecutionHostRunner {
     }
 
     fn kind(&self) -> ExecutionHostKind {
-        ExecutionHostKind::SandboxedProcess
+        ExecutionHostKind::LocalProcess
     }
 
     fn status(&self, policy: &ExecutionPolicy) -> Result<ExecutionHostStatus, ExecutionError> {
         validate_local_policy(policy.filesystem.workspace_root.as_path(), policy)?;
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
         platform::check_available(&self.runtime_executable, policy)?;
         Ok(ExecutionHostStatus {
             kind: self.kind(),
@@ -394,13 +376,9 @@ impl ExecutionHostRunner for LocalExecutionHostRunner {
         &self,
         request: ExecutionFileSystemRequest,
     ) -> Result<ExecutionFileSystemOutput, ExecutionFileSystemError> {
-        #[cfg(test)]
-        if self.embedded_test {
-            validate_local_policy(request.cwd.as_path(), &request.policy)
-                .map_err(filesystem_sandbox_error)?;
-            return run_policy_scoped_execution_file_system_operation(request);
-        }
-        self.run_file_system_helper(request)
+        validate_local_policy(request.cwd.as_path(), &request.policy)
+            .map_err(filesystem_sandbox_error)?;
+        run_policy_scoped_execution_file_system_operation(request)
     }
 
     fn run_host_command(
@@ -410,77 +388,6 @@ impl ExecutionHostRunner for LocalExecutionHostRunner {
         cancellation_probe: Option<&ExecutionCancellationProbe>,
     ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
         self.run_command(req, cancellation_probe)
-    }
-}
-
-impl LocalExecutionHostRunner {
-    fn run_file_system_helper(
-        &self,
-        request: ExecutionFileSystemRequest,
-    ) -> Result<ExecutionFileSystemOutput, ExecutionFileSystemError> {
-        validate_local_policy(request.cwd.as_path(), &request.policy)
-            .map_err(filesystem_sandbox_error)?;
-        let input = serde_json::to_vec(&request).map_err(|error| {
-            ExecutionFileSystemError::new(
-                centaeris_core::execution::ExecutionFileSystemErrorKind::HostUnavailable,
-                "encode local filesystem sandbox request failed",
-            )
-            .with_diagnostic(error.to_string())
-        })?;
-        if input.len() > LOCAL_FILESYSTEM_FRAME_LIMIT_BYTES {
-            return Err(ExecutionFileSystemError::new(
-                centaeris_core::execution::ExecutionFileSystemErrorKind::TooLarge,
-                "local filesystem sandbox request is too large",
-            ));
-        }
-        let mut prepared = platform::prepare_command(
-            self.runtime_executable.as_path(),
-            self.runtime_executable.as_path(),
-            &["--local-sandbox-filesystem-helper".to_string()],
-            request.cwd.as_path(),
-            &std::collections::HashMap::new(),
-            &request.policy,
-            false,
-        )
-        .map_err(filesystem_sandbox_error)?;
-        prepared
-            .command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        configure_local_process(&mut prepared.command);
-        let output = run_local_command_with_timeout(
-            &mut prepared.command,
-            LOCAL_FILESYSTEM_TIMEOUT_MS,
-            None,
-            None,
-            Some(ProcessInput {
-                bytes: input.as_slice(),
-                output_limit: None,
-            }),
-            #[cfg(target_os = "linux")]
-            prepared.scope.take(),
-            #[cfg(target_os = "macos")]
-            true,
-        )
-        .map_err(filesystem_sandbox_error)?;
-        if output.timed_out || output.exit_code != Some(0) {
-            return Err(ExecutionFileSystemError::new(
-                centaeris_core::execution::ExecutionFileSystemErrorKind::HostUnavailable,
-                "local filesystem sandbox helper failed",
-            )
-            .with_diagnostic(output.stderr));
-        }
-        serde_json::from_str::<Result<ExecutionFileSystemOutput, ExecutionFileSystemError>>(
-            output.stdout.as_str(),
-        )
-        .map_err(|error| {
-            ExecutionFileSystemError::new(
-                centaeris_core::execution::ExecutionFileSystemErrorKind::HostUnavailable,
-                "decode local filesystem sandbox response failed",
-            )
-            .with_diagnostic(error.to_string())
-        })?
     }
 }
 
@@ -495,24 +402,11 @@ fn filesystem_sandbox_error(error: ExecutionError) -> ExecutionFileSystemError {
         .with_diagnostic(error.internal_debug_message())
 }
 
-pub fn run_file_system_helper() -> Result<(), String> {
-    let mut input = Vec::new();
-    std::io::stdin()
-        .lock()
-        .take((LOCAL_FILESYSTEM_FRAME_LIMIT_BYTES + 1) as u64)
-        .read_to_end(&mut input)
-        .map_err(|error| format!("read local filesystem sandbox request failed: {error}"))?;
-    if input.is_empty() || input.len() > LOCAL_FILESYSTEM_FRAME_LIMIT_BYTES {
-        return Err("local filesystem sandbox request size is invalid".to_string());
-    }
-    let request = serde_json::from_slice::<ExecutionFileSystemRequest>(input.as_slice())
-        .map_err(|error| format!("decode local filesystem sandbox request failed: {error}"))?;
-    let result = run_direct_execution_file_system_operation(request);
-    serde_json::to_writer(std::io::stdout().lock(), &result)
-        .map_err(|error| format!("encode local filesystem sandbox response failed: {error}"))
-}
-
 pub fn resolve_bash_path(explicit_bash_path: Option<PathBuf>) -> Result<PathBuf, ExecutionError> {
+    #[cfg(target_os = "windows")]
+    return windows::resolve_git_bash_path(explicit_bash_path);
+
+    #[cfg(not(target_os = "windows"))]
     if let Some(path) = explicit_bash_path {
         return executable_file(path.as_path()).ok_or_else(|| ExecutionError::HostUnavailable {
             reason: format!(
@@ -522,6 +416,7 @@ pub fn resolve_bash_path(explicit_bash_path: Option<PathBuf>) -> Result<PathBuf,
         });
     }
 
+    #[cfg(not(target_os = "windows"))]
     {
         if let Some(path) = executable_file(Path::new("/bin/bash")).or_else(|| find_on_path("bash"))
         {
@@ -533,16 +428,30 @@ pub fn resolve_bash_path(explicit_bash_path: Option<PathBuf>) -> Result<PathBuf,
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn executable_file(path: &Path) -> Option<PathBuf> {
     path.is_file().then(|| path.to_path_buf())
 }
 
+#[cfg(not(target_os = "windows"))]
 fn find_on_path(name: &str) -> Option<PathBuf> {
     env::var_os("PATH").and_then(|path| {
         env::split_paths(&path)
             .map(|directory| directory.join(name))
             .find_map(|candidate| executable_file(candidate.as_path()))
     })
+}
+
+#[cfg(target_os = "windows")]
+fn windows_executable_extensions() -> Vec<String> {
+    let raw = env::var_os("PATHEXT")
+        .and_then(|value| value.to_str().map(str::to_owned))
+        .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".to_string());
+    raw.split(';')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .collect()
 }
 
 fn policy_summary(policy: &ExecutionPolicy, policy_enforced: bool) -> ExecutionPolicySummary {
@@ -678,17 +587,22 @@ fn materialize_temporary_root(policy: &ExecutionPolicy) -> Result<(), ExecutionE
 }
 
 fn platform_transition_reason() -> &'static str {
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
-        "linux_nono"
+        "unix_host"
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(target_os = "windows")]
     {
-        "macos_nono"
+        "windows_git_bash_host"
     }
 }
 
 fn configure_local_process(command: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
     #[cfg(unix)]
     command.process_group(0);
 }
@@ -712,14 +626,19 @@ fn run_local_command_with_timeout(
     command: &mut Command,
     timeout_ms: u64,
     cancellation_probe: Option<&ExecutionCancellationProbe>,
-    completion: Option<&CompletionMarker>,
     stdin_input: Option<ProcessInput<'_>>,
-    #[cfg(target_os = "linux")] scope: Option<linux::ProcessScope>,
-    #[cfg(target_os = "macos")] policy_handshake: bool,
 ) -> Result<CapturedProcessOutput, ExecutionError> {
+    #[cfg(target_os = "windows")]
+    let process_job = WindowsProcessJob::new()?;
     let mut child = command
         .spawn()
         .map_err(|error| ExecutionError::Io(format!("spawn local command failed: {error}")))?;
+    #[cfg(target_os = "windows")]
+    if let Err(error) = process_job.assign(&child) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
     // Feed input concurrently with output draining: a hook may write more
     // than a pipe buffer before it starts reading its event.
     let stdin_writer = if let Some(input) = stdin_input {
@@ -745,27 +664,11 @@ fn run_local_command_with_timeout(
     if let Err(error) =
         configure_nonblocking_output(&stdout).and_then(|_| configure_nonblocking_output(&stderr))
     {
-        {
-            #[cfg(target_os = "linux")]
-            if let Some(scope) = &scope {
-                scope.terminate()?;
-            }
-            terminate_process_tree(&mut child);
-        }
+        terminate_process_tree(&mut child);
         let _ = child.wait();
         return Err(error);
     }
     let limit = stdin_input.and_then(|input| input.output_limit);
-    #[cfg(target_os = "macos")]
-    let stdout_limit = limit.map(|limit| {
-        limit
-            + if policy_handshake {
-                POLICY_HANDSHAKE.len()
-            } else {
-                0
-            }
-    });
-    #[cfg(not(target_os = "macos"))]
     let stdout_limit = limit;
     let mut stdout_output = ReadOutput {
         limit: stdout_limit,
@@ -801,14 +704,10 @@ fn run_local_command_with_timeout(
         let (stdout_drain, stderr_drain) = match drain_result {
             Ok(drains) => drains,
             Err(error) => {
+                #[cfg(target_os = "windows")]
+                let _ = terminate_windows_process_job(&mut child, &process_job);
                 #[cfg(unix)]
-                {
-                    #[cfg(target_os = "linux")]
-                    if let Some(scope) = &scope {
-                        scope.terminate()?;
-                    }
-                    terminate_process_tree(&mut child);
-                }
+                terminate_process_tree(&mut child);
                 let _ = child.wait();
                 return Err(error);
             }
@@ -817,14 +716,6 @@ fn run_local_command_with_timeout(
         stderr_eof |= stderr_drain.eof;
         if stdout_drain.bytes_read > 0 || stderr_drain.bytes_read > 0 {
             last_output_at = Some(now);
-        }
-        if child_exit_code.is_none() {
-            if let Some(completion) = completion {
-                if let Some(exit_code) = read_completion_marker(completion)? {
-                    child_exit_code = Some(Some(exit_code));
-                    child_exit_at = Some(now);
-                }
-            }
         }
         if child_exit_code.is_none() {
             match child.try_wait() {
@@ -847,14 +738,10 @@ fn run_local_command_with_timeout(
                     Err(error) => Some(format!("cancellation probe failed: {error}")),
                 };
                 if let Some(reason) = cancellation_reason {
+                    #[cfg(target_os = "windows")]
+                    let termination = terminate_cancelled_process(&mut child, &process_job);
                     #[cfg(unix)]
-                    let termination = {
-                        #[cfg(target_os = "linux")]
-                        if let Some(scope) = &scope {
-                            scope.terminate()?;
-                        }
-                        terminate_cancelled_process(&mut child)
-                    };
+                    let termination = terminate_cancelled_process(&mut child);
                     return Err(ExecutionError::CancellationIndeterminate {
                         reason: format!("{reason}; {termination}"),
                     });
@@ -876,14 +763,10 @@ fn run_local_command_with_timeout(
             }
         }
         if now >= deadline {
+            #[cfg(target_os = "windows")]
+            terminate_windows_process_job(&mut child, &process_job)?;
             #[cfg(unix)]
-            {
-                #[cfg(target_os = "linux")]
-                if let Some(scope) = &scope {
-                    scope.terminate()?;
-                }
-                terminate_process_tree(&mut child);
-            }
+            terminate_process_tree(&mut child);
             if child_exit_code.is_none() {
                 child.wait().map_err(|error| {
                     ExecutionError::Io(format!("wait for timed out local command failed: {error}"))
@@ -893,11 +776,9 @@ fn run_local_command_with_timeout(
         }
         sleep(PROCESS_POLL_INTERVAL);
     };
-    #[cfg(target_os = "linux")]
+    #[cfg(target_os = "windows")]
     if !timed_out {
-        if let Some(scope) = scope {
-            scope.reap_in_background(child);
-        }
+        process_job.allow_children_to_outlive_job()?;
     }
     if let Some(writer) = stdin_writer.filter(|writer| writer.is_finished()) {
         let result = writer
@@ -908,10 +789,6 @@ fn run_local_command_with_timeout(
                 ExecutionError::Io(format!("write local process input failed: {error}"))
             })?;
         }
-    }
-    #[cfg(target_os = "macos")]
-    if policy_handshake {
-        strip_policy_handshake(&mut stdout_output)?;
     }
     let stdout = stdout_output;
     let stderr = stderr_output;
@@ -935,56 +812,6 @@ fn run_local_command_with_timeout(
     })
 }
 
-fn read_completion_marker(marker: &CompletionMarker) -> Result<Option<i32>, ExecutionError> {
-    let value = match std::fs::read_to_string(marker.path.as_path()) {
-        Ok(value) => value,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(ExecutionError::Io(format!(
-                "read sandbox supervisor completion failed: {error}"
-            )))
-        }
-    };
-    let Some((exit_code, digest)) = value.trim().split_once(':') else {
-        return Ok(None);
-    };
-    let Ok(exit_code) = exit_code.parse::<i32>() else {
-        return Ok(None);
-    };
-    if digest != completion_digest(marker.secret.as_str(), exit_code) {
-        return Ok(None);
-    }
-    cleanup_completion_marker(marker);
-    Ok(Some(exit_code))
-}
-
-fn cleanup_completion_marker(marker: &CompletionMarker) {
-    let _ = std::fs::remove_file(marker.path.as_path());
-    if let Some(control_path) = marker.control_path.as_deref() {
-        let _ = std::fs::remove_file(control_path);
-    }
-    let _ = std::fs::remove_dir(marker.root.as_path());
-}
-
-fn completion_digest(secret: &str, exit_code: i32) -> String {
-    format!("{:x}", Sha256::digest(format!("{secret}:{exit_code}")))
-}
-
-#[cfg(target_os = "linux")]
-fn completion_secret() -> Result<String, ExecutionError> {
-    let mut bytes = [0u8; 32];
-    #[cfg(unix)]
-    {
-        use std::io::Read as _;
-        std::fs::File::open("/dev/urandom")
-            .and_then(|mut file| file.read_exact(&mut bytes))
-            .map_err(|error| {
-                ExecutionError::Io(format!("generate completion secret failed: {error}"))
-            })?;
-    }
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
-}
-
 #[cfg(unix)]
 fn terminate_cancelled_process(child: &mut std::process::Child) -> String {
     terminate_process_tree(child);
@@ -999,6 +826,117 @@ fn terminate_process_tree(child: &mut std::process::Child) {
     let process_group_id = child.id() as i32;
     if unsafe { libc::kill(-process_group_id, libc::SIGKILL) } != 0 {
         let _ = child.kill();
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn terminate_cancelled_process(child: &mut std::process::Child, job: &WindowsProcessJob) -> String {
+    match terminate_windows_process_job(child, job) {
+        Ok(()) => match child.wait() {
+            Ok(_) => "local process tree termination completed".to_string(),
+            Err(error) => format!("local process tree terminated but wait failed: {error}"),
+        },
+        Err(error) => format!(
+            "local process tree termination could not be verified: {}",
+            error.internal_debug_message()
+        ),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn terminate_windows_process_job(
+    child: &mut std::process::Child,
+    job: &WindowsProcessJob,
+) -> Result<(), ExecutionError> {
+    job.terminate()?;
+    let _ = child.wait();
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsProcessJob(HANDLE);
+
+// SAFETY: a job object handle is an owned kernel handle that may be used from
+// any thread; access is serialized by the owning `Mutex` in the sidecar store.
+#[cfg(target_os = "windows")]
+unsafe impl Send for WindowsProcessJob {}
+
+#[cfg(target_os = "windows")]
+unsafe impl Sync for WindowsProcessJob {}
+
+#[cfg(target_os = "windows")]
+impl WindowsProcessJob {
+    fn new() -> Result<Self, ExecutionError> {
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(ExecutionError::Io(format!(
+                "create local process job failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        let job = Self(handle);
+        job.set_kill_on_close(true)?;
+        Ok(job)
+    }
+
+    fn assign(&self, child: &std::process::Child) -> Result<(), ExecutionError> {
+        self.assign_handle(child.as_raw_handle() as HANDLE)
+    }
+
+    fn assign_handle(&self, process: HANDLE) -> Result<(), ExecutionError> {
+        let assigned = unsafe { AssignProcessToJobObject(self.0, process) };
+        if assigned == 0 {
+            return Err(ExecutionError::Io(format!(
+                "assign local process to job failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(())
+    }
+
+    fn terminate(&self) -> Result<(), ExecutionError> {
+        if unsafe { TerminateJobObject(self.0, 1) } == 0 {
+            return Err(ExecutionError::Io(format!(
+                "terminate local process job failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(())
+    }
+
+    fn allow_children_to_outlive_job(&self) -> Result<(), ExecutionError> {
+        self.set_kill_on_close(false)
+    }
+
+    fn set_kill_on_close(&self, enabled: bool) -> Result<(), ExecutionError> {
+        let mut limits = unsafe { std::mem::zeroed::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() };
+        limits.BasicLimitInformation.LimitFlags = if enabled {
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        } else {
+            0
+        };
+        let configured = unsafe {
+            SetInformationJobObject(
+                self.0,
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&limits).cast(),
+                std::mem::size_of_val(&limits) as u32,
+            )
+        };
+        if configured == 0 {
+            return Err(ExecutionError::Io(format!(
+                "configure local process job failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsProcessJob {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
     }
 }
 
@@ -1018,18 +956,6 @@ impl ReadOutput {
         self.bytes
             .extend_from_slice(&input[..input.len().min(remaining)]);
     }
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn strip_policy_handshake(output: &mut ReadOutput) -> Result<(), ExecutionError> {
-    if !output.bytes.starts_with(POLICY_HANDSHAKE) {
-        return Err(ExecutionError::PolicyUnavailable {
-            reason: "macOS launcher did not confirm nono enforcement".into(),
-        });
-    }
-    output.bytes.drain(..POLICY_HANDSHAKE.len());
-    output.total_bytes = output.total_bytes.saturating_sub(POLICY_HANDSHAKE.len());
-    Ok(())
 }
 
 #[derive(Default)]
@@ -1082,6 +1008,55 @@ fn drain_available_output(
     Ok(drain)
 }
 
+#[cfg(target_os = "windows")]
+fn drain_available_output(
+    reader: &mut (impl Read + AsRawHandle),
+    output: &mut ReadOutput,
+) -> Result<OutputDrain, ExecutionError> {
+    let mut drain = OutputDrain::default();
+    let mut chunk = [0u8; 8 * 1024];
+    loop {
+        let mut available_bytes = 0u32;
+        let peeked = unsafe {
+            PeekNamedPipe(
+                reader.as_raw_handle() as HANDLE,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut available_bytes,
+                std::ptr::null_mut(),
+            )
+        };
+        if peeked == 0 {
+            let error = std::io::Error::last_os_error();
+            if matches!(
+                error.raw_os_error(),
+                Some(code) if code == ERROR_BROKEN_PIPE as i32 || code == ERROR_PIPE_NOT_CONNECTED as i32
+            ) {
+                drain.eof = true;
+                break;
+            }
+            return Err(ExecutionError::Io(format!(
+                "inspect local process output failed: {error}"
+            )));
+        }
+        if available_bytes == 0 {
+            break;
+        }
+        let read_capacity = chunk.len().min(available_bytes as usize);
+        let read = reader.read(&mut chunk[..read_capacity]).map_err(|error| {
+            ExecutionError::Io(format!("read local process output failed: {error}"))
+        })?;
+        if read == 0 {
+            drain.eof = true;
+            break;
+        }
+        drain.bytes_read = drain.bytes_read.saturating_add(read);
+        output.append(&chunk[..read]);
+    }
+    Ok(drain)
+}
+
 #[cfg(test)]
 fn read_all_output(mut reader: impl Read) -> Result<ReadOutput, ExecutionError> {
     let mut output = ReadOutput::default();
@@ -1101,51 +1076,7 @@ fn read_all_output(mut reader: impl Read) -> Result<ReadOutput, ExecutionError> 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn policy_handshake_is_required_and_removed_before_decoding_output() {
-        let mut output = ReadOutput::default();
-        output.append(POLICY_HANDSHAKE);
-        output.append(&[0xff, 0xfe, b'O', 0, b'K', 0]);
-        strip_policy_handshake(&mut output).unwrap();
-        assert_eq!(decode_process_output(&output.bytes).text, "OK");
-        assert_eq!(output.total_bytes, 6);
-        let mut missing = ReadOutput::default();
-        missing.append(b"startup failed");
-        assert!(matches!(
-            strip_policy_handshake(&mut missing),
-            Err(ExecutionError::PolicyUnavailable { .. })
-        ));
-    }
-    #[test]
-    fn abandoned_completion_marker_removes_only_its_owned_control_files() {
-        let root = env::temp_dir().join(format!(
-            "centaeris-abandoned-marker-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&root).unwrap();
-        let marker = CompletionMarker {
-            path: root.join("exit"),
-            control_path: Some(root.join("control")),
-            root: root.clone(),
-            secret: "test-only".into(),
-        };
-        std::fs::write(&marker.path, "0").unwrap();
-        std::fs::write(marker.control_path.as_ref().unwrap(), "stop").unwrap();
-        drop(marker);
-        let removed = !root.exists();
-        if !removed {
-            std::fs::remove_dir_all(root).unwrap();
-        }
-        assert!(
-            removed,
-            "failed command preparation must not leak supervisor state"
-        );
-    }
-    #[test]
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(unix)]
     fn missing_denied_paths_never_create_workspace_directories() {
         let workspace = std::env::temp_dir().join(format!(
             "centaeris-missing-deny-{}-{}",
@@ -1182,6 +1113,56 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "windows")]
+    fn windows_resolves_extension_less_program_names() {
+        let runner = LocalExecutionHostRunner::new(None).expect("create Windows runner");
+        let cwd = std::env::current_dir().expect("current directory");
+        let request = ExecutionCommandRequest {
+            program: "cmd".to_string(),
+            args: vec!["/C".to_string(), "echo ok".to_string()],
+            cwd: cwd.clone(),
+            env: HashMap::new(),
+            policy: ExecutionPolicy::workspace_write_public_internet(cwd),
+            timeout_ms: 10_000,
+        };
+        let resolved = runner
+            .resolve_program(&request)
+            .expect("resolve extension-less program");
+        assert!(
+            resolved.is_file(),
+            "resolved program must exist: {}",
+            resolved.display()
+        );
+        assert_eq!(
+            resolved
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase(),
+            "exe"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn windows_defers_unknown_program_names_to_the_os() {
+        let runner = LocalExecutionHostRunner::new(None).expect("create Windows runner");
+        let cwd = std::env::current_dir().expect("current directory");
+        let request = ExecutionCommandRequest {
+            program: "centaeris-definedly-missing-program".to_string(),
+            args: Vec::new(),
+            cwd: cwd.clone(),
+            env: HashMap::new(),
+            policy: ExecutionPolicy::workspace_write_public_internet(cwd),
+            timeout_ms: 10_000,
+        };
+        assert_eq!(
+            runner.resolve_program(&request).expect("defer to OS"),
+            PathBuf::from("centaeris-definedly-missing-program")
+        );
+    }
+
+    #[test]
     fn local_failure_classification_is_preserved() {
         assert_eq!(
             classify_execution_host_failure(Some(127), false, "", "command not found"),
@@ -1196,33 +1177,6 @@ mod tests {
 
         assert_eq!(output.bytes, expected);
         assert_eq!(output.total_bytes, 1024 * 1024 + 17);
-    }
-
-    #[test]
-    fn completion_marker_rejects_an_unauthenticated_exit_status() {
-        let root = env::temp_dir().join(format!(
-            "centaeris-completion-marker-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock")
-                .as_nanos()
-        ));
-        std::fs::create_dir(&root).expect("create completion root");
-        let marker = CompletionMarker {
-            path: root.join("shell-exit"),
-            root,
-            control_path: None,
-            secret: "banana".to_string(),
-        };
-        std::fs::write(&marker.path, "0:banana\n").expect("write forged marker");
-        assert_eq!(read_completion_marker(&marker).unwrap(), None);
-        std::fs::write(
-            &marker.path,
-            format!("0:{}\n", completion_digest(&marker.secret, 0)),
-        )
-        .expect("write authentic marker");
-        assert_eq!(read_completion_marker(&marker).unwrap(), Some(0));
     }
 
     #[test]
@@ -1269,7 +1223,7 @@ mod tests {
     }
 
     #[test]
-    fn local_sandbox_rejects_network_allowlist_without_running_the_command() {
+    fn local_host_rejects_network_allowlist_without_running_the_command() {
         let workspace = env::temp_dir().join(format!(
             "centaeris-allowlist-{}-{}",
             std::process::id(),
@@ -1329,18 +1283,8 @@ mod tests {
         configure_local_process(&mut command);
 
         let started = Instant::now();
-        let output = run_local_command_with_timeout(
-            &mut command,
-            5_000,
-            None,
-            None,
-            None,
-            #[cfg(target_os = "linux")]
-            None,
-            #[cfg(target_os = "macos")]
-            false,
-        )
-        .expect("background command must return after the parent shell exits");
+        let output = run_local_command_with_timeout(&mut command, 5_000, None, None)
+            .expect("background command must return after the parent shell exits");
 
         assert!(!output.timed_out);
         assert_eq!(output.exit_code, Some(0));
@@ -1369,18 +1313,8 @@ mod tests {
         configure_local_process(&mut command);
 
         let started = Instant::now();
-        let output = run_local_command_with_timeout(
-            &mut command,
-            250,
-            None,
-            None,
-            None,
-            #[cfg(target_os = "linux")]
-            None,
-            #[cfg(target_os = "macos")]
-            false,
-        )
-        .expect("foreground command must terminate at deadline");
+        let output = run_local_command_with_timeout(&mut command, 250, None, None)
+            .expect("foreground command must terminate at deadline");
 
         assert!(output.timed_out);
         assert!(started.elapsed() < Duration::from_secs(5));
@@ -1403,11 +1337,6 @@ mod tests {
             30_000,
             Some(&cancellation_probe),
             None,
-            None,
-            #[cfg(target_os = "linux")]
-            None,
-            #[cfg(target_os = "macos")]
-            false,
         ) {
             Ok(_) => panic!("cancelled process must not report a completed tool result"),
             Err(error) => error,

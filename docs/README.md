@@ -27,9 +27,8 @@ implementation plans or compatibility aliases.
 
 - [Building](development/Building.md): toolchains and artifact commands.
 - [Testing](development/Testing.md): focused and full local gates.
-- [ExecutionHost contract decision](architecture/ExecutionHostContract.md):
-  execution semantics and Host isolation boundaries; WSL2/nono support remains
-  pending.
+- [ExecutionHost contract](architecture/ExecutionHostContract.md):
+  execution semantics and Host boundaries for the native local Host.
 - [Release process](development/ReleaseProcess.md): source freeze, clean-clone
   verification, artifacts, and publication boundary.
 - [Release gate](eval/ReleaseGate.md): the current executable release gate.

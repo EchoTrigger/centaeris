@@ -37,7 +37,7 @@ npm run dev --workspace centaeris-ui
 npm run dev --workspace @centaeris/electron-host
 ```
 
-The default development Runtime is `target/wsl/debug/centaeris-runtime` on Windows.
+The default development Runtime is `target/debug/centaeris-runtime.exe` on Windows.
 `CENTAERIS_RUNTIME_EXE` may select an explicit build. Missing or incompatible
 Runtime binaries fail.
 

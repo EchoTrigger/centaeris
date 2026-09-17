@@ -1,7 +1,8 @@
 # Windows setup
 
-Windows x64 clients use a Linux Runtime in WSL2. Local packaging is verified;
-the remote release runner still needs WSL2 provisioning.
+Windows x64 clients run a native Windows Runtime and execute host commands
+through Git for Windows Bash. Local packaging is verified; the remote release
+runner packages native Windows artifacts.
 
 ## Requirements
 
@@ -9,8 +10,8 @@ the remote release runner still needs WSL2 provisioning.
 - Node.js `22.21.0`
 - npm `10.9.4`
 - Git for source development
-- WSL2 Ubuntu 24.04 with systemd, a working user service manager, and the pinned
-  Rust toolchain for source builds; see [local execution](../architecture/LocalExecution.md)
+- Git for Windows (provides the verified `bash.exe` used for host execution); see
+  [local execution](../architecture/LocalExecution.md)
 
 Clone the repository and install locked dependencies:
 
@@ -53,8 +54,8 @@ Build the standalone TUI archive:
 
 The archive is written to
 `packages/tui/dist/centaeris-windows-x64.zip`. It contains `centa.exe`, the
-matching Linux Runtime ELF, license material, and a file manifest verified by the
-installer.
+matching native `centaeris-runtime.exe`, license material, and a file manifest
+verified by the installer.
 
 After an official GitHub Release exists, `scripts/install-tui.ps1` can install a
 named version or `latest`. Do not use the release installer as a substitute for
@@ -62,7 +63,7 @@ the source build before release assets exist.
 
 ## First run
 
-Choose a Linux working directory and configure a model in the client. For the TUI,
-pass `--workspace /home/your-user/project` or its WSL UNC path. Local data is
-created in the Linux user's `~/.centaeris`. Windows drive workspaces, missing WSL2,
-an incompatible Runtime, or corrupt local state fail explicitly.
+Choose a working directory and configure a model in the client. For the TUI,
+pass `--workspace C:\path\to\project`. Local data is created in the user's data
+root. A missing or unverified Git Bash, an incompatible Runtime, or corrupt local
+state fails explicitly.

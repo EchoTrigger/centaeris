@@ -8,9 +8,9 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $tuiDir = Join-Path $repoRoot "packages/tui"
 $tuiReleaseTarget = Join-Path $repoRoot "target/tui-release"
-$releaseTarget = Join-Path $repoRoot "target/wsl/release"
+$releaseTarget = Join-Path $repoRoot "target/release"
 $tuiBinary = Join-Path $tuiReleaseTarget "centa.exe"
-$runtimeBinary = Join-Path $releaseTarget "centaeris-runtime"
+$runtimeBinary = Join-Path $releaseTarget "centaeris-runtime.exe"
 $distRoot = Join-Path $tuiDir "dist/centaeris"
 
 function Assert-CommandAvailable {
@@ -131,7 +131,7 @@ Invoke-Checked "tui release build" "cargo.exe" @(
     (Join-Path $tuiDir "Cargo.toml")
 ) $repoRoot
 
-Invoke-Checked "WSL runtime release build" "node.exe" @(
+Invoke-Checked "native runtime release build" "node.exe" @(
     (Join-Path $repoRoot "packages/desktop/scripts/ensure-runtime.mjs"),
     "--profile", "release"
 ) $repoRoot
@@ -150,7 +150,7 @@ if (Test-Path -LiteralPath $distRoot) {
 New-Item -ItemType Directory -Path $distRoot -Force | Out-Null
 
 $tuiName = "centa.exe"
-$runtimeName = "centaeris-runtime"
+$runtimeName = "centaeris-runtime.exe"
 Copy-Item -LiteralPath $tuiBinary -Destination (Join-Path $distRoot $tuiName)
 Copy-Item -LiteralPath $runtimeBinary -Destination (Join-Path $distRoot $runtimeName)
 Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE") -Destination (Join-Path $distRoot "LICENSE.centaeris.txt")
@@ -163,8 +163,7 @@ Invoke-Checked "third-party license assembly" "node.exe" @(
     (Join-Path $distRoot "THIRD_PARTY_LICENSES"),
     "centaeris-runtime",
     "centaeris-tui",
-    "--rust-only",
-    "--wsl-runtime"
+    "--rust-only"
 ) $repoRoot
 
 if ($systemSkillsBundle) {
