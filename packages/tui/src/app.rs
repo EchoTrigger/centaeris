@@ -525,25 +525,6 @@ fn install_panic_hook() {
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<AppConfig, String> {
     let default_workspace = env::current_dir()
         .map_err(|error| format!("cannot read current directory as default workspace: {error}"))?;
-    #[cfg(windows)]
-    {
-        let mut args = args.into_iter().collect::<Vec<_>>();
-        for index in 1..args.len() {
-            if args[index - 1] == "--workspace" {
-                args[index] = crate::wsl::desktop_path(
-                    &crate::wsl::linux_path(&args[index], &crate::wsl::distribution()?, false)?,
-                    &crate::wsl::distribution()?,
-                )?;
-            }
-        }
-        let mut config =
-            parse_args_with_default_and_home(args, default_workspace, user_home_dir())?;
-        let (_, linux) = crate::wsl::workspace_paths(&config.workspace_root)?;
-        config.workspace_root = PathBuf::from(&linux);
-        config.session_cwd = linux;
-        Ok(config)
-    }
-    #[cfg(not(windows))]
     parse_args_with_default_and_home(args, default_workspace, user_home_dir())
 }
 

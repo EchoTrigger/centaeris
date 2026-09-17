@@ -42,7 +42,7 @@ jobs:
           cargo clippy --locked -p centaeris-runtime --all-targets -- -D warnings
           cargo test --locked -p centaeris-core query_loop
           cargo test --locked -p centaeris-runtime-sqlite --test core_runtime
-      - name: Exercise actual nono processes and file helpers
+      - name: Exercise native local host execution
         run: cargo test --locked -p centaeris-runtime --test local_execution_sandbox -- --nocapture
       - name: Verify public-network DNS through macOS services
         run: cargo test --locked -p centaeris-runtime --test local_execution_sandbox macos_public_network_resolves_dns -- --ignored --exact --nocapture

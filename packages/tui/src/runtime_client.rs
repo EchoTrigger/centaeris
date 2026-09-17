@@ -5,16 +5,20 @@ use std::collections::HashMap;
 use std::env;
 use std::fmt;
 use std::io::Read;
+#[cfg(unix)]
 use std::io::Write;
+#[cfg(any(unix, test))]
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
-use std::process::Command;
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+#[cfg(windows)]
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 
 const JSON_RPC_VERSION: &str = "2.0";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -135,7 +139,7 @@ pub(crate) struct RuntimeClient {
     #[cfg(unix)]
     shutdown_stream: Option<std::os::unix::net::UnixStream>,
     #[cfg(windows)]
-    relay: Option<std::process::Child>,
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     next_id: u64,
 }
 
@@ -175,9 +179,8 @@ impl RuntimeClient {
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let connected = Arc::new(AtomicBool::new(true));
         #[cfg(windows)]
-        let relay = start_windows_runtime_io(
+        let shutdown_tx = start_windows_runtime_io(
             executable.as_path(),
-            expected_build_id.trim_start_matches("sha256:"),
             write_rx,
             write_tx.clone(),
             event_tx.clone(),
@@ -220,7 +223,7 @@ impl RuntimeClient {
             #[cfg(unix)]
             shutdown_stream: Some(shutdown_stream),
             #[cfg(windows)]
-            relay: Some(relay),
+            shutdown_tx: Some(shutdown_tx),
             next_id: 1,
         })
     }
@@ -252,8 +255,6 @@ impl RuntimeClient {
         if !self.is_connected() {
             return Err(RUNTIME_CONNECTION_CLOSED.to_string());
         }
-        #[cfg(windows)]
-        let params = crate::wsl::map_request_paths(method, params)?;
         let id = format!("tui-{}", self.next_id);
         self.next_id = self.next_id.saturating_add(1);
         let (tx, rx) = mpsc::channel::<Result<Value, RuntimeRequestError>>();
@@ -331,7 +332,7 @@ impl RuntimeClient {
             #[cfg(unix)]
             shutdown_stream: None,
             #[cfg(windows)]
-            relay: None,
+            shutdown_tx: None,
             next_id: 1,
         }
     }
@@ -349,9 +350,8 @@ impl Drop for RuntimeClient {
             let _ = stream.shutdown(std::net::Shutdown::Both);
         }
         #[cfg(windows)]
-        if let Some(mut relay) = self.relay.take() {
-            let _ = relay.kill();
-            let _ = relay.wait();
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
         }
     }
 }
@@ -527,6 +527,7 @@ fn invalidate_runtime_connection(
     true
 }
 
+#[cfg(unix)]
 fn spawn_writer<TStream>(
     mut stream: TStream,
     write_rx: mpsc::Receiver<String>,
@@ -554,6 +555,7 @@ fn spawn_writer<TStream>(
     });
 }
 
+#[cfg(any(unix, test))]
 fn spawn_reader<TStream>(
     stream: TStream,
     write_tx: mpsc::Sender<String>,
@@ -588,97 +590,111 @@ fn spawn_reader<TStream>(
 #[cfg(windows)]
 fn start_windows_runtime_io(
     executable: &Path,
-    digest: &str,
     write_rx: mpsc::Receiver<String>,
     write_tx: mpsc::Sender<String>,
     event_tx: mpsc::Sender<RuntimeEvent>,
     pending: PendingRuntimeResponses,
     connected: Arc<AtomicBool>,
-) -> Result<std::process::Child, String> {
-    let bridge = crate::wsl::WslRuntime::prepare(executable, digest)?;
-    let connection = match connect_wsl_relay(&bridge) {
-        Ok(connection) => connection,
-        Err(_) => {
-            // Another client may start this same profile concurrently. A
-            // successful connection is authoritative even if start lost that race.
-            let start_error = bridge.start().err();
-            let deadline = Instant::now() + Duration::from_secs(30);
-            loop {
-                match connect_wsl_relay(&bridge) {
-                    Ok(connection) => break connection,
-                    Err(error) if Instant::now() >= deadline => {
-                        return Err(format!(
-                            "WSL Runtime did not start: {error}; {}",
-                            start_error.unwrap_or_default()
-                        ))
-                    }
-                    Err(_) => thread::sleep(Duration::from_millis(100)),
+) -> Result<tokio::sync::oneshot::Sender<()>, String> {
+    let executable = executable.to_path_buf();
+    let endpoint = runtime_server_endpoint(executable.as_path())?;
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(), String>>(1);
+    thread::Builder::new()
+        .name("centaeris-tui-runtime-io".to_string())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = ready_tx.send(Err(format!(
+                        "create Windows Runtime Server I/O runtime failed: {error}"
+                    )));
+                    return;
                 }
+            };
+            let stream = match runtime.block_on(async {
+                connect_or_start_runtime_server(executable.as_path(), endpoint.as_str())
+            }) {
+                Ok(stream) => stream,
+                Err(error) => {
+                    let _ = ready_tx.send(Err(error));
+                    return;
+                }
+            };
+            if ready_tx.send(Ok(())).is_err() {
+                return;
             }
-        }
-    };
-    let (mut child, reader) = connection;
-    let writer = child.stdin.take().expect("piped relay stdin");
-    spawn_writer(
-        writer,
-        write_rx,
-        event_tx.clone(),
-        Arc::clone(&pending),
-        Arc::clone(&connected),
-    );
-    spawn_reader(reader, write_tx, event_tx, pending, connected);
-    Ok(child)
-}
-
-#[cfg(windows)]
-fn connect_wsl_relay(
-    bridge: &crate::wsl::WslRuntime,
-) -> Result<(std::process::Child, BufReader<std::process::ChildStdout>), String> {
-    let mut child = bridge
-        .command("connect")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("start WSL relay failed: {e}"))?;
-    let stdout = child.stdout.take().expect("piped relay stdout");
-    let stderr = child.stderr.take().expect("piped relay stderr");
-    let tail = Arc::new(Mutex::new(String::new()));
-    let stderr_tail = Arc::clone(&tail);
-    thread::spawn(move || capture_runtime_stderr_tail(stderr, &stderr_tail));
-    let (tx, rx) = mpsc::sync_channel(1);
-    thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        let mut header = Vec::new();
-        let result = (&mut reader)
-            .take(1025)
-            .read_until(b'\n', &mut header)
-            .map_err(|e| e.to_string())
-            .and_then(|_| {
-                if header == b"{\"connected\":true}\n" {
-                    Ok(reader)
-                } else {
-                    Err("invalid WSL relay handshake".into())
+            let (async_write_tx, mut async_write_rx) = tokio::sync::mpsc::unbounded_channel();
+            thread::spawn(move || {
+                for line in write_rx {
+                    if async_write_tx.send(line).is_err() {
+                        break;
+                    }
                 }
             });
-        let _ = tx.send(result);
-    });
-    match rx.recv_timeout(Duration::from_secs(10)) {
-        Ok(Ok(reader)) => Ok((child, reader)),
-        other => {
-            let _ = child.kill();
-            let _ = child.wait();
-            let reason = match other {
-                Ok(Err(e)) => e,
-                Err(e) => e.to_string(),
-                _ => unreachable!(),
-            };
-            Err(format!(
-                "{reason}; {}",
-                sanitized_runtime_stderr_tail(&tail)
-            ))
-        }
-    }
+            runtime.block_on(async move {
+                let (reader, mut writer) = tokio::io::split(stream);
+                let writer_events = event_tx.clone();
+                let writer_pending = Arc::clone(&pending);
+                let writer_connected = Arc::clone(&connected);
+                let writer_task = tokio::spawn(async move {
+                    while let Some(line) = async_write_rx.recv().await {
+                        if let Err(error) = writer.write_all(line.as_bytes()).await {
+                            fail_runtime_connection(
+                                &writer_connected,
+                                &writer_pending,
+                                &writer_events,
+                                format!("write runtime frame failed: {error}"),
+                            );
+                            return;
+                        }
+                        if let Err(error) = writer.flush().await {
+                            fail_runtime_connection(
+                                &writer_connected,
+                                &writer_pending,
+                                &writer_events,
+                                format!("flush runtime frame failed: {error}"),
+                            );
+                            return;
+                        }
+                    }
+                });
+                let mut lines = TokioBufReader::new(reader).lines();
+                let mut close_reason = RUNTIME_CONNECTION_CLOSED.to_string();
+                loop {
+                    let line = match tokio::select! {
+                        _ = &mut shutdown_rx => break,
+                        result = lines.next_line() => result,
+                    } {
+                        Ok(Some(line)) => line,
+                        Ok(None) => break,
+                        Err(error) => {
+                            close_reason = format!("read runtime frame failed: {error}");
+                            break;
+                        }
+                    };
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    if let Err(error) =
+                        handle_runtime_line(line.as_str(), &write_tx, &event_tx, &pending)
+                    {
+                        close_reason = error;
+                        break;
+                    }
+                }
+                fail_runtime_connection(&connected, &pending, &event_tx, close_reason);
+                writer_task.abort();
+            });
+        })
+        .map_err(|error| format!("start Windows Runtime Server I/O worker failed: {error}"))?;
+    ready_rx
+        .recv()
+        .map_err(|_| "Windows Runtime Server I/O worker stopped during startup".to_string())??;
+    Ok(shutdown_tx)
 }
 
 fn handle_runtime_line(
@@ -820,7 +836,6 @@ fn runtime_id_to_string(value: &Value) -> String {
         .unwrap_or_else(|| value.to_string())
 }
 
-#[cfg(unix)]
 fn connect_or_start_runtime_server(
     executable: &Path,
     endpoint: &str,
@@ -896,7 +911,6 @@ fn capture_runtime_stderr_tail(mut stderr: impl Read, tail: &Mutex<String>) {
     }
 }
 
-#[cfg(unix)]
 fn runtime_server_exit_message(status: &str, stderr_tail: &Mutex<String>) -> String {
     let detail = sanitized_runtime_stderr_tail(stderr_tail);
     if detail.is_empty() {
@@ -915,7 +929,7 @@ fn sanitized_runtime_stderr_tail(stderr_tail: &Mutex<String>) -> String {
         .unwrap_or_default()
 }
 
-pub(crate) fn sanitize_runtime_stderr(raw: &str) -> String {
+fn sanitize_runtime_stderr(raw: &str) -> String {
     raw.lines()
         .filter_map(|line| {
             let line = line.trim();
@@ -946,7 +960,6 @@ pub(crate) fn sanitize_runtime_stderr(raw: &str) -> String {
         .join(" | ")
 }
 
-#[cfg(unix)]
 fn runtime_server_endpoint(executable: &Path) -> Result<String, String> {
     let output = Command::new(executable)
         .arg("--runtime-server-endpoint")
@@ -974,6 +987,16 @@ fn runtime_server_endpoint(executable: &Path) -> Result<String, String> {
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
         .ok_or_else(|| "Runtime Server endpoint descriptor is missing endpoint".to_string())
+}
+
+#[cfg(windows)]
+type RuntimeServerStream = NamedPipeClient;
+
+#[cfg(windows)]
+fn connect_runtime_server(endpoint: &str) -> Result<RuntimeServerStream, String> {
+    ClientOptions::new()
+        .open(endpoint)
+        .map_err(|error| format!("connect Runtime Server named pipe {endpoint} failed: {error}"))
 }
 
 #[cfg(unix)]
@@ -1009,18 +1032,17 @@ fn runtime_executable_candidates(exe_dir: Option<&Path>, cwd: &Path) -> Vec<Path
         }
         candidates.push(exe_dir.join(exe_name));
     }
-    let target = if cfg!(windows) {
-        cwd.join("target/wsl")
-    } else {
-        cwd.join("target")
-    };
-    candidates.push(target.join("release").join(exe_name));
-    candidates.push(target.join("debug").join(exe_name));
+    candidates.push(cwd.join("target/release").join(exe_name));
+    candidates.push(cwd.join("target/debug").join(exe_name));
     candidates
 }
 
 fn runtime_exe_name() -> &'static str {
-    "centaeris-runtime"
+    if cfg!(windows) {
+        "centaeris-runtime.exe"
+    } else {
+        "centaeris-runtime"
+    }
 }
 
 #[cfg(test)]
@@ -1346,13 +1368,8 @@ mod tests {
     fn runtime_resolution_prefers_exe_dir_then_target_release_then_target_debug() {
         let root = temp_test_dir("runtime-resolution");
         let exe_dir = root.join("exe");
-        let target = if cfg!(windows) {
-            root.join("target/wsl")
-        } else {
-            root.join("target")
-        };
-        let release_dir = target.join("release");
-        let debug_dir = target.join("debug");
+        let release_dir = root.join("target/release");
+        let debug_dir = root.join("target/debug");
         std::fs::create_dir_all(exe_dir.as_path()).expect("exe dir");
         std::fs::create_dir_all(release_dir.as_path()).expect("release dir");
         std::fs::create_dir_all(debug_dir.as_path()).expect("debug dir");
@@ -1412,80 +1429,6 @@ mod tests {
             Some(stale_runtime)
         );
         std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[test]
-    #[cfg(windows)]
-    #[ignore = "requires an isolated WSL smoke profile and the Linux Runtime artifact"]
-    fn wsl_runtime_keeps_other_clients_and_persists_sessions() {
-        let data = std::env::var("CENTAERIS_WSL_DATA_DIR").expect("isolated WSL data directory");
-        assert!(
-            data.contains("centaeris-tui-smoke-"),
-            "use a disposable smoke profile"
-        );
-        let workspace =
-            std::env::var("CENTAERIS_TUI_SMOKE_WORKSPACE").expect("Linux smoke workspace");
-        let distro = crate::wsl::distribution().unwrap();
-        let local = PathBuf::from(crate::wsl::desktop_path(&workspace, &distro).unwrap());
-        std::fs::create_dir_all(&local).unwrap();
-        let initialize = |client: &mut RuntimeClient, viewer| {
-            let descriptor = client
-                .request(
-                    "initialize",
-                    json!({"request":{"clientKind":"tui","viewerId":viewer}}),
-                )
-                .unwrap();
-            client.validate_initialize_descriptor(&descriptor).unwrap();
-            descriptor
-        };
-        let mut first = RuntimeClient::start().unwrap();
-        let first_descriptor = initialize(&mut first, "tui-smoke-first");
-        let created = first.request("session/new", json!({"request":{"operationId":"tui-wsl-smoke-create","cwd":workspace,"title":"WSL TUI persistence"}})).unwrap();
-        let mut second = RuntimeClient::start().unwrap();
-        let second_descriptor = initialize(&mut second, "tui-smoke-second");
-        assert_eq!(
-            first_descriptor["profileId"],
-            second_descriptor["profileId"]
-        );
-        assert_eq!(first_descriptor["storeId"], second_descriptor["storeId"]);
-        drop(first);
-        let sessions = second
-            .request("session/list", json!({"request":{}}))
-            .unwrap();
-        assert!(
-            sessions
-                .to_string()
-                .contains(created["id"].as_str().unwrap()),
-            "session survives first client exit"
-        );
-        let started = second.request("sidecar_start", json!({"request":{
-            "command":"python3","workspaceRoot":workspace,"args":["-c",
-            "import pathlib,sys,time,os\ntry:\n pathlib.Path(sys.argv[1]).read_text(); pathlib.Path('leaked').touch()\nexcept PermissionError: pass\nif os.fork()==0:\n os.setsid(); pathlib.Path('ready').touch(); time.sleep(2); pathlib.Path('escaped').touch()\nelse: time.sleep(30)",
-            format!("{data}/config.toml")]
-        }})).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !local.join("ready").exists() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(25));
-        }
-        assert!(local.join("ready").exists(), "sandboxed sidecar started");
-        second
-            .request(
-                "sidecar_stop",
-                json!({"request":{"sidecarId":started["sidecarId"]}}),
-            )
-            .unwrap();
-        thread::sleep(Duration::from_millis(2200));
-        assert!(!local.join("leaked").exists());
-        assert!(!local.join("escaped").exists());
-        drop(second);
-        let mut reopened = RuntimeClient::start().unwrap();
-        let descriptor = initialize(&mut reopened, "tui-smoke-reopened");
-        assert_eq!(first_descriptor["profileId"], descriptor["profileId"]);
-        assert!(reopened
-            .request("session/list", json!({"request":{}}))
-            .unwrap()
-            .to_string()
-            .contains(created["id"].as_str().unwrap()));
     }
 
     fn temp_test_dir(label: &str) -> PathBuf {

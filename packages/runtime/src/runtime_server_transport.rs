@@ -46,37 +46,6 @@ pub(crate) fn print_endpoint() -> Result<(), RuntimeHostError> {
     write_json_line(&serde_json::json!({ "endpoint": endpoint.endpoint }))
 }
 
-#[cfg(target_os = "linux")]
-pub(crate) async fn relay_stdio() -> Result<(), RuntimeHostError> {
-    let endpoint = current_endpoint()?;
-    let socket = tokio::net::UnixStream::connect(&endpoint.endpoint)
-        .await
-        .map_err(|e| RuntimeHostError::new("runtime_connect_failed", e.to_string()))?;
-    let (mut read, mut write) = socket.into_split();
-    let mut stdin = tokio::io::stdin();
-    let mut stdout = tokio::io::stdout();
-    stdout
-        .write_all(b"{\"connected\":true}\n")
-        .await
-        .map_err(|e| RuntimeHostError::new("runtime_relay_failed", e.to_string()))?;
-    stdout
-        .flush()
-        .await
-        .map_err(|e| RuntimeHostError::new("runtime_relay_failed", e.to_string()))?;
-    let result = tokio::select! {
-        result = tokio::io::copy(&mut stdin, &mut write) => result,
-        result = tokio::io::copy(&mut read, &mut stdout) => result,
-    };
-    let _ = write.shutdown().await;
-    stdout
-        .flush()
-        .await
-        .map_err(|e| RuntimeHostError::new("runtime_relay_failed", e.to_string()))?;
-    result
-        .map(|_| ())
-        .map_err(|e| RuntimeHostError::new("runtime_relay_failed", e.to_string()))
-}
-
 pub(crate) async fn run_server() -> Result<(), RuntimeHostError> {
     crate::user_data_layout::ensure_runtime_endpoint_layout()
         .map_err(|error| RuntimeHostError::new("runtime_endpoint_layout_init_failed", error))?;

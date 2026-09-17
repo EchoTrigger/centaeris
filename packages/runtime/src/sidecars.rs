@@ -1,12 +1,9 @@
 use centaeris_core::runtime::contracts::current_timestamp_ms;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 use centaeris_runtime::local_execution_host::LocalOwnedProcess as OsChild;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-use std::process::Child as OsChild;
 use std::process::ExitStatus;
 
 #[derive(Default)]
@@ -97,12 +94,6 @@ pub(crate) fn start(
     let workspace_root_text = workspace_root.to_string_lossy().to_string();
     let cwd_text = Some(cwd.to_string_lossy().to_string());
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let spawn_result: Result<OsChild, String> = {
-        let _ = (&args, &cwd, &request.env);
-        Err("Native Windows sidecars are unavailable; use WSL2.".into())
-    };
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let spawn_result = (|| {
         let runner = centaeris_runtime::local_execution_host::LocalExecutionHostRunner::new(None)
             .map_err(|e| e.internal_debug_message())?;
@@ -343,5 +334,36 @@ mod tests {
         let mut store = SidecarStoreState::default();
 
         assert!(list(&mut store).sidecars.is_empty());
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn windows_sidecar_starts_and_stops_under_job_ownership() {
+        let workspace = unique_temp_dir("sidecar-windows");
+        let mut store = SidecarStoreState::default();
+        let response = start(
+            &mut store,
+            SidecarStartRequest {
+                command: String::from("bash"),
+                args: Some(vec![String::from("-c"), String::from("sleep 30")]),
+                workspace_root: Some(workspace.to_string_lossy().to_string()),
+                cwd: None,
+                env: None,
+                name: None,
+            },
+        )
+        .expect("start Windows sidecar through Git Bash");
+        assert!(response.pid.is_some());
+
+        let stopped = stop(
+            &mut store,
+            SidecarStopRequest {
+                sidecar_id: response.sidecar_id,
+            },
+        )
+        .expect("stop Windows sidecar");
+
+        assert!(stopped.ok);
+        let _ = fs::remove_dir_all(workspace);
     }
 }

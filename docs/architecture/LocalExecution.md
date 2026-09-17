@@ -1,85 +1,55 @@
 # Local execution
 
-Windows Desktop and the native Windows TUI use WSL2. The local acceptance environment is Ubuntu 24.04,
-Landlock ABI 3 and cgroup v2 with `cgroup.kill`. The distribution must run systemd
-and provide a working `systemctl --user` session. Runtime startup creates a
-profile-specific transient user service with delegation; no model tool can
-change the service or grant policy.
+Windows Desktop and the native Windows TUI run the Runtime directly on Windows
+and execute host commands through verified Git for Windows Bash. Linux and macOS
+run the same Runtime natively with the system Bash. The local Host claims no OS
+sandbox: it launches the requested program with the current user's authority and
+reports `policyEnforced: false`.
 
-`CENTAERIS_WSL_DISTRIBUTION` selects the distribution (default `Ubuntu-24.04`).
-`CENTAERIS_WSL_DATA_DIR` optionally selects an absolute Linux data directory.
-The default data directory is the Linux user's `~/.centaeris`, outside the
-workspace. There is no reserved workspace `.centaeris` directory. Existing
-Windows profiles and arbitrary project files are not automatically moved.
+## Windows
 
-The Desktop default workspace is `~/.local/share/centaeris/workspaces/default` inside
-WSL. Windows folder dialogs can select Linux folders through
-`\\wsl.localhost\<distribution>\...`. Workspace and executable resource grants
-must be on the Linux filesystem: nono rejects Windows drive mounts. Windows
-image and plugin sources can be imported through `/mnt/<drive>/...`; these
-import paths do not become writable execution roots. Skill source directories
-must live on the Linux filesystem.
+Git for Windows is required. The Runtime discovers `bash.exe` under
+`%ProgramW6432%`, `%ProgramFiles%`, `%ProgramFiles(x86)%`, `%LOCALAPPDATA%`, or
+on `PATH`, and verifies the MSYS2 runtime beside it. An explicit path can be
+selected through `CENTAERIS_RUNTIME_EXE` for the Runtime binary and the host
+configuration for Bash. A missing or unverified Bash fails explicitly.
 
-The packaged Linux binary is installed under
-`~/.local/share/centaeris/bin/<sha256>/centaeris-runtime`. The relay is one
-persistent connection to the existing Runtime Unix socket. No Python bridge,
-nono CLI profile, permission broker or additional Core protocol is introduced.
-
-For development, install the repository's pinned Rust toolchain in the selected
-distribution, plus its native C build tools. On Windows:
+The default development Runtime is `target/debug/centaeris-runtime.exe`
+(Windows) or `target/debug/centaeris-runtime` (Linux/macOS). Set
+`CENTAERIS_RUNTIME_EXE` to select an explicit build.
 
 ```powershell
 node packages/desktop/scripts/ensure-runtime.mjs --profile debug
-$env:CENTAERIS_RUNTIME_EXE = "$PWD/target/wsl/debug/centaeris-runtime"
-node packages/desktop/scripts/smoke-wsl-runtime.mjs
+node packages/desktop/scripts/smoke-runtime.mjs
 ```
 
-The smoke test uses a fresh temporary Linux profile and workspace. It exercises
-connection/build identity, reconnect, sidecar isolation and stop, then kills
-only its own Runtime service to check descendant cleanup.
-
-`npm run smoke:runtime --workspace @centaeris/electron-host` builds and tests
-the default release WSL artifact. `npm run smoke:tui-wsl --workspace
-@centaeris/electron-host` verifies both clients against one Linux profile.
-
-`scripts/build-desktop.ps1` builds the release ELF and bundles it with the
-Windows Electron application and Linux dependency licenses. Packaged window
-acceptance also uses WSL2. The remote Release Candidate runner has not yet been
-provisioned or certified for these new prerequisites; local acceptance does
-not establish remote release readiness.
-
-The macOS Runtime regression workflow passed on Apple Silicon and Intel at
-`5be7d90` (run `34966224952`), including nono execution and public-network DNS.
-macOS detached-process lifetime containment remains separate follow-up work.
+`npm run smoke:runtime --workspace @centaeris/electron-host` builds and tests the
+default release Runtime. `scripts/build-desktop.ps1` bundles the native
+`centaeris-runtime.exe` with the Windows Electron application; packaged window
+acceptance runs the same native Runtime.
 
 ## Native Windows TUI
 
-The renderer, keyboard handling and Windows clipboard stay native. The Rust
-client invokes `wsl.exe` directly, with no Node or Python runtime dependency.
-Desktop and TUI consume `packages/runtime/host/wsl-bootstrap.sh` for installation,
-service startup and the existing Runtime stdio relay. They share request-path
-metadata and path fixtures; Core execution semantics remain unchanged.
+The renderer, keyboard handling, Windows clipboard, and Runtime client stay
+native. The Rust client spawns `centaeris-runtime.exe` and connects to the
+profile-scoped named-pipe Runtime Server; there is no Node, Python, or WSL
+dependency.
 
-Start the packaged TUI with a Linux workspace:
+Start the packaged TUI:
 
 ```powershell
-.\packages\tui\dist\centaeris\centa.exe --workspace /home/your-user/project
+.\packages\tui\dist\centaeris\centa.exe --workspace C:\path\to\project
 ```
 
-The selected distribution's `\\wsl.localhost\<distribution>\...` paths also
-work. Without `--workspace`, the current directory must resolve to that Linux
-filesystem. Windows drive workspaces fail explicitly. Client disconnection
-releases only that connection; a Runtime used by Desktop keeps running.
+Without `--workspace`, the current directory is used. Client disconnection
+releases only that connection; a Runtime used by Desktop keeps running. The TUI
+package contains native `centa.exe`, native `centaeris-runtime.exe`, and combined
+third-party licenses.
 
-The package contains native `centa.exe`, Linux `centaeris-runtime`, the shared
-bootstrap embedded in the TUI, and combined Windows-TUI/Linux-Runtime licenses.
-The old Windows Git Bash launcher, Job Object backend and unsandboxed sidecar
-fallback have been removed. Direct native Windows Runtime startup fails with a
-WSL2-required error. An inert Windows execution facade keeps host-independent
-Rust tests buildable; every execution and filesystem operation returns unavailable.
+## Linux and macOS
 
-Local acceptance covered both clients sharing one profile, TUI disconnect and
-session persistence, Unicode/space paths, sidecar private-file denial and detached
-child cleanup, packaged TUI startup/exit, and packaged Desktop window/idle shutdown.
-The retained protocol and mapping tests cover build identity, relay framing and
-invalid paths. This is not a claim that the remote Windows release runner has WSL2.
+The local Host runs the requested program directly and uses the system Bash. On
+Unix, commands run in their own process group so timeout, cancellation, and
+owned-process teardown can signal the group; a descendant that creates a new
+session is outside that group. `macOS Runtime` CI exercises this path on Apple
+Silicon and Intel, including public-network DNS.

@@ -2,19 +2,14 @@ use std::fs;
 #[cfg(not(target_os = "windows"))]
 use std::path::PathBuf;
 #[cfg(not(target_os = "windows"))]
-use std::thread::sleep;
-#[cfg(not(target_os = "windows"))]
 use std::time::Duration;
-#[cfg(not(target_os = "windows"))]
-use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use centaeris_core::execution::ExecutionHostRunner;
 use centaeris_core::execution::{ExecutionCommandRequest, ExecutionPolicy};
 #[cfg(not(target_os = "windows"))]
 use centaeris_core::execution::{
-    ExecutionFileSystemErrorKind, ExecutionFileSystemOperation, ExecutionFileSystemOutput,
-    ExecutionFileSystemRequest,
+    ExecutionFileSystemOperation, ExecutionFileSystemOutput, ExecutionFileSystemRequest,
 };
 use centaeris_runtime::local_execution_host::LocalExecutionHostRunner;
 
@@ -78,51 +73,6 @@ fn macos_public_network_resolves_dns() {
 
 #[test]
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn local_commands_cannot_connect_to_a_private_host_socket() {
-    use std::os::unix::net::{UnixListener, UnixStream};
-    let root = PathBuf::from("/tmp").join(format!(
-        "cn-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let workspace = root.join("work");
-    fs::create_dir_all(&workspace).unwrap();
-    let socket = root.join("private.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let runner = LocalExecutionHostRunner::new_with_runtime_executable(
-        None,
-        PathBuf::from(env!("CARGO_BIN_EXE_centaeris-runtime")),
-    )
-    .unwrap();
-    let output = runner.run_host_command(None, ExecutionCommandRequest {
-        program: "python3".into(), args: vec!["-c".into(),
-            "import socket,sys\ntry:\n s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])\nexcept PermissionError: sys.exit(0)\nsys.exit(77)".into(), socket.to_string_lossy().into_owned()],
-        cwd: workspace.clone(), env: Default::default(), timeout_ms: 5000,
-        policy: ExecutionPolicy::workspace_write_public_internet(&workspace),
-    }, None).unwrap();
-    assert_eq!(
-        output.process.exit_code,
-        Some(0),
-        "{}",
-        output.process.stderr
-    );
-    assert!(listener.accept().is_err());
-    let parent_connection = UnixStream::connect(&socket).unwrap();
-    assert!(
-        listener.accept().is_ok(),
-        "the Runtime parent retains its own access"
-    );
-    drop(parent_connection);
-    drop(listener);
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn stdin_hooks_can_write_output_before_reading_a_large_event() {
     let workspace =
         std::env::temp_dir().join(format!("centaeris-hook-duplex-{}", std::process::id()));
@@ -136,7 +86,7 @@ fn stdin_hooks_can_write_output_before_reading_a_large_event() {
         program: "python3".into(), args: vec!["-c".into(),
             "import sys; sys.stdout.write('x'*200000); sys.stdout.flush(); data=sys.stdin.read(); sys.stderr.write(str(len(data)))".into()],
         cwd: workspace.clone(), env: Default::default(), timeout_ms: 3000,
-        policy: ExecutionPolicy::workspace_write_no_network(&workspace),
+        policy: ExecutionPolicy::workspace_write_public_internet(&workspace),
     }, &vec![b'a'; 200000]).unwrap();
     fs::remove_dir_all(workspace).unwrap();
     assert_eq!(output.process.exit_code, Some(0));
@@ -158,7 +108,7 @@ fn stdin_hook_capture_is_bounded_while_preserving_total_byte_counts() {
         program: "python3".into(), args: vec!["-c".into(),
             "import sys; sys.stdin.read(); sys.stdout.write('x'*200000); sys.stderr.write('y'*200000)".into()],
         cwd: workspace.clone(), env: Default::default(), timeout_ms: 5000,
-        policy: ExecutionPolicy::workspace_write_no_network(&workspace),
+        policy: ExecutionPolicy::workspace_write_public_internet(&workspace),
     }, b"input").unwrap();
     fs::remove_dir_all(workspace).unwrap();
     assert_eq!(output.process.exit_code, Some(0));
@@ -169,55 +119,11 @@ fn stdin_hook_capture_is_bounded_while_preserving_total_byte_counts() {
 }
 
 #[test]
-#[cfg(target_os = "linux")]
-fn owned_process_drop_stops_detached_descendants_and_denies_private_files() {
-    let root = std::env::temp_dir().join(format!(
-        "centaeris-owned-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let workspace = root.join("workspace");
-    fs::create_dir_all(&workspace).unwrap();
-    fs::write(root.join("private"), "SECRET").unwrap();
-    let runner = LocalExecutionHostRunner::new_with_runtime_executable(
-        None,
-        PathBuf::from(env!("CARGO_BIN_EXE_centaeris-runtime")),
-    )
-    .unwrap();
-    let child = runner.spawn_owned_process(
-        "python3".into(), vec!["-c".into(),
-        "import os,time,pathlib\ntry:\n pathlib.Path('../private').read_text(); pathlib.Path('leaked').touch()\nexcept PermissionError: pass\nif os.fork()==0:\n os.setsid(); pathlib.Path('ready').touch(); time.sleep(1); pathlib.Path('escaped').touch()\nelse: time.sleep(20)".into()],
-        workspace.clone(), Default::default(), ExecutionPolicy::workspace_write_public_internet(&workspace)).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !workspace.join("ready").exists() && Instant::now() < deadline {
-        sleep(Duration::from_millis(10));
-    }
-    let ready = workspace.join("ready").exists();
-    drop(child);
-    assert!(ready, "owned process must run before testing cleanup");
-    sleep(Duration::from_millis(1100));
-    assert!(!workspace.join("leaked").exists());
-    assert!(!workspace.join("escaped").exists());
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn stdin_commands_share_the_filesystem_boundary_and_preserve_process_facts() {
-    let root = std::env::temp_dir().join(format!(
-        "centaeris-hook-input-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let workspace = root.join("workspace");
+fn stdin_commands_preserve_process_facts() {
+    let workspace =
+        std::env::temp_dir().join(format!("centaeris-hook-input-{}", std::process::id()));
     fs::create_dir_all(&workspace).unwrap();
-    fs::write(root.join("private"), "SECRET").unwrap();
     let runner = LocalExecutionHostRunner::new_with_runtime_executable(
         None,
         PathBuf::from(env!("CARGO_BIN_EXE_centaeris-runtime")),
@@ -225,56 +131,51 @@ fn stdin_commands_share_the_filesystem_boundary_and_preserve_process_facts() {
     .unwrap();
     let output = runner.run_command_with_stdin(ExecutionCommandRequest {
         program: "python3".to_string(),
-        args: vec!["-c".to_string(), "import json,sys,pathlib\nevent=json.load(sys.stdin)\nprint(event['message'])\ntry: pathlib.Path('../private').read_text()\nexcept PermissionError: print('DENIED',file=sys.stderr); sys.exit(7)\nsys.exit(77)".to_string()],
+        args: vec!["-c".to_string(), "import json,sys\nevent=json.load(sys.stdin)\nprint(event['message'])\nsys.stderr.write('stderr-line')".to_string()],
         cwd: workspace.clone(), env: std::collections::HashMap::new(), timeout_ms: 5000,
-        policy: ExecutionPolicy::workspace_write_no_network(&workspace),
+        policy: ExecutionPolicy::workspace_write_public_internet(&workspace),
     }, br#"{"message":"hook input"}"#).unwrap();
-    assert_eq!(output.process.exit_code, Some(7));
+    assert_eq!(output.process.exit_code, Some(0));
     assert_eq!(output.process.stdout, "hook input\n");
-    assert_eq!(output.process.stderr, "DENIED\n");
-    assert_eq!(fs::read_to_string(root.join("private")).unwrap(), "SECRET");
-    fs::remove_dir_all(root).unwrap();
+    assert_eq!(output.process.stderr, "stderr-line");
+    fs::remove_dir_all(workspace).unwrap();
 }
 
 #[test]
-#[cfg(not(target_os = "windows"))]
-fn production_runtime_helper_enforces_platform_sandbox_and_lifecycle() {
-    let root = std::env::temp_dir().join(format!(
-        "centaeris-runtime-platform-sandbox-{}-{}",
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn unix_local_host_executes_commands_and_filesystem_operations() {
+    let workspace = std::env::temp_dir().join(format!(
+        "centaeris-native-unix-{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
             .as_nanos()
     ));
-    let workspace = root.join("workspace");
-    let protected = root.join("protected-inputs");
     fs::create_dir_all(&workspace).expect("create workspace directory");
-    fs::create_dir_all(&protected).expect("create protected directory");
-    fs::write(protected.join("secret.txt"), "SECRET").expect("write protected fixture");
-    let outside = root.join("outside.txt");
-    let allowed = workspace.join("allowed.txt");
-    let background = workspace.join("background.txt");
-    let background_escape = root.join("background-escape.txt");
-    let mut command = "(sleep 0.25; printf ESCAPED > ../background-escape.txt 2>/dev/null || true) & (sleep 0.5; printf BACKGROUND > background.txt) & printf ALLOWED > allowed.txt; printf OUTSIDE > ../outside.txt 2>/dev/null || true; whoami; cat ../protected-inputs/secret.txt; if printf TAMPERED > ../protected-inputs/secret.txt 2>/dev/null; then exit 76; fi; if printf TAMPERED > ../protected-inputs/blocked.txt 2>/dev/null; then exit 71; fi".to_string();
-    command.push_str("; if exec 3<>/dev/tcp/1.1.1.1/53; then exit 72; fi");
-    let capture_root = root.join("agent-tool-results").join("banana");
-    let spill_path = capture_root.join("tool-result.log");
-    let mut policy = ExecutionPolicy::workspace_write_no_network(workspace.clone());
-    policy.filesystem.read_only_roots.push(protected.clone());
-    policy.filesystem.tmp_root = Some(capture_root.clone());
-    policy.filesystem.read_only_roots.push(capture_root.clone());
+    let policy = ExecutionPolicy::workspace_write_public_internet(workspace.clone());
     let runner = LocalExecutionHostRunner::new_with_runtime_executable(
         None,
         PathBuf::from(env!("CARGO_BIN_EXE_centaeris-runtime")),
     )
-    .expect("create local runner with production Runtime helper");
+    .expect("create local runner");
+
+    let status = runner.status(&policy).expect("native unix status is ready");
+    assert_eq!(
+        status.kind,
+        centaeris_core::execution::ExecutionHostKind::LocalProcess
+    );
+    assert!(
+        !status.policy_enforced,
+        "a native host process is not an OS sandbox"
+    );
+
     let output = runner
         .run_host_command(
             None,
             ExecutionCommandRequest {
                 program: "bash".to_string(),
-                args: vec!["-c".to_string(), command],
+                args: vec!["-c".to_string(), "printf ALLOWED > allowed.txt".to_string()],
                 cwd: workspace.clone(),
                 env: std::collections::HashMap::new(),
                 timeout_ms: 10_000,
@@ -282,165 +183,33 @@ fn production_runtime_helper_enforces_platform_sandbox_and_lifecycle() {
             },
             None,
         )
-        .expect("run platform sandbox");
-
+        .expect("run native command");
     assert_eq!(output.process.exit_code, Some(0), "{:#?}", output.process);
-    assert!(output.process.attempt.policy.enforced);
-    assert_eq!(fs::read_to_string(&allowed).unwrap(), "ALLOWED");
-    assert!(output.process.stdout.contains("SECRET"));
     assert_eq!(
-        fs::read_to_string(protected.join("secret.txt")).unwrap(),
-        "SECRET"
+        fs::read_to_string(workspace.join("allowed.txt")).unwrap(),
+        "ALLOWED"
     );
-    assert!(!protected.join("blocked.txt").exists());
-    assert!(!outside.exists());
-    runner
+
+    let read = runner
         .run_file_system_operation(ExecutionFileSystemRequest {
             operation_id: None,
             cwd: workspace.clone(),
-            policy: policy.clone(),
+            policy,
             model_path: "allowed.txt".to_string(),
             operation: ExecutionFileSystemOperation::ReadFile { max_bytes: 1024 },
         })
-        .expect("production filesystem helper reads an allowed file");
-    let mut spill_write_policy = policy.clone();
-    spill_write_policy
-        .filesystem
-        .writable_roots
-        .push(capture_root.clone());
-    runner
-        .run_file_system_operation(ExecutionFileSystemRequest {
-            operation_id: None,
-            cwd: workspace.clone(),
-            policy: spill_write_policy,
-            model_path: spill_path.to_string_lossy().to_string(),
-            operation: ExecutionFileSystemOperation::WriteFile {
-                content: b"IMMUTABLE".to_vec(),
-                expected_file_hash: None,
-                create_only: true,
-            },
-        })
-        .expect("spill writer receives a temporary exact write grant");
-    let published_spill = runner
-        .run_file_system_operation(ExecutionFileSystemRequest {
-            operation_id: None,
-            cwd: workspace.clone(),
-            policy: policy.clone(),
-            model_path: spill_path.to_string_lossy().to_string(),
-            operation: ExecutionFileSystemOperation::ReadFile { max_bytes: 1024 },
-        })
-        .expect("published spill remains readable");
-    let ExecutionFileSystemOutput::ReadFile(published_spill) = published_spill else {
-        panic!("published spill read returned the wrong filesystem output")
+        .expect("read allowed file");
+    let ExecutionFileSystemOutput::ReadFile(read) = read else {
+        panic!("read returned the wrong filesystem output")
     };
-    let immutable_error = runner
-        .run_file_system_operation(ExecutionFileSystemRequest {
-            operation_id: None,
-            cwd: workspace.clone(),
-            policy: policy.clone(),
-            model_path: spill_path.to_string_lossy().to_string(),
-            operation: ExecutionFileSystemOperation::WriteFile {
-                content: b"TAMPERED".to_vec(),
-                expected_file_hash: Some(published_spill.file_hash),
-                create_only: false,
-            },
-        })
-        .expect_err("published spill must reject filesystem mutation");
-    assert_eq!(
-        immutable_error.kind,
-        ExecutionFileSystemErrorKind::PermissionDenied
-    );
-    let spill_bash = runner
-        .run_host_command(
-            None,
-            ExecutionCommandRequest {
-                program: "bash".to_string(),
-                args: vec![
-                    "-c".to_string(),
-                    "spill_root=\"$1\"; cat \"$spill_root/tool-result.log\"; if printf TAMPERED >> \"$spill_root/tool-result.log\" 2>/dev/null; then exit 75; fi".to_string(),
-                    "centaeris-spill-check".to_string(),
-                    capture_root.to_string_lossy().to_string(),
-                ],
-                cwd: workspace.clone(),
-                env: std::collections::HashMap::new(),
-                timeout_ms: 10_000,
-                policy: policy.clone(),
-            },
-            None,
-        )
-        .expect("read published spill from sandboxed Bash");
-    assert_eq!(spill_bash.process.exit_code, Some(0));
-    assert_eq!(spill_bash.process.stdout, "IMMUTABLE");
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while fs::read_to_string(&background).ok().as_deref() != Some("BACKGROUND")
-        && Instant::now() < deadline
-    {
-        sleep(Duration::from_millis(25));
-    }
-    assert_eq!(
-        fs::read_to_string(&background).expect("background sandbox output"),
-        "BACKGROUND"
-    );
-    assert!(!background_escape.exists());
+    assert_eq!(read.bytes, b"ALLOWED");
 
-    let timed_marker = workspace.join("timed-marker.txt");
-    let timed_output = runner
-        .run_host_command(
-            None,
-            ExecutionCommandRequest {
-                program: "bash".to_string(),
-                args: vec![
-                    "-c".to_string(),
-                    "(sleep 1; printf ESCAPED > timed-marker.txt) & wait".to_string(),
-                ],
-                cwd: workspace.clone(),
-                env: std::collections::HashMap::new(),
-                timeout_ms: 250,
-                policy: policy.clone(),
-            },
-            None,
-        )
-        .expect("time out platform sandbox");
-    assert!(timed_output.process.timed_out);
-    sleep(Duration::from_millis(1_100));
-    assert!(!timed_marker.exists());
-
-    let cancelled_marker = workspace.join("cancelled-marker.txt");
-    let cancellation_probe = || Ok(Some("user_interrupt".to_string()));
-    let cancellation = runner
-        .run_host_command(
-            None,
-            ExecutionCommandRequest {
-                program: "bash".to_string(),
-                args: vec![
-                    "-c".to_string(),
-                    "(sleep 1; printf ESCAPED > cancelled-marker.txt) & wait".to_string(),
-                ],
-                cwd: workspace.clone(),
-                env: std::collections::HashMap::new(),
-                timeout_ms: 10_000,
-                policy,
-            },
-            Some(&cancellation_probe),
-        )
-        .expect_err("cancel platform sandbox");
-    assert!(cancellation.is_cancellation_indeterminate());
-    sleep(Duration::from_millis(1_100));
-    assert!(!cancelled_marker.exists());
-
-    let cleanup_deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        match fs::remove_dir_all(&root) {
-            Ok(()) => break,
-            Err(_) if Instant::now() < cleanup_deadline => sleep(Duration::from_millis(25)),
-            Err(error) => panic!("remove platform sandbox fixture: {error}"),
-        }
-    }
+    fs::remove_dir_all(workspace).expect("remove workspace directory");
 }
 
 #[test]
 #[cfg(target_os = "windows")]
-fn native_windows_execution_fails_without_running_bash() {
+fn native_windows_executes_commands_through_git_bash() {
     let workspace = std::env::temp_dir().join(format!(
         "centaeris-runtime-windows-host-{}-{}",
         std::process::id(),
@@ -455,12 +224,18 @@ fn native_windows_execution_fails_without_running_bash() {
         std::path::PathBuf::from(env!("CARGO_BIN_EXE_centaeris-runtime")),
     )
     .expect("create Windows host runner");
+    let policy = ExecutionPolicy::workspace_write_public_internet(workspace.clone());
     let status = runner
-        .status(&ExecutionPolicy::workspace_write_public_internet(
-            workspace.clone(),
-        ))
-        .expect_err("native Windows execution is unavailable");
-    assert!(status.internal_debug_message().contains("WSL2"));
+        .status(&policy)
+        .expect("native Windows status is ready");
+    assert_eq!(
+        status.kind,
+        centaeris_core::execution::ExecutionHostKind::LocalProcess
+    );
+    assert!(
+        !status.policy_enforced,
+        "a Git Bash host process is not an OS sandbox"
+    );
 
     let marker = workspace.join("host-process-ran.txt");
     let output = runner
@@ -475,47 +250,50 @@ fn native_windows_execution_fails_without_running_bash() {
                 cwd: workspace.clone(),
                 env: std::collections::HashMap::new(),
                 timeout_ms: 10_000,
-                policy: ExecutionPolicy::workspace_write_public_internet(workspace.clone()),
+                policy: policy.clone(),
             },
             None,
         )
-        .expect_err("must not execute Git Bash");
-    assert!(output.internal_debug_message().contains("WSL2"));
-    assert!(!marker.exists());
-    let error = runner
+        .expect("execute through Git Bash");
+    assert_eq!(output.process.exit_code, Some(0));
+    assert_eq!(output.process.stdout, "");
+    assert!(marker.exists(), "Git Bash must create the workspace file");
+
+    let _written = runner
         .run_file_system_operation(centaeris_core::execution::ExecutionFileSystemRequest {
             operation_id: None,
             cwd: workspace.clone(),
-            policy: ExecutionPolicy::workspace_write_public_internet(workspace.clone()),
-            model_path: "host-process-ran.txt".into(),
+            policy: policy.clone(),
+            model_path: "native-write.txt".into(),
             operation: centaeris_core::execution::ExecutionFileSystemOperation::WriteFile {
                 content: b"RAN".to_vec(),
                 expected_file_hash: None,
                 create_only: true,
             },
         })
-        .expect_err("native Windows filesystem fallback must be unavailable");
-    assert_eq!(
-        error.kind,
-        centaeris_core::execution::ExecutionFileSystemErrorKind::HostUnavailable
-    );
-    assert!(!marker.exists());
+        .expect("native Windows filesystem write");
+    assert!(workspace.join("native-write.txt").exists());
 
     fs::remove_dir_all(workspace).expect("remove Windows host workspace");
 }
 
 #[test]
 #[cfg(windows)]
-fn native_windows_runtime_requires_wsl() {
+fn native_windows_runtime_no_longer_requires_wsl() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_centaeris-runtime"))
-        .arg("--runtime-server-endpoint")
+        .arg("--centaeris-unknown-startup-option")
         .output()
         .expect("start native Runtime");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !output.status.success(),
-        "native Windows execution must be unavailable"
+        !stderr.contains("WSL2"),
+        "native Windows Runtime must not require WSL2: {stderr}"
     );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("WSL2"));
+    assert!(
+        stderr.contains("unknown Runtime Host startup option"),
+        "expected unknown-option startup diagnostics, got: {stderr}"
+    );
 }
 
 // Capability probing launches the production binary, not the Rust test harness.
@@ -533,13 +311,12 @@ fn desktop_execution_host_reports_its_platform_capability() {
             ),
         )
         .expect("local status");
-    #[cfg(not(target_os = "windows"))]
     assert_eq!(
         status.kind,
-        centaeris_core::execution::ExecutionHostKind::SandboxedProcess
+        centaeris_core::execution::ExecutionHostKind::LocalProcess
     );
-    #[cfg(target_os = "linux")]
-    assert!(status.policy_enforced);
-    #[cfg(target_os = "macos")]
-    assert!(status.policy_enforced);
+    assert!(
+        !status.policy_enforced,
+        "a native host process is not an OS sandbox"
+    );
 }
