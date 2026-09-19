@@ -308,8 +308,6 @@ pub struct ExecutionDirectoryListOutput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExecutionFileWriteOutput {
     pub identity: ExecutionFileIdentity,
-    pub previous_file_hash: Option<String>,
-    pub file_hash: String,
     pub created: bool,
 }
 
@@ -773,8 +771,6 @@ fn write_file(
         .map_err(|error| io_error("write file", model_path, error))?;
     Ok(ExecutionFileWriteOutput {
         identity: resolved.identity(),
-        previous_file_hash: None,
-        file_hash: sha256_bytes(content),
         created: !existed,
     })
 }
@@ -1314,7 +1310,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_file_system_reports_content_hashes() {
+    fn direct_file_system_reads_hashes_and_writes_a_receipt() {
         let cwd = temp_directory("hash");
         let path = cwd.join("state.txt");
         fs::write(path.as_path(), b"before").expect("write fixture");
@@ -1329,6 +1325,7 @@ mod tests {
             panic!("expected read output");
         };
 
+        assert_eq!(read.file_hash, sha256_bytes(b"before"));
         let write = run_direct_execution_file_system_operation(request(
             cwd.as_path(),
             "state.txt",
@@ -1342,7 +1339,10 @@ mod tests {
         let ExecutionFileSystemOutput::WriteFile(write) = write else {
             panic!("expected write output");
         };
-        assert_eq!(write.previous_file_hash, None);
+        let receipt = serde_json::to_value(&write).expect("serialize write receipt");
+        assert_eq!(receipt.as_object().unwrap().len(), 2);
+        assert!(receipt.get("identity").is_some());
+        assert_eq!(receipt["created"], false);
         assert_eq!(fs::read(path).expect("read result"), b"after");
         fs::remove_dir_all(cwd).expect("remove fixture");
     }
