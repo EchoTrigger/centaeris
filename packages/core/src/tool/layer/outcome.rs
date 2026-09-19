@@ -12,8 +12,7 @@ pub(super) const FILE_TOOL_REJECTED_SCHEMA: &str = "file_tool_rejected_v1";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FileToolErrorKind {
     InvalidInput,
-    ReadSnapshotMissing,
-    ReadSnapshotMismatch,
+    VersionConflict,
     WriteConflict,
     EditTextMismatch,
     DurableCommitMissing,
@@ -34,8 +33,7 @@ impl FileToolErrorKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::InvalidInput => "invalid_input",
-            Self::ReadSnapshotMissing => "read_snapshot_missing",
-            Self::ReadSnapshotMismatch => "read_snapshot_mismatch",
+            Self::VersionConflict => "version_conflict",
             Self::WriteConflict => "write_conflict",
             Self::EditTextMismatch => "edit_text_mismatch",
             Self::DurableCommitMissing => "durable_commit_missing",
@@ -69,8 +67,7 @@ impl FileToolErrorKind {
             | Self::AssetUnavailable
             | Self::ResolvedInputRequired
             | Self::StaleInput
-            | Self::ReadSnapshotMissing
-            | Self::ReadSnapshotMismatch
+            | Self::VersionConflict
             | Self::EditTextMismatch => ToolFailureKind::InvalidInput,
         }
     }
@@ -107,7 +104,7 @@ impl FileToolError {
             ExecutionFileSystemErrorKind::AccessRevoked => FileToolErrorKind::AccessRevoked,
             ExecutionFileSystemErrorKind::SourceDeleted => FileToolErrorKind::SourceDeleted,
             ExecutionFileSystemErrorKind::StaleGeneration => FileToolErrorKind::StaleGeneration,
-            ExecutionFileSystemErrorKind::Conflict => FileToolErrorKind::ReadSnapshotMismatch,
+            ExecutionFileSystemErrorKind::Conflict => FileToolErrorKind::VersionConflict,
             ExecutionFileSystemErrorKind::HostUnavailable | ExecutionFileSystemErrorKind::Io => {
                 FileToolErrorKind::Io
             }
@@ -163,15 +160,10 @@ impl FileToolError {
 
     fn safe_messages(&self) -> (String, String) {
         match self.kind {
-            FileToolErrorKind::ReadSnapshotMissing => (
-                "file mutation rejected; read the existing file before editing or overwriting it"
+            FileToolErrorKind::VersionConflict => (
+                "file version conflict; re-read the resource and retry"
                     .to_string(),
-                "File must be read before mutation".to_string(),
-            ),
-            FileToolErrorKind::ReadSnapshotMismatch => (
-                "file mutation rejected; file changed since the last read, so re-read it and retry"
-                    .to_string(),
-                "File changed since last read".to_string(),
+                "File version conflict".to_string(),
             ),
             FileToolErrorKind::WriteConflict => (
                 "file write conflict; another runtime owner currently holds the file claim"
@@ -471,34 +463,7 @@ impl FileToolOutcome {
 
     fn file_fact(&self) -> Value {
         match self {
-            Self::Read(outcome) => json!({
-                "schema": "file_read_fact_v1",
-                "toolName": "read",
-                "path": outcome.path,
-                "fileHash": outcome.file_hash,
-                "startLine": outcome.start_line,
-                "endLine": outcome.end_line,
-                "totalLines": outcome.total_lines,
-                "totalBytes": outcome.total_bytes,
-                "outputBytes": outcome.output_bytes,
-                "maxLines": outcome.max_lines,
-                "maxBytes": outcome.max_bytes,
-                "truncated": outcome.truncated,
-                "truncatedBy": outcome.truncated_by,
-                "firstLineExceedsLimit": outcome.first_line_exceeds_limit,
-                "nextOffset": outcome.next_offset,
-                "inputRef": outcome.input_ref,
-                "displayName": outcome.display_name,
-                "ownerRef": outcome.owner_ref,
-                "ownerKind": outcome.owner_kind,
-                "evidenceKind": outcome.evidence_kind,
-                "ownerSha256": outcome.owner_sha256,
-                "citationRef": outcome.citation_ref,
-                "pageStart": outcome.page_start,
-                "pageEnd": outcome.page_end,
-                "documentRoute": outcome.document_route,
-                "documentUsedOcr": outcome.document_used_ocr,
-            }),
+            Self::Read(outcome) => read_file_fact(outcome),
             Self::ReadBatch(outcome) => json!({
                 "schema": "file_read_batch_fact_v1",
                 "toolName": "read",

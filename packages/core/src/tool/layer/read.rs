@@ -380,16 +380,9 @@ fn execute_read(
         .map_err(|message| {
             FileToolError::new(FileToolErrorKind::Io, message).with_model_path(lookup_path)
         })?;
-    let (
-        display_path,
-        snapshot_identity,
-        file_hash,
-        content,
-        document_route,
-        document_used_ocr,
-        page_start,
-        page_end,
-    ) = if binding.mode() == crate::execution::ExecutionHostMode::Remote {
+    let (display_path, file_hash, content) = if binding.mode()
+        == crate::execution::ExecutionHostMode::Remote
+    {
         let output = binding
             .run_file_system_operation(
                 lookup_path,
@@ -423,7 +416,6 @@ fn execute_read(
             offset,
             limit,
             runtime_context,
-            output.identity.key.as_str(),
         )? {
             return Ok(outcome);
         }
@@ -443,13 +435,8 @@ fn execute_read(
         }
         (
             output.identity.display_path,
-            output.identity.key,
             output.file_hash,
             String::from_utf8_lossy(output.bytes.as_slice()).into_owned(),
-            None,
-            None,
-            None,
-            None,
         )
     } else {
         let resolved = resolve_manifest_physical_path(runtime_context, lookup_path)?;
@@ -491,7 +478,6 @@ fn execute_read(
             offset,
             limit,
             runtime_context,
-            resolved.path.to_string_lossy().as_ref(),
         )? {
             return Ok(outcome);
         }
@@ -504,42 +490,13 @@ fn execute_read(
             .with_model_path(display_path.as_str()));
         }
         let content = read_bounded_text(resolved.path.as_path(), display_path.as_str())?;
-        let (document_route, document_used_ocr, page_start, page_end) = (None, None, None, None);
-        (
-            display_path,
-            resolved.path.to_string_lossy().into_owned(),
-            file_hash,
-            content,
-            document_route,
-            document_used_ocr,
-            page_start,
-            page_end,
-        )
+        (display_path, file_hash, content)
     };
-    let total_bytes = content.len();
-    let all_lines: Vec<&str> = content.lines().collect();
-    let offset = offset.unwrap_or(0);
-    if offset > all_lines.len() {
-        return Err(FileToolError::new(
-            FileToolErrorKind::InvalidInput,
-            "Read start line exceeds available content",
-        ));
-    }
-    let limit = limit.unwrap_or(READ_MAX_LINES);
-    if limit == 0 || limit > READ_MAX_LINES {
-        return Err(FileToolError::new(
-            FileToolErrorKind::InvalidInput,
-            format!("read file limit must be between 1 and {READ_MAX_LINES}"),
-        ));
-    }
-    let selection = select_bounded_read_lines(all_lines.as_slice(), offset, limit);
-    let selected = selection.lines;
-    let start_line = offset.saturating_add(1);
-    let end_line = offset.saturating_add(selected.len());
-    let citation_ref = resolved_input
+    let mut outcome = text_read_outcome(display_path, file_hash.clone(), &content, offset, limit)?;
+    outcome.citation_ref = resolved_input
         .as_ref()
         .filter(|input| input.citation_allowed)
-        .filter(|_| !selected.is_empty())
+        .filter(|_| outcome.start_line <= outcome.end_line)
         .map(|input| {
             build_citation_ref(
                 runtime_context
@@ -548,49 +505,26 @@ fn execute_read(
                     .expect("resolved input requires manifest")
                     .agent_run_id(),
                 input,
-                start_line,
-                end_line,
+                outcome.start_line,
+                outcome.end_line,
                 None,
             )
         });
-    runtime_context
-        .record_file_read_snapshot(snapshot_identity.as_str(), file_hash.clone())
-        .map_err(|message| FileToolError::new(FileToolErrorKind::Io, message))?;
-    Ok(FileToolOutcome::Read(Box::new(FileReadOutcome {
-        path: display_path,
-        start_line,
-        end_line,
-        total_lines: all_lines.len(),
-        total_bytes,
-        output_bytes: selection.output_bytes,
-        max_lines: limit,
-        max_bytes: READ_MAX_BYTES,
-        truncated: selection.truncated,
-        truncated_by: selection.truncated_by,
-        first_line_exceeds_limit: selection.first_line_exceeds_limit,
-        next_offset: selection.next_offset,
-        file_hash,
-        content: selected.join("\n"),
-        input_ref: resolved_input.as_ref().map(|input| input.input_ref.clone()),
-        display_name: resolved_input
-            .as_ref()
-            .map(|input| input.display_name.clone()),
-        owner_ref: resolved_input
-            .as_ref()
-            .map(|input| input.object_ref.clone()),
-        owner_kind: resolved_input
-            .as_ref()
-            .map(|input| input.owner_kind.clone()),
-        evidence_kind: resolved_input
-            .as_ref()
-            .map(|input| input.evidence_kind.clone()),
-        owner_sha256: resolved_input.as_ref().map(|input| input.sha256.clone()),
-        citation_ref,
-        page_start,
-        page_end,
-        document_route,
-        document_used_ocr,
-    })))
+    outcome.input_ref = resolved_input.as_ref().map(|input| input.input_ref.clone());
+    outcome.display_name = resolved_input
+        .as_ref()
+        .map(|input| input.display_name.clone());
+    outcome.owner_ref = resolved_input
+        .as_ref()
+        .map(|input| input.object_ref.clone());
+    outcome.owner_kind = resolved_input
+        .as_ref()
+        .map(|input| input.owner_kind.clone());
+    outcome.evidence_kind = resolved_input
+        .as_ref()
+        .map(|input| input.evidence_kind.clone());
+    outcome.owner_sha256 = resolved_input.as_ref().map(|input| input.sha256.clone());
+    Ok(FileToolOutcome::Read(Box::new(outcome)))
 }
 
 fn execute_workspace_read(
@@ -638,12 +572,22 @@ fn execute_workspace_read(
         offset,
         limit,
         runtime_context,
-        output.identity.key.as_str(),
     )? {
         return Ok(outcome);
     }
     let content = String::from_utf8_lossy(output.bytes.as_slice()).into_owned();
-    let (document_route, document_used_ocr, page_start, page_end) = (None, None, None, None);
+    let outcome = text_read_outcome(display_path, file_hash.clone(), &content, offset, limit)?;
+    Ok(FileToolOutcome::Read(Box::new(outcome)))
+}
+
+// Source validation and citations stay with the read entry points.
+fn text_read_outcome(
+    display_path: String,
+    file_hash: String,
+    content: &str,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<FileReadOutcome, FileToolError> {
     let total_bytes = content.len();
     let all_lines = content.lines().collect::<Vec<_>>();
     let offset = offset.unwrap_or(0);
@@ -664,10 +608,7 @@ fn execute_workspace_read(
     let selected = selection.lines;
     let start_line = offset.saturating_add(1);
     let end_line = offset.saturating_add(selected.len());
-    runtime_context
-        .record_file_read_snapshot(output.identity.key.as_str(), file_hash.clone())
-        .map_err(|message| FileToolError::new(FileToolErrorKind::Io, message))?;
-    Ok(FileToolOutcome::Read(Box::new(FileReadOutcome {
+    Ok(FileReadOutcome {
         path: display_path,
         start_line,
         end_line,
@@ -689,17 +630,13 @@ fn execute_workspace_read(
         evidence_kind: None,
         owner_sha256: None,
         citation_ref: None,
-        page_start,
-        page_end,
-        document_route,
-        document_used_ocr,
-    })))
+        page_start: None,
+        page_end: None,
+        document_route: None,
+        document_used_ocr: None,
+    })
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "image read projection keeps source and snapshot fields explicit"
-)]
 fn try_image_read_outcome(
     bytes: &[u8],
     display_path: &str,
@@ -708,7 +645,6 @@ fn try_image_read_outcome(
     offset: Option<usize>,
     limit: Option<usize>,
     runtime_context: &ToolRuntimeContext,
-    snapshot_identity: &str,
 ) -> Result<Option<FileToolOutcome>, FileToolError> {
     if !looks_like_supported_image(bytes) && !is_supported_model_image_path(Path::new(display_path))
     {
@@ -748,9 +684,6 @@ fn try_image_read_outcome(
             placeholder,
         },
     };
-    runtime_context
-        .record_file_read_snapshot(snapshot_identity, file_hash.to_string())
-        .map_err(|message| FileToolError::new(FileToolErrorKind::Io, message))?;
     Ok(Some(FileToolOutcome::ImageRead(FileImageReadOutcome {
         schema: "image_read_result_v1",
         path: display_path.to_string(),
@@ -1184,6 +1117,106 @@ mod tests {
         assert!(output.content.contains("never returns partial lines"));
 
         std::fs::remove_dir_all(root).expect("cleanup read workspace");
+    }
+
+    #[test]
+    fn text_read_sources_preserve_paging_and_fact_parity() {
+        let root = read_limit_test_root("source-parity");
+        let relative_input = "sources/srcobj_1/notice.md";
+        std::fs::create_dir_all(root.join("sources/srcobj_1")).unwrap();
+        let root = root.canonicalize().unwrap();
+        for content in [
+            String::new(),
+            "\n".into(),
+            "第一行\r\nsecond\r\n".into(),
+            "x".repeat(READ_MAX_BYTES + 1),
+        ] {
+            std::fs::write(root.join("plain.txt"), &content).unwrap();
+            std::fs::write(root.join(relative_input), &content).unwrap();
+            let input = test_input(content.as_bytes());
+            let new_context = || {
+                ToolRuntimeContext::with_cwd(root.clone())
+                    .unwrap()
+                    .with_resolved_input_manifest(manifest_state(
+                        input.clone(),
+                        "agent_run_parity",
+                        None,
+                        vec![input.clone()],
+                    ))
+                    .with_resolved_input_root(root.clone())
+                    .unwrap()
+                    .with_tool_invocation("call_read_parity", "read")
+            };
+            let lines = content.lines().count();
+            for options in [
+                json!({}),
+                json!({"offset": lines}),
+                json!({"limit": 1}),
+                json!({"offset": lines + 1, "limit": 0}),
+                json!({"limit": 0}),
+            ] {
+                let context = new_context();
+                let read = |key: &str, value: &str| {
+                    let mut args = options.clone();
+                    args[key] = json!(value);
+                    test_handler().invoke(&args.to_string(), &context)
+                };
+                let plain = read("path", "plain.txt");
+                let resolved = read("input_ref", "input_1");
+                match (plain, resolved) {
+                    (Ok(plain), Ok(resolved)) => {
+                        for field in [
+                            "startLine",
+                            "endLine",
+                            "totalLines",
+                            "totalBytes",
+                            "outputBytes",
+                            "maxLines",
+                            "maxBytes",
+                            "truncated",
+                            "truncatedBy",
+                            "firstLineExceedsLimit",
+                            "nextOffset",
+                            "content",
+                            "fileHash",
+                        ] {
+                            assert_eq!(
+                                plain.details.get(field),
+                                resolved.details.get(field),
+                                "{field}: {options}"
+                            );
+                        }
+                        assert!(plain.details.get("citationRef").is_none());
+                        let has_lines = resolved.details["startLine"].as_u64().unwrap()
+                            <= resolved.details["endLine"].as_u64().unwrap();
+                        assert_eq!(resolved.details.get("citationRef").is_some(), has_lines);
+                        assert_eq!(resolved.details["inputRef"], "input_1");
+                    }
+                    (Err(plain), Err(resolved)) => {
+                        assert_eq!(plain.content, resolved.content);
+                        assert_eq!(plain.details, resolved.details);
+                    }
+                    _ => panic!("read source changed pagination acceptance: {options}"),
+                }
+            }
+            let context = new_context();
+            let single = test_handler()
+                .invoke(r#"{"input_ref":"input_1"}"#, &context)
+                .unwrap();
+            let batch = test_handler()
+                .invoke(r#"{"input_refs":["input_1"]}"#, &context)
+                .unwrap();
+            assert_eq!(
+                single.details["fileFact"],
+                batch.details["fileFact"]["items"][0]
+            );
+            assert_eq!(single.details["fileFact"]["fileHash"], input.sha256);
+        }
+        std::fs::remove_file(root.join("plain.txt")).unwrap();
+        std::fs::remove_file(root.join(relative_input)).unwrap();
+        std::fs::remove_dir(root.join("sources/srcobj_1")).unwrap();
+        std::fs::remove_dir(root.join("sources")).unwrap();
+        std::fs::remove_dir(root).unwrap();
     }
 
     fn test_input(bytes: &[u8]) -> ResolvedInput {

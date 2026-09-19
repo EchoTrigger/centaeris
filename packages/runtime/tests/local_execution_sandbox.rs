@@ -267,7 +267,7 @@ fn native_windows_executes_commands_through_git_bash() {
             model_path: "native-write.txt".into(),
             operation: centaeris_core::execution::ExecutionFileSystemOperation::WriteFile {
                 content: b"RAN".to_vec(),
-                expected_file_hash: None,
+                observed_file_hash: None,
                 create_only: true,
             },
         })

@@ -88,9 +88,7 @@ pub struct TranscriptContentRefV1 {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TranscriptTextContentV1 {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub inline_content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub source_ref: Option<TranscriptContentRefV1>,
 }
 
@@ -140,7 +138,12 @@ pub enum TranscriptBlockStatusV1 {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum TranscriptBlockBodyV1 {
     UserText {
         content: TranscriptTextContentV1,

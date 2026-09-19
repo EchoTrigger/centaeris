@@ -7,6 +7,53 @@ use centaeris_core::session::transcript::{
     TRANSCRIPT_PATCH_SCHEMA_V1, TRANSCRIPT_PROJECTION_VERSION_V1,
 };
 
+#[test]
+fn transcript_json_uses_camel_case_and_explicit_null_content_fields() {
+    use serde_json::json;
+    let content = TranscriptTextContentV1::inline("hello".into());
+    assert_eq!(
+        serde_json::to_value(&content).unwrap(),
+        json!({"inlineContent":"hello","sourceRef":null})
+    );
+    let reference = TranscriptContentRefV1 {
+        ref_id: "ref-1".into(),
+        revision: "1".into(),
+        byte_length: "70000".into(),
+    };
+    assert_eq!(
+        serde_json::to_value(TranscriptTextContentV1::referenced(reference)).unwrap(),
+        json!({"inlineContent":null,"sourceRef":{"refId":"ref-1","revision":"1","byteLength":"70000"}})
+    );
+    for (body, expected) in [
+        (
+            TranscriptBlockBodyV1::Reasoning {
+                request_id: "req-1".into(),
+                content: content.clone(),
+                status: TranscriptBlockStatusV1::Completed,
+            },
+            json!({"kind":"reasoning","requestId":"req-1","content":{"inlineContent":"hello","sourceRef":null},"status":"completed"}),
+        ),
+        (
+            tool_block(1, TranscriptBlockStatusV1::Running).body,
+            json!({"kind":"tool","callId":"call-a","toolName":"read","status":"running","summary":"Read the source","summaryRef":null,"outputRef":null}),
+        ),
+        (
+            TranscriptBlockBodyV1::Notice {
+                notice_type: "error".into(),
+                content,
+                status: TranscriptBlockStatusV1::Failed,
+            },
+            json!({"kind":"notice","noticeType":"error","content":{"inlineContent":"hello","sourceRef":null},"status":"failed"}),
+        ),
+    ] {
+        assert_eq!(serde_json::to_value(&body).unwrap(), expected);
+        assert_eq!(
+            serde_json::from_value::<TranscriptBlockBodyV1>(expected).unwrap(),
+            body
+        );
+    }
+}
+
 fn tool_block(revision: u64, status: TranscriptBlockStatusV1) -> TranscriptBlockV1 {
     TranscriptBlockV1 {
         block_id: "tool:call-a".to_string(),

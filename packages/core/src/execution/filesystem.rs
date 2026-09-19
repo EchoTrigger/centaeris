@@ -232,7 +232,9 @@ pub enum ExecutionFileSystemOperation {
     },
     WriteFile {
         content: Vec<u8>,
-        expected_file_hash: Option<String>,
+        /// Latest tool observation, available to resource-specific coordination.
+        /// Ordinary filesystem writes do not use it as a version precondition.
+        observed_file_hash: Option<String>,
         create_only: bool,
     },
     DeleteFile {
@@ -583,13 +585,12 @@ fn run_execution_file_system_operation(
         .map(ExecutionFileSystemOutput::ListDirectory),
         ExecutionFileSystemOperation::WriteFile {
             content,
-            expected_file_hash,
+            observed_file_hash: _,
             create_only,
         } => write_file(
             cwd.as_path(),
             request.model_path.as_str(),
             content.as_slice(),
-            expected_file_hash.as_deref(),
             create_only,
             &scope,
         )
@@ -743,16 +744,9 @@ fn write_file(
     cwd: &Path,
     model_path: &str,
     content: &[u8],
-    expected_file_hash: Option<&str>,
     create_only: bool,
     scope: &FileSystemScope,
 ) -> Result<ExecutionFileWriteOutput, ExecutionFileSystemError> {
-    if create_only && expected_file_hash.is_some() {
-        return Err(ExecutionFileSystemError::new(
-            ExecutionFileSystemErrorKind::InvalidPath,
-            "create-only writes cannot include an expected file hash",
-        ));
-    }
     let resolved = resolve_mutation_path(cwd, model_path, scope)?;
     let existed = resolved.path.exists();
     if existed && !resolved.path.is_file() {
@@ -767,22 +761,6 @@ fn write_file(
             format!("write target already exists: {}", resolved.display_path),
         ));
     }
-    let previous_file_hash = if existed {
-        let bytes = fs::read(resolved.path.as_path())
-            .map_err(|error| io_error("read file before write", model_path, error))?;
-        Some(sha256_bytes(bytes.as_slice()))
-    } else {
-        None
-    };
-    if previous_file_hash.as_deref() != expected_file_hash {
-        return Err(ExecutionFileSystemError::new(
-            ExecutionFileSystemErrorKind::Conflict,
-            format!(
-                "write target changed before mutation: {}",
-                resolved.display_path
-            ),
-        ));
-    }
     let parent = resolved.path.parent().ok_or_else(|| {
         ExecutionFileSystemError::new(
             ExecutionFileSystemErrorKind::InvalidPath,
@@ -795,7 +773,7 @@ fn write_file(
         .map_err(|error| io_error("write file", model_path, error))?;
     Ok(ExecutionFileWriteOutput {
         identity: resolved.identity(),
-        previous_file_hash,
+        previous_file_hash: None,
         file_hash: sha256_bytes(content),
         created: !existed,
     })
@@ -1058,19 +1036,27 @@ mod tests {
     fn filesystem_operation_protocol_uses_camel_case_variant_fields() {
         let value = serde_json::to_value(ExecutionFileSystemOperation::WriteFile {
             content: vec![1],
-            expected_file_hash: None,
+            observed_file_hash: None,
             create_only: true,
         })
         .expect("serialize operation");
         assert_eq!(value["type"], "writeFile");
-        assert!(value.get("expectedFileHash").is_some());
+        assert!(value.get("observedFileHash").is_some());
+        assert!(value.get("expectedFileHash").is_none());
         assert_eq!(value["createOnly"], true);
-        assert!(value.get("expected_file_hash").is_none());
+        assert!(value.get("observed_file_hash").is_none());
+        let mut old_write = value.clone();
+        old_write
+            .as_object_mut()
+            .unwrap()
+            .remove("observedFileHash");
+        old_write["expectedFileHash"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<ExecutionFileSystemOperation>(old_write).is_err());
         assert!(
             serde_json::from_value::<ExecutionFileSystemOperation>(serde_json::json!({
                 "type": "writeFile",
                 "content": [1],
-                "expected_file_hash": null,
+                "observed_file_hash": null,
                 "create_only": true
             }))
             .is_err()
@@ -1217,7 +1203,7 @@ mod tests {
                 "project-files/example.txt",
                 ExecutionFileSystemOperation::WriteFile {
                     content: b"tampered".to_vec(),
-                    expected_file_hash: Some(metadata.file_hash),
+                    observed_file_hash: Some(metadata.file_hash),
                     create_only: false,
                 },
             ))
@@ -1298,7 +1284,7 @@ mod tests {
                 "escape-dir/new.txt",
                 ExecutionFileSystemOperation::WriteFile {
                     content: b"new".to_vec(),
-                    expected_file_hash: None,
+                    observed_file_hash: None,
                     create_only: true,
                 },
             ),
@@ -1328,7 +1314,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_file_system_keeps_hash_validation_runtime_owned() {
+    fn direct_file_system_reports_content_hashes() {
         let cwd = temp_directory("hash");
         let path = cwd.join("state.txt");
         fs::write(path.as_path(), b"before").expect("write fixture");
@@ -1348,39 +1334,35 @@ mod tests {
             "state.txt",
             ExecutionFileSystemOperation::WriteFile {
                 content: b"after".to_vec(),
-                expected_file_hash: Some(read.file_hash),
+                observed_file_hash: Some(read.file_hash),
                 create_only: false,
             },
         ))
-        .expect("guarded write");
+        .expect("ordinary write");
         let ExecutionFileSystemOutput::WriteFile(write) = write else {
             panic!("expected write output");
         };
-        assert_eq!(
-            write.previous_file_hash.as_deref(),
-            Some("sha256:6db7d803e74f1ffa7d8f5adc0bf95b3e15bf4c8373fffadf546227cc6c6742cb")
-        );
+        assert_eq!(write.previous_file_hash, None);
         assert_eq!(fs::read(path).expect("read result"), b"after");
         fs::remove_dir_all(cwd).expect("remove fixture");
     }
 
     #[test]
-    fn stale_hash_rejects_mutation() {
-        let cwd = temp_directory("stale");
-        fs::write(cwd.join("state.txt"), b"current").expect("write fixture");
-
-        let error = run_direct_execution_file_system_operation(request(
-            cwd.as_path(),
-            "state.txt",
+    fn ordinary_write_does_not_guard_the_observed_version() {
+        let cwd = temp_directory("unconditional-write");
+        fs::write(cwd.join("file.txt"), b"current").unwrap();
+        run_direct_execution_file_system_operation(request(
+            &cwd,
+            "file.txt",
             ExecutionFileSystemOperation::WriteFile {
-                content: b"after".to_vec(),
-                expected_file_hash: Some("sha256:banana".to_string()),
+                content: b"replacement".to_vec(),
+                observed_file_hash: Some(sha256_bytes(b"earlier observation")),
                 create_only: false,
             },
         ))
-        .expect_err("stale hash must fail");
-
-        assert_eq!(error.kind, ExecutionFileSystemErrorKind::Conflict);
-        fs::remove_dir_all(cwd).expect("remove fixture");
+        .expect("ordinary writes replace current contents");
+        assert_eq!(fs::read(cwd.join("file.txt")).unwrap(), b"replacement");
+        fs::remove_file(cwd.join("file.txt")).unwrap();
+        fs::remove_dir(cwd).unwrap();
     }
 }

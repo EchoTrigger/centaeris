@@ -1,20 +1,17 @@
 use serde::Deserialize;
 
-use crate::execution::{
-    ExecutionFileSystemOperation, ExecutionFileSystemOutput, ExecutionPathKind,
-};
 use crate::tool::{
     EDIT_MAX_ARGS_BYTES, EDIT_MAX_ITEMS, EDIT_MAX_NEW_TEXT_BYTES, EDIT_MAX_OLD_TEXT_BYTES,
-    WORKSPACE_MUTATION_MAX_BYTES,
 };
 
-use super::mutation::{acquire_file_write_guard, sha256_bytes, write_diff_preview};
+use super::mutation::{
+    execute_file_mutation, write_diff_preview, CommittedMutation, MutationKind, PreparedMutation,
+};
 use super::outcome::{
     FileEditOperationOutcome, FileEditOutcome, FileToolError, FileToolErrorKind, FileToolOutcome,
 };
 use super::{
-    parse_tool_args, FileMutationCommitRequest, LocalToolError, LocalToolHandler, LocalToolOutput,
-    ToolRuntimeContext,
+    parse_tool_args, LocalToolError, LocalToolHandler, LocalToolOutput, ToolRuntimeContext,
 };
 #[derive(Debug)]
 pub(super) struct EditToolHandler;
@@ -99,156 +96,63 @@ fn execute_edit_outcome(
     }
     validate_and_normalize_edits(args.edits.as_mut_slice())?;
 
-    let binding = runtime_context
-        .execution_host_binding()
-        .map_err(|message| {
-            FileToolError::new(FileToolErrorKind::Io, message).with_model_path(raw_path)
-        })?;
-    let inspection = binding
-        .run_file_system_operation(raw_path, ExecutionFileSystemOperation::InspectMutationPath)
-        .map_err(|error| FileToolError::from_execution_host(error).with_model_path(raw_path))?;
-    let ExecutionFileSystemOutput::InspectMutationPath(inspection) = inspection else {
-        return Err(FileToolError::new(
-            FileToolErrorKind::Io,
-            "execution host returned the wrong filesystem result for edit inspection",
-        ));
-    };
-    if !inspection.exists || inspection.kind != Some(ExecutionPathKind::File) {
-        return Err(FileToolError::new(
-            FileToolErrorKind::InvalidInput,
-            format!(
-                "edit target is not an existing file: {}",
-                inspection.identity.display_path
-            ),
-        ));
-    }
-    let display_path = inspection.identity.display_path.clone();
-    let path_identity = inspection.identity.key.clone();
-    let _lease =
-        acquire_file_write_guard(path_identity.as_str(), runtime_context).map_err(|message| {
-            FileToolError::new(FileToolErrorKind::WriteConflict, message)
-                .with_model_path(display_path.as_str())
-        })?;
-    let read_snapshot_hash = runtime_context
-        .require_file_read_snapshot(path_identity.as_str(), raw_path)
-        .map_err(|message| {
-            FileToolError::new(FileToolErrorKind::ReadSnapshotMissing, message)
-                .with_model_path(display_path.as_str())
-        })?;
-    let read = binding
-        .run_file_system_operation(
-            raw_path,
-            ExecutionFileSystemOperation::ReadFile {
-                max_bytes: WORKSPACE_MUTATION_MAX_BYTES,
-            },
-        )
-        .map_err(|error| {
-            FileToolError::from_execution_host(error).with_model_path(display_path.as_str())
-        })?;
-    let ExecutionFileSystemOutput::ReadFile(read) = read else {
-        return Err(FileToolError::new(
-            FileToolErrorKind::Io,
-            "execution host returned the wrong filesystem result before edit",
-        ));
-    };
-    if read.file_hash != read_snapshot_hash {
-        return Err(FileToolError::new(
-            FileToolErrorKind::ReadSnapshotMismatch,
-            format!("file mutation rejected: {raw_path} changed since the last read"),
-        ));
-    }
-    let previous_file_hash = read.file_hash;
-    let previous_content = read.bytes;
-    let normalized_file = normalize_edit_file(previous_content.as_slice())?;
-    let matched_edits =
-        match_edits_against_original(normalized_file.content.as_str(), args.edits.as_slice())?;
-    let mut updated_normalized = String::with_capacity(normalized_file.content.len());
-    let mut cursor = 0usize;
-    for edit in &matched_edits {
-        updated_normalized.push_str(&normalized_file.content[cursor..edit.start]);
-        updated_normalized.push_str(edit.new_text);
-        cursor = edit.end;
-    }
-    updated_normalized.push_str(&normalized_file.content[cursor..]);
-    let updated_content = restore_edit_file(&normalized_file, updated_normalized.as_str());
-    let diff = write_diff_preview(
-        display_path.as_str(),
-        Some(previous_content.as_slice()),
-        updated_normalized.as_str(),
-    );
-    let file_hash = sha256_bytes(updated_content.as_slice());
-    runtime_context
-        .commit_file_mutation(FileMutationCommitRequest {
-            schema: "file_mutation_pre_apply_commit_v1".to_string(),
-            tool_call_id: runtime_context.current_tool_call_id().map_err(|message| {
-                FileToolError::new(FileToolErrorKind::DurableCommitMissing, message)
-            })?,
-            tool_name: runtime_context.current_tool_name().map_err(|message| {
-                FileToolError::new(FileToolErrorKind::DurableCommitMissing, message)
-            })?,
-            operation: "update".to_string(),
-            path: display_path.clone(),
-            target_path: None,
-            previous_file_hash: Some(previous_file_hash.clone()),
-            read_snapshot_hash: Some(read_snapshot_hash),
-            file_hash: Some(file_hash.clone()),
-            bytes_written: Some(updated_content.len()),
-            added_lines: Some(diff.added_lines),
-            removed_lines: Some(diff.removed_lines),
-            session_id: runtime_context.session_id.clone(),
-            execution_owner: runtime_context.write_lease_owner().to_string(),
-        })
-        .map_err(|message| {
-            FileToolError::new(FileToolErrorKind::DurableCommitFailed, message)
-                .with_model_path(display_path.as_str())
-        })?;
-    let written = binding
-        .run_file_system_operation(
-            raw_path,
-            ExecutionFileSystemOperation::WriteFile {
+    execute_file_mutation(
+        raw_path,
+        runtime_context,
+        MutationKind::Edit,
+        |display_path, previous_content| {
+            let previous_content = previous_content.expect("edit requires an existing file");
+            let normalized_file = normalize_edit_file(previous_content)?;
+            let matched_edits = match_edits_against_original(
+                normalized_file.content.as_str(),
+                args.edits.as_slice(),
+            )?;
+            let mut updated_normalized = String::with_capacity(normalized_file.content.len());
+            let mut cursor = 0usize;
+            for edit in &matched_edits {
+                updated_normalized.push_str(&normalized_file.content[cursor..edit.start]);
+                updated_normalized.push_str(edit.new_text);
+                cursor = edit.end;
+            }
+            updated_normalized.push_str(&normalized_file.content[cursor..]);
+            let updated_content = restore_edit_file(&normalized_file, updated_normalized.as_str());
+            let diff = write_diff_preview(
+                display_path,
+                Some(previous_content),
+                updated_normalized.as_str(),
+            );
+            Ok(PreparedMutation {
                 content: updated_content,
-                expected_file_hash: Some(previous_file_hash.clone()),
-                create_only: false,
-            },
-        )
-        .map_err(|error| {
-            FileToolError::from_execution_host(error).with_model_path(display_path.as_str())
-        })?;
-    let ExecutionFileSystemOutput::WriteFile(written) = written else {
-        return Err(FileToolError::new(
-            FileToolErrorKind::Io,
-            "execution host returned the wrong filesystem result for edit",
-        ));
-    };
-    if written.previous_file_hash.as_deref() != Some(previous_file_hash.as_str())
-        || written.file_hash != file_hash
-    {
-        return Err(FileToolError::new(
-            FileToolErrorKind::Io,
-            "execution host edit result failed hash verification",
-        ));
-    }
-    runtime_context
-        .record_file_read_snapshot(written.identity.key.as_str(), file_hash.clone())
-        .map_err(|message| FileToolError::new(FileToolErrorKind::Io, message))?;
-    let operation = FileEditOperationOutcome {
-        operation_type: "update",
-        path: display_path,
-        target_path: None,
-        previous_file_hash: Some(previous_file_hash),
-        file_hash: Some(file_hash),
-        added_lines: diff.added_lines,
-        removed_lines: diff.removed_lines,
-    };
-    Ok(FileToolOutcome::Edit(FileEditOutcome {
-        schema: "edit_result_v1",
-        files_changed: 1,
-        replacements_applied: args.edits.len(),
-        added_lines: diff.added_lines,
-        removed_lines: diff.removed_lines,
-        diff_preview: diff.text,
-        operations: vec![operation],
-    }))
+                diff,
+            })
+        },
+        |CommittedMutation {
+             display_path,
+             previous_file_hash,
+             file_hash,
+             diff,
+             ..
+         }| {
+            let operation = FileEditOperationOutcome {
+                operation_type: "update",
+                path: display_path,
+                target_path: None,
+                previous_file_hash,
+                file_hash: Some(file_hash),
+                added_lines: diff.added_lines,
+                removed_lines: diff.removed_lines,
+            };
+            FileToolOutcome::Edit(FileEditOutcome {
+                schema: "edit_result_v1",
+                files_changed: 1,
+                replacements_applied: args.edits.len(),
+                added_lines: diff.added_lines,
+                removed_lines: diff.removed_lines,
+                diff_preview: diff.text,
+                operations: vec![operation],
+            })
+        },
+    )
 }
 
 fn validate_and_normalize_edits(edits: &mut [EditItemRequest]) -> Result<(), FileToolError> {
