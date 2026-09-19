@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -86,7 +86,6 @@ pub struct ToolRuntimeContext {
     pub execution_owner: Option<String>,
     pub current_tool_call_id: Option<String>,
     pub current_tool_name: Option<String>,
-    file_read_snapshots: Arc<Mutex<HashMap<String, String>>>,
     pub resource_claim_store: Option<Arc<dyn ResourceClaimStorePort + Send + Sync>>,
     pub resource_claim_ttl_ms: u64,
     pub file_mutation_commit_port: Option<Arc<dyn FileMutationCommitPort + Send + Sync>>,
@@ -105,7 +104,6 @@ impl Default for ToolRuntimeContext {
             execution_owner: None,
             current_tool_call_id: None,
             current_tool_name: None,
-            file_read_snapshots: Arc::new(Mutex::new(HashMap::new())),
             resource_claim_store: None,
             resource_claim_ttl_ms: DEFAULT_RESOURCE_CLAIM_TTL_MS,
             file_mutation_commit_port: None,
@@ -197,7 +195,6 @@ impl ToolRuntimeContext {
             previous_root.as_path(),
             canonical.as_path(),
         );
-        self.file_read_snapshots = Arc::new(Mutex::new(HashMap::new()));
         let policy = self.execution_host_policy(binding.mode());
         self.execution_host_binding = Some(Arc::new(binding.with_policy(policy)));
         Ok(self)
@@ -281,35 +278,6 @@ impl ToolRuntimeContext {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .unwrap_or("anonymous-tool-runtime")
-    }
-
-    pub(super) fn record_file_read_snapshot(
-        &self,
-        path_identity: &str,
-        file_hash: impl Into<String>,
-    ) -> Result<(), String> {
-        self.file_read_snapshots
-            .lock()
-            .map_err(|_| "file read snapshot registry lock poisoned".to_string())?
-            .insert(path_identity.to_string(), file_hash.into());
-        Ok(())
-    }
-
-    pub(super) fn require_file_read_snapshot(
-        &self,
-        path_identity: &str,
-        path_label: &str,
-    ) -> Result<String, String> {
-        self.file_read_snapshots
-            .lock()
-            .map_err(|_| "file read snapshot registry lock poisoned".to_string())?
-            .get(path_identity)
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "file mutation rejected: read snapshot is required before modifying existing file: {path_label}"
-                )
-            })
     }
 
     pub fn with_resource_claim_store(
