@@ -4327,7 +4327,24 @@ fn reduce_assistant_message(
         .iter()
         .map(|value| value.as_str().expect("validated artifact ref").to_string())
         .collect::<Vec<_>>();
-    if artifact_refs != projection.artifact_order {
+    let run_artifacts = projection
+        .artifacts
+        .values()
+        .filter(|artifact| {
+            projection
+                .tool_calls
+                .get(&artifact.tool_call_id)
+                .is_some_and(|call| call.agent_run_id == agent_run_id)
+        })
+        .map(|artifact| artifact.artifact_ref.as_str())
+        .collect::<HashSet<_>>();
+    let expected_refs = projection
+        .artifact_order
+        .iter()
+        .filter(|reference| run_artifacts.contains(reference.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if artifact_refs != expected_refs {
         return Err(format!(
             "session.event.v1 {} assistant artifactRefs do not match published order",
             event.event_id
@@ -5876,6 +5893,24 @@ mod tests {
             validate_event_log("session-1", log.as_slice()).expect("artifact log validates");
         assert_eq!(projection.artifact_order, vec![artifact_ref]);
         assert_eq!(projection.artifacts.len(), 1);
+
+        let second = serde_json::to_string(&log)
+            .unwrap()
+            .replace("turn-1", "turn-2")
+            .replace("run-1", "run-2")
+            .replace("evt-artifact", "evt-second")
+            .replace("msg-artifact-user", "msg-second-user")
+            .replace("call-publish", "call-publish-second")
+            .replace("artifact:artifact_1", "artifact:artifact_2")
+            .replace(
+                &format!("pub_{}", "a".repeat(64)),
+                &format!("pub_{}", "c".repeat(64)),
+            );
+        let mut both = log.clone();
+        both.extend(serde_json::from_str::<Vec<Value>>(&second).unwrap());
+        let projection = validate_event_log("session-1", &both)
+            .expect("each run references only its own publications across a session replay");
+        assert_eq!(projection.artifact_order.len(), 2);
 
         log[5]["payload"]["artifactRefs"] = json!([]);
         let error = validate_event_log("session-1", log.as_slice())
