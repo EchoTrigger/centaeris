@@ -18,7 +18,7 @@ test("reasoning disclosure survives updates, completion and row remount without 
   };
   act(() => { renderer = create(<AgentResultStream turn={turn} />); });
   expect(renderer.root.findAll((node) => node.props.className === "agentStatusRow")).toHaveLength(0);
-  const button = () => renderer.root.findAllByType("button")[0];
+  const button = () => renderer.root.findAll((node) => node.type === "button" && node.props.className !== "workProgressSummary")[0];
   expect(button().props["aria-label"]).toBe("Thinking");
   expect(button().findAllByType("span")[0].props.className).toBe("statusShimmer");
   expect(button().findAllByType("span")[0].children).toEqual(["Thinking"]);
@@ -37,8 +37,8 @@ test("reasoning disclosure survives updates, completion and row remount without 
   ] };
   act(() => renderer.update(<AgentResultStream turn={updated} />));
   expect(button().props["aria-label"]).toBe("Thoughts");
-  expect(renderer.root.findAllByType("button").map((item) => item.props["aria-label"])).toEqual(["Thoughts", "Thoughts"]);
-  expect(renderer.root.findAllByType("button").map((item) => item.props["aria-expanded"])).toEqual([true, false]);
+  expect(renderer.root.findAll((node) => node.type === "button" && node.props.className !== "workProgressSummary").map((item) => item.props["aria-label"])).toEqual(["Thoughts", "Thoughts"]);
+  expect(renderer.root.findAll((node) => node.type === "button" && node.props.className !== "workProgressSummary").map((item) => item.props["aria-expanded"])).toEqual([true, false]);
   expect(renderer.root.findByType("p").children).toEqual(["Inspect more"]);
   expect(renderer.root.findByProps({ className: "reasoningPreviewText" }).children).toEqual(["Separate"]);
   act(() => renderer.unmount());

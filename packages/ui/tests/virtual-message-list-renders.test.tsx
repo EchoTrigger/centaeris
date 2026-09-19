@@ -27,7 +27,7 @@ vi.mock("@tanstack/react-virtual", () => ({
 vi.mock("../src/components/chat/chatViewStore", () => {
   const messages = {
     user: { id: "user", role: "user", text: "hello", timestamp: Date.now() },
-    assistant: { id: "assistant", role: "assistant", turn: { id: "turn", chunks: [], finalAnswer: "answer", isStreaming: false } },
+    assistant: { id: "assistant", role: "assistant", turn: { id: "turn", agentRunId: "run:1", chunks: [], finalAnswer: "answer", isStreaming: false } },
   };
   return {
     selectChatMessageIds: () => ["user", "assistant"],
@@ -39,7 +39,7 @@ vi.mock("../src/components/chat/chatViewStore", () => {
       count(harness.roleReads, messageId);
       return messageId === "user" ? "user" : "assistant";
     },
-    useChatViewStore: (selector: (state: unknown) => unknown) => selector({}),
+    useChatViewStore: Object.assign((selector: (state: unknown) => unknown) => selector({ messageById: messages }), { getState: () => ({ messageById: messages }) }),
   };
 });
 

@@ -485,3 +485,25 @@ fn long_answer_reference_round_trips_exact_markdown_and_rejects_foreign_sources(
     wrong.revision = "2".into();
     assert!(transcript_event_content_range(&wrong, &answer.event).is_err());
 }
+
+#[test]
+fn supplement_is_a_process_notice_not_a_new_user_turn() {
+    let mut projector =
+        TranscriptProjectorV1::new("session-1".into(), "generation-1".into()).unwrap();
+    let event = record(
+        1,
+        "turn_supplement",
+        "supplement-event",
+        json!({
+            "supplementId": "extra-1", "messageId": "message:turn-1:supplement:extra-1", "message": "Keep the same clock"
+        }),
+    );
+    let update = projector.apply(&event, "run-1", "cursor-1").unwrap();
+    let TranscriptProjectionUpdateV1::Patch(patch) = update else {
+        panic!("supplement must be visible")
+    };
+    assert!(
+        matches!(&patch.upserts[0].body, TranscriptBlockBodyV1::Notice { notice_type, content, .. }
+        if notice_type == "turn_supplement" && content.inline_content.as_deref() == Some("Keep the same clock"))
+    );
+}

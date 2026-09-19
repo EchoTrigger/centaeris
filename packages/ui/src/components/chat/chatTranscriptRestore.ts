@@ -688,19 +688,19 @@ export const applySessionEventToAssistantTurn = (
           chunks = existing ? chunks.map((chunk) => chunk === existing ? next : chunk) : [...chunks, next];
         }
       }
-      return { ...turn, chunks, liveRevision: payload.revision, finalAnswer: payload.text };
+      return { ...turn, chunks, liveRevision: payload.revision, finalAnswerConfirmed: false, finalAnswer: payload.text };
     }
     case "ModelTextDelta": {
       const delta = getEventPayloadRawString(payload, "delta");
-      return delta ? { ...turn, finalAnswer: `${turn.finalAnswer}${delta}` } : turn;
+      return delta ? { ...turn, finalAnswerConfirmed: false, finalAnswer: `${turn.finalAnswer}${delta}` } : turn;
     }
     case "ModelTextReplace": {
       const content = getEventPayloadRawString(payload, "content");
-      return { ...turn, finalAnswer: content };
+      return { ...turn, finalAnswerConfirmed: false, finalAnswer: content };
     }
     case "Final": {
       const content = getEventPayloadRawString(payload, "content");
-      return content ? { ...turn, finalAnswer: content } : turn;
+      return content ? { ...turn, finalAnswerConfirmed: true, finalAnswer: content } : turn;
     }
     case "Status": {
       if (getEventPayloadString(payload, "stage") !== "model_process_summary") {

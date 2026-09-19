@@ -242,6 +242,7 @@ export type AssistantExecutionTurn = {
     NarrativeChunk | GuidedSupplementChunk | TaskChunk | SubagentChunk | ReasoningChunk
   >;
   finalAnswer: string;
+  finalAnswerConfirmed?: boolean;
   isStreaming: boolean;
   startedAtMs?: number;
   completedAtMs?: number;
@@ -313,6 +314,7 @@ export type SessionViewSnapshot = {
 };
 
 export type AgentResultStreamProps = {
+  showWorkProgress?: boolean;
   turn: AssistantExecutionTurn;
   onOpenAgentSession?: (sessionId: string, title: string) => void;
   onOpenWorkspacePath?: (
