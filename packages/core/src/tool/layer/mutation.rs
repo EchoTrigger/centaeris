@@ -4,11 +4,172 @@ use std::sync::{Arc, Mutex, OnceLock};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use super::{now_ms, ToolRuntimeContext};
+use super::outcome::{FileToolError, FileToolErrorKind, FileToolOutcome};
+use super::{now_ms, FileMutationCommitRequest, ToolRuntimeContext};
+use crate::execution::{
+    ExecutionFileSystemOperation, ExecutionFileSystemOutput, ExecutionPathKind,
+};
 use crate::session::reliability::{
     AcquireResourceClaimDisposition, AcquireResourceClaimRequest, ReleaseResourceClaimRequest,
     ResourceClaimStorePort,
 };
+use crate::tool::WORKSPACE_MUTATION_MAX_BYTES;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum MutationKind {
+    Edit,
+    Write,
+}
+
+pub(super) struct PreparedMutation {
+    pub content: Vec<u8>,
+    pub diff: WriteDiffPreview,
+}
+
+pub(super) struct CommittedMutation {
+    pub display_path: String,
+    pub existed: bool,
+    pub previous_file_hash: Option<String>,
+    pub file_hash: String,
+    pub bytes_written: usize,
+    pub diff: WriteDiffPreview,
+}
+
+// Keep tool transformations separate from the shared write and record sequence.
+pub(super) fn execute_file_mutation(
+    raw_path: &str,
+    runtime_context: &ToolRuntimeContext,
+    kind: MutationKind,
+    prepare: impl FnOnce(&str, Option<&[u8]>) -> Result<PreparedMutation, FileToolError>,
+    finish: impl FnOnce(CommittedMutation) -> FileToolOutcome,
+) -> Result<FileToolOutcome, FileToolError> {
+    let tool_name = match kind {
+        MutationKind::Edit => "edit",
+        MutationKind::Write => "write",
+    };
+    let binding = runtime_context
+        .execution_host_binding()
+        .map_err(|message| {
+            FileToolError::new(FileToolErrorKind::Io, message).with_model_path(raw_path)
+        })?;
+    let inspection = binding
+        .run_file_system_operation(raw_path, ExecutionFileSystemOperation::InspectMutationPath)
+        .map_err(|error| FileToolError::from_execution_host(error).with_model_path(raw_path))?;
+    let ExecutionFileSystemOutput::InspectMutationPath(inspection) = inspection else {
+        return Err(FileToolError::new(
+            FileToolErrorKind::Io,
+            format!(
+                "execution host returned the wrong filesystem result for {tool_name} inspection"
+            ),
+        ));
+    };
+    if (inspection.exists && inspection.kind != Some(ExecutionPathKind::File))
+        || (kind == MutationKind::Edit && !inspection.exists)
+    {
+        return Err(FileToolError::new(
+            FileToolErrorKind::InvalidInput,
+            match kind {
+                MutationKind::Edit => format!(
+                    "edit target is not an existing file: {}",
+                    inspection.identity.display_path
+                ),
+                MutationKind::Write => format!(
+                    "write target is not a file: {}",
+                    inspection.identity.display_path
+                ),
+            },
+        ));
+    }
+    let display_path = inspection.identity.display_path.clone();
+    let path_identity = inspection.identity.key.clone();
+    let _lease =
+        acquire_file_write_guard(path_identity.as_str(), runtime_context).map_err(|message| {
+            FileToolError::new(FileToolErrorKind::WriteConflict, message)
+                .with_model_path(display_path.as_str())
+        })?;
+    let existed = inspection.exists;
+    let (previous_file_hash, previous_content) = if existed {
+        let read = binding
+            .run_file_system_operation(
+                raw_path,
+                ExecutionFileSystemOperation::ReadFile {
+                    max_bytes: WORKSPACE_MUTATION_MAX_BYTES,
+                },
+            )
+            .map_err(|error| {
+                FileToolError::from_execution_host(error).with_model_path(display_path.as_str())
+            })?;
+        let ExecutionFileSystemOutput::ReadFile(read) = read else {
+            return Err(FileToolError::new(
+                FileToolErrorKind::Io,
+                format!("execution host returned the wrong filesystem result before {tool_name}"),
+            ));
+        };
+        (Some(read.file_hash), Some(read.bytes))
+    } else {
+        (None, None)
+    };
+    let PreparedMutation { content, diff } = prepare(&display_path, previous_content.as_deref())?;
+    let file_hash = sha256_bytes(&content);
+    runtime_context
+        .commit_file_mutation(FileMutationCommitRequest {
+            schema: "file_mutation_pre_apply_commit_v1".to_string(),
+            tool_call_id: runtime_context.current_tool_call_id().map_err(|message| {
+                FileToolError::new(FileToolErrorKind::DurableCommitMissing, message)
+            })?,
+            tool_name: runtime_context.current_tool_name().map_err(|message| {
+                FileToolError::new(FileToolErrorKind::DurableCommitMissing, message)
+            })?,
+            operation: match kind {
+                MutationKind::Edit => "update",
+                MutationKind::Write if existed => "overwrite",
+                MutationKind::Write => "create",
+            }
+            .to_string(),
+            path: display_path.clone(),
+            target_path: None,
+            previous_file_hash: previous_file_hash.clone(),
+            read_snapshot_hash: None,
+            file_hash: Some(file_hash.clone()),
+            bytes_written: Some(content.len()),
+            added_lines: Some(diff.added_lines),
+            removed_lines: Some(diff.removed_lines),
+            session_id: runtime_context.session_id.clone(),
+            execution_owner: runtime_context.write_lease_owner().to_string(),
+        })
+        .map_err(|message| {
+            FileToolError::new(FileToolErrorKind::DurableCommitFailed, message)
+                .with_model_path(display_path.as_str())
+        })?;
+    let bytes_written = content.len();
+    let written = binding
+        .run_file_system_operation(
+            raw_path,
+            ExecutionFileSystemOperation::WriteFile {
+                content,
+                observed_file_hash: previous_file_hash.clone(),
+                create_only: false,
+            },
+        )
+        .map_err(|error| {
+            FileToolError::from_execution_host(error).with_model_path(display_path.as_str())
+        })?;
+    let ExecutionFileSystemOutput::WriteFile(written) = written else {
+        return Err(FileToolError::new(
+            FileToolErrorKind::Io,
+            format!("execution host returned the wrong filesystem result for {tool_name}"),
+        ));
+    };
+    // Build the tool-specific outcome before releasing the write guard.
+    Ok(finish(CommittedMutation {
+        display_path,
+        existed: !written.created,
+        previous_file_hash,
+        file_hash,
+        bytes_written,
+        diff,
+    }))
+}
 
 static FILE_WRITE_LEASES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 fn file_write_leases() -> &'static Mutex<HashMap<String, String>> {

@@ -178,7 +178,7 @@ fn spill_tool_result(
             model_path.as_str(),
             ExecutionFileSystemOperation::WriteFile {
                 content: bytes.clone(),
-                expected_file_hash: None,
+                observed_file_hash: None,
                 create_only: true,
             },
         ) {
@@ -383,7 +383,7 @@ mod tests {
                 path.to_string_lossy(),
                 ExecutionFileSystemOperation::WriteFile {
                     content: b"tampered".to_vec(),
-                    expected_file_hash: Some(spilled.file_hash),
+                    observed_file_hash: Some(spilled.file_hash),
                     create_only: false,
                 },
             )
