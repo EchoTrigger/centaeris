@@ -232,5 +232,10 @@
   "transcriptText.failed": "Unable to load content.",
   "transcriptText.retry": "Retry",
   "transcriptText.previousOutput": "Previous output",
-  "transcriptText.nextOutput": "Next output"
+  "transcriptText.nextOutput": "Next output",
+  "workProgress.working": "Working",
+  "workProgress.worked": "Worked",
+  "workProgress.hours": "{{count}}h",
+  "workProgress.minutes": "{{count}}m",
+  "workProgress.seconds": "{{count}}s"
 }

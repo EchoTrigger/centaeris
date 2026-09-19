@@ -81,6 +81,7 @@ export const useAssistantTurnUpdateQueue = ({
         }
         nextTurn = {
           ...nextTurn,
+          finalAnswerConfirmed: false,
           finalAnswer: `${nextTurn.finalAnswer}${pendingTextDeltas.join("")}`,
           activity: null,
         };
