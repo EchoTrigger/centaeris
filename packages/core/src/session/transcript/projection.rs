@@ -729,12 +729,21 @@ impl TranscriptProjectorV1 {
                     status: TranscriptBlockStatusV1::Running,
                 },
             }),
+            SessionRecordType::TurnSupplement => Some(TranscriptBlockV1 {
+                block_id: payload_string(payload, "messageId")?,
+                block_revision: "1".to_string(),
+                order_key,
+                body: TranscriptBlockBodyV1::Notice {
+                    notice_type: "turn_supplement".to_string(),
+                    content: text_content(event, "message", payload_string(payload, "message")?, 1),
+                    status: TranscriptBlockStatusV1::Completed,
+                },
+            }),
             SessionRecordType::SessionMeta
             | SessionRecordType::AgentRunStarted
             | SessionRecordType::AgentRunRecoveryAttempted
             | SessionRecordType::AgentRunExecutionStarted
             | SessionRecordType::AgentRunExecutionEnded
-            | SessionRecordType::TurnSupplement
             | SessionRecordType::ModelRequestStarted
             | SessionRecordType::ProviderUsage
             | SessionRecordType::ExternalEvidenceRef
@@ -784,7 +793,6 @@ pub(super) fn transcript_event_type_is_payload_free(event_type: SessionRecordTyp
             | SessionRecordType::AgentRunRecoveryAttempted
             | SessionRecordType::AgentRunExecutionStarted
             | SessionRecordType::AgentRunExecutionEnded
-            | SessionRecordType::TurnSupplement
             | SessionRecordType::ModelRequestStarted
             | SessionRecordType::ProviderUsage
             | SessionRecordType::ExternalEvidenceRef

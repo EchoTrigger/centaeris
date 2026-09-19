@@ -1,5 +1,8 @@
+import { WorkProgress } from "./WorkProgress";
+import { transcriptMessageGroups } from "./transcriptMessageGroups";
+import { useShallow } from "zustand/react/shallow";
 import { t } from "../../i18n";
-import { memo, useLayoutEffect, type RefObject } from "react";
+import { memo, useLayoutEffect, useMemo, type RefObject } from "react";
 import { Check, Copy, Pencil } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { AgentResultStream } from "./AgentResultStream";
@@ -148,10 +151,12 @@ const UserMessageRow = memo(function UserMessageRow({
 
 const AssistantMessageRow = memo(function AssistantMessageRow({
   messageId,
+  showWorkProgress = true,
   onOpenAgentSession,
   onOpenWorkspacePath,
 }: {
   messageId: string;
+  showWorkProgress?: boolean;
   onOpenAgentSession?: VirtualMessageListProps["onOpenAgentSession"];
   onOpenWorkspacePath?: VirtualMessageListProps["onOpenWorkspacePath"];
 }) {
@@ -166,12 +171,31 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
         {status}
         <AgentResultStream
           turn={message.turn}
+          showWorkProgress={showWorkProgress}
           onOpenAgentSession={onOpenAgentSession}
           onOpenWorkspacePath={onOpenWorkspacePath}
         />
       </div>
     </div>
   );
+});
+
+const HistoryProcessGroup = memo(function HistoryProcessGroup({ ids, onOpenAgentSession, onOpenWorkspacePath }: {
+  ids: string[];
+  onOpenAgentSession?: VirtualMessageListProps["onOpenAgentSession"];
+  onOpenWorkspacePath?: VirtualMessageListProps["onOpenWorkspacePath"];
+}) {
+  const messages = useChatViewStore(useShallow((state) => ids.map((id) => state.messageById[id])));
+  const isAnswer = (message: ChatMessage) => message.role === "assistant"
+    && (Boolean(message.turn.finalAnswer) || Boolean(message.transcriptText && !message.turn.chunks.length));
+  const row = (message: ChatMessage) => <AssistantMessageRow key={message.id} messageId={message.id}
+    showWorkProgress={false} onOpenAgentSession={onOpenAgentSession} onOpenWorkspacePath={onOpenWorkspacePath} />;
+  return <>
+    <WorkProgress running={false} finalStarted={messages.some(isAnswer)}>
+      {messages.filter((message) => !isAnswer(message)).map(row)}
+    </WorkProgress>
+    {messages.filter(isAnswer).map(row)}
+  </>;
 });
 
 const MessageRow = memo(function MessageRow({
@@ -226,8 +250,9 @@ export function VirtualMessageList({
   ...props
 }: VirtualMessageListProps) {
   const messageIds = useChatViewStore(selectChatMessageIds);
+  const groups = useMemo(() => transcriptMessageGroups(messageIds, (id) => useChatViewStore.getState().messageById[id]), [messageIds]);
   const virtualizer = useVirtualizer({
-    count: messageIds.length,
+    count: groups.length,
     getScrollElement: () => containerRef.current,
     estimateSize: () => ESTIMATED_MESSAGE_HEIGHT_PX,
     overscan: MESSAGE_LIST_OVERSCAN,
@@ -255,18 +280,6 @@ export function VirtualMessageList({
         }
       }}
     >
-      {hasOlder ? (
-        <button
-          type="button"
-          className="load-older-transcript"
-          disabled={isLoadingOlder}
-          onClick={onLoadOlder}
-        >
-          {isLoadingOlder
-            ? t("virtualMessageList.loadingEarlier")
-            : t("virtualMessageList.loadEarlier")}
-        </button>
-      ) : null}
       <div
         style={{
           height: `${totalSize}px`,
@@ -275,7 +288,8 @@ export function VirtualMessageList({
         }}
       >
         {virtualItems.map((item) => {
-          const messageId = messageIds[item.index];
+          const ids = groups[item.index];
+          const messageId = ids?.[0];
           if (!messageId) {
             return null;
           }
@@ -292,10 +306,12 @@ export function VirtualMessageList({
                 width: "100%",
               }}
             >
-              <MessageRow
-                messageId={messageId}
-                props={props}
-              />
+              {(() => {
+                const message = useChatViewStore.getState().messageById[messageId];
+                return message.role === "assistant" && !message.turn.agentRunId
+                  ? <HistoryProcessGroup ids={ids} onOpenAgentSession={props.onOpenAgentSession} onOpenWorkspacePath={props.onOpenWorkspacePath} />
+                  : <MessageRow messageId={messageId} props={props} />;
+              })()}
             </div>
           );
         })}

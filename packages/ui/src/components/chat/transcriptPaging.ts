@@ -297,6 +297,7 @@ const materializeBlock = (
   switch (body.kind) {
     case "assistantText":
       turn.finalAnswer = materializeText(body.content);
+      turn.finalAnswerConfirmed = true;
       break;
     case "reasoning":
       turn.chunks.push({
@@ -342,6 +343,10 @@ const materializeBlock = (
       break;
     }
     case "notice":
+      if (body.noticeType === "turn_supplement") {
+        turn.chunks.push({ id: block.blockId, kind: "guidedSupplement", text: materializeText(body.content), timestamp: 0 });
+        break;
+      }
       turn.chunks.push({
         id: block.blockId,
         kind: "narrative",

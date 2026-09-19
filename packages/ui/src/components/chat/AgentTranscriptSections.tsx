@@ -226,10 +226,12 @@ export const AgentSubagentTranscript = memo(function AgentSubagentTranscript({
 export const AgentFinalAnswer = memo(function AgentFinalAnswer({
   finalItem,
   isStreaming,
+  isProcessDraft = false,
   onOpenWorkspacePath,
 }: {
   finalItem: TranscriptViewModel["finalItem"];
   isStreaming: boolean;
+  isProcessDraft?: boolean;
   onOpenWorkspacePath: OpenWorkspacePath;
 }) {
   const targetText = finalItem?.text ?? "";
@@ -240,8 +242,8 @@ export const AgentFinalAnswer = memo(function AgentFinalAnswer({
   const presentationActive = isStreaming || visibleText !== targetText;
   return (
     <div
-      className="agentAssistantAnswer answerMarkdownBlock"
-      data-waterfall-section={finalItem?.waterfall?.section ?? "final"}
+      className={isProcessDraft ? "agentProcessSectionHeading isStreaming" : "agentAssistantAnswer answerMarkdownBlock"}
+      data-waterfall-section={isProcessDraft ? "process" : finalItem?.waterfall?.section ?? "final"}
     >
       <div className="answer-content" key={finalItem.id}>
         <MarkdownContent
