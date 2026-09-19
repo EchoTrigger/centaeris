@@ -27,6 +27,26 @@ Core tool -> ExecutionHost binding -> Host
 
 ## Ownership
 
+Ordinary `edit` and `write` use a shared file-mutation guard, but do not require a
+previous model `read` or maintain a read-snapshot ledger. `edit` matches against
+current text; `write` creates or overwrites the target. Ordinary filesystem writes
+use direct file I/O, without a publication-time version check or temporary-file
+replacement guarantee. An interrupted write can leave partial content.
+
+The internal `WriteFile.observedFileHash` is the version observed during the
+current tool invocation. Resource-specific Hosts may use it for coordination;
+ordinary filesystem execution does not enforce it. It replaces `expectedFileHash`
+for write requests, with no alias; delete requests retain their separate contract.
+An ordinary write receipt has no `previousFileHash`, since the Host does not read
+the destination again. Tool diffs and previous-file facts describe the tool's own
+observation, not a globally locked version. Content hashes remain for result and
+existing pre-apply facts; they do not establish disk verification.
+
+The existing pre-apply event schema retains its nullable `readSnapshotHash` field;
+new tools emit null. Revising the durable event protocol is separate from removing
+the live snapshot ledger. Hosted private memory-directory coordination remains a
+Workspace decision; Core does not interpret its URI or assume a separate memory model.
+
 | Concern | Authority |
 | --- | --- |
 | Tool schema, exact edits, snapshots, bounded observations | Core tools |

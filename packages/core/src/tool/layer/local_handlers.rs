@@ -408,8 +408,140 @@ mod tests {
         }
     }
 
-    fn test_file_hash(path: &std::path::Path) -> String {
-        sha256_bytes(fs::read(path).expect("read test file for hash").as_slice())
+    #[test]
+    fn mutation_commit_boundary_preserves_guard_and_retry() {
+        struct ObserveCommit {
+            target: std::path::PathBuf,
+            calls: Mutex<usize>,
+            fail: bool,
+        }
+        impl super::super::FileMutationCommitPort for ObserveCommit {
+            fn commit_file_mutation(
+                &self,
+                request: super::super::FileMutationCommitRequest,
+            ) -> Result<(), String> {
+                *self.calls.lock().unwrap() += 1;
+                let identity = test_path_identity(&self.target);
+                assert_eq!(fs::read(&self.target).unwrap(), b"before\n");
+                let old_hash = sha256_bytes(b"before\n");
+                assert_eq!(request.previous_file_hash.as_ref(), Some(&old_hash));
+                assert_eq!(request.read_snapshot_hash, None);
+                assert_eq!(request.file_hash, Some(sha256_bytes(b"after\n")));
+                assert_eq!(request.bytes_written, Some(6));
+                assert_eq!(
+                    request.operation,
+                    if request.tool_name == "edit" {
+                        "update"
+                    } else {
+                        "overwrite"
+                    }
+                );
+                assert!(acquire_file_write_lease(&identity, "competitor").is_err());
+                if self.fail {
+                    Err("observed commit failure".into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        for tool in ["edit", "write"] {
+            let root = std::env::temp_dir().join(format!(
+                "centaeris-mutation-boundary-{tool}-{}-{}",
+                std::process::id(),
+                crate::runtime::contracts::current_timestamp_ms()
+            ));
+            fs::create_dir_all(&root).unwrap();
+            let root = root.canonicalize().unwrap();
+            let target = root.join("target.txt");
+            fs::write(&target, "before\n").unwrap();
+            let identity = test_path_identity(&target);
+            let context = ToolRuntimeContext::with_cwd(root.clone())
+                .unwrap()
+                .with_execution_owner("mutation-owner")
+                .with_tool_invocation("mutation-call", tool);
+            let args = if tool == "edit" {
+                json!({"path": "target.txt", "edits": [{"old_text": "before", "new_text": "after"}]})
+            } else {
+                json!({"path": "target.txt", "content": "after\n"})
+            }.to_string();
+            for fail in [true, false] {
+                let observer = Arc::new(ObserveCommit {
+                    target: target.clone(),
+                    calls: Mutex::new(0),
+                    fail,
+                });
+                let invocation = context
+                    .clone()
+                    .with_file_mutation_commit_port(observer.clone());
+                let result = if tool == "edit" {
+                    execute_edit(&args, &invocation)
+                } else {
+                    execute_write(&args, &invocation)
+                };
+                assert_eq!(*observer.calls.lock().unwrap(), 1);
+                assert_eq!(result.is_err(), fail);
+                let expected = if fail {
+                    b"before\n".as_slice()
+                } else {
+                    b"after\n".as_slice()
+                };
+                assert_eq!(fs::read(&target).unwrap(), expected);
+                drop(
+                    acquire_file_write_lease(&identity, "competitor")
+                        .expect("guard released after return"),
+                );
+            }
+            fs::remove_file(&target).unwrap();
+            fs::remove_dir(&root).unwrap();
+        }
+    }
+
+    #[test]
+    fn file_tools_do_not_require_a_prior_read_or_reject_unrelated_changes() {
+        for tool in ["edit", "write"] {
+            let root = std::env::temp_dir().join(format!(
+                "centaeris-simple-{tool}-{}-{}",
+                std::process::id(),
+                crate::runtime::contracts::current_timestamp_ms()
+            ));
+            fs::create_dir_all(&root).unwrap();
+            let target = root.join("file.txt");
+            fs::write(&target, "before\nunchanged\n").unwrap();
+            let context = context_with_file_mutation_commit(
+                ToolRuntimeContext::with_cwd(root.clone()).unwrap(),
+                "simple-call",
+                tool,
+            );
+            let args = if tool == "edit" {
+                json!({"path":"file.txt", "edits":[{"old_text":"before", "new_text":"after"}]})
+            } else {
+                json!({"path":"file.txt", "content":"after\n"})
+            }
+            .to_string();
+            let invoke = || {
+                if tool == "edit" {
+                    execute_edit(&args, &context)
+                } else {
+                    execute_write(&args, &context)
+                }
+            };
+            invoke().expect("no previous read required");
+            ReadToolHandler::new()
+                .invoke(r#"{"path":"file.txt"}"#, &context)
+                .unwrap();
+            fs::write(&target, "before\nexternal change\n").unwrap();
+            invoke().expect("a previous observation does not lock the version");
+            assert_eq!(
+                fs::read_to_string(&target).unwrap(),
+                if tool == "edit" {
+                    "after\nexternal change\n"
+                } else {
+                    "after\n"
+                }
+            );
+            fs::remove_file(target).unwrap();
+            fs::remove_dir(root).unwrap();
+        }
     }
 
     fn test_path_identity(path: &std::path::Path) -> String {
@@ -658,45 +790,6 @@ mod tests {
     }
 
     #[test]
-    fn write_tool_requires_read_snapshot_when_overwriting_existing_file() {
-        let workspace_root = std::env::temp_dir().join(format!(
-            "centaeris-write-stale-guard-workspace-{}",
-            crate::runtime::contracts::current_timestamp_ms()
-        ));
-        fs::create_dir_all(workspace_root.as_path()).expect("create workspace root");
-        let workspace_root = workspace_root
-            .canonicalize()
-            .expect("canonicalize workspace root");
-        fs::write(workspace_root.join("existing.txt"), "original").expect("write existing file");
-        let runtime_context = context_with_file_mutation_commit(
-            ToolRuntimeContext::with_cwd(workspace_root.clone())
-                .expect("workspace root context")
-                .with_execution_owner("task-a"),
-            "call-write-stale-hash",
-            "write",
-        );
-
-        let error = execute_write(
-            json!({
-                "path": "existing.txt",
-                "content": "replacement"
-            })
-            .to_string()
-            .as_str(),
-            &runtime_context,
-        )
-        .expect_err("overwrite without a prior read should fail");
-
-        fs::remove_dir_all(workspace_root.as_path()).expect("cleanup workspace root");
-        assert!(error.content.contains("file mutation rejected"));
-        assert!(error.content.contains("read the existing file"));
-        assert!(error
-            .details
-            .to_string()
-            .contains("read snapshot is required"));
-    }
-
-    #[test]
     fn write_tool_does_not_apply_when_file_mutation_commit_fails() {
         let workspace_root = std::env::temp_dir().join(format!(
             "centaeris-write-commit-fail-workspace-{}",
@@ -734,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn write_tool_rejects_stale_read_snapshot_and_accepts_current_snapshot() {
+    fn write_tool_preserves_diff_and_commit_facts() {
         let workspace_root = std::env::temp_dir().join(format!(
             "centaeris-write-stale-hash-workspace-{}",
             crate::runtime::contracts::current_timestamp_ms()
@@ -745,36 +838,12 @@ mod tests {
             .expect("canonicalize workspace root");
         let target = workspace_root.join("existing.txt");
         fs::write(target.as_path(), "original").expect("write existing file");
-        let current_hash = test_file_hash(target.as_path());
         let commit_port = RecordingFileMutationCommitPort::shared();
         let runtime_context = ToolRuntimeContext::with_cwd(workspace_root.clone())
             .expect("workspace root context")
             .with_execution_owner("task-a")
             .with_tool_invocation("call-write-stale", "write")
             .with_file_mutation_commit_port(commit_port.clone());
-        runtime_context
-            .record_file_read_snapshot(test_path_identity(target.as_path()).as_str(), current_hash)
-            .expect("record initial read snapshot");
-        fs::write(target.as_path(), "external change").expect("mutate after read");
-
-        let error = execute_write(
-            json!({
-                "path": "existing.txt",
-                "content": "replacement"
-            })
-            .to_string()
-            .as_str(),
-            &runtime_context,
-        )
-        .expect_err("stale read snapshot should fail");
-        assert!(error.content.contains("changed since the last read"));
-
-        fs::write(target.as_path(), "original").expect("restore source");
-        let current_hash = test_file_hash(target.as_path());
-        runtime_context
-            .record_file_read_snapshot(test_path_identity(target.as_path()).as_str(), current_hash)
-            .expect("record current read snapshot");
-
         let output = execute_write(
             json!({
                 "path": "existing.txt",
@@ -784,7 +853,7 @@ mod tests {
             .as_str(),
             &runtime_context,
         )
-        .expect("current read snapshot should allow overwrite");
+        .expect("overwrite existing file");
         let payload = output.details;
         assert_eq!(payload.get("created").and_then(Value::as_bool), Some(false));
         assert_eq!(
@@ -894,48 +963,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_tool_requires_read_snapshot_for_update() {
-        let workspace_root = std::env::temp_dir().join(format!(
-            "centaeris-edit-missing-snapshot-workspace-{}",
-            crate::runtime::contracts::current_timestamp_ms()
-        ));
-        fs::create_dir_all(workspace_root.as_path()).expect("create workspace root");
-        let workspace_root = workspace_root
-            .canonicalize()
-            .expect("canonicalize workspace root");
-        fs::write(workspace_root.join("edit.txt"), "alpha\nbeta\n").expect("write source");
-        let runtime_context = context_with_file_mutation_commit(
-            ToolRuntimeContext::with_cwd(workspace_root.clone())
-                .expect("workspace root context")
-                .with_execution_owner("task-a"),
-            "call-edit-stale",
-            "edit",
-        );
-        let error = execute_edit(
-            json!({
-                "path": "edit.txt",
-                "edits": [{
-                    "old_text": "alpha\nbeta",
-                    "new_text": "alpha\nbravo"
-                }]
-            })
-            .to_string()
-            .as_str(),
-            &runtime_context,
-        )
-        .expect_err("edit without a prior read should fail");
-
-        fs::remove_dir_all(workspace_root.as_path()).expect("cleanup workspace root");
-        assert!(error.content.contains("file mutation rejected"));
-        assert!(error.content.contains("read the existing file"));
-        assert!(error
-            .details
-            .to_string()
-            .contains("read snapshot is required"));
-    }
-
-    #[test]
-    fn edit_tool_rejects_stale_read_snapshot_and_accepts_current_snapshot() {
+    fn edit_tool_rejects_missing_text_and_preserves_diff_facts() {
         let workspace_root = std::env::temp_dir().join(format!(
             "centaeris-edit-stale-snapshot-workspace-{}",
             crate::runtime::contracts::current_timestamp_ms()
@@ -946,7 +974,6 @@ mod tests {
             .expect("canonicalize workspace root");
         let target = workspace_root.join("edit.txt");
         fs::write(target.as_path(), "alpha\nbeta\n").expect("write source");
-        let current_hash = test_file_hash(target.as_path());
         let runtime_context = context_with_file_mutation_commit(
             ToolRuntimeContext::with_cwd(workspace_root.clone())
                 .expect("workspace root context")
@@ -954,9 +981,6 @@ mod tests {
             "call-edit-current-hash",
             "edit",
         );
-        runtime_context
-            .record_file_read_snapshot(test_path_identity(target.as_path()).as_str(), current_hash)
-            .expect("record initial read snapshot");
         fs::write(target.as_path(), "alpha\nexternal\n").expect("mutate after read");
         let error = execute_edit(
             json!({
@@ -970,14 +994,10 @@ mod tests {
             .as_str(),
             &runtime_context,
         )
-        .expect_err("stale read snapshot should fail");
-        assert!(error.content.contains("changed since the last read"));
+        .expect_err("changed target text should fail");
+        assert!(error.details.to_string().contains("edit_text_mismatch"));
 
         fs::write(target.as_path(), "alpha\nbeta\n").expect("restore edit source");
-        let current_hash = test_file_hash(target.as_path());
-        runtime_context
-            .record_file_read_snapshot(test_path_identity(target.as_path()).as_str(), current_hash)
-            .expect("record current read snapshot");
         let output = execute_edit(
             json!({
                 "path": "edit.txt",
@@ -990,7 +1010,7 @@ mod tests {
             .as_str(),
             &runtime_context,
         )
-        .expect("current read snapshot should allow edit");
+        .expect("matching current text should allow edit");
         let payload = output.details;
         assert_eq!(
             payload.get("schema").and_then(Value::as_str),
@@ -1024,16 +1044,12 @@ mod tests {
         let target = workspace_root.join("edit.txt");
         let original = "alpha\none\nmiddle\ntwo\nomega\n";
         fs::write(target.as_path(), original).expect("write source");
-        let current_hash = test_file_hash(target.as_path());
         let commit_port = RecordingFileMutationCommitPort::shared();
         let runtime_context = ToolRuntimeContext::with_cwd(workspace_root.clone())
             .expect("workspace root context")
             .with_execution_owner("task-a")
             .with_tool_invocation("call-edit-atomic", "edit")
             .with_file_mutation_commit_port(commit_port.clone());
-        runtime_context
-            .record_file_read_snapshot(test_path_identity(target.as_path()).as_str(), current_hash)
-            .expect("record read snapshot");
 
         let output = execute_edit(
             json!({
@@ -1075,16 +1091,12 @@ mod tests {
         let target = workspace_root.join("edit.txt");
         let original = "aaa alpha beta gamma delta delta\n";
         fs::write(target.as_path(), original).expect("write source");
-        let current_hash = test_file_hash(target.as_path());
         let commit_port = RecordingFileMutationCommitPort::shared();
         let runtime_context = ToolRuntimeContext::with_cwd(workspace_root.clone())
             .expect("workspace root context")
             .with_execution_owner("task-a")
             .with_tool_invocation("call-edit-atomic-reject", "edit")
             .with_file_mutation_commit_port(commit_port.clone());
-        runtime_context
-            .record_file_read_snapshot(test_path_identity(target.as_path()).as_str(), current_hash)
-            .expect("record read snapshot");
 
         let invalid_batches = [
             json!({
@@ -1238,7 +1250,6 @@ mod tests {
             .expect("canonicalize workspace root");
         let target = workspace_root.join("edit.txt");
         fs::write(target.as_path(), "alpha\nbeta\n").expect("write source");
-        let current_hash = test_file_hash(target.as_path());
         let runtime_context = context_with_file_mutation_commit(
             ToolRuntimeContext::with_cwd(workspace_root.clone())
                 .expect("workspace root context")
@@ -1246,9 +1257,6 @@ mod tests {
             "call-edit-text-mismatch",
             "edit",
         );
-        runtime_context
-            .record_file_read_snapshot(test_path_identity(target.as_path()).as_str(), current_hash)
-            .expect("record read snapshot");
 
         let error = execute_edit(
             json!({
