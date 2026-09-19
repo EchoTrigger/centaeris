@@ -739,3 +739,50 @@ pub struct InternalDiagnostic {
     pub raw_detail: Option<String>,
     pub created_at_ms: TimestampMs,
 }
+
+/// One execution fact a closure plan depends on. `receipt_present` records
+/// absence as well as presence, so a plan built before a real receipt arrived
+/// can be detected as stale at commit time instead of committing a synthetic
+/// closure over a real result.
+#[derive(Debug, Clone)]
+pub struct ClosureEvidencePreconditionV1 {
+    pub call_id: String,
+    pub source_turn_id: String,
+    pub intent_event_id: String,
+    pub receipt_event_id: Option<String>,
+    pub receipt_present: bool,
+    /// Deterministic id of the receipt event that would exist if execution had
+    /// completed. Populated when the plan read an intent without a receipt, so
+    /// the committing host can reject a stale plan if that receipt appears.
+    pub expected_receipt_event_id: Option<String>,
+    pub model_args_digest: String,
+}
+
+/// Session-level recovery fact that closes an unpaired tool call owned by an
+/// already-terminal AgentRun. `turn_id`/`agent_run_id` describe the original
+/// call owner; `trigger_*` only record who asked for the closure.
+#[derive(Debug, Clone)]
+pub struct UnpairedToolCallClosureV1 {
+    pub recovery: String,
+    pub session_id: String,
+    pub turn_id: String,
+    pub agent_run_id: String,
+    pub call: crate::model::ToolCallEnvelope,
+    pub result: crate::tool::layer::ToolExecutionResult,
+    pub call_event_id: Option<String>,
+    pub trigger_agent_run_id: String,
+    pub trigger_turn_id: String,
+}
+
+/// Read-only admission plan for starting a new user turn. It carries the
+/// session head and the execution-evidence preconditions the closures were
+/// computed against so the committing host can reject a stale plan.
+#[derive(Debug, Clone)]
+pub struct NewUserTurnClosurePlanV1 {
+    pub session_id: String,
+    pub expected_session_sequence: u64,
+    pub trigger_agent_run_id: String,
+    pub trigger_turn_id: String,
+    pub evidence_preconditions: Vec<ClosureEvidencePreconditionV1>,
+    pub closures: Vec<UnpairedToolCallClosureV1>,
+}
