@@ -18,6 +18,11 @@ for (const name of ["theme.ts", "useStreamPresentation.ts", "../public/theme-ini
   const contents = await Promise.all(sources.map((source) => readFile(path.join(source, name), "utf8")));
   assert.equal(contents[0].replaceAll("\r\n", "\n"), contents[1].replaceAll("\r\n", "\n"), `Client ${name} logic differs`);
 }
+for (const name of ["WorkProgress.tsx", "workDuration.ts"]) {
+  const contents = await Promise.all(sources.map((source, index) => readFile(path.join(source, index === 0 ? "components/chat" : "chat", name), "utf8")));
+  const normalize = (text) => text.replaceAll("\r\n", "\n").replace('"../../i18n"', '"../i18n"');
+  assert.equal(normalize(contents[0]), normalize(contents[1]), `Client ${name} logic differs`);
+}
 const inventories = await Promise.all(sources.map(async (source) => {
   const directory = path.join(source, "assets/fonts");
   const names = (await readdir(directory)).sort();

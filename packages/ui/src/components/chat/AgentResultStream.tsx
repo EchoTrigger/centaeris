@@ -1,3 +1,4 @@
+import { WorkProgress } from "./WorkProgress";
 import { useMemo } from "react";
 import {
   AgentFinalAnswer,
@@ -15,6 +16,7 @@ import type {
 
 export function AgentResultStream({
   turn,
+  showWorkProgress = true,
   onOpenAgentSession,
   onOpenWorkspacePath,
 }: AgentResultStreamProps) {
@@ -24,8 +26,8 @@ export function AgentResultStream({
     [chunks],
   );
   const finalItem = useMemo(
-    () => buildTranscriptFinalItem({ finalAnswer, id, isStreaming }),
-    [finalAnswer, id, isStreaming],
+    () => buildTranscriptFinalItem({ finalAnswer: isStreaming && !turn.finalAnswerConfirmed ? "" : finalAnswer, id, isStreaming: false }),
+    [finalAnswer, id, isStreaming, turn.finalAnswerConfirmed],
   );
   const subagents = useMemo(
     () => chunks
@@ -36,9 +38,8 @@ export function AgentResultStream({
   const hasRunningTool = chunks.some(
     (chunk) => chunk.kind === "task" && chunk.task.status === "running",
   );
-  return (
-    <div className="agentResultBash">
-      <div className="agentResultMain">
+  const isProcessDraft = isStreaming && !turn.finalAnswerConfirmed;
+  const process = <>
         <AgentProcessTranscript
           processTranscript={processTranscript}
           isStreaming={isStreaming}
@@ -53,11 +54,17 @@ export function AgentResultStream({
           subagents={subagents}
           onOpenAgentSession={onOpenAgentSession}
         />
-        <AgentFinalAnswer
-          finalItem={finalItem}
-          isStreaming={isStreaming}
-          onOpenWorkspacePath={onOpenWorkspacePath}
-        />
+  </>;
+  return (
+    <div className="agentResultBash">
+      <div className="agentResultMain">
+        {showWorkProgress ? <WorkProgress running={isStreaming} finalStarted={Boolean(finalItem) && !isProcessDraft}
+          startedAtMs={turn.startedAtMs} completedAtMs={turn.completedAtMs}
+          responseIsProcess={isProcessDraft}
+          response={<AgentFinalAnswer finalItem={finalItem} isStreaming={false} onOpenWorkspacePath={onOpenWorkspacePath} />}>
+          {process}
+        </WorkProgress> : <>{process}<AgentFinalAnswer finalItem={finalItem} isStreaming={false} onOpenWorkspacePath={onOpenWorkspacePath} /></>}
+
       </div>
     </div>
   );

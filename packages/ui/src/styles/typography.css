@@ -17,5 +17,12 @@
   --reasoning-label: var(--process-text, #6b6b6b);
   --reasoning-scroll-thumb: color-mix(in srgb, var(--on-surface-variant) 40%, var(--surface-color));
 }
-.reasoningPreview { display: flex; justify-content: flex-end; flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; color: var(--reasoning-text);  }
+.reasoningPreview { display: flex; justify-content: flex-end; flex: 1; min-width: 0; overflow: hidden; contain: paint; white-space: nowrap; color: var(--reasoning-text);  }
 .reasoningPreviewText { margin-left: 0; flex: none; min-width: 100%; width: max-content; text-align: left; }
+
+.workProgress { min-width: 0; }
+.workProgressStatus { padding: 8px 0; color: var(--reasoning-text); }
+.workProgressSummary { display: flex; align-items: center; gap: 6px; width: 100%; padding: 8px 0; border: 0; border-bottom: 1px solid var(--outline-variant); border-radius: 0; background: transparent; color: var(--reasoning-text); font: inherit; text-align: left; cursor: pointer; }
+.workProgressSummary svg { width: 14px; height: 14px; flex: none; }
+.workProgressSummary svg.isExpanded { transform: rotate(90deg); }
+.workProgressBody { display: grid; gap: 18px; min-width: 0; padding-top: 12px; }

@@ -331,7 +331,7 @@ test("shows live status only when no running tool or final answer supersedes it"
   await act(async () => {
     renderer.update(<AgentResultStream turn={{
       ...baseTurn,
-      finalAnswer: "Final answer",
+      finalAnswer: "Final answer", finalAnswerConfirmed: true,
     }} />);
   });
   const withFinal = JSON.stringify(renderer.toJSON());
@@ -360,7 +360,7 @@ test("opens a durable subagent session with its visible title", async () => {
   });
 
   expect(findText(renderer, "Investigate renderer")).toBeDefined();
-  await click(renderer.root.findByType("button"));
+  await click(renderer.root.findAllByType("button").find((button) => button.props.className !== "workProgressSummary")!);
   expect(onOpenAgentSession).toHaveBeenCalledWith(
     "session-child",
     "Investigate renderer",
@@ -369,14 +369,14 @@ test("opens a durable subagent session with its visible title", async () => {
   await act(async () => renderer.unmount());
 });
 
-test("stream completion preserves the final Markdown subtree", async () => {
+test("completion displays the buffered final once without remounting it", async () => {
   const streamingTurn = makeTurn({
     finalAnswer: "Stable answer",
     isStreaming: true,
   });
   const renderer = await renderStream({ turn: streamingTurn });
-  expect(harness.markdownMounts).toBe(1);
-  expect(harness.markdownStreamingStates).toEqual([true]);
+  expect(harness.markdownMounts).toBe(0);
+  expect(harness.markdownStreamingStates).toEqual([]);
 
   await act(async () => {
     renderer.update(<AgentResultStream turn={{
@@ -386,7 +386,7 @@ test("stream completion preserves the final Markdown subtree", async () => {
   });
   expect(harness.markdownMounts).toBe(1);
   expect(harness.markdownUnmounts).toBe(0);
-  expect(harness.markdownStreamingStates).toEqual([true, false]);
+  expect(harness.markdownStreamingStates).toEqual([false]);
 
   await act(async () => renderer.unmount());
   expect(harness.markdownUnmounts).toBe(1);
@@ -396,7 +396,7 @@ test("terminal text reuses the presentation mounted before the first live text",
   const streamingTurn = makeTurn({ isStreaming: true });
   const renderer = await renderStream({ turn: streamingTurn });
   expect(harness.presentationMounts).toBe(1);
-  expect(harness.presentationStreamingStates).toEqual([true]);
+  expect(harness.presentationStreamingStates).toEqual([false]);
   expect(harness.markdownMounts).toBe(0);
 
   await act(async () => {
@@ -409,7 +409,7 @@ test("terminal text reuses the presentation mounted before the first live text",
 
   expect(harness.presentationMounts).toBe(1);
   expect(harness.presentationUnmounts).toBe(0);
-  expect(harness.presentationStreamingStates).toEqual([true, false]);
+  expect(harness.presentationStreamingStates).toEqual([false, false]);
   expect(harness.markdownMounts).toBe(1);
 
   await act(async () => renderer.unmount());
@@ -424,9 +424,11 @@ test("final answer deltas do not rerender an unchanged process transcript", asyn
   const initialTurn = makeTurn({
     chunks: [processChunk],
     finalAnswer: "Answer one",
+    finalAnswerConfirmed: true,
     isStreaming: true,
   });
   const renderer = await renderStream({ turn: initialTurn });
+  await click(renderer.root.findByProps({ className: "workProgressSummary" }));
   expect(harness.markdownRendersByText.get("Stable process note")).toBe(1);
 
   await act(async () => {
@@ -444,6 +446,7 @@ test("process updates do not rerender an unchanged final answer", async () => {
   const initialTurn = makeTurn({
     chunks: [{ id: "process", kind: "narrative", text: "Process one" }],
     finalAnswer: "Stable final answer",
+    finalAnswerConfirmed: true,
     isStreaming: true,
   });
   const renderer = await renderStream({ turn: initialTurn });
@@ -457,5 +460,20 @@ test("process updates do not rerender an unchanged final answer", async () => {
   });
   expect(harness.markdownRendersByText.get("Stable final answer")).toBe(1);
 
+  await act(async () => renderer.unmount());
+});
+
+
+test("unclassified text stays buffered until the runtime confirms final", async () => {
+  const turn = makeTurn({ finalAnswer: "Final response", isStreaming: true });
+  const renderer = await renderStream({ turn });
+  expect(JSON.stringify(renderer.toJSON())).not.toContain("Final response");
+  expect(renderer.root.findAllByProps({ className: "workProgressSummary" })).toHaveLength(0);
+  await act(async () => renderer.update(<AgentResultStream turn={{ ...turn, finalAnswerConfirmed: true }} />));
+  expect(JSON.stringify(renderer.toJSON())).toContain("Final response");
+  expect(renderer.root.findByProps({ className: "workProgressSummary" }).props["aria-expanded"]).toBe(false);
+  expect(renderer.root.findAllByProps({ className: "agentAssistantAnswer answerMarkdownBlock" })).toHaveLength(1);
+  expect(harness.markdownMounts).toBe(1);
+  expect(harness.markdownStreamingStates).toEqual([false]);
   await act(async () => renderer.unmount());
 });
