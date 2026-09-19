@@ -72,6 +72,7 @@ pub use self::subagent_runner::{
     ModelClientSubagentRunner, QueryLifecycleSubagentObserver, ToolSafePointCommitPort,
 };
 use self::text_preview::*;
+pub use self::tool_execution::{TOOL_EXECUTION_INTENT_SCHEMA_V1, TOOL_EXECUTION_RECEIPT_SCHEMA_V1};
 pub use self::tool_observability::project_tool_operations_json;
 use self::tool_observability::*;
 
@@ -861,6 +862,60 @@ pub fn canonical_tool_result_record(
             &[session_id, turn_id, result.tool_call_id.as_str()],
         ),
         SessionRecordType::ToolResult,
+        session_id,
+        Some(turn_id.to_string()),
+        Some(agent_run_id.to_string()),
+        completed_at_ms,
+        payload,
+    )
+}
+
+/// Builds the session-level recovery fact that closes a tool call whose owning
+/// AgentRun is already terminal. Its event identity is derived from the original
+/// call, so repeated admission attempts share one durable closure.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "closure record keeps original call ownership and trigger identity explicit"
+)]
+pub fn canonical_tool_call_closure_record(
+    session_id: &str,
+    turn_id: &str,
+    agent_run_id: &str,
+    call: &ToolCallEnvelope,
+    result: &ToolExecutionResult,
+    recovery: &str,
+    call_event_id: Option<&str>,
+    trigger_agent_run_id: &str,
+    trigger_turn_id: &str,
+    created_at_ms: i64,
+) -> Result<SessionLogRecord, String> {
+    if !matches!(recovery, "receipt" | "not_executed" | "indeterminate") {
+        return Err(format!(
+            "tool_call_closure recovery must be receipt, not_executed or indeterminate: {recovery}"
+        ));
+    }
+    let mut payload = canonical_tool_result_payload(call, result)?;
+    let object = payload
+        .as_object_mut()
+        .ok_or_else(|| "tool_call_closure payload must be an object".to_string())?;
+    object.insert("recovery".to_string(), json!(recovery));
+    object.insert(
+        "callEventId".to_string(),
+        call_event_id.map_or(Value::Null, |value| json!(value)),
+    );
+    object.insert("triggerAgentRunId".to_string(), json!(trigger_agent_run_id));
+    object.insert("triggerTurnId".to_string(), json!(trigger_turn_id));
+    let completed_at_ms = if result.completed_at_ms > 0 {
+        result.completed_at_ms
+    } else {
+        created_at_ms
+    };
+    canonical_session_record(
+        events::stable_session_event_id(
+            "tool_call_closure",
+            &[session_id, agent_run_id, result.tool_call_id.as_str()],
+        ),
+        SessionRecordType::ToolCallClosure,
         session_id,
         Some(turn_id.to_string()),
         Some(agent_run_id.to_string()),
