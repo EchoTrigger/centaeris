@@ -11,8 +11,8 @@ use crate::extension::hooks::{
 };
 use sha2::{Digest, Sha256};
 
-const TOOL_EXECUTION_INTENT_SCHEMA_V1: &str = "tool_execution.intent.v1";
-const TOOL_EXECUTION_RECEIPT_SCHEMA_V1: &str = "tool_execution.receipt.v1";
+pub const TOOL_EXECUTION_INTENT_SCHEMA_V1: &str = "tool_execution.intent.v1";
+pub const TOOL_EXECUTION_RECEIPT_SCHEMA_V1: &str = "tool_execution.receipt.v1";
 const POST_TOOL_HOOK_INTENT_SCHEMA_V1: &str = "post_tool_hook.intent.v1";
 const POST_TOOL_HOOK_RECEIPT_SCHEMA_V1: &str = "post_tool_hook.receipt.v1";
 const AGENT_TOOL_RESULT_SCHEMA_V1: &str = "agent_tool_result_v1";
@@ -233,7 +233,7 @@ pub(super) struct ToolExecutionReceiptV1 {
 }
 
 impl ToolExecutionReceiptV1 {
-    fn decode_result(&self) -> Result<ToolExecutionResult, String> {
+    pub(super) fn decode_result(&self) -> Result<ToolExecutionResult, String> {
         serde_json::from_str(self.result_json.as_str())
             .map_err(|error| format!("decode tool execution receipt result failed: {error}"))
     }
@@ -416,7 +416,7 @@ fn lifecycle_hook_post_tool_payload(
     })
 }
 
-fn sha256_digest(value: &[u8]) -> String {
+pub(super) fn sha256_digest(value: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(value))
 }
 
@@ -429,7 +429,11 @@ fn tool_execution_intent_event_id(session_id: &str, turn_id: &str, tool_call_id:
     tool_fact_event_id("tool_execution.intent", session_id, turn_id, tool_call_id)
 }
 
-fn tool_execution_receipt_event_id(session_id: &str, turn_id: &str, tool_call_id: &str) -> String {
+pub(super) fn tool_execution_receipt_event_id(
+    session_id: &str,
+    turn_id: &str,
+    tool_call_id: &str,
+) -> String {
     tool_fact_event_id("tool_execution.receipt", session_id, turn_id, tool_call_id)
 }
 
@@ -461,7 +465,9 @@ fn internal_tool_fact_event<T: Serialize>(
     })
 }
 
-fn indeterminate_tool_execution_result(intent: &ToolExecutionIntentV1) -> ToolExecutionResult {
+pub(super) fn indeterminate_tool_execution_result(
+    intent: &ToolExecutionIntentV1,
+) -> ToolExecutionResult {
     let at_ms = now_ms();
     ToolExecutionResult {
         tool_call_id: intent.tool_call_id.clone(),
@@ -532,6 +538,17 @@ fn unstarted_session_tool_execution_result(
         parallel_group: None,
         transition_reason: Some("agent_run_interrupted_before_tool_execution".to_string()),
     }
+}
+
+/// Read-only snapshot of the durable execution facts for one unpaired tool call.
+/// Building it performs no writes; callers decide what to persist.
+pub(super) struct UnpairedToolCallEvidenceV1 {
+    pub intent: ToolExecutionIntentV1,
+    pub source_turn_id: String,
+    pub effective_call: ToolCallEnvelope,
+    pub receipt: Option<ToolExecutionReceiptV1>,
+    pub intent_event_id: String,
+    pub receipt_event_id: Option<String>,
 }
 
 impl<
@@ -728,14 +745,17 @@ impl<
         Ok(facts)
     }
 
-    pub(super) fn recover_interrupted_tool_execution_result(
+    /// Reads the durable execution facts for an unpaired call without writing
+    /// anything. Returns `None` when the call never reached the execution host.
+    pub(super) fn read_unpaired_tool_call_evidence(
         &self,
         session_id: &str,
         call: &crate::runtime::contracts::ToolCall,
-    ) -> Result<Option<(ToolExecutionIntentV1, ToolCallEnvelope, ToolExecutionResult)>, String>
-    {
+    ) -> Result<Option<UnpairedToolCallEvidenceV1>, String> {
         const PAGE_SIZE: usize = 256;
         let mut source_turn_id = None;
+        let mut intent_event_id: Option<String> = None;
+        let mut receipt_event_id: Option<String> = None;
         let mut offset = 0usize;
         loop {
             let events = self
@@ -770,6 +790,15 @@ impl<
                 };
                 if tool_call_id != call.tool_call_id {
                     continue;
+                }
+                match event.event_type.as_str() {
+                    TOOL_EXECUTION_INTENT_SCHEMA_V1 => {
+                        intent_event_id = Some(event.event_id.clone());
+                    }
+                    TOOL_EXECUTION_RECEIPT_SCHEMA_V1 => {
+                        receipt_event_id = Some(event.event_id.clone());
+                    }
+                    _ => unreachable!("filtered tool execution fact type"),
                 }
                 if source_turn_id
                     .replace(turn_id.clone())
@@ -815,29 +844,66 @@ impl<
                 call.tool_call_id
             ));
         }
-        let model_call = ToolCallEnvelope {
+        let effective_call = ToolCallEnvelope {
             id: call.tool_call_id.clone(),
             name: intent.source_tool_name.clone(),
             args_json: intent.effective_args_json.clone(),
         };
-        if let Some(receipt) = facts.receipts.get(call.tool_call_id.as_str()) {
+        let receipt = facts.receipts.remove(call.tool_call_id.as_str());
+        Ok(Some(UnpairedToolCallEvidenceV1 {
+            intent,
+            source_turn_id,
+            effective_call,
+            receipt,
+            intent_event_id: intent_event_id.ok_or_else(|| {
+                format!(
+                    "tool execution intent record missing for callId={}",
+                    call.tool_call_id
+                )
+            })?,
+            receipt_event_id,
+        }))
+    }
+
+    pub(super) fn recover_interrupted_tool_execution_result(
+        &self,
+        session_id: &str,
+        call: &crate::runtime::contracts::ToolCall,
+    ) -> Result<Option<(ToolExecutionIntentV1, ToolCallEnvelope, ToolExecutionResult)>, String>
+    {
+        let Some(evidence) = self.read_unpaired_tool_call_evidence(session_id, call)? else {
+            return Ok(None);
+        };
+        let UnpairedToolCallEvidenceV1 {
+            intent,
+            source_turn_id,
+            effective_call,
+            receipt,
+            ..
+        } = evidence;
+        if let Some(receipt) = receipt {
             return receipt
                 .decode_result()
-                .map(|result| Some((intent, model_call, result)));
+                .map(|result| Some((intent, effective_call, result)));
         }
+        let mut facts = Self::load_tool_execution_facts(
+            &self.runtime_store,
+            session_id,
+            source_turn_id.as_str(),
+        )?;
         let result = indeterminate_tool_execution_result(&intent);
         let result = self.persist_tool_execution_receipt(
             &mut facts,
             session_id,
             source_turn_id.as_str(),
-            &model_call,
-            &model_call,
+            &effective_call,
+            &effective_call,
             &[],
             false,
             result,
             None,
         )?;
-        Ok(Some((intent, model_call, result)))
+        Ok(Some((intent, effective_call, result)))
     }
 
     pub fn recover_incomplete_session_tool_call(
