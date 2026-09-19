@@ -785,53 +785,23 @@ impl<
                 continue;
             }
             let call = open_call_by_id.get(tool_call_id).cloned().unwrap_or(None);
-            let tool_name = call
-                .as_ref()
-                .map(|call| call.tool_name.clone())
-                .unwrap_or_else(|| "unknown".to_string());
             let permission = call.as_ref().map(|call| {
                 self.evaluate_tool_permission_decision(
                     call.tool_name.as_str(),
                     Some(call.args_json.as_str()),
                 )
             });
-            let normalized_input = permission
-                .as_ref()
-                .map(|decision| json!(decision.normalized_input))
-                .unwrap_or(Value::Null);
-            let permission_decision = permission
-                .as_ref()
-                .map(PermissionDecision::audit_json)
-                .unwrap_or(Value::Null);
-            result_by_call_id.insert(tool_call_id.clone(), ToolExecutionResult {
-                tool_call_id: tool_call_id.clone(),
-                tool_name: tool_name.clone(),
-                status: "blocked".to_string(),
-                content: "The previous unpaired tool call was closed before execution; it was not replayed.".to_string(),
-                details: json!({
-                    "schema": "tool_result_tombstone_v1",
-                    "status": "blocked",
-                    "reason": "unpaired_tool_call_closed_by_new_user_turn",
-                    "message": "The previous tool call had no recorded tool result before a new user turn started; the tool call was not executed by this recovery step.",
-                    "sessionId": session_id,
-                    "turnId": turn_id,
-                    "toolCallId": tool_call_id,
-                    "toolName": tool_name,
-                    "normalizedInput": normalized_input,
-                    "permissionDecision": permission_decision,
-                }),
-                facts: Vec::new(),
-                error: Some(ToolErrorInfo::new(
-                    ToolFailureKind::Cancelled,
-                    "unpaired tool call closed before execution",
-                    "Unpaired tool call closed before execution",
-                )),
-                started_at_ms: now,
-                completed_at_ms: now,
-                latency_ms: 0,
-                parallel_group: None,
-                transition_reason: Some("unpaired_tool_call_closed_by_new_user_turn".to_string()),
-            });
+            result_by_call_id.insert(
+                tool_call_id.clone(),
+                unpaired_tool_call_closed_result(
+                    session_id,
+                    turn_id,
+                    tool_call_id,
+                    call.as_ref(),
+                    permission.as_ref(),
+                    now,
+                ),
+            );
         }
         let results = open_tool_call_ids
             .iter()
@@ -846,6 +816,212 @@ impl<
             results.as_slice(),
         )?;
         Ok(summary.tool_messages_written)
+    }
+
+    /// Read-only admission plan for starting a new user turn. It rebuilds the
+    /// durable history, finds trailing unpaired tool calls, reads their
+    /// execution evidence, and decides how each one closes. It writes nothing:
+    /// no receipt, no session record, no runtime event, no clock, no random
+    /// identity.
+    pub fn plan_new_user_turn_closures(
+        &self,
+        session_id: &str,
+        session_records: &[crate::session::SessionLogRecord],
+        trigger_agent_run_id: &str,
+        trigger_turn_id: &str,
+        expected_session_sequence: u64,
+        now_ms: i64,
+    ) -> Result<crate::runtime::contracts::NewUserTurnClosurePlanV1, String> {
+        let snapshot = crate::session::restore_runtime_snapshot_from_session_records(
+            session_id,
+            session_records,
+        )?;
+        let open_tool_call_ids =
+            crate::runtime::context_window::trailing_unpaired_model_tool_call_ids(
+                snapshot.messages.as_slice(),
+                &snapshot.model_semantics,
+            )?;
+        let mut evidence_preconditions = Vec::new();
+        let mut closures = Vec::new();
+        for tool_call_id in &open_tool_call_ids {
+            let call = find_model_assistant_semantics_tool_call(&snapshot, tool_call_id.as_str())
+                .ok_or_else(|| {
+                format!("trailing unpaired tool call {tool_call_id} has no assistant semantics")
+            })?;
+            let (original_agent_run_id, original_turn_id, call_event_id) =
+                locate_tool_call_record(session_records, tool_call_id.as_str())?;
+            let evidence = self.read_unpaired_tool_call_evidence(session_id, &call)?;
+            let effective_call = evidence
+                .as_ref()
+                .map(|evidence| evidence.effective_call.clone())
+                .unwrap_or_else(|| crate::model::ToolCallEnvelope {
+                    id: call.tool_call_id.clone(),
+                    name: call.tool_name.clone(),
+                    args_json: call.args_json.clone(),
+                });
+            let model_args_digest = super::tool_execution::sha256_digest(call.args_json.as_bytes());
+            let precondition = match evidence.as_ref() {
+                Some(evidence) => crate::runtime::contracts::ClosureEvidencePreconditionV1 {
+                    call_id: tool_call_id.clone(),
+                    source_turn_id: evidence.source_turn_id.clone(),
+                    intent_event_id: evidence.intent_event_id.clone(),
+                    receipt_event_id: evidence.receipt_event_id.clone(),
+                    receipt_present: evidence.receipt.is_some(),
+                    expected_receipt_event_id: evidence.receipt.is_none().then(|| {
+                        super::tool_execution::tool_execution_receipt_event_id(
+                            session_id,
+                            evidence.source_turn_id.as_str(),
+                            tool_call_id.as_str(),
+                        )
+                    }),
+                    model_args_digest,
+                },
+                None => crate::runtime::contracts::ClosureEvidencePreconditionV1 {
+                    call_id: tool_call_id.clone(),
+                    source_turn_id: original_turn_id.clone(),
+                    intent_event_id: String::new(),
+                    receipt_event_id: None,
+                    receipt_present: false,
+                    expected_receipt_event_id: None,
+                    model_args_digest,
+                },
+            };
+            let (recovery, result) = match evidence.as_ref() {
+                Some(evidence) if evidence.receipt.is_some() => {
+                    let result = evidence
+                        .receipt
+                        .as_ref()
+                        .expect("checked receipt")
+                        .decode_result()?;
+                    ("receipt".to_string(), result)
+                }
+                Some(evidence) => (
+                    "indeterminate".to_string(),
+                    super::tool_execution::indeterminate_tool_execution_result(&evidence.intent),
+                ),
+                None => {
+                    let permission = self.evaluate_tool_permission_decision(
+                        call.tool_name.as_str(),
+                        Some(call.args_json.as_str()),
+                    );
+                    (
+                        "not_executed".to_string(),
+                        unpaired_tool_call_closed_result(
+                            session_id,
+                            trigger_turn_id,
+                            tool_call_id.as_str(),
+                            Some(&call),
+                            Some(&permission),
+                            now_ms,
+                        ),
+                    )
+                }
+            };
+            evidence_preconditions.push(precondition);
+            closures.push(crate::runtime::contracts::UnpairedToolCallClosureV1 {
+                recovery,
+                session_id: session_id.to_string(),
+                turn_id: original_turn_id,
+                agent_run_id: original_agent_run_id,
+                call: effective_call,
+                result,
+                call_event_id,
+                trigger_agent_run_id: trigger_agent_run_id.to_string(),
+                trigger_turn_id: trigger_turn_id.to_string(),
+            });
+        }
+        Ok(crate::runtime::contracts::NewUserTurnClosurePlanV1 {
+            session_id: session_id.to_string(),
+            expected_session_sequence,
+            trigger_agent_run_id: trigger_agent_run_id.to_string(),
+            trigger_turn_id: trigger_turn_id.to_string(),
+            evidence_preconditions,
+            closures,
+        })
+    }
+}
+
+fn locate_tool_call_record(
+    session_records: &[crate::session::SessionLogRecord],
+    tool_call_id: &str,
+) -> Result<(String, String, Option<String>), String> {
+    let mut found: Option<(String, String, String)> = None;
+    for record in session_records {
+        if record.event_type != crate::session::SessionRecordType::ToolCall {
+            continue;
+        }
+        if record.payload.get("callId").and_then(Value::as_str) != Some(tool_call_id) {
+            continue;
+        }
+        let agent_run_id = record
+            .agent_run_id
+            .clone()
+            .ok_or_else(|| format!("tool_call {tool_call_id} record has no agentRunId"))?;
+        let turn_id = record
+            .turn_id
+            .clone()
+            .ok_or_else(|| format!("tool_call {tool_call_id} record has no turnId"))?;
+        if let Some((existing_run, existing_turn, _)) = found.as_ref() {
+            if existing_run != &agent_run_id || existing_turn != &turn_id {
+                return Err(format!(
+                    "tool_call {tool_call_id} identity is ambiguous across session records"
+                ));
+            }
+        }
+        found = Some((agent_run_id, turn_id, record.event_id.clone()));
+    }
+    found
+        .map(|(agent_run_id, turn_id, event_id)| (agent_run_id, turn_id, Some(event_id)))
+        .ok_or_else(|| format!("tool_call {tool_call_id} has no durable session record"))
+}
+
+fn unpaired_tool_call_closed_result(
+    session_id: &str,
+    trigger_turn_id: &str,
+    tool_call_id: &str,
+    call: Option<&crate::runtime::contracts::ToolCall>,
+    permission: Option<&PermissionDecision>,
+    now_ms: i64,
+) -> ToolExecutionResult {
+    let tool_name = call
+        .map(|call| call.tool_name.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let normalized_input = permission
+        .map(|decision| json!(decision.normalized_input))
+        .unwrap_or(Value::Null);
+    let permission_decision = permission
+        .map(PermissionDecision::audit_json)
+        .unwrap_or(Value::Null);
+    ToolExecutionResult {
+        tool_call_id: tool_call_id.to_string(),
+        tool_name: tool_name.clone(),
+        status: "blocked".to_string(),
+        content:
+            "The previous unpaired tool call was closed before execution; it was not replayed."
+                .to_string(),
+        details: json!({
+            "schema": "tool_result_tombstone_v1",
+            "status": "blocked",
+            "reason": "unpaired_tool_call_closed_by_new_user_turn",
+            "message": "The previous tool call had no recorded tool result before a new user turn started; the tool call was not executed by this recovery step.",
+            "sessionId": session_id,
+            "turnId": trigger_turn_id,
+            "toolCallId": tool_call_id,
+            "toolName": tool_name,
+            "normalizedInput": normalized_input,
+            "permissionDecision": permission_decision,
+        }),
+        facts: Vec::new(),
+        error: Some(ToolErrorInfo::new(
+            ToolFailureKind::Cancelled,
+            "unpaired tool call closed before execution",
+            "Unpaired tool call closed before execution",
+        )),
+        started_at_ms: now_ms,
+        completed_at_ms: now_ms,
+        latency_ms: 0,
+        parallel_group: None,
+        transition_reason: Some("unpaired_tool_call_closed_by_new_user_turn".to_string()),
     }
 }
 

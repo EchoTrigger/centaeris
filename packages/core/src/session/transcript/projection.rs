@@ -648,7 +648,7 @@ impl TranscriptProjectorV1 {
                 );
                 Some(block)
             }
-            SessionRecordType::ToolResult => {
+            SessionRecordType::ToolResult | SessionRecordType::ToolCallClosure => {
                 let call_id = payload_string(payload, "callId")?;
                 let tool_name = payload_string(payload, "toolName")?;
                 let tool = self.tools.get(call_id.as_str()).cloned().ok_or_else(|| {
@@ -681,10 +681,22 @@ impl TranscriptProjectorV1 {
                     .get("outputByteLength")
                     .and_then(|value| value.as_u64())
                     .expect("validated outputByteLength");
-                let output_ref = (output_byte_length > 0).then(|| TranscriptContentRefV1 {
-                    ref_id: format!("tool-output:{call_id}"),
-                    revision: revision.to_string(),
-                    byte_length: output_byte_length.to_string(),
+                let output_ref = (output_byte_length > 0).then(|| {
+                    if event.event_type == SessionRecordType::ToolCallClosure {
+                        // A closure has no durable tool_result row, so its
+                        // displayable text resolves through the session event.
+                        TranscriptContentRefV1 {
+                            ref_id: format!("session-event:{}:modelContent", event.event_id),
+                            revision: "1".to_string(),
+                            byte_length: output_byte_length.to_string(),
+                        }
+                    } else {
+                        TranscriptContentRefV1 {
+                            ref_id: format!("tool-output:{call_id}"),
+                            revision: revision.to_string(),
+                            byte_length: output_byte_length.to_string(),
+                        }
+                    }
                 });
                 self.tools.remove(call_id.as_str());
                 let (summary, summary_ref) = bounded_text(

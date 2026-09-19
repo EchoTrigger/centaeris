@@ -75,7 +75,7 @@ impl TranscriptContentRangeReadRequestV1 {
         require_identifier(event_id, "transcript content eventId")?;
         if !matches!(
             field,
-            "text" | "modelMarkdown" | "displayTarget" | "summary" | "message"
+            "text" | "modelMarkdown" | "displayTarget" | "summary" | "message" | "modelContent"
         ) {
             return Err("transcript content range field is unsupported".to_string());
         }
@@ -98,6 +98,7 @@ pub fn transcript_event_content_range(
         SessionRecordType::AssistantMessage => "modelMarkdown",
         SessionRecordType::ToolCall => "displayTarget",
         SessionRecordType::ToolResult => "summary",
+        SessionRecordType::ToolCallClosure => "modelContent",
         SessionRecordType::PhaseEvent => "message",
         _ => return Err("transcript source has no visible text".to_string()),
     };
@@ -252,6 +253,14 @@ mod tests {
         let mut unsupported = request.clone();
         unsupported.ref_id = "session-event:event-1:privateField".to_string();
         assert!(unsupported.validate().is_err());
+        // A tool_call_closure exposes its model-visible text through the session
+        // event reference, since it has no durable tool_result row.
+        let mut closure_ref = request.clone();
+        closure_ref.ref_id = "session-event:event-1:modelContent".to_string();
+        closure_ref.revision = "1".to_string();
+        closure_ref
+            .validate()
+            .expect("closure model content reference must be readable");
         let mut oversized = request;
         oversized.max_bytes = TRANSCRIPT_CONTENT_RANGE_MAX_BYTES as u32 + 1;
         assert!(oversized.validate().is_err());

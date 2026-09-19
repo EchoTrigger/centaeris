@@ -117,6 +117,7 @@ pub enum SessionRecordType {
     AssistantMessage,
     ToolCall,
     ToolResult,
+    ToolCallClosure,
     ModelRequestStarted,
     ReasoningBlock,
     ProviderUsage,
@@ -150,6 +151,7 @@ impl SessionRecordType {
             "assistant_message",
             "tool_call",
             "tool_result",
+            "tool_call_closure",
             "model_request_started",
             "reasoning_block",
             "provider_usage",
@@ -179,6 +181,7 @@ impl SessionRecordType {
             Self::AssistantMessage => "assistant_message",
             Self::ToolCall => "tool_call",
             Self::ToolResult => "tool_result",
+            Self::ToolCallClosure => "tool_call_closure",
             Self::ModelRequestStarted => "model_request_started",
             Self::ReasoningBlock => "reasoning_block",
             Self::ProviderUsage => "provider_usage",
@@ -1574,6 +1577,7 @@ pub fn session_record_projects_to_agent_run_stream(event_type: SessionRecordType
         | SessionRecordType::ModelRequestStarted
         | SessionRecordType::ProviderUsage
         | SessionRecordType::CheckpointRef
+        | SessionRecordType::ToolCallClosure
         | SessionRecordType::FileFact => false,
     }
 }
@@ -1645,7 +1649,7 @@ fn committed_runtime_projection(
             Some(required_payload_string(payload_object, "toolName", record)?.to_string()),
             record.payload.clone(),
         ),
-        SessionRecordType::ToolResult => {
+        SessionRecordType::ToolResult | SessionRecordType::ToolCallClosure => {
             let result_state = parse_result_state(payload_object, record)?;
             (
                 "ToolResult",
@@ -2042,6 +2046,7 @@ pub fn validate_event_shape(event: &SessionLogRecord) -> Result<(), String> {
         SessionRecordType::AssistantMessage => validate_assistant_message(event),
         SessionRecordType::ToolCall => validate_tool_call(event),
         SessionRecordType::ToolResult => validate_tool_result(event),
+        SessionRecordType::ToolCallClosure => validate_tool_call_closure(event),
         SessionRecordType::ModelRequestStarted => validate_model_request_started(event),
         SessionRecordType::ReasoningBlock => reasoning::validate_reasoning_block(event),
         SessionRecordType::ProviderUsage => validate_provider_usage(event),
@@ -2344,9 +2349,11 @@ pub fn restore_runtime_snapshot_from_session_records(
                     assistant_tool_call_ids.extend(tool_calls.iter().map(|call| call.id.clone()));
                     for call in &tool_calls {
                         if let Some(result_event) = active[tail_start..].iter().find(|candidate| {
-                            candidate.event_type == SessionRecordType::ToolResult
-                                && candidate.payload.get("callId").and_then(Value::as_str)
-                                    == Some(call.id.as_str())
+                            matches!(
+                                candidate.event_type,
+                                SessionRecordType::ToolResult | SessionRecordType::ToolCallClosure
+                            ) && candidate.payload.get("callId").and_then(Value::as_str)
+                                == Some(call.id.as_str())
                         }) {
                             append_restored_tool_result(
                                 &mut snapshot,
@@ -2358,7 +2365,7 @@ pub fn restore_runtime_snapshot_from_session_records(
                 }
                 emitted_tool_turns.insert(turn_key);
             }
-            SessionRecordType::ToolResult => {
+            SessionRecordType::ToolResult | SessionRecordType::ToolCallClosure => {
                 append_restored_tool_result(&mut snapshot, event, &mut tool_result_ids)?;
             }
             _ => {}
@@ -2778,6 +2785,9 @@ pub fn reduce_event(
         SessionRecordType::UserMessage => reduce_user_message(projection, event)?,
         SessionRecordType::TurnSupplement => reduce_turn_supplement(projection, event)?,
         SessionRecordType::AssistantMessage => reduce_assistant_message(projection, event)?,
+        SessionRecordType::ToolCallClosure => {
+            reduce_tool_result(projection, open_tool_call_ids, event)?
+        }
         SessionRecordType::ToolCall => {
             let payload = payload_object(event)?;
             let call_id = required_payload_string(payload, "callId", event)?;
@@ -3521,6 +3531,13 @@ fn validate_tool_result(event: &SessionLogRecord) -> Result<(), String> {
         ],
         event,
     )?;
+    validate_tool_result_payload(payload, event)
+}
+
+fn validate_tool_result_payload(
+    payload: &serde_json::Map<String, Value>,
+    event: &SessionLogRecord,
+) -> Result<(), String> {
     required_payload_string(payload, "callId", event)?;
     required_payload_string(payload, "toolName", event)?;
     let model_content = required_payload_string_allow_empty(payload, "modelContent", event)?;
@@ -3572,6 +3589,48 @@ fn validate_tool_result(event: &SessionLogRecord) -> Result<(), String> {
         })?;
     }
     required_payload_u64(payload, "latencyMs", event)?;
+    Ok(())
+}
+
+fn validate_tool_call_closure(event: &SessionLogRecord) -> Result<(), String> {
+    required_event_turn_id(event)?;
+    required_event_agent_run_id(event)?;
+    let payload = payload_object(event)?;
+    require_exact_payload_fields(
+        payload,
+        &[
+            "callId",
+            "toolName",
+            "resultState",
+            "modelContent",
+            "fullOutputPath",
+            "outputStartByte",
+            "outputByteLength",
+            "outputComplete",
+            "summary",
+            "operations",
+            "modelInputImages",
+            "latencyMs",
+            "recovery",
+            "callEventId",
+            "triggerAgentRunId",
+            "triggerTurnId",
+        ],
+        event,
+    )?;
+    validate_tool_result_payload(payload, event)?;
+    match required_payload_string(payload, "recovery", event)?.as_str() {
+        "receipt" | "not_executed" | "indeterminate" => {}
+        recovery => {
+            return Err(format!(
+                "session.event.v1 {} tool_call_closure recovery {} is invalid",
+                event.event_id, recovery
+            ))
+        }
+    }
+    optional_payload_string(payload, "callEventId", event)?;
+    required_payload_string(payload, "triggerAgentRunId", event)?;
+    required_payload_string(payload, "triggerTurnId", event)?;
     Ok(())
 }
 
