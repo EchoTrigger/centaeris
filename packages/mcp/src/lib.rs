@@ -225,6 +225,44 @@ impl LazyMcpDynamicToolProvider {
 }
 
 impl DynamicToolProvider for LazyMcpDynamicToolProvider {
+    fn execute_with_error_info<'a>(
+        &'a self,
+        request: DynamicToolProviderRequest,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        DynamicToolProviderResponse,
+                        centaeris_core::tool::ToolErrorInfo,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            self.execute(request).await.map_err(|message| {
+                use centaeris_core::tool::{ToolErrorInfo, ToolFailureKind};
+                let diagnostic = ToolErrorInfo::from_unstructured_error(message.clone()).diagnostic_id;
+                // Only expose code-owned categories. Connector errors can contain
+                // host paths or credentials and must not be copied into model context.
+                let safe_message = if message.starts_with("mcp_model_contract_mismatch:") {
+                    "mcp_model_contract_mismatch: installed tool declaration differs from server discovery; update the plugin contract before retrying"
+                } else if message.starts_with("mcp_connection_failed:") {
+                    "mcp_connection_failed: MCP initialization or discovery failed"
+                } else if message.starts_with("mcp_connection_lost:") {
+                    "mcp_connection_lost: MCP transport closed; execution outcome may be unknown"
+                } else if message == "MCP tool call timed out" {
+                    "mcp_tool_timeout: execution outcome may be unknown"
+                } else {
+                    "mcp_tool_failed: MCP tool execution failed"
+                };
+                let mut error = ToolErrorInfo::new(ToolFailureKind::ProviderError, safe_message, safe_message);
+                error.diagnostic_id = diagnostic;
+                error
+            })
+        })
+    }
+
     fn provider_id(&self) -> &str {
         self.provider_id.as_str()
     }
@@ -461,7 +499,13 @@ fn validate_live_tools(
                     declaration.source_name
                 ))
             })?;
-        if tool.description.as_deref() != Some(declaration.description.as_str()) {
+        // Discovery may reindent documentation without changing its words. Keep
+        // the frozen declaration and digest intact; normalize only this comparison.
+        if !tool.description.as_deref().is_some_and(|description| {
+            description
+                .split_whitespace()
+                .eq(declaration.description.split_whitespace())
+        }) {
             return Err(McpConnectError::ContractMismatch(format!(
                 "description differs for sourceName={}",
                 declaration.source_name
@@ -1209,6 +1253,46 @@ mod tests {
     }
 
     #[test]
+    fn model_receives_actionable_contract_failure_without_host_details() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let server = declaration(
+                    McpTransportV1::StreamableHttp {
+                        url: "https://banana.invalid/mcp".into(),
+                        bearer_credential_ref: None,
+                    },
+                    McpLifecycleV1::Initialize,
+                );
+                let changed = Tool::new(
+                    "search_laws",
+                    "Changed description",
+                    matching_tool().input_schema.clone(),
+                );
+                let (connector, _) = fake_connector(
+                    "mcp:legal:banana-source".into(),
+                    vec![vec![changed]],
+                    false,
+                    false,
+                );
+                let binding = lazy_mcp_server_binding("legal", &server, connector).unwrap();
+                let error = binding
+                    .provider
+                    .execute_with_error_info(fake_request(&binding.contracts[0], 1))
+                    .await
+                    .unwrap_err();
+                assert!(error
+                    .model_message
+                    .starts_with("mcp_model_contract_mismatch:"));
+                assert!(!error.model_message.contains("banana.invalid"));
+                assert!(!error.retryable);
+                assert!(error.diagnostic_id.is_some());
+            });
+    }
+
+    #[test]
     fn discovery_must_match_frozen_model_contract() {
         let declaration = declared_tool();
         let matching = matching_tool();
@@ -1230,22 +1314,28 @@ mod tests {
             "search_laws"
         );
 
-        let padded = Tool::new(
-            "search_laws",
+        for description in [
             "  Search laws. \n",
-            declared_tool()
-                .input_schema
-                .as_object()
-                .expect("object schema")
-                .clone(),
-        );
-        let mut padded_declaration = declaration.clone();
-        padded_declaration.description = "  Search laws. \n".to_string();
-        assert!(validate_live_tools(&[padded_declaration], std::slice::from_ref(&padded),).is_ok());
-        assert!(matches!(
-            validate_live_tools(std::slice::from_ref(&declaration), &[padded]),
-            Err(McpConnectError::ContractMismatch(message)) if message.contains("description differs")
-        ));
+            "\r\n\tSearch   laws.\r\n",
+            "Search\nlaws.",
+        ] {
+            let mut formatted = matching.clone();
+            formatted.description = Some(description.to_string().into());
+            assert_eq!(
+                validate_live_tools(std::slice::from_ref(&declaration), &[formatted])
+                    .expect("description whitespace does not alter the tool binding")
+                    ["banana_search"],
+                "search_laws"
+            );
+        }
+        for description in [Some("Search cases."), Some("Searchlaws."), None] {
+            let mut changed = matching.clone();
+            changed.description = description.map(|text| text.to_string().into());
+            assert!(matches!(
+                validate_live_tools(std::slice::from_ref(&declaration), &[changed]),
+                Err(McpConnectError::ContractMismatch(message)) if message.contains("description differs")
+            ));
+        }
 
         let mut changed_schema_value = declared_tool().input_schema;
         changed_schema_value["banana"] = json!(true);
