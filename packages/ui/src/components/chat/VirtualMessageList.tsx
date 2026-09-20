@@ -2,7 +2,7 @@ import { WorkProgress } from "./WorkProgress";
 import { transcriptMessageGroups } from "./transcriptMessageGroups";
 import { useShallow } from "zustand/react/shallow";
 import { t } from "../../i18n";
-import { memo, useLayoutEffect, useMemo, type RefObject } from "react";
+import { memo, useLayoutEffect, useMemo, useRef, type RefObject } from "react";
 import { Check, Copy, Pencil } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { AgentResultStream } from "./AgentResultStream";
@@ -20,6 +20,9 @@ import type { ChatMessage } from "./types";
 
 type VirtualMessageListProps = {
   containerRef: RefObject<HTMLDivElement | null>;
+  contentRef?: RefObject<HTMLDivElement | null>;
+  spacerRef?: RefObject<HTMLDivElement | null>;
+  onUpwardIntent?: () => void;
   editingUserMessageId: string | null;
   editingPrompt: string;
   copiedUserMessageId: string | null;
@@ -29,7 +32,7 @@ type VirtualMessageListProps = {
   isLoadingOlder?: boolean;
   onLoadOlder?: () => void;
   onScroll: () => void;
-  onContentSizeChange: (totalSize: number) => void;
+  onContentSizeChange: (totalSize: number, anchorTop: number, userId: string) => void;
   onEditingPromptChange: (value: string) => void;
   onCancelEditingUserMessage: () => void;
   onSubmitEditedUserMessage: (messageId: string) => void;
@@ -242,6 +245,9 @@ const MessageRow = memo(function MessageRow({
 
 export function VirtualMessageList({
   containerRef,
+  contentRef,
+  spacerRef,
+  onUpwardIntent,
   hasOlder = false,
   isLoadingOlder = false,
   onLoadOlder,
@@ -259,17 +265,34 @@ export function VirtualMessageList({
   });
   const virtualItems = virtualizer.getVirtualItems();
   const totalSize = virtualizer.getTotalSize();
+  const touchY = useRef<number | null>(null);
+  const userIndex = groups.findIndex((ids) => ids.includes(props.latestUserMessageId ?? ""));
+  const anchorTop = virtualizer.measurementsCache[userIndex]?.start ?? 0;
 
+  const viewportHeight = virtualizer.scrollRect?.height;
   useLayoutEffect(() => {
-    onContentSizeChange(totalSize);
-  }, [onContentSizeChange, totalSize]);
+    void viewportHeight;
+    onContentSizeChange(totalSize, anchorTop, props.latestUserMessageId ?? "");
+  }, [onContentSizeChange, totalSize, anchorTop, props.latestUserMessageId, viewportHeight]);
 
   return (
     <div
       className="messages-container uiRsMessagesContainer"
       ref={containerRef}
       onScroll={onScroll}
+      tabIndex={0}
+      onKeyDown={(event) => {
+        if ((event.target as HTMLElement).closest("textarea, input, [contenteditable=true]")) return;
+        if (["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey)) onUpwardIntent?.();
+      }}
+      onTouchStart={(event) => { touchY.current = event.touches[0]?.clientY ?? null; }}
+      onTouchMove={(event) => {
+        const y = event.touches[0]?.clientY ?? null;
+        if (y !== null && touchY.current !== null && y > touchY.current) onUpwardIntent?.();
+        touchY.current = y;
+      }}
       onWheel={(event) => {
+        if (event.deltaY < 0) onUpwardIntent?.();
         if (
           event.deltaY < 0 &&
           event.currentTarget.scrollTop <= 0 &&
@@ -281,6 +304,7 @@ export function VirtualMessageList({
       }}
     >
       <div
+        ref={contentRef}
         style={{
           height: `${totalSize}px`,
           position: "relative",
@@ -316,6 +340,7 @@ export function VirtualMessageList({
           );
         })}
       </div>
+      <div ref={spacerRef} aria-hidden="true" style={{ height: 0, flexShrink: 0 }} />
     </div>
   );
 }
