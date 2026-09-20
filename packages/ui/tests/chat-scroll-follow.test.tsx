@@ -13,7 +13,9 @@ type ScrollContainer = {
 
 type VirtualListHarnessProps = {
   containerRef: RefObject<HTMLDivElement | null>;
-  onContentSizeChange: () => void;
+  contentRef: RefObject<HTMLDivElement | null>;
+  spacerRef: RefObject<HTMLDivElement | null>;
+  onContentSizeChange: (size?: number, top?: number, userId?: string) => void;
   onScroll: () => void;
 };
 
@@ -99,7 +101,13 @@ vi.mock("../src/components/chat/ChatComposer", () => ({
 vi.mock("../src/components/chat/VirtualMessageList", () => ({
   VirtualMessageList: (props: VirtualListHarnessProps) => {
     harness.virtualListProps = props;
-    props.containerRef.current = harness.scrollContainer as HTMLDivElement;
+    props.containerRef.current = Object.assign(harness.scrollContainer, {
+      getBoundingClientRect: () => ({ top: 0 }),
+    }) as HTMLDivElement;
+    props.contentRef.current = { getBoundingClientRect: () => ({
+      top: -harness.scrollContainer.scrollTop, height: harness.scrollContainer.scrollHeight,
+    }) } as HTMLDivElement;
+    props.spacerRef.current = { style: { height: "0px" } } as HTMLDivElement;
     return <div data-testid="virtual-message-list" />;
   },
 }));
@@ -160,10 +168,10 @@ const getComposerProps = (): ComposerHarnessProps => {
   return harness.composerProps;
 };
 
-const runAnimationFrames = () => {
+const runAnimationFrames = (time = 0) => {
   const callbacks = Array.from(harness.frameCallbacks.values());
   harness.frameCallbacks.clear();
-  callbacks.forEach((callback) => callback(0));
+  callbacks.forEach((callback) => callback(time));
 };
 
 const finishInitialScroll = async () => {
@@ -182,6 +190,7 @@ beforeEach(() => {
   sessionViewCacheStore.clear();
   useChatViewStore.getState().clear();
   vi.useFakeTimers();
+  vi.stubGlobal("getComputedStyle", () => ({ paddingBottom: "0" }));
   Object.defineProperty(globalThis, "window", {
     configurable: true,
     value: {
@@ -209,6 +218,7 @@ afterEach(() => {
   sessionViewCacheStore.clear();
   useChatViewStore.getState().clear();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   if (originalWindowDescriptor) {
     Object.defineProperty(globalThis, "window", originalWindowDescriptor);
   } else {
@@ -251,7 +261,7 @@ test("content changes coalesce while jump-to-latest resumes following", async ()
   expect(harness.frameCallbacks).toHaveLength(1);
   expect(renderer.root.findAllByProps({ "aria-label": "Jump to latest" })).toHaveLength(0);
   await act(async () => runAnimationFrames());
-  expect(harness.scrollContainer.scrollTop).toBe(1_000);
+  expect(harness.scrollContainer.scrollTop).toBe(600);
 
   await act(async () => renderer.unmount());
 });
@@ -277,7 +287,7 @@ test("switching sessions resumes following", async () => {
   expect(renderer.root.findAllByProps({ "aria-label": "Jump to latest" })).toHaveLength(0);
   expect(harness.frameCallbacks).toHaveLength(1);
   await act(async () => runAnimationFrames());
-  expect(harness.scrollContainer.scrollTop).toBe(1_000);
+  expect(harness.scrollContainer.scrollTop).toBe(600);
 
   await act(async () => renderer.unmount());
 });
@@ -293,5 +303,23 @@ test("direct submission resumes following before the new content is measured", a
 
   expect(renderer.root.findAllByProps({ "aria-label": "Jump to latest" })).toHaveLength(0);
 
+  await act(async () => renderer.unmount());
+});
+
+
+test("a submitted prompt anchors its measured user row instead of jumping to the bottom", async () => {
+  const renderer = await renderChatArea("a");
+  await finishInitialScroll();
+  harness.scrollContainer.scrollTop = 100;
+  await act(async () => getVirtualListProps().onScroll());
+  await act(async () => getComposerProps().onInputChange("hello"));
+  await act(async () => getComposerProps().onSubmit());
+  await act(async () => getVirtualListProps().onContentSizeChange(1000, 800, "new-user"));
+  await act(async () => runAnimationFrames());
+  expect(harness.scrollContainer.scrollTop).toBe(100);
+  await act(async () => runAnimationFrames(0));
+  await act(async () => runAnimationFrames(320));
+  expect(harness.scrollContainer.scrollTop).toBe(700);
+  expect(getVirtualListProps().spacerRef.current?.style.height).toBe("100px");
   await act(async () => renderer.unmount());
 });

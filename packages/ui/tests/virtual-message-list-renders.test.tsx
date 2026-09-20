@@ -16,6 +16,7 @@ const count = (reads: Map<string, number>, messageId: string) => {
 vi.mock("@tanstack/react-virtual", () => ({
   useVirtualizer: () => ({
     getTotalSize: () => harness.totalSize,
+    measurementsCache: [{ index: 0, start: 0 }, { index: 1, start: 220 }],
     getVirtualItems: () => [
       { index: 0, start: 0 },
       { index: 1, start: 220 },
@@ -147,13 +148,13 @@ test("content-size notifications carry each measured total", async () => {
   await act(async () => {
     renderer = create(<VirtualMessageList {...props} />);
   });
-  expect(onContentSizeChange).toHaveBeenLastCalledWith(440);
+  expect(onContentSizeChange).toHaveBeenLastCalledWith(440, 0, "user");
 
   harness.totalSize = 880;
   await act(async () => {
     renderer!.update(<VirtualMessageList {...props} />);
   });
-  expect(onContentSizeChange).toHaveBeenLastCalledWith(880);
+  expect(onContentSizeChange).toHaveBeenLastCalledWith(880, 0, "user");
 
   await act(async () => renderer!.unmount());
 });
