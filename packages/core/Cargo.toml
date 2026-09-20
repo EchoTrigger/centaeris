@@ -14,11 +14,19 @@ workspace = true
 name = "centaeris_core"
 path = "src/lib.rs"
 
+[features]
+contract-schema = ["dep:schemars"]
+
+[[example]]
+name = "transcript_schema"
+required-features = ["contract-schema"]
+
 [[example]]
 name = "model_image_contract"
 test = true
 
 [dependencies]
+schemars = { version = "=1.2.1", optional = true }
 base64.workspace = true
 centaeris-model-catalog.workspace = true
 serde.workspace = true

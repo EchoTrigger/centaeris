@@ -8,6 +8,7 @@ pub const TRANSCRIPT_CONTENT_RANGE_MAX_BYTES: usize = 64 * 1024;
 pub const TRANSCRIPT_CONTENT_RANGE_SERIALIZED_MAX_BYTES: usize =
     2 * TRANSCRIPT_CONTENT_RANGE_MAX_BYTES;
 
+#[cfg_attr(feature = "contract-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TranscriptContentRangeReadRequestV1 {
@@ -138,6 +139,7 @@ pub fn transcript_event_content_range(
     Ok(response)
 }
 
+#[cfg_attr(feature = "contract-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TranscriptContentRangeV1 {
