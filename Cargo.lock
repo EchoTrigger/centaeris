@@ -254,6 +254,7 @@ dependencies = [
  "hmac",
  "image",
  "libc",
+ "schemars",
  "serde",
  "serde_json",
  "sha2",
