@@ -61,6 +61,7 @@ impl Default for TranscriptPagePolicyV1 {
     }
 }
 
+#[cfg_attr(feature = "contract-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TranscriptOrderKeyV1 {
@@ -77,6 +78,7 @@ impl TranscriptOrderKeyV1 {
     }
 }
 
+#[cfg_attr(feature = "contract-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TranscriptContentRefV1 {
@@ -85,6 +87,7 @@ pub struct TranscriptContentRefV1 {
     pub byte_length: String,
 }
 
+#[cfg_attr(feature = "contract-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TranscriptTextContentV1 {
@@ -127,6 +130,7 @@ impl TranscriptTextContentV1 {
     }
 }
 
+#[cfg_attr(feature = "contract-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum TranscriptBlockStatusV1 {
@@ -137,6 +141,7 @@ pub enum TranscriptBlockStatusV1 {
     Interrupted,
 }
 
+#[cfg_attr(feature = "contract-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(
     tag = "kind",
@@ -184,6 +189,7 @@ impl TranscriptBlockBodyV1 {
     }
 }
 
+#[cfg_attr(feature = "contract-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TranscriptBlockV1 {
@@ -263,6 +269,7 @@ impl TranscriptContentRefV1 {
     }
 }
 
+#[cfg_attr(feature = "contract-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TranscriptResumeCursorV1 {
@@ -270,6 +277,7 @@ pub struct TranscriptResumeCursorV1 {
     pub cursor: String,
 }
 
+#[cfg_attr(feature = "contract-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TranscriptPageV1 {
@@ -355,6 +363,7 @@ impl TranscriptPageV1 {
     }
 }
 
+#[cfg_attr(feature = "contract-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TranscriptBlockRemovalV1 {
@@ -373,6 +382,7 @@ impl TranscriptBlockRemovalV1 {
     }
 }
 
+#[cfg_attr(feature = "contract-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TranscriptPatchV1 {
