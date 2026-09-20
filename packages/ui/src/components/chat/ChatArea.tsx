@@ -253,6 +253,9 @@ export function ChatArea({
   });
   const {
     messagesContainerRef,
+    contentRef: messagesContentRef,
+    spacerRef: messagesSpacerRef,
+    pauseFollowing,
     isFollowingLatest,
     handleMessagesScroll,
     scheduleFollowLatestScroll,
@@ -950,6 +953,9 @@ export function ChatArea({
             ) : null}
             <VirtualMessageList
               containerRef={messagesContainerRef}
+              contentRef={messagesContentRef}
+              spacerRef={messagesSpacerRef}
+              onUpwardIntent={pauseFollowing}
               hasOlder={transcriptHasOlder}
               isLoadingOlder={isLoadingOlderTranscript}
               onLoadOlder={handleLoadOlderTranscript}
