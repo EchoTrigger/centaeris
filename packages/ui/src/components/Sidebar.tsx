@@ -72,6 +72,7 @@ export function Sidebar({
   onOpenFile,
 }: SidebarProps) {
   const [renameSessionId, setRenameSessionId] = useState<string | null>(null);
+  const renameSessionIdRef = useRef<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [deleteSessionId, setDeleteSessionId] = useState<string | null>(null);
   const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
@@ -122,18 +123,27 @@ export function Sidebar({
   };
   const beginRename = (session: UiSession) => {
     setDeleteSessionId(null);
+    renameSessionIdRef.current = session.id;
     setRenameSessionId(session.id);
     setRenameDraft(session.title);
   };
 
   const saveRename = async (sessionId: string) => {
+    if (renameSessionIdRef.current !== sessionId || pendingSessionIdRef.current) return;
     const title = renameDraft.trim();
-    if (!title || pendingSessionId) return;
+    if (!title || title === sessions.find((session) => session.id === sessionId)?.title) {
+      renameSessionIdRef.current = null;
+      setRenameSessionId(null);
+      return;
+    }
     pendingSessionIdRef.current = sessionId;
     setPendingSessionId(sessionId);
     try {
       await onRenameSession(sessionId, title);
-      setRenameSessionId(null);
+      if (renameSessionIdRef.current === sessionId) {
+        renameSessionIdRef.current = null;
+        setRenameSessionId(null);
+      }
     } catch {
       return;
     } finally {
@@ -301,8 +311,13 @@ export function Sidebar({
                       disabled={isPending}
                       onChange={(event) => setRenameDraft(event.target.value)}
                       onFocus={(event) => event.currentTarget.select()}
+                      onBlur={() => { void saveRename(session.id); }}
                       onKeyDown={(event) => {
-                        if (event.key === "Escape") setRenameSessionId(null);
+                        if (event.key === "Escape") {
+                          event.preventDefault();
+                          renameSessionIdRef.current = null;
+                          setRenameSessionId(null);
+                        }
                       }}
                       aria-label={t("sidebar.renameValue", { value1: session.title })}
                     />
