@@ -2,6 +2,7 @@ import {
   getChunkWaterfallOrder,
   getChunkWaterfallSection,
 } from "./chatRuntimeModel";
+import { taskFamily } from "./historyProcessEntries";
 import type {
   AssistantExecutionTurn,
   AgentDisplayEntry,
@@ -50,6 +51,7 @@ const buildAgentDisplayEntries = (
   for (const chunk of chunks) {
     if (work) work.inputChunkVisits += 1;
     if (chunk.kind === "task") {
+      if (pendingTasks.length && taskFamily(pendingTasks[0]) !== taskFamily(chunk.task)) flushTasks();
       pendingTasks.push(chunk.task);
       continue;
     }

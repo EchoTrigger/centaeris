@@ -19,6 +19,9 @@ pub(crate) struct ToolTranscriptLine {
     pub(crate) key: String,
     pub(crate) action_kind: ToolActionKind,
     pub(crate) subject: String,
+    pub(crate) full_text: Option<String>,
+    pub(crate) readable_range: Option<(u64, u64)>,
+    pub(crate) duration_ms: Option<u64>,
     pub(crate) operations: Vec<ToolOperation>,
     pub(crate) result_blocks: Vec<ToolResultBlock>,
     pub(crate) images: Vec<ToolImage>,
@@ -40,6 +43,8 @@ struct ToolCall {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ToolResult {
+    readable_range: Option<(u64, u64)>,
+    duration_ms: Option<u64>,
     call_id: String,
     result_state: ToolResultState,
     model_content: Option<String>,
@@ -386,8 +391,23 @@ impl ToolProjection {
 
 pub(crate) fn stable_tool_title(tool: &ToolTranscriptLine) -> String {
     let subject = stable_tool_subject(tool);
+    let verb = format!("{} ", tool.action_kind.succeeded_verb());
+    let subject = if tool.operations.is_empty() {
+        subject.strip_prefix(&verb).unwrap_or(&subject)
+    } else {
+        &subject
+    };
+    if tool.action_kind == ToolActionKind::Read
+        && tool.operations.is_empty()
+        && subject.starts_with("Listed ")
+        && !tool.running
+        && !tool.interrupted
+        && tool_outcome(&tool.result_states) == ToolOutcome::Succeeded
+    {
+        return subject.to_string();
+    }
     if tool.action_kind == ToolActionKind::Command && tool.description_title {
-        return subject;
+        return subject.to_string();
     }
     if tool.running {
         return format!("{} {subject}", tool.action_kind.running_verb());
@@ -432,20 +452,15 @@ pub(crate) fn transcript_page_tool_line(
         TranscriptBlockStatusV1::Interrupted => vec![ToolResultState::Aborted],
         TranscriptBlockStatusV1::Queued | TranscriptBlockStatusV1::Running => Vec::new(),
     };
-    let result_blocks = output_byte_length
-        .map(|byte_length| ToolResultBlock::Text {
-            lines: vec![TextResultLine::Text(format!(
-                "Output stored by reference: {byte_length} bytes"
-            ))],
-        })
-        .into_iter()
-        .collect();
     ToolTranscriptLine {
+        full_text: None,
+        readable_range: None,
+        duration_ms: None,
         key: format!("tool_call:{call_id}"),
         action_kind: tool_action_kind(tool_name),
         subject: summary,
         operations: Vec::new(),
-        result_blocks,
+        result_blocks: Vec::new(),
         images: Vec::new(),
         result_states,
         interrupted,
@@ -616,7 +631,19 @@ fn decode_tool_result(event: &Value, payload: &Value) -> Result<ToolResult, Stri
             }
         }
     }
+    let readable_range = payload
+        .get("operations")
+        .and_then(Value::as_array)
+        .and_then(|ops| ops.first())
+        .and_then(|op| {
+            Some((
+                op.get("contentStartByte")?.as_u64()?,
+                op.get("contentByteLength")?.as_u64()?,
+            ))
+        });
     Ok(ToolResult {
+        readable_range,
+        duration_ms: payload.get("latencyMs").and_then(Value::as_u64),
         call_id,
         result_state,
         model_content: payload
@@ -865,6 +892,9 @@ fn tool_action_kind(tool_name: &str) -> ToolActionKind {
 fn running_call_line(call: &ToolCall) -> ToolTranscriptLine {
     let action_kind = tool_action_kind(call.tool_name.as_str());
     ToolTranscriptLine {
+        full_text: None,
+        readable_range: None,
+        duration_ms: None,
         key: format!("tool_call:{}", call.call_id),
         action_kind,
         subject: call
@@ -916,6 +946,11 @@ fn seal_call(call: ToolCall, result: Option<ToolResult>) -> ToolTranscriptLine {
         .map(|result| result.images.clone())
         .unwrap_or_default();
     ToolTranscriptLine {
+        readable_range: result.as_ref().and_then(|r| r.readable_range),
+        duration_ms: result.as_ref().and_then(|r| r.duration_ms),
+        full_text: result
+            .as_ref()
+            .and_then(|result| result.model_content.clone()),
         key: format!("tool_call:{}", call.call_id),
         action_kind,
         subject,

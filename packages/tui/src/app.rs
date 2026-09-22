@@ -43,7 +43,10 @@ use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
 
 mod commands;
+mod output_preview;
 mod paging;
+mod reasoning;
+mod runs;
 mod session_transcript;
 mod theme;
 mod transcript;
@@ -51,9 +54,8 @@ mod view;
 
 use crate::runtime_client::{RuntimeClient, RuntimeEvent, RuntimeResponse};
 use crate::tool_projection::{
-    empty_tool_result_detail, stable_tool_title, tool_operation_paths, tool_outcome, DiffRow,
-    DiffRowKind, TextResultLine, ToolActionKind, ToolImage, ToolOutcome, ToolProjection,
-    ToolResultBlock, ToolTranscriptLine,
+    empty_tool_result_detail, stable_tool_title, tool_operation_paths, DiffRow, DiffRowKind,
+    TextResultLine, ToolActionKind, ToolImage, ToolProjection, ToolResultBlock, ToolTranscriptLine,
 };
 #[cfg(test)]
 use crate::tool_projection::{ToolOperation, ToolResultState, DIFF_PREVIEW_MAX_ROWS};
@@ -200,12 +202,6 @@ struct TuiWorkspaceImageResponse {
     data_url: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ToolGroupHitRegion {
-    key: String,
-    row: u16,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct TextPoint {
     row: u16,
@@ -227,7 +223,7 @@ struct RenderedTextRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum MouseDrag {
     Input,
-    Transcript { tool_group_key: Option<String> },
+    Transcript,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -353,6 +349,7 @@ struct App {
     draft_image_attachments: Vec<DraftImageAttachment>,
     next_image_number: usize,
     image_picker: Picker,
+    output_preview: HashMap<String, output_preview::OutputPreview>,
     image_preview: Option<ImagePreview>,
     image_preview_area: Option<Rect>,
     inline_images: HashMap<String, StatefulProtocol>,
@@ -383,9 +380,7 @@ struct App {
     transcript_scroll: u64,
     transcript_max_scroll: u64,
     transcript_follow_bottom: bool,
-    expanded_tool_groups: HashSet<String>,
-    focused_tool_group: Option<String>,
-    tool_group_hit_regions: Vec<ToolGroupHitRegion>,
+    snapshot_revisions: HashMap<String, u64>,
     transcript_area: Option<Rect>,
     transcript_rows: Vec<RenderedTextRow>,
     transcript_selection: Option<TextSelection>,
@@ -397,6 +392,10 @@ struct App {
     assistant_tail_in_code_block: bool,
     assistant_stream_started: bool,
     assistant_stream_start: Option<usize>,
+    presentation_run_id: Option<String>,
+    assistant_run_id: Option<String>,
+    assistant_is_final: bool,
+    run_activity: HashMap<String, runs::RunState>,
     render_width: u16,
     active_tool_label: Option<String>,
     active_agent_run_id: Option<String>,
@@ -458,6 +457,7 @@ enum RuntimeDisplayState {
     Thinking,
     ToolRunning,
     ProviderWaiting,
+    WaitingRuntime,
     WaitingUser,
     Working,
 }
@@ -664,6 +664,7 @@ impl App {
             draft_image_attachments: Vec::new(),
             next_image_number: 1,
             image_picker: halfblock_image_picker(),
+            output_preview: HashMap::new(),
             image_preview: None,
             image_preview_area: None,
             inline_images: HashMap::new(),
@@ -694,9 +695,7 @@ impl App {
             transcript_scroll: 0,
             transcript_max_scroll: 0,
             transcript_follow_bottom: true,
-            expanded_tool_groups: HashSet::new(),
-            focused_tool_group: None,
-            tool_group_hit_regions: Vec::new(),
+            snapshot_revisions: HashMap::new(),
             transcript_area: None,
             transcript_rows: Vec::new(),
             transcript_selection: None,
@@ -708,6 +707,10 @@ impl App {
             assistant_tail_in_code_block: false,
             assistant_stream_started: false,
             assistant_stream_start: None,
+            presentation_run_id: None,
+            assistant_run_id: None,
+            assistant_is_final: false,
+            run_activity: HashMap::new(),
             render_width: 80,
             active_tool_label: None,
             active_agent_run_id: None,
@@ -772,6 +775,7 @@ fn run_event_loop(
         redraw |= drain_model_request(&mut app);
         redraw |= drain_runtime_events(&mut app);
         redraw |= drain_image_preview(&mut app);
+        redraw |= output_preview::poll(&mut app);
         if materialize_assistant_prefix(&mut app) {
             invalidate_transcript_layout(&mut app);
         }
@@ -780,8 +784,9 @@ fn run_event_loop(
         if redraw {
             let transcript_view = build_cached_transcript_view(&mut app, width);
             cache_visible_transcript_images(&mut app, &transcript_view);
+            let drawn_revision = app.transcript_revision;
             terminal.draw(|frame| render(frame, &mut app, &transcript_view))?;
-            redraw = false;
+            redraw = app.transcript_revision != drawn_revision;
             last_draw_at = now;
         }
 
@@ -1493,10 +1498,6 @@ fn handle_key(key: KeyEvent, app: &mut App) -> bool {
             app.input_cursor = 0;
             false
         }
-        KeyCode::Esc if app.focused_tool_group.is_some() => {
-            app.focused_tool_group = None;
-            false
-        }
         KeyCode::Esc => {
             if has_active_agent_run(app) {
                 if app.pending_esc_stop {
@@ -1524,14 +1525,6 @@ fn handle_key(key: KeyEvent, app: &mut App) -> bool {
             complete_selected_command(app);
             false
         }
-        KeyCode::Tab => {
-            move_visible_tool_group_focus(app, 1);
-            false
-        }
-        KeyCode::BackTab => {
-            move_visible_tool_group_focus(app, -1);
-            false
-        }
         KeyCode::PageUp => {
             scroll_transcript(app, -8);
             false
@@ -1543,7 +1536,6 @@ fn handle_key(key: KeyEvent, app: &mut App) -> bool {
         KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.transcript_scroll = 0;
             app.transcript_follow_bottom = false;
-            app.focused_tool_group = None;
             if let Err(error) = load_older_transcript_page(app) {
                 show_message(app, error);
             }
@@ -1552,11 +1544,6 @@ fn handle_key(key: KeyEvent, app: &mut App) -> bool {
         KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.transcript_scroll = app.transcript_max_scroll;
             app.transcript_follow_bottom = true;
-            app.focused_tool_group = None;
-            false
-        }
-        KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            toggle_focused_or_latest_tool_group(app);
             false
         }
         KeyCode::Backspace => {
@@ -1594,10 +1581,6 @@ fn handle_key(key: KeyEvent, app: &mut App) -> bool {
             insert_text_at_cursor(app, "\n");
             false
         }
-        KeyCode::Enter if app.focused_tool_group.is_some() && app.input.is_empty() => {
-            toggle_focused_or_latest_tool_group(app);
-            false
-        }
         KeyCode::Enter => handle_enter(app),
         KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if app.model_credential_prompt.is_some() {
@@ -1607,8 +1590,7 @@ fn handle_key(key: KeyEvent, app: &mut App) -> bool {
             }
             false
         }
-        KeyCode::Char(ch) => {
-            app.focused_tool_group = None;
+        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.message = None;
             insert_text_at_cursor(app, &ch.to_string());
             promote_exact_input_image_path(app);
@@ -2008,22 +1990,16 @@ fn handle_mouse(mouse: MouseEvent, app: &mut App) {
                 app.input_selection_anchor = None;
                 let point = transcript_point_from_mouse(app, mouse.column, mouse.row)
                     .expect("transcript area was checked");
-                let tool_group_key = app
-                    .tool_group_hit_regions
-                    .iter()
-                    .find(|region| region.row == mouse.row)
-                    .map(|region| region.key.clone());
                 app.transcript_selection = Some(TextSelection {
                     anchor: point,
                     head: point,
                 });
-                app.mouse_drag = Some(MouseDrag::Transcript { tool_group_key });
+                app.mouse_drag = Some(MouseDrag::Transcript);
                 return;
             }
             app.input_selection_anchor = None;
             app.transcript_selection = None;
             app.mouse_drag = None;
-            app.focused_tool_group = None;
         }
         MouseEventKind::Drag(MouseButton::Left) => match app.mouse_drag {
             Some(MouseDrag::Input) => {
@@ -2031,7 +2007,7 @@ fn handle_mouse(mouse: MouseEvent, app: &mut App) {
                     app.input_cursor = cursor;
                 }
             }
-            Some(MouseDrag::Transcript { .. }) => {
+            Some(MouseDrag::Transcript) => {
                 if let Some(point) = transcript_point_from_mouse(app, mouse.column, mouse.row) {
                     if let Some(selection) = app.transcript_selection.as_mut() {
                         selection.head = point;
@@ -2046,7 +2022,7 @@ fn handle_mouse(mouse: MouseEvent, app: &mut App) {
                     app.input_cursor = cursor;
                 }
             }
-            Some(MouseDrag::Transcript { tool_group_key }) => {
+            Some(MouseDrag::Transcript) => {
                 if let Some(point) = transcript_point_from_mouse(app, mouse.column, mouse.row) {
                     if let Some(selection) = app.transcript_selection.as_mut() {
                         selection.head = point;
@@ -2056,8 +2032,6 @@ fn handle_mouse(mouse: MouseEvent, app: &mut App) {
                     if let Err(error) = crate::clipboard::copy_text(selected.as_str()) {
                         show_message(app, error);
                     }
-                } else if let Some(key) = tool_group_key {
-                    toggle_tool_group(app, key);
                 } else {
                     app.transcript_selection = None;
                 }
@@ -2092,53 +2066,10 @@ fn scroll_transcript(app: &mut App, delta: i32) {
     };
     app.transcript_scroll = next;
     app.transcript_follow_bottom = next == app.transcript_max_scroll;
-    app.focused_tool_group = None;
 }
 
 fn prepend_anchor_scroll(current: u64, previous_total_rows: u64, next_total_rows: u64) -> u64 {
     current.saturating_add(next_total_rows.saturating_sub(previous_total_rows))
-}
-
-fn move_visible_tool_group_focus(app: &mut App, delta: isize) {
-    let keys = app
-        .tool_group_hit_regions
-        .iter()
-        .map(|region| region.key.as_str())
-        .collect::<Vec<_>>();
-    if keys.is_empty() {
-        app.focused_tool_group = None;
-        return;
-    }
-    let current = app
-        .focused_tool_group
-        .as_deref()
-        .and_then(|focused| keys.iter().position(|key| *key == focused));
-    let index = match (current, delta.is_negative()) {
-        (Some(index), true) => index.checked_sub(1).unwrap_or(keys.len() - 1),
-        (Some(index), false) => (index + 1) % keys.len(),
-        (None, true) => keys.len() - 1,
-        (None, false) => 0,
-    };
-    app.focused_tool_group = Some(keys[index].to_string());
-}
-
-fn toggle_focused_or_latest_tool_group(app: &mut App) {
-    let key = app.focused_tool_group.clone().or_else(|| {
-        app.tool_group_hit_regions
-            .last()
-            .map(|region| region.key.clone())
-    });
-    if let Some(key) = key {
-        toggle_tool_group(app, key);
-    }
-}
-
-fn toggle_tool_group(app: &mut App, key: String) {
-    if !app.expanded_tool_groups.remove(&key) {
-        app.expanded_tool_groups.insert(key.clone());
-    }
-    app.focused_tool_group = Some(key);
-    invalidate_transcript_layout(app);
 }
 
 /// Ctrl+G：调用 `$VISUAL`/`$EDITOR`/默认编辑器编辑当前输入，退出后读回。
@@ -3498,7 +3429,6 @@ fn start_prompt(app: &mut App, message: String) -> Result<(), String> {
         )?;
     app.transcript.push(TranscriptLine::User(message.clone()));
     app.transcript_follow_bottom = true;
-    app.focused_tool_group = None;
     for attachment in app.draft_image_attachments.drain(..) {
         let _ = std::fs::remove_file(attachment.local_path);
     }
@@ -3573,7 +3503,6 @@ fn send_supplement(app: &mut App, message: String) -> Result<(), String> {
     clear_composer(app);
     app.message = None;
     app.transcript_follow_bottom = true;
-    app.focused_tool_group = None;
     app.process_state = RuntimeDisplayState::Working;
     if app.agent_run_started_at.is_none() {
         app.agent_run_started_at = Some(Instant::now());
@@ -4726,6 +4655,12 @@ fn apply_stream_payload_for_agent_run(app: &mut App, payload: &Value, agent_run_
 }
 
 fn apply_session_event(app: &mut App, event: &Value, agent_run_id: Option<&str>) {
+    app.presentation_run_id = agent_run_id.map(str::to_string);
+    apply_session_event_inner(app, event, agent_run_id);
+    app.presentation_run_id = None;
+}
+
+fn apply_session_event_inner(app: &mut App, event: &Value, agent_run_id: Option<&str>) {
     let Some(event_type) = event.get("type").and_then(Value::as_str) else {
         app.transcript.push(TranscriptLine::Error(
             "session_event missing event.type".to_string(),
@@ -4768,6 +4703,19 @@ fn apply_session_event(app: &mut App, event: &Value, agent_run_id: Option<&str>)
         }
         if let Some(agent_run_id) = agent_run_id {
             mark_agent_run_terminal(app, agent_run_id);
+            app.transcript.push(TranscriptLine::RunBoundary {
+                run_id: agent_run_id.into(),
+                state: match event_type {
+                    "AgentRunCompleted" => runs::RunState::Completed,
+                    "AgentRunFailed" => runs::RunState::Failed,
+                    _ => runs::RunState::Interrupted,
+                },
+                reason: event
+                    .pointer("/payload/message")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .into(),
+            });
         } else {
             app.transcript.push(TranscriptLine::Error(format!(
                 "{event_type} missing stream agentRunId"
@@ -4784,6 +4732,7 @@ fn apply_session_event(app: &mut App, event: &Value, agent_run_id: Option<&str>)
         return;
     }
     let payload = event.get("payload").unwrap_or(&Value::Null);
+    runs::record_activity(app, event, agent_run_id);
     if let Some(process_state) = event.get("processState").and_then(Value::as_str) {
         app.process_state = runtime_display_state(process_state);
     }
@@ -4806,6 +4755,7 @@ fn apply_session_event(app: &mut App, event: &Value, agent_run_id: Option<&str>)
         app.active_tool_label = None;
     }
     match event_type {
+        "AgentRunStarted" => {}
         "ModelRequestStart" => {
             let purpose = payload.get("purpose").and_then(Value::as_str);
             let context_token_estimate =
@@ -4823,9 +4773,20 @@ fn apply_session_event(app: &mut App, event: &Value, agent_run_id: Option<&str>)
             }
             replace_assistant_buffer(app, initial_content.unwrap_or_default().to_string());
         }
+        "Reasoning" | "ReasoningBlock" => {
+            if let Err(error) = reasoning::apply_reasoning(app, payload) {
+                app.transcript.push(TranscriptLine::Error(error));
+            }
+        }
+        "ModelSnapshot" => {
+            if let Err(error) = reasoning::apply_snapshot(app, event, agent_run_id) {
+                app.transcript.push(TranscriptLine::Error(error));
+            }
+        }
         "ModelStatus" => {}
         "ModelTextDelta" => {
             if let Some(delta) = raw_payload_string(payload, "delta") {
+                app.assistant_run_id = agent_run_id.map(str::to_string);
                 app.assistant_buffer.push_str(delta.as_str());
             }
         }
@@ -4836,15 +4797,35 @@ fn apply_session_event(app: &mut App, event: &Value, agent_run_id: Option<&str>)
             );
         }
         "Final" => {
+            for line in app
+                .transcript
+                .iter_mut()
+                .rev()
+                .take_while(|line| !matches!(line, TranscriptLine::User(_)))
+            {
+                if let TranscriptLine::Reasoning { final_started, .. } = line {
+                    *final_started = true;
+                }
+            }
             if let Some(content) = raw_payload_string(payload, "content") {
                 replace_assistant_buffer(app, content);
+            }
+            app.assistant_run_id = agent_run_id.map(str::to_string);
+            app.assistant_is_final = true;
+            if let Some(start) = app.assistant_stream_start {
+                for line in &mut app.transcript[start..] {
+                    if let TranscriptLine::RunItem { final_answer, .. } = line {
+                        *final_answer = true;
+                    }
+                }
             }
         }
         "Status" => {
             if payload.get("stage").and_then(Value::as_str) == Some("model_process_summary") {
                 if let Some(message) = raw_payload_string(payload, "message") {
                     discard_assistant_stream(app);
-                    app.transcript.push(TranscriptLine::Summary(message));
+                    app.transcript
+                        .push(TranscriptLine::Summary(message).for_run(agent_run_id, false));
                 }
             }
         }
@@ -4882,7 +4863,7 @@ fn apply_session_event(app: &mut App, event: &Value, agent_run_id: Option<&str>)
                 }
             }
             if let Some(line) = subagent_transcript_line(event_type, payload) {
-                let line = TranscriptLine::Subagent(line);
+                let line = TranscriptLine::Subagent(line).for_run(agent_run_id, false);
                 if !app.tool_projection.has_open_calls() {
                     app.transcript.push(line);
                 } else {
@@ -4906,7 +4887,15 @@ fn apply_session_event(app: &mut App, event: &Value, agent_run_id: Option<&str>)
                 app.transcript.push(TranscriptLine::Error(error));
             }
         },
-        "AgentRunInterventionChanged" | "RuntimeWaitChanged" | "Citation" | "Artifact" => {}
+        "RuntimeWaitChanged" => {
+            app.process_state = if payload.get("status").and_then(Value::as_str) == Some("waiting")
+            {
+                RuntimeDisplayState::WaitingRuntime
+            } else {
+                RuntimeDisplayState::Working
+            };
+        }
+        "AgentRunInterventionChanged" | "Citation" | "Artifact" => {}
         other => app.transcript.push(TranscriptLine::Error(format!(
             "unsupported runtime/session event type: {other}"
         ))),
@@ -4954,7 +4943,8 @@ fn apply_tool_event(app: &mut App, event_type: &str, event: &Value, payload: &Va
         commit_assistant_buffer(app);
     }
     if let Some(tool) = update.started {
-        app.transcript.push(TranscriptLine::Tool(tool));
+        app.transcript
+            .push(TranscriptLine::Tool(tool).for_run(app.presentation_run_id.as_deref(), false));
     }
     if let Some(tool) = update.settled {
         cache_tool_images(app, tool.images.as_slice());
@@ -4977,7 +4967,7 @@ fn cache_visible_transcript_images(app: &mut App, view: &TranscriptView) {
     let images = app
         .transcript
         .iter()
-        .filter_map(|line| match line {
+        .filter_map(|line| match line.content() {
             TranscriptLine::Tool(tool) => Some(tool.images.as_slice()),
             _ => None,
         })
@@ -5111,7 +5101,7 @@ fn seal_active_tool_calls(app: &mut App) {
 
 fn settle_tool_line(app: &mut App, tool: ToolTranscriptLine) {
     let Some(index) = app.transcript.iter().rposition(
-        |line| matches!(line, TranscriptLine::Tool(existing) if existing.key == tool.key),
+        |line| matches!(line.content(), TranscriptLine::Tool(existing) if existing.key == tool.key),
     ) else {
         app.transcript.push(TranscriptLine::Error(format!(
             "Protocol error: settled tool call missing transcript row: {}",
@@ -5120,7 +5110,7 @@ fn settle_tool_line(app: &mut App, tool: ToolTranscriptLine) {
         app.tool_protocol_error = true;
         return;
     };
-    app.transcript[index] = TranscriptLine::Tool(tool);
+    *app.transcript[index].content_mut() = TranscriptLine::Tool(tool);
     if !app.pending_subagent_lines.is_empty() {
         app.transcript.append(&mut app.pending_subagent_lines);
     }
@@ -5220,21 +5210,23 @@ fn clear_assistant_buffer(app: &mut App) {
     app.assistant_tail_in_code_block = false;
     app.assistant_stream_started = false;
     app.assistant_stream_start = None;
+    app.assistant_run_id = None;
+    app.assistant_is_final = false;
 }
 
 fn reset_transcript_view(app: &mut App) {
     app.transcript_scroll = 0;
     app.transcript_max_scroll = 0;
     app.transcript_follow_bottom = true;
-    app.expanded_tool_groups.clear();
-    app.focused_tool_group = None;
-    app.tool_group_hit_regions.clear();
+    app.output_preview.clear();
+    app.transcript_layout_cache = None;
+    app.run_activity.clear();
+    app.snapshot_revisions.clear();
     invalidate_transcript_layout(app);
 }
 
 fn invalidate_transcript_layout(app: &mut App) {
     app.transcript_revision = app.transcript_revision.wrapping_add(1);
-    app.transcript_layout_cache = None;
 }
 
 fn replace_assistant_buffer(app: &mut App, content: String) {
@@ -5243,6 +5235,7 @@ fn replace_assistant_buffer(app: &mut App, content: String) {
     }
     discard_assistant_stream(app);
     app.assistant_buffer = content;
+    app.assistant_run_id = app.presentation_run_id.clone();
 }
 
 fn discard_assistant_stream(app: &mut App) {
@@ -5275,6 +5268,7 @@ fn runtime_display_state(raw: &str) -> RuntimeDisplayState {
         "tool_running" => RuntimeDisplayState::ToolRunning,
         "provider_waiting" => RuntimeDisplayState::ProviderWaiting,
         "waiting_user" => RuntimeDisplayState::WaitingUser,
+        "waiting" => RuntimeDisplayState::WaitingRuntime,
         _ => RuntimeDisplayState::Working,
     }
 }

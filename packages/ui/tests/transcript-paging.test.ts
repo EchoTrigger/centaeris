@@ -1,4 +1,6 @@
 import { expect, test } from "vitest";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import type {
   TranscriptBlockV1,
   TranscriptPageRpcResponseV1,
@@ -36,6 +38,38 @@ const page = (
   olderCursor,
   hasOlder: olderCursor !== null,
   resumeCursors: [{ streamId: "session-jsonl.v1", cursor: "12" }],
+});
+
+test("Desktop consumes actual Rust-serialized transcript content with explicit nulls", () => {
+  const blocks = JSON.parse(execFileSync("cargo", [
+    "run", "--locked", "--quiet", "-p", "centaeris-core", "--features", "contract-schema",
+    "--example", "transcript_schema", "--", "--samples",
+  ], { cwd: fileURLToPath(new URL("../../../", import.meta.url)), encoding: "utf8", timeout: 120_000 })) as TranscriptBlockV1[];
+  const messages = DesktopTranscriptView.open(page(blocks)).materializeMessages(false);
+  expect(messages[0]).toMatchObject({ role: "user", text: "sample" });
+  expect(messages[0].transcriptText).toBeUndefined();
+  expect(messages[1]).toMatchObject({ role: "assistant", turn: { finalAnswer: "sample" } });
+  expect(messages[2]).toMatchObject({ turn: { chunks: [{ kind: "reasoning", text: "sample" }] } });
+  expect(messages[5].transcriptText?.reference).toEqual({ refId: "ref", revision: "1", byteLength: "6" });
+}, 130_000);
+
+test.each([
+  { inlineContent: "hello", sourceRef: null },
+  { inlineContent: "", sourceRef: null },
+  { inlineContent: null, sourceRef: { refId: "ref", revision: "1", byteLength: "5" } },
+])("accepts exactly one non-null text source: %j", (content) => {
+  const body = JSON.parse(JSON.stringify({ kind: "userText", content }));
+  expect(() => DesktopTranscriptView.open(page([block("text", "1", "1", body)]))).not.toThrow();
+});
+
+test.each([
+  { inlineContent: "hello", sourceRef: { refId: "ref", revision: "1", byteLength: "5" } },
+  { inlineContent: null, sourceRef: null },
+  {},
+])("rejects ambiguous or missing text sources: %j", (content) => {
+  const body = JSON.parse(JSON.stringify({ kind: "userText", content }));
+  expect(() => DesktopTranscriptView.open(page([block("text", "1", "1", body)])))
+    .toThrow("must contain exactly one content source");
 });
 
 test("long message materialization preserves a readable reference instead of a byte-count placeholder", () => {
@@ -318,4 +352,14 @@ test("patch catch-up advances through the fixed generation", async () => {
     projectionGeneration: "generation-1",
     afterSourceHighWater: "12",
   }]);
+});
+
+
+test("history restores tool path, output bounds and latency from Core display facts", () => {
+  const item = block("tool:c", "2", "1", { kind: "tool", callId: "c", toolName: "read", status: "completed", summary: "Read file", summaryRef: null, outputRef: null });
+  item.presentation = { agentRunId: "r", sourceType: "tool_result", observedAtMs: 2000, displayTarget: "README.md", durationMs: 25,
+    operation: { callId: "c", toolName: "read", status: "completed", resultState: "successWithOutput", path: "README.md", startLine: 1, endLine: 5, contentStartByte: 12, contentByteLength: 30 } };
+  expect(DesktopTranscriptView.open(page([item])).materializeMessages(false)[0]).toMatchObject({ turn: { projectionRunId: "r", chunks: [{ task: {
+    displayTarget: "README.md", durationMs: 25, operations: [{ path: "README.md", contentStartByte: 12, contentByteLength: 30 }],
+  } }] } });
 });

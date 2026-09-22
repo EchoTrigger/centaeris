@@ -20,9 +20,9 @@ test("reasoning disclosure survives updates, completion and row remount without 
   expect(renderer.root.findAll((node) => node.props.className === "agentStatusRow")).toHaveLength(0);
   const button = () => renderer.root.findAll((node) => node.type === "button" && node.props.className !== "workProgressSummary")[0];
   expect(button().props["aria-label"]).toBe("Thinking");
-  expect(button().findAllByType("span")[0].props.className).toBe("statusShimmer");
+  expect(button().findAllByType("span")[0].props.className).not.toBe("statusShimmer");
   expect(button().findAllByType("span")[0].children).toEqual(["Thinking"]);
-  expect(renderer.root.findByProps({ className: "reasoningPreviewText" }).children).toEqual(["Inspect"]);
+  expect(renderer.root.findAllByProps({ className: "reasoningPreviewText" })).toHaveLength(0);
   expect(button().props["aria-expanded"]).toBe(false);
   expect(renderer.root.findAllByType("p")).toHaveLength(0);
   act(() => button().props.onClick());
@@ -40,7 +40,7 @@ test("reasoning disclosure survives updates, completion and row remount without 
   expect(renderer.root.findAll((node) => node.type === "button" && node.props.className !== "workProgressSummary").map((item) => item.props["aria-label"])).toEqual(["Thoughts", "Thoughts"]);
   expect(renderer.root.findAll((node) => node.type === "button" && node.props.className !== "workProgressSummary").map((item) => item.props["aria-expanded"])).toEqual([true, false]);
   expect(renderer.root.findByType("p").children).toEqual(["Inspect more"]);
-  expect(renderer.root.findByProps({ className: "reasoningPreviewText" }).children).toEqual(["Separate"]);
+  expect(renderer.root.findAllByProps({ className: "reasoningPreviewText" })).toHaveLength(0);
   act(() => renderer.unmount());
   act(() => { renderer = create(<AgentResultStream turn={updated} />); });
   expect(button().props["aria-expanded"]).toBe(true);
@@ -51,5 +51,5 @@ test("reasoning disclosure survives updates, completion and row remount without 
   act(() => button().props.onClick());
   expect(renderer.root.findAllByType("p")).toHaveLength(0);
   expect(button().props["aria-label"]).toBe("Thoughts");
-  expect(renderer.root.findAllByProps({ className: "reasoningPreviewText" }).map((node) => node.children)).toEqual([["Inspect more"], ["Separate"]]);
+  expect(renderer.root.findAllByProps({ className: "reasoningPreviewText" })).toHaveLength(0);
 });

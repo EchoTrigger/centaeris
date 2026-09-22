@@ -84,6 +84,7 @@ vi.mock("../src/components/CodePreview", () => ({
   },
 }));
 
+import { useChatViewStore } from "../src/components/chat/chatViewStore";
 import { AgentResultStream } from "../src/components/chat/AgentResultStream";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -154,6 +155,7 @@ const findText = (
 };
 
 beforeEach(() => {
+  useChatViewStore.getState().clear();
   harness.markdownMounts = 0;
   harness.markdownUnmounts = 0;
   harness.markdownStreamingStates.length = 0;
@@ -183,8 +185,7 @@ test("paged tool output replaces retained text and can return to its previous ra
     outputByteLength: 3 * 65536,
   });
   const renderer = await renderStream({ turn: makeTurn({ chunks: [{ id: "task", kind: "task", task }] }) });
-  await click(renderer.root.findByType("summary"));
-  await click(renderer.root.findAllByType("summary")[1]);
+  await click(renderer.root.findByProps({ className: "agent-operation-summary agent-tool-node-summary" }));
   const output = () => renderer.root.findByProps({ className: "agent-tool-bash-output" }).children.join("");
   expect(output()).toBe("a".repeat(65536));
   await click(findText(renderer, "Next output"));
@@ -194,7 +195,7 @@ test("paged tool output replaces retained text and can return to its previous ra
   await act(async () => renderer.unmount());
 });
 
-test("defers complete Bash output until both activity levels are expanded", async () => {
+test("defers complete Bash output until its single tool is expanded", async () => {
   const prefix = "header\n";
   const result = "complete output";
   harness.readDesktopFilePreview.mockResolvedValue({
@@ -219,17 +220,10 @@ test("defers complete Bash output until both activity levels are expanded", asyn
     turn: makeTurn({ chunks: [{ id: "task-chunk", kind: "task", task }] }),
   });
 
-  expect(JSON.stringify(renderer.toJSON())).toContain("Run the focused UI gate");
+  expect(JSON.stringify(renderer.toJSON())).toContain("npm test");
   expect(harness.readDesktopFilePreview).not.toHaveBeenCalled();
 
-  await click(renderer.root.findByType("summary"));
-  expect(harness.readDesktopFilePreview).not.toHaveBeenCalled();
-
-  const operationSummary = renderer.root.findAllByType("summary")[1];
-  if (!operationSummary) {
-    throw new Error("Missing Bash operation summary");
-  }
-  await click(operationSummary);
+  await click(renderer.root.findByProps({ className: "agent-operation-summary agent-tool-node-summary" }));
   expect(harness.readDesktopFilePreview).toHaveBeenCalledOnce();
   expect(harness.readDesktopFilePreview).toHaveBeenCalledWith("D:/spill.txt");
   expect(JSON.stringify(renderer.toJSON())).toContain(result);
@@ -257,7 +251,6 @@ test("opens a detail-free file operation with its exact source range", async () 
     onOpenWorkspacePath,
   });
 
-  await click(renderer.root.findByType("summary"));
   await click(renderer.root.findByProps({ "aria-label": "Open src/App.tsx" }));
   expect(onOpenWorkspacePath).toHaveBeenCalledWith("src/App.tsx", {
     startLine: 12,
@@ -286,58 +279,39 @@ test("does not mount a diff preview until its operation is expanded", async () =
   });
   expect(harness.codePreviewRenders).toBe(0);
 
-  await click(renderer.root.findByType("summary"));
-  expect(harness.codePreviewRenders).toBe(0);
-
-  const operationSummary = renderer.root.findAllByType("summary")[1];
-  if (!operationSummary) {
-    throw new Error("Missing edit operation summary");
-  }
-  await click(operationSummary);
+  await click(renderer.root.findByProps({ className: "agent-operation-summary agent-tool-node-summary" }));
   expect(harness.codePreviewRenders).toBe(1);
   expect(renderer.root.findByType("pre").children.join("")).toBe(diffPreview);
 
   await act(async () => renderer.unmount());
 });
 
-test("shows live status only when no running tool or final answer supersedes it", async () => {
-  const baseTurn = makeTurn({
-    isStreaming: true,
-    activity: { kind: "thinking", label: "Thinking" },
-    chunks: [{
-      id: "process",
-      kind: "narrative",
-      text: "First process note",
-    }],
-  });
-  const renderer = await renderStream({ turn: baseTurn });
+test("live status follows the latest content, tracks a tool and disappears on completion", async () => {
+  const turn = makeTurn({isStreaming:true, activity:{kind:"thinking",label:"Thinking"}, chunks:[{id:"note",kind:"narrative",text:"First process note"}]});
+  useChatViewStore.getState().replaceMessages([{id:"message",role:"assistant",turn}]);
+  const renderer = await renderStream({turn});
   const initial = JSON.stringify(renderer.toJSON());
-  expect(initial).toContain("First process note");
-  expect(initial).toContain("Thinking");
-  expect(initial.indexOf("First process note")).toBeLessThan(initial.indexOf("Thinking"));
-
-  const runningTask = makeTask({
-    status: "running",
-    operations: [makeOperation({ status: "running", resultState: undefined })],
-  });
+  expect(initial.indexOf("Thinking")).toBeGreaterThan(initial.indexOf("First process note"));
+  const running = {...turn, chunks:[...turn.chunks,{id:"task",kind:"task" as const,task:makeTask({status:"running"})}]};
   await act(async () => {
-    renderer.update(<AgentResultStream turn={{
-      ...baseTurn,
-      chunks: [...baseTurn.chunks, { id: "running", kind: "task", task: runningTask }],
-    }} />);
+    useChatViewStore.getState().replaceMessages([{id:"message",role:"assistant",turn:running}]);
+    renderer.update(<AgentResultStream turn={running}/>);
   });
-  expect(JSON.stringify(renderer.toJSON())).not.toContain("Thinking");
-
+  expect(renderer.root.findByProps({role:"status"}).children).toEqual(["Running a command…"]);
+  const answering = {...running,finalAnswer:"Latest answer",finalAnswerConfirmed:true};
   await act(async () => {
-    renderer.update(<AgentResultStream turn={{
-      ...baseTurn,
-      finalAnswer: "Final answer", finalAnswerConfirmed: true,
-    }} />);
+    useChatViewStore.getState().replaceMessages([{id:"message",role:"assistant",turn:answering}]);
+    renderer.update(<AgentResultStream turn={answering}/>);
   });
-  const withFinal = JSON.stringify(renderer.toJSON());
-  expect(withFinal).toContain("Final answer");
-  expect(withFinal).not.toContain("Thinking");
-
+  const active = JSON.stringify(renderer.toJSON());
+  expect(active.indexOf("Running a command…")).toBeGreaterThan(active.indexOf("Latest answer"));
+  const done = {...turn,isStreaming:false,finalAnswer:"Final answer"};
+  await act(async () => {
+    useChatViewStore.getState().replaceMessages([{id:"message",role:"assistant",turn:done}]);
+    renderer.update(<AgentResultStream turn={done}/>);
+  });
+  expect(renderer.root.findAllByProps({role:"status"})).toHaveLength(0);
+  expect(JSON.stringify(renderer.toJSON())).toContain("Final answer");
   await act(async () => renderer.unmount());
 });
 
@@ -428,7 +402,6 @@ test("final answer deltas do not rerender an unchanged process transcript", asyn
     isStreaming: true,
   });
   const renderer = await renderStream({ turn: initialTurn });
-  await click(renderer.root.findByProps({ className: "workProgressSummary" }));
   expect(harness.markdownRendersByText.get("Stable process note")).toBe(1);
 
   await act(async () => {
@@ -471,7 +444,7 @@ test("unclassified text stays buffered until the runtime confirms final", async 
   expect(renderer.root.findAllByProps({ className: "workProgressSummary" })).toHaveLength(0);
   await act(async () => renderer.update(<AgentResultStream turn={{ ...turn, finalAnswerConfirmed: true }} />));
   expect(JSON.stringify(renderer.toJSON())).toContain("Final response");
-  expect(renderer.root.findByProps({ className: "workProgressSummary" }).props["aria-expanded"]).toBe(false);
+  expect(renderer.root.findAllByProps({ className: "workProgressSummary" })).toHaveLength(0);
   expect(renderer.root.findAllByProps({ className: "agentAssistantAnswer answerMarkdownBlock" })).toHaveLength(1);
   expect(harness.markdownMounts).toBe(1);
   expect(harness.markdownStreamingStates).toEqual([false]);

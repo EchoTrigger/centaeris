@@ -335,6 +335,23 @@ impl TranscriptPagingState {
         removed
     }
 
+    pub(super) fn tool_output_reference(
+        &self,
+        key: &str,
+    ) -> Option<centaeris_core::session::transcript::TranscriptContentRefV1> {
+        self.view
+            .visible_blocks()
+            .into_iter()
+            .find_map(|block| match &block.body {
+                TranscriptBlockBodyV1::Tool {
+                    call_id,
+                    output_ref,
+                    ..
+                } if key == format!("tool_call:{call_id}") => output_ref.clone(),
+                _ => None,
+            })
+    }
+
     pub(super) fn materialize_history(&self, live_overlay_active: bool) -> Vec<TranscriptLine> {
         self.view
             .visible_blocks()
@@ -354,6 +371,64 @@ impl TranscriptPagingState {
 fn materialize_block(
     block: &centaeris_core::session::transcript::TranscriptBlockV1,
 ) -> TranscriptLine {
+    let mut line = materialize_block_body(block);
+    if let (TranscriptLine::Tool(tool), Some(facts)) = (&mut line, &block.presentation) {
+        tool.duration_ms = facts.duration_ms;
+        if let Some(target) = &facts.display_target {
+            tool.subject = target.clone();
+        }
+        tool.readable_range = facts.operation.as_ref().and_then(|op| {
+            Some((
+                op.get("contentStartByte")?.as_u64()?,
+                op.get("contentByteLength")?.as_u64()?,
+            ))
+        });
+    }
+    if let Some(facts) = &block.presentation {
+        if let TranscriptBlockBodyV1::Notice {
+            notice_type,
+            content,
+            ..
+        } = &block.body
+        {
+            if notice_type == "run_boundary" {
+                if let Some(run_id) = &facts.agent_run_id {
+                    return TranscriptLine::RunBoundary {
+                        run_id: run_id.clone(),
+                        state: super::runs::RunState::from_source(&facts.source_type),
+                        reason: materialize_text(content),
+                    };
+                }
+            }
+        }
+        if !matches!(
+            line,
+            TranscriptLine::User(_)
+                | TranscriptLine::Reasoning { .. }
+                | TranscriptLine::Supplement(_)
+                | TranscriptLine::Error(_)
+        ) {
+            line = line.for_run(
+                facts.agent_run_id.as_deref(),
+                facts.source_type == "assistant_message",
+            );
+        }
+        if matches!(&block.body, TranscriptBlockBodyV1::Notice { notice_type, .. } if notice_type == "model_process_summary")
+        {
+            if let TranscriptLine::Supplement(text) = line {
+                line = TranscriptLine::Summary(
+                    text.trim_start_matches("model_process_summary: ").into(),
+                )
+                .for_run(facts.agent_run_id.as_deref(), false);
+            }
+        }
+    }
+    line
+}
+
+fn materialize_block_body(
+    block: &centaeris_core::session::transcript::TranscriptBlockV1,
+) -> TranscriptLine {
     match &block.body {
         TranscriptBlockBodyV1::UserText { content } => {
             TranscriptLine::User(materialize_text(content))
@@ -361,9 +436,11 @@ fn materialize_block(
         TranscriptBlockBodyV1::AssistantText { content, .. } => {
             TranscriptLine::Summary(materialize_text(content))
         }
-        TranscriptBlockBodyV1::Reasoning { content, .. } => {
-            TranscriptLine::Supplement(materialize_text(content))
-        }
+        TranscriptBlockBodyV1::Reasoning { content, .. } => TranscriptLine::Reasoning {
+            key: block.block_id.clone(),
+            text: materialize_text(content),
+            final_started: false,
+        },
         TranscriptBlockBodyV1::Tool {
             call_id,
             tool_name,

@@ -955,7 +955,7 @@ export function ChatArea({
               containerRef={messagesContainerRef}
               contentRef={messagesContentRef}
               spacerRef={messagesSpacerRef}
-              onUpwardIntent={pauseFollowing}
+              onReadingIntent={pauseFollowing}
               hasOlder={transcriptHasOlder}
               isLoadingOlder={isLoadingOlderTranscript}
               onLoadOlder={handleLoadOlderTranscript}

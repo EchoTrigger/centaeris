@@ -5,9 +5,6 @@ use ratatui::style::Color;
 pub(super) struct Theme {
     pub(super) accent: Color,
     pub(super) muted: Color,
-    pub(super) success: Color,
-    pub(super) error: Color,
-    pub(super) warning: Color,
     pub(super) heading: Color,
     pub(super) code_bg: Color,
     pub(super) inline_code_bg: Color,
@@ -20,9 +17,6 @@ pub(super) struct Theme {
 static THEME: Theme = Theme {
     accent: Color::Reset,
     muted: Color::DarkGray,
-    success: Color::Green,
-    error: Color::Red,
-    warning: Color::Yellow,
     heading: Color::Reset,
     code_bg: Color::Reset,
     inline_code_bg: Color::Reset,

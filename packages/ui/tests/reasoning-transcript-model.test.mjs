@@ -2,11 +2,9 @@ import { expect, test } from "vitest";
 import { readFileSync } from "node:fs";
 import { buildTranscriptProcessViewModel } from "../src/components/chat/agentTranscriptModel";
 import { applySessionEventToAssistantTurn } from "../src/components/chat/chatTranscriptRestore";
-import { reasoningPreview } from "../src/components/chat/reasoningPreview";
 
 test("live reasoning and answer replace atomically, reject older revisions and cannot reopen a seal", () => {
   const reasoning = JSON.parse(readFileSync(new URL("../../core/tests/fixtures/live_reasoning.json", import.meta.url), "utf8"));
-  expect(reasoningPreview(reasoning.text)).toBe("核对 input 保留 code 与 来源");
   const snapshot = (revision, text, value = reasoning) => ({ id: `live:${revision}`, type: "ModelSnapshot", turnId: "turn-1", payload: { revision, text, reasoning: value } });
   let turn = applySessionEventToAssistantTurn({ chunks: [], finalAnswer: "", isStreaming: true }, snapshot(2, "answer"));
   expect(turn.chunks[0]).toMatchObject({ id: reasoning.blockId, text: reasoning.text, status: "streaming" });

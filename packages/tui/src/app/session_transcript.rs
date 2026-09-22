@@ -82,6 +82,8 @@ pub(super) fn load_older_transcript_page(app: &mut App) -> Result<bool, String> 
 }
 
 pub(super) fn release_loaded_transcript_history(app: &mut App) -> usize {
+    let previous_rows = build_cached_transcript_view(app, app.render_width).total_rows;
+    let previous_scroll = app.transcript_scroll;
     let removed = app
         .transcript_paging
         .as_mut()
@@ -94,7 +96,8 @@ pub(super) fn release_loaded_transcript_history(app: &mut App) -> usize {
     app.inline_image_cache_order.clear();
     app.inline_image_cache_bytes = 0;
     app.inline_image_errors.clear();
-    reset_transcript_view(app);
+    let next_rows = build_cached_transcript_view(app, app.render_width).total_rows;
+    app.transcript_scroll = previous_scroll.saturating_sub(previous_rows.saturating_sub(next_rows));
     removed
 }
 
@@ -124,6 +127,9 @@ pub(super) fn refresh_transcript_patches(app: &mut App) -> Result<bool, String> 
 
 pub(super) fn sync_materialized_transcript_history(app: &mut App) {
     let live_overlay_active = has_active_agent_run(app);
+    let stream_offset = app
+        .assistant_stream_start
+        .and_then(|start| start.checked_sub(app.transcript_history_len));
     let overlay = if live_overlay_active {
         app.transcript
             .get(app.transcript_history_len.min(app.transcript.len())..)
@@ -137,6 +143,10 @@ pub(super) fn sync_materialized_transcript_history(app: &mut App) {
     };
     let mut transcript = paging_state.materialize_history(live_overlay_active);
     app.transcript_history_len = transcript.len();
+    if live_overlay_active {
+        app.assistant_stream_start =
+            stream_offset.map(|offset| app.transcript_history_len + offset);
+    }
     transcript.extend(overlay);
     app.transcript = transcript;
     invalidate_transcript_layout(app);
@@ -278,6 +288,16 @@ pub(super) fn restore_active_agent_runs(app: &mut App, active_agent_runs: Vec<Ac
     let Some(first) = active_agent_runs.first() else {
         return;
     };
+    for run in &active_agent_runs {
+        app.run_activity.insert(
+            run.agent_run_id.clone(),
+            if run.status == "waiting_user" {
+                runs::RunState::WaitingInput
+            } else {
+                runs::RunState::Running
+            },
+        );
+    }
     app.active_agent_run_id = Some(first.agent_run_id.clone());
     app.active_agent_run_ids = active_agent_runs
         .iter()

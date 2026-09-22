@@ -27,24 +27,20 @@ import {
 } from "./transcriptContentRanges";
 import { useChatViewStore } from "./chatViewStore";
 import {
-  formatFullCommandLine,
   getOperationPath,
   isOperationPathOpenable,
 } from "./toolTimelineModel";
 import {
   getToolActivityAtom,
-  getToolActivityPresentation,
   type ToolActivityIconToken,
 } from "./toolActivityModel";
 import {
+  readableToolOutput,
   collectTimelineOperations,
   extractToolResultSpillContent,
-  formatOperationDuration,
-  formatOperationInlineSummary,
   formatTimelineMeta,
   formatToolGroupTitle,
   getOperationDetailState,
-  operationBashStatusLabel,
   operationStatusClass,
   type OperationDetailState,
 } from "./toolActivityTranscriptModel";
@@ -85,7 +81,11 @@ const ToolResultOutput = ({ operation }: { operation: TimelineOperation }) => {
   const fallback = operation.fullOutputPath
     ? "Loading complete output…"
     : operation.modelContent || operation.outputPreview || "";
-  const [content, setContent] = useState(fallback);
+  const [rawOutput, setRawOutput] = useState(false);
+  const [content, setContent] = useState(() => readableToolOutput({ contentStartByte: operation.contentStartByte, contentByteLength: operation.contentByteLength }, fallback));
+  const startOffset = String(rawOutput ? 0 : operation.contentStartByte ?? 0);
+  const contentEnd = !rawOutput && operation.contentStartByte !== undefined && operation.contentByteLength !== undefined
+    ? operation.contentStartByte + operation.contentByteLength : Infinity;
   const activeRead = useRef(0);
   const [offsets, setOffsets] = useState(["0"]);
   const [pageIndex, setPageIndex] = useState(0);
@@ -97,7 +97,7 @@ const ToolResultOutput = ({ operation }: { operation: TimelineOperation }) => {
 
   useEffect(() => {
     const epoch = ++activeRead.current;
-    setOffsets(["0"]);
+    setOffsets([startOffset]);
     setPageIndex(0);
     setReadError(false);
     retryPage.current = 0;
@@ -110,12 +110,12 @@ const ToolResultOutput = ({ operation }: { operation: TimelineOperation }) => {
       setLoadingMore(true);
       setHasMore(false);
       setNextOffset("0");
-      void loadTranscriptContentRange({ sessionId, projectionGeneration, reference }, "0")
+      void loadTranscriptContentRange({ sessionId, projectionGeneration, reference }, startOffset)
         .then((page) => {
           if (!active) return;
-          setContent(page.content);
+          setContent(readableToolOutput({ contentStartByte: operation.contentStartByte, contentByteLength: operation.contentByteLength }, page.content, Number(page.startOffset), rawOutput));
           setNextOffset(page.endOffset);
-          setHasMore(page.hasMore);
+          setHasMore(page.hasMore && Number(page.endOffset) < contentEnd);
         })
         .catch(() => {
           if (active) setReadError(true);
@@ -127,7 +127,7 @@ const ToolResultOutput = ({ operation }: { operation: TimelineOperation }) => {
     const start = operation.outputStartByte;
     const length = operation.outputByteLength;
     if (!path || start === undefined || length === undefined) {
-      setContent(operation.modelContent || operation.outputPreview || "");
+      setContent(readableToolOutput({ contentStartByte: operation.contentStartByte, contentByteLength: operation.contentByteLength }, operation.modelContent || operation.outputPreview || "", 0, rawOutput));
       setHasMore(false);
       return;
     }
@@ -135,19 +135,24 @@ const ToolResultOutput = ({ operation }: { operation: TimelineOperation }) => {
     void readDesktopFilePreview(path)
       .then((response) => {
         if (active) {
-          setContent(extractToolResultSpillContent(response.content, start, length));
+          setContent(readableToolOutput({ contentStartByte: operation.contentStartByte, contentByteLength: operation.contentByteLength }, extractToolResultSpillContent(response.content, start, length), 0, rawOutput));
         }
       })
       .catch(() => {
         if (active) {
           const preview = operation.modelContent || operation.outputPreview || "";
-          setContent(preview.replace(/\n\n\[Full tool result:[\s\S]*$/, ""));
+          setContent(readableToolOutput({ contentStartByte: operation.contentStartByte, contentByteLength: operation.contentByteLength }, preview, 0, rawOutput));
         }
       });
     return () => {
       active = false;
     };
   }, [
+    rawOutput,
+    startOffset,
+    contentEnd,
+    operation.contentStartByte,
+    operation.contentByteLength,
     operation.fullOutputPath,
     operation.modelContent,
     operation.outputByteLength,
@@ -174,11 +179,11 @@ const ToolResultOutput = ({ operation }: { operation: TimelineOperation }) => {
         offset,
       );
       if (activeRead.current !== epoch) return;
-      setContent(page.content);
+      setContent(readableToolOutput({ contentStartByte: operation.contentStartByte, contentByteLength: operation.contentByteLength }, page.content, Number(page.startOffset), rawOutput));
       setOffsets((current) => { const next = [...current]; next[targetIndex] = offset; return next; });
       setPageIndex(targetIndex);
       setNextOffset(page.endOffset);
-      setHasMore(page.hasMore);
+      setHasMore(page.hasMore && Number(page.endOffset) < contentEnd);
     } catch {
       if (activeRead.current === epoch) setReadError(true);
     } finally {
@@ -186,10 +191,12 @@ const ToolResultOutput = ({ operation }: { operation: TimelineOperation }) => {
     }
   }
 
-  if (!content && !loadingMore && !readError) return null;
+  if (!content && !loadingMore && !readError && operation.contentStartByte === undefined) return null;
   return (
     <>
-      {content ? <pre className="agent-tool-bash-output">{content}</pre> : null}
+      {operation.contentStartByte !== undefined ? <button type="button" onClick={() => setRawOutput(value => !value)}>{rawOutput ? "Readable output" : "Raw output"}</button> : null}
+      {content ? <div className="agent-tool-output-viewport" tabIndex={0} role="region" aria-label="Tool output"><pre className="agent-tool-bash-output">{content}</pre></div> : null}
+      {content ? <button type="button" aria-label="Copy current output page" onClick={() => copyToolDetailText(content)}><Copy size={14} aria-hidden="true" /></button> : null}
       {!content && loadingMore ? <span role="status">{t("transcriptText.loading")}</span> : null}
       {readError ? <span role="alert">{t("transcriptText.failed")}
         <button type="button" onClick={() => { void loadMore(retryPage.current); }}>{t("transcriptText.retry")}</button>
@@ -213,53 +220,15 @@ const renderOperationDetail = (
   detailState: OperationDetailState,
   statusClassName: TaskStatus,
 ): ReactNode => {
-  const {
-    command,
-    path,
-    showBashCommandInput,
-    hasBashDetail,
-    hasEditDetail,
-    hasTextDetail,
-  } = detailState;
+  const { command, path, hasBashDetail, hasEditDetail, hasTextDetail } = detailState;
   return (
-    <div
-      className={`agent-operation-body agent-tool-node-body ${statusClassName === "running" ? "is-running" : "is-done"}`}
-    >
+    <div className={`agent-operation-body agent-tool-node-body ${statusClassName === "running" ? "is-running" : "is-done"}`}>
       <div className="agent-tool-command-card">
-        {hasBashDetail ? (
-          <div className={`agent-tool-bash-card ${statusClassName}`}>
-            <div className="agent-tool-bash-header">
-              <span>Bash</span>
-              {command ? (
-                <button
-                  type="button"
-                  className="agent-tool-copy-button agent-tool-bash-copy-button"
-                  onClick={() => copyToolDetailText(command)}
-                  aria-label="Copy command"
-                  title="Copy command"
-                >
-                  <Copy className="agent-tool-copy-icon" aria-hidden="true" />
-                </button>
-              ) : null}
-            </div>
-            <div className="agent-tool-bash-scroll">
-              {showBashCommandInput && command ? (
-                <pre className="agent-tool-bash-command">
-                  {formatFullCommandLine(command)}
-                </pre>
-              ) : null}
-              {operation.modelContent || operation.outputPreview || operation.fullOutputPath || operation.transcriptContentRef ? (
-                <ToolResultOutput operation={operation} />
-              ) : null}
-              {operation.error ? (
-                <pre className="agent-tool-bash-output is-error">{operation.error}</pre>
-              ) : null}
-            </div>
-            <div className={`agent-tool-bash-status ${statusClassName}`}>
-              <span>{operationBashStatusLabel(operation, statusClassName)}</span>
-            </div>
-          </div>
-        ) : null}
+        {hasBashDetail ? <>
+          <ToolResultOutput operation={operation} />
+          {operation.error ? <pre className="agent-tool-output-block is-error">{operation.error}</pre> : null}
+          {command ? <button type="button" className="agent-tool-copy-button" aria-label="Copy command" onClick={() => copyToolDetailText(command)}><Copy size={14} aria-hidden="true" /></button> : null}
+        </> : null}
         {hasEditDetail && operation.diffPreview ? (
           <div className="agent-tool-command-section">
             <div className="agent-tool-command-label">Diff</div>
@@ -287,40 +256,34 @@ const renderOperationDetail = (
   );
 };
 
-const renderToolOperationNode = ({
+const ToolOperationNode = memo(function ToolOperationNode({
   operation,
   operationId,
-  isOpen,
-  onToggle,
   onOpenWorkspacePath,
 }: {
   operation: TimelineOperation;
   operationId: string;
-  isOpen: boolean;
-  onToggle: () => void;
   onOpenWorkspacePath?: AgentResultStreamProps["onOpenWorkspacePath"];
-}) => {
+}) {
+  const isOpen = useChatViewStore(state => Boolean(state.expandedTools[operationId]));
+  const onToggle = () => useChatViewStore.setState(state => {
+    const open = !state.expandedTools[operationId];
+    return { expandedTools: { ...state.expandedTools, [operationId]: open } };
+  });
   const statusClassName = operationStatusClass(operation.status);
   const atom = getToolActivityAtom(operation);
   const path = getOperationPath(operation);
   const metaText = formatTimelineMeta(operation);
-  const durationText = formatOperationDuration(operation);
   const detailState = getOperationDetailState(operation, atom, statusClassName);
   const hasDetail =
     detailState.hasBashDetail ||
     detailState.hasEditDetail ||
     detailState.hasTextDetail;
-  const detail = isOpen
-    ? renderOperationDetail(operation, detailState, statusClassName)
-    : null;
-  const leafSummary = formatOperationInlineSummary(
-    operation,
-    statusClassName,
-    durationText,
-    metaText,
-  );
+  const leafSummary = [formatToolGroupTitle([operation]), metaText].filter(Boolean).join(" · ");
+  const ActivityIcon = toolActivityIconByToken[atom.iconToken];
   const summary = (
     <>
+      <ActivityIcon className="agent-tool-node-icon" aria-hidden="true" />
       <span
         className="agent-tool-node-action is-inline-summary"
         title={leafSummary}
@@ -378,12 +341,11 @@ const renderToolOperationNode = ({
   }
 
   return (
-    <details
+    <div
       className={`agent-operation-group agent-tool-node ${statusClassName}`}
       key={operationId}
-      open={isOpen}
     >
-      <summary
+      <button type="button" aria-expanded={isOpen}
         className="agent-operation-summary agent-tool-node-summary"
         onClick={(event) => {
           event.preventDefault();
@@ -391,11 +353,13 @@ const renderToolOperationNode = ({
         }}
       >
         {summary}
-      </summary>
-      {detail}
-    </details>
+      </button>
+      {isOpen ? <OperationDetail operation={operation} detailState={detailState} statusClassName={statusClassName} /> : null}
+    </div>
   );
-};
+});
+
+const OperationDetail = ({ operation, detailState, statusClassName }: { operation: TimelineOperation; detailState: OperationDetailState; statusClassName: TaskStatus }) => renderOperationDetail(operation, detailState, statusClassName);
 
 export const TaskGroupTranscriptItem = memo(function TaskGroupTranscriptItem({
   entry,
@@ -404,12 +368,6 @@ export const TaskGroupTranscriptItem = memo(function TaskGroupTranscriptItem({
   entry: TranscriptToolLikeItem;
   onOpenWorkspacePath?: AgentResultStreamProps["onOpenWorkspacePath"];
 }) {
-  const [isOpen, setIsOpen] = useState(false);
-  const [expandedOperationIds, setExpandedOperationIds] = useState<Set<string>>(
-    new Set(),
-  );
-  const [collapsedDefaultOpenOperationIds, setCollapsedDefaultOpenOperationIds] =
-    useState<Set<string>>(new Set());
   const taskIds = useMemo(() => entry.tasks.map((task) => task.id), [entry.tasks]);
   const tasks = useChatViewStore(
     useShallow((state) =>
@@ -417,102 +375,13 @@ export const TaskGroupTranscriptItem = memo(function TaskGroupTranscriptItem({
     ),
   );
   const operations = useMemo(() => collectTimelineOperations(tasks), [tasks]);
-  const live = tasks.some((task) => task.status === "running");
-  const presentation = useMemo(
-    () => getToolActivityPresentation(operations),
-    [operations],
-  );
-  const latestOperation = operations[operations.length - 1];
-  const liveText = formatToolGroupTitle(operations);
-  const iconToken = live && latestOperation
-    ? getToolActivityAtom(latestOperation).iconToken
-    : presentation.iconToken;
-  const ActivityIcon = toolActivityIconByToken[iconToken];
-
-  const toggleOperation = (operationId: string, defaultOpen: boolean) => {
-    const setter = defaultOpen
-      ? setCollapsedDefaultOpenOperationIds
-      : setExpandedOperationIds;
-    setter((previous) => {
-      const next = new Set(previous);
-      if (next.has(operationId)) {
-        next.delete(operationId);
-      } else {
-        next.add(operationId);
-      }
-      return next;
-    });
-  };
-
-  const renderToolTaskBody = (defaultOperationOpen: boolean): ReactNode => (
-    <div
-      className="agent-tool-node-list"
-      data-waterfall-section={entry.waterfall?.section ?? "tool"}
-    >
-      {operations.map((operation, index) => {
-        const operationId = `${entry.id}-operation-${operation.taskId}-${operation.toolName}-${index}`;
-        const operationOpen = defaultOperationOpen
-          ? !collapsedDefaultOpenOperationIds.has(operationId)
-          : expandedOperationIds.has(operationId);
-        return renderToolOperationNode({
-          operation,
-          operationId,
-          isOpen: operationOpen,
-          onToggle: () => toggleOperation(operationId, defaultOperationOpen),
-          onOpenWorkspacePath,
-        });
+  return (
+    <div className="agent-tool-node-list" data-waterfall-section={entry.waterfall?.section ?? "tool"}>
+      {operations.map(operation => {
+        const operationId = `operation:${operation.taskId}:${operation.callId}`;
+        return <ToolOperationNode key={operationId} operation={operation} operationId={operationId} onOpenWorkspacePath={onOpenWorkspacePath} />;
       })}
     </div>
-  );
-
-  const summary = (
-    <div className="agent-operation-summary">
-      <ActivityIcon className="agent-tool-node-icon" aria-hidden="true" />
-      <span className={`agent-operation-summary-text ${live ? "agentRunStatusText statusShimmer" : ""}`}>{liveText}</span>
-      {presentation.expandable ? (
-        <span
-          className={`agent-operation-chevron ${isOpen ? "open" : ""}`}
-          aria-hidden="true"
-        />
-      ) : null}
-    </div>
-  );
-
-  if (!presentation.expandable) {
-    return (
-      <div
-        className={`agent-operation-group ${live ? "is-live" : ""}`}
-        data-waterfall-section={entry.waterfall?.section ?? "tool"}
-        aria-live={live ? "polite" : undefined}
-      >
-        {summary}
-      </div>
-    );
-  }
-
-  return (
-    <details
-      className={`agent-operation-group ${live ? "is-live" : ""}`}
-      data-waterfall-section={entry.waterfall?.section ?? "tool"}
-      aria-live={live ? "polite" : undefined}
-      open={isOpen}
-    >
-      <summary
-        className="agent-operation-summary agent-operation-summary-toggle"
-        onClick={(event) => {
-          event.preventDefault();
-          setIsOpen((previous) => !previous);
-        }}
-      >
-        <ActivityIcon className="agent-tool-node-icon" aria-hidden="true" />
-        <span className="agent-operation-summary-text">{liveText}</span>
-        <span
-          className={`agent-operation-chevron ${isOpen ? "open" : ""}`}
-          aria-hidden="true"
-        />
-      </summary>
-      {isOpen ? renderToolTaskBody(false) : null}
-    </details>
   );
 }, (previous, next) =>
   previous.entry.id === next.entry.id &&

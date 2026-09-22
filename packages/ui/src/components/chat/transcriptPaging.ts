@@ -1,3 +1,4 @@
+import { normalizeToolOperation } from "./chatToolRuntimeModel";
 import {
   getTranscriptPage,
   getTranscriptPatches,
@@ -70,7 +71,7 @@ const validateTextContent = (
   field: string,
 ): void => {
   const hasInline = typeof content.inlineContent === "string";
-  const hasReference = content.sourceRef !== undefined;
+  const hasReference = content.sourceRef != null;
   if (hasInline === hasReference) {
     throw new Error(`${field} must contain exactly one content source`);
   }
@@ -107,6 +108,11 @@ const validateBlock = (block: TranscriptBlockV1): OrderedBlock => {
     block.orderKey.ordinal > MAX_U32
   ) {
     throw new Error("transcript block ordinal is invalid");
+  }
+  const facts = block.presentation;
+  if (facts && (!Number.isSafeInteger(facts.observedAtMs) || facts.observedAtMs < 0
+    || (facts.durationMs !== null && (!Number.isSafeInteger(facts.durationMs) || facts.durationMs < 0)))) {
+    throw new Error("invalid transcript presentation timing");
   }
   const body = block.body;
   switch (body.kind) {
@@ -294,6 +300,9 @@ const materializeBlock = (
     };
   }
   const turn = emptyTurn(block.blockId, isLiveStatus(body.status));
+  turn.projectionRunId = block.presentation?.agentRunId ?? undefined;
+  if (block.presentation?.sourceType === "agent_run_started") turn.startedAtMs = block.presentation.observedAtMs;
+  if (["agent_run_completed", "agent_run_failed", "agent_run_interrupted"].includes(block.presentation?.sourceType ?? "")) turn.completedAtMs = block.presentation!.observedAtMs;
   switch (body.kind) {
     case "assistantText":
       turn.finalAnswer = materializeText(body.content);
@@ -323,6 +332,8 @@ const materializeBlock = (
           summary,
           status: taskStatus(body.status),
           provider: "tool",
+          displayTarget: block.presentation?.displayTarget ?? undefined,
+          durationMs: block.presentation?.durationMs ?? undefined,
           outputByteLength: body.outputRef
             ? safeUiInteger(body.outputRef.byteLength, "outputRef.byteLength")
             : undefined,
@@ -331,7 +342,7 @@ const materializeBlock = (
           transcriptProjectionGeneration: body.outputRef
             ? projectionGeneration
             : undefined,
-          operations: [
+          operations: block.presentation?.operation ? [normalizeToolOperation(block.presentation.operation)] : [
             {
               callId: body.callId,
               toolName: body.toolName,
@@ -343,6 +354,7 @@ const materializeBlock = (
       break;
     }
     case "notice":
+      if (body.noticeType === "run_boundary") break;
       if (body.noticeType === "turn_supplement") {
         turn.chunks.push({ id: block.blockId, kind: "guidedSupplement", text: materializeText(body.content), timestamp: 0 });
         break;

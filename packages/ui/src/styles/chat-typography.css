@@ -1,0 +1,8 @@
+:root {
+  --chat-body-size: 14px;
+  --chat-body-leading: 24px;
+  --chat-meta-size: 12px;
+  --chat-meta-leading: 18px;
+  --chat-code-size: 13px;
+  --chat-code-leading: 21px;
+}

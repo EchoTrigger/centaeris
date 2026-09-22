@@ -14,6 +14,7 @@ fn transcript_test_block(
     TranscriptBlockV1 {
         block_id: block_id.to_string(),
         block_revision: revision.to_string(),
+        presentation: None,
         order_key: TranscriptOrderKeyV1 {
             source_sequence: source_sequence.to_string(),
             ordinal: 0,
@@ -1009,6 +1010,9 @@ fn test_tool_line(
     result_states: Vec<ToolResultState>,
 ) -> ToolTranscriptLine {
     ToolTranscriptLine {
+        full_text: None,
+        readable_range: None,
+        duration_ms: None,
         key: "step-test".to_string(),
         action_kind,
         subject: subject.to_string(),
@@ -1671,7 +1675,7 @@ fn transcript_view_starts_at_the_live_bottom() {
         .push(TranscriptLine::User("hello".to_string()));
     let view = build_transcript_view(&app, 80);
     assert!(view.total_rows > 0);
-    assert!(view.tool_group_rows.is_empty());
+    assert!(view.source_rows.is_empty());
 }
 
 #[test]
@@ -2954,7 +2958,7 @@ fn agent_run_terminal_seals_calls_then_commits_buffer() {
     );
 
     assert!(matches!(
-        app.transcript.as_slice(),
+        app.transcript.iter().filter(|line| !matches!(line, TranscriptLine::RunBoundary { .. })).map(TranscriptLine::content).collect::<Vec<_>>().as_slice(),
         [
             TranscriptLine::Tool(tool),
             TranscriptLine::LiveAssistant { markdown, .. },
@@ -3043,7 +3047,7 @@ fn streaming_text_commits_before_each_tool_call() {
     );
 
     assert!(matches!(
-        app.transcript.as_slice(),
+        app.transcript.iter().filter(|line| !matches!(line, TranscriptLine::RunBoundary { .. })).map(TranscriptLine::content).collect::<Vec<_>>().as_slice(),
         [
             TranscriptLine::LiveAssistant { markdown: first, .. },
             TranscriptLine::Tool(build),
@@ -3288,7 +3292,7 @@ fn running_tool_group_updates_in_the_owned_transcript() {
     apply_tool_call(&mut app, "call-1", "bash");
     let running = build_transcript_view(&app, 80);
     assert!(rendered_lines_text(&running.lines).contains("Running"));
-    assert_eq!(running.tool_group_rows.len(), 1);
+    assert_eq!(running.source_rows.len(), 1);
 
     apply_tool_result(
         &mut app,
@@ -4280,39 +4284,6 @@ fn markdown_keeps_unclosed_fence_state_for_streaming() {
 }
 
 #[test]
-fn tool_groups_expand_without_rewriting_transcript_data() {
-    let workspace = unique_test_dir("workspace-tool-accordion");
-    let data_root = unique_test_dir("data-tool-accordion");
-    let mut app = test_app("", workspace.clone(), data_root.clone());
-    apply_tool_call(&mut app, "call-1", "bash");
-    apply_tool_result(
-        &mut app,
-        "call-1",
-        "successWithOutput",
-        "done",
-        json!([{
-            "callId": "call-1",
-            "kind": "command",
-            "outputPreview": "accordion-output-one\naccordion-output-two"
-        }]),
-    );
-    let key = match &app.transcript[0] {
-        TranscriptLine::Tool(tool) => tool.key.clone(),
-        other => panic!("unexpected line: {other:?}"),
-    };
-    let collapsed = build_transcript_view(&app, 80);
-    assert!(!rendered_lines_text(&collapsed.lines).contains("accordion-output-one"));
-
-    toggle_tool_group(&mut app, key);
-    let expanded = build_transcript_view(&app, 80);
-    assert!(rendered_lines_text(&expanded.lines).contains("accordion-output-one"));
-    assert!(rendered_lines_text(&expanded.lines).contains("accordion-output-two"));
-    assert_eq!(app.transcript.len(), 1);
-    let _ = std::fs::remove_dir_all(workspace);
-    let _ = std::fs::remove_dir_all(data_root);
-}
-
-#[test]
 fn assistant_text_is_the_tool_group_boundary() {
     let workspace = unique_test_dir("workspace-tool-boundary");
     let data_root = unique_test_dir("data-tool-boundary");
@@ -4351,53 +4322,12 @@ fn assistant_text_is_the_tool_group_boundary() {
     ];
 
     let view = build_transcript_view(&app, 80);
-    assert_eq!(view.tool_group_rows.len(), 2);
-    assert_eq!(view.tool_group_rows[0].0, "tool_call:first");
-    assert_eq!(view.tool_group_rows[1].0, "tool_call:third");
+    assert_eq!(view.source_rows.len(), 3);
+    assert_eq!(view.source_rows[0].0, "tool_call:first");
+    assert_eq!(view.source_rows[2].0, "tool_call:third");
     let rendered = rendered_lines_text(&view.lines);
     assert!(rendered.contains("Next step"));
     assert!(rendered.contains("research: done"));
-    let _ = std::fs::remove_dir_all(workspace);
-    let _ = std::fs::remove_dir_all(data_root);
-}
-
-#[test]
-fn rendered_tool_group_header_is_mouse_expandable() {
-    let workspace = unique_test_dir("workspace-tool-mouse");
-    let data_root = unique_test_dir("data-tool-mouse");
-    let mut app = test_app("", workspace.clone(), data_root.clone());
-    apply_tool_call(&mut app, "call-mouse", "bash");
-    let view = build_transcript_view(&app, 80);
-    let backend = ratatui::backend::TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-    terminal
-        .draw(|frame| render(frame, &mut app, &view))
-        .expect("render transcript");
-    let region = app
-        .tool_group_hit_regions
-        .first()
-        .cloned()
-        .expect("visible tool group");
-
-    handle_mouse(
-        MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 4,
-            row: region.row,
-            modifiers: KeyModifiers::NONE,
-        },
-        &mut app,
-    );
-    handle_mouse(
-        MouseEvent {
-            kind: MouseEventKind::Up(MouseButton::Left),
-            column: 4,
-            row: region.row,
-            modifiers: KeyModifiers::NONE,
-        },
-        &mut app,
-    );
-    assert!(app.expanded_tool_groups.contains(&region.key));
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -4464,7 +4394,7 @@ fn tui_consumes_core_committed_turn_projection() {
             apply_stream_payload(&mut app, &projection);
         }
         assert!(app.transcript.iter().any(|line| matches!(
-            line,
+            line.content(),
             TranscriptLine::LiveAssistant { markdown, .. } if markdown == "answer"
         )));
         assert!(app.active_agent_run_id.is_none());
@@ -4606,6 +4536,7 @@ fn test_app(input: &str, workspace_root: PathBuf, _data_root: PathBuf) -> App {
         draft_image_attachments: Vec::new(),
         next_image_number: 1,
         image_picker: halfblock_image_picker(),
+        output_preview: HashMap::new(),
         image_preview: None,
         image_preview_area: None,
         inline_images: HashMap::new(),
@@ -4636,9 +4567,7 @@ fn test_app(input: &str, workspace_root: PathBuf, _data_root: PathBuf) -> App {
         transcript_scroll: 0,
         transcript_max_scroll: 0,
         transcript_follow_bottom: true,
-        expanded_tool_groups: HashSet::new(),
-        focused_tool_group: None,
-        tool_group_hit_regions: Vec::new(),
+        snapshot_revisions: HashMap::new(),
         transcript_area: None,
         transcript_rows: Vec::new(),
         transcript_selection: None,
@@ -4650,6 +4579,10 @@ fn test_app(input: &str, workspace_root: PathBuf, _data_root: PathBuf) -> App {
         assistant_tail_in_code_block: false,
         assistant_stream_started: false,
         assistant_stream_start: None,
+        presentation_run_id: None,
+        assistant_run_id: None,
+        assistant_is_final: false,
+        run_activity: HashMap::new(),
         render_width: 80,
         active_tool_label: None,
         active_agent_run_id: None,
@@ -4721,4 +4654,945 @@ fn unique_test_dir(label: &str) -> PathBuf {
     ));
     std::fs::create_dir_all(dir.as_path()).expect("create temp dir");
     dir
+}
+
+#[test]
+fn reasoning_stays_hidden_across_final_and_updates() {
+    let path = PathBuf::from("D:/presentation-test");
+    let mut app = test_app("", path.clone(), path);
+    let reasoning = |id: &str, text: &str| {
+        json!({
+            "id": id, "type": "Reasoning", "visibility": "user",
+            "payload": {"blockId":"reasoning:req", "requestId":"req", "text":text, "status":"streaming"}
+        })
+    };
+    apply_session_event(
+        &mut app,
+        &reasoning("r1", "private process text"),
+        Some("run"),
+    );
+    let first = build_transcript_view(&app, 80);
+    assert!(!rendered_lines_text(&first.lines).contains("Thoughts"));
+    assert!(first.source_rows.is_empty());
+    apply_session_event(
+        &mut app,
+        &json!({"id":"f", "type":"Final", "payload":{"content":"Answer"}}),
+        Some("run"),
+    );
+    assert!(!rendered_lines_text(&build_transcript_view(&app, 80).lines)
+        .contains("private process text"));
+    apply_session_event(
+        &mut app,
+        &reasoning("r2", "updated process text"),
+        Some("run"),
+    );
+    assert!(!rendered_lines_text(&build_transcript_view(&app, 80).lines)
+        .contains("updated process text"));
+    assert!(app.transcript.iter().any(|line| matches!(line, TranscriptLine::Reasoning { text, .. } if text == "updated process text")));
+    assert!(!app
+        .transcript
+        .iter()
+        .any(|line| matches!(line, TranscriptLine::Error(_))));
+}
+
+#[test]
+fn model_snapshot_restores_reasoning_and_answer_without_an_unsupported_event() {
+    let path = PathBuf::from("D:/presentation-test");
+    let mut app = test_app("", path.clone(), path);
+    apply_session_event(
+        &mut app,
+        &json!({"id":"snapshot", "type":"ModelSnapshot", "turnId":"turn", "payload":{
+            "revision":1,"text":"restored answer", "reasoning":{"blockId":"reasoning:req","requestId":"req","text":"restored thought"}
+        }}),
+        Some("run"),
+    );
+    assert_eq!(app.assistant_buffer, "restored answer");
+    assert!(
+        !rendered_lines_text(&build_transcript_view(&app, 80).lines).contains("restored thought")
+    );
+    assert!(!app
+        .transcript
+        .iter()
+        .any(|line| matches!(line, TranscriptLine::Error(_))));
+}
+
+#[test]
+fn releasing_history_preserves_retained_tools_and_reading_position() {
+    let path = PathBuf::from("D:/presentation-test");
+    let mut app = test_app("", path.clone(), path);
+    let tail = transcript_test_page(
+        vec![transcript_test_block(
+            "tool:kept",
+            1,
+            12,
+            TranscriptBlockBodyV1::Tool {
+                call_id: "kept".to_string(),
+                tool_name: "bash".to_string(),
+                status: TranscriptBlockStatusV1::Completed,
+                summary: Some("kept tool".to_string()),
+                summary_ref: None,
+                output_ref: None,
+            },
+        )],
+        Some("older"),
+    );
+    let mut paging = TranscriptPagingState::open(tail).unwrap();
+    paging
+        .apply_older_page(transcript_test_page(
+            vec![transcript_test_block(
+                "user:old",
+                1,
+                1,
+                TranscriptBlockBodyV1::UserText {
+                    content: TranscriptTextContentV1::inline("old user".to_string()),
+                },
+            )],
+            None,
+        ))
+        .unwrap();
+    app.transcript_paging = Some(paging);
+    sync_materialized_transcript_history(&mut app);
+    let view = build_transcript_view(&app, 80);
+    let (_, row) = view.source_rows[0].clone();
+    app.transcript_scroll = row;
+    app.transcript_follow_bottom = false;
+    assert_eq!(release_loaded_transcript_history(&mut app), 1);
+    assert!(!app.transcript_follow_bottom);
+    assert_eq!(
+        app.transcript_scroll,
+        build_transcript_view(&app, 80).source_rows[0].1
+    );
+}
+
+#[test]
+fn historical_reasoning_has_no_rows_or_focus_after_projection_refresh() {
+    let path = PathBuf::from("D:/presentation-test");
+    let mut app = test_app("", path.clone(), path);
+    let page = transcript_test_page(
+        vec![
+            transcript_test_block(
+                "reasoning:req",
+                1,
+                1,
+                TranscriptBlockBodyV1::Reasoning {
+                    request_id: "req".to_string(),
+                    content: TranscriptTextContentV1::inline("history thought".to_string()),
+                    status: TranscriptBlockStatusV1::Completed,
+                },
+            ),
+            transcript_test_block(
+                "answer",
+                1,
+                2,
+                TranscriptBlockBodyV1::AssistantText {
+                    content: TranscriptTextContentV1::inline("final answer".to_string()),
+                    status: TranscriptBlockStatusV1::Completed,
+                },
+            ),
+        ],
+        None,
+    );
+    app.transcript_paging = Some(TranscriptPagingState::open(page).unwrap());
+    sync_materialized_transcript_history(&mut app);
+    let view = build_transcript_view(&app, 80);
+    assert!(!rendered_lines_text(&view.lines).contains("history thought"));
+    assert!(rendered_lines_text(&view.lines).contains("final answer"));
+    assert!(view.source_rows.is_empty());
+    sync_materialized_transcript_history(&mut app);
+    assert!(
+        !rendered_lines_text(&build_transcript_view(&app, 80).lines).contains("history thought")
+    );
+    reset_transcript_view(&mut app);
+    assert!(
+        !rendered_lines_text(&build_transcript_view(&app, 80).lines).contains("history thought")
+    );
+}
+
+#[test]
+fn reasoning_cannot_receive_tool_keyboard_focus() {
+    let path = PathBuf::from("D:/presentation-test");
+    let mut app = test_app("", path.clone(), path);
+    apply_session_event(
+        &mut app,
+        &json!({"id":"r","type":"Reasoning","payload":{
+            "blockId":"reasoning:req","requestId":"req","text":"reading thought","status":"streaming"
+        }}),
+        Some("run"),
+    );
+    let view = build_transcript_view(&app, 80);
+    assert!(view.source_rows.is_empty());
+    apply_session_event(
+        &mut app,
+        &json!({"id":"final","type":"Final","payload":{"content":"answer"}}),
+        Some("run"),
+    );
+    assert!(
+        !rendered_lines_text(&build_transcript_view(&app, 80).lines).contains("reading thought")
+    );
+}
+
+#[test]
+fn stale_model_snapshot_cannot_overwrite_newer_text_and_unknown_fields_fail() {
+    let path = PathBuf::from("D:/presentation-test");
+    let mut app = test_app("", path.clone(), path);
+    for (revision, text) in [(2, "new"), (1, "old")] {
+        let event = centaeris_core::runtime::projection::project_live_model_snapshot(
+            "session".into(),
+            "turn".into(),
+            revision,
+            text.into(),
+            None,
+        )
+        .unwrap();
+        apply_stream_payload_for_agent_run(&mut app, &event, Some("run"));
+    }
+    assert_eq!(app.assistant_buffer, "new");
+    apply_session_event(
+        &mut app,
+        &json!({"id":"bad","type":"Reasoning","payload":{
+            "blockId":"reasoning:req","requestId":"req","text":"bad","status":"streaming","unexpected":true
+        }}),
+        Some("run"),
+    );
+    assert!(matches!(
+        app.transcript.last(),
+        Some(TranscriptLine::Error(_))
+    ));
+}
+
+#[test]
+fn hidden_reasoning_does_not_split_tools_or_leave_spacing() {
+    let path = PathBuf::from("D:/presentation-test");
+    let mut app = test_app("", path.clone(), path);
+    let make = |id: &str| {
+        TranscriptLine::Tool(crate::tool_projection::transcript_page_tool_line(
+            id,
+            "read",
+            TranscriptBlockStatusV1::Completed,
+            "file.rs".into(),
+            None,
+        ))
+    };
+    app.transcript = vec![
+        make("a"),
+        TranscriptLine::Reasoning {
+            key: "r".into(),
+            text: "hidden".into(),
+            final_started: false,
+        },
+        make("b"),
+    ];
+    let with = build_transcript_view(&app, 80);
+    app.transcript.remove(1);
+    let without = build_transcript_view(&app, 80);
+    assert_eq!(with.lines, without.lines);
+    assert_eq!(with.source_rows, without.source_rows);
+    assert_eq!(with.source_rows.len(), 2);
+}
+
+#[test]
+fn historical_tool_title_does_not_repeat_read_verb() {
+    let tool = crate::tool_projection::transcript_page_tool_line(
+        "a",
+        "read",
+        TranscriptBlockStatusV1::Completed,
+        "Read src/main.rs".into(),
+        Some("30"),
+    );
+    assert_eq!(stable_tool_title(&tool), "Read src/main.rs");
+    let directory = crate::tool_projection::transcript_page_tool_line(
+        "d",
+        "read",
+        TranscriptBlockStatusV1::Completed,
+        "Listed packages · 8 entries".into(),
+        Some("30"),
+    );
+    assert_eq!(stable_tool_title(&directory), "Listed packages · 8 entries");
+}
+
+#[test]
+fn automatic_tools_preserve_follow_mode_through_layout_and_new_output() {
+    for following in [true, false] {
+        let path = PathBuf::from("D:/presentation-test");
+        let mut app = test_app("", path.clone(), path);
+        app.transcript
+            .push(TranscriptLine::Summary("previous output\n".repeat(40)));
+        let tool = test_tool_line(
+            ToolActionKind::Read,
+            "file.rs",
+            vec![],
+            vec![ToolResultState::SuccessNoOutput],
+        );
+        app.transcript.push(TranscriptLine::Tool(tool));
+        app.transcript_follow_bottom = following;
+        app.transcript_scroll = 3;
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 10)).unwrap();
+        for _ in 0..2 {
+            assert_eq!(app.transcript_follow_bottom, following);
+            app.transcript
+                .push(TranscriptLine::Summary("new output\n".repeat(4)));
+            terminal
+                .draw(|frame| {
+                    let view = build_transcript_view(&app, 80);
+                    render_transcript(frame, frame.area(), &mut app, &view);
+                })
+                .unwrap();
+            assert_eq!(app.transcript_follow_bottom, following);
+            if following {
+                assert_eq!(app.transcript_scroll, app.transcript_max_scroll);
+            } else {
+                assert_eq!(app.transcript_scroll, 3);
+            }
+        }
+    }
+}
+
+#[test]
+fn automatic_preview_resize_preserves_detached_reading_anchor() {
+    let path = PathBuf::from("D:/presentation-test");
+    let mut app = test_app("", path.clone(), path);
+    let mut tool = test_tool_line(
+        ToolActionKind::Read,
+        "main.rs",
+        vec![],
+        vec![ToolResultState::SuccessWithOutput],
+    );
+    tool.full_text = Some("中".repeat(30000));
+    app.transcript.push(TranscriptLine::Tool(tool));
+    app.transcript
+        .push(TranscriptLine::Summary("reading anchor\n".repeat(4)));
+    app.transcript_follow_bottom = false;
+    let old = build_cached_transcript_view(&mut app, 80);
+    let at = old
+        .lines
+        .iter()
+        .position(|l| rendered_lines_text(std::slice::from_ref(l)).contains("reading anchor"))
+        .unwrap();
+    app.transcript_scroll = old.lines[..at]
+        .iter()
+        .map(|l| u64::from(paragraph_line_count(std::slice::from_ref(l), 80)))
+        .sum();
+    invalidate_transcript_layout(&mut app);
+    let next = build_cached_transcript_view(&mut app, 80);
+    assert!(
+        rendered_lines_text(&transcript_render_window(&next, app.transcript_scroll, 1).lines)
+            .contains("reading anchor")
+    );
+    let resized = build_cached_transcript_view(&mut app, 45);
+    assert!(rendered_lines_text(
+        &transcript_render_window(&resized, app.transcript_scroll, 1).lines
+    )
+    .contains("reading anchor"));
+    assert!(!app.transcript_follow_bottom);
+}
+
+#[test]
+fn automatic_preview_poll_preserves_reading_and_session_reset_clears_cache() {
+    let path = PathBuf::from("D:/presentation-test");
+    let mut app = test_app("", path.clone(), path);
+    let mut tool = test_tool_line(
+        ToolActionKind::Read,
+        "main.rs",
+        vec![],
+        vec![ToolResultState::SuccessWithOutput],
+    );
+    tool.full_text = Some((0..4000).map(|i| format!("中文 output {i:04}\n")).collect());
+    app.transcript.push(TranscriptLine::Tool(tool));
+    app.transcript_follow_bottom = false;
+    invalidate_transcript_layout(&mut app);
+    let old = build_cached_transcript_view(&mut app, 80);
+    app.transcript_scroll = 0;
+    let old_scroll = app.transcript_scroll;
+    assert!(!output_preview::poll(&mut app));
+    let next = build_cached_transcript_view(&mut app, 80);
+    assert_eq!(next.total_rows, old.total_rows);
+    assert!(app.transcript_scroll.abs_diff(old_scroll) <= 2);
+    reset_transcript_view(&mut app);
+    assert!(app.output_preview.is_empty());
+}
+
+#[test]
+fn automatic_preview_hides_machine_framing() {
+    let path = PathBuf::from("D:/presentation-test");
+    let mut app = test_app("", path.clone(), path);
+    let mut tool = test_tool_line(
+        ToolActionKind::Read,
+        "main.rs",
+        vec![],
+        vec![ToolResultState::SuccessWithOutput],
+    );
+    tool.full_text = Some("machine header\n正文\nContinuation: complete".into());
+    tool.readable_range = Some((15, 6));
+    tool.duration_ms = Some(250);
+    app.transcript.push(TranscriptLine::Tool(tool));
+    invalidate_transcript_layout(&mut app);
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 20)).unwrap();
+    let draw = |terminal: &mut Terminal<ratatui::backend::TestBackend>, app: &mut App| {
+        terminal
+            .draw(|frame| {
+                let view = build_transcript_view(app, 100);
+                render(frame, app, &view);
+            })
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    };
+    let screen = draw(&mut terminal, &mut app);
+    assert!(screen.contains("正") && screen.contains("文"), "{screen}");
+    assert!(!screen.contains("Finished") && !screen.contains("0.25s"));
+    let preview = output_preview::preview_lines(
+        &app,
+        match app.transcript[0].content() {
+            TranscriptLine::Tool(tool) => tool,
+            _ => panic!(),
+        },
+        100,
+    );
+    assert_eq!(
+        preview.len(),
+        1,
+        "short output must not reserve ten blank rows"
+    );
+    assert!(!screen.contains("machine header"));
+    assert!(!screen.contains("Continuation:"));
+}
+
+#[test]
+fn referenced_tool_renders_only_its_title_without_preview_hint_row() {
+    let tool = crate::tool_projection::transcript_page_tool_line(
+        "read-file",
+        "read",
+        TranscriptBlockStatusV1::Completed,
+        "Read README.md".into(),
+        Some("4230"),
+    );
+    let lines = transcript_to_lines(&[TranscriptLine::Tool(tool)], 100);
+    let visible: Vec<_> = lines
+        .iter()
+        .filter(|line| {
+            !rendered_lines_text(std::slice::from_ref(line))
+                .trim()
+                .is_empty()
+        })
+        .collect();
+    assert_eq!(visible.len(), 1);
+    let text = rendered_lines_text(&lines);
+    assert!(text.contains("Read README.md"));
+    assert!(!text.contains("Enter to preview") && !text.contains("bytes"));
+}
+
+#[test]
+fn tool_visual_hierarchy_is_neutral_except_failures() {
+    for (state, color) in [
+        (ToolResultState::SuccessWithOutput, theme().muted),
+        (ToolResultState::Failed, theme().muted),
+        (ToolResultState::Denied, theme().muted),
+    ] {
+        let tool = test_tool_line(ToolActionKind::Read, "src/main.rs", vec![], vec![state]);
+        let lines = transcript_to_lines(&[TranscriptLine::Tool(tool)], 100);
+        assert_eq!(lines[0].spans[0].style.fg, Some(color));
+        assert!(lines[0]
+            .spans
+            .iter()
+            .all(|span| !span.style.add_modifier.contains(Modifier::BOLD)));
+    }
+}
+
+#[test]
+fn agent_run_completion_folds_process_but_keeps_final_answer() {
+    let path = PathBuf::from("D:/presentation-test");
+    let mut app = test_app("", path.clone(), path);
+    app.active_agent_run_id = Some("run-a".into());
+    for (id, kind, payload) in [
+        (
+            "stage",
+            "Status",
+            json!({"stage":"model_process_summary","message":"Inspecting source"}),
+        ),
+        ("answer", "Final", json!({"content":"The result is ready"})),
+    ] {
+        apply_session_event(
+            &mut app,
+            &json!({"id":id,"type":kind,"payload":payload}),
+            Some("run-a"),
+        );
+    }
+    let running = rendered_lines_text(&build_transcript_view(&app, 80).lines);
+    assert!(running.contains("Inspecting source"));
+    apply_session_event(
+        &mut app,
+        &json!({"id":"complete","type":"AgentRunCompleted","payload":{}}),
+        Some("run-a"),
+    );
+    let completed = rendered_lines_text(&build_transcript_view(&app, 80).lines);
+    assert!(completed.contains("The result is ready"));
+    assert!(completed.contains("Inspecting source"), "{completed}");
+    assert!(completed.contains('─'), "{completed}");
+}
+
+fn run_event(app: &mut App, run: &str, id: &str, kind: &str, payload: Value) {
+    apply_session_event(
+        app,
+        &json!({"id":id,"type":kind,"payload":payload}),
+        Some(run),
+    );
+}
+
+#[test]
+fn run_terminal_states_keep_results_and_do_not_require_final() {
+    for (kind, label, reason) in [
+        ("AgentRunCompleted", "└", ""),
+        ("AgentRunFailed", "Failed", "Provider unavailable"),
+        ("AgentRunInterrupted", "Interrupted", "Stopped by user"),
+    ] {
+        for final_first in [true, false] {
+            let path = PathBuf::from("D:/presentation-test");
+            let mut app = test_app("", path.clone(), path);
+            app.active_agent_run_id = Some("run".into());
+            run_event(
+                &mut app,
+                "run",
+                "stage",
+                "Status",
+                json!({"stage":"model_process_summary","message":"Inspecting source"}),
+            );
+            if final_first {
+                run_event(
+                    &mut app,
+                    "run",
+                    "final",
+                    "Final",
+                    json!({"content":"Useful result"}),
+                );
+            }
+            let payload = json!({"message":reason,"reasonType":"cancelled"});
+            run_event(&mut app, "run", "terminal", kind, payload.clone());
+            let before = rendered_lines_text(&build_transcript_view(&app, 80).lines);
+            assert!(before.contains(label), "{before}");
+            assert!(!before.contains("Working"), "{before}");
+            assert!(before.contains("Inspecting source"));
+            assert!(before.contains(reason));
+            assert_eq!(before.contains("Useful result"), final_first);
+            if !final_first {
+                run_event(
+                    &mut app,
+                    "run",
+                    "final",
+                    "Final",
+                    json!({"content":"Useful result"}),
+                );
+            }
+            run_event(&mut app, "run", "terminal", kind, payload);
+            let after = rendered_lines_text(&build_transcript_view(&app, 80).lines);
+            assert_eq!(after.matches("Useful result").count(), 1, "{after}");
+            assert_eq!(after.matches(label).count(), 1, "{after}");
+        }
+    }
+}
+
+#[test]
+fn child_completion_does_not_fold_parent_and_waiting_is_not_completion() {
+    let path = PathBuf::from("D:/presentation-test");
+    let mut app = test_app("", path.clone(), path);
+    app.active_agent_run_id = Some("parent".into());
+    app.active_agent_run_ids = HashSet::from(["parent".into(), "child".into()]);
+    for run in ["parent", "child"] {
+        run_event(
+            &mut app,
+            run,
+            &format!("stage-{run}"),
+            "Status",
+            json!({"stage":"model_process_summary","message":format!("Process of {run}")}),
+        );
+    }
+    run_event(
+        &mut app,
+        "child",
+        "done-child",
+        "AgentRunCompleted",
+        json!({}),
+    );
+    apply_session_event(
+        &mut app,
+        &json!({"id":"waiting-parent","type":"ModelStatus","processState":"waiting_user","payload":{}}),
+        Some("parent"),
+    );
+    let text = rendered_lines_text(&build_transcript_view(&app, 80).lines);
+    assert!(text.contains("Waiting for input"), "{text}");
+    assert!(text.contains("Process of parent"));
+    assert!(text.contains("Process of child"));
+    assert!(text.contains('─'));
+}
+
+fn run_block(
+    id: &str,
+    sequence: u64,
+    run: &str,
+    source: &str,
+    body: TranscriptBlockBodyV1,
+) -> TranscriptBlockV1 {
+    let mut block = transcript_test_block(id, 1, sequence, body);
+    block.presentation = Some(
+        centaeris_core::session::transcript::TranscriptPresentationV1 {
+            agent_run_id: Some(run.into()),
+            source_type: source.into(),
+            observed_at_ms: sequence as i64,
+            display_target: None,
+            duration_ms: None,
+            operation: None,
+        },
+    );
+    block
+}
+
+fn history_run_page(terminal: Option<&str>) -> TranscriptPageV1 {
+    let mut blocks = vec![
+        run_block(
+            "stage",
+            2,
+            "run",
+            "phase_event",
+            TranscriptBlockBodyV1::Notice {
+                notice_type: "model_process_summary".into(),
+                content: TranscriptTextContentV1::inline("Inspecting source".into()),
+                status: TranscriptBlockStatusV1::Running,
+            },
+        ),
+        run_block(
+            "result",
+            3,
+            "run",
+            "assistant_message",
+            TranscriptBlockBodyV1::AssistantText {
+                content: TranscriptTextContentV1::inline("Useful result".into()),
+                status: TranscriptBlockStatusV1::Completed,
+            },
+        ),
+    ];
+    if let Some(source) = terminal {
+        blocks.push(run_block(
+            "end",
+            4,
+            "run",
+            source,
+            TranscriptBlockBodyV1::Notice {
+                notice_type: "run_boundary".into(),
+                content: TranscriptTextContentV1::inline(
+                    if source == "agent_run_failed" {
+                        "Provider unavailable"
+                    } else {
+                        ""
+                    }
+                    .into(),
+                ),
+                status: TranscriptBlockStatusV1::Completed,
+            },
+        ));
+    }
+    transcript_test_page(blocks, None)
+}
+
+#[test]
+fn historical_runs_use_authoritative_terminal_state_and_preserve_user_disclosure() {
+    for terminal in [None, Some("agent_run_completed"), Some("agent_run_failed")] {
+        let path = PathBuf::from("D:/presentation-test");
+        let mut app = test_app("", path.clone(), path);
+        app.transcript_paging =
+            Some(TranscriptPagingState::open(history_run_page(terminal)).unwrap());
+        sync_materialized_transcript_history(&mut app);
+        let text = rendered_lines_text(&build_transcript_view(&app, 80).lines);
+        assert!(text.contains("Useful result"));
+        assert!(!text.contains("Working"));
+        assert!(text.contains("Inspecting source"));
+        match terminal {
+            None => assert!(!text.contains('─')),
+            Some("agent_run_failed") => assert!(text.contains("Failed · Provider unavailable")),
+            _ => {
+                assert!(text.contains('─'));
+                for _ in 0..2 {
+                    sync_materialized_transcript_history(&mut app);
+                }
+                assert!(rendered_lines_text(&build_transcript_view(&app, 80).lines)
+                    .contains("Inspecting source"));
+            }
+        }
+    }
+}
+
+#[test]
+fn final_promotes_already_materialized_stream_without_duplicate_or_hidden_answer() {
+    let path = PathBuf::from("D:/presentation-test");
+    let mut app = test_app("", path.clone(), path);
+    app.active_agent_run_id = Some("run".into());
+    run_event(
+        &mut app,
+        "run",
+        "delta",
+        "ModelTextDelta",
+        json!({"delta":"answer line\n"}),
+    );
+    materialize_assistant_prefix(&mut app);
+    run_event(
+        &mut app,
+        "run",
+        "final",
+        "Final",
+        json!({"content":"answer line\n"}),
+    );
+    run_event(&mut app, "run", "done", "AgentRunCompleted", json!({}));
+    let text = rendered_lines_text(&build_transcript_view(&app, 80).lines);
+    assert_eq!(text.matches("answer line").count(), 1, "{text}");
+}
+
+#[test]
+fn completed_run_structure_survives_older_page_and_release() {
+    let path = PathBuf::from("D:/presentation-test");
+    let mut app = test_app("", path.clone(), path);
+    let mut tail = history_run_page(Some("agent_run_completed"));
+    tail.older_cursor = Some("older".into());
+    tail.has_older = true;
+    app.transcript_paging = Some(TranscriptPagingState::open(tail).unwrap());
+    sync_materialized_transcript_history(&mut app);
+    app.transcript_paging
+        .as_mut()
+        .unwrap()
+        .apply_older_page(transcript_test_page(
+            vec![run_block(
+                "earlier",
+                1,
+                "run",
+                "phase_event",
+                TranscriptBlockBodyV1::Notice {
+                    notice_type: "model_process_summary".into(),
+                    content: TranscriptTextContentV1::inline("Earlier stage".into()),
+                    status: TranscriptBlockStatusV1::Running,
+                },
+            )],
+            None,
+        ))
+        .unwrap();
+    sync_materialized_transcript_history(&mut app);
+    let view = build_transcript_view(&app, 80);
+    assert_eq!(
+        view.source_rows
+            .iter()
+            .filter(|(key, _)| key == "run:run")
+            .count(),
+        1
+    );
+    assert!(rendered_lines_text(&view.lines).contains("Earlier stage"));
+    release_loaded_transcript_history(&mut app);
+    let text = rendered_lines_text(&build_transcript_view(&app, 80).lines);
+    assert!(!text.contains("Earlier stage"));
+    assert!(text.contains("Inspecting source"));
+    assert!(text.contains("Useful result"));
+}
+
+#[test]
+fn prepending_history_preserves_live_stream_replacement_boundary() {
+    let path = PathBuf::from("D:/presentation-test");
+    let mut app = test_app("", path.clone(), path);
+    app.transcript_paging =
+        Some(TranscriptPagingState::open(transcript_test_page(vec![], Some("older"))).unwrap());
+    app.active_agent_run_id = Some("live".into());
+    run_event(
+        &mut app,
+        "live",
+        "delta",
+        "ModelTextDelta",
+        json!({"delta":"draft\n"}),
+    );
+    materialize_assistant_prefix(&mut app);
+    app.transcript_paging
+        .as_mut()
+        .unwrap()
+        .apply_older_page(transcript_test_page(
+            vec![transcript_test_block(
+                "user-old",
+                1,
+                1,
+                TranscriptBlockBodyV1::UserText {
+                    content: TranscriptTextContentV1::inline("Historical question".into()),
+                },
+            )],
+            None,
+        ))
+        .unwrap();
+    sync_materialized_transcript_history(&mut app);
+    run_event(
+        &mut app,
+        "live",
+        "final",
+        "Final",
+        json!({"content":"replacement answer"}),
+    );
+    let text = rendered_lines_text(&build_transcript_view(&app, 80).lines);
+    assert!(text.contains("Historical question"), "{text}");
+    assert!(text.contains("replacement answer"));
+    assert!(!text.contains("draft"));
+}
+
+#[test]
+fn runtime_wait_and_resume_keep_run_open_with_truthful_status() {
+    let path = PathBuf::from("D:/presentation-test");
+    let mut app = test_app("", path.clone(), path);
+    app.active_agent_run_id = Some("run".into());
+    for (id, status, expected) in [
+        ("wait", "waiting", "Waiting"),
+        ("resume", "resumed", "Working"),
+    ] {
+        apply_session_event(
+            &mut app,
+            &json!({"id":id,"type":"RuntimeWaitChanged","visibility":"user","processState":"waiting","payload":{"status":status}}),
+            Some("run"),
+        );
+        let text = rendered_lines_text(&build_transcript_view(&app, 80).lines);
+        assert!(text.contains(expected), "{text}");
+        assert!(!text.contains("Worked"));
+    }
+}
+
+#[test]
+fn child_wait_does_not_change_parent_run_status() {
+    let path = PathBuf::from("D:/presentation-test");
+    let mut app = test_app("", path.clone(), path);
+    app.active_agent_run_id = Some("parent".into());
+    app.active_agent_run_ids = HashSet::from(["parent".into(), "child".into()]);
+    apply_session_event(
+        &mut app,
+        &json!({"id":"wait-child","type":"RuntimeWaitChanged","processState":"waiting","payload":{"status":"waiting"}}),
+        Some("child"),
+    );
+    let view = build_transcript_view(&app, 80);
+    for (key, row) in &view.source_rows {
+        let line = &view.lines[*row as usize];
+        let text = rendered_line_text(line);
+        if key == "status:parent" {
+            assert!(text.contains("Working"), "{text}");
+        }
+        if key == "status:child" {
+            assert!(text.contains("Waiting"), "{text}");
+        }
+    }
+}
+
+#[test]
+fn active_tools_show_automatic_six_line_preview_then_close_with_structure() {
+    let path = PathBuf::from("D:/presentation-test");
+    let mut app = test_app("", path.clone(), path);
+    app.active_agent_run_id = Some("run".into());
+    let mut tool = test_tool_line(
+        ToolActionKind::Read,
+        "README.md",
+        vec![],
+        vec![ToolResultState::SuccessWithOutput],
+    );
+    tool.full_text = Some((0..20).map(|i| format!("body {i}\n")).collect());
+    app.transcript = vec![
+        TranscriptLine::Summary("Checking the project".into()).for_run(Some("run"), false),
+        TranscriptLine::Tool(tool).for_run(Some("run"), false),
+    ];
+    let running = rendered_lines_text(&build_transcript_view(&app, 80).lines);
+    assert!(running.contains("body 0"), "{running}");
+    assert!(running.contains("body 5"));
+    assert!(!running.contains("body 6"));
+    assert!(running.contains('└') && running.contains('…'));
+    run_event(
+        &mut app,
+        "run",
+        "answer",
+        "Final",
+        json!({"content":"The result"}),
+    );
+    run_event(&mut app, "run", "end", "AgentRunCompleted", json!({}));
+    let closed = rendered_lines_text(&build_transcript_view(&app, 80).lines);
+    assert!(closed.contains("Checking the project") && closed.contains("The result"));
+    assert!(!closed.contains("README.md") && !closed.contains("body 0"));
+    assert!(closed.contains('─'));
+    assert!(!closed.contains("Worked") && !closed.contains('⌄'));
+}
+
+#[test]
+fn automatic_referenced_previews_only_load_visible_tools_without_collapsing_previous_rows() {
+    use centaeris_core::session::transcript::TranscriptContentRefV1;
+    let path = PathBuf::from("D:/presentation-test");
+    let mut app = test_app("", path.clone(), path);
+    let blocks = (1..=12)
+        .map(|seq| {
+            transcript_test_block(
+                &format!("tool:call-{seq}"),
+                1,
+                seq,
+                TranscriptBlockBodyV1::Tool {
+                    call_id: format!("call-{seq}"),
+                    tool_name: "read".into(),
+                    status: TranscriptBlockStatusV1::Completed,
+                    summary: Some(format!("Read file-{seq}")),
+                    summary_ref: None,
+                    output_ref: Some(TranscriptContentRefV1 {
+                        ref_id: format!("ref-{seq}"),
+                        revision: "1".into(),
+                        byte_length: "100".into(),
+                    }),
+                },
+            )
+        })
+        .collect();
+    app.transcript_paging =
+        Some(TranscriptPagingState::open(transcript_test_page(blocks, None)).unwrap());
+    sync_materialized_transcript_history(&mut app);
+    app.transcript_follow_bottom = false;
+    let view = build_transcript_view(&app, 80);
+    let (first, row) = view.source_rows[0].clone();
+    app.transcript_scroll = row;
+    output_preview::prepare_visible(&mut app, &view, 1);
+    assert_eq!(app.output_preview.len(), 1);
+    assert!(app.output_preview.contains_key(&first));
+    let (last, row) = view.source_rows.last().unwrap().clone();
+    app.transcript_scroll = row;
+    output_preview::prepare_visible(&mut app, &view, 1);
+    assert_eq!(app.output_preview.len(), 2);
+    assert!(app.output_preview.contains_key(&last));
+    assert!(app.output_preview.contains_key(&first));
+    app.transcript_paging = None;
+    assert!(output_preview::poll(&mut app));
+    assert!(app.output_preview.is_empty());
+}
+
+#[test]
+fn retired_tool_shortcuts_do_not_change_the_transcript_or_insert_control_characters() {
+    let path = PathBuf::from("D:/presentation-test");
+    let mut app = test_app("", path.clone(), path);
+    let mut tool = test_tool_line(
+        ToolActionKind::Read,
+        "README.md",
+        vec![],
+        vec![ToolResultState::SuccessWithOutput],
+    );
+    tool.full_text = Some("visible body".into());
+    app.transcript.push(TranscriptLine::Tool(tool));
+    let before = rendered_lines_text(&build_transcript_view(&app, 80).lines);
+    for key in [
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+    ] {
+        handle_key(key, &mut app);
+    }
+    assert!(app.input.is_empty());
+    assert_eq!(
+        rendered_lines_text(&build_transcript_view(&app, 80).lines),
+        before
+    );
+    for ch in "npvq".chars() {
+        handle_key(
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+            &mut app,
+        );
+    }
+    assert_eq!(app.input, "npvq");
 }

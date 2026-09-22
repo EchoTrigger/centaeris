@@ -22,6 +22,7 @@ vi.mock("@tanstack/react-virtual", () => ({
       { index: 1, start: 220 },
     ],
     measureElement: () => {},
+    resizeItem: () => {},
   }),
 }));
 
@@ -40,7 +41,7 @@ vi.mock("../src/components/chat/chatViewStore", () => {
       count(harness.roleReads, messageId);
       return messageId === "user" ? "user" : "assistant";
     },
-    useChatViewStore: Object.assign((selector: (state: unknown) => unknown) => selector({ messageById: messages }), { getState: () => ({ messageById: messages }) }),
+    useChatViewStore: Object.assign((selector: (state: unknown) => unknown) => selector({ messageById: messages, messageIds: Object.keys(messages), expandedReasoning: {} }), { getState: () => ({ messageById: messages }) }),
   };
 });
 

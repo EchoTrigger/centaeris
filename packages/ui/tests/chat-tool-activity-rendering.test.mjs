@@ -121,7 +121,7 @@ test("keeps reads in their chronological position before and after completion", 
   );
 });
 
-test("keeps one active tool header while its members settle", () => {
+test("keeps distinct read and command groups in source order while members settle", () => {
   const settledRead = makeTask({
     id: "settled-read",
     turnId: "turn-shared",
@@ -157,10 +157,10 @@ test("keeps one active tool header while its members settle", () => {
     ],
   });
 
-  assert.equal(view.processItems.length, 1);
+  assert.equal(view.processItems.length, 2);
   assert.equal(view.processItems[0]?.id, "settled-read-activity");
   assert.deepEqual(
-    view.processItems[0]?.tasks.map((task) => task.id),
+    view.processItems.flatMap(item => item.tasks.map(task => task.id)),
     ["settled-read", "running-command"],
   );
 
@@ -185,7 +185,7 @@ test("keeps one active tool header while its members settle", () => {
 
   assert.equal(settledView.processItems[0]?.id, view.processItems[0]?.id);
   assert.deepEqual(
-    settledView.processItems[0]?.tasks.map((task) => task.id),
+    settledView.processItems.flatMap(item => item.tasks.map(task => task.id)),
     ["settled-read", "running-command"],
   );
 });
@@ -278,7 +278,7 @@ test("uses exact structured operations and leaves no legacy summary chain", () =
     ],
   });
 
-  assert.equal(formatCompletedToolGroupTitle([command]), "Ran a command");
+  assert.equal(formatCompletedToolGroupTitle([command]), "Ran cargo test | rg fail");
   assert.equal(
     formatCompletedToolGroupTitle([web, command, read, edit]),
     "Searched the web, Ran a command, Read a file, Edited a file",
@@ -291,7 +291,7 @@ test("uses exact structured operations and leaves no legacy summary chain", () =
   });
   assert.equal(
     formatRunningToolGroupTitle([runningCommand]),
-    "Running a command",
+    "Running cargo test",
   );
   assert.equal(formatCompletedToolGroupTitle([weather]), "Ran an external tool");
   for (const isStreaming of [true, false]) {
