@@ -1,8 +1,8 @@
-import { WorkProgress } from "./WorkProgress";
 import { transcriptMessageGroups } from "./transcriptMessageGroups";
+import { historyProcessEntries } from "./historyProcessEntries";
 import { useShallow } from "zustand/react/shallow";
 import { t } from "../../i18n";
-import { memo, useLayoutEffect, useMemo, useRef, type RefObject } from "react";
+import { memo, useCallback, useLayoutEffect, useMemo, useRef, type ReactNode, type RefObject } from "react";
 import { Check, Copy, Pencil } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { AgentResultStream } from "./AgentResultStream";
@@ -22,7 +22,7 @@ type VirtualMessageListProps = {
   containerRef: RefObject<HTMLDivElement | null>;
   contentRef?: RefObject<HTMLDivElement | null>;
   spacerRef?: RefObject<HTMLDivElement | null>;
-  onUpwardIntent?: () => void;
+  onReadingIntent?: () => void;
   editingUserMessageId: string | null;
   editingPrompt: string;
   copiedUserMessageId: string | null;
@@ -72,7 +72,7 @@ const UserMessageRow = memo(function UserMessageRow({
   onStartEditingUserMessage: (message: ChatMessage & { role: "user" }) => void;
 }) {
   const storedMessage = useChatViewStore(selectChatMessageById(messageId));
-  const { message, status, loading } = useTranscriptText(storedMessage);
+  const { message, status, loading, paged } = useTranscriptText(storedMessage);
   if (!message || message.role !== "user") {
     return null;
   }
@@ -128,7 +128,7 @@ const UserMessageRow = memo(function UserMessageRow({
                 )}
               </Button>
             </Tooltip>
-            {canEdit && !loading ? (
+            {canEdit && !loading && !paged ? (
                   <Tooltip content={t("chatArea.edit")}>
                     <Button
                       type="button"
@@ -154,27 +154,35 @@ const UserMessageRow = memo(function UserMessageRow({
 
 const AssistantMessageRow = memo(function AssistantMessageRow({
   messageId,
-  showWorkProgress = true,
+  projectedMessage,
+  isStandaloneRow = true,
   onOpenAgentSession,
   onOpenWorkspacePath,
 }: {
   messageId: string;
-  showWorkProgress?: boolean;
+  projectedMessage?: ChatMessage;
+  isStandaloneRow?: boolean;
   onOpenAgentSession?: VirtualMessageListProps["onOpenAgentSession"];
   onOpenWorkspacePath?: VirtualMessageListProps["onOpenWorkspacePath"];
 }) {
-  const storedMessage = useChatViewStore(selectChatMessageById(messageId));
-  const { message, status } = useTranscriptText(storedMessage);
+  const stored = useChatViewStore(selectChatMessageById(messageId));
+  const storedMessage = projectedMessage ?? stored;
+  const reasoning = storedMessage?.role === "assistant" && storedMessage.turn.chunks.length === 1
+    && storedMessage.turn.chunks[0].kind === "reasoning" ? storedMessage.turn.chunks[0] : undefined;
+  const reasoningIdentity = reasoning ? JSON.stringify([reasoning.turnId ?? reasoning.id, reasoning.id]) : "";
+  const expanded = useChatViewStore(state => Boolean(state.expandedReasoning[reasoningIdentity]));
+  const toolOnly = storedMessage?.role === "assistant" && storedMessage.turn.chunks.length > 0
+    && storedMessage.turn.chunks.every(chunk => chunk.kind === "task");
+  const { message, status } = useTranscriptText(storedMessage, !toolOnly && (!reasoning || expanded));
   if (!message || message.role !== "assistant") {
     return null;
   }
   return (
-    <div className="message assistant-message">
+    <div className={`message assistant-message ${isStandaloneRow ? "" : "historyProcessRow"}`}>
       <div className="message-bubble">
         {status}
         <AgentResultStream
           turn={message.turn}
-          showWorkProgress={showWorkProgress}
           onOpenAgentSession={onOpenAgentSession}
           onOpenWorkspacePath={onOpenWorkspacePath}
         />
@@ -191,13 +199,15 @@ const HistoryProcessGroup = memo(function HistoryProcessGroup({ ids, onOpenAgent
   const messages = useChatViewStore(useShallow((state) => ids.map((id) => state.messageById[id])));
   const isAnswer = (message: ChatMessage) => message.role === "assistant"
     && (Boolean(message.turn.finalAnswer) || Boolean(message.transcriptText && !message.turn.chunks.length));
-  const row = (message: ChatMessage) => <AssistantMessageRow key={message.id} messageId={message.id}
-    showWorkProgress={false} onOpenAgentSession={onOpenAgentSession} onOpenWorkspacePath={onOpenWorkspacePath} />;
+  const entries = useMemo(() => historyProcessEntries(messages), [messages]);
+  const final = entries.at(-1);
+  const hasFinal = Boolean(final && isAnswer(final));
+  const process = hasFinal ? entries.slice(0, -1) : entries;
+  const row = (message: ChatMessage) => <AssistantMessageRow key={message.id} messageId={message.id} projectedMessage={message}
+    isStandaloneRow={false} onOpenAgentSession={onOpenAgentSession} onOpenWorkspacePath={onOpenWorkspacePath} />;
   return <>
-    <WorkProgress running={false} finalStarted={messages.some(isAnswer)}>
-      {messages.filter((message) => !isAnswer(message)).map(row)}
-    </WorkProgress>
-    {messages.filter(isAnswer).map(row)}
+    {process.length ? <div className="historyProcessRows">{process.map(row)}</div> : null}
+    {hasFinal && final ? row(final) : null}
   </>;
 });
 
@@ -243,11 +253,39 @@ const MessageRow = memo(function MessageRow({
   );
 });
 
+// Both layouts keep the same keyed component and DOM parent, so completing a
+// visible tail does not reset an open output page, selection or inner scroll.
+function TimelineRow({ id, item, measureElement, onMeasure, children }: {
+  id: string;
+  item?: { index: number; start: number };
+  measureElement: (element: HTMLDivElement | null) => void;
+  onMeasure: (id: string, height: number) => void;
+  children: ReactNode;
+}) {
+  const element = useRef<HTMLDivElement>(null);
+  const live = item === undefined;
+  const setElement = useCallback((node: HTMLDivElement | null) => {
+    element.current = node;
+    if (!live) measureElement(node);
+  }, [live, measureElement]);
+  useLayoutEffect(() => {
+    if (!live) return;
+    const measure = () => { if (element.current) onMeasure(id, element.current.getBoundingClientRect().height); };
+    measure();
+    if (typeof ResizeObserver === "undefined" || !element.current) return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element.current);
+    return () => observer.disconnect();
+  }, [id, live, onMeasure]);
+  return <div ref={setElement} data-index={item?.index} data-live-tail={live ? id : undefined} data-history-row={live ? undefined : id}
+    style={item ? {left:0,position:"absolute",top:0,transform:`translateY(${item.start}px)`,width:"100%"} : {display:"flow-root"}}>{children}</div>;
+}
+
 export function VirtualMessageList({
   containerRef,
   contentRef,
   spacerRef,
-  onUpwardIntent,
+  onReadingIntent,
   hasOlder = false,
   isLoadingOlder = false,
   onLoadOlder,
@@ -257,42 +295,97 @@ export function VirtualMessageList({
 }: VirtualMessageListProps) {
   const messageIds = useChatViewStore(selectChatMessageIds);
   const groups = useMemo(() => transcriptMessageGroups(messageIds, (id) => useChatViewStore.getState().messageById[id]), [messageIds]);
+  const lastGroup = groups.at(-1);
+  const liveKey = useChatViewStore(state => {
+    const message = lastGroup?.length === 1 ? state.messageById[lastGroup[0]] : undefined;
+    return message?.role === "assistant" && message.turn.isStreaming ? message.id : null;
+  });
+  const historyGroups = liveKey ? groups.slice(0, -1) : groups;
+  const rowHeights = useRef(new Map<string, number>());
   const virtualizer = useVirtualizer({
-    count: groups.length,
+    count: historyGroups.length,
+    getItemKey: (index) => historyGroups[index][0],
     getScrollElement: () => containerRef.current,
-    estimateSize: () => ESTIMATED_MESSAGE_HEIGHT_PX,
+    estimateSize: (index) => rowHeights.current.get(historyGroups[index][0]) ?? ESTIMATED_MESSAGE_HEIGHT_PX,
     overscan: MESSAGE_LIST_OVERSCAN,
   });
+  // A visible row grows down from its title. Only changes entirely above the
+  // viewport need virtualizer compensation to preserve the reading position.
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) =>
+    item.end <= (instance.scrollOffset ?? 0) && instance.scrollDirection !== "backward";
+  const previousTail = useRef<string | null>(null);
+  const previousFirst = useRef<string | undefined>(undefined);
+  useLayoutEffect(() => {
+    const completedKey = previousTail.current;
+    previousTail.current = liveKey;
+    if (completedKey && completedKey !== liveKey) {
+      const index = historyGroups.findIndex(ids => ids[0] === completedKey);
+      const height = virtualizer.elementsCache?.get(completedKey)?.getBoundingClientRect().height ?? rowHeights.current.get(completedKey);
+      if (index >= 0 && height !== undefined) virtualizer.resizeItem(index, height);
+    }
+    // A prepended page shifts existing rows. Preserve the old first row's
+    // screen offset; completion/appending does not trigger this correction.
+    const first = historyGroups[0]?.[0];
+    if (previousFirst.current && previousFirst.current !== first) {
+      const index = historyGroups.findIndex(ids => ids[0] === previousFirst.current);
+      const offset = index > 0 ? virtualizer.measurementsCache[index]?.start : undefined;
+      if (offset !== undefined && containerRef.current) containerRef.current.scrollTop += offset;
+    }
+    previousFirst.current = first;
+  }, [liveKey, historyGroups, virtualizer, containerRef]);
   const virtualItems = virtualizer.getVirtualItems();
   const totalSize = virtualizer.getTotalSize();
   const touchY = useRef<number | null>(null);
-  const userIndex = groups.findIndex((ids) => ids.includes(props.latestUserMessageId ?? ""));
+  const userIndex = historyGroups.findIndex((ids) => ids.includes(props.latestUserMessageId ?? ""));
   const anchorTop = virtualizer.measurementsCache[userIndex]?.start ?? 0;
 
   const viewportHeight = virtualizer.scrollRect?.height;
+  const notifySize = useCallback(() => {
+    onContentSizeChange(totalSize + (liveKey ? rowHeights.current.get(liveKey) ?? 0 : 0), anchorTop, props.latestUserMessageId ?? "");
+  }, [onContentSizeChange, totalSize, liveKey, anchorTop, props.latestUserMessageId]);
+  const measureTail = useCallback((id: string, height: number) => {
+    rowHeights.current.set(id, height);
+    notifySize();
+  }, [notifySize]);
   useLayoutEffect(() => {
     void viewportHeight;
-    onContentSizeChange(totalSize, anchorTop, props.latestUserMessageId ?? "");
-  }, [onContentSizeChange, totalSize, anchorTop, props.latestUserMessageId, viewportHeight]);
+    notifySize();
+  }, [notifySize, viewportHeight]);
+  useLayoutEffect(() => {
+    const retained = new Set(messageIds);
+    for (const key of rowHeights.current.keys()) if (!retained.has(key)) rowHeights.current.delete(key);
+  }, [messageIds]);
+  const renderGroup = (ids: string[]) => {
+    const messageId = ids[0];
+    const message = useChatViewStore.getState().messageById[messageId];
+    return message?.role === "assistant" && !message.turn.agentRunId
+      ? <HistoryProcessGroup ids={ids} onOpenAgentSession={props.onOpenAgentSession} onOpenWorkspacePath={props.onOpenWorkspacePath} />
+      : <MessageRow messageId={messageId} props={props} />;
+  };
 
   return (
     <div
       className="messages-container uiRsMessagesContainer"
+      style={{overflowAnchor:"none"}}
       ref={containerRef}
       onScroll={onScroll}
+      onClickCapture={(event) => {
+        // Pause before the disclosure changes height, including keyboard clicks.
+        if ((event.target as Element).closest("button[aria-expanded]")) onReadingIntent?.();
+      }}
       tabIndex={0}
       onKeyDown={(event) => {
         if ((event.target as HTMLElement).closest("textarea, input, [contenteditable=true]")) return;
-        if (["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey)) onUpwardIntent?.();
+        if (["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey)) onReadingIntent?.();
       }}
       onTouchStart={(event) => { touchY.current = event.touches[0]?.clientY ?? null; }}
       onTouchMove={(event) => {
         const y = event.touches[0]?.clientY ?? null;
-        if (y !== null && touchY.current !== null && y > touchY.current) onUpwardIntent?.();
+        if (y !== null && touchY.current !== null && y > touchY.current) onReadingIntent?.();
         touchY.current = y;
       }}
       onWheel={(event) => {
-        if (event.deltaY < 0) onUpwardIntent?.();
+        if (event.deltaY < 0) onReadingIntent?.();
         if (
           event.deltaY < 0 &&
           event.currentTarget.scrollTop <= 0 &&
@@ -303,42 +396,20 @@ export function VirtualMessageList({
         }
       }}
     >
-      <div
-        ref={contentRef}
-        style={{
-          height: `${totalSize}px`,
-          position: "relative",
-          width: "100%",
-        }}
-      >
-        {virtualItems.map((item) => {
-          const ids = groups[item.index];
-          const messageId = ids?.[0];
-          if (!messageId) {
-            return null;
-          }
-          return (
-            <div
-              key={messageId}
-              data-index={item.index}
-              ref={virtualizer.measureElement}
-              style={{
-                left: 0,
-                position: "absolute",
-                top: 0,
-                transform: `translateY(${item.start}px)`,
-                width: "100%",
-              }}
-            >
-              {(() => {
-                const message = useChatViewStore.getState().messageById[messageId];
-                return message.role === "assistant" && !message.turn.agentRunId
-                  ? <HistoryProcessGroup ids={ids} onOpenAgentSession={props.onOpenAgentSession} onOpenWorkspacePath={props.onOpenWorkspacePath} />
-                  : <MessageRow messageId={messageId} props={props} />;
-              })()}
-            </div>
-          );
-        })}
+      <div ref={contentRef} style={{width:"100%",position:"relative",display:"flow-root"}}>
+        <div aria-hidden="true" style={{height:`${totalSize}px`}} />
+        {[
+          ...virtualItems.flatMap(item => {
+            const ids = historyGroups[item.index];
+            const messageId = ids?.[0];
+            return messageId ? [<TimelineRow key={messageId} id={messageId} item={item} measureElement={virtualizer.measureElement} onMeasure={measureTail}>
+              {renderGroup(ids)}
+            </TimelineRow>] : [];
+          }),
+          ...(liveKey && lastGroup ? [<TimelineRow key={liveKey} id={liveKey} measureElement={virtualizer.measureElement} onMeasure={measureTail}>
+            {renderGroup(lastGroup)}
+          </TimelineRow>] : []),
+        ]}
       </div>
       <div ref={spacerRef} aria-hidden="true" style={{ height: 0, flexShrink: 0 }} />
     </div>

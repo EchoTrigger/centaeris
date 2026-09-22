@@ -1,5 +1,5 @@
 import { t } from "../../i18n";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { UiSession } from "../../types/ui";
 import {
   activateSession,
@@ -74,6 +74,7 @@ export function useSessionController({
   const currentSessionIdRef = useRef(currentSessionId);
   const selectionEpochRef = useRef(0);
   const refreshRequestIdRef = useRef(0);
+  const catalogMutationRef = useRef(0);
   inputsRef.current = { activeWorkspaceRoot, reportError };
   sessionsRef.current = sessions;
   currentSessionIdRef.current = currentSessionId;
@@ -95,6 +96,7 @@ export function useSessionController({
       isCurrent,
       applySessions: (items: SessionItem[], preferredSessionId?: string | null): boolean => {
         if (!isCurrent()) return false;
+        catalogMutationRef.current += 1;
         selectionEpochRef.current += 1;
         const mapped = sortSessions(items.map(toUiSession));
         sessionsRef.current = mapped;
@@ -138,6 +140,45 @@ export function useSessionController({
     const next = preferred ?? workspaceMatch ?? null;
     setCurrentSession(next?.id ?? null);
   }, [setCurrentSession]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof document === "undefined") return;
+    let disposed = false;
+    let pending = false;
+    const discover = async () => {
+      if (disposed || pending || document.visibilityState === "hidden") return;
+      pending = true;
+      const mutation = catalogMutationRef.current;
+      const requestId = ++refreshRequestIdRef.current;
+      try {
+        const fetched = sortSessions((await listSessions()).map(toUiSession));
+        if (disposed || mutation !== catalogMutationRef.current || requestId !== refreshRequestIdRef.current) return;
+        const previous = sessionsRef.current;
+        const unchanged = previous.length === fetched.length && fetched.every((session, index) =>
+          (Object.keys(session) as (keyof UiSession)[]).every((key) => session[key] === previous[index][key]),
+        );
+        if (!unchanged) {
+          sessionsRef.current = fetched;
+          setSessions(fetched);
+        }
+        // Discovery updates the catalog only: never select another session or erase a draft.
+      } catch (error) {
+        if (!disposed) inputsRef.current.reportError(errorMessage(error, t("app.unableToLoadConversations")));
+      } finally {
+        pending = false;
+      }
+    };
+    const onVisible = () => { void discover(); };
+    const timer = setInterval(onVisible, 5_000);
+    window.addEventListener("focus", onVisible);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      disposed = true;
+      clearInterval(timer);
+      window.removeEventListener("focus", onVisible);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, []);
 
   const selectSession = useCallback(async (
     sessionId: string,
@@ -197,6 +238,7 @@ export function useSessionController({
   const renameSession = useCallback(async (sessionId: string, title: string) => {
     try {
       const updated = toUiSession(await updateSession(sessionId, { title }));
+      catalogMutationRef.current += 1;
       setSessions((items) => sortSessions(
         items.map((session) => session.id === sessionId ? updated : session),
       ));
@@ -244,6 +286,7 @@ export function useSessionController({
   }, [refresh]);
 
   const resolveSession = useCallback((session: UiSession, options?: { activate?: boolean }) => {
+    catalogMutationRef.current += 1;
     setSessions((items) => sortSessions([
       session,
       ...items.filter((item) => item.id !== session.id),

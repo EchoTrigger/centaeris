@@ -123,8 +123,8 @@ export type TranscriptContentRefV1 = {
 };
 
 export type TranscriptTextContentV1 =
-  | { inlineContent: string; sourceRef?: never }
-  | { inlineContent?: never; sourceRef: TranscriptContentRefV1 };
+  | { inlineContent: string; sourceRef?: null }
+  | { inlineContent?: null; sourceRef: TranscriptContentRefV1 };
 
 export type TranscriptBlockBodyV1 =
   | { kind: "userText"; content: TranscriptTextContentV1 }
@@ -155,7 +155,17 @@ export type TranscriptBlockBodyV1 =
       status: TranscriptBlockStatusV1;
     };
 
+export type TranscriptPresentationV1 = {
+  agentRunId: string | null;
+  sourceType: string;
+  observedAtMs: number;
+  displayTarget: string | null;
+  durationMs: number | null;
+  operation: Record<string, unknown> | null;
+};
+
 export type TranscriptBlockV1 = {
+  presentation?: TranscriptPresentationV1 | null;
   blockId: string;
   blockRevision: string;
   orderKey: {

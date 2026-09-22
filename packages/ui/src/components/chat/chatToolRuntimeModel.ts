@@ -51,6 +51,8 @@ export const normalizeToolOperation = (raw: unknown): ToolOperation => {
     throw new Error(t("chatToolRuntimeModel.unsupportedToolOperationKindValueValue", { value1: toolName, value2: kind }));
   }
   return {
+    contentStartByte: toInt(raw.contentStartByte),
+    contentByteLength: toInt(raw.contentByteLength),
     callId,
     toolName,
     kind,

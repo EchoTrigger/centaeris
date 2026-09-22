@@ -10,7 +10,7 @@ pub(super) const COMMAND_NAME_WIDTH: usize = 14;
 pub(super) struct TranscriptView {
     pub(super) lines: Vec<Line<'static>>,
     line_start_rows: Vec<u64>,
-    pub(super) tool_group_rows: Vec<(String, u64)>,
+    pub(super) source_rows: Vec<(String, u64)>,
     pub(super) images: Vec<TranscriptImagePlacement>,
     pub(super) total_rows: u64,
 }
@@ -43,6 +43,17 @@ pub(super) fn build_cached_transcript_view(app: &mut App, width: u16) -> Arc<Tra
         }
     }
     let view = Arc::new(build_transcript_view(app, width));
+    if !app.transcript_follow_bottom {
+        if let Some(cache) = app.transcript_layout_cache.as_ref() {
+            app.transcript_scroll = restore_reading_row(
+                &cache.view,
+                &view,
+                app.transcript_scroll,
+                cache.width,
+                width,
+            );
+        }
+    }
     let rebuilds = app
         .transcript_layout_cache
         .as_ref()
@@ -56,6 +67,71 @@ pub(super) fn build_cached_transcript_view(app: &mut App, width: u16) -> Arc<Tra
         rebuilds,
     });
     view
+}
+
+// Keep the visible source line when preview loading or wrapping changes rows above it.
+// Prefer the same tool span so identical output from different tools does not alias.
+fn restore_reading_row(
+    old: &TranscriptView,
+    new: &TranscriptView,
+    scroll: u64,
+    old_width: u16,
+    width: u16,
+) -> u64 {
+    let index = old
+        .line_start_rows
+        .partition_point(|row| *row <= scroll)
+        .saturating_sub(1);
+    let Some(line) = old.lines.get(index) else {
+        return scroll;
+    };
+    let text = |line: &Line<'_>| {
+        line.spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>()
+    };
+    let target = text(line);
+    let scope = old.source_rows.iter().rev().find(|(_, row)| *row <= scroll);
+    let new_scope = scope.and_then(|(key, _)| {
+        new.source_rows
+            .iter()
+            .find(|(candidate, _)| candidate == key)
+    });
+    let old_start = scope.map_or(0, |(_, row)| {
+        old.line_start_rows.partition_point(|r| r < row)
+    });
+    let new_start = new_scope.map_or(0, |(_, row)| {
+        new.line_start_rows.partition_point(|r| r < row)
+    });
+    let occurrence = old.lines[old_start..index]
+        .iter()
+        .filter(|line| text(line) == target)
+        .count();
+    if !target.trim().is_empty() {
+        if let Some((found, _)) = new
+            .lines
+            .iter()
+            .enumerate()
+            .skip(new_start)
+            .filter(|(_, line)| text(line) == target)
+            .nth(occurrence)
+        {
+            let offset = scroll.saturating_sub(old.line_start_rows[index])
+                * u64::from(old_width.max(1))
+                / u64::from(width.max(1));
+            let height = u64::from(paragraph_line_count(
+                std::slice::from_ref(&new.lines[found]),
+                width,
+            ));
+            return new.line_start_rows[found] + offset.min(height.saturating_sub(1));
+        }
+    }
+    // A collapsed/evicted section no longer has the source line: retain its header.
+    if let Some((_, row)) = new_scope {
+        return *row;
+    }
+    scroll
 }
 
 pub(super) fn render(frame: &mut Frame, app: &mut App, transcript_view: &TranscriptView) {
@@ -73,28 +149,24 @@ pub(super) fn render(frame: &mut Frame, app: &mut App, transcript_view: &Transcr
     app.session_list_offset = 0;
     app.session_action_area = None;
     if area.width < 32 || area.height < 10 {
-        app.tool_group_hit_regions.clear();
         let paragraph =
-            Paragraph::new("Terminal too small.").style(Style::default().fg(theme().error));
+            Paragraph::new("Terminal too small.").style(Style::default().fg(theme().muted));
         frame.render_widget(paragraph, area);
         render_image_preview(frame, app, area);
         return;
     }
 
     if app.session_picker_open {
-        app.tool_group_hit_regions.clear();
         render_session_picker(frame, area, app);
         return;
     }
 
     if app.model_panel.is_some() {
-        app.tool_group_hit_regions.clear();
         render_model_panel(frame, area, app);
         return;
     }
 
     if app.show_state {
-        app.tool_group_hit_regions.clear();
         let input_rows = input_row_count(app, area.width);
         let panel_rows = panel_height(
             app,
@@ -160,7 +232,6 @@ pub(super) fn render(frame: &mut Frame, app: &mut App, transcript_view: &Transcr
         render_welcome(frame, chunks[0]);
         app.transcript_scroll = 0;
         app.transcript_max_scroll = 0;
-        app.tool_group_hit_regions.clear();
         app.transcript_selection = None;
     }
     if status_rows > 0 {
@@ -323,6 +394,7 @@ pub(super) fn render_transcript(
     } else {
         app.transcript_scroll = app.transcript_scroll.min(app.transcript_max_scroll);
     }
+    output_preview::prepare_visible(app, transcript_view, area.height);
     let window = transcript_render_window(transcript_view, app.transcript_scroll, area.height);
     frame.render_widget(
         Paragraph::new(window.lines)
@@ -351,19 +423,6 @@ pub(super) fn render_transcript(
         app.transcript_selection,
     );
     render_inline_images(frame, selectable_area, app, transcript_view);
-    app.tool_group_hit_regions = transcript_view
-        .tool_group_rows
-        .iter()
-        .filter_map(|(key, row)| {
-            let visible_row = row.checked_sub(app.transcript_scroll)?;
-            (visible_row < u64::from(area.height)).then(|| ToolGroupHitRegion {
-                key: key.clone(),
-                row: area
-                    .y
-                    .saturating_add(u16::try_from(visible_row).unwrap_or(u16::MAX)),
-            })
-        })
-        .collect();
 }
 
 fn render_inline_images(
@@ -390,7 +449,7 @@ fn render_inline_images(
         if let Some(error) = app.inline_image_errors.get(image.key.as_str()) {
             frame.render_widget(
                 Paragraph::new(format!("Image preview unavailable: {error}"))
-                    .style(Style::default().fg(theme().warning))
+                    .style(Style::default().fg(theme().muted))
                     .wrap(Wrap { trim: false }),
                 image_area,
             );
@@ -411,7 +470,7 @@ fn render_inline_images(
         } else {
             frame.render_widget(
                 Paragraph::new("Image preview unavailable")
-                    .style(Style::default().fg(theme().warning)),
+                    .style(Style::default().fg(theme().muted)),
                 image_area,
             );
         }
@@ -584,10 +643,13 @@ pub(super) fn append_live_assistant_markdown(app: &mut App, markdown: String, se
     }
     app.assistant_stream_start
         .get_or_insert(app.transcript.len());
-    app.transcript.push(TranscriptLine::LiveAssistant {
-        markdown,
-        separator,
-    });
+    app.transcript.push(
+        TranscriptLine::LiveAssistant {
+            markdown,
+            separator,
+        }
+        .for_run(app.assistant_run_id.as_deref(), app.assistant_is_final),
+    );
 }
 
 /// 只渲染当前未闭合尾块；已闭合行已经进入 owned transcript source。
@@ -606,84 +668,75 @@ pub(super) fn build_assistant_live_lines(app: &App, width: u16) -> Vec<Line<'sta
 }
 
 pub(super) fn build_transcript_view(app: &App, width: u16) -> TranscriptView {
+    let transcript = runs::visible_transcript(app);
     let mut lines = Vec::new();
-    let mut tool_group_line_indices = Vec::new();
+    let mut source_line_indices = Vec::new();
     let mut image_line_indices = Vec::new();
-    let mut start = 0;
-    while start < app.transcript.len() {
-        if is_assistant_boundary(&app.transcript[start]) {
-            let end = app.transcript[start..]
-                .iter()
-                .position(|item| !is_assistant_boundary(item))
-                .map(|offset| start + offset)
-                .unwrap_or(app.transcript.len());
-            lines.extend(transcript_to_lines(&app.transcript[start..end], width));
-            start = end;
-            continue;
-        }
-
-        let end = app.transcript[start..]
-            .iter()
-            .position(is_assistant_boundary)
-            .map(|offset| start + offset)
-            .unwrap_or(app.transcript.len());
-        let tools = app.transcript[start..end]
-            .iter()
-            .filter_map(|item| match item {
-                TranscriptLine::Tool(tool) => Some(tool),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        if tools.is_empty() {
-            lines.extend(transcript_to_lines(&app.transcript[start..end], width));
-            start = end;
-            continue;
-        }
-        let key = tools[0].key.clone();
-        let expanded = app.expanded_tool_groups.contains(&key);
-        let focused = app.focused_tool_group.as_deref() == Some(key.as_str());
-        let mut item = start;
-        let mut header_rendered = false;
-        while item < end {
-            if let TranscriptLine::Tool(tool) = &app.transcript[item] {
-                if !header_rendered {
-                    tool_group_line_indices.push((key.clone(), lines.len()));
-                    lines.push(tool_group_header(&tools, expanded, focused));
-                    header_rendered = true;
-                }
-                if expanded {
-                    lines.extend(transcript_to_lines(&app.transcript[item..item + 1], width));
-                }
+    let mut cursor = 0;
+    while cursor < transcript.len() {
+        let item = &transcript[cursor];
+        match item {
+            TranscriptLine::Tool(tool) => {
+                source_line_indices.push((tool.key.clone(), lines.len()));
+                lines.push(Line::from(format!("  {}", stable_tool_title(tool))));
+                lines.extend(output_preview::preview_lines(app, tool, width));
                 for image in &tool.images {
                     image_line_indices.push((image.key.clone(), lines.len()));
                     push_inline_image_lines(&mut lines, image.path.as_str(), width);
                 }
-            } else {
-                lines.extend(transcript_to_lines(&app.transcript[item..item + 1], width));
             }
-            item += 1;
+            TranscriptLine::ProcessEnd { key, label } => {
+                source_line_indices.push((key.clone(), lines.len()));
+                let text = if label.is_empty() {
+                    format!(
+                        "  └{}",
+                        "─".repeat(usize::from(width.saturating_sub(3).min(60)))
+                    )
+                } else {
+                    format!("  └ {label}")
+                };
+                lines.push(Line::styled(text, Style::default().fg(theme().muted)));
+            }
+            _ => {
+                let end = transcript[cursor..]
+                    .iter()
+                    .position(|item| {
+                        matches!(
+                            item,
+                            TranscriptLine::Tool(_) | TranscriptLine::ProcessEnd { .. }
+                        )
+                    })
+                    .map_or(transcript.len(), |offset| cursor + offset);
+                lines.extend(transcript_to_lines(&transcript[cursor..end], width));
+                cursor = end;
+                continue;
+            }
         }
-        if !expanded {
-            lines.push(Line::from(""));
-        }
-        start = end;
+        cursor += 1;
     }
-    lines.extend(build_assistant_live_lines(app, width));
+    if app.assistant_is_final
+        || app
+            .assistant_run_id
+            .as_deref()
+            .is_none_or(|id| runs::process_visible(app, id))
+    {
+        lines.extend(build_assistant_live_lines(app, width));
+    }
 
-    let mut tool_group_rows = Vec::with_capacity(tool_group_line_indices.len());
+    let mut source_rows = Vec::with_capacity(source_line_indices.len());
     let mut images = Vec::with_capacity(image_line_indices.len());
     let mut line_start_rows = Vec::with_capacity(lines.len());
     let mut total_rows = 0u64;
-    let mut next_group = 0;
+    let mut next_source = 0;
     let mut next_image = 0;
     for (line_index, line) in lines.iter().enumerate() {
         line_start_rows.push(total_rows);
-        while tool_group_line_indices
-            .get(next_group)
+        while source_line_indices
+            .get(next_source)
             .is_some_and(|(_, index)| *index == line_index)
         {
-            tool_group_rows.push((tool_group_line_indices[next_group].0.clone(), total_rows));
-            next_group += 1;
+            source_rows.push((source_line_indices[next_source].0.clone(), total_rows));
+            next_source += 1;
         }
         while image_line_indices
             .get(next_image)
@@ -703,7 +756,7 @@ pub(super) fn build_transcript_view(app: &App, width: u16) -> TranscriptView {
     TranscriptView {
         lines,
         line_start_rows,
-        tool_group_rows,
+        source_rows,
         images,
         total_rows,
     }
@@ -719,101 +772,6 @@ fn push_inline_image_lines(lines: &mut Vec<Line<'static>>, path: &str, width: u1
         ),
     ]));
     lines.push(Line::from(""));
-}
-
-fn is_assistant_boundary(item: &TranscriptLine) -> bool {
-    matches!(
-        item,
-        TranscriptLine::User(_)
-            | TranscriptLine::Summary(_)
-            | TranscriptLine::LiveAssistant { .. }
-            | TranscriptLine::Supplement(_)
-    )
-}
-
-fn tool_group_header(
-    tools: &[&ToolTranscriptLine],
-    expanded: bool,
-    focused: bool,
-) -> Line<'static> {
-    let title = tool_group_title(tools);
-    let failed = tools.iter().any(|tool| {
-        !tool.running && matches!(tool_outcome(&tool.result_states), ToolOutcome::Failed)
-    });
-    let style = if failed {
-        Style::default().fg(theme().error)
-    } else if focused {
-        Style::default()
-            .fg(theme().accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme().muted)
-    };
-    Line::from(vec![
-        Span::styled(if focused { "› " } else { "  " }, style),
-        Span::styled(title, style),
-        Span::styled(if expanded { " ⌄" } else { " ›" }, style),
-    ])
-}
-
-fn tool_group_title(tools: &[&ToolTranscriptLine]) -> String {
-    if tools.len() == 1 {
-        return stable_tool_title(tools[0]);
-    }
-    let running = tools.iter().any(|tool| tool.running);
-    let mut parts = Vec::new();
-    for kind in [
-        ToolActionKind::Command,
-        ToolActionKind::Read,
-        ToolActionKind::Search,
-        ToolActionKind::Edit,
-        ToolActionKind::Browser,
-        ToolActionKind::Plugin,
-        ToolActionKind::Host,
-        ToolActionKind::Tool,
-    ] {
-        let count = tools.iter().filter(|tool| tool.action_kind == kind).count();
-        if count > 0 {
-            parts.push(tool_group_part(kind, count, running));
-        }
-    }
-    let mut title = parts.join(", ");
-    if running {
-        title.push_str(" · Running…");
-    }
-    title
-}
-
-fn tool_group_part(kind: ToolActionKind, count: usize, running: bool) -> String {
-    let plural = |one: &'static str, many: &'static str| {
-        if count == 1 {
-            one
-        } else {
-            many
-        }
-    };
-    let noun = match kind {
-        ToolActionKind::Command => plural("command", "commands"),
-        ToolActionKind::Read => plural("file", "files"),
-        ToolActionKind::Search => plural("search", "searches"),
-        ToolActionKind::Edit => plural("file", "files"),
-        ToolActionKind::Browser => plural("browser action", "browser actions"),
-        ToolActionKind::Plugin => plural("plugin", "plugins"),
-        ToolActionKind::Host => plural("host operation", "host operations"),
-        ToolActionKind::Tool => plural("tool", "tools"),
-    };
-    if running {
-        return format!("{count} {noun}");
-    }
-    let verb = match kind {
-        ToolActionKind::Command => "Ran",
-        ToolActionKind::Read => "Read",
-        ToolActionKind::Search => "Searched",
-        ToolActionKind::Edit => "Edited",
-        ToolActionKind::Browser => "Used",
-        _ => "Called",
-    };
-    format!("{verb} {count} {noun}")
 }
 
 /// 行级 markdown 渲染：代码围栏、标题、列表、粗体、行内代码。
@@ -1252,7 +1210,7 @@ pub(super) fn render_panel(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(message) = app.message.as_deref() {
         frame.render_widget(
             Paragraph::new(message.to_string())
-                .style(Style::default().fg(theme().warning))
+                .style(Style::default().fg(theme().muted))
                 .wrap(Wrap { trim: true }),
             area,
         );
@@ -1274,7 +1232,7 @@ pub(super) fn render_home_risk_panel(frame: &mut Frame, area: Rect, app: &App) {
         ListItem::new(Line::from(Span::styled(
             "Home directory risk",
             Style::default()
-                .fg(theme().warning)
+                .fg(theme().muted)
                 .add_modifier(Modifier::BOLD),
         ))),
         ListItem::new(Line::from(Span::styled(
@@ -1309,14 +1267,14 @@ pub(super) fn render_home_risk_panel(frame: &mut Frame, area: Rect, app: &App) {
             if selected == panel.workspaces.len() {
                 Style::default().add_modifier(Modifier::REVERSED)
             } else {
-                Style::default().fg(theme().warning)
+                Style::default().fg(theme().muted)
             },
         ),
     );
     if let Some(notice) = panel.notice.as_deref() {
         items.push(ListItem::new(Line::from(Span::styled(
             fit_middle(notice, panel_area.width as usize),
-            Style::default().fg(theme().error),
+            Style::default().fg(theme().muted),
         ))));
     } else {
         items.push(ListItem::new(Line::from(Span::styled(
@@ -1430,7 +1388,7 @@ pub(super) fn render_mcp_panel(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(notice) = panel.notice.as_deref() {
         items.push(ListItem::new(Line::from(Span::styled(
             notice.to_string(),
-            Style::default().fg(theme().warning),
+            Style::default().fg(theme().muted),
         ))));
     }
     frame.render_widget(Clear, area);
@@ -1452,7 +1410,7 @@ pub(super) fn render_command_panel(frame: &mut Frame, area: Rect, app: &App) {
     };
     let items = if commands.is_empty() {
         vec![ListItem::new(Line::from(vec![
-            Span::styled("unknown", Style::default().fg(theme().error)),
+            Span::styled("unknown", Style::default().fg(theme().muted)),
             Span::raw("  Press Enter to fail loudly."),
         ]))]
     } else {
@@ -1783,11 +1741,7 @@ pub(super) fn render_model_panel(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     if let Some(message) = app.message.as_deref() {
-        let style = if message == "Switching model…" {
-            Style::default().fg(theme().muted)
-        } else {
-            Style::default().fg(theme().warning)
-        };
+        let style = Style::default().fg(theme().muted);
         frame.render_widget(Paragraph::new(message).style(style), chunks[3]);
     }
     frame.render_widget(
@@ -1996,7 +1950,7 @@ pub(super) fn render_session_picker(frame: &mut Frame, area: Rect, app: &mut App
                             "{:<half$}",
                             fit_middle_columns(format!("[Delete] {title}").as_str(), half)
                         ),
-                        Style::default().fg(theme().warning),
+                        Style::default().fg(theme().muted),
                     ),
                     Span::styled("[Cancel]", Style::default().fg(theme().muted)),
                 ])),
@@ -2004,7 +1958,7 @@ pub(super) fn render_session_picker(frame: &mut Frame, area: Rect, app: &mut App
             );
         } else if let Some(message) = app.message.as_deref() {
             frame.render_widget(
-                Paragraph::new(message).style(Style::default().fg(theme().warning)),
+                Paragraph::new(message).style(Style::default().fg(theme().muted)),
                 chunks[2],
             );
         }
@@ -2115,6 +2069,7 @@ pub(super) fn status_header(app: &App) -> String {
         RuntimeDisplayState::Thinking => "Thinking",
         RuntimeDisplayState::ToolRunning => "Running tools",
         RuntimeDisplayState::ProviderWaiting => "Waiting for model",
+        RuntimeDisplayState::WaitingRuntime => "Waiting",
         RuntimeDisplayState::WaitingUser => "Waiting for input",
         RuntimeDisplayState::Working => "Working",
     }
@@ -2158,7 +2113,10 @@ pub(super) fn transcript_to_lines_from(
     let mut live_in_code_block = false;
     for (index, item) in items.iter().enumerate() {
         let emit = index >= start;
-        match item {
+        match item.content() {
+            TranscriptLine::RunItem { .. }
+            | TranscriptLine::RunBoundary { .. }
+            | TranscriptLine::ProcessEnd { .. } => {}
             TranscriptLine::User(text) => {
                 live_in_code_block = false;
                 if emit {
@@ -2208,7 +2166,7 @@ pub(super) fn transcript_to_lines_from(
                     continue;
                 }
                 let style = match subagent.status.as_str() {
-                    "failed" | "cancelled" => Style::default().fg(theme().error),
+                    "failed" | "cancelled" => Style::default().fg(theme().muted),
                     _ => Style::default().fg(theme().muted),
                 };
                 let summary = if subagent.summary.trim().is_empty() {
@@ -2227,6 +2185,7 @@ pub(super) fn transcript_to_lines_from(
                     ),
                 ]));
             }
+            TranscriptLine::Reasoning { .. } => {}
             TranscriptLine::Supplement(text) => {
                 live_in_code_block = false;
                 if emit {
@@ -2251,26 +2210,10 @@ pub(super) fn transcript_to_lines_from(
                 if !emit {
                     continue;
                 }
-                let outcome = tool_outcome(&tool.result_states);
-                let indicator_style = if tool.running {
-                    Style::default().fg(theme().muted)
-                } else if tool.interrupted {
-                    Style::default().fg(theme().warning)
-                } else {
-                    match outcome {
-                        ToolOutcome::Succeeded => Style::default().fg(theme().success),
-                        ToolOutcome::Failed => Style::default().fg(theme().error),
-                        ToolOutcome::Denied | ToolOutcome::Aborted => {
-                            Style::default().fg(theme().warning)
-                        }
-                    }
-                };
+                let indicator_style = Style::default().fg(theme().muted);
                 lines.push(Line::from(vec![
-                    Span::styled("  • ", indicator_style),
-                    Span::styled(
-                        stable_tool_title(tool),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ),
+                    Span::styled("  ", indicator_style),
+                    Span::styled(stable_tool_title(tool), Style::default()),
                 ]));
                 if tool.action_kind == ToolActionKind::Command && tool.description_title {
                     push_text_result_block(
@@ -2296,8 +2239,8 @@ pub(super) fn transcript_to_lines_from(
                 live_in_code_block = false;
                 if emit {
                     lines.push(Line::from(vec![
-                        Span::styled("! ", Style::default().fg(theme().error)),
-                        Span::styled(text.clone(), Style::default().fg(theme().error)),
+                        Span::styled("! ", Style::default().fg(theme().muted)),
+                        Span::styled(text.clone(), Style::default().fg(theme().muted)),
                     ]));
                 }
             }

@@ -1,3 +1,4 @@
+import { observeRunActivity, type RunActivity } from "./runActivity";
 import { create } from "zustand";
 import type {
   AssistantExecutionTurn,
@@ -9,6 +10,8 @@ import type {
 type AssistantChatMessage = Extract<ChatMessage, { role: "assistant" }>;
 
 type ChatViewState = {
+  runActivityByTurnId: Record<string, RunActivity>;
+  expandedTools: Record<string, boolean>;
   expandedReasoning: Record<string, boolean>;
   toggleReasoning: (identity: string) => void;
   messageIds: string[];
@@ -25,6 +28,7 @@ type ChatViewState = {
 
 type ChatViewIndexes = Pick<
   ChatViewState,
+  | "runActivityByTurnId"
   | "messageIds"
   | "messageById"
   | "turnById"
@@ -38,6 +42,8 @@ const normalizeMessages = (
   messages: readonly ChatMessage[],
   previous: ChatViewState,
 ): ChatViewIndexes => {
+  const runActivityByTurnId: Record<string, RunActivity> = {};
+  const now = Date.now();
   const messageById: Record<string, ChatMessage> = {};
   const turnById: Record<string, AssistantExecutionTurn> = {};
   const turnIdByMessageId: Record<string, string> = {};
@@ -53,6 +59,8 @@ const normalizeMessages = (
       continue;
     }
     const turn = message.turn;
+    const activity = observeRunActivity(previous.runActivityByTurnId[turn.id], turn, now);
+    if (activity) runActivityByTurnId[turn.id] = activity;
     turnById[turn.id] = previous.turnById[turn.id] === turn
       ? previous.turnById[turn.id]
       : turn;
@@ -74,6 +82,7 @@ const normalizeMessages = (
     }
   }
   return {
+    runActivityByTurnId,
     messageIds: messages.map((message) => message.id),
     messageById,
     turnById,
@@ -85,7 +94,9 @@ const normalizeMessages = (
 };
 
 export const useChatViewStore = create<ChatViewState>((set) => ({
+  runActivityByTurnId: {},
   expandedReasoning: {},
+  expandedTools: {},
   toggleReasoning: (identity) => set((state) => {
     const expandedReasoning = { ...state.expandedReasoning };
     if (expandedReasoning[identity]) delete expandedReasoning[identity];
@@ -107,6 +118,8 @@ export const useChatViewStore = create<ChatViewState>((set) => ({
         return state;
       }
       let changed = false;
+      const runActivityByTurnId = { ...state.runActivityByTurnId };
+      const now = Date.now();
       let messageById = state.messageById;
       let turnById = state.turnById;
       let turnIdByMessageId = state.turnIdByMessageId;
@@ -124,6 +137,9 @@ export const useChatViewStore = create<ChatViewState>((set) => ({
           turnById = { ...turnById };
           turnIdByMessageId = { ...turnIdByMessageId };
         }
+        const activity = observeRunActivity(runActivityByTurnId[message.turn.id], message.turn, now);
+        if (activity) runActivityByTurnId[message.turn.id] = activity;
+        else delete runActivityByTurnId[message.turn.id];
         messageById[message.id] = message;
         turnById[message.turn.id] = message.turn;
         turnIdByMessageId[message.id] = message.turn.id;
@@ -150,6 +166,7 @@ export const useChatViewStore = create<ChatViewState>((set) => ({
       }
       return changed
         ? {
+            runActivityByTurnId,
             messageById,
             turnById,
             turnIdByMessageId,
@@ -161,7 +178,9 @@ export const useChatViewStore = create<ChatViewState>((set) => ({
     }),
   clear: () =>
     set({
+      runActivityByTurnId: {},
       expandedReasoning: {},
+  expandedTools: {},
       messageIds: [],
       messageById: {},
       turnById: {},

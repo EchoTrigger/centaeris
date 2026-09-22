@@ -931,17 +931,17 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   background: var(--surface-color);
   overflow: hidden;
   opacity: 0;
-  transform: translateX(40px);
+  transform: translateX(16px);
   visibility: hidden;
   pointer-events: none;
   transition:
-    flex-basis 520ms var(--motion-sidebar),
-    width 520ms var(--motion-sidebar),
-    min-width 520ms var(--motion-sidebar),
+    flex-basis 240ms var(--motion-sidebar),
+    width 240ms var(--motion-sidebar),
+    min-width 240ms var(--motion-sidebar),
     border-color 220ms ease,
     opacity 180ms ease,
-    transform 520ms var(--motion-sidebar),
-    visibility 0s linear 520ms;
+    transform 240ms var(--motion-sidebar),
+    visibility 0s linear 240ms;
   will-change: flex-basis, width, transform, opacity;
 }
 
@@ -955,12 +955,12 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   visibility: visible;
   pointer-events: auto;
   transition:
-    flex-basis 520ms var(--motion-sidebar),
-    width 520ms var(--motion-sidebar),
-    min-width 520ms var(--motion-sidebar),
+    flex-basis 240ms var(--motion-sidebar),
+    width 240ms var(--motion-sidebar),
+    min-width 240ms var(--motion-sidebar),
     border-color 220ms ease,
     opacity 180ms ease,
-    transform 520ms var(--motion-sidebar),
+    transform 240ms var(--motion-sidebar),
     visibility 0s linear 0s;
 }
 
@@ -2930,5 +2930,6 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   .thinFilePane,
   .thinFilePane.is-open {
     transition-duration: 0.01ms;
+    transition-delay: 0s;
   }
 }

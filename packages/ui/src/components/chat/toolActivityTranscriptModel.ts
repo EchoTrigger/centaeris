@@ -56,7 +56,7 @@ export const collectTimelineOperations = (
       });
     }
   }
-  return operations.slice(0, 32);
+  return operations;
 };
 
 const formatToolCountTitle = (
@@ -95,16 +95,8 @@ export const formatToolGroupTitle = (
     const operation = operations[0];
     const atom = getToolActivityAtom(operation);
     const status = operationStatusClass(operation.status);
-    const description = typeof operation.normalizedInput?.description === "string"
-      ? operation.normalizedInput.description.trim()
-      : "";
-    if (isCommandOperation(operation) && description) {
-      return description;
-    }
-    const target = toDisplayPath(getOperationPath(operation));
-    if (target && ["read", "write", "edit"].includes(operation.toolName)) {
-      return `${operationInlineVerb(operation, status)} ${target}`;
-    }
+    const target = operationPrimaryTarget(operation);
+    if (target) return `${operationInlineVerb(operation, status)} ${target}`;
     if (atom.kind === "webSearch") {
       return formatToolCountTitle(operation, 1, status);
     }
@@ -214,37 +206,24 @@ const operationInlineVerb = (
   return statusClassName === "error" ? atom.failedVerb : atom.completedVerb;
 };
 
+// Actual tool input takes priority over descriptions and generic result labels.
+const operationPrimaryTarget = (operation: TimelineOperation): string | undefined => [
+  isCommandOperation(operation) ? getOperationCommand(operation) : undefined,
+  toDisplayPath(getOperationPath(operation)),
+  getOperationQuery(operation),
+  operation.displayTarget,
+  operation.text === operation.toolName ? undefined : operation.text,
+].map(value => String(value ?? "").trim()).find(Boolean);
+
 export const formatOperationInlineSummary = (
   operation: TimelineOperation,
   statusClassName: TaskStatus,
   durationText?: string,
   metaText?: string,
 ): string => {
-  const command = isCommandOperation(operation)
-    ? getOperationCommand(operation)
-    : undefined;
-  const displayTarget = operation.displayTarget?.trim();
-  const inputDescription = typeof operation.normalizedInput?.description === "string"
-    ? operation.normalizedInput.description.trim()
-    : "";
-  const description = inputDescription || undefined;
-  if (isCommandOperation(operation) && description) {
-    return [description, durationText ? t("toolActivityTranscriptModel.elapsedValue", { value1: durationText }) : undefined]
-      .filter(Boolean)
-      .join("，");
-  }
-  const target = [
-    command,
-    toDisplayPath(getOperationPath(operation)),
-    getOperationQuery(operation),
-    operation.text,
-    displayTarget,
-    operation.toolName,
-  ]
-    .map((value) => String(value ?? "").trim())
-    .find((value) => value.length > 0);
+  const target = operationPrimaryTarget(operation);
   const parts = [
-    `${operationInlineVerb(operation, statusClassName)}${target ? ` · ${target}` : ""}`,
+    target || operationInlineVerb(operation, statusClassName),
   ];
   if (metaText && !target?.includes(metaText)) {
     parts.push(metaText);
@@ -306,3 +285,15 @@ export const getOperationDetailState = (
     hasTextDetail,
   };
 };
+
+// Byte boundaries are supplied by Core for known result formats, never inferred from prose.
+export function readableToolOutput(operation: Pick<TimelineOperation, "contentStartByte" | "contentByteLength">, text: string, offset = 0, raw = false): string {
+  const start = operation.contentStartByte;
+  const length = operation.contentByteLength;
+  if (raw || start === undefined || length === undefined) return text;
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(length) || start < 0 || length < 0) throw new Error("Invalid readable output range");
+  const bytes = new TextEncoder().encode(text);
+  const from = Math.max(0, start - offset);
+  const to = Math.min(bytes.length, start + length - offset);
+  return to <= from ? "" : new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(from, to));
+}
