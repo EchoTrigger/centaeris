@@ -115,6 +115,7 @@ pub struct RuntimeJobRecord {
     pub job_kind: String,
     pub status: RuntimeJobStatus,
     pub run_at_ms: TimestampMs,
+    /// Opaque claim identity returned by the store; never reconstruct from worker_id.
     pub lease_owner: Option<String>,
     pub lease_expires_at_ms: Option<TimestampMs>,
     #[serde(default)]
@@ -256,6 +257,10 @@ pub struct FailRuntimeJobRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CancelRuntimeJobRequest {
+    /// Worker-origin cancellation must compare this claim token and its expiry.
+    /// None is reserved for an explicit cancellation of the logical job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_lease_owner: Option<String>,
     pub job_id: String,
     pub reason: String,
     pub cancelled_at_ms: TimestampMs,
@@ -273,6 +278,9 @@ pub trait RuntimeJobStorePort {
         &self,
         req: ListRuntimeJobsRequest,
     ) -> Result<Vec<RuntimeJobRecord>, String>;
+    /// Every successful claim must mint a fresh lease_owner, including a reclaim
+    /// by the same worker. Renewal retains the token. Subsequent worker writes
+    /// compare the returned token and unexpired lease atomically.
     fn claim_due_runtime_jobs(
         &self,
         req: ClaimDueRuntimeJobsRequest,

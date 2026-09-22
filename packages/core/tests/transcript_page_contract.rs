@@ -58,6 +58,7 @@ fn tool_block(revision: u64, status: TranscriptBlockStatusV1) -> TranscriptBlock
     TranscriptBlockV1 {
         block_id: "tool:call-a".to_string(),
         block_revision: revision.to_string(),
+        presentation: None,
         order_key: TranscriptOrderKeyV1 {
             source_sequence: "100".to_string(),
             ordinal: 0,
@@ -77,6 +78,7 @@ fn assistant_block(sequence: u64, text: &str) -> TranscriptBlockV1 {
     TranscriptBlockV1 {
         block_id: format!("assistant:{sequence}"),
         block_revision: "1".to_string(),
+        presentation: None,
         order_key: TranscriptOrderKeyV1 {
             source_sequence: sequence.to_string(),
             ordinal: 0,

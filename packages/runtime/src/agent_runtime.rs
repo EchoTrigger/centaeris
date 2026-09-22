@@ -1526,7 +1526,13 @@ async fn run_agent_query_loop(
         session_id: request.session_id.clone(),
         config: model_config.clone(),
     };
-    let transport = ReqwestJsonHttpTransport::new()?;
+    let run_id = request
+        .agent_run_identity
+        .as_ref()
+        .ok_or_else(|| "model admission requires AgentRun identity".to_string())?
+        .agent_run_id
+        .clone();
+    let transport = ReqwestJsonHttpTransport::new(run_id)?;
     match model_config_wire_api(&registry, &model_config)? {
         WireApi::AnthropicMessages => {
             let client = AnthropicMessagesModelClient::new(registry, transport);
@@ -1591,7 +1597,7 @@ async fn run_manual_context_compaction(
         session_id: session_id.to_string(),
         config: model_config.clone(),
     };
-    let transport = ReqwestJsonHttpTransport::new()?;
+    let transport = ReqwestJsonHttpTransport::new(format!("compact:{session_id}:{turn_id}"))?;
     match model_config_wire_api(&registry, &model_config)? {
         WireApi::AnthropicMessages => {
             let client = AnthropicMessagesModelClient::new(registry, transport);
@@ -3270,7 +3276,8 @@ pub(crate) async fn test_model(request: ModelTestRequest) -> Result<ModelTestRes
         prepared_prompt: prompt,
         session_config: config.clone(),
     };
-    let transport = ModelTestTransport::new(ReqwestJsonHttpTransport::new()?);
+    let transport =
+        ModelTestTransport::new(ReqwestJsonHttpTransport::new("model-test".to_string())?);
     let http_status = transport.http_status.clone();
     let result = match model_config_wire_api(&registry, &config)? {
         WireApi::AnthropicMessages => {
@@ -4435,6 +4442,84 @@ mod tests {
             "message": "hello"
         }))
         .expect("valid operationId");
+    }
+
+    #[test]
+    fn concurrent_prompt_retries_commit_one_run_and_return_one_identity() {
+        let guard = message_log::test_env_mutex()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let environment = PromptTestEnvironment::new("prompt-concurrent-retries");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime.block_on(async {
+            let session = environment.create_session("concurrent retry")?;
+            let (_clients, writer, _outbound) = prompt_event_writer("prompt-concurrent");
+            let barrier = Arc::new(std::sync::Barrier::new(4));
+            let mut attempts = Vec::new();
+            for _ in 0..4 {
+                let writer = writer.clone();
+                let barrier = barrier.clone();
+                let session_id = session.id.clone();
+                attempts.push(tokio::task::spawn_blocking(move || {
+                    barrier.wait();
+                    input(
+                        writer,
+                        prompt_request("prompt-concurrent", &session_id, "hello"),
+                    )
+                    .map_err(|error| error.to_string())
+                }));
+            }
+            let mut responses = Vec::new();
+            for attempt in attempts {
+                responses.push(attempt.await.map_err(|error| error.to_string())??);
+            }
+            stop_prompt_agent_run(&writer, &responses[0]).await;
+            assert!(responses.iter().all(|response| response == &responses[0]));
+            assert_eq!(
+                message_log::project_agent_runs_for_session(&session.id)?.len(),
+                1
+            );
+            assert_eq!(
+                message_log::project_chat_messages(&session.id)?
+                    .iter()
+                    .filter(|message| message.role == "user")
+                    .count(),
+                1
+            );
+            Ok::<(), String>(())
+        });
+        drop(runtime);
+        drop(environment);
+        drop(guard);
+        result.expect("concurrent prompt admission");
+    }
+
+    #[test]
+    fn prompt_setup_failure_releases_session_for_the_next_request() {
+        let guard = message_log::test_env_mutex()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let environment = PromptTestEnvironment::new("prompt-setup-release");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime.block_on(async {
+            let session = environment.create_session("failed setup")?;
+            let (_clients, writer, _outbound) = prompt_event_writer("prompt-setup-release");
+            let invalid = serde_json::from_value(serde_json::json!({
+                "operationId":"prompt-setup-failure", "sessionId":session.id, "message":"rewrite",
+                "tailPolicy":"rewriteLastUser", "rewriteTargetMessageId":"missing", "rewriteExpectedTailMessageId":"missing"
+            })).unwrap();
+            assert!(input(writer.clone(), invalid).is_err());
+            assert!(writer.active_agent_run_for_session(&session.id)?.is_none());
+            let next = input(writer.clone(), prompt_request("prompt-after-setup-failure", &session.id, "next"))
+                .map_err(|error| error.to_string())?;
+            stop_prompt_agent_run(&writer, &next).await;
+            assert!(writer.active_agent_run_for_session(&session.id)?.is_none());
+            Ok::<(), String>(())
+        });
+        drop(runtime);
+        drop(environment);
+        drop(guard);
+        result.expect("failed prompt setup releases ownership");
     }
 
     #[test]

@@ -17,6 +17,7 @@ type VirtualListHarnessProps = {
   spacerRef: RefObject<HTMLDivElement | null>;
   onContentSizeChange: (size?: number, top?: number, userId?: string) => void;
   onScroll: () => void;
+  onReadingIntent: () => void;
 };
 
 type ComposerHarnessProps = {
@@ -321,5 +322,22 @@ test("a submitted prompt anchors its measured user row instead of jumping to the
   await act(async () => runAnimationFrames(320));
   expect(harness.scrollContainer.scrollTop).toBe(700);
   expect(getVirtualListProps().spacerRef.current?.style.height).toBe("100px");
+  await act(async () => renderer.unmount());
+});
+
+
+test("opening a detail cancels queued following until the user returns to latest", async () => {
+  const renderer = await renderChatArea("detail");
+  await finishInitialScroll();
+  const list = getVirtualListProps();
+  await act(async () => list.onContentSizeChange());
+  await act(async () => list.onReadingIntent());
+  harness.scrollContainer.scrollHeight += 240;
+  await act(async () => runAnimationFrames());
+  expect(harness.scrollContainer.scrollTop).toBe(600);
+  const jump = renderer.root.findByProps({"aria-label":"Jump to latest"});
+  await act(async () => jump.props.onClick());
+  await act(async () => runAnimationFrames());
+  expect(harness.scrollContainer.scrollTop).toBe(840);
   await act(async () => renderer.unmount());
 });

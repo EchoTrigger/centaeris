@@ -32,6 +32,7 @@ implementation plans or compatibility aliases.
 - [Release process](development/ReleaseProcess.md): source freeze, clean-clone
   verification, artifacts, and publication boundary.
 - [Release gate](eval/ReleaseGate.md): the current executable release gate.
+- [Upgrade acceptance](eval/UpgradeAcceptance.md): released-data fixtures, migration recovery, and history reconstruction.
 
 Hosted deployment, identity, workspace access control, commercial extension
 content, credentials, customer data, and private operations are outside this

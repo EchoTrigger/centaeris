@@ -1,0 +1,32 @@
+import { act, create, type ReactTestRenderer } from "react-test-renderer";
+import { afterEach, expect, test, vi } from "vitest";
+import { AnimatedDisclosure } from "../src/components/chat/AnimatedDisclosure";
+let renderer: ReactTestRenderer;
+afterEach(() => { act(() => renderer?.unmount()); vi.unstubAllGlobals(); });
+test("disclosure keeps closing content inert, reverses and releases only the last closure", async () => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  vi.stubGlobal("window", { matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) });
+  vi.stubGlobal("getComputedStyle", () => ({ opacity: "0.5" }));
+  const animations: { finish(): void; cancel: ReturnType<typeof vi.fn> }[] = [];
+  const element = { scrollHeight: 100, getBoundingClientRect: () => ({ height: 50 }), animate: vi.fn(() => {
+    let finish = () => {};
+    const finished = new Promise<void>(resolve => { finish = resolve; });
+    const animation = { finish, finished, cancel: vi.fn() };
+    animations.push(animation); return animation;
+  }) };
+  const view = (expanded: boolean) => <AnimatedDisclosure expanded={expanded}><p>Output</p></AnimatedDisclosure>;
+  act(() => { renderer = create(view(false), { createNodeMock: () => element }); });
+  expect(renderer.root.findAllByType("p")).toHaveLength(0);
+  act(() => renderer.update(view(true)));
+  expect(renderer.root.findAllByType("p")).toHaveLength(1);
+  act(() => renderer.update(view(false)));
+  expect(renderer.root.findByType("div").props.inert).toBe(true);
+  expect(renderer.root.findAllByType("p")).toHaveLength(1);
+  act(() => renderer.update(view(true)));
+  await act(async () => animations[1].finish());
+  expect(renderer.root.findAllByType("p")).toHaveLength(1);
+  expect(animations[1].cancel).toHaveBeenCalledOnce();
+  act(() => renderer.update(view(false)));
+  await act(async () => animations[3].finish());
+  expect(renderer.root.findAllByType("p")).toHaveLength(0);
+});

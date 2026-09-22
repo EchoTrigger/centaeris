@@ -53,6 +53,10 @@ struct ToolOperationPayload {
     removed: Option<u32>,
     #[serde(rename = "outputPreview", skip_serializing_if = "Option::is_none")]
     output_preview: Option<String>,
+    #[serde(rename = "contentStartByte", skip_serializing_if = "Option::is_none")]
+    content_start_byte: Option<usize>,
+    #[serde(rename = "contentByteLength", skip_serializing_if = "Option::is_none")]
+    content_byte_length: Option<usize>,
     #[serde(rename = "diffPreview", skip_serializing_if = "Option::is_none")]
     diff_preview: Option<String>,
     #[serde(rename = "error", skip_serializing_if = "Option::is_none")]
@@ -115,7 +119,10 @@ pub fn project_tool_operations_json(tool_results: &[ToolExecutionResult]) -> Opt
             .flatten();
         let status = report.status.clone();
 
+        let content_range = readable_content_range(details, &report.content);
         operations.push(ToolOperationPayload {
+            content_start_byte: content_range.map(|v| v.0),
+            content_byte_length: content_range.map(|v| v.1),
             call_id: report.tool_call_id.clone(),
             tool_name: report.tool_name.clone(),
             kind,
@@ -140,6 +147,23 @@ pub fn project_tool_operations_json(tool_results: &[ToolExecutionResult]) -> Opt
     }
 
     serde_json::to_string(&operations).ok()
+}
+
+fn readable_content_range(details: &Value, raw: &str) -> Option<(usize, usize)> {
+    if details.pointer("/fileFact/schema").and_then(Value::as_str) == Some("file_read_fact_v1") {
+        let body = details.get("content")?.as_str()?;
+        let start = raw.find('\n')? + 1;
+        return (raw.get(start..start + body.len()) == Some(body)).then_some((start, body.len()));
+    }
+    if details.get("schema").and_then(Value::as_str) == Some("directory_listing_result.v1")
+        || details.pointer("/fileFact/schema").and_then(Value::as_str)
+            == Some("directory_listing_fact_v1")
+    {
+        let start = raw.find('\n')? + 1;
+        let end = raw.rfind("\nContinuation:")?;
+        return (end >= start).then_some((start, end - start));
+    }
+    None
 }
 
 fn parse_result_envelope(details: &Value) -> Option<ResultEnvelope> {
@@ -214,10 +238,30 @@ pub(super) fn summarize_tool_result(report: &ToolExecutionResult) -> String {
 
 fn summarize_file_read_tool_result(details: &Value) -> Option<String> {
     let path = details.get("path").and_then(Value::as_str)?;
-    let (start_line, end_line, total_lines, truncated) = file_read_coverage_fields(details);
-    let total = total_lines
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "?".to_string());
+    // 目录结果没有文件行号，缺失覆盖信息也不能伪造成第 1 行。
+    if details.get("schema").and_then(Value::as_str) == Some("directory_listing_result.v1") {
+        let count = details
+            .get("totalEntries")
+            .and_then(Value::as_u64)
+            .map(|count| format!(" · {count} entries"))
+            .unwrap_or_default();
+        return Some(compact_text(&format!("Listed {path}{count}"), 160));
+    }
+    let (Some(start_line), Some(end_line)) = (
+        details.get("startLine").and_then(Value::as_u64),
+        details.get("endLine").and_then(Value::as_u64),
+    ) else {
+        return Some(compact_text(&format!("Read {path}"), 160));
+    };
+    let total = details
+        .get("totalLines")
+        .and_then(Value::as_u64)
+        .map(|value| format!(" of {value}"))
+        .unwrap_or_default();
+    let truncated = details
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let next_hint = if truncated {
         format!("; next offset {}", end_line)
     } else {
@@ -229,29 +273,15 @@ fn summarize_file_read_tool_result(details: &Value) -> Option<String> {
         .unwrap_or(false)
     {
         return Some(compact_text(
-            format!("Skipped reread of {path} lines {start_line}-{end_line} of {total}{next_hint}")
+            format!("Skipped reread of {path} lines {start_line}-{end_line}{total}{next_hint}")
                 .as_str(),
             160,
         ));
     }
     Some(compact_text(
-        format!("Read {path} lines {start_line}-{end_line} of {total}{next_hint}").as_str(),
+        format!("Read {path} lines {start_line}-{end_line}{total}{next_hint}").as_str(),
         160,
     ))
-}
-
-fn file_read_coverage_fields(parsed: &Value) -> (u64, u64, Option<u64>, bool) {
-    let start_line = parsed.get("startLine").and_then(Value::as_u64).unwrap_or(1);
-    let end_line = parsed
-        .get("endLine")
-        .and_then(Value::as_u64)
-        .unwrap_or(start_line);
-    let total_lines = parsed.get("totalLines").and_then(Value::as_u64);
-    let truncated = parsed
-        .get("truncated")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    (start_line, end_line, total_lines, truncated)
 }
 
 pub(super) fn preview_tool_result(report: &ToolExecutionResult) -> String {
@@ -421,5 +451,48 @@ fn tool_operation_output_preview(report: &ToolExecutionResult) -> Option<String>
         (Some(out), None) => Some(compact_text(out, 1_000)),
         (None, Some(err)) => Some(compact_text(err, 1_000)),
         (None, None) => Some(compact_text(report.content.as_str(), 1_000)),
+    }
+}
+
+#[cfg(test)]
+mod read_summary_tests {
+    use super::*;
+
+    #[test]
+    fn directory_read_summary_does_not_invent_file_line_coverage() {
+        let details = json!({ "schema":"directory_listing_result.v1", "path":"packages", "totalEntries":8, "entries":[], "truncated":false });
+        assert_eq!(
+            summarize_file_read_tool_result(&details).as_deref(),
+            Some("Listed packages · 8 entries")
+        );
+    }
+
+    #[test]
+    fn missing_read_coverage_does_not_become_line_one_of_unknown() {
+        assert_eq!(
+            summarize_file_read_tool_result(&json!({"path":"file.txt"})).as_deref(),
+            Some("Read file.txt")
+        );
+        assert_eq!(
+            summarize_file_read_tool_result(
+                &json!({"path":"file.txt", "startLine":3, "endLine":8})
+            )
+            .as_deref(),
+            Some("Read file.txt lines 3-8")
+        );
+    }
+}
+
+#[cfg(test)]
+mod readable_output_tests {
+    use super::*;
+    #[test]
+    fn file_body_is_exact_and_unknown_results_are_not_stripped() {
+        let raw = "Read x: machine header\nRead 中文\nContinuation: done.";
+        let details = json!({"fileFact":{"schema":"file_read_fact_v1"},"content":"Read 中文"});
+        let (start, length) = readable_content_range(&details, raw).unwrap();
+        assert_eq!(&raw[start..start + length], "Read 中文");
+        assert!(readable_content_range(&json!({"content":"Read 中文"}), raw).is_none());
+        assert!(readable_content_range(&details, "unrelated output").is_none());
     }
 }

@@ -582,7 +582,7 @@
   max-width: 100%;
   overflow-wrap: anywhere;
   word-break: normal;
-  animation: centaerisWaterfallItemIn 140ms ease-out both;
+
 }
 
 .agentProcessSectionHeading.is-compaction {
@@ -603,7 +603,6 @@
   max-width: 100%;
   margin-left: auto;
   margin-right: auto;
-  animation: centaerisProcessReveal 160ms ease-out both;
 }
 
 .agentGuidedSupplement {
@@ -615,7 +614,7 @@
   max-width: 100%;
   margin-left: auto;
   margin-right: auto;
-  animation: centaerisWaterfallItemIn 140ms ease-out both;
+
 }
 
 .agentGuidedSupplementLabel {
@@ -858,7 +857,7 @@
   width: 100%;
   min-width: 0;
   max-width: 100%;
-  animation: centaerisWaterfallItemIn 140ms ease-out both;
+
 }
 
 .agent-tool-node + .agent-tool-node {
@@ -879,7 +878,7 @@
   overflow: hidden;
 }
 
-.agent-tool-node > .agent-operation-body {
+.agent-tool-node-body.agent-operation-body {
   margin: 0;
   padding: 0 12px 10px;
 }
@@ -4199,4 +4198,40 @@ button.agent-tool-chip {
   color: var(--error);
   border-left-color: var(--primary-color);
   font-weight: 600;
+}
+
+/* Process records share a compact rail instead of ordinary message spacing. */
+.historyProcessRows { display: grid; gap: 10px; }
+.historyProcessRow.message { margin-bottom: 0; }
+.historyProcessRows .agentResultBash { margin: 0; }
+.transcriptPageControls { display: flex; gap: 8px; font-size: var(--chat-meta-size); }
+.agent-tool-node-body { box-sizing: border-box; }
+.historyProcessRows :is(.agentReasoning, .agentProcessSection, .agent-operation-group) { animation: none; }
+
+/* Desktop presentation override; shared typography tokens remain identical. */
+
+/* A single bounded output viewport for read, command and external tool results. */
+.agent-tool-output-viewport { max-height:240px; max-width:100%; min-width:0; overflow:auto; overscroll-behavior:contain; scrollbar-width:thin; }
+.agent-tool-output-viewport:focus-visible { outline:1px solid var(--outline-variant); outline-offset:2px; }
+
+/* Each tool owns its output scroll area; the card body must not scroll again. */
+.agent-tool-node-body.agent-operation-body {
+  max-height: none;
+  max-width: 100%;
+  overflow: visible;
+}
+button.agent-tool-node-summary { cursor: pointer; }
+
+/* These are single-column stacks. Explicit tracks avoid repeated intrinsic
+   width measurement through nested grids when a tool body mounts. */
+.agentResultBash,
+.agentResultMain,
+.agentProcessLive,
+.agentProcessSections,
+.agentProcessSection,
+.agentProcessFeed,
+.agent-tool-node-list,
+.agent-operation-body,
+.agent-tool-command-card {
+  grid-template-columns: minmax(0, 1fr);
 }

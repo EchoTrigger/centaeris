@@ -39,6 +39,7 @@ fs2 = "=0.4.3"
 futures = "=0.3.32"
 getrandom = "=0.4.3"
 hmac = "=0.12.1"
+httpdate = "=1.0.3"
 image = { version = "=0.25.9", default-features = false, features = ["jpeg", "png", "webp"] }
 libc = "=0.2.186"
 ratatui = "=0.29.0"
