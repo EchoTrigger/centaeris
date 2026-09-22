@@ -4,16 +4,11 @@ import { memo } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { CornerDownLeft } from "lucide-react";
 import { MarkdownContent } from "./MarkdownContent";
-import {
-  runtimeEasterEgg,
-  tachikomaEasterEgg,
-} from "./chatRuntimeCore";
 import { useChatViewStore } from "./chatViewStore";
 import { TaskGroupTranscriptItem } from "./ToolActivityTranscript";
 import { ReasoningTranscript } from "./ReasoningTranscript";
 import type {
   AgentResultStreamProps,
-  RuntimeActivity,
   SubagentResult,
   TranscriptItem,
   TranscriptTextItem,
@@ -87,65 +82,14 @@ const renderTranscriptItem = (
 
 export const AgentProcessTranscript = memo(function AgentProcessTranscript({
   processTranscript,
-  isStreaming,
   agentRunId,
-  activity,
-  subagents,
-  hasRunningTool,
-  hasFinalItem,
   onOpenWorkspacePath,
 }: {
   processTranscript: Pick<TranscriptViewModel, "processItems" | "processSections">;
-  isStreaming: boolean;
   agentRunId: string | undefined;
-  activity: RuntimeActivity | null | undefined;
-  subagents: SubagentResult[];
-  hasRunningTool: boolean;
-  hasFinalItem: boolean;
   onOpenWorkspacePath: OpenWorkspacePath;
 }) {
-  const subagentIds = new Set(subagents.map((subagent) => subagent.subagentId));
-  const liveSubagentIds = new Set(
-    subagents
-      .filter((subagent) => subagent.status === "running")
-      .map((subagent) => subagent.subagentId),
-  );
-  const tachikomaCount = tachikomaEasterEgg(
-    agentRunId,
-    subagentIds.size,
-    liveSubagentIds.size,
-  );
-  const hasTachikoma = tachikomaCount !== null;
-  const hasLiveReasoning = processTranscript.processItems.some(
-    (item) => item.kind === "reasoning" && item.status === "streaming",
-  );
-  const activityLabel = runtimeEasterEgg(
-    agentRunId,
-    activity?.processState,
-  ) ?? activity?.label ?? "";
-  const liveStatus = isStreaming && (hasTachikoma || activity) &&
-    !(hasLiveReasoning && activity?.kind === "thinking") &&
-    (hasTachikoma || !hasRunningTool) && !hasFinalItem ? (
-    <div className="agentStatusRow">
-      <div className="agentRunStatus" aria-live="polite">
-        <span className="agentRunStatusText statusShimmer">
-          {hasTachikoma ? (
-            <>
-              Tachikoma{" "}
-              <span className="tachikomaCount" key={tachikomaCount}>
-                ×{tachikomaCount}
-              </span>
-              {tachikomaCount === 1 ? " · awaiting result…" : " · whispering…"}
-            </>
-          ) : activityLabel}
-        </span>
-      </div>
-    </div>
-  ) : null;
-
-  if (processTranscript.processItems.length === 0 && !liveStatus) {
-    return null;
-  }
+  if (processTranscript.processItems.length === 0) return null;
 
   return (
     <div className="agentProcessLive">
@@ -165,7 +109,6 @@ export const AgentProcessTranscript = memo(function AgentProcessTranscript({
           </section>
         ))}
       </div>
-      {liveStatus}
     </div>
   );
 });

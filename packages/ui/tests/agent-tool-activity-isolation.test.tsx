@@ -4,26 +4,20 @@ import type {
   AssistantExecutionTurn,
   ChatMessage,
   TaskResult,
-  ToolOperation,
 } from "../src/components/chat/types";
 
 type AssistantChatMessage = Extract<ChatMessage, { role: "assistant" }>;
 
 const harness = vi.hoisted(() => ({
-  presentationCalls: [] as string[],
+  detailCalls: [] as string[],
 }));
 
-vi.mock("../src/components/chat/toolActivityModel", async (importOriginal) => {
-  const actual = await importOriginal<
-    typeof import("../src/components/chat/toolActivityModel")
-  >();
-  return {
-    ...actual,
-    getToolActivityPresentation(operations: ToolOperation[]) {
-      harness.presentationCalls.push(operations[0]?.callId ?? "missing");
-      return actual.getToolActivityPresentation(operations);
-    },
-  };
+vi.mock("../src/components/chat/toolActivityTranscriptModel", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/components/chat/toolActivityTranscriptModel")>();
+  return { ...actual, getOperationDetailState(...args: Parameters<typeof actual.getOperationDetailState>) {
+    harness.detailCalls.push(args[0].callId);
+    return actual.getOperationDetailState(...args);
+  }};
 });
 
 import { AgentResultStream } from "../src/components/chat/AgentResultStream";
@@ -64,7 +58,7 @@ const assistantMessage = (turn: AssistantExecutionTurn): AssistantChatMessage =>
 });
 
 beforeEach(() => {
-  harness.presentationCalls.length = 0;
+  harness.detailCalls.length = 0;
   useChatViewStore.getState().clear();
 });
 
@@ -81,8 +75,8 @@ test("a task update recomputes only the tool group that owns that task", async (
   if (!renderer) {
     throw new Error("Agent result stream did not render");
   }
-  expect(harness.presentationCalls).toEqual(["first-task-call", "second-task-call"]);
-  harness.presentationCalls.length = 0;
+  expect(harness.detailCalls).toEqual(["first-task-call", "second-task-call"]);
+  harness.detailCalls.length = 0;
 
   const updatedSecond = makeTask("second-task", "src/second-updated.ts");
   await act(async () => {
@@ -90,7 +84,35 @@ test("a task update recomputes only the tool group that owns that task", async (
       assistantMessage(makeTurn(first, updatedSecond)),
     ]);
   });
-  expect(harness.presentationCalls).toEqual(["second-task-call"]);
+  expect(harness.detailCalls).toEqual(["second-task-call"]);
 
   await act(async () => renderer.unmount());
+});
+
+
+test("Tool detail disclosure survives virtual unmount and appending a tool", async () => {
+  const first = {...makeTask("persistent", "one.rs"),modelContent:"file contents"};
+  const turn: AssistantExecutionTurn = { id: "persistent-turn", chunks: [{ id: first.id, kind: "task", task: first }], finalAnswer: "", isStreaming: false };
+  let renderer: ReactTestRenderer;
+  await act(async () => { renderer = create(<AgentResultStream turn={turn} />); });
+  const toggle = () => renderer!.root.findAllByProps({ className: "agent-operation-summary agent-tool-node-summary" })[0];
+  await act(async () => { toggle().props.onClick({ preventDefault() {} }); });
+  expect(toggle().props["aria-expanded"]).toBe(true);
+  await act(async () => { renderer!.unmount(); });
+  const second = makeTask("appended", "two.rs");
+  await act(async () => { renderer = create(<AgentResultStream turn={{ ...turn, chunks: [...turn.chunks, { id: second.id, kind: "task", task: second }] }} />); });
+  expect(toggle().props["aria-expanded"]).toBe(true);
+  await act(async () => { renderer!.unmount(); });
+});
+
+ test("tool titles are ready immediately and unrelated disclosure stays isolated", async () => {
+  const tasks = [makeTask("a", "a.rs"), makeTask("b", "b.rs")];
+  const turn: AssistantExecutionTurn = {id:"lazy",chunks:tasks.map(task=>({id:task.id,kind:"task",task})),finalAnswer:"",isStreaming:false};
+  let renderer: ReactTestRenderer;
+  await act(async()=> {renderer=create(<AgentResultStream turn={turn}/>);});
+  expect(harness.detailCalls).toEqual(["a-call","b-call"]);
+  harness.detailCalls.length=0;
+  await act(async()=> useChatViewStore.setState({expandedTools:{...useChatViewStore.getState().expandedTools,"unrelated":true}}));
+  expect(harness.detailCalls).toEqual([]);
+  await act(async()=>renderer!.unmount());
 });

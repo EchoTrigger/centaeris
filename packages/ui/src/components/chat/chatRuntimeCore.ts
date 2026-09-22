@@ -292,13 +292,6 @@ export const RUNTIME_ACTIVITY_BY_PROCESS_STATE: Record<
   provider_interrupted: { kind: "retrying", label: "Thinking" },
 };
 
-const NON_ACTIVITY_PROCESS_STATES = new Set<RuntimeProcessState>([
-  "waiting",
-  "auth_failed",
-  "provider_unavailable",
-  "provider_interrupted",
-]);
-
 export const normalizeRuntimeActivity = (
   label: string,
   kind: RuntimeActivityKind = "thinking",
@@ -362,9 +355,6 @@ export const mapProcessStateToActivity = (
   }
   if (state === "unknown") {
     throw new Error(t("chatRuntimeCore.unknownRuntimeProcessstateUnknown"));
-  }
-  if (NON_ACTIVITY_PROCESS_STATES.has(state)) {
-    return null;
   }
   const label = sanitizeRuntimeActivityLabel(fallbackLabel);
   const definition = RUNTIME_ACTIVITY_BY_PROCESS_STATE[state];

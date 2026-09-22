@@ -1,4 +1,4 @@
-import { WorkProgress } from "./WorkProgress";
+import { RunStatusLine } from "./RunStatusLine";
 import { useMemo } from "react";
 import {
   AgentFinalAnswer,
@@ -16,7 +16,6 @@ import type {
 
 export function AgentResultStream({
   turn,
-  showWorkProgress = true,
   onOpenAgentSession,
   onOpenWorkspacePath,
 }: AgentResultStreamProps) {
@@ -35,19 +34,10 @@ export function AgentResultStream({
       .map((chunk) => chunk.subagent),
     [chunks],
   );
-  const hasRunningTool = chunks.some(
-    (chunk) => chunk.kind === "task" && chunk.task.status === "running",
-  );
-  const isProcessDraft = isStreaming && !turn.finalAnswerConfirmed;
   const process = <>
         <AgentProcessTranscript
           processTranscript={processTranscript}
-          isStreaming={isStreaming}
           agentRunId={turn.agentRunId}
-          activity={turn.activity}
-          subagents={subagents}
-          hasRunningTool={hasRunningTool}
-          hasFinalItem={Boolean(finalItem)}
           onOpenWorkspacePath={onOpenWorkspacePath}
         />
         <AgentSubagentTranscript
@@ -58,13 +48,9 @@ export function AgentResultStream({
   return (
     <div className="agentResultBash">
       <div className="agentResultMain">
-        {showWorkProgress ? <WorkProgress running={isStreaming} finalStarted={Boolean(finalItem) && !isProcessDraft}
-          startedAtMs={turn.startedAtMs} completedAtMs={turn.completedAtMs}
-          responseIsProcess={isProcessDraft}
-          response={<AgentFinalAnswer finalItem={finalItem} isStreaming={false} onOpenWorkspacePath={onOpenWorkspacePath} />}>
-          {process}
-        </WorkProgress> : <>{process}<AgentFinalAnswer finalItem={finalItem} isStreaming={false} onOpenWorkspacePath={onOpenWorkspacePath} /></>}
-
+        {process}
+        <AgentFinalAnswer finalItem={finalItem} isStreaming={false} onOpenWorkspacePath={onOpenWorkspacePath} />
+        <RunStatusLine turnId={turn.id} />
       </div>
     </div>
   );

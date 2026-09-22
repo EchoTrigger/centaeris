@@ -1,8 +1,8 @@
+import { AnimatedDisclosure } from "./AnimatedDisclosure";
 import { useTranslation } from "../../i18n";
 import { memo, useId } from "react";
 import { Brain, ChevronDown } from "lucide-react";
 import { MarkdownContent } from "./MarkdownContent";
-import { reasoningPreview } from "./reasoningPreview";
 import { useReasoningFollow } from "./useReasoningFollow";
 import { useChatViewStore } from "./chatViewStore";
 import type { AgentResultStreamProps, ReasoningChunk } from "./types";
@@ -27,13 +27,12 @@ export const ReasoningTranscript = memo(function ReasoningTranscript({
         aria-label={label}
         aria-expanded={expanded} aria-controls={bodyId} onClick={() => toggle(identity)}>
         <Brain aria-hidden="true" />
-        <span className={!expanded && entry.status === "streaming" ? "statusShimmer" : undefined}>{label}</span>
-        {!expanded ? <span className="reasoningPreview" aria-hidden="true"><span className="reasoningPreviewText">{reasoningPreview(entry.text)}</span></span> : null}
+        <span>{label}</span>
         <ChevronDown className={expanded ? "is-expanded" : ""} aria-hidden="true" />
       </button>
-      {expanded ? <div ref={bodyRef} id={bodyId} className="agentReasoningBody" role="region" aria-label={t("reasoningTranscript.thinkingContent")} tabIndex={0}>
+      <AnimatedDisclosure expanded={expanded}><div ref={bodyRef} id={bodyId} className="agentReasoningBody" role="region" aria-label={t("reasoningTranscript.thinkingContent")} tabIndex={0}>
         <MarkdownContent text={entry.text} onOpenWorkspacePath={onOpenWorkspacePath} />
-      </div> : null}
+      </div></AnimatedDisclosure>
     </div>
   );
 });

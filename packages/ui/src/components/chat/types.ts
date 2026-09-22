@@ -100,6 +100,8 @@ export type RuntimeActivity = {
 };
 
 export type ToolOperation = {
+  contentStartByte?: number;
+  contentByteLength?: number;
   callId: string;
   toolName: string;
   kind?: "command";
@@ -235,6 +237,8 @@ export type EventWaterfall = {
 };
 
 export type AssistantExecutionTurn = {
+  projectionRunId?: string;
+
   liveRevision?: number;
   id: string;
   agentRunId?: string;
@@ -314,7 +318,6 @@ export type SessionViewSnapshot = {
 };
 
 export type AgentResultStreamProps = {
-  showWorkProgress?: boolean;
   turn: AssistantExecutionTurn;
   onOpenAgentSession?: (sessionId: string, title: string) => void;
   onOpenWorkspacePath?: (

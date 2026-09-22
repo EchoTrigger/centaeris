@@ -270,7 +270,7 @@ export const useAgentStreamEventLifecycle = ({
           appendNarrativeChunk(
             setTurnActivity(
               turn,
-              mapRuntimePayloadToActivity(activityPayload),
+              mapRuntimePayloadToActivity(activityPayload, "waiting"),
             ),
             text,
             "normal",

@@ -1,29 +1,50 @@
-/* Shared text hierarchy: readable content 14px, process details 13px. */
-:root[data-theme] :is(.markdown-content,.markdownContent,.workspaceUserMessage,.agentGuidedSupplementBubble,.user-message .message-bubble,.composer-prompt-input) {
-  font-size:14px; line-height:24px;
+/* Desktop maps shared chat roles onto its own components. */
+@import "./chat-typography.css";
+:root[data-theme] :is(.markdown-content,.markdownContent,.workspaceUserMessage,.agentGuidedSupplementBubble,.user-message .message-bubble,.composer-prompt-input,.summaryMarkdownContent) {
+  font-size:var(--chat-body-size); line-height:var(--chat-body-leading);
 }
 :root[data-theme] :is(.agentReasoningSummary,.agent-operation-summary,.agentRunStatus,.workspaceActivityGroup,.workspaceLiveStatus) {
-  color:var(--process-text); font-size:14px; line-height:20px;
+  color:var(--process-text); font-size:var(--chat-meta-size); line-height:var(--chat-meta-leading);
 }
-:root[data-theme] :is(.agentReasoningBody .markdown-content,.workspaceReasoningBody .markdownContent,.agent-operation-body,.activityOperationBody,.activityOperationSummary,.activityOperationCommand,.activityOperationOutput,.activityOperationMeta,.activityOperationFooter,.agent-tool-bash-output,.agent-tool-bash-command,.agent-tool-bash-status,.agent-tool-command-label,.agent-tool-output-block,.agent-tool-node-action,.agent-tool-node-summary) {
-  color:var(--process-text); font-size:13px; line-height:21px;
+:root[data-theme] :is(.agent-operation-body,.activityOperationBody,.activityOperationSummary,.activityOperationCommand,.activityOperationOutput,.activityOperationMeta,.activityOperationFooter,.agent-tool-bash-output,.agent-tool-bash-command,.agent-tool-bash-status,.agent-tool-command-label,.agent-tool-output-block,.agent-tool-node-action,.agent-tool-node-summary) {
+  color:var(--process-text); font-size:var(--chat-code-size); line-height:var(--chat-code-leading);
 }
-:root[data-theme] :is(.agentReasoningBody,.workspaceReasoningBody) :is(p,li,code,pre,th,td,a) {
-  color:var(--process-text); font-size:13px; line-height:21px;
+:root[data-theme] .agentReasoningBody .markdown-content {
+  color:var(--process-text); font-size:var(--chat-body-size); line-height:var(--chat-body-leading);
 }
 :root[data-theme] :is(.agent-operation-body,.activityOperationBody) :is(pre,code,th,td) {
-  color:var(--process-text); font-size:13px; line-height:21px;
+  color:var(--process-text); font-size:var(--chat-code-size); line-height:var(--chat-code-leading);
 }
-:root[data-theme] :is(.reasoningPreview,.workspaceLiveStatusText,.workspaceLiveStatusElapsed,.agent-tool-bash-status,.agent-tool-command-label,.activityOperationMeta) { color:var(--process-text); }
-:root[data-theme] :is(.reasoningPreview,.workspaceLiveStatusElapsed,.activityOperationFooter) { font-size:13px; line-height:21px; }
-:root[data-theme] .workspaceComposer textarea { font-size:14px; line-height:24px; }
+:root[data-theme] :is(.workspaceLiveStatusText,.workspaceLiveStatusElapsed,.agent-tool-bash-status,.agent-tool-command-label,.activityOperationMeta) { color:var(--process-text); }
+:root[data-theme] :is(.workspaceLiveStatusElapsed,.activityOperationFooter) { font-size:var(--chat-code-size); line-height:var(--chat-code-leading); }
+:root[data-theme] .workspaceComposer textarea { font-size:var(--chat-body-size); line-height:var(--chat-body-leading); }
 :root[data-theme] :is(.agentReasoningSummary,.agent-operation-summary-toggle,button.workspaceActivityGroup,button.activityOperationSummary):hover { background:transparent; color:var(--on-surface); }
-:root[data-theme] :is(.markdown-table,.markdownTable) :is(table,th,td) { font-size:13px; line-height:21px; }
+:root[data-theme] :is(.markdown-table,.markdownTable) :is(table,th,td) { font-size:inherit; line-height:inherit; }
 :root[data-theme] :is(.markdown-table,.markdownTable) :is(th,td) { white-space:normal; overflow-wrap:anywhere; }
-:root[data-theme] :is(.markdown-content,.markdownContent) pre { font-size:13px; line-height:21px; }
+:root[data-theme] :is(.markdown-content,.markdownContent) pre { font-size:var(--chat-code-size); line-height:var(--chat-code-leading); }
 :root[data-theme] :is(.agent-tool-bash-output,.agent-tool-output-block).is-error,
 :root[data-theme] .activityOperationOutput.isError { color:var(--error); }
 :root[data-theme] :is(.summaryCodePreviewDiffAdded,.activityDiffLine.isAdded) { background:var(--diff-add-bg); }
 :root[data-theme] :is(.summaryCodePreviewDiffRemoved,.activityDiffLine.isRemoved) { background:var(--diff-remove-bg); }
 :root[data-theme] .cm-selectionBackground { background:color-mix(in srgb,var(--primary-color) 25%,transparent); }
 :root[data-theme] :is(.markdown-content,.markdownContent) a { text-underline-offset:3px; }
+
+:root[data-theme] :is(.agent-tool-node-action,.agent-tool-node-summary,.agent-tool-command-label,.agent-tool-bash-status) {
+  font-size:var(--chat-meta-size); line-height:var(--chat-meta-leading);
+}
+:root[data-theme] .markdown-content code { font-size:var(--chat-code-size); line-height:var(--chat-code-leading); }
+.chatDisclosure { min-width:0; overflow:clip; }
+button.agent-operation-summary { width:100%; border:0; background:transparent; text-align:left; cursor:pointer; }
+@media (prefers-reduced-motion: reduce) {
+  .agentResultBash *, .thinFilePane, .thinAppShell {
+    animation:none !important; transition:none !important; scroll-behavior:auto !important;
+  }
+}
+
+
+.runStatusLine { display:flex; align-items:center; gap:8px; min-width:0; color:var(--on-surface-variant); font-size:12px; line-height:18px; margin-top:12px; }
+.runStatusLine [role=status] { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.runStatusSpinner { width:14px; height:14px; flex:none; animation:runStatusSpin 1s linear infinite; }
+.runStatusElapsed { flex:none; font-variant-numeric:tabular-nums; }
+@keyframes runStatusSpin { to { transform:rotate(360deg); } }
+@media (prefers-reduced-motion:reduce) { .runStatusSpinner { animation:none; } }
