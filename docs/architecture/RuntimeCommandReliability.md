@@ -89,6 +89,15 @@ request safe.
   identity. Its receipt is written before AgentRun startup, so retry can resume
   the receipt-before-run crash window; active, terminal, and reconnected replay
   all return the original identities without appending another user message.
+  Concurrent retries with the same identity also share that one result.
+- AgentRun handoff retains its Session lease while Core closes input admission.
+  Closing does not hold the shared registry mutex, so unrelated Sessions can
+  start. A close failure retains ownership for a successful retry; a delayed
+  concurrent finish cannot release a replacement lease. Startup failure releases
+  its registration, allowing the next valid request to start.
+- The current prompt API rejects a competing active Session with a busy result;
+  it has no queued-input promotion or atomic cancel-and-start command. These
+  guarantees do not imply FIFO admission after a Session becomes free.
 - Supplement and intervention commands require an existing `agentRunId`, but
   repeated delivery semantics must be checked against their durable
   intervention identities before they can be classified as safe retries.
@@ -136,3 +145,38 @@ Each implementation slice starts with a failing behavior test:
 
 No automatic retry is introduced before steps 4 and 5 have durable receipts and
 reconcile behavior.
+
+
+## Late worker results and recovery
+
+Core's job-store contract requires a fresh opaque `leaseOwner` for every claim,
+including a reclaim by the same worker. Callers must use the returned value;
+`workerId` is a scheduler label and is not a claim token. SQLite generates the
+new identity inside the claim transaction. Renewal retains it. Existing persisted
+lease strings remain valid until their lease ends; no table or stored-record
+schema change or history rewrite is required.
+
+Start, renewal, yield, success and failure compare ownership and expiry in the
+store. Worker-origin cancellation now carries `expectedLeaseOwner` and uses the
+same atomic check. Explicit user cancellation targets the logical job and omits
+that condition. The subagent runner and provider-poll Stop path pass their claim
+identity, so an old execution cannot cancel a replacement execution.
+
+External result object/link writes and successful job completion remain one
+SQLite transaction. Losing ownership rolls back the entire result write, rather
+than leaving an object available for later context injection. Reopening the store
+does not recreate or change an existing claim identity; a subsequent reclaim
+creates a new one.
+
+Before storing a scheduler result in a parent Session projection, Core rechecks
+the durable job's kind, Session, parent turn, terminal status, work packet and
+result reference. A notification for another Session, a still-running job, or
+an obsolete result fails before a snapshot write. Replaying the same committed
+terminal result is idempotent. Existing model-attempt stream reset, AgentRun
+identity checks, immutable terminal messages and checkpoint recovery continue to
+own their respective boundaries; this does not add branch generations or change
+transcript projection generations.
+
+These checks fence durable results and terminal transitions. They do not roll
+back external effects already performed by a worker before cancellation or lease
+loss, and do not promise exactly-once execution of external commands.

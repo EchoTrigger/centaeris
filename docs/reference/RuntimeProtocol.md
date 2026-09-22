@@ -160,7 +160,7 @@ The result has this exact field set:
 | `coreProtocolVersion` | Exact Core protocol version, currently `1.0.0`. |
 | `profileId` | Non-empty identity of the user-data profile. |
 | `storeId` | Non-empty identity of the Runtime store. |
-| `storeSchemaVersion` | Positive storage schema version, currently `3`. |
+| `storeSchemaVersion` | Positive storage schema version, currently `4`. |
 | `layoutSchemaVersion` | Positive user-data layout version, currently `1`. |
 
 The v1 descriptor publishes these arrays:
@@ -402,7 +402,9 @@ identifier.
 - Otherwise the Runtime requests interruption of each run owned by the lost
   connection.
 - An interrupted lease remains active until its Session actor persists the
-  terminal state and releases the lease. A second turn cannot race cleanup.
+  terminal state, Core closes input admission, and the lease is released. A
+  second turn cannot race that cleanup. Failed input closure retains the lease;
+  unrelated Sessions remain available during closure.
 - Runs owned by other connected clients are unaffected.
 
 The Runtime Server exits only after it has no connected clients, no active
@@ -431,3 +433,16 @@ This page describes the current clean-slate v1 implementation. A later protocol
 change updates the owning Core or Host type, protocol tests, and this reference
 together. Documentation does not require an unimplemented stricter handshake,
 transport policy, error taxonomy, or schema catalog from the current release.
+
+### Transcript display facts
+
+Newly projected blocks may include `presentation` with the source `agentRunId`,
+`sourceType`, `observedAtMs`, tool `displayTarget`, `durationMs`, and bounded tool
+`operation` facts. Absence means unknown; existing projections are not repaired.
+`run_boundary` notices carry authoritative run start/terminal timing and have no
+visible body. Clients pair the same run identity and never sum parallel tool latency.
+
+For recognized file/directory reads, tool operations may contain `contentStartByte`
+and `contentByteLength`: a UTF-8 byte range within the unchanged raw tool output.
+Readers show this range as the readable body and retain an explicit raw-output view.
+Unknown result formats retain their original text without heuristic header removal.

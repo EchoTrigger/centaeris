@@ -802,6 +802,7 @@ pub fn cancel_subagent_run_job<S: RuntimeJobStorePort>(
     req: CancelSubagentRunJobRequest,
 ) -> Result<SubagentSchedulerEvent, String> {
     store.cancel_runtime_job(CancelRuntimeJobRequest {
+        expected_lease_owner: None,
         job_id: req.job_id.clone(),
         reason: req.reason,
         cancelled_at_ms: req.cancelled_at_ms,
@@ -827,8 +828,17 @@ pub async fn cancel_subagent_run_job_async(
     store: &RuntimeStoreActor,
     req: CancelSubagentRunJobRequest,
 ) -> Result<SubagentSchedulerEvent, String> {
+    cancel_subagent_run_job_with_lease_async(store, req, None).await
+}
+
+async fn cancel_subagent_run_job_with_lease_async(
+    store: &RuntimeStoreActor,
+    req: CancelSubagentRunJobRequest,
+    expected_lease_owner: Option<String>,
+) -> Result<SubagentSchedulerEvent, String> {
     store
         .cancel_runtime_job(CancelRuntimeJobRequest {
+            expected_lease_owner,
             job_id: req.job_id.clone(),
             reason: req.reason,
             cancelled_at_ms: req.cancelled_at_ms,
@@ -1266,13 +1276,14 @@ where
             .await?
         }
         SubagentWorkerRunOutcome::Cancelled { reason } => {
-            cancel_subagent_run_job_async(
+            cancel_subagent_run_job_with_lease_async(
                 store,
                 CancelSubagentRunJobRequest {
                     job_id: running_job.job_id.clone(),
                     reason,
                     cancelled_at_ms: finished_at_ms,
                 },
+                Some(lease_owner),
             )
             .await?
         }
@@ -1859,7 +1870,7 @@ fn stable_hash(value: &str) -> String {
     format!("{hash:016x}")
 }
 
-fn scheduler_event_from_job(
+pub(super) fn scheduler_event_from_job(
     job: &RuntimeJobRecord,
     kind: SubagentSchedulerEventKind,
     status: SubagentLifecycleStatus,

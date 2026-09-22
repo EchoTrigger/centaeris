@@ -507,3 +507,156 @@ fn supplement_is_a_process_notice_not_a_new_user_turn() {
         if notice_type == "turn_supplement" && content.inline_content.as_deref() == Some("Keep the same clock"))
     );
 }
+
+#[test]
+fn projected_tool_keeps_display_target_and_duration() {
+    let mut projector =
+        TranscriptProjectorV1::new("session-1".into(), "generation-1".into()).unwrap();
+    let call = projector.apply(&tool_call(100), "run-1", "c1").unwrap();
+    let TranscriptProjectionUpdateV1::Patch(call) = call else {
+        panic!()
+    };
+    let value = serde_json::to_value(&call.upserts[0]).unwrap();
+    assert_eq!(value["presentation"]["displayTarget"], "README.md");
+    let result = projector.apply(&tool_result(200), "run-1", "c2").unwrap();
+    let TranscriptProjectionUpdateV1::Patch(result) = result else {
+        panic!()
+    };
+    let value = serde_json::to_value(&result.upserts[0]).unwrap();
+    assert_eq!(value["presentation"]["displayTarget"], "README.md");
+    assert_eq!(value["presentation"]["durationMs"], 10);
+    assert_eq!(value["presentation"]["agentRunId"], "run-1");
+}
+
+#[test]
+fn run_boundaries_keep_authoritative_identity_and_timestamps() {
+    let mut projector =
+        TranscriptProjectorV1::new("session-1".into(), "generation-1".into()).unwrap();
+    for record in [
+        record(
+            100,
+            "agent_run_started",
+            "start",
+            json!({"userObjective":"read project"}),
+        ),
+        record(
+            4000,
+            "agent_run_completed",
+            "end",
+            json!({"doneReason":"complete"}),
+        ),
+    ] {
+        let TranscriptProjectionUpdateV1::Patch(patch) = projector
+            .apply(&record, "run-1", &record.sequence.to_string())
+            .unwrap()
+        else {
+            panic!()
+        };
+        let value = serde_json::to_value(&patch.upserts[0]).unwrap();
+        assert_eq!(value["presentation"]["observedAtMs"], record.sequence);
+        assert_eq!(value["presentation"]["agentRunId"], "run-1");
+        assert_eq!(value["body"]["noticeType"], "run_boundary");
+    }
+}
+
+#[test]
+fn terminal_run_boundaries_retain_failure_and_interruption_messages() {
+    for (kind, payload) in [
+        (
+            "agent_run_failed",
+            json!({"reasonType":"provider_error","message":"Provider unavailable"}),
+        ),
+        (
+            "agent_run_interrupted",
+            json!({"reasonType":"cancelled","message":"Stopped by user","retryable":false}),
+        ),
+    ] {
+        let mut projector =
+            TranscriptProjectorV1::new("session-1".into(), "generation-1".into()).unwrap();
+        let event = record(1, kind, "terminal", payload.clone());
+        let TranscriptProjectionUpdateV1::Patch(patch) =
+            projector.apply(&event, "run-1", "cursor-1").unwrap()
+        else {
+            panic!()
+        };
+        let block = serde_json::to_value(&patch.upserts[0]).unwrap();
+        assert_eq!(
+            block["body"]["content"]["inlineContent"],
+            payload["message"]
+        );
+        assert_eq!(block["presentation"]["sourceType"], kind);
+    }
+}
+
+#[test]
+fn large_terminal_reason_reference_can_be_read() {
+    use centaeris_core::session::transcript::*;
+    let text = "Failure detail 字".repeat(10000);
+    let event = record(
+        1,
+        "agent_run_failed",
+        "failure",
+        json!({"reasonType":"provider_error","message":text}),
+    );
+    let mut projector =
+        TranscriptProjectorV1::new("session-1".into(), "generation-1".into()).unwrap();
+    let TranscriptProjectionUpdateV1::Patch(patch) = projector.apply(&event, "run-1", "1").unwrap()
+    else {
+        panic!()
+    };
+    let TranscriptBlockBodyV1::Notice { content, .. } = &patch.upserts[0].body else {
+        panic!()
+    };
+    let reference = content.source_ref.as_ref().unwrap();
+    let request = TranscriptContentRangeReadRequestV1 {
+        schema: TRANSCRIPT_CONTENT_RANGE_REQUEST_SCHEMA_V1.into(),
+        session_id: "session-1".into(),
+        projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.into(),
+        projection_generation: "generation-1".into(),
+        ref_id: reference.ref_id.clone(),
+        revision: reference.revision.clone(),
+        byte_length: reference.byte_length.clone(),
+        offset: "0".into(),
+        max_bytes: 1024,
+    };
+    let range = transcript_event_content_range(&request, &event.event).unwrap();
+    assert!(text.starts_with(&range.content));
+    assert!(range.has_more);
+}
+
+#[test]
+fn read_only_page_respects_tombstones_pagination_and_waterline() {
+    use centaeris_core::session::transcript::{
+        read_only_transcript_page_from_records, TRANSCRIPT_PROJECTION_VERSION_V1,
+    };
+    let mut records = (1..=3).map(|seq| record(seq,"user_message",&format!("event-{seq}"),json!({"messageId":format!("message-{seq}"),"text":format!("text-{seq}"),"attachments":[]}))).collect::<Vec<_>>();
+    records.push(record(
+        4,
+        "tombstone",
+        "event-tombstone",
+        json!({"tombstoneId":"tombstone-1","targetEventIds":["event-2"],"reasonType":"rewrite"}),
+    ));
+    let mut request = TranscriptPageReadRequestV1 {
+        session_id: "session-1".into(),
+        projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.into(),
+        projection_generation: "g".into(),
+        source_high_water: "4".into(),
+        older_cursor: None,
+        policy: TranscriptPagePolicyV1 {
+            max_blocks: 1,
+            ..Default::default()
+        },
+    };
+    let tail = read_only_transcript_page_from_records(&request, &records).unwrap();
+    assert_eq!(tail.blocks.len(), 1);
+    assert_eq!(tail.blocks[0].order_key.source_sequence, "3");
+    assert!(tail.blocks[0].presentation.is_some());
+    assert!(tail.resume_cursors.is_empty());
+    request.older_cursor = tail.older_cursor;
+    let older = read_only_transcript_page_from_records(&request, &records).unwrap();
+    assert_eq!(older.blocks.len(), 1);
+    assert_eq!(older.blocks[0].order_key.source_sequence, "1");
+    assert!(!older.has_older);
+    request.source_high_water = "5".into();
+    assert!(read_only_transcript_page_from_records(&request, &records).is_err());
+}
