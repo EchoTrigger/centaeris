@@ -49,6 +49,14 @@ fn main() {
             .map(|(index, body)| TranscriptBlockV1 {
                 block_id: format!("block-{index}"),
                 block_revision: "1".into(),
+                presentation: Some(TranscriptPresentationV1 {
+                    agent_run_id: Some("run".into()),
+                    source_type: "tool_result".into(),
+                    observed_at_ms: 1000,
+                    display_target: Some("README.md".into()),
+                    duration_ms: Some(25),
+                    operation: None,
+                }),
                 order_key: TranscriptOrderKeyV1 {
                     source_sequence: "1".into(),
                     ordinal: index as u32,

@@ -28,7 +28,7 @@ mod sqlite_transcript;
 #[path = "sqlite_store/sqlite_turn_supplement.rs"]
 mod sqlite_turn_supplement;
 
-pub const STORE_SCHEMA_VERSION: i64 = 3;
+pub const STORE_SCHEMA_VERSION: i64 = 4;
 
 #[derive(Debug, Clone)]
 pub struct SqliteRuntimeStore {
@@ -608,6 +608,7 @@ mod tests {
 
         store
             .cancel_runtime_job(CancelRuntimeJobRequest {
+                expected_lease_owner: None,
                 job_id: "job-expected-cancel".to_string(),
                 reason: "user_cancelled".to_string(),
                 cancelled_at_ms: 200,
@@ -616,6 +617,7 @@ mod tests {
             .expect_err("stale expected status must reject cancellation");
         store
             .cancel_runtime_job(CancelRuntimeJobRequest {
+                expected_lease_owner: None,
                 job_id: "job-expected-cancel".to_string(),
                 reason: "user_cancelled".to_string(),
                 cancelled_at_ms: 201,
@@ -1054,6 +1056,169 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn reclaimed_same_worker_cannot_commit_old_result_after_store_reopen() {
+        use centaeris_core::session::reliability::{
+            ClaimDueRuntimeJobsRequest, ScheduleRuntimeJobRequest,
+        };
+        let path = temp_db_path("claim-fencing");
+        let store = SqliteRuntimeStore::new(&path).unwrap();
+        store
+            .schedule_runtime_job(ScheduleRuntimeJobRequest {
+                job: runtime_job("fenced-job", RuntimeJobStatus::Queued, None),
+            })
+            .unwrap();
+        let claim = |now_ms| ClaimDueRuntimeJobsRequest {
+            now_ms,
+            worker_id: "same-worker".into(),
+            job_id: Some("fenced-job".into()),
+            job_kind: None,
+            session_id: None,
+            limit: 1,
+            lease_ms: 100,
+        };
+        let old = store.claim_due_runtime_jobs(claim(100)).unwrap().remove(0);
+        drop(store);
+        let store = SqliteRuntimeStore::new(&path).unwrap();
+        assert_eq!(store.get_runtime_job("fenced-job").unwrap().unwrap(), old);
+        store.reclaim_expired_runtime_job_leases(200).unwrap();
+        let current = store.claim_due_runtime_jobs(claim(200)).unwrap().remove(0);
+        let old_owner = old.lease_owner.clone().unwrap();
+        assert!(store
+            .start_runtime_job(
+                centaeris_core::session::reliability::StartRuntimeJobRequest {
+                    job_id: "fenced-job".into(),
+                    lease_owner: old_owner.clone(),
+                    started_at_ms: 201,
+                }
+            )
+            .is_err());
+        assert!(store
+            .renew_runtime_job_lease(
+                centaeris_core::session::reliability::RenewRuntimeJobLeaseRequest {
+                    job_id: "fenced-job".into(),
+                    lease_owner: old_owner.clone(),
+                    heartbeat_at_ms: 201,
+                    lease_ms: 1000,
+                }
+            )
+            .is_err());
+        assert!(store
+            .fail_runtime_job(FailRuntimeJobRequest {
+                job_id: "fenced-job".into(),
+                lease_owner: old_owner.clone(),
+                failed_at_ms: 201,
+                last_error: "old failure".into(),
+                next_run_at_ms: None,
+                disposition: RuntimeJobFailureDisposition::Failed,
+            })
+            .is_err());
+        assert!(store
+            .yield_runtime_job(YieldRuntimeJobRequest {
+                job_id: "fenced-job".into(),
+                lease_owner: old_owner,
+                yielded_at_ms: 201,
+                run_at_ms: 202,
+                transition_reason: "old yield".into(),
+            })
+            .is_err());
+
+        let error = store
+            .upsert_external_context_link_and_complete_job(
+                UpsertExternalContextLinkAndCompleteJobRequest {
+                    object: Some(external_context_object("late-result")),
+                    link: None,
+                    complete_job: CompleteRuntimeJobRequest {
+                        job_id: "fenced-job".into(),
+                        lease_owner: old.lease_owner.unwrap(),
+                        output_refs: vec!["late-result".into()],
+                        completed_at_ms: 201,
+                    },
+                },
+            )
+            .expect_err("previous claim must not complete the replacement claim");
+        assert!(error.contains("lease mismatch"));
+        assert!(store
+            .load_external_context_object("late-result")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store.get_runtime_job("fenced-job").unwrap().unwrap(),
+            current
+        );
+        store
+            .complete_runtime_job(CompleteRuntimeJobRequest {
+                job_id: "fenced-job".into(),
+                lease_owner: current.lease_owner.unwrap(),
+                output_refs: vec!["current-result".into()],
+                completed_at_ms: 202,
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .get_runtime_job("fenced-job")
+                .unwrap()
+                .unwrap()
+                .output_refs,
+            ["current-result"]
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn worker_cancellation_cannot_cancel_another_or_expired_claim() {
+        let path = temp_db_path("cancel-fencing");
+        let store = SqliteRuntimeStore::new(&path).unwrap();
+        store
+            .schedule_runtime_job(
+                centaeris_core::session::reliability::ScheduleRuntimeJobRequest {
+                    job: runtime_job(
+                        "cancel-fenced",
+                        RuntimeJobStatus::Running,
+                        Some("new-owner"),
+                    ),
+                },
+            )
+            .unwrap();
+        for (owner, at) in [("old-owner", 300), ("new-owner", 1000)] {
+            store
+                .cancel_runtime_job(CancelRuntimeJobRequest {
+                    job_id: "cancel-fenced".into(),
+                    reason: "late worker".into(),
+                    cancelled_at_ms: at,
+                    expected_status: Some(RuntimeJobStatus::Running),
+                    expected_lease_owner: Some(owner.into()),
+                })
+                .expect_err("worker cancellation requires the current unexpired claim");
+        }
+        assert_eq!(
+            store
+                .get_runtime_job("cancel-fenced")
+                .unwrap()
+                .unwrap()
+                .status,
+            RuntimeJobStatus::Running
+        );
+        store
+            .cancel_runtime_job(CancelRuntimeJobRequest {
+                job_id: "cancel-fenced".into(),
+                reason: "user stop".into(),
+                cancelled_at_ms: 1001,
+                expected_status: None,
+                expected_lease_owner: None,
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .get_runtime_job("cancel-fenced")
+                .unwrap()
+                .unwrap()
+                .status,
+            RuntimeJobStatus::Cancelled
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

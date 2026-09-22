@@ -79,7 +79,24 @@ const FORWARD_MIGRATIONS: &[ForwardMigration] = &[
         to_version: 3,
         apply: migrate_v2_to_v3,
     },
+    ForwardMigration {
+        from_version: 3,
+        to_version: 4,
+        apply: migrate_v3_to_v4,
+    },
 ];
+
+fn migrate_v3_to_v4(conn: &Connection) -> Result<(), String> {
+    // Older v2/v3 projections serialized enum fields as snake_case. These are
+    // derived rows: invalidate them without decoding or rewriting user facts.
+    // Runtime rebuilds and publishes a replacement generation from its source.
+    conn.execute(
+        "UPDATE transcript_projection_heads SET invalidation_reason='stored_transcript_camel_case_upgrade' WHERE invalidation_reason IS NULL",
+        [],
+    )
+    .map_err(|error| format!("invalidate pre-v4 transcript projections failed: {error}"))?;
+    Ok(())
+}
 
 fn migrate_v1_to_v2(conn: &Connection) -> Result<(), String> {
     let mut ddl = String::new();
@@ -822,6 +839,65 @@ mod tests {
     }
 
     #[test]
+    fn transcript_upgrade_rolls_back_on_failure_and_retries_once() {
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-v4-upgrade-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("runtime.db");
+        let conn = Connection::open(&path).unwrap();
+        create_schema(&conn).unwrap();
+        conn.execute_batch("DELETE FROM schema_migrations WHERE version > 3;
+            INSERT INTO transcript_projection_heads VALUES('session-a','transcript.projection.v1','generation-a',1,NULL);
+            CREATE TRIGGER fail_upgrade BEFORE INSERT ON schema_migrations WHEN NEW.version=4
+            BEGIN SELECT RAISE(ABORT, 'injected upgrade failure'); END;").unwrap();
+        let error = ensure_schema(&conn).expect_err("version write fails after invalidation");
+        assert!(error.contains("injected upgrade failure"));
+        assert_eq!(schema_versions(&conn).unwrap(), vec![1, 2, 3]);
+        let reason = || {
+            conn.query_row(
+                "SELECT invalidation_reason FROM transcript_projection_heads",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(reason(), None, "invalidation must roll back too");
+        let backup = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "backup"))
+            .unwrap();
+        let backup_conn = Connection::open(&backup).unwrap();
+        assert_eq!(schema_versions(&backup_conn).unwrap(), vec![1, 2, 3]);
+        assert_eq!(
+            backup_conn
+                .query_row(
+                    "SELECT invalidation_reason FROM transcript_projection_heads",
+                    [],
+                    |row| row.get::<_, Option<String>>(0)
+                )
+                .unwrap(),
+            None
+        );
+        drop(backup_conn);
+        conn.execute_batch("DROP TRIGGER fail_upgrade").unwrap();
+        ensure_schema(&conn).expect("retry migration");
+        assert!(reason().is_some());
+        assert_eq!(schema_versions(&conn).unwrap(), vec![1, 2, 3, 4]);
+        let backup_count = fs::read_dir(&root).unwrap().count();
+        ensure_schema(&conn).expect("idempotent reopen");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), backup_count);
+        drop(conn);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn forward_migration_backs_up_and_rolls_back_as_one_transaction() {
         let root = std::env::temp_dir().join(format!(
             "centaeris-sqlite-migration-{}-{}",
@@ -925,7 +1001,10 @@ mod tests {
         )
         .expect("transcript generation owner lookup")
         .is_some());
-        assert_eq!(schema_versions(&migrated).expect("versions"), vec![1, 2, 3]);
+        assert_eq!(
+            schema_versions(&migrated).expect("versions"),
+            vec![1, 2, 3, 4]
+        );
         drop(migrated);
         fs::remove_dir_all(root).expect("cleanup");
     }

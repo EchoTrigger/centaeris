@@ -44,7 +44,7 @@ async fn sleep_before_http_retry(attempt: u32, retry_backoff_ms: u64) {
     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
 }
 
-fn is_retryable_http_status(status_code: u16) -> bool {
+pub(super) fn is_retryable_http_status(status_code: u16) -> bool {
     status_code == 408 || status_code == 429 || status_code >= 500
 }
 

@@ -561,18 +561,22 @@ fn page_with_store<S: TranscriptProjectionGenerationStorePortV1 + ?Sized>(
         page.validate(TranscriptPagePolicyV1::default())?;
         Some(page)
     } else if target_reached && generation.published {
-        Some(
-            store
-                .load_current_transcript_page(TranscriptPageReadRequestV1 {
-                    session_id: request.session_id,
-                    projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.to_string(),
-                    projection_generation: generation.projection_generation.clone(),
-                    source_high_water: requested_waterline,
-                    older_cursor: request.older_cursor,
-                    policy: TranscriptPagePolicyV1::default(),
-                })?
-                .page,
-        )
+        let older_cursor = request.older_cursor.clone();
+        let stored = store
+            .load_current_transcript_page(TranscriptPageReadRequestV1 {
+                session_id: request.session_id,
+                projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.into(),
+                projection_generation: generation.projection_generation.clone(),
+                source_high_water: requested_waterline,
+                older_cursor: request.older_cursor,
+                policy: TranscriptPagePolicyV1::default(),
+            })?
+            .page;
+        Some(page_with_read_only_presentation(
+            path,
+            older_cursor.as_deref(),
+            stored,
+        )?)
     } else {
         None
     };
@@ -585,6 +589,52 @@ fn page_with_store<S: TranscriptProjectionGenerationStorePortV1 + ?Sized>(
         target_reached,
         page,
     })
+}
+
+fn page_with_read_only_presentation(
+    path: &Path,
+    older_cursor: Option<&str>,
+    page: TranscriptPageV1,
+) -> Result<TranscriptPageV1, String> {
+    if page.blocks.iter().all(|block| block.presentation.is_some()) {
+        return Ok(page);
+    }
+    let target = parse_waterline(&page.source_high_water, "read-only presentation")?;
+    let mut cursor = None;
+    let mut records = Vec::new();
+    while records.last().map_or(
+        0,
+        |record: &centaeris_core::session::SequencedSessionRecord| record.sequence,
+    ) < target
+    {
+        let slice =
+            message_log::read_transcript_source_slice(path, &page.session_id, cursor.as_ref())?;
+        let before = records.len();
+        for (record, next) in slice.records.into_iter().zip(slice.cursors_after_records) {
+            if record.sequence > target {
+                break;
+            }
+            records.push(record);
+            cursor = Some(next);
+        }
+        if records.len() == before {
+            return Err("read-only transcript source ended before the requested page".into());
+        }
+    }
+    let mut refreshed =
+        centaeris_core::session::transcript::read_only_transcript_page_from_records(
+            &TranscriptPageReadRequestV1 {
+                session_id: page.session_id,
+                projection_version: page.projection_version,
+                projection_generation: page.projection_generation,
+                source_high_water: page.source_high_water,
+                older_cursor: older_cursor.map(str::to_string),
+                policy: TranscriptPagePolicyV1::default(),
+            },
+            &records,
+        )?;
+    refreshed.resume_cursors = page.resume_cursors;
+    Ok(refreshed)
 }
 
 fn patches_with_store<S: TranscriptProjectionGenerationStorePortV1 + ?Sized>(
@@ -1398,6 +1448,181 @@ mod tests {
         assert!(rebuilt.page.expect("rebuilt page").blocks.is_empty());
     }
 
+    fn released_upgrade_fixture() -> TranscriptFixture {
+        let mut fixture = TranscriptFixture::new("generation", 0);
+        fixture.session_id = "session-1";
+        fixture.log_path = fixture.root.join("session-1.jsonl");
+        fs::write(
+            &fixture.log_path,
+            include_bytes!("../tests/fixtures/upgrade-v1.0.0/session.jsonl"),
+        )
+        .unwrap();
+        let observations = fixture.root.join("session-1.observations");
+        fs::create_dir(&observations).unwrap();
+        fs::write(observations.join("manifest-608038e10859b6eeaef30ed2702ab70bcaec9ea9b5d9cd044f5fa9313d0e854b.json"),
+            include_bytes!("../tests/fixtures/upgrade-v1.0.0/session-1.observations/manifest-608038e10859b6eeaef30ed2702ab70bcaec9ea9b5d9cd044f5fa9313d0e854b.json")).unwrap();
+        fixture
+    }
+
+    #[test]
+    fn upgrade_released_v1_preserves_history_sources_and_continuation() {
+        use centaeris_core::session::external_context::ExternalContextStorePort;
+        use centaeris_core::session::store::AgentRuntimeSnapshotStorePort;
+        let mut fixture = released_upgrade_fixture();
+        let source = include_bytes!("../tests/fixtures/upgrade-v1.0.0/session.jsonl");
+        let conn = rusqlite::Connection::open(&fixture.database_path).unwrap();
+        conn.execute_batch(include_str!("../tests/fixtures/upgrade-v1.0.0/runtime.sql"))
+            .unwrap();
+        drop(conn);
+        let request = || TranscriptPageRpcRequestV1 {
+            session_id: "session-1".into(),
+            projection_generation: None,
+            source_high_water: None,
+            older_cursor: None,
+        };
+        let store =
+            SqliteRuntimeStore::new(&fixture.database_path).expect("upgrade released store");
+        let page = page_until_ready(&store, &fixture.log_path, request())
+            .page
+            .unwrap();
+        assert!(page.blocks.iter().any(|block| matches!(&block.body,
+            TranscriptBlockBodyV1::Reasoning { request_id, content, .. }
+            if request_id == "model-request-1" && content.inline_content.as_deref() == Some("Upgrade fixture reasoning."))));
+        assert!(page.blocks.iter().any(|block| matches!(&block.body,
+            TranscriptBlockBodyV1::AssistantText { content, .. } if content.inline_content.as_deref() == Some("done"))));
+        let output = page
+            .blocks
+            .iter()
+            .find_map(|block| match &block.body {
+                TranscriptBlockBodyV1::Tool {
+                    call_id,
+                    output_ref,
+                    ..
+                } if call_id == "call-1" => output_ref.clone(),
+                _ => None,
+            })
+            .expect("tool output source reference");
+        assert_eq!(output.ref_id, "tool-output:call-1");
+        assert_eq!(output.byte_length, "15");
+        assert_eq!(
+            store
+                .load_external_context_object("source-object-1")
+                .unwrap()
+                .unwrap()
+                .content,
+            "notice contents"
+        );
+        assert_eq!(
+            store
+                .load_agent_runtime_snapshot("session-1")
+                .unwrap()
+                .as_deref(),
+            Some("{\"fixture\":\"released-v1\"}")
+        );
+        assert_eq!(fs::read(&fixture.log_path).unwrap(), source);
+        let document = message_log::read_session_document(&fixture.log_path)
+            .expect("hydrate released observation manifest and records");
+        let citation = document
+            .records
+            .iter()
+            .find(|record| record.event_id == "evt-citation")
+            .expect("retained citation");
+        assert_eq!(citation.payload["sourceToolCallId"], "call-1");
+        assert_eq!(citation.payload["ownerRef"], "source-object-1");
+        assert_eq!(
+            citation.payload["locator"],
+            json!({"startLine": 1, "endLine": 8})
+        );
+        centaeris_core::session::restore_runtime_snapshot_from_session_records(
+            "session-1",
+            &document.records,
+        )
+        .expect("released conversation remains restorable for continuation");
+        drop(store);
+        let store =
+            SqliteRuntimeStore::new(&fixture.database_path).expect("restart upgraded release");
+        assert_eq!(
+            page_until_ready(&store, &fixture.log_path, request())
+                .page
+                .unwrap(),
+            page
+        );
+        fixture.append_user_record(11);
+        let continued = page_until_ready(&store, &fixture.log_path, request())
+            .page
+            .unwrap();
+        assert_eq!(continued.blocks.len(), page.blocks.len() + 1);
+        drop(store);
+        let store =
+            SqliteRuntimeStore::new(&fixture.database_path).expect("restart after continuation");
+        assert_eq!(
+            page_until_ready(&store, &fixture.log_path, request())
+                .page
+                .unwrap(),
+            continued
+        );
+    }
+
+    #[test]
+    fn upgrade_v3_invalidates_legacy_projection_and_rebuilds_without_rewriting_source() {
+        let mut fixture = released_upgrade_fixture();
+        let store = SqliteRuntimeStore::new(&fixture.database_path).expect("old store");
+        let request = || TranscriptPageRpcRequestV1 {
+            session_id: fixture.session_id.into(),
+            projection_generation: None,
+            source_high_water: None,
+            older_cursor: None,
+        };
+        let before = page_until_ready(&store, &fixture.log_path, request())
+            .page
+            .unwrap();
+        drop(store);
+        let conn = rusqlite::Connection::open(&fixture.database_path).unwrap();
+        conn.execute_batch("DELETE FROM schema_migrations WHERE version > 3;
+            UPDATE transcript_block_versions SET block_json = json_remove(json_set(block_json,
+                '$.body.request_id', json_extract(block_json, '$.body.requestId')), '$.body.requestId')
+                WHERE json_extract(block_json, '$.body.kind')='reasoning';").unwrap();
+        drop(conn);
+        let original = fs::read(&fixture.log_path).unwrap();
+        let store = SqliteRuntimeStore::new(&fixture.database_path).expect("upgrade");
+        let pending = page_with_store(&store, &fixture.log_path, request())
+            .expect("invalidated, not decoded");
+        assert!(pending.page.is_none());
+        drop(store); // Restart before the rebuild has run.
+        let store =
+            SqliteRuntimeStore::new(&fixture.database_path).expect("restart pending upgrade");
+        let rebuilt = page_until_ready(&store, &fixture.log_path, request());
+        assert_ne!(
+            rebuilt.projection_generation,
+            LOCAL_TRANSCRIPT_PROJECTION_GENERATION_V1
+        );
+        assert_eq!(rebuilt.page.as_ref().unwrap().blocks, before.blocks);
+        assert_eq!(fs::read(&fixture.log_path).unwrap(), original);
+        drop(store);
+        let store =
+            SqliteRuntimeStore::new(&fixture.database_path).expect("reopen completed upgrade");
+        let reopened = page_until_ready(&store, &fixture.log_path, request());
+        assert_eq!(
+            reopened.projection_generation,
+            rebuilt.projection_generation
+        );
+        fixture.append_user_record(11);
+        let continued = page_until_ready(
+            &store,
+            &fixture.log_path,
+            TranscriptPageRpcRequestV1 {
+                session_id: fixture.session_id.into(),
+                projection_generation: None,
+                source_high_water: None,
+                older_cursor: None,
+            },
+        );
+        assert_eq!(
+            continued.page.unwrap().blocks.len(),
+            before.blocks.len() + 1
+        );
+    }
+
     fn page_until_ready(
         store: &SqliteRuntimeStore,
         path: &Path,
@@ -1488,6 +1713,74 @@ mod tests {
             .expect("background projection slice");
         }
         panic!("patch projection did not reach target");
+    }
+
+    #[test]
+    fn missing_presentation_is_read_from_source_without_rewriting_history() {
+        let fixture = TranscriptFixture::new("active", 1);
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&fixture.log_path)
+            .unwrap();
+        for (sequence, kind, payload) in [
+            (2, "agent_run_started", json!({"userObjective":"inspect"})),
+            (
+                3,
+                "phase_event",
+                json!({"stage":"model_process_summary","message":"Inspecting source"}),
+            ),
+            (
+                4,
+                "assistant_message",
+                json!({"messageId":"message:turn-1:assistant","modelMarkdown":"Result","artifactRefs":[],"status":"done"}),
+            ),
+            (5, "agent_run_completed", json!({"doneReason":"finalized"})),
+        ] {
+            let record = SequencedSessionRecord { sequence, event:parse_event(&json!({
+                "schemaVersion":"session.event.v1","eventVersion":1,"type":kind,"eventId":format!("event-{sequence}"),
+                "sessionId":fixture.session_id,"turnId":"turn-1","agentRunId":"run-1","createdAtMs":sequence,"payload":payload
+            })).unwrap() };
+            serde_json::to_writer(&mut file, &wire_record_value(&record).unwrap()).unwrap();
+            file.write_all(b"\n").unwrap();
+        }
+        file.sync_all().unwrap();
+        drop(file);
+        let store = SqliteRuntimeStore::new(&fixture.database_path).unwrap();
+        let current = page_until_ready(
+            &store,
+            &fixture.log_path,
+            TranscriptPageRpcRequestV1 {
+                session_id: fixture.session_id.into(),
+                projection_generation: None,
+                source_high_water: None,
+                older_cursor: None,
+            },
+        )
+        .page
+        .unwrap();
+        let mut old = current.clone();
+        old.blocks.retain(|block| !matches!(&block.body,TranscriptBlockBodyV1::Notice{notice_type,..} if notice_type == "run_boundary"));
+        for block in &mut old.blocks {
+            block.presentation = None;
+        }
+        let before = fs::read(&fixture.log_path).unwrap();
+        let hydrated = page_with_read_only_presentation(&fixture.log_path, None, old).unwrap();
+        assert_eq!(hydrated, current);
+        assert_eq!(fs::read(&fixture.log_path).unwrap(), before);
+        assert_eq!(
+            store
+                .load_current_transcript_page(TranscriptPageReadRequestV1 {
+                    session_id: fixture.session_id.into(),
+                    projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.into(),
+                    projection_generation: current.projection_generation.clone(),
+                    source_high_water: current.source_high_water.clone(),
+                    older_cursor: None,
+                    policy: TranscriptPagePolicyV1::default(),
+                })
+                .unwrap()
+                .page,
+            current
+        );
     }
 
     struct TranscriptFixture {
