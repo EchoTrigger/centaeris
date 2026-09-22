@@ -306,12 +306,15 @@ async fn runtime_store_actor_owns_runtime_jobs_and_external_context_ports() {
         .await
         .expect("claim runtime job");
     assert_eq!(claimed.len(), 1);
-    assert_eq!(claimed[0].lease_owner.as_deref(), Some("actor-worker"));
+    assert!(claimed[0]
+        .lease_owner
+        .as_ref()
+        .is_some_and(|owner| !owner.is_empty() && owner != "actor-worker"));
 
     actor
         .start_runtime_job(StartRuntimeJobRequest {
             job_id: "job-actor-1".to_string(),
-            lease_owner: "actor-worker".to_string(),
+            lease_owner: claimed[0].lease_owner.clone().expect("claim owner"),
             started_at_ms: 12,
         })
         .await
@@ -319,7 +322,7 @@ async fn runtime_store_actor_owns_runtime_jobs_and_external_context_ports() {
     actor
         .complete_runtime_job(CompleteRuntimeJobRequest {
             job_id: "job-actor-1".to_string(),
-            lease_owner: "actor-worker".to_string(),
+            lease_owner: claimed[0].lease_owner.clone().expect("claim owner"),
             output_refs: vec!["ref:done".to_string()],
             completed_at_ms: 13,
         })

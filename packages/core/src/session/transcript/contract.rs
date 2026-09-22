@@ -189,12 +189,27 @@ impl TranscriptBlockBodyV1 {
     }
 }
 
+/// Optional display facts. Missing facts remain unknown; no history repair is implied.
+#[cfg_attr(feature = "contract-schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TranscriptPresentationV1 {
+    pub agent_run_id: Option<String>,
+    pub source_type: String,
+    pub observed_at_ms: i64,
+    pub display_target: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub operation: Option<serde_json::Value>,
+}
+
 #[cfg_attr(feature = "contract-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TranscriptBlockV1 {
     pub block_id: String,
     pub block_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<TranscriptPresentationV1>,
     pub order_key: TranscriptOrderKeyV1,
     pub body: TranscriptBlockBodyV1,
 }
@@ -208,6 +223,30 @@ impl TranscriptBlockV1 {
         require_identifier(self.block_id.as_str(), "transcript blockId")?;
         parse_decimal_u64(self.block_revision.as_str(), "transcript blockRevision")?;
         self.order_key.source_sequence_value()?;
+        if let Some(presentation) = &self.presentation {
+            require_identifier(
+                &presentation.source_type,
+                "transcript presentation sourceType",
+            )?;
+            if let Some(id) = &presentation.agent_run_id {
+                require_identifier(id, "transcript presentation agentRunId")?;
+            }
+            if presentation.observed_at_ms < 0
+                || presentation
+                    .operation
+                    .as_ref()
+                    .is_some_and(|v| !v.is_object())
+            {
+                return Err("invalid transcript presentation facts".into());
+            }
+            if serde_json::to_vec(presentation)
+                .map_err(|e| e.to_string())?
+                .len()
+                > 16 * 1024
+            {
+                return Err("transcript presentation exceeds display budget".into());
+            }
+        }
         match &self.body {
             TranscriptBlockBodyV1::Reasoning {
                 request_id,
@@ -369,6 +408,8 @@ impl TranscriptPageV1 {
 pub struct TranscriptBlockRemovalV1 {
     pub block_id: String,
     pub block_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<TranscriptPresentationV1>,
 }
 
 impl TranscriptBlockRemovalV1 {

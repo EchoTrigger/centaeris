@@ -100,7 +100,9 @@ pub fn transcript_event_content_range(
         SessionRecordType::ToolCall => "displayTarget",
         SessionRecordType::ToolResult => "summary",
         SessionRecordType::ToolCallClosure => "modelContent",
-        SessionRecordType::PhaseEvent => "message",
+        SessionRecordType::PhaseEvent
+        | SessionRecordType::AgentRunFailed
+        | SessionRecordType::AgentRunInterrupted => "message",
         _ => return Err("transcript source has no visible text".to_string()),
     };
     if event.session_id != request.session_id

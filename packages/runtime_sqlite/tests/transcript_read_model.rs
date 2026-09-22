@@ -90,6 +90,7 @@ fn text_block(block_id: &str, source_sequence: u64, text: &str) -> TranscriptBlo
     TranscriptBlockV1 {
         block_id: block_id.to_string(),
         block_revision: "1".to_string(),
+        presentation: None,
         order_key: TranscriptOrderKeyV1 {
             source_sequence: source_sequence.to_string(),
             ordinal: 0,
@@ -104,6 +105,7 @@ fn tool_block(revision: u64, status: TranscriptBlockStatusV1) -> TranscriptBlock
     TranscriptBlockV1 {
         block_id: "tool:call-a".to_string(),
         block_revision: revision.to_string(),
+        presentation: None,
         order_key: TranscriptOrderKeyV1 {
             source_sequence: "2".to_string(),
             ordinal: 0,

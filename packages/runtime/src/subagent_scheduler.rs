@@ -392,7 +392,7 @@ impl ElectronSubagentRunner {
             auto_continue_after_resume_wait: Some(auto_continue_after_resume_wait),
             agent_run_identity: Some(agent_run_identity),
         };
-        let transport = ReqwestJsonHttpTransport::new()?;
+        let transport = ReqwestJsonHttpTransport::new(req.job.job_id.clone())?;
         let stream_sink = {
             let event_writer = self.event_writer.clone();
             let runtime_job_id = req.job.job_id.clone();

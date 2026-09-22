@@ -32,6 +32,7 @@ pub struct GenerateResult {
     pub prompt_cache_miss_tokens: Option<i64>,
 }
 
+pub mod admission;
 pub mod prepared_prompt;
 pub mod prompt;
 mod protocol_adapters;

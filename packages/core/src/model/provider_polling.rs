@@ -773,6 +773,7 @@ fn cancel_provider_poll_job<S: RuntimeJobStorePort>(
         return Err("stop provider poll job requires a reason".to_string());
     }
     store.cancel_runtime_job(CancelRuntimeJobRequest {
+        expected_lease_owner: job.lease_owner.clone(),
         job_id: job.job_id.clone(),
         reason: reason.to_string(),
         cancelled_at_ms: now_ms(),

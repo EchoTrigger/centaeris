@@ -148,7 +148,7 @@ impl RuntimeJobStorePort for SqliteRuntimeStore {
                         "
                         UPDATE runtime_jobs
                         SET status = 'leased',
-                            lease_owner = ?1,
+                            lease_owner = ?1 || ':' || lower(hex(randomblob(16))),
                             lease_expires_at_ms = ?2,
                             updated_at_ms = ?3,
                             heartbeat_at_ms = ?3
@@ -572,12 +572,15 @@ impl RuntimeJobStorePort for SqliteRuntimeStore {
                     WHERE job_id = ?3
                       AND status NOT IN ('succeeded', 'failed', 'dead_lettered', 'cancelled')
                       AND (?4 IS NULL OR status = ?4)
+                      AND (?5 IS NULL OR (status IN ('leased', 'running')
+                           AND lease_owner = ?5 AND lease_expires_at_ms > ?1))
                     ",
                     params![
                         req.cancelled_at_ms,
                         req.reason.as_str(),
                         req.job_id.as_str(),
                         req.expected_status.as_ref().map(runtime_job_status_to_db),
+                        req.expected_lease_owner.as_deref(),
                     ],
                 )
                 .map_err(|err| format!("cancel_runtime_job failed: {err}"))?;
@@ -1724,14 +1727,14 @@ mod tests {
         store
             .start_runtime_job(StartRuntimeJobRequest {
                 job_id: "job_heartbeat".to_string(),
-                lease_owner: "worker:old".to_string(),
+                lease_owner: claimed[0].lease_owner.clone().expect("claim owner"),
                 started_at_ms: 11,
             })
             .expect("start job");
         store
             .renew_runtime_job_lease(RenewRuntimeJobLeaseRequest {
                 job_id: "job_heartbeat".to_string(),
-                lease_owner: "worker:old".to_string(),
+                lease_owner: claimed[0].lease_owner.clone().expect("claim owner"),
                 heartbeat_at_ms: 20,
                 lease_ms: 100,
             })
@@ -1745,7 +1748,7 @@ mod tests {
         assert!(store
             .complete_runtime_job(CompleteRuntimeJobRequest {
                 job_id: "job_heartbeat".to_string(),
-                lease_owner: "worker:old".to_string(),
+                lease_owner: claimed[0].lease_owner.clone().expect("claim owner"),
                 output_refs: vec![],
                 completed_at_ms: 120,
             })
@@ -1770,7 +1773,7 @@ mod tests {
         assert!(store
             .complete_runtime_job(CompleteRuntimeJobRequest {
                 job_id: "job_heartbeat".to_string(),
-                lease_owner: "worker:old".to_string(),
+                lease_owner: claimed[0].lease_owner.clone().expect("claim owner"),
                 output_refs: vec![],
                 completed_at_ms: 121,
             })

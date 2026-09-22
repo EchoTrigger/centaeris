@@ -37,6 +37,44 @@ Session truth.
 6. Desktop and TUI render the same canonical events. They may differ in layout,
    but not in runtime meaning.
 
+## Model request admission
+
+Core's `model::admission` owns fixed concurrency, round-robin selection across
+waiting runs, FIFO within each run, cancellation cleanup, and shared Retry-After
+cooldown. Hosts explicitly share one `ModelAdmission` instance per quota domain;
+provider/model labels or credentials are not used to infer domain identity.
+
+The Local Runtime currently uses one conservative process-wide domain with four
+slots, shared by main AgentRuns, subagent jobs, automatic/manual compaction and
+model connectivity checks. Main AgentRuns and subagent jobs use their existing
+run identities; manual compaction uses its Session/turn identity, and connectivity
+checks share a diagnostic queue. Different providers can therefore delay each
+other. There is no account/project quota configuration, adaptive concurrency,
+persistent admission state, or coordination across Runtime processes/machines.
+
+`AdmittedJsonHttpTransport` wraps each actual HTTP attempt inside the existing
+protocol-adapter retry loops. A slot covers the complete JSON response body or
+SSE stream, including idle time. Success, transport error, stream cancellation,
+or dropping the caller's future releases it once. Dropping a queued future removes
+its queue entry without sending a request. Core's existing cancellation path
+drops the generation future, so Stop also cancels admission waiting. HTTP timeouts
+start after admission; admission waiting itself has no new deadline.
+
+Retry backoff and response parsing do not hold a slot; every retry joins the
+queue again. A completed retryable HTTP response (408, 429 or 5xx) with a valid
+`Retry-After` installs a shared cooldown before releasing its slot, even when
+no retries remain. Delay-seconds and HTTP dates are accepted; expired dates mean
+zero delay, malformed/unrepresentable values are ignored, and a later shorter
+cooldown cannot shorten an existing deadline. Cooldown stops new attempts and
+does not interrupt streams already in flight. A failed body read does not return
+response headers through the current transport contract, so it cannot contribute
+a Retry-After cooldown. No request/event/persistent schema changes are involved.
+
+Behavioral tests use controlled transports and paused time for admission, retry,
+cooldown and cancellation, plus a query-loop cancellation test and a Local Runtime
+shared-domain wiring test. These establish local coordination behavior, not a
+provider-specific rate limit or throughput claim.
+
 ## Persistence
 
 Local state lives below the user data root, which defaults to `~/.centaeris`.

@@ -12,10 +12,10 @@ use super::{
     require_identifier, TranscriptBlockBodyV1, TranscriptBlockIndexV1, TranscriptBlockStatusV1,
     TranscriptBlockV1, TranscriptCheckpointRefsV1, TranscriptCommittedBlockV1,
     TranscriptContentRefV1, TranscriptOrderKeyV1, TranscriptPagePolicyV1, TranscriptPageV1,
-    TranscriptPatchV1, TranscriptProjectionCheckpointV1, TranscriptProjectionCommitV1,
-    TranscriptProjectionFrontierV1, TranscriptProjectionOpenToolV1, TranscriptProjectionRecoveryV1,
-    TranscriptProjectionStorePort, TranscriptResumeCursorV1, TranscriptTextContentV1,
-    TRANSCRIPT_CHECKPOINT_SCHEMA_V1, TRANSCRIPT_FRONTIER_SCHEMA_V1,
+    TranscriptPatchV1, TranscriptPresentationV1, TranscriptProjectionCheckpointV1,
+    TranscriptProjectionCommitV1, TranscriptProjectionFrontierV1, TranscriptProjectionOpenToolV1,
+    TranscriptProjectionRecoveryV1, TranscriptProjectionStorePort, TranscriptResumeCursorV1,
+    TranscriptTextContentV1, TRANSCRIPT_CHECKPOINT_SCHEMA_V1, TRANSCRIPT_FRONTIER_SCHEMA_V1,
     TRANSCRIPT_PAGE_INLINE_CONTENT_MAX_BYTES, TRANSCRIPT_PATCH_SCHEMA_V1,
     TRANSCRIPT_PROJECTION_VERSION_V1,
 };
@@ -560,13 +560,46 @@ impl TranscriptProjectorV1 {
             source_sequence: record.sequence.to_string(),
             ordinal: 0,
         };
-        let block = match event.event_type {
+        let display_target = payload
+            .get("displayTarget")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .or_else(|| {
+                payload
+                    .get("callId")
+                    .and_then(|v| v.as_str())
+                    .and_then(|id| self.tools.get(id))
+                    .and_then(|tool| tool.block.presentation.as_ref())
+                    .and_then(|p| p.display_target.clone())
+            });
+        let presentation = TranscriptPresentationV1 {
+            agent_run_id: event.agent_run_id.clone(),
+            source_type: event.event_type.as_str().into(),
+            observed_at_ms: event.created_at_ms,
+            display_target,
+            duration_ms: payload.get("latencyMs").and_then(|v| v.as_u64()),
+            operation: payload
+                .get("operations")
+                .and_then(|v| v.as_array())
+                .and_then(|v| v.first())
+                .map(|v| {
+                    let mut op = v.clone();
+                    if let Some(object) = op.as_object_mut() {
+                        object.retain(|k, _| {
+                            !["outputPreview", "diffPreview", "error"].contains(&k.as_str())
+                        });
+                    }
+                    op
+                }),
+        };
+        let mut block = match event.event_type {
             SessionRecordType::UserMessage => {
                 let block_id = payload_string(payload, "messageId")?;
                 let text = payload_string_allow_empty(payload, "text")?;
                 Some(TranscriptBlockV1 {
                     block_id,
                     block_revision: "1".to_string(),
+                    presentation: Some(presentation.clone()),
                     order_key,
                     body: TranscriptBlockBodyV1::UserText {
                         content: text_content(event, "text", text, 1),
@@ -584,6 +617,7 @@ impl TranscriptProjectorV1 {
                 Some(TranscriptBlockV1 {
                     block_id,
                     block_revision: "1".to_string(),
+                    presentation: Some(presentation.clone()),
                     order_key,
                     body: TranscriptBlockBodyV1::AssistantText {
                         content: text_content(event, "modelMarkdown", text, 1),
@@ -603,6 +637,7 @@ impl TranscriptProjectorV1 {
                 Some(TranscriptBlockV1 {
                     block_id,
                     block_revision: "1".to_string(),
+                    presentation: Some(presentation.clone()),
                     order_key,
                     body: TranscriptBlockBodyV1::Reasoning {
                         request_id,
@@ -627,6 +662,7 @@ impl TranscriptProjectorV1 {
                 let block = TranscriptBlockV1 {
                     block_id,
                     block_revision: "1".to_string(),
+                    presentation: Some(presentation.clone()),
                     order_key: order_key.clone(),
                     body: TranscriptBlockBodyV1::Tool {
                         call_id: call_id.clone(),
@@ -708,6 +744,7 @@ impl TranscriptProjectorV1 {
                 Some(TranscriptBlockV1 {
                     block_id: format!("tool:{call_id}"),
                     block_revision: revision.to_string(),
+                    presentation: Some(presentation.clone()),
                     order_key: tool.order_key.clone(),
                     body: TranscriptBlockBodyV1::Tool {
                         call_id,
@@ -722,6 +759,7 @@ impl TranscriptProjectorV1 {
             SessionRecordType::PhaseEvent => Some(TranscriptBlockV1 {
                 block_id: format!("notice:{}", event.event_id),
                 block_revision: "1".to_string(),
+                presentation: None,
                 order_key,
                 body: TranscriptBlockBodyV1::Notice {
                     notice_type: payload_string(payload, "stage")?,
@@ -732,6 +770,7 @@ impl TranscriptProjectorV1 {
             SessionRecordType::TurnSupplement => Some(TranscriptBlockV1 {
                 block_id: payload_string(payload, "messageId")?,
                 block_revision: "1".to_string(),
+                presentation: None,
                 order_key,
                 body: TranscriptBlockBodyV1::Notice {
                     notice_type: "turn_supplement".to_string(),
@@ -739,8 +778,24 @@ impl TranscriptProjectorV1 {
                     status: TranscriptBlockStatusV1::Completed,
                 },
             }),
+            SessionRecordType::AgentRunStarted
+            | SessionRecordType::AgentRunCompleted
+            | SessionRecordType::AgentRunFailed
+            | SessionRecordType::AgentRunInterrupted => Some(TranscriptBlockV1 {
+                block_id: format!("run-boundary:{}", event.event_id),
+                block_revision: "1".into(),
+                presentation: Some(presentation.clone()),
+                order_key,
+                body: TranscriptBlockBodyV1::Notice {
+                    notice_type: "run_boundary".into(),
+                    content: match payload.get("message").and_then(|value| value.as_str()) {
+                        Some(message) => text_content(event, "message", message.to_string(), 1),
+                        None => TranscriptTextContentV1::inline(String::new()),
+                    },
+                    status: TranscriptBlockStatusV1::Completed,
+                },
+            }),
             SessionRecordType::SessionMeta
-            | SessionRecordType::AgentRunStarted
             | SessionRecordType::AgentRunRecoveryAttempted
             | SessionRecordType::AgentRunExecutionStarted
             | SessionRecordType::AgentRunExecutionEnded
@@ -751,12 +806,12 @@ impl TranscriptProjectorV1 {
             | SessionRecordType::ArtifactPublished
             | SessionRecordType::Compaction
             | SessionRecordType::CheckpointRef
-            | SessionRecordType::FileFact
-            | SessionRecordType::AgentRunCompleted
-            | SessionRecordType::AgentRunFailed
-            | SessionRecordType::AgentRunInterrupted => None,
+            | SessionRecordType::FileFact => None,
             SessionRecordType::Tombstone => unreachable!("tombstone handled before projection"),
         };
+        if let Some(block) = block.as_mut() {
+            block.presentation = Some(presentation);
+        }
         Ok(block)
     }
 
@@ -789,7 +844,6 @@ pub(super) fn transcript_event_type_is_payload_free(event_type: SessionRecordTyp
     matches!(
         event_type,
         SessionRecordType::SessionMeta
-            | SessionRecordType::AgentRunStarted
             | SessionRecordType::AgentRunRecoveryAttempted
             | SessionRecordType::AgentRunExecutionStarted
             | SessionRecordType::AgentRunExecutionEnded
@@ -801,9 +855,6 @@ pub(super) fn transcript_event_type_is_payload_free(event_type: SessionRecordTyp
             | SessionRecordType::Compaction
             | SessionRecordType::CheckpointRef
             | SessionRecordType::FileFact
-            | SessionRecordType::AgentRunCompleted
-            | SessionRecordType::AgentRunFailed
-            | SessionRecordType::AgentRunInterrupted
     )
 }
 
@@ -863,4 +914,46 @@ fn payload_string_allow_empty(
         .and_then(|value| value.as_str())
         .map(str::to_string)
         .ok_or_else(|| format!("transcript source payload {field} must be a string"))
+}
+
+/// Reconstruct a display page from authoritative records without committing or rotating a
+/// projection. Active-set/tombstone semantics stay in Core. Transport resume cursors are
+/// intentionally absent; the caller retains the durable projection's cursors.
+pub fn read_only_transcript_page_from_records(
+    request: &super::TranscriptPageReadRequestV1,
+    records: &[SequencedSessionRecord],
+) -> Result<TranscriptPageV1, String> {
+    request.validate()?;
+    let target = super::parse_decimal_u64(&request.source_high_water, "read-only page waterline")?;
+    if records.last().map_or(0, |record| record.sequence) != target {
+        return Err("read-only transcript source does not reach the requested waterline".into());
+    }
+    if !records.is_empty() {
+        crate::session::validate_sequenced_session_records(records)?;
+    }
+    let events = records
+        .iter()
+        .map(|record| &record.event)
+        .collect::<Vec<_>>();
+    let targets = crate::session::active_tombstone_targets(&request.session_id, &events)?;
+    let mut projector = TranscriptProjectorV1::new(
+        request.session_id.clone(),
+        request.projection_generation.clone(),
+    )?;
+    for record in records {
+        if record.event.event_type == SessionRecordType::Tombstone
+            || targets.contains(&record.event.event_id)
+        {
+            projector.advance_without_display(
+                record.sequence,
+                "read-only",
+                &record.sequence.to_string(),
+            )?;
+        } else {
+            projector.apply(record, "read-only", &record.sequence.to_string())?;
+        }
+    }
+    let mut page = projector.page_at(target, request.older_cursor.as_deref(), request.policy)?;
+    page.resume_cursors.clear();
+    Ok(page)
 }

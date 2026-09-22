@@ -663,6 +663,18 @@ impl crate::session::reliability::RuntimeJobStorePort for AgentRuntimeTestStore 
         {
             return Err("runtime_job_cancel_status_mismatch".to_string());
         }
+        if request.expected_lease_owner.as_ref().is_some_and(|owner| {
+            job.lease_owner.as_ref() != Some(owner)
+                || !matches!(
+                    job.status,
+                    RuntimeJobStatus::Leased | RuntimeJobStatus::Running
+                )
+                || job
+                    .lease_expires_at_ms
+                    .is_none_or(|expires| expires <= request.cancelled_at_ms)
+        }) {
+            return Err("runtime_job_cancel_lease_mismatch".to_string());
+        }
         if !job.status.is_terminal() {
             job.status = RuntimeJobStatus::Cancelled;
             job.last_error = Some(request.reason);
@@ -7742,6 +7754,120 @@ async fn query_loop_external_cancel_stops_before_another_provider_request() {
             .agent_run_resource_usage
             .provider_attempts,
         30
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn query_loop_cancellation_removes_queued_model_attempt_before_provider_call() {
+    use crate::model::admission::{AdmittedJsonHttpTransport, ModelAdmission};
+    use crate::model::{JsonHttpFuture, JsonHttpRequest, JsonHttpTransport};
+    use futures::poll;
+    use std::num::NonZeroUsize;
+
+    struct PendingHttp(Arc<AtomicUsize>);
+    impl JsonHttpTransport for PendingHttp {
+        fn execute_json<'a>(&'a self, _: &'a JsonHttpRequest) -> JsonHttpFuture<'a> {
+            Box::pin(async move {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                std::future::pending().await
+            })
+        }
+    }
+    struct QueuedClient {
+        transport: AdmittedJsonHttpTransport<PendingHttp>,
+        request: JsonHttpRequest,
+        entered: Arc<AtomicBool>,
+    }
+    impl ModelClient for QueuedClient {
+        fn generate<'a>(
+            &'a self,
+            _: &'a ModelClientRequest,
+        ) -> ModelClientFuture<'a, ModelClientResponse> {
+            Box::pin(async move {
+                self.entered.store(true, Ordering::SeqCst);
+                let _ = self.transport.execute_json(&self.request).await;
+                Err(ModelClientError::new(
+                    ModelClientErrorKind::Network,
+                    "unexpected completion",
+                    false,
+                ))
+            })
+        }
+    }
+    let domain = ModelAdmission::new(NonZeroUsize::new(1).unwrap());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let request = JsonHttpRequest {
+        method: "POST".into(),
+        url: "https://unused.invalid".into(),
+        headers: HashMap::new(),
+        timeout_ms: 1000,
+        sse_idle_timeout_ms: 1000,
+        max_retries: 0,
+        retry_backoff_ms: 0,
+        body_json: "{}".into(),
+    };
+    let blocker = AdmittedJsonHttpTransport::new(
+        PendingHttp(calls.clone()),
+        domain.clone(),
+        "other-run".into(),
+    );
+    let mut occupied = blocker.execute_json(&request);
+    assert!(poll!(&mut occupied).is_pending());
+    let entered = Arc::new(AtomicBool::new(false));
+    let client = QueuedClient {
+        transport: AdmittedJsonHttpTransport::new(
+            PendingHttp(calls.clone()),
+            domain.clone(),
+            "cancelled-run".into(),
+        ),
+        request: request.clone(),
+        entered: entered.clone(),
+    };
+    let engine =
+        AgentRuntime::new_for_test(AgentRuntimeTestStore::new(), AgentRuntimeConfig::default());
+    let config_store = StaticModelSessionConfigStore {
+        config: Some(ModelSessionConfig::default()),
+    };
+    let result = engine
+        .process_turn_loop_online_with_model_client_stream_cancellable_async(
+            AgentRunRequest {
+                session_id: "cancel-model-admission".into(),
+                initial_turn_id: "turn-admission".into(),
+                user_message: "cancel while queued".into(),
+                agent_run_identity: None,
+                runtime_scope: PromptCompactionScopeV1::main(),
+                resume_from_turn_id: None,
+                auto_continue_after_resume_wait: None,
+            },
+            &client,
+            &config_store,
+            &mut |_| {},
+            &|| {
+                Ok(entered
+                    .load(Ordering::SeqCst)
+                    .then(|| "cancel while queued".into()))
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result.stop,
+        AgentRunStop::Cancelled("cancel while queued".into())
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "cancelled queued request reached provider"
+    );
+    drop(occupied);
+    let next =
+        AdmittedJsonHttpTransport::new(PendingHttp(calls.clone()), domain, "next-run".into());
+    let mut admitted = next.execute_json(&request);
+    assert!(poll!(&mut admitted).is_pending());
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "cancelled waiter blocked successor"
     );
 }
 

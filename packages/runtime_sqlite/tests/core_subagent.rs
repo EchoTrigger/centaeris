@@ -115,6 +115,7 @@ impl AsyncSubagentWorkerRunner for CancellingRunner {
             );
             self.store
                 .cancel_runtime_job(CancelRuntimeJobRequest {
+                    expected_lease_owner: None,
                     job_id: req.job.job_id,
                     reason: self.reason.clone(),
                     cancelled_at_ms: self.cancelled_at_ms,
@@ -421,7 +422,11 @@ fn claim_subagent_run_jobs_leases_runtime_jobs_and_projects_lifecycle() {
 
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].job.status, RuntimeJobStatus::Leased);
-    assert_eq!(claimed[0].job.lease_owner.as_deref(), Some("worker-1"));
+    assert!(claimed[0]
+        .job
+        .lease_owner
+        .as_ref()
+        .is_some_and(|owner| !owner.is_empty() && owner != "worker-1"));
     assert_eq!(claimed[0].lifecycle.status, SubagentLifecycleStatus::Leased);
     assert_eq!(
         claimed[0].lifecycle.subagent_id,
@@ -460,7 +465,11 @@ fn complete_fail_and_cancel_subagent_run_jobs_project_scheduler_events() {
         &complete_store,
         CompleteSubagentRunJobRequest {
             job_id: complete_claimed.job.job_id.clone(),
-            lease_owner: "worker-complete".to_string(),
+            lease_owner: complete_claimed
+                .job
+                .lease_owner
+                .clone()
+                .expect("claim owner"),
             output_refs: vec!["external_context:subagent_result".to_string()],
             completed_at_ms: 2_000,
         },
@@ -493,7 +502,7 @@ fn complete_fail_and_cancel_subagent_run_jobs_project_scheduler_events() {
         &fail_store,
         FailSubagentRunJobRequest {
             job_id: fail_claimed.job.job_id.clone(),
-            lease_owner: "worker-fail".to_string(),
+            lease_owner: fail_claimed.job.lease_owner.clone().expect("claim owner"),
             failed_at_ms: 3_000,
             last_error: "worker failed".to_string(),
             retry: None,
@@ -546,7 +555,7 @@ fn retrying_failed_subagent_run_job_requeues_runtime_job() {
         &store,
         FailSubagentRunJobRequest {
             job_id: claimed.job.job_id.clone(),
-            lease_owner: "worker-retry".to_string(),
+            lease_owner: claimed.job.lease_owner.clone().expect("claim owner"),
             failed_at_ms: 5_000,
             last_error: "temporary failure".to_string(),
             retry: Some(SubagentRunRetry {
@@ -1530,7 +1539,7 @@ fn reclaim_expired_runtime_job_leases_recovers_running_subagent_job() {
     store
         .start_runtime_job(StartRuntimeJobRequest {
             job_id: job_id.clone(),
-            lease_owner: "worker-reclaim-running".to_string(),
+            lease_owner: claimed[0].job.lease_owner.clone().expect("claim owner"),
             started_at_ms: 1_010,
         })
         .expect("start runtime job");
@@ -1720,4 +1729,145 @@ async fn run_due_subagent_jobs_worker_pool_async_fails_when_resource_claim_packe
 
     drop(store);
     let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn late_cancelled_worker_cannot_cancel_reclaimed_job() {
+    use centaeris_core::session::reliability::ClaimDueRuntimeJobsRequest;
+    struct ReclaimedRunner {
+        actor: RuntimeStoreActor,
+    }
+    impl AsyncSubagentWorkerRunner for ReclaimedRunner {
+        fn run_async<'a>(
+            &'a self,
+            request: SubagentWorkerRunRequest,
+        ) -> SubagentWorkerRunFuture<'a> {
+            Box::pin(async move {
+                self.actor
+                    .reclaim_expired_runtime_job_leases(6001)
+                    .await
+                    .unwrap();
+                let newer = self
+                    .actor
+                    .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
+                        now_ms: 6001,
+                        worker_id: "same-worker".into(),
+                        job_id: Some(request.job.job_id),
+                        job_kind: None,
+                        session_id: None,
+                        limit: 1,
+                        lease_ms: 5000,
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(newer.len(), 1);
+                SubagentWorkerRunOutcome::Cancelled {
+                    reason: "old execution stopped".into(),
+                }
+            })
+        }
+    }
+    let path = temp_db_path("late-cancelled-worker");
+    let store = SqliteRuntimeStore::new(&path).unwrap();
+    let claimed = enqueue_and_claim(&store, "parent", "turn", "call", "same-worker");
+    let job_id = claimed.job.job_id.clone();
+    store_valid_subagent_work_packet(
+        &store,
+        claimed.job.payload_ref.as_deref().unwrap(),
+        "workspace:test",
+        "Borrow",
+        vec!["read".into()],
+        vec![],
+    );
+    let actor = RuntimeStoreActor::start(store.clone()).unwrap();
+    let observer_events = Arc::new(Mutex::new(Vec::new()));
+    let observer = RecordingObserver {
+        events: observer_events.clone(),
+        fail_on_start: false,
+        fail_on_stop: false,
+    };
+    run_claimed_subagent_job_async(
+        &actor,
+        claimed,
+        &ReclaimedRunner {
+            actor: actor.clone(),
+        },
+        &observer,
+        RunClaimedSubagentJobRequest {
+            worker_id: "same-worker".into(),
+            started_at_ms: 1002,
+            finished_at_ms: 6300,
+        },
+    )
+    .await
+    .expect_err("old cancellation must not affect a newly claimed execution");
+    let current = store.get_runtime_job(&job_id).unwrap().unwrap();
+    assert_eq!(current.status, RuntimeJobStatus::Leased);
+    assert_eq!(current.lease_expires_at_ms, Some(11001));
+    assert_eq!(
+        observer_events.lock().unwrap().len(),
+        1,
+        "stale worker published stop hook"
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn late_subagent_projection_checks_durable_owner_and_terminal_result() {
+    use centaeris_core::runtime::persist_subagent_result_projection_from_scheduler_events as project;
+    use centaeris_core::session::store::AgentRuntimeSnapshotStorePort;
+    let path = temp_db_path("late-result-projection");
+    let store = SqliteRuntimeStore::new(&path).unwrap();
+    let claimed = enqueue_and_claim(&store, "parent", "turn", "call", "worker");
+    let event = complete_subagent_run_job(
+        &store,
+        CompleteSubagentRunJobRequest {
+            job_id: claimed.job.job_id.clone(),
+            lease_owner: claimed.job.lease_owner.unwrap(),
+            output_refs: vec!["result-current".into()],
+            completed_at_ms: 2000,
+        },
+    )
+    .unwrap();
+    assert!(
+        project(&store, "unrelated-session", std::slice::from_ref(&event)).is_err(),
+        "event must not be injected into a different Session"
+    );
+    assert!(store
+        .load_agent_runtime_snapshot("unrelated-session")
+        .unwrap()
+        .is_none());
+    let mut stale = event.clone();
+    stale.result_ref = Some("result-old".into());
+    assert!(
+        project(&store, "parent", &[stale]).is_err(),
+        "stale result must be checked against durable job output"
+    );
+    assert!(store
+        .load_agent_runtime_snapshot("parent")
+        .unwrap()
+        .is_none());
+    for field in ["child", "parentTurn", "status"] {
+        let mut stale = event.clone();
+        match field {
+            "child" => stale.child_session_id = "other-child".into(),
+            "parentTurn" => stale.parent_turn_id = "other-turn".into(),
+            _ => stale.status = SubagentLifecycleStatus::Cancelled,
+        }
+        assert!(
+            project(&store, "parent", &[stale]).is_err(),
+            "invalid {field} binding accepted"
+        );
+    }
+    assert_eq!(
+        project(&store, "parent", std::slice::from_ref(&event)).unwrap(),
+        1
+    );
+    let original = store.load_agent_runtime_snapshot("parent").unwrap();
+    assert_eq!(project(&store, "parent", &[event]).unwrap(), 0);
+    assert_eq!(
+        store.load_agent_runtime_snapshot("parent").unwrap(),
+        original
+    );
+    let _ = std::fs::remove_file(path);
 }

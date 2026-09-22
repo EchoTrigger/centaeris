@@ -1,29 +1,61 @@
+use centaeris_core::model::admission::{AdmittedJsonHttpTransport, ModelAdmission};
 use centaeris_core::model::{
     JsonHttpFuture, JsonHttpRequest, JsonHttpResponse, JsonHttpTransport,
     MODEL_PROVIDER_WAITING_STREAM_EVENT_TYPE,
 };
 use futures::StreamExt;
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
+use std::sync::OnceLock;
 use std::time::Duration;
 
+// The local Host has no account/project quota binding yet. Use one conservative
+// process-wide domain across all providers and models, rather than guessing a
+// quota identity from provider names or credentials. No cross-process guarantee.
+const MODEL_ATTEMPT_LIMIT: usize = 4;
+fn admit_runtime_transport<T>(inner: T, run_id: String) -> AdmittedJsonHttpTransport<T> {
+    static DOMAIN: OnceLock<ModelAdmission> = OnceLock::new();
+    let admission = DOMAIN.get_or_init(|| {
+        ModelAdmission::new(NonZeroUsize::new(MODEL_ATTEMPT_LIMIT).expect("positive attempt limit"))
+    });
+    AdmittedJsonHttpTransport::new(inner, admission.clone(), run_id)
+}
+
 pub(crate) struct ReqwestJsonHttpTransport {
-    client: reqwest::Client,
+    inner: AdmittedJsonHttpTransport<ReqwestHttpClient>,
 }
 
 impl ReqwestJsonHttpTransport {
-    pub(crate) fn new() -> Result<Self, String> {
+    pub(crate) fn new(run_id: String) -> Result<Self, String> {
         let client = reqwest::Client::builder()
             .build()
             .map_err(|error| format!("build reqwest client failed: {error}"))?;
-        Ok(Self { client })
+        Ok(Self {
+            inner: admit_runtime_transport(ReqwestHttpClient { client }, run_id),
+        })
     }
 }
 
 impl JsonHttpTransport for ReqwestJsonHttpTransport {
     fn execute_json<'a>(&'a self, request: &'a JsonHttpRequest) -> JsonHttpFuture<'a> {
+        self.inner.execute_json(request)
+    }
+    fn execute_sse<'a>(
+        &'a self,
+        request: &'a JsonHttpRequest,
+        on_data: &'a mut (dyn FnMut(String) + Send),
+    ) -> JsonHttpFuture<'a> {
+        self.inner.execute_sse(request, on_data)
+    }
+}
+
+struct ReqwestHttpClient {
+    client: reqwest::Client,
+}
+impl JsonHttpTransport for ReqwestHttpClient {
+    fn execute_json<'a>(&'a self, request: &'a JsonHttpRequest) -> JsonHttpFuture<'a> {
         Box::pin(execute_json_async(self.client.clone(), request.clone()))
     }
-
     fn execute_sse<'a>(
         &'a self,
         request: &'a JsonHttpRequest,
@@ -288,6 +320,61 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
+
+    #[tokio::test]
+    async fn independently_created_model_transports_share_runtime_capacity() {
+        use futures::poll;
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        struct Pending(Arc<AtomicUsize>);
+        impl JsonHttpTransport for Pending {
+            fn execute_json<'a>(&'a self, _: &'a JsonHttpRequest) -> JsonHttpFuture<'a> {
+                Box::pin(async move {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                    std::future::pending().await
+                })
+            }
+        }
+        let started = Arc::new(AtomicUsize::new(0));
+        let clients: Vec<_> = ["main-a", "child-a", "main-b", "compact", "model-test"]
+            .into_iter()
+            .map(|run| admit_runtime_transport(Pending(started.clone()), run.into()))
+            .collect();
+        let request = JsonHttpRequest {
+            method: "POST".into(),
+            url: "https://unused.invalid".into(),
+            headers: HashMap::new(),
+            timeout_ms: 1000,
+            sse_idle_timeout_ms: 1000,
+            max_retries: 0,
+            retry_backoff_ms: 0,
+            body_json: "{}".into(),
+        };
+        let mut attempts: Vec<_> = clients
+            .iter()
+            .map(|client| client.execute_json(&request))
+            .collect();
+        for attempt in &mut attempts {
+            assert!(poll!(attempt).is_pending());
+        }
+        assert_eq!(started.load(Ordering::SeqCst), MODEL_ATTEMPT_LIMIT);
+        drop(attempts.remove(0));
+        assert!(poll!(attempts.last_mut().unwrap()).is_pending());
+        assert_eq!(started.load(Ordering::SeqCst), MODEL_ATTEMPT_LIMIT + 1);
+        drop(attempts);
+        // No capacity lost after dropping both active and previously queued calls.
+        let mut again: Vec<_> = clients
+            .iter()
+            .take(MODEL_ATTEMPT_LIMIT)
+            .map(|client| client.execute_json(&request))
+            .collect();
+        for attempt in &mut again {
+            assert!(poll!(attempt).is_pending());
+        }
+        assert_eq!(started.load(Ordering::SeqCst), MODEL_ATTEMPT_LIMIT * 2 + 1);
+    }
 
     #[tokio::test]
     async fn model_http_client_routes_socks5h_proxy_scheme_to_connector() {

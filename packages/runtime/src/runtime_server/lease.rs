@@ -153,26 +153,47 @@ impl AgentRunRegistry {
     }
 
     pub fn finish(&self, lease_id: &str) -> Result<AgentRunLease, String> {
+        self.finish_with(lease_id, TurnControl::close)
+    }
+
+    fn finish_with(
+        &self,
+        lease_id: &str,
+        close: impl FnOnce(&TurnControl) -> Result<(), String>,
+    ) -> Result<AgentRunLease, String> {
         let lease_id = required_identifier(lease_id, "leaseId")?;
+        let active = self
+            .state
+            .lock()
+            .map_err(|_| "Session AgentRun registry lock poisoned".to_string())?
+            .active_by_session
+            .values()
+            .find(|active| active.lease.lease_id == lease_id)
+            .cloned()
+            .ok_or_else(|| format!("unknown agent run lease: {lease_id}"))?;
+        // Keep the session occupied while Core closes input admission. Do not
+        // hold the registry mutex: close may wait on a control callback that
+        // itself needs the registry, and unrelated sessions must keep running.
+        close(&active.control)?;
         let mut state = self
             .state
             .lock()
             .map_err(|_| "Session AgentRun registry lock poisoned".to_string())?;
-        let session_id = state
+        let session_id = active.lease.session_id;
+        if state
             .active_by_session
-            .iter()
-            .find_map(|(session_id, active)| {
-                (active.lease.lease_id == lease_id).then(|| session_id.clone())
-            })
-            .ok_or_else(|| format!("unknown agent run lease: {lease_id}"))?;
-        let active_agent_run = state
+            .get(&session_id)
+            .is_none_or(|current| current.lease.lease_id != lease_id)
+        {
+            return Err(format!("unknown agent run lease: {lease_id}"));
+        }
+        let finished = state
             .active_by_session
-            .remove(session_id.as_str())
+            .remove(&session_id)
             .ok_or_else(|| format!("agent run lease disappeared before finish: {lease_id}"))?;
         drop(state);
         self.changed.notify_all();
-        active_agent_run.control.close()?;
-        Ok(active_agent_run.lease)
+        Ok(finished.lease)
     }
 
     pub fn active(&self, agent_run_id: &str) -> Result<Option<ActiveAgentRun>, String> {
@@ -371,6 +392,159 @@ mod tests {
             owner_kind,
             TurnControl::new(),
         )
+    }
+
+    #[test]
+    fn finishing_keeps_session_owned_until_control_closes_without_blocking_other_sessions() {
+        let registry = AgentRunRegistry::default();
+        let first = start_agent_run(
+            &registry,
+            "chat-a",
+            "run-a",
+            "host-a",
+            RuntimeClientKind::Desktop,
+        )
+        .unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let registry = &registry;
+            let lease_id = first.lease_id.clone();
+            let closing = scope.spawn(move || {
+                registry.finish_with(&lease_id, |control| {
+                    entered_tx.send(()).unwrap();
+                    release_rx
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                    control.close()
+                })
+            });
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            let during = registry.active_for_session("chat-a").unwrap();
+            let contender = start_agent_run(
+                registry,
+                "chat-a",
+                "run-c",
+                "host-c",
+                RuntimeClientKind::Tui,
+            );
+            let independent = start_agent_run(
+                registry,
+                "chat-b",
+                "run-b",
+                "host-b",
+                RuntimeClientKind::Desktop,
+            );
+            release_tx.send(()).unwrap();
+            closing.join().unwrap().unwrap();
+            assert_eq!(
+                during.map(|run| run.lease.agent_run_id),
+                Some("run-a".to_string())
+            );
+            assert!(matches!(contender, Err(StartAgentRunError::SessionBusy(_))));
+            assert!(independent.is_ok());
+        });
+        let next = start_agent_run(
+            &registry,
+            "chat-a",
+            "run-next",
+            "host-a",
+            RuntimeClientKind::Desktop,
+        )
+        .unwrap();
+        registry.finish(&next.lease_id).unwrap();
+    }
+
+    #[test]
+    fn concurrent_finish_cannot_release_a_replacement_lease() {
+        let registry = AgentRunRegistry::default();
+        let first = start_agent_run(
+            &registry,
+            "chat-a",
+            "run-a",
+            "host-a",
+            RuntimeClientKind::Desktop,
+        )
+        .unwrap();
+        let old_control = registry.active("run-a").unwrap().unwrap().control;
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let registry = &registry;
+            let lease_id = first.lease_id.clone();
+            let late = scope.spawn(move || {
+                registry.finish_with(&lease_id, |control| {
+                    entered_tx.send(()).unwrap();
+                    release_rx
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                    control.close()
+                })
+            });
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            registry.finish(&first.lease_id).unwrap();
+            let replacement = start_agent_run(
+                registry,
+                "chat-a",
+                "run-b",
+                "host-b",
+                RuntimeClientKind::Tui,
+            )
+            .unwrap();
+            release_tx.send(()).unwrap();
+            assert!(late.join().unwrap().is_err());
+            assert_eq!(
+                registry
+                    .active_for_session("chat-a")
+                    .unwrap()
+                    .unwrap()
+                    .lease,
+                replacement
+            );
+        });
+        assert!(old_control
+            .enqueue_supplement_with("late input".to_string(), || Ok(()))
+            .is_err());
+    }
+
+    #[test]
+    fn failed_control_close_keeps_ownership_until_a_successful_retry() {
+        let registry = AgentRunRegistry::default();
+        let first = start_agent_run(
+            &registry,
+            "chat-a",
+            "run-a",
+            "host-a",
+            RuntimeClientKind::Desktop,
+        )
+        .unwrap();
+        assert_eq!(
+            registry.finish_with(&first.lease_id, |_| Err("close failed".to_string())),
+            Err("close failed".to_string())
+        );
+        assert!(matches!(
+            start_agent_run(
+                &registry,
+                "chat-a",
+                "run-b",
+                "host-b",
+                RuntimeClientKind::Tui
+            ),
+            Err(StartAgentRunError::SessionBusy(_))
+        ));
+        registry.finish(&first.lease_id).unwrap();
+        assert!(start_agent_run(
+            &registry,
+            "chat-a",
+            "run-b",
+            "host-b",
+            RuntimeClientKind::Tui
+        )
+        .is_ok());
     }
 
     #[test]
