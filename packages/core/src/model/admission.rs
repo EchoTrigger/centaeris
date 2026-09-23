@@ -1,7 +1,7 @@
 //! Per-attempt model admission. Hosts share one coordinator for each quota
 //! domain; a domain is an explicit Host decision, never inferred from secrets,
 //! provider names, or model names. Clones share capacity and cooldown state.
-use super::{JsonHttpFuture, JsonHttpRequest, JsonHttpResponse, JsonHttpTransport};
+use super::{JsonHttpFuture, JsonHttpRequest, JsonHttpTransport};
 use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
@@ -40,7 +40,10 @@ impl ModelAdmission {
         }))
     }
 
-    async fn acquire(&self, run_id: &str) -> Attempt {
+    /// Admit one actual provider attempt. The returned ticket owns capacity until
+    /// it is dropped, including while a response body or stream is being read.
+    /// Dropping the acquire future removes its queued request.
+    pub async fn acquire_attempt(&self, run_id: &str) -> ModelAttemptTicket {
         let ticket = {
             let mut state = self.0.state.lock().expect("model admission lock poisoned");
             let ticket = state.next_ticket;
@@ -57,7 +60,7 @@ impl ModelAdmission {
             }
             ticket
         };
-        let mut attempt = Attempt {
+        let mut attempt = ModelAttemptTicket {
             admission: self.clone(),
             ticket,
             admitted: false,
@@ -98,15 +101,11 @@ impl ModelAdmission {
         }
     }
 
-    fn observe_response(&self, response: &JsonHttpResponse) {
-        if !super::transport::is_retryable_http_status(response.status_code) {
+    fn observe_http_status(&self, status_code: u16, retry_after: Option<&str>) {
+        if !super::transport::is_retryable_http_status(status_code) {
             return;
         }
-        let delay = response
-            .headers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
-            .and_then(|(_, value)| retry_after_delay(value, SystemTime::now()));
+        let delay = retry_after.and_then(|value| retry_after_delay(value, SystemTime::now()));
         let Some(until) = delay.and_then(|delay| Instant::now().checked_add(delay)) else {
             return;
         };
@@ -122,12 +121,21 @@ impl ModelAdmission {
 
 // One owner represents both queue membership and the eventual permit. Dropping
 // an unpolled/dropped/failed HTTP future needs no asynchronous cleanup task.
-struct Attempt {
+/// A cancellation-safe, single-attempt capacity ticket. Hosts that own the
+/// provider transport hold it through complete body or stream consumption.
+pub struct ModelAttemptTicket {
     admission: ModelAdmission,
     ticket: u64,
     admitted: bool,
 }
-impl Drop for Attempt {
+impl ModelAttemptTicket {
+    /// Install a shared Retry-After cooldown before releasing the ticket.
+    /// Invalid values and non-retryable statuses have no effect.
+    pub fn observe_http_status(&self, status_code: u16, retry_after: Option<&str>) {
+        self.admission.observe_http_status(status_code, retry_after);
+    }
+}
+impl Drop for ModelAttemptTicket {
     fn drop(&mut self) {
         let mut state = self
             .admission
@@ -178,10 +186,17 @@ impl<T> AdmittedJsonHttpTransport<T> {
 impl<T: JsonHttpTransport> JsonHttpTransport for AdmittedJsonHttpTransport<T> {
     fn execute_json<'a>(&'a self, request: &'a JsonHttpRequest) -> JsonHttpFuture<'a> {
         Box::pin(async move {
-            let _attempt = self.admission.acquire(&self.run_id).await;
+            let attempt = self.admission.acquire_attempt(&self.run_id).await;
             let response = self.inner.execute_json(request).await;
             if let Ok(response) = &response {
-                self.admission.observe_response(response);
+                attempt.observe_http_status(
+                    response.status_code,
+                    response
+                        .headers
+                        .iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+                        .map(|(_, value)| value.as_str()),
+                );
             }
             response
         })
@@ -192,10 +207,17 @@ impl<T: JsonHttpTransport> JsonHttpTransport for AdmittedJsonHttpTransport<T> {
         on_data: &'a mut (dyn FnMut(String) + Send),
     ) -> JsonHttpFuture<'a> {
         Box::pin(async move {
-            let _attempt = self.admission.acquire(&self.run_id).await;
+            let attempt = self.admission.acquire_attempt(&self.run_id).await;
             let response = self.inner.execute_sse(request, on_data).await;
             if let Ok(response) = &response {
-                self.admission.observe_response(response);
+                attempt.observe_http_status(
+                    response.status_code,
+                    response
+                        .headers
+                        .iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+                        .map(|(_, value)| value.as_str()),
+                );
             }
             response
         })
