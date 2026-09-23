@@ -16,10 +16,8 @@ const trayIconIcns = path.join(hostRoot, "assets", "icon.icns");
 const outRoot = path.join(hostRoot, "dist");
 const appRoot = path.join(outRoot, "Centaeris Desktop");
 const resourcesRoot = path.join(appRoot, "resources");
-const systemSkillsSource = process.env.CENTAERIS_SYSTEM_SKILLS_SOURCE?.trim();
-const systemSkillsBundle = systemSkillsSource
-  ? await inspectSystemSkillsBundle(systemSkillsSource)
-  : null;
+const systemSkillsSource = path.join(repoRoot, "system-skills");
+const systemSkillsBundle = await inspectSystemSkillsBundle(systemSkillsSource);
 const packagedAppRoot = path.join(resourcesRoot, "app");
 const keptLocales = ["en-US", "zh-CN", "zh-TW", "ja", "ko"];
 
@@ -74,7 +72,8 @@ await fs.copyFile(
   path.join(appRoot, "COPYRIGHT"),
 );
 const distNotices = (await fs.readFile(path.join(repoRoot, "THIRD_PARTY_NOTICES.md"), "utf8"))
-  .replaceAll("packages/ui/public/licenses/", "resources/ui-dist/licenses/");
+  .replaceAll("packages/ui/public/licenses/", "resources/ui-dist/licenses/")
+  .replaceAll("system-skills/", "resources/system-skills/");
 await fs.writeFile(path.join(appRoot, "THIRD_PARTY_NOTICES.md"), distNotices);
 const localesRoot = path.join(appRoot, "locales");
 for (const entry of await fs.readdir(localesRoot)) {
@@ -95,19 +94,18 @@ await fs.copyFile(
 await fs.mkdir(path.join(resourcesRoot, "ui-dist"), { recursive: true });
 await fs.cp(uiDist, path.join(resourcesRoot, "ui-dist"), { recursive: true });
 
-if (systemSkillsBundle) {
-  const packagedSystemSkills = path.join(resourcesRoot, "system-skills");
-  await fs.cp(systemSkillsSource, packagedSystemSkills, {
-    recursive: true,
-  });
-  const packagedBundle = await inspectSystemSkillsBundle(packagedSystemSkills);
-  if (packagedBundle.digest !== systemSkillsBundle.digest) {
-    throw new Error("Packaged System Skill bundle digest mismatch");
-  }
-  console.log(
-    `Bundled ${systemSkillsBundle.skillNames.length} System Skills (${systemSkillsBundle.digest})`,
-  );
+const packagedSystemSkills = path.join(resourcesRoot, "system-skills");
+await fs.cp(systemSkillsSource, packagedSystemSkills, {
+  recursive: true,
+  filter: (source) => !path.relative(systemSkillsSource, source)
+    .split(path.sep)
+    .some((part) => part === "__pycache__" || part.endsWith(".pyc")),
+});
+const packagedBundle = await inspectSystemSkillsBundle(packagedSystemSkills);
+if (packagedBundle.digest !== systemSkillsBundle.digest) {
+  throw new Error("Packaged System Skill bundle digest mismatch");
 }
+console.log(`Bundled ${systemSkillsBundle.skillNames.length} System Skills (${systemSkillsBundle.digest})`);
 
 await writeThirdPartyLicenses(
   repoRoot,
@@ -142,7 +140,6 @@ const licenseCheck = spawnSync(
     path.join(hostRoot, "scripts", "check-dist-licenses.mjs"),
     "--dist",
     appRoot,
-    ...(systemSkillsSource ? ["--system-skills-source", systemSkillsSource] : []),
   ],
   { cwd: repoRoot, stdio: "inherit", shell: false },
 );

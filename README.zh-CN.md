@@ -8,7 +8,7 @@
 
 Centaeris 是使用 Rust 编写、不依赖特定宿主的智能体运行时框架。桌面端、终端和托管产品共用会话、模型请求、工具、事件、持久化和持久续执行的运行时契约。
 
-本仓库包含公共运行时、本地宿主和用户界面，不包含第一方商业包、技能、托管控制平面代码、凭据或客户数据。
+本仓库包含公共运行时、本地宿主、用户界面和三项内置 System Skills。不包含商业扩展包、私有 Skill、托管控制平面代码、凭据或客户数据。
 
 ## 外观
 
@@ -20,7 +20,7 @@ Centaeris 是使用 Rust 编写、不依赖特定宿主的智能体运行时框�
 - 本地 Electron 和终端宿主使用严格的宿主协议。
 - 类型化工具契约、执行终态、安全决策和可观测的运行时事件。
 - SQLite 存储适配器和 MCP 适配器遵循运行时定义的契约。
-- 支持加载扩展包和技能，不捆绑具体扩展内容。
+- 支持加载扩展包和技能，内置三项公开的 System Skills，不捆绑商业扩展包。
 
 ## 仓库结构
 
@@ -34,6 +34,7 @@ packages/
   desktop/          Electron 宿主
   tui/              终端宿主
   ui/               共用桌面界面
+system-skills/       公开的内置 System Skills
 ```
 
 ## 当前发布范围
@@ -47,7 +48,7 @@ packages/
 
 ## 从源码构建
 
-环境要求：Rust 1.94.1、Node.js 22.21.0、npm 10.9.4。
+环境要求：Rust 1.94.1、Node.js 22.21.0、npm 10.9.4。完整发布检查还会运行 Python 3.9+ 的辅助脚本测试。
 
 ```powershell
 cargo test --locked -p centaeris-core query_loop
@@ -55,7 +56,7 @@ npm ci
 npm run gate --workspace centaeris-ui
 ```
 
-完整构建和首次运行说明见 [Windows 配置指南](docs/getting-started/Windows.md)。运行时和测试无需安装扩展包或 Skill。扩展是单独版本化的资源。
+完整构建和首次运行说明见 [Windows 配置指南](docs/getting-started/Windows.md)。运行时和测试无需安装 Plugin。Desktop 与 TUI 发行包内置本仓库的公开 System Skills；其他扩展仍是单独版本化的资源。
 
 ## 界面语言
 

@@ -1,7 +1,3 @@
-param(
-    [string]$SystemSkillsSource = $env:CENTAERIS_SYSTEM_SKILLS_SOURCE
-)
-
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
@@ -89,13 +85,6 @@ Assert-CommandAvailable "npm.cmd"
 Assert-CommandAvailable "node.exe"
 Assert-CommandAvailable "cargo.exe"
 Assert-DistNotRunning
-
-if ($SystemSkillsSource) {
-    $resolvedSystemSkillsSource = (Resolve-Path -LiteralPath $SystemSkillsSource).Path
-    $env:CENTAERIS_SYSTEM_SKILLS_SOURCE = $resolvedSystemSkillsSource
-} else {
-    Remove-Item Env:CENTAERIS_SYSTEM_SKILLS_SOURCE -ErrorAction SilentlyContinue
-}
 
 Invoke-Checked "ui production build" "npm.cmd" @("run", "build") $uiDir
 Invoke-Checked "electron release runtime and desktop dist build" "npm.cmd" @("run", "build") $electronDir

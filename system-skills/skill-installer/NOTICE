@@ -1,0 +1,6 @@
+This Skill is adapted from openai/skills, skills/.system/skill-installer:
+https://github.com/openai/skills/tree/main/skills/.system/skill-installer
+
+The upstream work and this adapted Skill are licensed under the Apache License,
+Version 2.0. This Skill was substantially modified for Centaeris in 2026.
+The exact upstream revision used for the initial adaptation was not recorded.

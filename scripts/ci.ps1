@@ -37,10 +37,13 @@ try {
     }
 
     if ($Stage -eq "Node") {
+        python -B scripts/test_system_skills.py
+        node --test packages/desktop/src/systemSkills.test.mjs
         & (Join-Path $PSScriptRoot "desktop-ui-acceptance.ps1") -ValidationOnly -SkipFrontendTests
     }
 
     if ($Stage -eq "Release") {
+        python -B scripts/test_system_skills.py
         & (Join-Path $PSScriptRoot "desktop-ui-acceptance.ps1")
         & (Join-Path $PSScriptRoot "build-tui.ps1")
         npm --prefix packages/desktop run smoke:runtime

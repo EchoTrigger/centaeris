@@ -39,6 +39,9 @@ with.
 
 ## System Skills
 
-Builds may receive a System Skills bundle through
-`CENTAERIS_SYSTEM_SKILLS_SOURCE`. The build validates the bundle and preserves
-required upstream LICENSE/NOTICE files. An empty bundle is supported.
+Desktop and TUI distributions include the three public System Skills from
+`system-skills/` in this source tree: `runtime-recovery`, `skill-creator`, and
+`skill-installer`. Builds validate the bundle and preserve its upstream
+LICENSE/NOTICE files. A standalone development Runtime can use
+`CENTAERIS_SYSTEM_SKILLS_SOURCE` to point at this directory; release builds
+always package the checked-in source.
