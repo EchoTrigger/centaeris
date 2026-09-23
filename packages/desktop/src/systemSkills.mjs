@@ -6,6 +6,7 @@ const filesBelow = async (root, relative = "") => {
   const entries = await fs.readdir(path.join(root, relative), { withFileTypes: true });
   const files = [];
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+    if (entry.name === "__pycache__" || entry.name.endsWith(".pyc")) continue;
     const next = path.join(relative, entry.name);
     if (entry.isSymbolicLink()) {
       throw new Error(`System Skill bundle must not contain symbolic links: ${next}`);
