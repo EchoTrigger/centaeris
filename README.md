@@ -10,7 +10,9 @@ Centaeris is a host-agnostic agent runtime framework written in Rust. Desktop,
 terminal, and hosted products use the same runtime contracts for sessions, model
 requests, tools, events, persistence, and durable continuation.
 
-This repository contains the public runtime, local hosts, and user interfaces. It does not contain first-party commercial packages, skills, hosted control-plane code, credentials, or customer data.
+This repository contains the public runtime, local hosts, user interfaces, and
+three built-in System Skills. It does not contain commercial packages, private
+Skills, hosted control-plane code, credentials, or customer data.
 
 ## Appearance
 
@@ -22,7 +24,8 @@ Use the sun/moon button immediately to the right of the left-sidebar toggle to s
 - Local Electron and terminal hosts over a strict host protocol.
 - Typed tool contracts, terminal outcomes, safety decisions, and observable runtime events.
 - SQLite storage adapter and MCP adapter behind runtime-owned contracts.
-- Package and skill loading without bundled package content.
+- Package and skill loading, with three public built-in System Skills and no
+  bundled commercial package content.
 
 ## Repository layout
 
@@ -36,6 +39,7 @@ packages/
   desktop/          Electron host
   tui/              Terminal host
   ui/               Shared desktop UI
+system-skills/       Public built-in System Skills
 ```
 
 ## Current release scope
@@ -50,7 +54,8 @@ may compile elsewhere, but that is not a release-platform claim.
 
 ## Build from source
 
-Requirements: Rust 1.94.1, Node.js 22.21.0, and npm 10.9.4.
+Requirements: Rust 1.94.1, Node.js 22.21.0, and npm 10.9.4. The full release
+gate also runs Python 3.9+ helper checks.
 
 ```powershell
 cargo test --locked -p centaeris-core query_loop
@@ -59,8 +64,9 @@ npm run gate --workspace centaeris-ui
 ```
 
 See [Windows setup](docs/getting-started/Windows.md) for the complete build and
-first-run paths. The runtime and tests do not require an installed package or
-Skill. Extensions are separate versioned assets.
+first-run paths. The runtime and tests do not require an installed Plugin. The
+Desktop and TUI distributions include the public System Skills in this tree;
+other extensions are separate versioned assets.
 
 ## Interface language
 

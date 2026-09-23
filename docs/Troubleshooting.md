@@ -21,9 +21,12 @@ disabling validation.
 
 ## System Skills are missing
 
-A source build may use an empty System Skills directory. To bundle System
-Skills, set `CENTAERIS_SYSTEM_SKILLS_SOURCE` to a validated bundle before the
-Desktop or TUI build. Preserve any upstream LICENSE and NOTICE files.
+Rebuild the Desktop or TUI distribution from a checkout containing
+`system-skills/`, then restart the Host. The release build validates and bundles
+these Skills with their LICENSE and NOTICE files. For a standalone development
+Runtime, set `CENTAERIS_SYSTEM_SKILLS_SOURCE` to the checkout's
+`system-skills/` directory. If the installed System Skills directory is damaged,
+preserve it for diagnosis before using the Host's supported repair path.
 
 ## A Plugin cannot be activated
 
