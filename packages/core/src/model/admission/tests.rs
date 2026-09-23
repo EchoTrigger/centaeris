@@ -70,6 +70,20 @@ fn response(status: u16, retry_after: Option<&str>) -> JsonHttpResponse {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn public_attempt_ticket_holds_capacity_and_observes_cooldown() {
+    let (admission, _, _, _) = fixture(1);
+    let first = admission.acquire_attempt("first-run").await;
+    let mut next = Box::pin(admission.acquire_attempt("next-run"));
+    assert!(poll!(&mut next).is_pending());
+    first.observe_http_status(429, Some("5"));
+    drop(first);
+    assert!(poll!(&mut next).is_pending());
+    tokio::time::advance(Duration::from_secs(5)).await;
+    let second = next.await;
+    drop(second);
+}
+
 #[tokio::test]
 async fn shared_limit_is_held_for_whole_stream_and_released_on_drop() {
     let (domain, raw, mut calls, req) = fixture(1);
