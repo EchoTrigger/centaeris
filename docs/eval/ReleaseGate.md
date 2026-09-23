@@ -50,6 +50,8 @@ third-party-license assembly and distribution validation, plus runtime and windo
 smoke tests, plus Desktop/TUI coexistence, persistence and sidecar
 acceptance on Windows x64. Playwright/E2E and visual-snapshot tests are not part of the gate;
 visual and interaction acceptance is manual.
+The Node and release stages also run the bundled System Skill Python helper
+behavior checks.
 Use [FrontendManualAcceptance.md](FrontendManualAcceptance.md) for the retained
 Desktop interaction and appearance checks.
 
@@ -61,7 +63,8 @@ The repository must also pass these structural checks:
 
 - every workspace member is below `packages/`;
 - no source `#[path]` includes another crate;
-- no hosted control-plane source, commercial package, concrete Skill, credential, customer data, private deployment configuration, or third-party research snapshot is tracked;
+- no hosted control-plane source, commercial package, concrete Skill outside the reviewed built-in `system-skills/` bundle, credential, customer data, private deployment configuration, or third-party research snapshot is tracked;
+- the public built-in System Skills are present in the source archive and each Desktop/TUI distribution, with applicable upstream licenses, attribution, and modification notices;
 - root ignore rules exclude test results, browser artifacts, logs, local environment files, and unrelated binary documents before source freeze; the Git index is inspected separately because ignore rules do not remove tracked files;
 - Core treats `ExecutionHost` file identities as opaque and does not classify Host-private namespaces;
 - an empty package catalog builds and starts;

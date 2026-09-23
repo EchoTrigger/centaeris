@@ -29,7 +29,7 @@ npm run dev --workspace @centaeris/electron-host
 
 The Desktop command builds the UI, release Runtime, Electron directory, and
 license payload, then checks Runtime freshness and identity. The TUI command
-builds `centa.exe`, the matching Runtime, licenses, optional System Skills, and
+builds `centa.exe`, the matching Runtime, licenses, built-in System Skills, and
 the package manifest before creating the Windows archive.
 
 Do not advertise an artifact for a platform that is absent from this build

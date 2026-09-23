@@ -1,7 +1,3 @@
-param(
-    [string]$SystemSkillsSource = $env:CENTAERIS_SYSTEM_SKILLS_SOURCE
-)
-
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
@@ -114,13 +110,9 @@ if (-not $IsWindows) {
 Assert-CommandAvailable "cargo.exe"
 Assert-CommandAvailable "node.exe"
 
-$resolvedSystemSkillsSource = $null
-$systemSkillsBundle = $null
-if (-not [string]::IsNullOrWhiteSpace($SystemSkillsSource)) {
-    $resolvedSystemSkillsSource = (Resolve-Path -LiteralPath $SystemSkillsSource).Path
-    $systemSkillsBundle = Get-SystemSkillsBundle $resolvedSystemSkillsSource
-    Assert-SystemSkillLicenses $resolvedSystemSkillsSource $systemSkillsBundle
-}
+$resolvedSystemSkillsSource = Join-Path $repoRoot "system-skills"
+$systemSkillsBundle = Get-SystemSkillsBundle $resolvedSystemSkillsSource
+Assert-SystemSkillLicenses $resolvedSystemSkillsSource $systemSkillsBundle
 
 Invoke-Checked "tui release build" "cargo.exe" @(
     "build",
@@ -166,14 +158,21 @@ Invoke-Checked "third-party license assembly" "node.exe" @(
     "--rust-only"
 ) $repoRoot
 
-if ($systemSkillsBundle) {
-    $packagedSystemSkills = Join-Path $distRoot "system-skills"
-    Copy-Item -LiteralPath $resolvedSystemSkillsSource -Destination $packagedSystemSkills -Recurse
-    $packagedBundle = Get-SystemSkillsBundle $packagedSystemSkills
-    Assert-SystemSkillLicenses $packagedSystemSkills $packagedBundle
-    if ($packagedBundle.digest -ne $systemSkillsBundle.digest) {
-        throw "Packaged System Skills bundle digest mismatch"
+$packagedSystemSkills = Join-Path $distRoot "system-skills"
+foreach ($sourceFile in Get-ChildItem -LiteralPath $resolvedSystemSkillsSource -File -Recurse -Force) {
+    $relativePath = [System.IO.Path]::GetRelativePath($resolvedSystemSkillsSource, $sourceFile.FullName)
+    $parts = $relativePath -split '[\\/]'
+    if ($parts -contains "__pycache__" -or $sourceFile.Extension -eq ".pyc") {
+        continue
     }
+    $destinationFile = Join-Path $packagedSystemSkills $relativePath
+    New-Item -ItemType Directory -Path (Split-Path -Parent $destinationFile) -Force | Out-Null
+    Copy-Item -LiteralPath $sourceFile.FullName -Destination $destinationFile
+}
+$packagedBundle = Get-SystemSkillsBundle $packagedSystemSkills
+Assert-SystemSkillLicenses $packagedSystemSkills $packagedBundle
+if ($packagedBundle.digest -ne $systemSkillsBundle.digest) {
+    throw "Packaged System Skills bundle digest mismatch"
 }
 
 $version = Get-Version
@@ -204,13 +203,24 @@ foreach ($requiredPath in @(
         throw "TUI package manifest is missing required license content: $requiredPath"
     }
 }
-if ($systemSkillsBundle) {
-    foreach ($skillName in $systemSkillsBundle.skillNames) {
-        $skillManifestPath = "system-skills/$skillName/SKILL.md"
-        if ($manifest.files.path -notcontains $skillManifestPath) {
-            throw "TUI package manifest is missing a bundled System Skill manifest"
-        }
+foreach ($skillName in $systemSkillsBundle.skillNames) {
+    $skillManifestPath = "system-skills/$skillName/SKILL.md"
+    if ($manifest.files.path -notcontains $skillManifestPath) {
+        throw "TUI package manifest is missing a bundled System Skill manifest"
     }
+}
+foreach ($relativePath in @(
+    "system-skills/skill-creator/license.txt",
+    "system-skills/skill-creator/NOTICE",
+    "system-skills/skill-installer/LICENSE.txt",
+    "system-skills/skill-installer/NOTICE"
+)) {
+    if ($manifest.files.path -notcontains $relativePath -or -not $notices.Contains($relativePath)) {
+        throw "TUI package is missing System Skill attribution: $relativePath"
+    }
+}
+if ($manifest.files.path | Where-Object { $_ -match '^system-skills/.*(/__pycache__/|\.pyc$)' }) {
+    throw "TUI package contains generated System Skill bytecode"
 }
 
 $zipName = "centaeris-windows-x64.zip"
@@ -227,6 +237,4 @@ Write-Host "TUI size: $((Get-Item -LiteralPath (Join-Path $distRoot $tuiName)).L
 Write-Host "Runtime size: $((Get-Item -LiteralPath (Join-Path $distRoot $runtimeName)).Length) bytes"
 Write-Host "Archive size: $((Get-Item -LiteralPath $zipPath).Length) bytes"
 Write-Host "Version: $version"
-if ($systemSkillsBundle) {
-    Write-Host "System Skills: $($systemSkillsBundle.skillNames.Count) ($($systemSkillsBundle.digest))"
-}
+Write-Host "System Skills: $($systemSkillsBundle.skillNames.Count) ($($systemSkillsBundle.digest))"

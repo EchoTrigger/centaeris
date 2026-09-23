@@ -10,6 +10,7 @@ import { createRuntimeHostTransport } from "../src/runtimeHostTransport.mjs";
 
 const hostRoot = path.resolve(import.meta.dirname, "..");
 const repoRoot = path.resolve(hostRoot, "..", "..");
+const bundledSystemSkills = path.join(repoRoot, "system-skills");
 const defaultRuntimeExe = path.join(
   repoRoot,
   "target",
@@ -759,6 +760,7 @@ const main = async () => {
   await fs.mkdir(path.join(tempRoot, "skills", "system"), { recursive: true });
   const runtimeEnvironment = {
     ...process.env,
+    CENTAERIS_SYSTEM_SKILLS_SOURCE: bundledSystemSkills,
     CENTAERIS_DESKTOP_DATA_DIR: tempRoot,
     CENTAERIS_PROVIDER_POLLING_HOST_ENABLED: "false",
     CENTAERIS_RUNTIME_GC_HOST_ENABLED: "false",
@@ -1058,8 +1060,14 @@ const main = async () => {
       request: { cwd: workspaceRoot },
     });
     assertArray(skillCatalog.skills, "skill/catalog skills");
-    if (skillCatalog.skills.length !== 0) {
-      fail("clean public runtime must not inject concrete System Skills");
+    const bundledNames = skillCatalog.skills
+      .filter((skill) => skill.sourceId === "centaeris-system-skills")
+      .map((skill) => skill.name)
+      .sort();
+    if (JSON.stringify(bundledNames) !== JSON.stringify([
+      "runtime-recovery", "skill-creator", "skill-installer",
+    ].sort())) {
+      fail(`public runtime did not load its built-in System Skills: ${bundledNames.join(", ")}`);
     }
 
     const mcpCatalog = await invoke(child, "mcp/catalog", { request: {} });
