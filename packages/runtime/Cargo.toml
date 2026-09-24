@@ -35,6 +35,7 @@ fs2.workspace = true
 futures.workspace = true
 getrandom.workspace = true
 centaeris-core.workspace = true
+centaeris-model-catalog.workspace = true
 centaeris-mcp.workspace = true
 centaeris-runtime-sqlite.workspace = true
 rmcp.workspace = true

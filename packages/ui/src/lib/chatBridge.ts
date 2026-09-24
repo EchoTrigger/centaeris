@@ -627,6 +627,8 @@ export type ModelCatalogItem = {
 export type ModelProvider = {
   providerId: string;
   name: string;
+  tier?: "direct_api" | "coding_plan" | "token_plan" | null;
+  logoSvg?: string | null;
   builtIn: boolean;
   accessKind: "api_key" | "custom";
   configured: boolean;
