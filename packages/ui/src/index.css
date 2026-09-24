@@ -1967,6 +1967,12 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   background: var(--surface-variant);
 }
 
+.modelsProviderIdentity { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.providerLogo, .providerLogoFallback { width: 18px; height: 18px; flex: 0 0 18px; }
+.providerLogoFallback { display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; background: var(--outline-variant); color: var(--process-text); font-size: 10px; font-weight: 700; }
+.modelsProviderCards .providerLogo { width: 18px; height: 18px; position: static; }
+.modelsProviderCards .modelsProviderIdentity { color: var(--on-surface); font-size: 12px; }
+
 .modelsConfiguredDot {
   width: 7px;
   height: 7px;

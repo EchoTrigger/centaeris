@@ -1,5 +1,7 @@
 use crate::atomic_file::write_file_atomically;
-use crate::runtime_config::{validate_persisted_model_state, PersistedRuntimeConfigState};
+use crate::runtime_config::{
+    migrate_persisted_model_selection, validate_persisted_model_state, PersistedRuntimeConfigState,
+};
 use crate::user_data_layout;
 use centaeris_core::extension::skills::{
     validate_skill_sources_config, SkillPolicyV1, SkillSourceConfigV1, SkillSourceKindV1,
@@ -163,8 +165,12 @@ pub(crate) fn load_at(path: &Path) -> Result<UserConfigDocument, String> {
             path.display()
         )
     })?;
-    let config = UserConfigDocument::from(stored);
+    let mut config = UserConfigDocument::from(stored);
+    let migrated = migrate_persisted_model_selection(&mut config.runtime);
     validate(&config)?;
+    if migrated {
+        persist_at(path, &config)?;
+    }
     Ok(config)
 }
 
@@ -360,6 +366,53 @@ mod tests {
         let restored = load_at(path.as_path()).expect("load config");
         assert_eq!(restored.plugins.disabled, vec!["plugin-a"]);
         assert_eq!(restored.skills, SkillSourcesConfigV1::default());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn loading_retired_builtin_selection_migrates_file_and_preserves_plugins() {
+        let root = temp_root("model-migration");
+        let path = root.join("config.toml");
+        let mut config = UserConfigDocument::default();
+        config.plugins.disabled.push("plugin-a".to_string());
+        let encoded = toml::to_string_pretty(&StoredUserConfigDocument::from(&config))
+            .expect("encode config");
+        let mut value: toml::Value = toml::from_str(&encoded).expect("parse config");
+        value["runtime"]
+            .as_table_mut()
+            .expect("runtime section")
+            .insert(
+                "active_model".to_string(),
+                toml::Value::Table(toml::map::Map::from_iter([
+                    (
+                        "provider_id".to_string(),
+                        toml::Value::String("deepseek.default".to_string()),
+                    ),
+                    (
+                        "model".to_string(),
+                        toml::Value::String("deepseek-v4-flash".to_string()),
+                    ),
+                    (
+                        "model_thinking_mode".to_string(),
+                        toml::Value::String("high".to_string()),
+                    ),
+                ])),
+            );
+        fs::write(
+            &path,
+            toml::to_string_pretty(&value).expect("encode old config"),
+        )
+        .expect("write old config");
+
+        let restored = load_at(&path).expect("migrate old selection");
+        assert_eq!(restored.plugins.disabled, ["plugin-a"]);
+        let persisted = fs::read_to_string(&path).expect("read migrated config");
+        assert!(persisted.contains("deepseek-flash"));
+        assert!(!persisted.contains("deepseek-v4-flash"));
+        assert_eq!(
+            load_at(&path).expect("idempotent reload").plugins.disabled,
+            ["plugin-a"]
+        );
         let _ = fs::remove_dir_all(root);
     }
 

@@ -18,6 +18,10 @@ pub struct ModelProviderDefinition {
     pub provider_id: String,
     pub catalog_id: String,
     pub display_name: String,
+    pub tier: ModelProviderTier,
+    pub logo_id: String,
+    #[serde(default, skip_deserializing)]
+    pub logo_svg: Option<String>,
     pub provider_kind: String,
     pub api: ModelApi,
     pub api_base: String,
@@ -25,6 +29,14 @@ pub struct ModelProviderDefinition {
     #[serde(default)]
     pub http_headers: HashMap<String, String>,
     pub models: Vec<ModelDefinition>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelProviderTier {
+    DirectApi,
+    CodingPlan,
+    TokenPlan,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -64,12 +76,37 @@ pub struct ModelDefinition {
 pub fn model_catalog() -> &'static ModelCatalog {
     static CATALOG: OnceLock<ModelCatalog> = OnceLock::new();
     CATALOG.get_or_init(|| {
-        let catalog: ModelCatalog =
+        let mut catalog: ModelCatalog =
             serde_json::from_str(include_str!("../centaeris_model_catalog/catalog.json"))
                 .expect("embedded model catalog must be valid JSON");
         assert_eq!(catalog.schema, MODEL_CATALOG_SCHEMA, "model catalog schema");
+        for provider in &mut catalog.providers {
+            provider.logo_svg = Some(
+                logo_svg(provider.logo_id.as_str())
+                    .unwrap_or_else(|| panic!("unknown provider logo: {}", provider.logo_id))
+                    .to_string(),
+            );
+        }
         catalog
     })
+}
+
+pub fn logo_svg(logo_id: &str) -> Option<&'static str> {
+    let svg = match logo_id {
+        "openai" => include_str!("../centaeris_model_catalog/logos/openai.svg"),
+        "anthropic" => include_str!("../centaeris_model_catalog/logos/anthropic.svg"),
+        "deepseek" => include_str!("../centaeris_model_catalog/logos/deepseek.svg"),
+        "moonshot" => include_str!("../centaeris_model_catalog/logos/moonshot.svg"),
+        "minimax" => include_str!("../centaeris_model_catalog/logos/minimax.svg"),
+        "xiaomimimo" => include_str!("../centaeris_model_catalog/logos/xiaomimimo.svg"),
+        "zai" => include_str!("../centaeris_model_catalog/logos/zai.svg"),
+        "zhipu" => include_str!("../centaeris_model_catalog/logos/zhipu.svg"),
+        "qwen" => include_str!("../centaeris_model_catalog/logos/qwen.svg"),
+        "opencode" => include_str!("../centaeris_model_catalog/logos/opencode.svg"),
+        "kimi" => include_str!("../centaeris_model_catalog/logos/kimi.svg"),
+        _ => return None,
+    };
+    Some(svg)
 }
 
 #[cfg(test)]
@@ -86,6 +123,10 @@ mod tests {
         for provider in &catalog.providers {
             assert!(provider_ids.insert(provider.provider_id.as_str()));
             assert!(catalog_ids.insert(provider.catalog_id.as_str()));
+            assert!(provider
+                .logo_svg
+                .as_deref()
+                .is_some_and(|svg| svg.contains("<svg")));
             assert!(matches!(
                 provider.provider_kind.as_str(),
                 "open_ai" | "anthropic" | "kimi" | "deep_seek" | "zai" | "custom"
@@ -112,5 +153,51 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn approved_direct_api_and_opencode_go_models_are_exact() {
+        let catalog = model_catalog();
+        let direct = catalog
+            .providers
+            .iter()
+            .filter(|provider| provider.tier == ModelProviderTier::DirectApi)
+            .collect::<Vec<_>>();
+        assert_eq!(direct.len(), 12);
+        let go = catalog
+            .providers
+            .iter()
+            .find(|provider| provider.catalog_id == "opencode_zen_go")
+            .expect("OpenCode Go catalog entry");
+        assert_eq!(go.tier, ModelProviderTier::CodingPlan);
+        assert_eq!(
+            go.models
+                .iter()
+                .map(|model| model.model.as_str())
+                .collect::<Vec<_>>(),
+            ["glm-5.3-flash", "deepseek-v4.1-flash"]
+        );
+        assert!(go
+            .models
+            .iter()
+            .all(|model| model.thinking_mode.is_none() && model.thinking_modes.is_empty()));
+        assert_eq!(
+            catalog
+                .providers
+                .iter()
+                .find(|provider| provider.catalog_id == "zai")
+                .expect("existing Z.AI coding route")
+                .api_base,
+            "https://api.z.ai/api/coding/paas/v4"
+        );
+        assert_eq!(
+            catalog
+                .providers
+                .iter()
+                .find(|provider| provider.catalog_id == "zai_standard")
+                .expect("new Z.AI standard route")
+                .api_base,
+            "https://api.z.ai/api/paas/v4"
+        );
     }
 }

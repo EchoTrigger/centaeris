@@ -121,6 +121,7 @@ impl<T: JsonHttpTransport> AnthropicMessagesModelClient<T> {
     fn parse_http_response(
         &self,
         response: JsonHttpResponse,
+        preserve_content_blocks: bool,
     ) -> Result<ModelClientResponse, ModelClientError> {
         if response.status_code >= 400 {
             return Err(map_anthropic_messages_http_error(
@@ -152,7 +153,8 @@ impl<T: JsonHttpTransport> AnthropicMessagesModelClient<T> {
             generate_result: GenerateResult {
                 content: extract_anthropic_text(parsed.content.as_slice()),
                 tool_calls,
-                continuation_reasoning_content: None,
+                continuation_reasoning_content: preserve_content_blocks
+                    .then(|| serde_json::to_string(&raw_content).expect("valid content blocks")),
                 reasoning_content: extract_anthropic_reasoning(parsed.content.as_slice())?,
                 input_tokens: usage.and_then(|item| item.input_tokens),
                 total_tokens: usage.and_then(|item| {
@@ -181,7 +183,10 @@ impl<T: JsonHttpTransport> ModelClient for AnthropicMessagesModelClient<T> {
         Box::pin(async move {
             let http_request = self.build_http_request(request, false)?;
             execute_json_model_response_with_retries(&self.transport, &http_request, |response| {
-                self.parse_http_response(response)
+                self.parse_http_response(
+                    response,
+                    is_minimax_provider(&request.session_config.provider_id),
+                )
             })
             .await
         })
@@ -316,19 +321,22 @@ impl<T: JsonHttpTransport> ModelClient for AnthropicMessagesModelClient<T> {
             }
             let parsed = stream_state.into_response();
             let mut parsed_response = self
-                .parse_http_response(JsonHttpResponse {
-                    status_code: response.status_code,
-                    headers: response.headers,
-                    body_json: serde_json::to_string(&parsed).map_err(|error| {
-                        ModelClientError::new(
-                            ModelClientErrorKind::Provider,
-                            format!(
+                .parse_http_response(
+                    JsonHttpResponse {
+                        status_code: response.status_code,
+                        headers: response.headers,
+                        body_json: serde_json::to_string(&parsed).map_err(|error| {
+                            ModelClientError::new(
+                                ModelClientErrorKind::Provider,
+                                format!(
                                 "serialize anthropic-messages stream completion failed: {error}"
                             ),
-                            false,
-                        )
-                    })?,
-                })
+                                false,
+                            )
+                        })?,
+                    },
+                    is_minimax_provider(&request.session_config.provider_id),
+                )
                 .map_err(|error| error.with_provider_attempts(attempted.attempts))?;
             parsed_response.provider_attempts = attempted.attempts;
             for event in pending_completion_events {
@@ -421,6 +429,7 @@ pub(super) struct AnthropicErrorObject {
 pub(super) struct AnthropicMessagesStreamState {
     provider_request_id: Option<String>,
     content: String,
+    content_blocks_by_index: HashMap<usize, Value>,
     reasoning_by_index: HashMap<usize, String>,
     completed_tool_calls: Vec<ToolCallEnvelope>,
     tool_calls_by_index: HashMap<usize, AnthropicStreamToolCallState>,
@@ -519,15 +528,46 @@ pub(super) fn build_anthropic_messages(
                 }
             }
             ModelMessageRoleV1::Assistant => {
-                if item
-                    .reasoning_content
-                    .as_deref()
-                    .is_some_and(|value| !value.trim().is_empty())
+                let replay = if is_minimax_provider(&request.session_config.provider_id) {
+                    item.reasoning_content
+                        .as_deref()
+                        .map(parse_minimax_content_blocks)
+                        .transpose()?
+                } else {
+                    None
+                };
+                if replay.is_none()
+                    && item
+                        .reasoning_content
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
                 {
                     return Err(invalid_openai_compatible_request(format!(
                         "anthropic reasoning history requires provider signatures: messageId={}",
                         item.message_id
                     )));
+                }
+                if let Some(content) = replay {
+                    let replayed_calls = content
+                        .iter()
+                        .filter(|block| block["type"] == "tool_use")
+                        .filter_map(|block| block["id"].as_str())
+                        .collect::<Vec<_>>();
+                    let expected_calls = item
+                        .tool_calls
+                        .iter()
+                        .map(|call| call.id.as_str())
+                        .collect::<Vec<_>>();
+                    if replayed_calls != expected_calls {
+                        return Err(invalid_openai_compatible_request(format!(
+                            "MiniMax tool call replay differs from saved transcript: messageId={}",
+                            item.message_id
+                        )));
+                    }
+                    pending_tool_call_ids
+                        .extend(item.tool_calls.iter().map(|call| call.id.clone()));
+                    push_anthropic_message(&mut messages, "assistant", content);
+                    continue;
                 }
                 let mut content = Vec::<Value>::new();
                 let trimmed = item.content.trim();
@@ -598,6 +638,31 @@ pub(super) fn build_anthropic_messages(
     }
     let system = (!system_parts.is_empty()).then(|| system_parts.join("\n\n"));
     Ok((system, messages))
+}
+
+fn is_minimax_provider(provider_id: &str) -> bool {
+    matches!(provider_id, "minimax.default" | "minimax-cn.default")
+}
+
+fn parse_minimax_content_blocks(raw: &str) -> Result<Vec<Value>, ModelClientError> {
+    let blocks = serde_json::from_str::<Vec<Value>>(raw).map_err(|_| {
+        invalid_openai_compatible_request(
+            "MiniMax continuation requires saved content blocks".to_string(),
+        )
+    })?;
+    if blocks.is_empty()
+        || blocks.iter().any(|block| {
+            !matches!(
+                block.get("type").and_then(Value::as_str),
+                Some("thinking" | "text" | "tool_use")
+            )
+        })
+    {
+        return Err(invalid_openai_compatible_request(
+            "MiniMax continuation has invalid content blocks".to_string(),
+        ));
+    }
+    Ok(blocks)
 }
 
 pub(super) fn push_anthropic_message(
@@ -717,6 +782,8 @@ impl AnthropicMessagesStreamState {
                 let Some(content_block) = parsed.get("content_block") else {
                     return Ok(Vec::new());
                 };
+                self.content_blocks_by_index
+                    .insert(index as usize, content_block.clone());
                 if content_block.get("type").and_then(Value::as_str) == Some("thinking") {
                     let text = anthropic_thinking_text(content_block)?;
                     self.reasoning_by_index
@@ -775,6 +842,28 @@ impl AnthropicMessagesStreamState {
                                 )
                             })?;
                         accumulated.push_str(text);
+                        if let Some(block) = index.and_then(|index| {
+                            self.content_blocks_by_index.get_mut(&(index as usize))
+                        }) {
+                            let previous =
+                                block["thinking"].as_str().unwrap_or_default().to_string();
+                            block["thinking"] = Value::String(format!("{previous}{text}"));
+                        }
+                        Vec::new()
+                    }
+                    "signature_delta" => {
+                        if let (Some(index), Some(signature)) = (
+                            parsed.get("index").and_then(Value::as_u64),
+                            delta
+                                .and_then(|item| item.get("signature"))
+                                .and_then(Value::as_str),
+                        ) {
+                            if let Some(block) =
+                                self.content_blocks_by_index.get_mut(&(index as usize))
+                            {
+                                block["signature"] = Value::String(signature.to_string());
+                            }
+                        }
                         Vec::new()
                     }
                     "text_delta" => {
@@ -786,6 +875,15 @@ impl AnthropicMessagesStreamState {
                             Vec::new()
                         } else {
                             self.content.push_str(text);
+                            if let Some(index) = parsed.get("index").and_then(Value::as_u64) {
+                                if let Some(block) =
+                                    self.content_blocks_by_index.get_mut(&(index as usize))
+                                {
+                                    let previous =
+                                        block["text"].as_str().unwrap_or_default().to_string();
+                                    block["text"] = Value::String(format!("{previous}{text}"));
+                                }
+                            }
                             vec![AnthropicMessagesStreamUpdate::Token {
                                 content: text.to_string(),
                             }]
@@ -851,6 +949,10 @@ impl AnthropicMessagesStreamState {
         let state = self.tool_calls_by_index.remove(&index)?;
         let (call_id, name) = identity;
         let args_json = normalize_stream_tool_arguments(state.input_json, None);
+        if let Some(block) = self.content_blocks_by_index.get_mut(&index) {
+            block["input"] = serde_json::from_str(args_json.as_str())
+                .unwrap_or_else(|_| Value::Object(Default::default()));
+        }
         self.completed_tool_calls.push(ToolCallEnvelope {
             id: call_id.clone(),
             name: name.clone(),
@@ -881,25 +983,27 @@ impl AnthropicMessagesStreamState {
         for index in indexes {
             let _ = self.finish_tool_call(index);
         }
-        let mut content = Vec::new();
-        let mut reasoning = self.reasoning_by_index.into_iter().collect::<Vec<_>>();
-        reasoning.sort_unstable_by_key(|(index, _)| *index);
-        for (_, thinking) in reasoning {
-            content.push(json!({"type": "thinking", "thinking": thinking}));
-        }
-        if !self.content.is_empty() {
-            content.push(json!({ "type": "text", "text": self.content }));
-        }
-        for tool_call in self.completed_tool_calls {
-            let input = serde_json::from_str::<Value>(tool_call.args_json.as_str())
-                .unwrap_or_else(|_| Value::Object(Default::default()));
-            content.push(json!({
-                "type": "tool_use",
-                "id": tool_call.id,
-                "name": tool_call.name,
-                "input": input,
-            }));
-        }
+        let mut ordered = self.content_blocks_by_index.into_iter().collect::<Vec<_>>();
+        ordered.sort_unstable_by_key(|(index, _)| *index);
+        let content = if ordered.is_empty() {
+            let mut content = Vec::new();
+            let mut reasoning = self.reasoning_by_index.into_iter().collect::<Vec<_>>();
+            reasoning.sort_unstable_by_key(|(index, _)| *index);
+            for (_, thinking) in reasoning {
+                content.push(json!({"type": "thinking", "thinking": thinking}));
+            }
+            if !self.content.is_empty() {
+                content.push(json!({"type": "text", "text": self.content}));
+            }
+            for tool_call in self.completed_tool_calls {
+                let input = serde_json::from_str::<Value>(tool_call.args_json.as_str())
+                    .unwrap_or_else(|_| Value::Object(Default::default()));
+                content.push(json!({"type": "tool_use", "id": tool_call.id, "name": tool_call.name, "input": input}));
+            }
+            content
+        } else {
+            ordered.into_iter().map(|(_, block)| block).collect()
+        };
         AnthropicMessageResponse {
             id: self.provider_request_id,
             content,

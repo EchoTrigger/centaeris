@@ -296,6 +296,7 @@ dependencies = [
  "base64 0.22.1",
  "centaeris-core",
  "centaeris-mcp",
+ "centaeris-model-catalog",
  "centaeris-runtime-sqlite",
  "chrono",
  "fs2",

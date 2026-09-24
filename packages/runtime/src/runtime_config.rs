@@ -7,6 +7,7 @@ use centaeris_core::model::{
 };
 use centaeris_core::runtime::contracts::current_timestamp_ms;
 use centaeris_core::runtime::{normalize_tool_parallelism, DEFAULT_TOOL_PARALLELISM};
+use centaeris_model_catalog::{model_catalog as embedded_model_catalog, ModelProviderTier};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
@@ -212,6 +213,8 @@ pub(crate) struct ModelCatalogItemResponse {
 pub(crate) struct ModelProviderResponse {
     pub(crate) provider_id: String,
     pub(crate) name: String,
+    pub(crate) tier: Option<ModelProviderTier>,
+    pub(crate) logo_svg: Option<String>,
     pub(crate) built_in: bool,
     pub(crate) access_kind: String,
     pub(crate) configured: bool,
@@ -648,6 +651,16 @@ fn model_providers(
                     .get(provider_id.as_str())
                     .map(|provider| provider.name.clone())
                     .unwrap_or_else(|| provider_id.clone()),
+                tier: embedded_model_catalog()
+                    .providers
+                    .iter()
+                    .find(|provider| provider.provider_id == provider_id)
+                    .map(|provider| provider.tier),
+                logo_svg: embedded_model_catalog()
+                    .providers
+                    .iter()
+                    .find(|provider| provider.provider_id == provider_id)
+                    .and_then(|provider| provider.logo_svg.clone()),
                 built_in: true,
                 access_kind: "api_key".to_string(),
                 configured: credential_source.is_some(),
@@ -671,6 +684,8 @@ fn model_providers(
         ModelProviderResponse {
             provider_id: provider.provider_id.clone(),
             name: provider.name.clone(),
+            tier: None,
+            logo_svg: None,
             built_in: false,
             access_kind: "custom".to_string(),
             configured: credential_source.is_some(),
@@ -1066,6 +1081,42 @@ fn apply_default_record(
 
 fn load_state() -> Result<PersistedRuntimeConfigState, String> {
     Ok(user_config::load()?.runtime)
+}
+
+pub(crate) fn migrate_persisted_model_selection(state: &mut PersistedRuntimeConfigState) -> bool {
+    let Some(active) = state.active_model.as_mut() else {
+        return false;
+    };
+    let replacement = match (active.provider_id.as_str(), active.model.as_str()) {
+        ("openai.default", "gpt-5.6-sol") => Some("gpt-6-sol"),
+        ("openai.default", "gpt-5.6-luna") => Some("gpt-6-luna"),
+        ("anthropic.default", "claude-opus-5") => Some("claude-opus-5-5"),
+        ("anthropic.default", "claude-fable-5") => Some("claude-fable-5-1"),
+        ("deepseek.default", "deepseek-v4-flash") => Some("deepseek-flash"),
+        ("xiaomi.default", "mimo-v2.5") => Some("mimo-v2.6-flash"),
+        ("xiaomi.default", "mimo-v2.5-pro") => Some("mimo-v2.6-pro"),
+        _ => None,
+    };
+    let mut changed = false;
+    if let Some(model) = replacement {
+        active.model = model.to_string();
+        changed = true;
+    }
+    let profile = built_in_model_profile(active.provider_id.as_str(), active.model.as_str());
+    if profile.is_none() && built_in_model_provider_ids().contains(&active.provider_id) {
+        state.active_model = None;
+        return true;
+    }
+    if let Some(profile) = profile {
+        if active.model_thinking_mode.as_ref().is_some_and(|mode| {
+            !profile.thinking_modes.contains(mode)
+                && profile.thinking_mode.as_deref() != Some(mode.as_str())
+        }) {
+            active.model_thinking_mode = None;
+            changed = true;
+        }
+    }
+    changed
 }
 
 pub(crate) fn validate_persisted_model_state(
@@ -1727,7 +1778,7 @@ mod tests {
         persist_model_api_key(&mut secrets, DEEPSEEK_PROVIDER_ID, "secret".to_string());
         let request = AgentRuntimeConfigSetRequest {
             model_provider_id: Some(DEEPSEEK_PROVIDER_ID.to_string()),
-            model: Some("deepseek-v4-pro".to_string()),
+            model: Some("deepseek-flash".to_string()),
             model_thinking_mode: Some("default".to_string()),
             ..AgentRuntimeConfigSetRequest::default()
         };
@@ -1738,7 +1789,7 @@ mod tests {
         assert!(state.models.is_empty());
         assert_eq!(
             active_model_record(&state).map(|item| item.model),
-            Some("deepseek-v4-pro".to_string())
+            Some("deepseek-flash".to_string())
         );
         let record = default_record(&state);
         assert_eq!(record.model_context_tokens, Some(1_000_000));
@@ -1751,7 +1802,7 @@ mod tests {
         };
         assert!(apply_model_thinking_mode_request(&mut state, &invalid)
             .expect_err("DeepSeek must reject xhigh")
-            .contains("expected high, max"));
+            .contains("expected low, high, max"));
         apply_model_thinking_mode_request(
             &mut state,
             &AgentRuntimeConfigSetRequest {
@@ -1767,17 +1818,53 @@ mod tests {
     }
 
     #[test]
-    fn catalog_model_route_overrides_are_projected_without_persisted_copies() {
-        let item = model_catalog(&PersistedRuntimeConfigState::default())
+    fn opencode_go_catalog_exposes_only_the_approved_two_models() {
+        let models = model_catalog(&PersistedRuntimeConfigState::default())
             .into_iter()
-            .find(|item| item.provider_id == "opencode-go.default" && item.model == "minimax-m3")
-            .expect("OpenCode MiniMax catalog item");
+            .filter(|item| item.provider_id == "opencode-go.default")
+            .map(|item| item.model)
+            .collect::<Vec<_>>();
+        assert_eq!(models, ["glm-5.3-flash", "deepseek-v4.1-flash"]);
+    }
 
-        assert_eq!(item.model_api, Some(ModelWireApi::AnthropicMessages));
+    #[test]
+    fn old_builtin_selection_migrates_without_touching_other_settings() {
+        let mut state = PersistedRuntimeConfigState {
+            default_tool_parallelism: Some(3),
+            active_model: Some(ActiveModelRef {
+                provider_id: DEEPSEEK_PROVIDER_ID.to_string(),
+                model: "deepseek-v4-flash".to_string(),
+                model_thinking_mode: Some("high".to_string()),
+            }),
+            ..PersistedRuntimeConfigState::default()
+        };
+        assert!(migrate_persisted_model_selection(&mut state));
+        let active = state.active_model.as_ref().expect("selection retained");
+        assert_eq!(active.model, "deepseek-flash");
+        assert_eq!(active.model_thinking_mode.as_deref(), Some("high"));
+        assert_eq!(state.default_tool_parallelism, Some(3));
+        assert!(!migrate_persisted_model_selection(&mut state));
+        validate_persisted_model_state(&state).expect("migrated selection remains valid");
+    }
+
+    #[test]
+    fn retired_opencode_go_selection_clears_only_active_model() {
+        let mut state = PersistedRuntimeConfigState {
+            default_bash_path: Some("C:/tools/bash.exe".to_string()),
+            active_model: Some(ActiveModelRef {
+                provider_id: "opencode-go.default".to_string(),
+                model: "kimi-k3".to_string(),
+                model_thinking_mode: Some("max".to_string()),
+            }),
+            ..PersistedRuntimeConfigState::default()
+        };
+        assert!(migrate_persisted_model_selection(&mut state));
+        assert!(state.active_model.is_none());
         assert_eq!(
-            item.model_api_base.as_deref(),
-            Some("https://opencode.ai/zen/go")
+            state.default_bash_path.as_deref(),
+            Some("C:/tools/bash.exe")
         );
+        validate_persisted_model_state(&state).expect("other settings remain valid");
     }
 
     #[test]
@@ -1786,7 +1873,7 @@ mod tests {
         let mut secrets = PersistedRuntimeSecretState::default();
         let request = AgentRuntimeConfigSetRequest {
             model_provider_id: Some(DEEPSEEK_PROVIDER_ID.to_string()),
-            model: Some("deepseek-v4-pro".to_string()),
+            model: Some("deepseek-flash".to_string()),
             ..AgentRuntimeConfigSetRequest::default()
         };
         assert!(apply_model_request(&mut state, &secrets, &request).is_err());
@@ -1812,7 +1899,7 @@ mod tests {
             &secrets,
             &AgentRuntimeConfigSetRequest {
                 model_provider_id: Some(DEEPSEEK_PROVIDER_ID.to_string()),
-                model: Some("deepseek-v4-pro".to_string()),
+                model: Some("deepseek-flash".to_string()),
                 ..AgentRuntimeConfigSetRequest::default()
             },
         )
@@ -1849,12 +1936,12 @@ mod tests {
     #[test]
     fn persisted_builtin_duplicate_loud_fails() {
         let mut state = PersistedRuntimeConfigState::default();
-        let duplicate = resolve_model_record(&state, DEEPSEEK_PROVIDER_ID, "deepseek-v4-flash")
+        let duplicate = resolve_model_record(&state, DEEPSEEK_PROVIDER_ID, "deepseek-flash")
             .expect("built-in profile");
         state.models.push(duplicate);
         state.active_model = Some(ActiveModelRef {
             provider_id: DEEPSEEK_PROVIDER_ID.to_string(),
-            model: "deepseek-v4-flash".to_string(),
+            model: "deepseek-flash".to_string(),
             model_thinking_mode: Some("high".to_string()),
         });
 
