@@ -86,7 +86,7 @@ async fn built_in_provider_registry_contains_expected_defaults() {
         .expect("openai provider should exist");
     assert_eq!(
         openai_provider.capability_profile.max_context_tokens,
-        Some(272_000)
+        Some(1_050_000)
     );
     assert!(providers.contains_key("anthropic.default"));
     let kimi_provider = providers
@@ -126,18 +126,18 @@ fn built_in_model_profiles_are_canonical_and_bounded() {
             .map(|provider| provider.models.len())
             .sum::<usize>()
     );
-    let deepseek = built_in_model_profile("deepseek.default", "deepseek-v4-pro")
-        .expect("DeepSeek V4 Pro profile");
+    let deepseek = built_in_model_profile("deepseek.default", "deepseek-flash")
+        .expect("DeepSeek Flash profile");
     assert_eq!(deepseek.context_tokens, 1_000_000);
     assert_eq!(deepseek.max_output_tokens, 384_000);
     assert_eq!(deepseek.thinking_mode.as_deref(), Some("high"));
-    assert_eq!(deepseek.thinking_modes, ["high", "max"]);
+    assert_eq!(deepseek.thinking_modes, ["low", "high", "max"]);
     let kimi = built_in_model_profile("kimi.default", "kimi-k3").expect("Kimi K3 profile");
     assert_eq!(kimi.context_tokens, 1_048_576);
     assert_eq!(kimi.max_output_tokens, 131_072);
     assert_eq!(kimi.thinking_mode.as_deref(), Some("high"));
     assert!(built_in_model_profile("deepseek.default", "deepseek-v4-fast").is_none());
-    assert!(built_in_model_profile("deepseek.default", "DEEPSEEK-V4-PRO").is_none());
+    assert!(built_in_model_profile("deepseek.default", "DEEPSEEK-FLASH").is_none());
 }
 
 #[tokio::test]
@@ -445,7 +445,7 @@ fn build_kimi_request(model: &str, thinking_mode: Option<&str>) -> ModelClientRe
 fn build_deepseek_request(thinking_mode: Option<&str>) -> ModelClientRequest {
     let mut request = build_model_request("deepseek.default");
     request.session_config.provider_kind = ModelProviderKind::DeepSeek;
-    request.session_config.model = "deepseek-v4-pro".to_string();
+    request.session_config.model = "deepseek-flash".to_string();
     request.session_config.thinking_mode = thinking_mode.map(str::to_string);
     request
 }
@@ -752,6 +752,83 @@ async fn anthropic_messages_stream_accumulates_tool_json_before_completion() {
         ModelClientStreamEvent::Done { finish_reason: Some(reason) }
             if reason == "tool_use"
     )));
+}
+
+#[tokio::test]
+async fn minimax_stream_replays_complete_thinking_and_tool_blocks() {
+    std::env::set_var("MINIMAX_API_KEY", "test-key");
+    let transport = MockJsonHttpTransport::with_sse(
+        Ok(JsonHttpResponse {
+            status_code: 200,
+            headers: HashMap::new(),
+            body_json: String::new(),
+        }),
+        vec![
+            r#"{"type":"message_start","message":{"id":"minimax-1"}}"#,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Inspect file"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"opaque-signature"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Reading now"}}"#,
+            r#"{"type":"content_block_stop","index":1}"#,
+            r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"call-read","name":"read","input":{}}}"#,
+            r#"{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"README.md\"}"}}"#,
+            r#"{"type":"content_block_stop","index":2}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#,
+            r#"{"type":"message_stop"}"#,
+        ],
+    );
+    let client = AnthropicMessagesModelClient::new(ModelProviderRegistry::new(), &transport);
+    let mut request = build_model_request("minimax.default");
+    request.session_config.model = "MiniMax-M2.7".to_string();
+    let result = client
+        .generate_stream(&request, &mut |_| {})
+        .await
+        .expect("MiniMax stream");
+    let saved = result
+        .generate_result
+        .continuation_reasoning_content
+        .expect("full blocks");
+    let saved_blocks: Value = serde_json::from_str(&saved).expect("content JSON");
+    assert_eq!(
+        saved_blocks[0],
+        json!({"type":"thinking","thinking":"Inspect file","signature":"opaque-signature"})
+    );
+    assert_eq!(saved_blocks[2]["input"], json!({"path":"README.md"}));
+
+    request.prepared_prompt.messages = test_model_messages(vec![
+        ChatMessage {
+            message_id: "user".to_string(),
+            role: MessageRole::User,
+            content: "Inspect".to_string(),
+            created_at_ms: 1,
+            metadata: HashMap::new(),
+        },
+        ChatMessage {
+            message_id: "assistant".to_string(),
+            role: MessageRole::Assistant,
+            content: "Reading now".to_string(),
+            created_at_ms: 2,
+            metadata: assistant_semantics_metadata(
+                Some(&saved),
+                &[("call-read", "read", r#"{"path":"README.md"}"#)],
+            ),
+        },
+        ChatMessage {
+            message_id: "tool".to_string(),
+            role: MessageRole::Tool,
+            content: "done".to_string(),
+            created_at_ms: 3,
+            metadata: tool_result_semantics_metadata("call-read", "read", "ok"),
+        },
+    ]);
+    let (_, messages) =
+        super::anthropic_messages::build_anthropic_messages(&request).expect("replay");
+    assert_eq!(
+        serde_json::to_value(&messages).unwrap()[1]["content"],
+        saved_blocks
+    );
 }
 
 fn test_hash_json(value: &Value) -> String {

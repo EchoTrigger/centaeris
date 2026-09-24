@@ -11,6 +11,7 @@ import {
   type ModelWireApi,
 } from "../lib/chatBridge";
 import type { ConfirmAction } from "./ConfirmDialog";
+import { ProviderLogo } from "./ProviderLogo";
 
 type ModelsDialogProps = {
   onClose: () => void;
@@ -46,16 +47,17 @@ type ModelTestState = AgentRuntimeModelTestResponse & {
   model: string;
 };
 
-const OAUTH_SUBSCRIPTIONS = [
-  { name: "ChatGPT / Codex", models: "GPT-5.6 Sol · Terra · Luna" },
-  { name: "Claude", models: "Opus 5 · Sonnet 5 · Fable 5" },
-] as const;
-
 const API_OPTIONS: ModelWireApi[] = [
   "openai-completions",
   "openai-responses",
   "anthropic-messages",
 ];
+
+const PROVIDER_TIERS = [
+  { id: "direct_api", label: "DIRECT API" },
+  { id: "coding_plan", label: "CODING PLANS" },
+  { id: "token_plan", label: "TOKEN PLANS" },
+] as const;
 
 let nextCustomModelKey = 1;
 
@@ -410,12 +412,9 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
     "OpenAI Anthropic compatible",
     "Custom endpoint HTTP HTTPS",
   );
-  const visibleOAuthSubscriptions = OAUTH_SUBSCRIPTIONS.filter((provider) =>
-    providerMatches(provider.name, provider.models));
   const visibleApiProviders = (config?.modelProviders ?? []).filter((provider) => provider.builtIn &&
     providerMatches(provider.name, "API key HTTPS"));
   const providerPickerEmpty = !customCandidateVisible
-    && visibleOAuthSubscriptions.length === 0
     && visibleApiProviders.length === 0;
   return (
     <div className="modelsDialogLayout">
@@ -424,7 +423,7 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
           const active = selectedProviderId === provider.providerId;
           return <div className="modelsProviderGroup" key={provider.providerId}>
             <button type="button" className={active && selection.kind === "provider" ? "modelsProviderButton is-active" : "modelsProviderButton"} onClick={() => select({ kind: "provider", providerId: provider.providerId })}>
-              <span>{provider.name}</span>{provider.configured ? <span className="modelsConfiguredDot" aria-label="configured" /> : null}
+              <span className="modelsProviderIdentity"><ProviderLogo svg={provider.logoSvg} name={provider.name} />{provider.name}</span>{provider.configured ? <span className="modelsConfiguredDot" aria-label="configured" /> : null}
             </button>
           </div>;
         })}
@@ -490,10 +489,10 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
           <div className="modelsProviderPickerScroll">
             <div className="modelsProviderPicker">
               {customCandidateVisible ? <section><h2>CUSTOM</h2><div className="modelsProviderCards"><button type="button" onClick={addCustomProvider}><strong>OpenAI / Anthropic compatible</strong><span>Custom endpoint · HTTP or HTTPS</span><Plus aria-hidden="true" /></button></div></section> : null}
-              {visibleOAuthSubscriptions.length ? <section><h2>OAUTH SUBSCRIPTIONS</h2><div className="modelsProviderCards">{visibleOAuthSubscriptions.map((provider) => <button type="button" disabled key={provider.name} title="OAuth provider SDK adapter is not enabled in this build"><strong>{provider.name}</strong><span>{provider.models}</span><small>SDK adapter pending</small></button>)}</div></section> : null}
-              {visibleApiProviders.length ? <section><h2>API</h2><div className="modelsProviderCards">{visibleApiProviders.map((provider) => {
-                return <button type="button" key={provider.providerId} onClick={() => { select({ kind: "provider", providerId: provider.providerId }); setProviderPickerOpen(false); }}><strong>{provider.name}</strong></button>;
-              })}</div></section> : null}
+              {PROVIDER_TIERS.map((tier) => {
+                const providers = visibleApiProviders.filter((provider) => provider.tier === tier.id);
+                return providers.length ? <section key={tier.id}><h2>{tier.label}</h2><div className="modelsProviderCards">{providers.map((provider) => <button type="button" key={provider.providerId} onClick={() => { select({ kind: "provider", providerId: provider.providerId }); setProviderPickerOpen(false); }}><span className="modelsProviderIdentity"><ProviderLogo svg={provider.logoSvg} name={provider.name} /><strong>{provider.name}</strong></span></button>)}</div></section> : null;
+              })}
               {providerPickerEmpty ? <div className="modelsProviderPickerEmpty">No providers found.</div> : null}
             </div>
           </div>
