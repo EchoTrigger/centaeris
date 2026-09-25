@@ -1,7 +1,5 @@
 use crate::atomic_file::write_file_atomically;
-use crate::runtime_config::{
-    migrate_persisted_model_selection, validate_persisted_model_state, PersistedRuntimeConfigState,
-};
+use crate::runtime_config::{validate_persisted_model_state, PersistedRuntimeConfigState};
 use crate::user_data_layout;
 use centaeris_core::extension::skills::{
     validate_skill_sources_config, SkillPolicyV1, SkillSourceConfigV1, SkillSourceKindV1,
@@ -146,35 +144,19 @@ pub(crate) fn load_at(path: &Path) -> Result<UserConfigDocument, String> {
         .ok_or_else(|| {
             format!("{USER_CONFIG_UNSUPPORTED}: user config schema_version must be an integer")
         })?;
-    let upgrade_v1 = match schema_version {
-        1 => true,
-        value if value == i64::from(USER_CONFIG_SCHEMA_VERSION) => false,
-        value if value < i64::from(USER_CONFIG_SCHEMA_VERSION) => {
-            return Err(format!(
-                "{USER_CONFIG_UNSUPPORTED}: no forward migration exists from schema_version {value} to {USER_CONFIG_SCHEMA_VERSION}"
-            ));
-        }
-        value => {
-            return Err(format!(
-                "{USER_CONFIG_UNSUPPORTED}: refusing config downgrade from schema_version {value} to {USER_CONFIG_SCHEMA_VERSION}"
-            ));
-        }
-    };
+    if schema_version != i64::from(USER_CONFIG_SCHEMA_VERSION) {
+        return Err(format!(
+            "{USER_CONFIG_UNSUPPORTED}: unsupported schema_version: expected {USER_CONFIG_SCHEMA_VERSION}, got {schema_version}"
+        ));
+    }
     let stored = toml::from_str::<StoredUserConfigDocument>(raw.as_str()).map_err(|error| {
         format!(
             "{USER_CONFIG_UNSUPPORTED}: parse user config v{schema_version} failed for {}: {error}",
             path.display()
         )
     })?;
-    let mut config = UserConfigDocument::from(stored);
-    if upgrade_v1 {
-        config.schema_version = USER_CONFIG_SCHEMA_VERSION;
-    }
-    let migrated = migrate_persisted_model_selection(&mut config.runtime) || upgrade_v1;
+    let config = UserConfigDocument::from(stored);
     validate(&config)?;
-    if migrated {
-        persist_at(path, &config)?;
-    }
     Ok(config)
 }
 
@@ -360,6 +342,23 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn unsupported_config_schema_is_rejected_without_rewriting_file() {
+        let root = temp_root("unsupported-schema");
+        let path = root.join("config.toml");
+        let config = UserConfigDocument {
+            schema_version: 1,
+            ..UserConfigDocument::default()
+        };
+        let raw = toml::to_string_pretty(&StoredUserConfigDocument::from(&config)).unwrap();
+        fs::write(&path, &raw).unwrap();
+        assert!(load_at(&path)
+            .expect_err("unsupported schema")
+            .contains(USER_CONFIG_UNSUPPORTED));
+        assert_eq!(fs::read_to_string(&path).unwrap(), raw);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn round_trip_preserves_all_sections() {
         let root = temp_root("round-trip");
         let path = root.join("config.toml");
@@ -374,8 +373,8 @@ mod tests {
     }
 
     #[test]
-    fn loading_retired_builtin_selection_migrates_file_and_preserves_plugins() {
-        let root = temp_root("model-migration");
+    fn unsupported_model_is_rejected_without_rewriting_config() {
+        let root = temp_root("unsupported-model");
         let path = root.join("config.toml");
         let mut config = UserConfigDocument::default();
         config.plugins.disabled.push("plugin-a".to_string());
@@ -408,28 +407,24 @@ mod tests {
         )
         .expect("write old config");
 
-        let restored = load_at(&path).expect("migrate old selection");
-        assert_eq!(restored.plugins.disabled, ["plugin-a"]);
-        let persisted = fs::read_to_string(&path).expect("read migrated config");
-        assert!(persisted.contains("deepseek-flash"));
-        assert!(!persisted.contains("deepseek-v4-flash"));
-        assert_eq!(
-            load_at(&path).expect("idempotent reload").plugins.disabled,
-            ["plugin-a"]
-        );
+        let original = fs::read(&path).unwrap();
+        assert!(load_at(&path)
+            .expect_err("unsupported model")
+            .contains(USER_CONFIG_UNSUPPORTED));
+        assert_eq!(fs::read(&path).unwrap(), original);
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn v1_config_migrates_to_v2_without_losing_selected_effort() {
-        let root = temp_root("effort-migration");
+    fn current_config_read_preserves_selected_effort_and_file_bytes() {
+        let root = temp_root("effort-read");
         let path = root.join("config.toml");
         let mut config = UserConfigDocument::default();
         config.plugins.disabled.push("plugin-a".to_string());
         let encoded = toml::to_string_pretty(&StoredUserConfigDocument::from(&config))
             .expect("encode current config");
         let mut old: toml::Value = toml::from_str(&encoded).expect("parse current config");
-        old["schema_version"] = toml::Value::Integer(1);
+        old["schema_version"] = toml::Value::Integer(i64::from(USER_CONFIG_SCHEMA_VERSION));
         old["runtime"]
             .as_table_mut()
             .expect("runtime section")
@@ -452,16 +447,18 @@ mod tests {
             );
         fs::write(
             &path,
-            toml::to_string_pretty(&old).expect("encode v1 config"),
+            toml::to_string_pretty(&old).expect("encode current config"),
         )
-        .expect("write v1 config");
+        .expect("write current config");
 
-        let restored = load_at(&path).expect("migrate v1 config");
+        let original = fs::read(&path).unwrap();
+        let restored = load_at(&path).expect("read current config");
+        assert_eq!(fs::read(&path).unwrap(), original);
         assert_eq!(restored.schema_version, 2);
         assert_eq!(restored.plugins.disabled, ["plugin-a"]);
         let saved: toml::Value =
-            toml::from_str(&fs::read_to_string(&path).expect("read migrated config"))
-                .expect("parse migrated config");
+            toml::from_str(&fs::read_to_string(&path).expect("read current config"))
+                .expect("parse current config");
         assert_eq!(saved["schema_version"].as_integer(), Some(2));
         assert_eq!(
             saved["runtime"]["active_model"]["model_thinking_mode"].as_str(),
@@ -484,7 +481,7 @@ mod tests {
             .expect_err("unknown field")
             .starts_with(USER_CONFIG_UNSUPPORTED));
 
-        fs::write(path.as_path(), "schema_version = 1\n").expect("write incomplete config");
+        fs::write(path.as_path(), "schema_version = 2\n").expect("write incomplete config");
         assert!(load_at(path.as_path())
             .expect_err("missing sections")
             .starts_with(USER_CONFIG_UNSUPPORTED));
@@ -498,17 +495,17 @@ mod tests {
     }
 
     #[test]
-    fn schema_dispatch_rejects_unimplemented_upgrade_and_downgrade() {
+    fn schema_dispatch_rejects_unsupported_versions() {
         let root = temp_root("schema-dispatch");
         let path = root.join("config.toml");
         fs::write(path.as_path(), "schema_version = 0\n").expect("write old config");
         assert!(load_at(path.as_path())
             .expect_err("old config")
-            .contains("no forward migration exists"));
+            .contains("unsupported schema_version"));
         fs::write(path.as_path(), "schema_version = 3\n").expect("write future config");
         assert!(load_at(path.as_path())
             .expect_err("future config")
-            .contains("refusing config downgrade"));
+            .contains("unsupported schema_version"));
         let _ = fs::remove_dir_all(root);
     }
 
