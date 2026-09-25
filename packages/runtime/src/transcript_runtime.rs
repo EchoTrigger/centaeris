@@ -1448,40 +1448,55 @@ mod tests {
         assert!(rebuilt.page.expect("rebuilt page").blocks.is_empty());
     }
 
-    fn released_upgrade_fixture() -> TranscriptFixture {
+    fn persisted_transcript_fixture() -> TranscriptFixture {
         let mut fixture = TranscriptFixture::new("generation", 0);
         fixture.session_id = "session-1";
         fixture.log_path = fixture.root.join("session-1.jsonl");
         fs::write(
             &fixture.log_path,
-            include_bytes!("../tests/fixtures/upgrade-v1.0.0/session.jsonl"),
+            include_bytes!("../tests/fixtures/transcript/session.jsonl"),
         )
         .unwrap();
         let observations = fixture.root.join("session-1.observations");
         fs::create_dir(&observations).unwrap();
         fs::write(observations.join("manifest-608038e10859b6eeaef30ed2702ab70bcaec9ea9b5d9cd044f5fa9313d0e854b.json"),
-            include_bytes!("../tests/fixtures/upgrade-v1.0.0/session-1.observations/manifest-608038e10859b6eeaef30ed2702ab70bcaec9ea9b5d9cd044f5fa9313d0e854b.json")).unwrap();
+            include_bytes!("../tests/fixtures/transcript/session-1.observations/manifest-608038e10859b6eeaef30ed2702ab70bcaec9ea9b5d9cd044f5fa9313d0e854b.json")).unwrap();
         fixture
     }
 
     #[test]
-    fn upgrade_released_v1_preserves_history_sources_and_continuation() {
+    fn current_store_preserves_history_sources_and_continuation() {
         use centaeris_core::session::external_context::ExternalContextStorePort;
         use centaeris_core::session::store::AgentRuntimeSnapshotStorePort;
-        let mut fixture = released_upgrade_fixture();
-        let source = include_bytes!("../tests/fixtures/upgrade-v1.0.0/session.jsonl");
-        let conn = rusqlite::Connection::open(&fixture.database_path).unwrap();
-        conn.execute_batch(include_str!("../tests/fixtures/upgrade-v1.0.0/runtime.sql"))
+        let mut fixture = persisted_transcript_fixture();
+        let source = include_bytes!("../tests/fixtures/transcript/session.jsonl");
+        let store = SqliteRuntimeStore::new(&fixture.database_path).expect("create current store");
+        store
+            .upsert_external_context_object(
+                centaeris_core::session::external_context::ExternalContextObject {
+                    schema_version: "external_context.v1".into(),
+                    object_id: "source-object-1".into(),
+                    object_kind: "text".into(),
+                    source_provider_id: "fixture".into(),
+                    source_tool_name: "read".into(),
+                    title: "notice.md".into(),
+                    content: "notice contents".into(),
+                    metadata: json!({"fixture":"transcript"}),
+                    updated_at_ms: 1,
+                },
+            )
             .unwrap();
-        drop(conn);
+        store
+            .save_agent_runtime_snapshot("session-1", r#"{"fixture":"transcript"}"#, 1)
+            .unwrap();
+        drop(store);
         let request = || TranscriptPageRpcRequestV1 {
             session_id: "session-1".into(),
             projection_generation: None,
             source_high_water: None,
             older_cursor: None,
         };
-        let store =
-            SqliteRuntimeStore::new(&fixture.database_path).expect("upgrade released store");
+        let store = SqliteRuntimeStore::new(&fixture.database_path).expect("open current store");
         let page = page_until_ready(&store, &fixture.log_path, request())
             .page
             .unwrap();
@@ -1517,11 +1532,11 @@ mod tests {
                 .load_agent_runtime_snapshot("session-1")
                 .unwrap()
                 .as_deref(),
-            Some("{\"fixture\":\"released-v1\"}")
+            Some("{\"fixture\":\"transcript\"}")
         );
         assert_eq!(fs::read(&fixture.log_path).unwrap(), source);
         let document = message_log::read_session_document(&fixture.log_path)
-            .expect("hydrate released observation manifest and records");
+            .expect("hydrate persisted observation manifest and records");
         let citation = document
             .records
             .iter()
@@ -1537,10 +1552,9 @@ mod tests {
             "session-1",
             &document.records,
         )
-        .expect("released conversation remains restorable for continuation");
+        .expect("persisted conversation remains restorable for continuation");
         drop(store);
-        let store =
-            SqliteRuntimeStore::new(&fixture.database_path).expect("restart upgraded release");
+        let store = SqliteRuntimeStore::new(&fixture.database_path).expect("restart current store");
         assert_eq!(
             page_until_ready(&store, &fixture.log_path, request())
                 .page
@@ -1564,8 +1578,8 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_v3_invalidates_legacy_projection_and_rebuilds_without_rewriting_source() {
-        let mut fixture = released_upgrade_fixture();
+    fn invalidated_projection_rebuilds_without_rewriting_source() {
+        let mut fixture = persisted_transcript_fixture();
         let store = SqliteRuntimeStore::new(&fixture.database_path).expect("old store");
         let request = || TranscriptPageRpcRequestV1 {
             session_id: fixture.session_id.into(),
@@ -1578,19 +1592,20 @@ mod tests {
             .unwrap();
         drop(store);
         let conn = rusqlite::Connection::open(&fixture.database_path).unwrap();
-        conn.execute_batch("DELETE FROM schema_migrations WHERE version > 3;
+        conn.execute_batch("UPDATE transcript_projection_heads SET invalidation_reason='fixture_rebuild';
             UPDATE transcript_block_versions SET block_json = json_remove(json_set(block_json,
                 '$.body.request_id', json_extract(block_json, '$.body.requestId')), '$.body.requestId')
                 WHERE json_extract(block_json, '$.body.kind')='reasoning';").unwrap();
         drop(conn);
         let original = fs::read(&fixture.log_path).unwrap();
-        let store = SqliteRuntimeStore::new(&fixture.database_path).expect("upgrade");
+        let store =
+            SqliteRuntimeStore::new(&fixture.database_path).expect("open invalidated store");
         let pending = page_with_store(&store, &fixture.log_path, request())
             .expect("invalidated, not decoded");
         assert!(pending.page.is_none());
         drop(store); // Restart before the rebuild has run.
         let store =
-            SqliteRuntimeStore::new(&fixture.database_path).expect("restart pending upgrade");
+            SqliteRuntimeStore::new(&fixture.database_path).expect("restart pending rebuild");
         let rebuilt = page_until_ready(&store, &fixture.log_path, request());
         assert_ne!(
             rebuilt.projection_generation,
@@ -1600,7 +1615,7 @@ mod tests {
         assert_eq!(fs::read(&fixture.log_path).unwrap(), original);
         drop(store);
         let store =
-            SqliteRuntimeStore::new(&fixture.database_path).expect("reopen completed upgrade");
+            SqliteRuntimeStore::new(&fixture.database_path).expect("reopen completed rebuild");
         let reopened = page_until_ready(&store, &fixture.log_path, request());
         assert_eq!(
             reopened.projection_generation,

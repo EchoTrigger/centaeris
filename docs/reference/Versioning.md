@@ -6,7 +6,7 @@ another contract.
 
 ## Source and product version
 
-Current Rust workspace and Node package metadata is `1.0.0`. This describes the
+Current Rust workspace and Node package metadata is `0.1.0`. This describes the
 source candidate; it does not assert that a public tag, package-registry
 publication, or GitHub Release already exists.
 
@@ -25,7 +25,7 @@ sandbox code may exist, without creating a supported download or release
 claim. A platform enters the release matrix only with an explicit build target,
 packaging rules, license assembly, and acceptance tests.
 
-The Rust crates and Node workspaces are repository components. v1 does not
+The Rust crates and Node workspaces are repository components. The product does not
 claim that they are independently published to crates.io or npm.
 
 ## Plugin package version
@@ -44,14 +44,14 @@ active AgentRun.
 
 The current public identities include:
 
-| Contract | v1 identity |
+| Contract | Current identity |
 | --- | --- |
 | Core protocol | `1.0.0` |
 | Local Runtime protocol | `centaeris.runtime`, `protocolVersion: 1` |
 | Session manifest | `session.manifest.v1` |
 | Session event | `session.event.v1`, `eventVersion: 1` |
 | Runtime event projection | `version: v1` |
-| Plugin manifest | Runtime major 1 plus `.centaeris-plugin/plugin.json` |
+| Plugin manifest | `.centaeris-plugin/plugin.json` with the current manifest contract |
 | Plugin Activation | `plugin_activation_snapshot_v1` |
 | MCP declaration | `mcp_servers_v1` |
 | MCP model contract | `mcp_model_contract_v1` |
@@ -75,21 +75,19 @@ For every current contract:
 - an adapter does not translate old persisted semantics into Core behind the
   public contract.
 
-The Plugin manifest intentionally has no serialized schema field in Runtime v1.
-Its exact path and Runtime major identify its parser. The v1 manifest cannot
-gain optional fields in place; an incompatible manifest revision belongs to a
-later Runtime major and a new public contract.
+The Plugin manifest has no serialized schema field. Its exact path and the
+published manifest contract identify its parser independently of product versions.
 
-## Stored data and migration
+## Stored data
 
-Storage adapters own physical migrations for their data. A migration may
-change a table or file layout while preserving the same public Core contract.
-It must validate the source format, apply atomically or recoverably, and leave
-unsupported data failed rather than partially interpreted.
+Storage adapters own physical schemas. Runtime initializes an empty database
+with the current schema and validates an existing database before using it.
+Configuration loading validates the current schema and its model identities.
+Unsupported formats fail explicitly; readers do not guess or rewrite them.
 
-A change in runtime meaning is not a storage migration. It requires a new
-public schema or protocol decision. v1 does not add old field names or old
-event shapes merely to keep an earlier development database readable.
+Session logs and observation content are authoritative. Derived transcript
+projections can be rebuilt without rewriting source records or replaying tools.
+See [persistence acceptance](../eval/PersistenceAcceptance.md) for validation.
 
 ## Release change rule
 

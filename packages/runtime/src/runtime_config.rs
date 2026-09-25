@@ -1136,56 +1136,6 @@ fn load_state() -> Result<PersistedRuntimeConfigState, String> {
     Ok(user_config::load()?.runtime)
 }
 
-pub(crate) fn migrate_persisted_model_selection(state: &mut PersistedRuntimeConfigState) -> bool {
-    let saved_preferences = std::mem::take(&mut state.thinking_mode_preferences);
-    state.thinking_mode_preferences = saved_preferences
-        .iter()
-        .filter(|item| {
-            thinking_mode_supported_for_model(
-                state,
-                item.provider_id.as_str(),
-                item.model.as_str(),
-                item.mode.as_str(),
-            )
-        })
-        .cloned()
-        .collect();
-    let preferences_changed = state.thinking_mode_preferences != saved_preferences;
-    let Some(active) = state.active_model.as_mut() else {
-        return preferences_changed;
-    };
-    let replacement = match (active.provider_id.as_str(), active.model.as_str()) {
-        ("openai.default", "gpt-5.6-sol") => Some("gpt-6-sol"),
-        ("openai.default", "gpt-5.6-luna") => Some("gpt-6-luna"),
-        ("anthropic.default", "claude-opus-5") => Some("claude-opus-5-5"),
-        ("anthropic.default", "claude-fable-5") => Some("claude-fable-5-1"),
-        ("deepseek.default", "deepseek-v4-flash") => Some("deepseek-flash"),
-        ("xiaomi.default", "mimo-v2.5") => Some("mimo-v2.6-flash"),
-        ("xiaomi.default", "mimo-v2.5-pro") => Some("mimo-v2.6-pro"),
-        _ => None,
-    };
-    let mut changed = preferences_changed;
-    if let Some(model) = replacement {
-        active.model = model.to_string();
-        changed = true;
-    }
-    let profile = built_in_model_profile(active.provider_id.as_str(), active.model.as_str());
-    if profile.is_none() && built_in_model_provider_ids().contains(&active.provider_id) {
-        state.active_model = None;
-        return true;
-    }
-    if let Some(profile) = profile {
-        if active.model_thinking_mode.as_ref().is_some_and(|mode| {
-            !profile.thinking_modes.contains(mode)
-                && profile.thinking_mode.as_deref() != Some(mode.as_str())
-        }) {
-            active.model_thinking_mode = None;
-            changed = true;
-        }
-    }
-    changed
-}
-
 fn thinking_mode_supported_for_model(
     state: &PersistedRuntimeConfigState,
     provider_id: &str,
@@ -1974,7 +1924,6 @@ mod tests {
         let encoded = toml::to_string(&state).expect("serialize settings");
         let mut restored: PersistedRuntimeConfigState =
             toml::from_str(&encoded).expect("reload settings");
-        assert!(!migrate_persisted_model_selection(&mut restored));
         validate_persisted_model_state(&restored).expect("saved preference remains valid");
         assert_eq!(
             default_record(&restored).model_thinking_mode.as_deref(),
@@ -1988,8 +1937,8 @@ mod tests {
     }
 
     #[test]
-    fn removed_catalog_effort_preference_does_not_block_settings_reload() {
-        let mut state = PersistedRuntimeConfigState {
+    fn unsupported_catalog_effort_preference_is_rejected() {
+        let state = PersistedRuntimeConfigState {
             thinking_mode_preferences: vec![ModelThinkingPreference {
                 provider_id: "google.default".to_string(),
                 model: "gemini-3.1-pro-preview".to_string(),
@@ -1997,9 +1946,8 @@ mod tests {
             }],
             ..PersistedRuntimeConfigState::default()
         };
-        assert!(migrate_persisted_model_selection(&mut state));
-        assert!(state.thinking_mode_preferences.is_empty());
-        validate_persisted_model_state(&state).expect("stale preference is removed");
+        assert!(validate_persisted_model_state(&state).is_err());
+        assert_eq!(state.thinking_mode_preferences[0].mode, "max");
     }
 
     #[test]
@@ -2013,8 +1961,8 @@ mod tests {
     }
 
     #[test]
-    fn old_builtin_selection_migrates_without_touching_other_settings() {
-        let mut state = PersistedRuntimeConfigState {
+    fn unsupported_builtin_selection_is_rejected() {
+        let state = PersistedRuntimeConfigState {
             default_tool_parallelism: Some(3),
             active_model: Some(ActiveModelRef {
                 provider_id: DEEPSEEK_PROVIDER_ID.to_string(),
@@ -2023,18 +1971,17 @@ mod tests {
             }),
             ..PersistedRuntimeConfigState::default()
         };
-        assert!(migrate_persisted_model_selection(&mut state));
-        let active = state.active_model.as_ref().expect("selection retained");
-        assert_eq!(active.model, "deepseek-flash");
-        assert_eq!(active.model_thinking_mode.as_deref(), Some("high"));
+        assert!(validate_persisted_model_state(&state).is_err());
+        assert_eq!(
+            state.active_model.as_ref().unwrap().model,
+            "deepseek-v4-flash"
+        );
         assert_eq!(state.default_tool_parallelism, Some(3));
-        assert!(!migrate_persisted_model_selection(&mut state));
-        validate_persisted_model_state(&state).expect("migrated selection remains valid");
     }
 
     #[test]
-    fn retired_opencode_go_selection_clears_only_active_model() {
-        let mut state = PersistedRuntimeConfigState {
+    fn unsupported_opencode_go_selection_is_rejected() {
+        let state = PersistedRuntimeConfigState {
             default_bash_path: Some("C:/tools/bash.exe".to_string()),
             active_model: Some(ActiveModelRef {
                 provider_id: "opencode-go.default".to_string(),
@@ -2043,13 +1990,12 @@ mod tests {
             }),
             ..PersistedRuntimeConfigState::default()
         };
-        assert!(migrate_persisted_model_selection(&mut state));
-        assert!(state.active_model.is_none());
+        assert!(validate_persisted_model_state(&state).is_err());
+        assert_eq!(state.active_model.as_ref().unwrap().model, "kimi-k3");
         assert_eq!(
             state.default_bash_path.as_deref(),
             Some("C:/tools/bash.exe")
         );
-        validate_persisted_model_state(&state).expect("other settings remain valid");
     }
 
     #[test]

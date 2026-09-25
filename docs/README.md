@@ -21,6 +21,7 @@ implementation plans or compatibility aliases.
 - [Extensions](reference/Extensions.md): Plugin, Skill, MCP, CLI, and Hook boundary.
 - [Plugin and Skill package spec](reference/SkillPackageSpec.md): package layout
   and strict manifest shape.
+- [Provider catalog](reference/ProviderCatalog.md): model identities, routes, and reasoning preferences.
 - [Versioning](reference/Versioning.md): clean-slate v1 and release versions.
 
 ## Development and release
@@ -32,7 +33,7 @@ implementation plans or compatibility aliases.
 - [Release process](development/ReleaseProcess.md): source freeze, clean-clone
   verification, artifacts, and publication boundary.
 - [Release gate](eval/ReleaseGate.md): the current executable release gate.
-- [Upgrade acceptance](eval/UpgradeAcceptance.md): released-data fixtures, migration recovery, and history reconstruction.
+- [Persistence acceptance](eval/PersistenceAcceptance.md): schema validation, restart recovery, and history reconstruction.
 
 Hosted deployment, identity, workspace access control, commercial extension
 content, credentials, customer data, and private operations are outside this

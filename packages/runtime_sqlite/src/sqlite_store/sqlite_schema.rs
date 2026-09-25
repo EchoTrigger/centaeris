@@ -1,6 +1,4 @@
 use rusqlite::{params, Connection, OptionalExtension};
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::STORE_SCHEMA_VERSION;
 
@@ -31,8 +29,6 @@ pub(super) fn ensure_schema(conn: &Connection) -> Result<(), String> {
         return Ok(());
     }
 
-    let current_version = validate_schema_history(conn)?;
-    apply_forward_migrations(conn, current_version)?;
     validate_schema_history(conn)?;
     validate_schema_shape(conn)
 }
@@ -51,6 +47,11 @@ fn validate_schema_history(conn: &Connection) -> Result<i64, String> {
             "runtime sqlite refuses schema downgrade: store version {current_version}, runtime version {STORE_SCHEMA_VERSION}"
         ));
     }
+    if current_version != STORE_SCHEMA_VERSION {
+        return Err(format!(
+            "runtime sqlite unsupported schema version: expected {STORE_SCHEMA_VERSION}, got {current_version}"
+        ));
+    }
     let expected = (1..=current_version).collect::<Vec<_>>();
     if versions != expected {
         return Err(format!(
@@ -58,168 +59,6 @@ fn validate_schema_history(conn: &Connection) -> Result<i64, String> {
         ));
     }
     Ok(current_version)
-}
-
-struct ForwardMigration {
-    from_version: i64,
-    to_version: i64,
-    apply: fn(&Connection) -> Result<(), String>,
-}
-
-// v1 is the initial schema. Add an exact n -> n+1 entry only when that
-// forward migration exists; missing paths fail without touching the store.
-const FORWARD_MIGRATIONS: &[ForwardMigration] = &[
-    ForwardMigration {
-        from_version: 1,
-        to_version: 2,
-        apply: migrate_v1_to_v2,
-    },
-    ForwardMigration {
-        from_version: 2,
-        to_version: 3,
-        apply: migrate_v2_to_v3,
-    },
-    ForwardMigration {
-        from_version: 3,
-        to_version: 4,
-        apply: migrate_v3_to_v4,
-    },
-];
-
-fn migrate_v3_to_v4(conn: &Connection) -> Result<(), String> {
-    // Older v2/v3 projections serialized enum fields as snake_case. These are
-    // derived rows: invalidate them without decoding or rewriting user facts.
-    // Runtime rebuilds and publishes a replacement generation from its source.
-    conn.execute(
-        "UPDATE transcript_projection_heads SET invalidation_reason='stored_transcript_camel_case_upgrade' WHERE invalidation_reason IS NULL",
-        [],
-    )
-    .map_err(|error| format!("invalidate pre-v4 transcript projections failed: {error}"))?;
-    Ok(())
-}
-
-fn migrate_v1_to_v2(conn: &Connection) -> Result<(), String> {
-    let mut ddl = String::new();
-    for table in TRANSCRIPT_TABLES.iter().filter(|table| {
-        !matches!(
-            table.name,
-            "transcript_projection_current_generations"
-                | "transcript_projection_current_recoveries"
-        )
-    }) {
-        ddl.push_str(table.sql);
-        ddl.push_str(";\n");
-    }
-    for index in TRANSCRIPT_INDEXES {
-        ddl.push_str(index.sql);
-        ddl.push_str(";\n");
-    }
-    conn.execute_batch(ddl.as_str())
-        .map_err(|error| format!("create transcript read model schema failed: {error}"))
-}
-
-fn migrate_v2_to_v3(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(TRANSCRIPT_CURRENT_GENERATIONS_SQL)
-        .map_err(|error| format!("create transcript generation owner schema failed: {error}"))?;
-    conn.execute_batch(TRANSCRIPT_CURRENT_RECOVERIES_SQL)
-        .map_err(|error| format!("create transcript current recovery schema failed: {error}"))
-}
-
-fn apply_forward_migrations(conn: &Connection, current_version: i64) -> Result<(), String> {
-    apply_forward_migrations_to(
-        conn,
-        current_version,
-        STORE_SCHEMA_VERSION,
-        FORWARD_MIGRATIONS,
-    )
-}
-
-fn apply_forward_migrations_to(
-    conn: &Connection,
-    current_version: i64,
-    target_version: i64,
-    available_migrations: &[ForwardMigration],
-) -> Result<(), String> {
-    if current_version == target_version {
-        return Ok(());
-    }
-    let migrations = (current_version..target_version)
-        .map(|from_version| {
-            available_migrations
-                .iter()
-                .find(|migration| {
-                    migration.from_version == from_version
-                        && migration.to_version == from_version + 1
-                })
-                .ok_or_else(|| {
-                    format!(
-                        "runtime sqlite has no forward migration from version {from_version} to {}",
-                        from_version + 1
-                    )
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    create_migration_backup(conn, current_version, target_version)?;
-    let transaction = conn
-        .unchecked_transaction()
-        .map_err(|error| format!("begin runtime sqlite migration transaction failed: {error}"))?;
-    for migration in migrations {
-        (migration.apply)(&transaction)?;
-        transaction.execute(
-            "INSERT INTO schema_migrations(version, applied_at_ms) VALUES(?1, CAST(strftime('%s','now') AS INTEGER) * 1000)",
-            params![migration.to_version],
-        )
-        .map_err(|error| {
-            format!(
-                "record runtime sqlite schema migration {} failed: {error}",
-                migration.to_version
-            )
-        })?;
-    }
-    transaction
-        .commit()
-        .map_err(|error| format!("commit runtime sqlite migrations failed: {error}"))
-}
-
-fn create_migration_backup(
-    conn: &Connection,
-    from_version: i64,
-    to_version: i64,
-) -> Result<Option<PathBuf>, String> {
-    let database_path = conn
-        .query_row(
-            "SELECT file FROM pragma_database_list WHERE name = 'main'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .map_err(|error| format!("resolve runtime sqlite path before migration failed: {error}"))?;
-    if database_path.is_empty() {
-        return Ok(None);
-    }
-    let database_path = PathBuf::from(database_path);
-    let file_name = database_path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| "runtime sqlite path has no valid file name".to_string())?;
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| format!("resolve migration backup timestamp failed: {error}"))?
-        .as_nanos();
-    let backup_path = database_path.with_file_name(format!(
-        "{file_name}.pre-v{from_version}-to-v{to_version}-{timestamp}.backup"
-    ));
-    conn.execute(
-        "VACUUM INTO ?1",
-        params![backup_path.to_string_lossy().to_string()],
-    )
-    .map_err(|error| {
-        format!(
-            "create runtime sqlite migration backup {} failed: {error}",
-            backup_path.display()
-        )
-    })?;
-    Ok(Some(backup_path))
 }
 
 fn create_schema(conn: &Connection) -> Result<(), String> {
@@ -829,183 +668,32 @@ fn user_indexes(conn: &Connection) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SqliteRuntimeStore;
-    use std::fs;
-
-    fn failing_migration(conn: &Connection) -> Result<(), String> {
-        conn.execute_batch("CREATE TABLE partial_migration(value INTEGER NOT NULL);")
-            .map_err(|error| error.to_string())?;
-        Err("injected migration failure".to_string())
-    }
 
     #[test]
-    fn transcript_upgrade_rolls_back_on_failure_and_retries_once() {
-        let root = std::env::temp_dir().join(format!(
-            "centaeris-v4-upgrade-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        let path = root.join("runtime.db");
-        let conn = Connection::open(&path).unwrap();
-        create_schema(&conn).unwrap();
-        conn.execute_batch("DELETE FROM schema_migrations WHERE version > 3;
-            INSERT INTO transcript_projection_heads VALUES('session-a','transcript.projection.v1','generation-a',1,NULL);
-            CREATE TRIGGER fail_upgrade BEFORE INSERT ON schema_migrations WHEN NEW.version=4
-            BEGIN SELECT RAISE(ABORT, 'injected upgrade failure'); END;").unwrap();
-        let error = ensure_schema(&conn).expect_err("version write fails after invalidation");
-        assert!(error.contains("injected upgrade failure"));
-        assert_eq!(schema_versions(&conn).unwrap(), vec![1, 2, 3]);
-        let reason = || {
-            conn.query_row(
-                "SELECT invalidation_reason FROM transcript_projection_heads",
-                [],
-                |row| row.get::<_, Option<String>>(0),
+    fn unsupported_schema_is_rejected_without_changing_stored_facts() {
+        for version in (1..STORE_SCHEMA_VERSION).rev() {
+            let conn = Connection::open_in_memory().unwrap();
+            create_schema(&conn).unwrap();
+            conn.execute(
+                "DELETE FROM schema_migrations WHERE version > ?1",
+                [version],
             )
-            .unwrap()
-        };
-        assert_eq!(reason(), None, "invalidation must roll back too");
-        let backup = fs::read_dir(&root)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .find(|path| path.extension().is_some_and(|ext| ext == "backup"))
             .unwrap();
-        let backup_conn = Connection::open(&backup).unwrap();
-        assert_eq!(schema_versions(&backup_conn).unwrap(), vec![1, 2, 3]);
-        assert_eq!(
-            backup_conn
+            conn.execute_batch("INSERT INTO transcript_projection_heads VALUES('session-a','transcript.projection.v1','generation-a',1,NULL);").unwrap();
+            let error = ensure_schema(&conn).expect_err("unsupported schema must fail");
+            assert!(error.contains("unsupported"), "{error}");
+            assert_eq!(
+                schema_versions(&conn).unwrap(),
+                (1..=version).collect::<Vec<_>>()
+            );
+            let reason: Option<String> = conn
                 .query_row(
                     "SELECT invalidation_reason FROM transcript_projection_heads",
                     [],
-                    |row| row.get::<_, Option<String>>(0)
+                    |row| row.get(0),
                 )
-                .unwrap(),
-            None
-        );
-        drop(backup_conn);
-        conn.execute_batch("DROP TRIGGER fail_upgrade").unwrap();
-        ensure_schema(&conn).expect("retry migration");
-        assert!(reason().is_some());
-        assert_eq!(schema_versions(&conn).unwrap(), vec![1, 2, 3, 4]);
-        let backup_count = fs::read_dir(&root).unwrap().count();
-        ensure_schema(&conn).expect("idempotent reopen");
-        assert_eq!(fs::read_dir(&root).unwrap().count(), backup_count);
-        drop(conn);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn forward_migration_backs_up_and_rolls_back_as_one_transaction() {
-        let root = std::env::temp_dir().join(format!(
-            "centaeris-sqlite-migration-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).expect("root");
-        let database_path = root.join("runtime.db");
-        let conn = Connection::open(&database_path).expect("database");
-        conn.execute_batch(
-            "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at_ms INTEGER NOT NULL);
-             INSERT INTO schema_migrations(version, applied_at_ms) VALUES(1, 1);
-             CREATE TABLE stable(value TEXT NOT NULL);
-             INSERT INTO stable(value) VALUES('preserved');",
-        )
-        .expect("v1 fixture");
-
-        let backup = create_migration_backup(&conn, 1, 2)
-            .expect("backup")
-            .expect("file database backup");
-        let backup_conn = Connection::open(&backup).expect("open backup");
-        assert_eq!(
-            backup_conn
-                .query_row("SELECT value FROM stable", [], |row| row
-                    .get::<_, String>(0))
-                .expect("backup value"),
-            "preserved"
-        );
-        drop(backup_conn);
-
-        let error = apply_forward_migrations_to(
-            &conn,
-            1,
-            2,
-            &[ForwardMigration {
-                from_version: 1,
-                to_version: 2,
-                apply: failing_migration,
-            }],
-        )
-        .expect_err("migration must fail");
-        assert!(error.contains("injected migration failure"));
-        assert!(object_sql(&conn, "table", "partial_migration")
-            .expect("partial table query")
-            .is_none());
-        assert_eq!(schema_versions(&conn).expect("versions"), vec![1]);
-
-        drop(conn);
-        fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[test]
-    fn v1_store_migrates_to_the_persistent_transcript_read_model() {
-        let root = std::env::temp_dir().join(format!(
-            "centaeris-sqlite-transcript-migration-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).expect("root");
-        let database_path = root.join("runtime.db");
-        let conn = Connection::open(&database_path).expect("database");
-        let mut ddl = String::new();
-        for table in REQUIRED_TABLES {
-            ddl.push_str(table.sql);
-            ddl.push_str(";\n");
+                .unwrap();
+            assert_eq!(reason, None);
         }
-        for index in REQUIRED_INDEXES {
-            ddl.push_str(index.sql);
-            ddl.push_str(";\n");
-        }
-        conn.execute_batch(ddl.as_str()).expect("v1 schema");
-        conn.execute(
-            "INSERT INTO schema_migrations(version, applied_at_ms) VALUES(1, 1)",
-            [],
-        )
-        .expect("v1 history");
-        drop(conn);
-
-        drop(SqliteRuntimeStore::new(&database_path).expect("migrate v1 store"));
-        let migrated = Connection::open(&database_path).expect("migrated database");
-        assert!(
-            object_sql(&migrated, "table", "transcript_projection_heads")
-                .expect("transcript table lookup")
-                .is_some()
-        );
-        assert!(
-            object_sql(&migrated, "table", "transcript_projection_frontiers")
-                .expect("transcript frontier table lookup")
-                .is_some()
-        );
-        assert!(object_sql(
-            &migrated,
-            "table",
-            "transcript_projection_current_generations"
-        )
-        .expect("transcript generation owner lookup")
-        .is_some());
-        assert_eq!(
-            schema_versions(&migrated).expect("versions"),
-            vec![1, 2, 3, 4]
-        );
-        drop(migrated);
-        fs::remove_dir_all(root).expect("cleanup");
     }
 }
