@@ -69,6 +69,6 @@ test("Read and Bash share a card, show actual targets and omit persisted timing"
  for (const button of renderer.root.findAllByProps({className:"agent-operation-summary agent-tool-node-summary"})) {
   await act(async()=>button.props.onClick({preventDefault(){}}));
  }
- expect(renderer.root.findAllByType("pre").map(node=>node.children.join(""))).toEqual(["file body","command body"]);
+ expect(renderer.root.findAllByType("pre").map(node=>node.children.join(""))).toEqual(["file body","git status --short","command body"]);
  expect(read).not.toHaveBeenCalled();
 });

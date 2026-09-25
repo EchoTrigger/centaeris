@@ -5,7 +5,7 @@ import {
   type ReactTestInstance,
   type ReactTestRenderer,
 } from "react-test-renderer";
-import { beforeEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { DesktopFilePreviewReadResponse } from "../src/lib/workspaceBridge";
 import type {
   TranscriptContentRangeV1,
@@ -168,6 +168,10 @@ beforeEach(() => {
   harness.loadTranscriptContentRange.mockReset();
 });
 
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 test("paged tool output replaces retained text and can return to its previous range", async () => {
   harness.loadTranscriptContentRange.mockImplementation(async (_identity, offset) => {
     const start = Number(offset);
@@ -283,6 +287,100 @@ test("does not mount a diff preview until its operation is expanded", async () =
   expect(harness.codePreviewRenders).toBe(1);
   expect(renderer.root.findByType("pre").children.join("")).toBe(diffPreview);
 
+  await act(async () => renderer.unmount());
+});
+
+test("Shell separates command and output copies, and copies only the current output page", async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal("navigator", { clipboard: { writeText } });
+  harness.loadTranscriptContentRange.mockImplementation(async (_identity, offset) => ({
+    schema: "transcript.content.range.v1",
+    sessionId: "session-1",
+    projectionVersion: "transcript.projection.v1",
+    projectionGeneration: "generation-1",
+    refId: "tool-output:call-one",
+    revision: "1",
+    byteLength: "24",
+    startOffset: String(offset),
+    endOffset: offset === "0" ? "12" : "24",
+    content: offset === "0" ? "first page\n" : "second page\n",
+    hasMore: offset === "0",
+  }));
+  const task = makeTask({
+    normalizedInput: { command: "git status --short" },
+    transcriptSessionId: "session-1",
+    transcriptProjectionGeneration: "generation-1",
+    transcriptContentRef: { refId: "tool-output:call-one", revision: "1", byteLength: "24" },
+  });
+  const renderer = await renderStream({ turn: makeTurn({ chunks: [{ id: "shell", kind: "task", task }] }) });
+  await click(renderer.root.findByProps({ className: "agent-operation-summary agent-tool-node-summary" }));
+
+  const command = renderer.root.findByProps({ "aria-label": "Command" });
+  const output = renderer.root.findByProps({ "aria-label": "Output" });
+  expect(command.findByProps({ "aria-label": "Copy command" })).toBeDefined();
+  expect(output.findByProps({ "aria-label": "Copy current output page" })).toBeDefined();
+  expect(JSON.stringify(renderer.toJSON()).indexOf("git status --short")).toBeLessThan(
+    JSON.stringify(renderer.toJSON()).indexOf("first page"),
+  );
+  await click(command.findByProps({ "aria-label": "Copy command" }));
+  await click(findText(renderer, "Next output"));
+  await click(output.findByProps({ "aria-label": "Copy current output page" }));
+  expect(writeText.mock.calls.map(([value]) => value)).toEqual(["git status --short", "second page\n"]);
+  await act(async () => renderer.unmount());
+});
+
+test("Edit and Write copy their complete diff from the expanded file header", async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal("navigator", { clipboard: { writeText } });
+  const diff = "diff --git a/src/App.tsx b/src/App.tsx\n--- a/src/App.tsx\n+++ b/src/App.tsx\n-old\n+new\n";
+  const tasks = (["edit", "write"] as const).map((toolName) => makeTask({
+    id: `${toolName}-task`,
+    title: toolName,
+    operations: [makeOperation({ callId: `${toolName}-call`, toolName, kind: undefined, path: "src/App.tsx", diffPreview: diff })],
+  }));
+  const renderer = await renderStream({ turn: makeTurn({ chunks: tasks.map(task => ({ id: task.id, kind: "task" as const, task })) }) });
+  for (const summary of renderer.root.findAllByProps({ className: "agent-operation-summary agent-tool-node-summary" })) {
+    await click(summary);
+  }
+  const changes = renderer.root.findAllByProps({ "aria-label": "File changes" });
+  expect(changes).toHaveLength(2);
+  for (const change of changes) {
+    expect(change.findAllByProps({ "aria-label": "Copy diff" })).toHaveLength(1);
+    await click(change.findByProps({ "aria-label": "Copy diff" }));
+  }
+  expect(writeText.mock.calls.map(([value]) => value)).toEqual([diff, diff]);
+  await act(async () => renderer.unmount());
+});
+
+test("Read copies the expanded file content from its upper-right control", async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal("navigator", { clipboard: { writeText } });
+  const task = makeTask({
+    id: "read-task",
+    title: "read",
+    modelContent: "  file body\n",
+    operations: [makeOperation({ callId: "read-call", toolName: "read", kind: undefined, path: "README.md" })],
+  });
+  const renderer = await renderStream({ turn: makeTurn({ chunks: [{ id: "read", kind: "task", task }] }) });
+  await click(renderer.root.findByProps({ className: "agent-operation-summary agent-tool-node-summary" }));
+  const content = renderer.root.findByProps({ "aria-label": "Read result" });
+  expect(content.findByProps({ "aria-label": "Copy current content page" })).toBeDefined();
+  await click(content.findByProps({ "aria-label": "Copy current content page" }));
+  expect(writeText).toHaveBeenCalledWith("  file body\n");
+  await act(async () => renderer.unmount());
+});
+
+test("other text tools keep an output heading instead of a Read heading", async () => {
+  const task = makeTask({
+    id: "search-task",
+    title: "web_search",
+    modelContent: "search results",
+    operations: [makeOperation({ callId: "search-call", toolName: "web_search", kind: undefined })],
+  });
+  const renderer = await renderStream({ turn: makeTurn({ chunks: [{ id: "search", kind: "task", task }] }) });
+  await click(renderer.root.findByProps({ className: "agent-operation-summary agent-tool-node-summary" }));
+  expect(renderer.root.findByProps({ "aria-label": "Output" })).toBeDefined();
+  expect(renderer.root.findAllByProps({ "aria-label": "Read result" })).toHaveLength(0);
   await act(async () => renderer.unmount());
 });
 
