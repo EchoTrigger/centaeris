@@ -13,6 +13,7 @@ $env:ComSpec = Join-Path $env:SystemRoot "System32\cmd.exe"
 
 Push-Location $repoRoot
 try {
+    python -B scripts/test_product_version.py
     if ($Stage -in @("Release", "Rust")) {
         cargo fmt --all -- --check
         cargo check --workspace --locked

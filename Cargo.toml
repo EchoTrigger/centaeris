@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.95.0"
 license = "AGPL-3.0-only"
@@ -65,7 +65,7 @@ path = "packages/core"
 
 [workspace.dependencies.centaeris-model-catalog]
 path = "packages/model-catalog"
-version = "=1.0.0"
+version = "=0.1.0"
 
 [workspace.dependencies.centaeris-mcp]
 path = "packages/mcp"
