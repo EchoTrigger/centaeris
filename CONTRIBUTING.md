@@ -38,8 +38,8 @@ scope of these rights and the public-source availability commitment will be
 published before contributions reopen and will require contributors' explicit
 agreement. Current submissions do not constitute acceptance of a future CLA.
 
-This policy governs contribution intake only. It does not change Centaeris
-1.0.0's `AGPL-3.0-only` license or restrict anyone's rights to use, modify, or
+This policy governs contribution intake only. It does not change Centaeris's
+`AGPL-3.0-only` license or restrict anyone's rights to use, modify, or
 distribute the software under that license.
 
 ## Maintainer development

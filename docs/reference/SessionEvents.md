@@ -29,7 +29,7 @@ The v1 manifest has this exact shape:
   "sessionId": "session-id",
   "protocolMajor": 1,
   "createdAtMs": 1,
-  "writerVersion": "1.0.0",
+  "writerVersion": "0.1.0",
   "requiredFeatures": [],
   "integrityMode": "record"
 }

@@ -246,7 +246,7 @@ dependencies = [
 
 [[package]]
 name = "centaeris-core"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "centaeris-model-catalog",
@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "centaeris-mcp"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "axum",
  "centaeris-core",
@@ -283,7 +283,7 @@ dependencies = [
 
 [[package]]
 name = "centaeris-model-catalog"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -291,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "centaeris-runtime"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "centaeris-core",
@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "centaeris-runtime-sqlite"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "centaeris-core",
  "rusqlite",
@@ -329,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "centaeris-tui"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "arboard",
  "base64 0.22.1",

@@ -1,7 +1,7 @@
 {
   "name": "@centaeris/electron-host",
   "productName": "Centaeris Desktop",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "private": true,
   "license": "AGPL-3.0-only",
   "repository": {

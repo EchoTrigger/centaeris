@@ -9,14 +9,15 @@ rules below.
 ## Version identity
 
 The v1 Plugin manifest does not carry a `schema` field. Its protocol identity
-is the combination of Centaeris Runtime major version 1 and the exact path
-`.centaeris-plugin/plugin.json`. The manifest's `version` field is the Plugin's
-own release version and never selects a manifest parser.
+is the published v1 manifest contract at the exact path
+`.centaeris-plugin/plugin.json`, independent of the product release version.
+The manifest's `version` field is the Plugin's own release version and never
+selects a manifest parser.
 
 A Runtime v1 implementation must parse this file using only the exact v1 shape
 below and reject unknown fields. The v1 shape cannot gain optional fields in
-place. An incompatible manifest revision belongs to a later Runtime major and a
-new public contract; v1 does not perform in-band schema negotiation.
+place. An incompatible manifest revision requires a new public contract;
+v1 does not perform in-band schema negotiation.
 
 ## Plugin root and manifest
 
