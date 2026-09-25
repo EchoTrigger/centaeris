@@ -64,7 +64,10 @@ impl<T: JsonHttpTransport> OpenAiResponsesModelClient<T> {
                 request,
                 resolved.session_config.model.as_str(),
             ),
-            prompt_cache_retention: request.provider_prompt_cache_retention.clone(),
+            prompt_cache_retention: (resolved.provider.info.provider_kind
+                == ModelProviderKind::OpenAi)
+                .then(|| request.provider_prompt_cache_retention.clone())
+                .flatten(),
             instructions: request
                 .prepared_prompt
                 .system_prompt

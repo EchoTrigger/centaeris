@@ -2,13 +2,30 @@
 
 Status: implementation in two isolated worktrees. The provider and model shortlist below was approved on 2026-09-24. Core and Workspace source changes are local; no production credential, database, pinned Core revision, or deployment has been changed.
 
+## Second wave: approved catalog additions
+
+The maintainer approved three more direct vendor APIs and one separately identified API-exported plan on 2026-09-24. The catalog now contains these fixed entries in addition to the first-wave entries below:
+
+| Entry | Models | API route |
+| --- | --- | --- |
+| xAI | `grok-4.7` | Responses at `https://api.x.ai/v1` |
+| Mistral | `mistral-small-2603`, `mistral-medium-3-5` | Chat Completions at `https://api.mistral.ai/v1` |
+| Google Gemini | `gemini-3.8-flash`, `gemini-3.1-pro-preview` | OpenAI-compatible Chat Completions at `https://generativelanguage.googleapis.com/v1beta/openai` |
+| Command Code GOAT | `deepseek/deepseek-v4.1-flash`, `z-ai/glm-5.3-flash`, `xiaomi/mimo-v2.6-flash`, `MiniMaxAI/MiniMax-M3` | Responses at `https://api.commandcode.ai/provider/v1` |
+
+GOAT is a distinct Coding Plan entry with its own credential and four-model allowance. OpenCode Go remains at its approved two models. Command Code Go has no Provider API access and is not a catalog entry. The Command Code logomark comes from its official brand assets; the three direct vendor marks come from the same pi-web sprite used in the first wave.
+
+Gemini's Chat Completions tool calls carry an opaque `extra_content.google.thought_signature`. Core preserves it in continuation state and replays it on the next request; imported history from another model uses Google's documented placeholder. Workspace's hosted Chat adapter applies the same projection. The stream parser accepts tool calls with a terminal `stop` reason as well as `tool_calls`. xAI keeps the Responses cache routing key, while OpenAI's 24-hour cache retention parameter is sent only to OpenAI.
+
+The Core catalog and UI projections have no per-model enable switch. New templates reach Workspace through the runtime catalog API; existing Workspace instances require an administrator reconciliation preview and apply. The Core revision must be publicly reachable before Workspace pins it. Live provider calls, including multi-turn tool continuation and streaming for Gemini's beta-compatible endpoint, remain release gates before deployment.
+
 ## Implementation checkpoint
 
-Core now has the twelve direct API entries, explicit direct/Coding Plan/Token Plan tiers, the two-model OpenCode Go entry, and selected pi-web SVG marks embedded once in the model-catalog package. The Desktop runtime response includes the icon and tier, and the Desktop picker groups entries accordingly. Retired Desktop active-model IDs are migrated on config load; an OpenCode Go selection outside the two-model allowance is cleared while its credential remains untouched. The MiniMax Anthropic adapter preserves streamed content blocks, including thinking signatures, for the next tool-call turn.
+Core now has fifteen direct API entries, explicit direct/Coding Plan/Token Plan tiers, the two-model OpenCode Go entry, and selected SVG marks embedded once in the model-catalog package. The Desktop runtime response includes the icon and tier, and the Desktop picker groups entries accordingly. Retired Desktop active-model IDs are migrated on config load; an OpenCode Go selection outside the two-model allowance is cleared while its credential remains untouched. The MiniMax Anthropic adapter preserves streamed content blocks, including thinking signatures, for the next tool-call turn.
 
 Workspace now projects the same catalog icon and tier into admin templates, renders icons in its provider list and picker, and exposes an administrator-only reconciliation preview/apply API at `/api/admin/model-catalog-reconciliation`. Apply requires the digest from a fresh preview, blocks retired models with queued/running runs and route changes, and creates model revisions while retaining credential and historical rows. The UI does not yet invoke Apply; release operators must review the preview and apply it during a controlled rollout.
 
-Verification so far: Core model-catalog tests, 579 Core library tests, 29 Desktop runtime-config tests, Desktop TypeScript checks, Workspace frontend typecheck/lint/build, and 14 Workspace model-admin tests passed. Live provider calls and a production database preview remain release gates. The Workspace `core-revision.txt` still points to the prior Core commit; update it only after the Core change has a reviewable reachable commit.
+The second-wave local Core Release gate passed, including the Core workspace tests, Desktop distribution and window smoke checks, and TUI package build. The Workspace adapter passed all 494 Django tests and the frontend lint, typecheck, and production build. Workspace's full `scripts/ci.ps1` still stops at its pinned-local-Core check because the neighboring original Core checkout does not match `core-revision.txt`; this does not change the successful checks run separately. Live provider calls and a production database preview remain release gates. The Workspace `core-revision.txt` still points to the prior Core commit; update it only after the Core change has a reviewable reachable commit.
 
 A read-only snapshot of the running Workspace database on 2026-09-24 found one instantiated preset: DeepSeek with current `deepseek-v4-pro` and `deepseek-v4-flash`. The proposed catalog would retire both rows and add `deepseek-flash`; 23 historical runs reference the old Flash row (20 completed, 3 failed), and no queued/running run referenced either old row at the time of the query. This is a snapshot, not the new API's authoritative reconciliation preview. Re-run the preview after deploying the new runtime and before Apply.
 
@@ -87,3 +104,8 @@ The Core Anthropic Messages adapter currently sends `thinking: adaptive` only fo
 - Z.AI and BigModel quick starts: https://docs.z.ai/guides/overview/quick-start and https://docs.bigmodel.cn/cn/guide/start/quick-start
 - Alibaba endpoints and recommended models: https://docs.modelstudio.console.alibabacloud.com/en/model-studio/base-url and https://docs.modelstudio.console.alibabacloud.com/en/model-studio/text-generation-model
 - OpenCode Go endpoints: https://opencode.ai/docs/go/
+- xAI Grok model and Responses API: https://docs.x.ai/developers/models and https://docs.x.ai/developers/rest-api-reference/inference/responses
+- Mistral model cards and Chat API: https://docs.mistral.ai/models and https://docs.mistral.ai/api
+- Gemini model list and OpenAI compatibility: https://ai.google.dev/gemini-api/docs/models and https://ai.google.dev/gemini-api/docs/openai
+- Command Code GOAT and Provider API: https://commandcode.ai/docs/plans/goat and https://commandcode.ai/docs/provider
+- Command Code brand assets: https://commandcode.ai/brand

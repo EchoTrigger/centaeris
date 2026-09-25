@@ -112,6 +112,7 @@ impl<T: JsonHttpTransport> OpenAiCompatibleModelClient<T> {
     fn parse_http_response(
         &self,
         response: JsonHttpResponse,
+        provider_kind: &ModelProviderKind,
     ) -> Result<ModelClientResponse, ModelClientError> {
         if response.status_code >= 400 {
             return Err(map_openai_compatible_http_error(
@@ -146,7 +147,15 @@ impl<T: JsonHttpTransport> OpenAiCompatibleModelClient<T> {
             );
         }
         reject_openai_compatible_finish_reason(finish_reason.as_deref())?;
-        let tool_calls = extract_openai_compatible_tool_calls(raw_tool_calls)?;
+        let tool_calls = extract_openai_compatible_tool_calls(raw_tool_calls.clone())?;
+        let gemini_continuation =
+            if *provider_kind == ModelProviderKind::Gemini && !tool_calls.is_empty() {
+                Some(gemini_tool_continuation(
+                    raw_tool_calls.as_deref().unwrap_or_default(),
+                )?)
+            } else {
+                None
+            };
         let provider_request_id = parsed
             .id
             .or_else(|| response.headers.get("x-request-id").cloned());
@@ -167,7 +176,8 @@ impl<T: JsonHttpTransport> OpenAiCompatibleModelClient<T> {
             generate_result: GenerateResult {
                 content,
                 tool_calls,
-                continuation_reasoning_content: reasoning_content.clone(),
+                continuation_reasoning_content: gemini_continuation
+                    .or_else(|| reasoning_content.clone()),
                 reasoning_content,
                 input_tokens: usage.and_then(openai_compatible_input_tokens),
                 total_tokens: usage.and_then(|usage| usage.total_tokens),
@@ -189,7 +199,7 @@ impl<T: JsonHttpTransport> ModelClient for OpenAiCompatibleModelClient<T> {
         Box::pin(async move {
             let http_request = self.build_http_request(request, false)?;
             execute_json_model_response_with_retries(&self.transport, &http_request, |response| {
-                self.parse_http_response(response)
+                self.parse_http_response(response, &request.session_config.provider_kind)
             })
             .await
         })
@@ -324,17 +334,22 @@ impl<T: JsonHttpTransport> ModelClient for OpenAiCompatibleModelClient<T> {
             }
             let parsed = stream_state.into_response();
             let mut parsed_response = self
-                .parse_http_response(JsonHttpResponse {
-                    status_code: response.status_code,
-                    headers: response.headers,
-                    body_json: serde_json::to_string(&parsed).map_err(|err| {
-                        ModelClientError::new(
-                            ModelClientErrorKind::Provider,
-                            format!("serialize openai-compatible stream completion failed: {err}"),
-                            false,
-                        )
-                    })?,
-                })
+                .parse_http_response(
+                    JsonHttpResponse {
+                        status_code: response.status_code,
+                        headers: response.headers,
+                        body_json: serde_json::to_string(&parsed).map_err(|err| {
+                            ModelClientError::new(
+                                ModelClientErrorKind::Provider,
+                                format!(
+                                    "serialize openai-compatible stream completion failed: {err}"
+                                ),
+                                false,
+                            )
+                        })?,
+                    },
+                    &request.session_config.provider_kind,
+                )
                 .map_err(|error| error.with_provider_attempts(attempted.attempts))?;
             parsed_response.provider_attempts = attempted.attempts;
             for event in pending_completion_events {
@@ -363,6 +378,8 @@ pub(super) struct OpenAiCompatibleRequestToolCall {
     #[serde(rename = "type")]
     pub(super) tool_type: String,
     pub(super) function: OpenAiCompatibleToolFunction,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) extra_content: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -425,6 +442,55 @@ pub(super) struct OpenAiCompatibleAssistantMessage {
 pub(super) struct OpenAiCompatibleToolCall {
     id: Option<String>,
     function: OpenAiCompatibleToolFunction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    extra_content: Option<Value>,
+}
+
+const GEMINI_TOOL_CONTINUATION_SCHEMA: &str = "gemini_chat_tool_signatures.v1";
+const GEMINI_IMPORTED_TOOL_SIGNATURE: &str = "skip_thought_signature_validator";
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiToolContinuation {
+    schema: String,
+    tool_signatures: HashMap<String, String>,
+}
+
+fn gemini_tool_continuation(
+    calls: &[OpenAiCompatibleToolCall],
+) -> Result<String, ModelClientError> {
+    let tool_signatures = calls
+        .iter()
+        .filter_map(|call| {
+            let signature = call
+                .extra_content
+                .as_ref()?
+                .pointer("/google/thought_signature")?
+                .as_str()?;
+            (!signature.is_empty())
+                .then(|| call.id.clone().map(|id| (id, signature.to_string())))
+                .flatten()
+        })
+        .collect::<HashMap<_, _>>();
+    let first_id = calls.first().and_then(|call| call.id.as_deref());
+    if first_id.is_none_or(|id| !tool_signatures.contains_key(id)) {
+        return Err(ModelClientError::new(
+            ModelClientErrorKind::Provider,
+            "Gemini tool call is missing its required thought signature",
+            false,
+        ));
+    }
+    serde_json::to_string(&GeminiToolContinuation {
+        schema: GEMINI_TOOL_CONTINUATION_SCHEMA.to_string(),
+        tool_signatures,
+    })
+    .map_err(|error| {
+        ModelClientError::new(
+            ModelClientErrorKind::Provider,
+            format!("serialize Gemini tool continuation failed: {error}"),
+            false,
+        )
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -521,6 +587,7 @@ pub(super) struct OpenAiCompatibleStreamState {
     usage: Option<OpenAiCompatibleUsage>,
     tool_calls_by_index: HashMap<usize, OpenAiCompatibleStreamToolCallState>,
     completed_tool_calls: Vec<ToolCallEnvelope>,
+    completed_tool_extra_content: HashMap<String, Value>,
     finish_reason: Option<String>,
 }
 
@@ -530,6 +597,7 @@ pub(super) struct OpenAiCompatibleStreamToolCallState {
     name: Option<String>,
     arguments: String,
     preparing_emitted: bool,
+    extra_content: Option<Value>,
 }
 
 impl OpenAiCompatibleStreamState {
@@ -625,7 +693,10 @@ pub(super) fn build_openai_compatible_messages(
                 }
             }
             ModelMessageRoleV1::Assistant => {
-                let message = build_openai_compatible_assistant_message(item);
+                let message = build_openai_compatible_assistant_message(
+                    item,
+                    request.session_config.provider_kind == ModelProviderKind::Gemini,
+                );
                 if let Some(tool_calls) = message.tool_calls.as_ref() {
                     pending_tool_call_ids.extend(tool_calls.iter().map(|call| call.id.clone()));
                 }
@@ -698,7 +769,19 @@ pub(super) fn openai_compatible_text_message(
 
 pub(super) fn build_openai_compatible_assistant_message(
     message: &ModelMessageV1,
+    gemini: bool,
 ) -> OpenAiCompatibleChatMessage {
+    let signatures = if gemini {
+        message
+            .reasoning_content
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<GeminiToolContinuation>(raw).ok())
+            .filter(|value| value.schema == GEMINI_TOOL_CONTINUATION_SCHEMA)
+            .map(|value| value.tool_signatures)
+            .unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
     OpenAiCompatibleChatMessage {
         role: "assistant".to_string(),
         content: Value::String(message.content.clone()),
@@ -707,7 +790,16 @@ pub(super) fn build_openai_compatible_assistant_message(
                 .tool_calls
                 .iter()
                 .cloned()
-                .map(|call| OpenAiCompatibleRequestToolCall {
+                .enumerate()
+                .map(|(index, call)| OpenAiCompatibleRequestToolCall {
+                    extra_content: gemini
+                        .then(|| {
+                            let signature = signatures.get(&call.id).cloned().or_else(|| {
+                                (index == 0).then(|| GEMINI_IMPORTED_TOOL_SIGNATURE.to_string())
+                            });
+                            signature.map(|value| json!({"google": {"thought_signature": value}}))
+                        })
+                        .flatten(),
                     id: call.id,
                     tool_type: "function".to_string(),
                     function: OpenAiCompatibleToolFunction {
@@ -718,7 +810,9 @@ pub(super) fn build_openai_compatible_assistant_message(
                 .collect(),
         )
         .filter(|items: &Vec<OpenAiCompatibleRequestToolCall>| !items.is_empty()),
-        reasoning_content: message.reasoning_content.clone(),
+        reasoning_content: (!gemini)
+            .then(|| message.reasoning_content.clone())
+            .flatten(),
         tool_call_id: None,
     }
 }
@@ -1051,6 +1145,9 @@ impl OpenAiCompatibleStreamState {
                         .unwrap_or(self.tool_calls_by_index.len() as u64)
                         as usize;
                     let entry = self.tool_calls_by_index.entry(index).or_default();
+                    if let Some(extra_content) = tool_call.get("extra_content") {
+                        entry.extra_content = Some(extra_content.clone());
+                    }
                     if let Some(id) = tool_call.get("id").and_then(Value::as_str) {
                         if !id.is_empty() {
                             entry.id = Some(id.to_string());
@@ -1077,7 +1174,9 @@ impl OpenAiCompatibleStreamState {
             }
             if let Some(finish_reason) = choice.get("finish_reason").and_then(Value::as_str) {
                 self.finish_reason = Some(finish_reason.to_string());
-                if finish_reason == "tool_calls" {
+                if matches!(finish_reason, "tool_calls" | "stop")
+                    && !self.tool_calls_by_index.is_empty()
+                {
                     updates.extend(self.flush_ready_tool_calls()?);
                 }
                 updates.push(OpenAiCompatibleStreamUpdate::Done {
@@ -1105,6 +1204,10 @@ impl OpenAiCompatibleStreamState {
             )?;
             let args_json = normalize_stream_tool_arguments(state.arguments, None);
             let args_preview = preview_tool_arguments_json(args_json.as_str());
+            if let Some(extra_content) = state.extra_content {
+                self.completed_tool_extra_content
+                    .insert(call_id.clone(), extra_content);
+            }
             self.completed_tool_calls.push(ToolCallEnvelope {
                 id: call_id.clone(),
                 name: name.clone(),
@@ -1144,6 +1247,7 @@ impl OpenAiCompatibleStreamState {
     }
 
     fn into_response(self) -> OpenAiCompatibleChatCompletionsResponse {
+        let completed_tool_extra_content = self.completed_tool_extra_content;
         let tool_calls = if self.completed_tool_calls.is_empty() {
             None
         } else {
@@ -1151,6 +1255,7 @@ impl OpenAiCompatibleStreamState {
                 self.completed_tool_calls
                     .into_iter()
                     .map(|item| OpenAiCompatibleToolCall {
+                        extra_content: completed_tool_extra_content.get(&item.id).cloned(),
                         id: Some(item.id),
                         function: OpenAiCompatibleToolFunction {
                             name: item.name,

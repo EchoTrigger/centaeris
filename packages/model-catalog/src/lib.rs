@@ -104,6 +104,10 @@ pub fn logo_svg(logo_id: &str) -> Option<&'static str> {
         "qwen" => include_str!("../centaeris_model_catalog/logos/qwen.svg"),
         "opencode" => include_str!("../centaeris_model_catalog/logos/opencode.svg"),
         "kimi" => include_str!("../centaeris_model_catalog/logos/kimi.svg"),
+        "xai" => include_str!("../centaeris_model_catalog/logos/xai.svg"),
+        "mistral" => include_str!("../centaeris_model_catalog/logos/mistral.svg"),
+        "google" => include_str!("../centaeris_model_catalog/logos/google.svg"),
+        "commandcode" => include_str!("../centaeris_model_catalog/logos/commandcode.svg"),
         _ => return None,
     };
     Some(svg)
@@ -129,7 +133,16 @@ mod tests {
                 .is_some_and(|svg| svg.contains("<svg")));
             assert!(matches!(
                 provider.provider_kind.as_str(),
-                "open_ai" | "anthropic" | "kimi" | "deep_seek" | "zai" | "custom"
+                "open_ai"
+                    | "anthropic"
+                    | "kimi"
+                    | "deep_seek"
+                    | "zai"
+                    | "xai"
+                    | "mistral"
+                    | "gemini"
+                    | "command_code"
+                    | "custom"
             ));
             assert!(!provider.credential.env.is_empty());
             assert!(!provider.credential.header.is_empty());
@@ -163,7 +176,7 @@ mod tests {
             .iter()
             .filter(|provider| provider.tier == ModelProviderTier::DirectApi)
             .collect::<Vec<_>>();
-        assert_eq!(direct.len(), 12);
+        assert_eq!(direct.len(), 15);
         let go = catalog
             .providers
             .iter()
@@ -199,5 +212,119 @@ mod tests {
                 .api_base,
             "https://api.z.ai/api/paas/v4"
         );
+    }
+
+    #[test]
+    fn approved_second_wave_entries_have_exact_models_and_routes() {
+        let catalog = model_catalog();
+        let expected = [
+            (
+                "xai",
+                ModelProviderTier::DirectApi,
+                "openai-responses",
+                "https://api.x.ai/v1",
+                &["grok-4.7"][..],
+            ),
+            (
+                "mistral",
+                ModelProviderTier::DirectApi,
+                "openai-completions",
+                "https://api.mistral.ai/v1",
+                &["mistral-small-2603", "mistral-medium-3-5"][..],
+            ),
+            (
+                "google",
+                ModelProviderTier::DirectApi,
+                "openai-completions",
+                "https://generativelanguage.googleapis.com/v1beta/openai",
+                &["gemini-3.8-flash", "gemini-3.1-pro-preview"][..],
+            ),
+            (
+                "command_code_goat",
+                ModelProviderTier::CodingPlan,
+                "openai-responses",
+                "https://api.commandcode.ai/provider/v1",
+                &[
+                    "deepseek/deepseek-v4.1-flash",
+                    "z-ai/glm-5.3-flash",
+                    "xiaomi/mimo-v2.6-flash",
+                    "MiniMaxAI/MiniMax-M3",
+                ][..],
+            ),
+        ];
+        for (id, tier, api, base, models) in expected {
+            let provider = catalog
+                .providers
+                .iter()
+                .find(|provider| provider.catalog_id == id)
+                .unwrap_or_else(|| panic!("missing provider {id}"));
+            assert_eq!(provider.tier, tier, "{id}");
+            assert_eq!(serde_json::to_value(provider.api).unwrap(), api, "{id}");
+            assert_eq!(provider.api_base, base, "{id}");
+            assert_eq!(
+                provider
+                    .models
+                    .iter()
+                    .map(|model| model.model.as_str())
+                    .collect::<Vec<_>>(),
+                models,
+                "{id}",
+            );
+        }
+    }
+
+    #[test]
+    fn configured_second_wave_reasoning_levels_and_limits() {
+        let catalog = model_catalog();
+        let expected = [
+            (
+                "xai",
+                "grok-4.7",
+                500_000,
+                65_536,
+                "high",
+                &["low", "medium", "high", "xhigh"][..],
+            ),
+            (
+                "google",
+                "gemini-3.8-flash",
+                1_048_576,
+                65_536,
+                "medium",
+                &["low", "medium", "high"][..],
+            ),
+            (
+                "google",
+                "gemini-3.1-pro-preview",
+                1_048_576,
+                65_536,
+                "high",
+                &["low", "medium", "high"][..],
+            ),
+        ];
+        for (provider_id, model_id, context, output_cap, default_effort, efforts) in expected {
+            let model = catalog
+                .providers
+                .iter()
+                .find(|provider| provider.catalog_id == provider_id)
+                .and_then(|provider| provider.models.iter().find(|model| model.model == model_id))
+                .unwrap_or_else(|| panic!("missing {provider_id}/{model_id}"));
+            assert_eq!(model.context_tokens, context, "{model_id}");
+            assert_eq!(model.max_output_tokens, output_cap, "{model_id}");
+            assert_eq!(
+                model.thinking_mode.as_deref(),
+                Some(default_effort),
+                "{model_id}"
+            );
+            assert_eq!(
+                model
+                    .thinking_modes
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                efforts,
+                "{model_id}"
+            );
+        }
     }
 }

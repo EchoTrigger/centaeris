@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Centaeris provider and model catalog"
-include = ["src/**", "centaeris_model_catalog/catalog.json"]
+include = ["src/**", "centaeris_model_catalog/catalog.json", "centaeris_model_catalog/logos/**"]
 
 [lints]
 workspace = true

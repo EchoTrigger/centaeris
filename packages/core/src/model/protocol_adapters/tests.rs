@@ -11,7 +11,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
 use crate::model::prepared_prompt::{
-    project_session_messages_to_model_messages, ModelInputImageV1, ModelMessageV1, PreparedPromptV1,
+    project_session_messages_to_model_messages, ModelInputImageV1, ModelMessageRoleV1,
+    ModelMessageV1, ModelToolCallV1, PreparedPromptV1,
 };
 
 #[test]
@@ -957,6 +958,30 @@ async fn openai_responses_prompt_cache_key_is_model_scoped_and_serialized() {
 }
 
 #[tokio::test]
+async fn xai_responses_keeps_cache_routing_without_openai_retention_extension() {
+    std::env::set_var("XAI_API_KEY", "test-xai-key");
+    let client = OpenAiResponsesModelClient::new(
+        ModelProviderRegistry::new(),
+        MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+            status_code: 200,
+            headers: HashMap::new(),
+            body_json: "{\"id\":\"xai\",\"output_text\":\"ok\"}".to_string(),
+        })),
+    );
+    let mut request = build_model_request("xai.default");
+    request.session_config.provider_kind = ModelProviderKind::Xai;
+    request.session_config.model = "grok-4.7".to_string();
+    request.session_config.api_base = None;
+    request.provider_prompt_cache_key = Some("cache-seed".to_string());
+    request.provider_prompt_cache_retention = Some("24h".to_string());
+    client.generate(&request).await.expect("response");
+    let requests = client.transport.take_requests();
+    let body: Value = serde_json::from_str(&requests[0].body_json).expect("JSON");
+    assert!(body.get("prompt_cache_key").is_some());
+    assert!(body.get("prompt_cache_retention").is_none());
+}
+
+#[tokio::test]
 async fn openai_compatible_chat_completions_does_not_send_responses_prompt_cache_key() {
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
         status_code: 200,
@@ -1465,6 +1490,7 @@ async fn openai_compatible_chat_messages_keep_dynamic_context_after_reusable_pre
             role: "assistant".to_string(),
             content: Value::String(first_assistant.to_string()),
             tool_calls: Some(vec![super::OpenAiCompatibleRequestToolCall {
+                extra_content: None,
                 id: "call-read-1".to_string(),
                 tool_type: "function".to_string(),
                 function: super::OpenAiCompatibleToolFunction {
@@ -1688,6 +1714,156 @@ async fn openai_compatible_client_builds_chat_completions_request() {
         .expect("openai completions request JSON");
     assert!(body.get("tools").is_some());
     assert!(body.get("reasoning_effort").is_none());
+}
+
+#[tokio::test]
+async fn gemini_chat_tool_signature_survives_the_next_request() {
+    std::env::set_var("GEMINI_API_KEY", "test-gemini-key");
+    let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        status_code: 200,
+        headers: HashMap::new(),
+        body_json: json!({
+            "id": "gemini-turn-1",
+            "choices": [{
+                "message": {
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-read",
+                        "type": "function",
+                        "function": {"name": "read", "arguments": "{\"path\":\"README.md\"}"},
+                        "extra_content": {"google": {"thought_signature": "opaque-signature"}}
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        })
+        .to_string(),
+    }));
+    let client = OpenAiCompatibleModelClient::new(ModelProviderRegistry::new(), transport);
+    let mut request = build_model_request("google.default");
+    request.session_config.provider_kind = ModelProviderKind::Gemini;
+    request.session_config.model = "gemini-3.8-flash".to_string();
+    request.session_config.api_base = None;
+
+    let first = client.generate(&request).await.expect("Gemini tool call");
+    let continuation = first
+        .generate_result
+        .continuation_reasoning_content
+        .expect("Gemini signature must be preserved");
+    assert_eq!(first.generate_result.tool_calls.len(), 1);
+
+    request.prepared_prompt.messages.push(ModelMessageV1 {
+        message_id: "assistant-tool".to_string(),
+        role: ModelMessageRoleV1::Assistant,
+        content: String::new(),
+        tool_calls: vec![ModelToolCallV1 {
+            id: "call-read".to_string(),
+            name: "read".to_string(),
+            args_json: "{\"path\":\"README.md\"}".to_string(),
+        }],
+        tool_call_id: None,
+        reasoning_content: Some(continuation),
+    });
+    request.prepared_prompt.messages.push(ModelMessageV1 {
+        message_id: "tool-result".to_string(),
+        role: ModelMessageRoleV1::Tool,
+        content: "README content".to_string(),
+        tool_calls: vec![],
+        tool_call_id: Some("call-read".to_string()),
+        reasoning_content: None,
+    });
+    let next = client
+        .build_http_request(&request, false)
+        .expect("Gemini continuation request");
+    let body: Value = serde_json::from_str(next.body_json.as_str()).expect("request JSON");
+    assert_eq!(
+        body.pointer("/messages/2/tool_calls/0/extra_content/google/thought_signature")
+            .and_then(Value::as_str),
+        Some("opaque-signature")
+    );
+    assert!(body.pointer("/messages/2/reasoning_content").is_none());
+}
+
+#[tokio::test]
+async fn gemini_stream_keeps_the_tool_signature_after_tool_arguments() {
+    std::env::set_var("GEMINI_API_KEY", "test-gemini-key");
+    let transport = MockJsonHttpTransport::with_sse(
+        Ok(JsonHttpResponse {
+            status_code: 200,
+            headers: HashMap::new(),
+            body_json: String::new(),
+        }),
+        vec![
+            r#"{"id":"gemini-stream","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-read","function":{"name":"read","arguments":"{\"path\":\"README.md\"}"}}]}}]}"#,
+            r#"{"id":"gemini-stream","choices":[{"delta":{"tool_calls":[{"index":0,"extra_content":{"google":{"thought_signature":"opaque-stream-signature"}}}]}}]}"#,
+            r#"{"id":"gemini-stream","choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+        ],
+    );
+    let client = OpenAiCompatibleModelClient::new(ModelProviderRegistry::new(), transport);
+    let mut request = build_model_request("google.default");
+    request.session_config.provider_kind = ModelProviderKind::Gemini;
+    request.session_config.model = "gemini-3.8-flash".to_string();
+    request.session_config.api_base = None;
+    let result = client
+        .generate_stream(&request, &mut |_| {})
+        .await
+        .expect("Gemini stream result");
+    let continuation = result
+        .generate_result
+        .continuation_reasoning_content
+        .expect("streamed signature must survive");
+    let value: Value = serde_json::from_str(&continuation).expect("continuation JSON");
+    assert_eq!(
+        value
+            .pointer("/toolSignatures/call-read")
+            .and_then(Value::as_str),
+        Some("opaque-stream-signature")
+    );
+}
+
+#[tokio::test]
+async fn gemini_accepts_tool_history_imported_from_another_model() {
+    std::env::set_var("GEMINI_API_KEY", "test-gemini-key");
+    let client = OpenAiCompatibleModelClient::new(
+        ModelProviderRegistry::new(),
+        MockJsonHttpTransport::with_response(Err("must not send".to_string())),
+    );
+    let mut request = build_model_request("google.default");
+    request.session_config.provider_kind = ModelProviderKind::Gemini;
+    request.session_config.model = "gemini-3.8-flash".to_string();
+    request.session_config.api_base = None;
+    request.prepared_prompt.messages.push(ModelMessageV1 {
+        message_id: "old-assistant".to_string(),
+        role: ModelMessageRoleV1::Assistant,
+        content: String::new(),
+        tool_calls: vec![ModelToolCallV1 {
+            id: "old-call".to_string(),
+            name: "read".to_string(),
+            args_json: "{}".to_string(),
+        }],
+        tool_call_id: None,
+        reasoning_content: None,
+    });
+    request.prepared_prompt.messages.push(ModelMessageV1 {
+        message_id: "old-result".to_string(),
+        role: ModelMessageRoleV1::Tool,
+        content: "ok".to_string(),
+        tool_calls: vec![],
+        tool_call_id: Some("old-call".to_string()),
+        reasoning_content: None,
+    });
+    let body: Value = serde_json::from_str(
+        &client
+            .build_http_request(&request, false)
+            .expect("request")
+            .body_json,
+    )
+    .expect("JSON");
+    assert_eq!(
+        body.pointer("/messages/2/tool_calls/0/extra_content/google/thought_signature")
+            .and_then(Value::as_str),
+        Some("skip_thought_signature_validator")
+    );
 }
 
 #[tokio::test]

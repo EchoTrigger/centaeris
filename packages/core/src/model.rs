@@ -22,8 +22,8 @@ pub struct GenerateResult {
     pub content: String,
     pub tool_calls: Vec<ToolCallEnvelope>,
     pub reasoning_content: Option<String>,
-    /// Provider-approved plain-text continuation, independent of display summaries.
-    /// Opaque reasoning and signatures require a separate provider-native contract.
+    /// Provider-specific continuation state, separate from display reasoning. It may
+    /// contain the exact signed blocks needed for a multi-step tool call.
     #[serde(rename = "continuationReasoningContent")]
     pub continuation_reasoning_content: Option<String>,
     pub input_tokens: Option<i64>,

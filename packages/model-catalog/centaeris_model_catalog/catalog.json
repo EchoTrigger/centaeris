@@ -587,6 +587,115 @@
       "logoId": "qwen"
     },
     {
+      "providerId": "xai.default",
+      "catalogId": "xai",
+      "displayName": "xAI",
+      "providerKind": "xai",
+      "api": "openai-responses",
+      "apiBase": "https://api.x.ai/v1",
+      "credential": {
+        "env": "XAI_API_KEY",
+        "header": "authorization",
+        "prefix": "Bearer"
+      },
+      "httpHeaders": {},
+      "models": [
+        {
+          "model": "grok-4.7",
+          "displayName": "Grok 4.7",
+          "contextTokens": 500000,
+          "maxOutputTokens": 65536,
+          "thinkingMode": "high",
+          "thinkingModes": ["low", "medium", "high", "xhigh"],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        }
+      ],
+      "tier": "direct_api",
+      "logoId": "xai"
+    },
+    {
+      "providerId": "mistral.default",
+      "catalogId": "mistral",
+      "displayName": "Mistral",
+      "providerKind": "mistral",
+      "api": "openai-completions",
+      "apiBase": "https://api.mistral.ai/v1",
+      "credential": {
+        "env": "MISTRAL_API_KEY",
+        "header": "authorization",
+        "prefix": "Bearer"
+      },
+      "httpHeaders": {},
+      "models": [
+        {
+          "model": "mistral-small-2603",
+          "displayName": "Mistral Small 4",
+          "contextTokens": 256000,
+          "maxOutputTokens": 32768,
+          "thinkingMode": null,
+          "thinkingModes": [],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "mistral-medium-3-5",
+          "displayName": "Mistral Medium 3.5",
+          "contextTokens": 256000,
+          "maxOutputTokens": 32768,
+          "thinkingMode": null,
+          "thinkingModes": [],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        }
+      ],
+      "tier": "direct_api",
+      "logoId": "mistral"
+    },
+    {
+      "providerId": "google.default",
+      "catalogId": "google",
+      "displayName": "Google Gemini",
+      "providerKind": "gemini",
+      "api": "openai-completions",
+      "apiBase": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "credential": {
+        "env": "GEMINI_API_KEY",
+        "header": "authorization",
+        "prefix": "Bearer"
+      },
+      "httpHeaders": {},
+      "models": [
+        {
+          "model": "gemini-3.8-flash",
+          "displayName": "Gemini 3.8 Flash",
+          "contextTokens": 1048576,
+          "maxOutputTokens": 65536,
+          "thinkingMode": "medium",
+          "thinkingModes": ["low", "medium", "high"],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "gemini-3.1-pro-preview",
+          "displayName": "Gemini 3.1 Pro Preview",
+          "contextTokens": 1048576,
+          "maxOutputTokens": 65536,
+          "thinkingMode": "high",
+          "thinkingModes": ["low", "medium", "high"],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        }
+      ],
+      "tier": "direct_api",
+      "logoId": "google"
+    },
+    {
       "providerId": "kimi-code.default",
       "catalogId": "kimi_code",
       "displayName": "Kimi Code",
@@ -772,6 +881,68 @@
       ],
       "tier": "coding_plan",
       "logoId": "zai"
+    },
+    {
+      "providerId": "command-code-goat.default",
+      "catalogId": "command_code_goat",
+      "displayName": "Command Code GOAT",
+      "providerKind": "command_code",
+      "api": "openai-responses",
+      "apiBase": "https://api.commandcode.ai/provider/v1",
+      "credential": {
+        "env": "COMMAND_CODE_API_KEY",
+        "header": "authorization",
+        "prefix": "Bearer"
+      },
+      "httpHeaders": {},
+      "models": [
+        {
+          "model": "deepseek/deepseek-v4.1-flash",
+          "displayName": "DeepSeek V4.1 Flash",
+          "contextTokens": 1000000,
+          "maxOutputTokens": 65536,
+          "thinkingMode": null,
+          "thinkingModes": [],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "z-ai/glm-5.3-flash",
+          "displayName": "GLM 5.3 Flash",
+          "contextTokens": 1048576,
+          "maxOutputTokens": 65536,
+          "thinkingMode": null,
+          "thinkingModes": [],
+          "supportsVision": false,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "xiaomi/mimo-v2.6-flash",
+          "displayName": "MiMo V2.6 Flash",
+          "contextTokens": 1048576,
+          "maxOutputTokens": 65536,
+          "thinkingMode": null,
+          "thinkingModes": [],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "MiniMaxAI/MiniMax-M3",
+          "displayName": "MiniMax M3",
+          "contextTokens": 1000000,
+          "maxOutputTokens": 65536,
+          "thinkingMode": null,
+          "thinkingModes": [],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        }
+      ],
+      "tier": "coding_plan",
+      "logoId": "commandcode"
     },
     {
       "providerId": "qwen.default",
