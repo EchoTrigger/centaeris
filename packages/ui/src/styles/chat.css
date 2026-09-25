@@ -1002,6 +1002,119 @@ button.agent-tool-chip {
   max-width: 100%;
 }
 
+.agent-tool-detail-card {
+  gap: 0;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--outline-variant);
+  border-radius: 10px;
+  background: var(--surface-container);
+}
+
+.agent-tool-detail-title {
+  padding: 9px 12px 3px;
+  color: var(--on-surface-variant);
+  font-size: var(--font-size-sm);
+}
+
+.agent-tool-detail-section {
+  min-width: 0;
+}
+
+.agent-tool-detail-section + .agent-tool-detail-section {
+  border-top: 1px solid color-mix(in srgb, var(--outline-variant) 70%, transparent 30%);
+}
+
+.agent-tool-detail-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 34px;
+  padding: 4px 8px 4px 12px;
+  color: var(--on-surface-variant);
+  font-size: var(--font-size-sm);
+}
+
+.agent-tool-detail-section-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-tool-detail-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.agent-tool-detail-section-header > .agent-tool-copy-button {
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.agent-tool-command-viewport {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+  max-height: 128px;
+  padding: 3px 12px 10px;
+  overflow: auto;
+  scrollbar-width: thin;
+}
+
+.agent-tool-command-viewport:focus-visible {
+  outline: 1px solid var(--outline-variant);
+  outline-offset: -1px;
+}
+
+.agent-tool-command-prompt {
+  color: var(--on-surface-variant);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.agent-tool-detail-section .agent-tool-output-viewport {
+  box-sizing: border-box;
+  padding: 3px 12px 10px;
+}
+
+.agent-tool-detail-paging {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 10px 8px;
+}
+
+.agent-tool-raw-toggle {
+  border: 0;
+  background: transparent;
+  color: var(--on-surface-variant);
+  cursor: pointer;
+  font-size: var(--font-size-xs);
+}
+
+.agent-tool-diff-counts {
+  display: inline-flex;
+  gap: 5px;
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+}
+
+.agent-tool-diff-counts .is-added { color: var(--success); }
+.agent-tool-diff-counts .is-removed { color: var(--error); }
+
+.agent-tool-detail-section.is-diff .agent-tool-diff-preview {
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--outline-variant);
+  border-radius: 0;
+}
+
 .agent-tool-bash-card {
   display: grid;
   gap: 8px;

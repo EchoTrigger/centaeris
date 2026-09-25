@@ -22,6 +22,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { readDesktopFilePreview } from "../../lib/workspaceBridge";
+import { countDiffPreviewChanges, diffPanelFileTitle } from "../../lib/diffPanel";
 import {
   loadTranscriptContentRange,
 } from "./transcriptContentRanges";
@@ -64,20 +65,30 @@ const toolActivityIconByToken: Record<ToolActivityIconToken, LucideIcon> = {
 };
 
 const copyToolDetailText = (text: string): void => {
-  const normalized = text.trim();
   if (
-    !normalized ||
+    !text.trim() ||
     typeof navigator === "undefined" ||
     !navigator.clipboard
   ) {
     return;
   }
-  void navigator.clipboard.writeText(normalized).catch(() => {
+  void navigator.clipboard.writeText(text).catch(() => {
     // Clipboard failures should not disturb tool detail rendering.
   });
 };
 
-const ToolResultOutput = ({ operation }: { operation: TimelineOperation }) => {
+const ToolCopyButton = ({ text, label }: { text: string; label: string }) => (
+  <button type="button" className="agent-tool-copy-button" aria-label={label} title={label}
+    onClick={() => copyToolDetailText(text)}>
+    <Copy size={14} aria-hidden="true" />
+  </button>
+);
+
+const ToolResultOutput = ({ operation, variant = "output", path }: {
+  operation: TimelineOperation;
+  variant?: "output" | "file";
+  path?: string;
+}) => {
   const fallback = operation.fullOutputPath
     ? "Loading complete output…"
     : operation.modelContent || operation.outputPreview || "";
@@ -193,25 +204,33 @@ const ToolResultOutput = ({ operation }: { operation: TimelineOperation }) => {
 
   if (!content && !loadingMore && !readError && operation.contentStartByte === undefined) return null;
   return (
-    <>
-      {operation.contentStartByte !== undefined ? <button type="button" onClick={() => setRawOutput(value => !value)}>{rawOutput ? "Readable output" : "Raw output"}</button> : null}
+    <section className={`agent-tool-detail-section ${variant === "file" ? "is-file" : "is-output"}`}
+      aria-label={variant === "file" ? "Read result" : "Output"}>
+      <div className="agent-tool-detail-section-header">
+        <span className="agent-tool-detail-section-title" title={path}>{variant === "file" ? path || "Read result" : "Output"}</span>
+        <div className="agent-tool-detail-actions">
+          {operation.contentStartByte !== undefined ? <button type="button" className="agent-tool-raw-toggle" onClick={() => setRawOutput(value => !value)}>{rawOutput ? "Readable output" : "Raw output"}</button> : null}
+          {content ? <ToolCopyButton text={content} label={variant === "file" ? "Copy current content page" : "Copy current output page"} /> : null}
+        </div>
+      </div>
       {content ? <div className="agent-tool-output-viewport" tabIndex={0} role="region" aria-label="Tool output"><pre className="agent-tool-bash-output">{content}</pre></div> : null}
-      {content ? <button type="button" aria-label="Copy current output page" onClick={() => copyToolDetailText(content)}><Copy size={14} aria-hidden="true" /></button> : null}
       {!content && loadingMore ? <span role="status">{t("transcriptText.loading")}</span> : null}
       {readError ? <span role="alert">{t("transcriptText.failed")}
         <button type="button" onClick={() => { void loadMore(retryPage.current); }}>{t("transcriptText.retry")}</button>
       </span> : null}
-      {pageIndex > 0 ? <button type="button" disabled={loadingMore} onClick={() => { void loadMore(pageIndex - 1); }}>
-        {t("transcriptText.previousOutput")}
-      </button> : null}
-      {hasMore ? (
-        <button type="button" onClick={() => { void loadMore(); }} disabled={loadingMore}>
-          {loadingMore
-            ? t("toolActivityTranscript.loading")
-            : t("transcriptText.nextOutput")}
-        </button>
-      ) : null}
-    </>
+      {pageIndex > 0 || hasMore ? <div className="agent-tool-detail-paging">
+        {pageIndex > 0 ? <button type="button" disabled={loadingMore} onClick={() => { void loadMore(pageIndex - 1); }}>
+          {t("transcriptText.previousOutput")}
+        </button> : null}
+        {hasMore ? (
+          <button type="button" onClick={() => { void loadMore(); }} disabled={loadingMore}>
+            {loadingMore
+              ? t("toolActivityTranscript.loading")
+              : t("transcriptText.nextOutput")}
+          </button>
+        ) : null}
+      </div> : null}
+    </section>
   );
 };
 
@@ -221,17 +240,35 @@ const renderOperationDetail = (
   statusClassName: TaskStatus,
 ): ReactNode => {
   const { command, path, hasBashDetail, hasEditDetail, hasTextDetail } = detailState;
+  const diff = operation.diffPreview;
+  const changeCount = diff ? countDiffPreviewChanges(diff) : null;
   return (
     <div className={`agent-operation-body agent-tool-node-body ${statusClassName === "running" ? "is-running" : "is-done"}`}>
-      <div className="agent-tool-command-card">
+      <div className="agent-tool-command-card agent-tool-detail-card">
         {hasBashDetail ? <>
+          <div className="agent-tool-detail-title">Shell</div>
+          {command ? <section className="agent-tool-detail-section is-command" aria-label="Command">
+            <div className="agent-tool-detail-section-header">
+              <span className="agent-tool-detail-section-title">Command</span>
+              <ToolCopyButton text={command} label="Copy command" />
+            </div>
+            <div className="agent-tool-command-viewport" tabIndex={0}>
+              <span className="agent-tool-command-prompt" aria-hidden="true">$</span>
+              <pre className="agent-tool-bash-command">{command}</pre>
+            </div>
+          </section> : null}
           <ToolResultOutput operation={operation} />
           {operation.error ? <pre className="agent-tool-output-block is-error">{operation.error}</pre> : null}
-          {command ? <button type="button" className="agent-tool-copy-button" aria-label="Copy command" onClick={() => copyToolDetailText(command)}><Copy size={14} aria-hidden="true" /></button> : null}
         </> : null}
-        {hasEditDetail && operation.diffPreview ? (
-          <div className="agent-tool-command-section">
-            <div className="agent-tool-command-label">Diff</div>
+        {hasEditDetail && diff ? (
+          <section className="agent-tool-detail-section is-diff" aria-label="File changes">
+            <div className="agent-tool-detail-section-header">
+              <span className="agent-tool-detail-section-title" title={path}>{diffPanelFileTitle(path || "changes.diff")}</span>
+              {changeCount ? <span className="agent-tool-diff-counts" aria-label={`${changeCount.added} added, ${changeCount.removed} removed`}>
+                <span className="is-added">+{changeCount.added}</span> <span className="is-removed">-{changeCount.removed}</span>
+              </span> : null}
+              <ToolCopyButton text={diff} label="Copy diff" />
+            </div>
             <div className="agent-tool-diff-preview">
               <Suspense
                 fallback={
@@ -239,18 +276,19 @@ const renderOperationDetail = (
                 }
               >
                 <CodePreview
-                  content={operation.diffPreview}
+                  content={diff}
                   path={path || "changes.diff"}
                   variant="diff"
                 />
               </Suspense>
             </div>
-          </div>
+          </section>
         ) : null}
-        {hasEditDetail && !operation.diffPreview && operation.error ? (
+        {hasEditDetail && !diff && operation.error ? (
           <pre className="agent-tool-output-block is-error">{operation.error}</pre>
         ) : null}
-        {hasTextDetail ? <ToolResultOutput operation={operation} /> : null}
+        {hasTextDetail ? <ToolResultOutput operation={operation}
+          variant={operation.toolName === "read" ? "file" : "output"} path={path} /> : null}
       </div>
     </div>
   );
