@@ -842,9 +842,13 @@ export function ChatArea({
   }, [sendPrompt]);
   const handleModelSelect = useCallback(
     (configured: Parameters<typeof selectGlobalModel>[0]) => {
-      void selectGlobalModel(configured);
+      void (async () => {
+        if (await selectGlobalModel(configured) && currentSessionId) {
+          await refreshContextUsage(currentSessionId);
+        }
+      })();
     },
-    [selectGlobalModel],
+    [currentSessionId, refreshContextUsage, selectGlobalModel],
   );
   const handleReasoningEffortSelect = useCallback(
     (effort: Parameters<typeof selectReasoningEffort>[0]) => {
