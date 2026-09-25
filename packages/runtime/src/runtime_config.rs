@@ -106,12 +106,22 @@ struct ActiveModelRef {
     model_thinking_mode: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelThinkingPreference {
+    provider_id: String,
+    model: String,
+    mode: String,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PersistedRuntimeConfigState {
     models: Vec<CustomModelRecord>,
     custom_model_providers: Vec<CustomModelProviderRecord>,
     active_model: Option<ActiveModelRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    thinking_mode_preferences: Vec<ModelThinkingPreference>,
     default_tool_parallelism: Option<usize>,
     default_bash_path: Option<String>,
 }
@@ -413,8 +423,25 @@ fn apply_model_request(
             "model provider is not configured: providerId={provider_id}"
         ));
     }
-    let model_thinking_mode = built_in_model_profile(provider_id.as_str(), model.as_str())
-        .and_then(|profile| profile.thinking_mode);
+    if let Some(active) = state.active_model.as_ref() {
+        if let Some(mode) = active.model_thinking_mode.as_deref() {
+            save_model_thinking_preference(
+                &mut state.thinking_mode_preferences,
+                active.provider_id.as_str(),
+                active.model.as_str(),
+                mode,
+            );
+        }
+    }
+    let model_thinking_mode = state
+        .thinking_mode_preferences
+        .iter()
+        .find(|item| item.provider_id == provider_id && item.model == model)
+        .map(|item| item.mode.clone())
+        .or_else(|| {
+            resolve_model_record(state, provider_id.as_str(), model.as_str())
+                .and_then(|record| record.model_thinking_mode)
+        });
     state.active_model = Some(ActiveModelRef {
         provider_id,
         model,
@@ -470,7 +497,33 @@ fn apply_model_thinking_mode_request(
         }
     }
     active.model_thinking_mode = Some(mode.to_string());
+    save_model_thinking_preference(
+        &mut state.thinking_mode_preferences,
+        active.provider_id.as_str(),
+        active.model.as_str(),
+        mode,
+    );
     Ok(())
+}
+
+fn save_model_thinking_preference(
+    preferences: &mut Vec<ModelThinkingPreference>,
+    provider_id: &str,
+    model: &str,
+    mode: &str,
+) {
+    if let Some(item) = preferences
+        .iter_mut()
+        .find(|item| item.provider_id == provider_id && item.model == model)
+    {
+        item.mode = mode.to_string();
+    } else {
+        preferences.push(ModelThinkingPreference {
+            provider_id: provider_id.to_string(),
+            model: model.to_string(),
+            mode: mode.to_string(),
+        });
+    }
 }
 
 fn apply_custom_model_providers_request(
@@ -1084,8 +1137,22 @@ fn load_state() -> Result<PersistedRuntimeConfigState, String> {
 }
 
 pub(crate) fn migrate_persisted_model_selection(state: &mut PersistedRuntimeConfigState) -> bool {
+    let saved_preferences = std::mem::take(&mut state.thinking_mode_preferences);
+    state.thinking_mode_preferences = saved_preferences
+        .iter()
+        .filter(|item| {
+            thinking_mode_supported_for_model(
+                state,
+                item.provider_id.as_str(),
+                item.model.as_str(),
+                item.mode.as_str(),
+            )
+        })
+        .cloned()
+        .collect();
+    let preferences_changed = state.thinking_mode_preferences != saved_preferences;
     let Some(active) = state.active_model.as_mut() else {
-        return false;
+        return preferences_changed;
     };
     let replacement = match (active.provider_id.as_str(), active.model.as_str()) {
         ("openai.default", "gpt-5.6-sol") => Some("gpt-6-sol"),
@@ -1097,7 +1164,7 @@ pub(crate) fn migrate_persisted_model_selection(state: &mut PersistedRuntimeConf
         ("xiaomi.default", "mimo-v2.5-pro") => Some("mimo-v2.6-pro"),
         _ => None,
     };
-    let mut changed = false;
+    let mut changed = preferences_changed;
     if let Some(model) = replacement {
         active.model = model.to_string();
         changed = true;
@@ -1119,9 +1186,51 @@ pub(crate) fn migrate_persisted_model_selection(state: &mut PersistedRuntimeConf
     changed
 }
 
+fn thinking_mode_supported_for_model(
+    state: &PersistedRuntimeConfigState,
+    provider_id: &str,
+    model: &str,
+    mode: &str,
+) -> bool {
+    if let Some(profile) = built_in_model_profile(provider_id, model) {
+        return profile.thinking_modes.iter().any(|item| item == mode)
+            || (profile.thinking_modes.is_empty()
+                && profile.thinking_mode.as_deref() == Some(mode));
+    }
+    validate_model_ready(state, provider_id, model).is_ok()
+        && matches!(mode, "none" | "low" | "medium" | "high" | "xhigh" | "max")
+}
+
 pub(crate) fn validate_persisted_model_state(
     state: &PersistedRuntimeConfigState,
 ) -> Result<(), String> {
+    let mut preferred_models = HashSet::new();
+    for item in &state.thinking_mode_preferences {
+        if item.provider_id.trim() != item.provider_id
+            || item.model.trim() != item.model
+            || item.provider_id.is_empty()
+            || item.model.is_empty()
+        {
+            return Err("thinking preference model identity is empty or non-canonical".to_string());
+        }
+        if !preferred_models.insert((item.provider_id.as_str(), item.model.as_str())) {
+            return Err(format!(
+                "duplicate thinking preference: providerId={} model={}",
+                item.provider_id, item.model
+            ));
+        }
+        if !thinking_mode_supported_for_model(
+            state,
+            item.provider_id.as_str(),
+            item.model.as_str(),
+            item.mode.as_str(),
+        ) {
+            return Err(format!(
+                "unsupported thinking preference: providerId={} model={} mode={}",
+                item.provider_id, item.model, item.mode
+            ));
+        }
+    }
     let mut custom_provider_ids = Vec::new();
     for provider in &state.custom_model_providers {
         let canonical = canonical_custom_model_provider_id(provider.provider_id.as_str())?;
@@ -1815,6 +1924,82 @@ mod tests {
             default_record(&state).model_thinking_mode.as_deref(),
             Some("max")
         );
+    }
+
+    #[test]
+    fn model_effort_choice_survives_switching_models_and_reloading_settings() {
+        let mut state = PersistedRuntimeConfigState::default();
+        let mut secrets = PersistedRuntimeSecretState::default();
+        persist_model_api_key(&mut secrets, "google.default", "test-google".to_string());
+        persist_model_api_key(&mut secrets, "xai.default", "test-xai".to_string());
+        let select = |state: &mut PersistedRuntimeConfigState, provider_id: &str, model: &str| {
+            apply_model_request(
+                state,
+                &secrets,
+                &AgentRuntimeConfigSetRequest {
+                    model_provider_id: Some(provider_id.to_string()),
+                    model: Some(model.to_string()),
+                    ..AgentRuntimeConfigSetRequest::default()
+                },
+            )
+            .expect("select model");
+        };
+        let effort = |state: &mut PersistedRuntimeConfigState, mode: &str| {
+            apply_model_thinking_mode_request(
+                state,
+                &AgentRuntimeConfigSetRequest {
+                    model_thinking_mode: Some(mode.to_string()),
+                    ..AgentRuntimeConfigSetRequest::default()
+                },
+            )
+            .expect("set effort");
+        };
+        select(&mut state, "google.default", "gemini-3.1-pro-preview");
+        assert_eq!(
+            default_record(&state).model_thinking_mode.as_deref(),
+            Some("high")
+        );
+        effort(&mut state, "low");
+        select(&mut state, "xai.default", "grok-4.7");
+        assert_eq!(
+            default_record(&state).model_thinking_mode.as_deref(),
+            Some("high")
+        );
+        effort(&mut state, "xhigh");
+        select(&mut state, "google.default", "gemini-3.1-pro-preview");
+        assert_eq!(
+            default_record(&state).model_thinking_mode.as_deref(),
+            Some("low")
+        );
+        let encoded = toml::to_string(&state).expect("serialize settings");
+        let mut restored: PersistedRuntimeConfigState =
+            toml::from_str(&encoded).expect("reload settings");
+        assert!(!migrate_persisted_model_selection(&mut restored));
+        validate_persisted_model_state(&restored).expect("saved preference remains valid");
+        assert_eq!(
+            default_record(&restored).model_thinking_mode.as_deref(),
+            Some("low")
+        );
+        select(&mut restored, "xai.default", "grok-4.7");
+        assert_eq!(
+            default_record(&restored).model_thinking_mode.as_deref(),
+            Some("xhigh")
+        );
+    }
+
+    #[test]
+    fn removed_catalog_effort_preference_does_not_block_settings_reload() {
+        let mut state = PersistedRuntimeConfigState {
+            thinking_mode_preferences: vec![ModelThinkingPreference {
+                provider_id: "google.default".to_string(),
+                model: "gemini-3.1-pro-preview".to_string(),
+                mode: "max".to_string(),
+            }],
+            ..PersistedRuntimeConfigState::default()
+        };
+        assert!(migrate_persisted_model_selection(&mut state));
+        assert!(state.thinking_mode_preferences.is_empty());
+        validate_persisted_model_state(&state).expect("stale preference is removed");
     }
 
     #[test]

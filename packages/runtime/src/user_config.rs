@@ -13,7 +13,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
 
-const USER_CONFIG_SCHEMA_VERSION: u32 = 1;
+const USER_CONFIG_SCHEMA_VERSION: u32 = 2;
 const USER_CONFIG_UNSUPPORTED: &str = "user_config_unsupported";
 const USER_CONFIG_IO: &str = "user_config_io";
 static USER_CONFIG_LOCK: Mutex<()> = Mutex::new(());
@@ -146,8 +146,9 @@ pub(crate) fn load_at(path: &Path) -> Result<UserConfigDocument, String> {
         .ok_or_else(|| {
             format!("{USER_CONFIG_UNSUPPORTED}: user config schema_version must be an integer")
         })?;
-    match schema_version {
-        value if value == i64::from(USER_CONFIG_SCHEMA_VERSION) => {}
+    let upgrade_v1 = match schema_version {
+        1 => true,
+        value if value == i64::from(USER_CONFIG_SCHEMA_VERSION) => false,
         value if value < i64::from(USER_CONFIG_SCHEMA_VERSION) => {
             return Err(format!(
                 "{USER_CONFIG_UNSUPPORTED}: no forward migration exists from schema_version {value} to {USER_CONFIG_SCHEMA_VERSION}"
@@ -158,15 +159,18 @@ pub(crate) fn load_at(path: &Path) -> Result<UserConfigDocument, String> {
                 "{USER_CONFIG_UNSUPPORTED}: refusing config downgrade from schema_version {value} to {USER_CONFIG_SCHEMA_VERSION}"
             ));
         }
-    }
+    };
     let stored = toml::from_str::<StoredUserConfigDocument>(raw.as_str()).map_err(|error| {
         format!(
-            "{USER_CONFIG_UNSUPPORTED}: parse user config v{USER_CONFIG_SCHEMA_VERSION} failed for {}: {error}",
+            "{USER_CONFIG_UNSUPPORTED}: parse user config v{schema_version} failed for {}: {error}",
             path.display()
         )
     })?;
     let mut config = UserConfigDocument::from(stored);
-    let migrated = migrate_persisted_model_selection(&mut config.runtime);
+    if upgrade_v1 {
+        config.schema_version = USER_CONFIG_SCHEMA_VERSION;
+    }
+    let migrated = migrate_persisted_model_selection(&mut config.runtime) || upgrade_v1;
     validate(&config)?;
     if migrated {
         persist_at(path, &config)?;
@@ -417,6 +421,56 @@ mod tests {
     }
 
     #[test]
+    fn v1_config_migrates_to_v2_without_losing_selected_effort() {
+        let root = temp_root("effort-migration");
+        let path = root.join("config.toml");
+        let mut config = UserConfigDocument::default();
+        config.plugins.disabled.push("plugin-a".to_string());
+        let encoded = toml::to_string_pretty(&StoredUserConfigDocument::from(&config))
+            .expect("encode current config");
+        let mut old: toml::Value = toml::from_str(&encoded).expect("parse current config");
+        old["schema_version"] = toml::Value::Integer(1);
+        old["runtime"]
+            .as_table_mut()
+            .expect("runtime section")
+            .insert(
+                "active_model".to_string(),
+                toml::Value::Table(toml::map::Map::from_iter([
+                    (
+                        "provider_id".to_string(),
+                        toml::Value::String("google.default".to_string()),
+                    ),
+                    (
+                        "model".to_string(),
+                        toml::Value::String("gemini-3.1-pro-preview".to_string()),
+                    ),
+                    (
+                        "model_thinking_mode".to_string(),
+                        toml::Value::String("low".to_string()),
+                    ),
+                ])),
+            );
+        fs::write(
+            &path,
+            toml::to_string_pretty(&old).expect("encode v1 config"),
+        )
+        .expect("write v1 config");
+
+        let restored = load_at(&path).expect("migrate v1 config");
+        assert_eq!(restored.schema_version, 2);
+        assert_eq!(restored.plugins.disabled, ["plugin-a"]);
+        let saved: toml::Value =
+            toml::from_str(&fs::read_to_string(&path).expect("read migrated config"))
+                .expect("parse migrated config");
+        assert_eq!(saved["schema_version"].as_integer(), Some(2));
+        assert_eq!(
+            saved["runtime"]["active_model"]["model_thinking_mode"].as_str(),
+            Some("low")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn unknown_and_duplicate_values_fail_loudly() {
         let root = temp_root("invalid");
         let path = root.join("config.toml");
@@ -451,7 +505,7 @@ mod tests {
         assert!(load_at(path.as_path())
             .expect_err("old config")
             .contains("no forward migration exists"));
-        fs::write(path.as_path(), "schema_version = 2\n").expect("write future config");
+        fs::write(path.as_path(), "schema_version = 3\n").expect("write future config");
         assert!(load_at(path.as_path())
             .expect_err("future config")
             .contains("refusing config downgrade"));
