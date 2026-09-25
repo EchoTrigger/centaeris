@@ -4,6 +4,7 @@ import type {
   AgentContextCompactResponse,
   AgentContextUsageSummary,
   AgentRuntimeConfig,
+  SelectableModel,
 } from "../src/lib/chatBridge";
 import type { SessionHydrationSnapshot } from "../src/components/chat/types";
 import type { UiSession } from "../src/types/ui";
@@ -30,6 +31,14 @@ type ComposerHarnessProps = {
   isStreaming: boolean;
   runtimeConfigError: string;
   onCompact: () => void;
+  onModelSelect: (model: SelectableModel) => void;
+};
+
+const deepSeekModel: SelectableModel = {
+  providerId: "deepseek.default",
+  providerName: "DeepSeek",
+  model: "deepseek-flash",
+  modelThinkingModes: ["low", "high", "max"],
 };
 
 const runtimeConfig: AgentRuntimeConfig = {
@@ -39,7 +48,7 @@ const runtimeConfig: AgentRuntimeConfig = {
   model: "model",
   modelThinkingMode: "low",
   modelProviders: [],
-  selectableModels: [],
+  selectableModels: [deepSeekModel],
   updatedAt: 1,
 };
 
@@ -92,7 +101,13 @@ vi.mock("../src/lib/chatBridge", () => ({
   getAgentRunLiveSnapshot: vi.fn(),
   sendAgentInput: vi.fn(),
   sendAgentSupplement: vi.fn(),
-  setAgentRuntimeConfig: vi.fn(async () => runtimeConfig),
+  setAgentRuntimeConfig: vi.fn(async () => ({
+    ...runtimeConfig,
+    modelProviderId: deepSeekModel.providerId,
+    model: deepSeekModel.model,
+    modelContextTokens: 1_000_000,
+    updatedAt: 2,
+  })),
 }));
 
 vi.mock("../src/components/chat/ChatComposer", () => ({
@@ -309,6 +324,24 @@ test("successful manual compaction refreshes usage and clears the pending state"
   expect(getComposerProps().contextUsage).toEqual(refreshedUsage);
   expect(getComposerProps().runtimeConfigError).toBe("");
   expect(getComposerProps().isCompacting).toBe(false);
+  await act(async () => renderer.unmount());
+});
+
+test("selecting DeepSeek refreshes a displayed 200k context window to its current 1M limit", async () => {
+  const oldUsage = { ...makeUsage("session", 1, 10), maxContextTokens: 200_000 };
+  const renderer = await renderSession("session");
+  await resolveHydration("session", oldUsage);
+
+  await act(async () => {
+    getComposerProps().onModelSelect(deepSeekModel);
+    await Promise.resolve();
+  });
+
+  expect(harness.usageRequests).toHaveLength(1);
+  expect(harness.usageRequests[0].sessionId).toBe("session");
+  const refreshedUsage = { ...oldUsage, maxContextTokens: 1_000_000 };
+  await resolveUsage(harness.usageRequests[0], refreshedUsage);
+  expect(getComposerProps().contextUsage?.maxContextTokens).toBe(1_000_000);
   await act(async () => renderer.unmount());
 });
 

@@ -96,12 +96,14 @@ export const useAgentRuntimeConfig = ({
         });
         if (requestIdRef.current === requestId) {
           commitRuntimeConfig(config);
+          return true;
         }
       } catch (error) {
         if (requestIdRef.current === requestId) {
           onError(formatConfigRequestError(error));
         }
       }
+      return false;
     },
     [commitRuntimeConfig, onError],
   );

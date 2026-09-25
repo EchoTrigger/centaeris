@@ -1,5 +1,5 @@
 import { memo, useEffect, useState } from "react";
-import { LoaderCircle } from "lucide-react";
+import { Loader } from "lucide-react";
 import { useTranslation } from "../../i18n";
 import { useChatViewStore } from "./chatViewStore";
 import { runtimeEasterEgg, tachikomaEasterEgg } from "./chatRuntimeCore";
@@ -28,7 +28,7 @@ export const RunStatusLine = memo(function RunStatusLine({ turnId }: { turnId: s
   const label = count !== null ? `Tachikoma ×${count}${count === 1 ? " · awaiting result…" : " · whispering…"}`
     : egg ?? t(`runStatus.${labelKey(current)}`, { defaultValue: current.label });
   return <div className="runStatusLine">
-    {current.spinning ? <LoaderCircle className="runStatusSpinner" aria-hidden="true" /> : null}
+    {current.spinning ? <Loader className="runStatusSpinner" aria-hidden="true" /> : null}
     <span role="status">{label}</span>
     <TaskClock key={current.id} startedAtMs={current.startedAtMs} />
   </div>;

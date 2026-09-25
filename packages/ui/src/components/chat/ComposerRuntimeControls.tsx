@@ -50,15 +50,16 @@ export const ComposerRuntimeControls = memo(function ComposerRuntimeControls({
   const maxContextTokens = contextUsage?.maxContextTokens ?? 0;
   const usedTokens = contextUsage?.usedTokens ?? 0;
   const usedPercentage = contextUsage?.usedPercentage ?? 0;
-  const contextRows = breakdown ? [
+  const contextSegments = breakdown ? [
     ["Messages", breakdown.messageTokens, "messages"],
     ["System tools", breakdown.systemToolTokens, "system-tools"],
     ["MCP tools", breakdown.mcpToolTokens, "mcp-tools"],
     ["System prompt", breakdown.systemPromptTokens, "system-prompt"],
     ["Skills", breakdown.skillsTokens, "skills"],
-    ["Autocompact buffer", breakdown.autoCompactBufferTokens, "buffer"],
+    ["buffer", breakdown.autoCompactBufferTokens, "buffer"],
     ["Free space", breakdown.freeSpaceTokens, "free"],
   ] as const : [];
+  const contextRows = contextSegments.filter(([, , kind]) => kind !== "buffer");
   const activeModel = selectableModels[activeModelIndex];
   const modelGroups = useMemo(() => {
     const groups = new Map<string, {
@@ -190,7 +191,7 @@ export const ComposerRuntimeControls = memo(function ComposerRuntimeControls({
                   </strong>
                 </header>
                 <div className="contextWindowBar">
-                  {contextRows.filter(([, tokens]) => tokens > 0).map(([label, tokens, kind]) => (
+                  {contextSegments.filter(([, tokens]) => tokens > 0).map(([label, tokens, kind]) => (
                     <i
                       key={label}
                       className={`is-${kind}`}
