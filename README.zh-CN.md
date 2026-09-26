@@ -48,15 +48,13 @@ system-skills/       公开的内置 System Skills
 
 ## 从源码构建
 
-环境要求：Rust 1.94.1、Node.js 22.21.0、npm 10.9.4。完整发布检查还会运行 Python 3.9+ 的辅助脚本测试。
+环境要求：`rust-toolchain.toml` 指定的 Rust、Node.js 22.21.0、npm 10.9.4 和 Python 3.12。
 
-```powershell
-cargo test --locked -p centaeris-core query_loop
-npm ci
-npm run gate --workspace centaeris-ui
+```sh
+python3 scripts/ci.py Source --frontend-tests
 ```
 
-完整构建和首次运行说明见 [Windows 配置指南](docs/getting-started/Windows.md)。运行时和测试无需安装 Plugin。Desktop 与 TUI 发行包内置本仓库的公开 System Skills；其他扩展仍是单独版本化的资源。
+Windows 使用 `python`。跨平台源码检查见[开发指南](docs/development/Building.md)；完整 Windows 构建和首次运行说明见 [Windows 配置指南](docs/getting-started/Windows.md)。运行时和测试无需安装 Plugin。Desktop 与 TUI 发行包内置本仓库的公开 System Skills；其他扩展仍是单独版本化的资源。
 
 ## 界面语言
 

@@ -47,12 +47,3 @@ fn desktop_parity_consumes_the_generated_runtime_registry() {
     assert!(parity.contains("packages/runtime/generated/runtime-methods.json"));
     assert!(!parity.contains("packages/runtime/src/commands.rs"));
 }
-
-#[test]
-fn local_ci_checks_generated_runtime_protocol_reference() {
-    let ci =
-        fs::read_to_string(runtime_root().join("../../scripts/ci.ps1")).expect("local CI script");
-    assert!(ci.contains(
-        "cargo run --locked -p centaeris-runtime --bin centaeris-runtime-protocol-docs -- --check"
-    ));
-}

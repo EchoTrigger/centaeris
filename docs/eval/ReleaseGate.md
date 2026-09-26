@@ -23,8 +23,8 @@ message-log implementation changes:
 cargo test --locked -p centaeris-runtime message_log::observation_cas::tests::observation_manifest_growth_is_linear_with_early_changes_through_4095_observations -- --ignored --exact --nocapture --test-threads=1
 ```
 
-The checked-in `CI` workflow runs the Rust gate and the Node source-validation
-portion in parallel for pull requests and `main` changes. GitHub Actions does
+The checked-in `CI` workflow runs `scripts/ci.py` Rust and Node source gates
+on Windows, Linux and macOS for pull requests and `main` changes. GitHub Actions does
 not execute frontend tests: the Node job runs source lint, production
 typechecking/build, Electron syntax/host-parity checks, and license assembly.
 It also omits release packaging and packaged-application smoke tests so routine
@@ -41,10 +41,10 @@ The checked-in `Performance` workflow runs the observation storage-growth gate
 for relevant pull requests and `main` changes, and also supports an explicit
 manual run.
 
-The full local script runs formatting, workspace checks, Clippy with warnings
+The portable source gate runs formatting, workspace checks, Clippy with warnings
 denied, the focused Core query-loop and SQLite integration gates, the full Rust
-workspace tests, the Windows x64 TUI package build, and the desktop/UI acceptance
-script. Local Desktop acceptance performs `npm ci`, the UI gate (typecheck, Vite
+workspace tests and UI/Electron source checks. The Windows `ci.ps1 Release`
+entry additionally runs TUI packaging and desktop/UI acceptance. Local Desktop acceptance performs `npm ci`, the UI gate (typecheck, Vite
 build, and Vitest), retained Electron host/security tests and build,
 third-party-license assembly and distribution validation, plus runtime and window
 smoke tests, plus Desktop/TUI coexistence, persistence and sidecar

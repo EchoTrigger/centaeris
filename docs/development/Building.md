@@ -2,23 +2,35 @@
 
 ## Locked toolchains
 
-Use Rust `1.94.1`, Node.js `22.21.0`, and npm `10.9.4`. Commit and use
+Use the Rust version in `rust-toolchain.toml`, Python 3.12, Node.js `22.21.0`, and npm `10.9.4`. Commit and use
 `Cargo.lock` and `package-lock.json`; do not replace locked installs with
 floating dependency resolution in release builds.
 
-```powershell
+```sh
 cargo fetch --locked
 npm ci
 ```
 
 ## Development targets
 
-```powershell
+```sh
 cargo check --workspace --locked
 npm run typecheck
 npm run dev --workspace centaeris-ui
 npm run dev --workspace @centaeris/electron-host
 ```
+
+## Portable source checks
+
+Run `python scripts/ci.py Source --frontend-tests` on Windows, or
+`python3 scripts/ci.py Source --frontend-tests` on macOS/Linux. `Rust` and `Node`
+select individual stages. The entry point resolves paths from the repository,
+uses the current Python interpreter, and stops at the first failed command.
+Windows Rust checks use Git Bash; Unix checks use native tools from PATH.
+
+CI runs the source gates on Windows, Linux and macOS. The additional macOS
+Runtime workflow retains native execution and DNS checks, including Intel.
+This source matrix does not produce installers or claim desktop packaging support.
 
 ## Release targets
 

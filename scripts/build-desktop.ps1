@@ -1,3 +1,5 @@
+if (-not $IsWindows) { throw "This distribution builder supports Windows only; use scripts/ci.py for portable source checks." }
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
