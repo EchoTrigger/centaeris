@@ -9,7 +9,6 @@ mod lease;
 mod live_text;
 
 pub use lease::{
-    ActiveAgentRun, AgentRunLease, AgentRunRegistry, OwnerExitDisposition, RuntimeClientKind,
-    StartAgentRunError,
+    ActiveAgentRun, AgentRunLease, AgentRunRegistry, RuntimeClientKind, StartAgentRunError,
 };
 pub use live_text::{LiveTextJournal, LiveTextJournalKey, LiveTextOperation};

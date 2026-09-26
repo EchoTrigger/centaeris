@@ -318,6 +318,30 @@ impl RuntimeClient {
     }
 
     #[cfg(test)]
+    pub(crate) fn from_test_request_handler(
+        handler: impl Fn(Value) -> Value + Send + 'static,
+    ) -> Self {
+        let (event_tx, event_rx) = mpsc::channel();
+        let (write_tx, write_rx) = mpsc::channel::<String>();
+        let mut client = Self::from_test_event_receiver(event_rx, true);
+        client.write_tx = write_tx;
+        let pending = Arc::clone(&client.pending);
+        thread::spawn(move || {
+            let _event_tx = event_tx;
+            for line in write_rx {
+                let frame: Value = serde_json::from_str(&line).expect("test request JSON");
+                let result = handler(frame.clone());
+                handle_runtime_response(
+                    &json!({"jsonrpc": "2.0", "id": frame["id"], "result": result}),
+                    &pending,
+                )
+                .expect("test response");
+            }
+        });
+        client
+    }
+
+    #[cfg(test)]
     pub(crate) fn from_test_event_receiver(
         event_rx: mpsc::Receiver<RuntimeEvent>,
         connected: bool,

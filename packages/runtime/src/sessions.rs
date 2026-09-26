@@ -1089,7 +1089,7 @@ mod tests {
                             reason: Some("session_deleted".to_string()),
                         })
                         .expect("commit deleted Session AgentRun terminal")
-                        .cancelled
+                        .cancel_accepted
                     );
                     terminal_event_writer
                         .finish_agent_run(lease.lease_id.as_str())

@@ -18,14 +18,11 @@ pub struct AgentRunLease {
     pub lease_id: String,
     pub session_id: String,
     pub agent_run_id: String,
-    pub owner_id: String,
-    pub owner_kind: RuntimeClientKind,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionBusy {
     pub active_agent_run_id: String,
-    pub origin_owner_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,25 +31,40 @@ pub enum StartAgentRunError {
     SessionBusy(SessionBusy),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum OwnerExitDisposition {
-    Interrupt(AgentRunLease),
-    Transfer(AgentRunLease),
-}
-
 #[derive(Clone, Debug)]
 pub struct ActiveAgentRun {
     pub lease: AgentRunLease,
     pub turn_id: String,
     pub control: TurnControl,
-    cancellation_reason: Arc<Mutex<Option<String>>>,
-    owner_exit_observed: bool,
+    cancellation_reason: Arc<Mutex<Option<CancellationCause>>>,
+}
+
+#[derive(Clone, Debug)]
+struct CancellationCause {
+    reason: String,
+    reason_type: &'static str,
 }
 
 impl ActiveAgentRun {
     pub fn close_with_cancellation<TResult>(
         &self,
         reason: &str,
+        request: impl FnOnce() -> Result<TResult, String>,
+    ) -> Result<TResult, String> {
+        self.close_with_cause(reason, "cancelled", request)
+    }
+
+    pub fn close_with_shutdown<TResult>(
+        &self,
+        request: impl FnOnce() -> Result<TResult, String>,
+    ) -> Result<TResult, String> {
+        self.close_with_cause("runtime_server_shutdown", "shutdown", request)
+    }
+
+    fn close_with_cause<TResult>(
+        &self,
+        reason: &str,
+        reason_type: &'static str,
         request: impl FnOnce() -> Result<TResult, String>,
     ) -> Result<TResult, String> {
         self.control.close_with(|| {
@@ -62,7 +74,10 @@ impl ActiveAgentRun {
                 .lock()
                 .map_err(|_| "active agent run cancellation lock poisoned".to_string())?;
             if cancellation_reason.is_none() {
-                *cancellation_reason = Some(reason.to_string());
+                *cancellation_reason = Some(CancellationCause {
+                    reason: reason.to_string(),
+                    reason_type,
+                });
             }
             Ok(result)
         })
@@ -72,7 +87,14 @@ impl ActiveAgentRun {
         self.cancellation_reason
             .lock()
             .map_err(|_| "active agent run cancellation lock poisoned".to_string())
-            .map(|reason| reason.clone())
+            .map(|reason| reason.as_ref().map(|cause| cause.reason.clone()))
+    }
+
+    pub fn cancellation_reason_type(&self) -> Result<Option<&'static str>, String> {
+        self.cancellation_reason
+            .lock()
+            .map_err(|_| "active agent run cancellation lock poisoned".to_string())
+            .map(|reason| reason.as_ref().map(|cause| cause.reason_type))
     }
 }
 
@@ -96,8 +118,6 @@ impl AgentRunRegistry {
         session_id: &str,
         agent_run_id: &str,
         turn_id: &str,
-        owner_id: &str,
-        owner_kind: RuntimeClientKind,
         control: TurnControl,
     ) -> Result<AgentRunLease, StartAgentRunError> {
         let session_id =
@@ -106,8 +126,6 @@ impl AgentRunRegistry {
             required_identifier(agent_run_id, "agentRunId").map_err(StartAgentRunError::Invalid)?;
         let turn_id =
             required_identifier(turn_id, "turnId").map_err(StartAgentRunError::Invalid)?;
-        let owner_id =
-            required_identifier(owner_id, "ownerId").map_err(StartAgentRunError::Invalid)?;
         let mut state = self
             .state
             .lock()
@@ -120,7 +138,6 @@ impl AgentRunRegistry {
         if let Some(existing) = state.active_by_session.get(session_id.as_str()) {
             return Err(StartAgentRunError::SessionBusy(SessionBusy {
                 active_agent_run_id: existing.lease.agent_run_id.clone(),
-                origin_owner_id: existing.lease.owner_id.clone(),
             }));
         }
         if state
@@ -136,8 +153,6 @@ impl AgentRunRegistry {
             lease_id: format!("lease:{}", NEXT_LEASE_ID.fetch_add(1, Ordering::Relaxed)),
             session_id,
             agent_run_id,
-            owner_id,
-            owner_kind,
         };
         state.active_by_session.insert(
             lease.session_id.clone(),
@@ -146,7 +161,6 @@ impl AgentRunRegistry {
                 turn_id,
                 control,
                 cancellation_reason: Arc::new(Mutex::new(None)),
-                owner_exit_observed: false,
             },
         );
         Ok(lease)
@@ -218,53 +232,18 @@ impl AgentRunRegistry {
             .map(|state| state.active_by_session.get(session_id.as_str()).cloned())
     }
 
-    /// Returns exactly the AgentRuns affected by one host exit. Interrupted AgentRuns
-    /// remain active until the session actor persists their terminal state and
-    /// calls `finish`, preventing a second turn from racing that transition.
-    pub fn owner_exited(
-        &self,
-        owner_id: &str,
-        desktop_owner_ids: &[String],
-    ) -> Result<Vec<OwnerExitDisposition>, String> {
-        let owner_id = required_identifier(owner_id, "ownerId")?;
-        let mut desktop_owner_ids = desktop_owner_ids
-            .iter()
-            .map(|owner_id| required_identifier(owner_id, "desktopOwnerId"))
-            .collect::<Result<Vec<_>, _>>()?;
-        desktop_owner_ids.sort();
-        desktop_owner_ids.dedup();
-        let mut state = self
+    pub fn active_agent_runs(&self) -> Result<Vec<ActiveAgentRun>, String> {
+        let state = self
             .state
             .lock()
             .map_err(|_| "Session AgentRun registry lock poisoned".to_string())?;
-        let mut dispositions = Vec::new();
-        for active_agent_run in state
+        let mut runs = state
             .active_by_session
-            .values_mut()
-            .filter(|active_agent_run| {
-                active_agent_run.lease.owner_id == owner_id && !active_agent_run.owner_exit_observed
-            })
-        {
-            if active_agent_run.lease.owner_kind == RuntimeClientKind::Tui
-                && desktop_owner_ids.len() == 1
-            {
-                active_agent_run.lease.owner_id = desktop_owner_ids[0].clone();
-                active_agent_run.lease.owner_kind = RuntimeClientKind::Desktop;
-                active_agent_run.owner_exit_observed = false;
-                dispositions.push(OwnerExitDisposition::Transfer(
-                    active_agent_run.lease.clone(),
-                ));
-            } else {
-                active_agent_run.owner_exit_observed = true;
-                dispositions.push(OwnerExitDisposition::Interrupt(
-                    active_agent_run.lease.clone(),
-                ));
-            }
-        }
-        dispositions.sort_by(|left, right| {
-            disposition_agent_run_id(left).cmp(disposition_agent_run_id(right))
-        });
-        Ok(dispositions)
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        runs.sort_by(|left, right| left.lease.agent_run_id.cmp(&right.lease.agent_run_id));
+        Ok(runs)
     }
 
     pub fn active_agent_run_count(&self) -> Result<usize, String> {
@@ -274,7 +253,7 @@ impl AgentRunRegistry {
             .map(|state| state.active_by_session.len())
     }
 
-    pub fn owner_id_for_lease(&self, lease_id: &str) -> Result<String, String> {
+    pub fn require_lease(&self, lease_id: &str) -> Result<(), String> {
         let lease_id = required_identifier(lease_id, "leaseId")?;
         self.state
             .lock()
@@ -282,7 +261,7 @@ impl AgentRunRegistry {
             .active_by_session
             .values()
             .find(|active| active.lease.lease_id == lease_id)
-            .map(|active| active.lease.owner_id.clone())
+            .map(|_| ())
             .ok_or_else(|| format!("unknown agent run lease: {lease_id}"))
     }
 
@@ -357,14 +336,6 @@ impl Drop for SessionDeletionRegistration<'_> {
     }
 }
 
-fn disposition_agent_run_id(disposition: &OwnerExitDisposition) -> &str {
-    match disposition {
-        OwnerExitDisposition::Interrupt(lease) | OwnerExitDisposition::Transfer(lease) => {
-            lease.agent_run_id.as_str()
-        }
-    }
-}
-
 fn required_identifier(value: &str, field: &str) -> Result<String, String> {
     let value = value.trim();
     if value.is_empty() {
@@ -377,19 +348,68 @@ fn required_identifier(value: &str, field: &str) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn shutdown_is_typed_and_the_first_stop_cause_wins() {
+        for shutdown_first in [false, true] {
+            let registry = AgentRunRegistry::default();
+            registry
+                .start("session", "run", "turn", TurnControl::new())
+                .unwrap();
+            let active = registry.active("run").unwrap().unwrap();
+            if shutdown_first {
+                active.close_with_shutdown(|| Ok(())).unwrap();
+                active
+                    .close_with_cancellation("user_cancelled", || Ok(()))
+                    .unwrap();
+                assert_eq!(active.cancellation_reason_type().unwrap(), Some("shutdown"));
+                assert_eq!(
+                    active.cancellation_reason().unwrap().as_deref(),
+                    Some("runtime_server_shutdown")
+                );
+            } else {
+                // A caller-controlled reason cannot acquire service semantics.
+                active
+                    .close_with_cancellation("runtime_server_shutdown", || Ok(()))
+                    .unwrap();
+                active.close_with_shutdown(|| Ok(())).unwrap();
+                assert_eq!(
+                    active.cancellation_reason_type().unwrap(),
+                    Some("cancelled")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn failed_stop_request_does_not_claim_a_cancellation_cause() {
+        let registry = AgentRunRegistry::default();
+        registry
+            .start("session", "run", "turn", TurnControl::new())
+            .unwrap();
+        let active = registry.active("run").unwrap().unwrap();
+        assert!(active
+            .close_with_shutdown(|| Err::<(), _>("request failed".into()))
+            .is_err());
+        assert_eq!(active.cancellation_reason().unwrap(), None);
+        assert_eq!(active.cancellation_reason_type().unwrap(), None);
+        active
+            .close_with_cancellation("user_cancelled", || Ok(()))
+            .unwrap();
+        assert_eq!(
+            active.cancellation_reason_type().unwrap(),
+            Some("cancelled")
+        );
+    }
+
     fn start_agent_run(
         registry: &AgentRunRegistry,
         session_id: &str,
         agent_run_id: &str,
-        owner_id: &str,
-        owner_kind: RuntimeClientKind,
     ) -> Result<AgentRunLease, StartAgentRunError> {
         registry.start(
             session_id,
             agent_run_id,
             format!("turn:{agent_run_id}").as_str(),
-            owner_id,
-            owner_kind,
             TurnControl::new(),
         )
     }
@@ -397,14 +417,7 @@ mod tests {
     #[test]
     fn finishing_keeps_session_owned_until_control_closes_without_blocking_other_sessions() {
         let registry = AgentRunRegistry::default();
-        let first = start_agent_run(
-            &registry,
-            "chat-a",
-            "run-a",
-            "host-a",
-            RuntimeClientKind::Desktop,
-        )
-        .unwrap();
+        let first = start_agent_run(&registry, "chat-a", "run-a").unwrap();
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
@@ -423,20 +436,8 @@ mod tests {
                 .recv_timeout(std::time::Duration::from_secs(5))
                 .unwrap();
             let during = registry.active_for_session("chat-a").unwrap();
-            let contender = start_agent_run(
-                registry,
-                "chat-a",
-                "run-c",
-                "host-c",
-                RuntimeClientKind::Tui,
-            );
-            let independent = start_agent_run(
-                registry,
-                "chat-b",
-                "run-b",
-                "host-b",
-                RuntimeClientKind::Desktop,
-            );
+            let contender = start_agent_run(registry, "chat-a", "run-c");
+            let independent = start_agent_run(registry, "chat-b", "run-b");
             release_tx.send(()).unwrap();
             closing.join().unwrap().unwrap();
             assert_eq!(
@@ -446,28 +447,14 @@ mod tests {
             assert!(matches!(contender, Err(StartAgentRunError::SessionBusy(_))));
             assert!(independent.is_ok());
         });
-        let next = start_agent_run(
-            &registry,
-            "chat-a",
-            "run-next",
-            "host-a",
-            RuntimeClientKind::Desktop,
-        )
-        .unwrap();
+        let next = start_agent_run(&registry, "chat-a", "run-next").unwrap();
         registry.finish(&next.lease_id).unwrap();
     }
 
     #[test]
     fn concurrent_finish_cannot_release_a_replacement_lease() {
         let registry = AgentRunRegistry::default();
-        let first = start_agent_run(
-            &registry,
-            "chat-a",
-            "run-a",
-            "host-a",
-            RuntimeClientKind::Desktop,
-        )
-        .unwrap();
+        let first = start_agent_run(&registry, "chat-a", "run-a").unwrap();
         let old_control = registry.active("run-a").unwrap().unwrap().control;
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -487,14 +474,7 @@ mod tests {
                 .recv_timeout(std::time::Duration::from_secs(5))
                 .unwrap();
             registry.finish(&first.lease_id).unwrap();
-            let replacement = start_agent_run(
-                registry,
-                "chat-a",
-                "run-b",
-                "host-b",
-                RuntimeClientKind::Tui,
-            )
-            .unwrap();
+            let replacement = start_agent_run(registry, "chat-a", "run-b").unwrap();
             release_tx.send(()).unwrap();
             assert!(late.join().unwrap().is_err());
             assert_eq!(
@@ -514,164 +494,46 @@ mod tests {
     #[test]
     fn failed_control_close_keeps_ownership_until_a_successful_retry() {
         let registry = AgentRunRegistry::default();
-        let first = start_agent_run(
-            &registry,
-            "chat-a",
-            "run-a",
-            "host-a",
-            RuntimeClientKind::Desktop,
-        )
-        .unwrap();
+        let first = start_agent_run(&registry, "chat-a", "run-a").unwrap();
         assert_eq!(
             registry.finish_with(&first.lease_id, |_| Err("close failed".to_string())),
             Err("close failed".to_string())
         );
         assert!(matches!(
-            start_agent_run(
-                &registry,
-                "chat-a",
-                "run-b",
-                "host-b",
-                RuntimeClientKind::Tui
-            ),
+            start_agent_run(&registry, "chat-a", "run-b",),
             Err(StartAgentRunError::SessionBusy(_))
         ));
         registry.finish(&first.lease_id).unwrap();
-        assert!(start_agent_run(
-            &registry,
-            "chat-a",
-            "run-b",
-            "host-b",
-            RuntimeClientKind::Tui
-        )
-        .is_ok());
+        assert!(start_agent_run(&registry, "chat-a", "run-b",).is_ok());
     }
 
     #[test]
     fn accepts_different_sessions_and_rejects_a_second_run_in_one_session() {
         let registry = AgentRunRegistry::default();
-        let first = start_agent_run(
-            &registry,
-            "chat-a",
-            "agent-run-a",
-            "host-a",
-            RuntimeClientKind::Desktop,
-        )
-        .expect("start first AgentRun");
-        start_agent_run(
-            &registry,
-            "chat-b",
-            "agent-run-b",
-            "host-b",
-            RuntimeClientKind::Desktop,
-        )
-        .expect("start independent session");
+        let first =
+            start_agent_run(&registry, "chat-a", "agent-run-a").expect("start first AgentRun");
+        start_agent_run(&registry, "chat-b", "agent-run-b").expect("start independent session");
         assert!(matches!(
             start_agent_run(
                 &registry,
                 "chat-c",
                 "agent-run-b",
-                "host-c",
-                RuntimeClientKind::Desktop,
             ),
             Err(StartAgentRunError::Invalid(message)) if message.contains("already active")
         ));
 
-        let busy = start_agent_run(
-            &registry,
-            "chat-a",
-            "agent-run-c",
-            "host-c",
-            RuntimeClientKind::Tui,
-        )
-        .expect_err("same session must be busy");
+        let busy = start_agent_run(&registry, "chat-a", "agent-run-c")
+            .expect_err("same session must be busy");
         let StartAgentRunError::SessionBusy(busy) = busy else {
             panic!("same session must return SessionBusy");
         };
         assert_eq!(busy.active_agent_run_id, first.agent_run_id);
-        assert_eq!(busy.origin_owner_id, "host-a");
-    }
-
-    #[test]
-    fn owner_exit_transfers_only_tui_run_with_exactly_one_desktop() {
-        let registry = AgentRunRegistry::default();
-        let desktop_owned = start_agent_run(
-            &registry,
-            "chat-a",
-            "agent-run-a",
-            "desktop-a",
-            RuntimeClientKind::Desktop,
-        )
-        .expect("start Desktop AgentRun");
-        let tui_owned = start_agent_run(
-            &registry,
-            "chat-b",
-            "agent-run-b",
-            "tui-a",
-            RuntimeClientKind::Tui,
-        )
-        .expect("start TUI AgentRun");
-        start_agent_run(
-            &registry,
-            "chat-c",
-            "agent-run-c",
-            "tui-b",
-            RuntimeClientKind::Tui,
-        )
-        .expect("start ambiguous TUI AgentRun");
-
-        assert_eq!(
-            registry
-                .owner_exited("tui-a", &["desktop-a".to_string()])
-                .expect("TUI owner exit"),
-            vec![OwnerExitDisposition::Transfer(AgentRunLease {
-                owner_id: "desktop-a".to_string(),
-                owner_kind: RuntimeClientKind::Desktop,
-                ..tui_owned.clone()
-            })]
-        );
-        assert_eq!(
-            registry
-                .owner_id_for_lease(tui_owned.lease_id.as_str())
-                .expect("transferred owner"),
-            "desktop-a"
-        );
-        assert_eq!(
-            registry
-                .owner_exited("desktop-a", &[])
-                .expect("Desktop owner exit"),
-            vec![
-                OwnerExitDisposition::Interrupt(desktop_owned),
-                OwnerExitDisposition::Interrupt(AgentRunLease {
-                    owner_id: "desktop-a".to_string(),
-                    owner_kind: RuntimeClientKind::Desktop,
-                    ..tui_owned
-                }),
-            ]
-        );
-        assert!(matches!(
-            registry
-                .owner_exited(
-                    "tui-b",
-                    &["desktop-a".to_string(), "desktop-b".to_string()]
-                )
-                .expect("ambiguous Desktop exit")
-                .as_slice(),
-            [OwnerExitDisposition::Interrupt(lease)] if lease.agent_run_id == "agent-run-c"
-        ));
     }
 
     #[test]
     fn active_agent_run_count_tracks_start_and_finish() {
         let registry = AgentRunRegistry::default();
-        let lease = start_agent_run(
-            &registry,
-            "chat-a",
-            "agent-run-a",
-            "desktop-a",
-            RuntimeClientKind::Desktop,
-        )
-        .expect("start AgentRun");
+        let lease = start_agent_run(&registry, "chat-a", "agent-run-a").expect("start AgentRun");
         assert_eq!(registry.active_agent_run_count().expect("active count"), 1);
 
         registry
@@ -690,22 +552,14 @@ mod tests {
                         &registry,
                         "chat-a",
                         "agent-run-a",
-                        "desktop-a",
-                        RuntimeClientKind::Desktop,
                     ),
                     Err(StartAgentRunError::Invalid(message)) if message.contains("being deleted")
                 ));
                 Ok(())
             })
             .expect("delete Session");
-        start_agent_run(
-            &registry,
-            "chat-a",
-            "agent-run-a",
-            "desktop-a",
-            RuntimeClientKind::Desktop,
-        )
-        .expect("deletion guard must release after cleanup");
+        start_agent_run(&registry, "chat-a", "agent-run-a")
+            .expect("deletion guard must release after cleanup");
     }
 
     #[test]
@@ -717,13 +571,7 @@ mod tests {
             .unwrap_err()
             .contains("unknown"));
         assert!(matches!(
-            start_agent_run(
-                &registry,
-                " ",
-                "agent-run-a",
-                "owner-a",
-                RuntimeClientKind::Desktop,
-            ),
+            start_agent_run(&registry, " ", "agent-run-a",),
             Err(StartAgentRunError::Invalid(_))
         ));
     }

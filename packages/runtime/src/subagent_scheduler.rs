@@ -4,7 +4,7 @@ use crate::http_transport::ReqwestJsonHttpTransport;
 use crate::mcp;
 use crate::message_log;
 use crate::runtime_config;
-use crate::runtime_rpc_transport::EventWriter;
+use crate::runtime_rpc_transport::{EventWriter, RuntimeServerClientHub};
 use crate::sessions;
 use centaeris_core::model::{
     AnthropicMessagesModelClient, OpenAiCompatibleModelClient, OpenAiResponsesModelClient, WireApi,
@@ -26,7 +26,7 @@ use centaeris_core::session::reliability::{
     ListRuntimeJobsRequest, RuntimeJobRecord, RuntimeJobStatus,
 };
 use centaeris_core::session::store::RuntimeStoreActor;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -34,12 +34,25 @@ const DEFAULT_SUBAGENT_SCHEDULER_LEASE_MS: u64 = 120_000;
 const DEFAULT_SUBAGENT_MAX_PARALLELISM: usize = 3;
 const SUBAGENT_QUEUE_SCAN_LIMIT: usize = 64;
 const BACKGROUND_WORKER_IDLE_MS: u64 = 250;
+pub(crate) type ShutdownJobs = tokio::sync::Mutex<HashSet<String>>;
 
-pub(crate) async fn run_background_worker(event_writer: EventWriter) {
+pub(crate) async fn run_background_worker(
+    event_writer: EventWriter,
+    clients: Arc<RuntimeServerClientHub>,
+    shutdown_jobs: Arc<ShutdownJobs>,
+) {
     loop {
+        if clients.is_draining() {
+            return;
+        }
         match next_queued_parent_session().await {
             Ok(Some(session_id)) => {
-                match run_parent_batch(session_id.as_str(), event_writer.clone()).await {
+                if clients.is_draining() {
+                    return;
+                }
+                match run_parent_batch(session_id.as_str(), event_writer.clone(), &shutdown_jobs)
+                    .await
+                {
                     Ok(()) => continue,
                     Err(error) => eprintln!("centaeris Agent background worker failed: {error}"),
                 }
@@ -48,6 +61,115 @@ pub(crate) async fn run_background_worker(event_writer: EventWriter) {
             Err(error) => eprintln!("centaeris Agent background worker scan failed: {error}"),
         }
         tokio::time::sleep(std::time::Duration::from_millis(BACKGROUND_WORKER_IDLE_MS)).await;
+    }
+}
+
+pub(crate) async fn stop_pending_jobs(shutdown_jobs: &ShutdownJobs) -> Result<(), String> {
+    let store = agent_runtime::agent_runtime_store_actor()?;
+    loop {
+        let jobs = store
+            .list_runtime_jobs(ListRuntimeJobsRequest {
+                statuses: vec![
+                    RuntimeJobStatus::Queued,
+                    RuntimeJobStatus::Leased,
+                    RuntimeJobStatus::Running,
+                ],
+                limit: SUBAGENT_QUEUE_SCAN_LIMIT,
+                ..Default::default()
+            })
+            .await?;
+        if jobs.is_empty() {
+            return Ok(());
+        }
+        for job in jobs {
+            let mut stopped = shutdown_jobs.lock().await;
+            if stop_job(&store, &job, "runtime_server_shutdown").await? {
+                stopped.insert(job.job_id.clone());
+                if job.status == RuntimeJobStatus::Queued {
+                    let job_id = job.job_id.clone();
+                    tokio::task::spawn_blocking(move || {
+                        if let Some(run) = message_log::project_agent_run(&job_id)? {
+                            agent_runtime::stop_agent_run_after_tool_closure(
+                                &run,
+                                "shutdown",
+                                "runtime_server_shutdown",
+                            )?;
+                        }
+                        Ok::<(), String>(())
+                    })
+                    .await
+                    .map_err(|error| error.to_string())??;
+                }
+            }
+        }
+    }
+}
+
+async fn stop_job(
+    store: &RuntimeStoreActor,
+    job: &RuntimeJobRecord,
+    reason: &str,
+) -> Result<bool, String> {
+    let result = store
+        .cancel_runtime_job(
+            centaeris_core::session::reliability::CancelRuntimeJobRequest {
+                expected_lease_owner: None,
+                job_id: job.job_id.clone(),
+                reason: reason.to_string(),
+                cancelled_at_ms: current_timestamp_ms(),
+                expected_status: Some(job.status.clone()),
+            },
+        )
+        .await;
+    match result {
+        Ok(()) => Ok(true),
+        Err(error) => {
+            if store
+                .get_runtime_job(&job.job_id)
+                .await?
+                .is_some_and(|current| current.status.is_terminal() || current.status != job.status)
+            {
+                Ok(false)
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Startup reconciles job admission with authoritative Session terminals before
+/// reclaiming expired leases. Stopped child work is never made runnable again.
+pub(crate) async fn reconcile_stopped_jobs() -> Result<(), String> {
+    let store = agent_runtime::agent_runtime_store_actor()?;
+    let stopped = message_log::project_agent_runs()?
+        .into_iter()
+        .filter(|run| !matches!(run.status.as_str(), "running" | "stalled"))
+        .map(|run| (run.agent_run_id, run.status))
+        .collect::<HashMap<_, _>>();
+    let mut offset = 0;
+    loop {
+        let jobs = store
+            .list_runtime_jobs(ListRuntimeJobsRequest {
+                statuses: vec![
+                    RuntimeJobStatus::Queued,
+                    RuntimeJobStatus::Leased,
+                    RuntimeJobStatus::Running,
+                ],
+                limit: SUBAGENT_QUEUE_SCAN_LIMIT,
+                offset,
+                ..Default::default()
+            })
+            .await?;
+        if jobs.is_empty() {
+            return Ok(());
+        }
+        for job in jobs {
+            if stopped.contains_key(&job.job_id) {
+                stop_job(&store, &job, "runtime_server_recovered_interrupted").await?;
+            } else {
+                offset += 1;
+            }
+        }
     }
 }
 
@@ -82,7 +204,11 @@ async fn next_queued_parent_session() -> Result<Option<String>, String> {
     Ok(None)
 }
 
-async fn run_parent_batch(session_id: &str, event_writer: EventWriter) -> Result<(), String> {
+async fn run_parent_batch(
+    session_id: &str,
+    event_writer: EventWriter,
+    shutdown_jobs: &ShutdownJobs,
+) -> Result<(), String> {
     let started_at_ms = current_timestamp_ms();
     let cwd = PathBuf::from(sessions::cwd_for_session_id(session_id)?);
     let worker_id = format!("electron-agent-worker-{}", std::process::id());
@@ -162,6 +288,7 @@ async fn run_parent_batch(session_id: &str, event_writer: EventWriter) -> Result
             item.job_id.as_str(),
             binding.child_session_id.as_str(),
             binding.child_turn_id.as_str(),
+            shutdown_jobs,
         )
         .await?;
     }
@@ -179,11 +306,17 @@ async fn persist_agent_session_terminal_projection(
     runtime_job_id: &str,
     child_session_id: &str,
     child_turn_id: &str,
+    shutdown_jobs: &ShutdownJobs,
 ) -> Result<(), String> {
     let job = store
         .get_runtime_job(runtime_job_id)
         .await?
         .ok_or_else(|| format!("Agent runtime job missing: {runtime_job_id}"))?;
+    if message_log::project_agent_run(runtime_job_id)?
+        .is_some_and(|run| !matches!(run.status.as_str(), "running" | "stalled"))
+    {
+        return Ok(());
+    }
     let (status, content) = match job.status {
         RuntimeJobStatus::Succeeded => {
             let result_ref = job
@@ -203,7 +336,11 @@ async fn persist_agent_session_terminal_projection(
                 .unwrap_or_else(|| "Agent failed without an error message.".to_string()),
         ),
         RuntimeJobStatus::Cancelled => (
-            "cancelled",
+            if shutdown_jobs.lock().await.contains(&job.job_id) {
+                "shutdown"
+            } else {
+                "cancelled"
+            },
             job.last_error
                 .clone()
                 .unwrap_or_else(|| "Agent was cancelled.".to_string()),
@@ -474,4 +611,198 @@ fn subagent_engine_config(
         .unwrap_or(engine_config.tool_parallelism);
     engine_config.allowed_tools = allowed_tools;
     engine_config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use centaeris_core::session::reliability::{
+        CancelRuntimeJobRequest, ScheduleRuntimeJobRequest,
+    };
+
+    #[test]
+    fn service_stop_and_restart_reconciliation_do_not_reclaim_stopped_jobs_or_spoof_user_cause() {
+        let _guard = message_log::test_env_mutex()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-shutdown-jobs-{}-{}",
+            std::process::id(),
+            current_timestamp_ms()
+        ));
+        std::fs::create_dir_all(root.join("workspace")).unwrap();
+        let previous = [
+            ("CENTAERIS_DESKTOP_DATA_DIR", root.clone()),
+            ("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR", root.join("sessions")),
+            (
+                "CENTAERIS_AGENT_RUNTIME_DB_PATH",
+                root.join("runtime-state.sqlite3"),
+            ),
+        ]
+        .into_iter()
+        .map(|(name, value)| {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            (name, previous)
+        })
+        .collect::<Vec<_>>();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(async {
+            let session = sessions::create(sessions::SessionCreateRequest {
+                title: Some("shutdown jobs".to_string()),
+                cwd: root.join("workspace").to_string_lossy().to_string(),
+            })?;
+            let store = agent_runtime::agent_runtime_store_actor()?;
+            let hub = Arc::new(RuntimeServerClientHub::default());
+            let shutdown_jobs = ShutdownJobs::default();
+            for (name, status) in [
+                ("queued", RuntimeJobStatus::Queued),
+                ("leased", RuntimeJobStatus::Leased),
+                ("running", RuntimeJobStatus::Running),
+                ("user", RuntimeJobStatus::Queued),
+                ("service", RuntimeJobStatus::Queued),
+                ("service-queued", RuntimeJobStatus::Queued),
+            ] {
+                let id = format!("job-{name}");
+                message_log::append_agent_run_started(&session.id, &id, &id, "test", 1)?;
+                let leased = matches!(status, RuntimeJobStatus::Leased | RuntimeJobStatus::Running);
+                store
+                    .schedule_runtime_job(ScheduleRuntimeJobRequest {
+                        job: RuntimeJobRecord {
+                            job_id: id.clone(),
+                            job_kind: SUBAGENT_RUN_JOB_KIND.to_string(),
+                            status,
+                            run_at_ms: 1,
+                            lease_owner: leased.then(|| "expired-owner".to_string()),
+                            lease_expires_at_ms: leased.then_some(2),
+                            heartbeat_at_ms: leased.then_some(1),
+                            retry_count: 0,
+                            max_retries: 1,
+                            backoff_policy: Default::default(),
+                            idempotency_key: id.clone(),
+                            session_id: Some(session.id.clone()),
+                            branch_id: Some(id.clone()),
+                            checkpoint_id: None,
+                            payload_ref: None,
+                            output_refs: vec![],
+                            last_error: None,
+                            created_at_ms: 1,
+                            updated_at_ms: 1,
+                        },
+                    })
+                    .await?;
+                if matches!(name, "queued" | "leased" | "running") {
+                    message_log::append_agent_run_terminal(
+                        &session.id,
+                        &id,
+                        &id,
+                        "stopped",
+                        Some("runtime_server_recovered_interrupted"),
+                        3,
+                    )?;
+                }
+            }
+            store
+                .cancel_runtime_job(CancelRuntimeJobRequest {
+                    job_id: "job-user".to_string(),
+                    expected_lease_owner: None,
+                    expected_status: None,
+                    reason: "runtime_server_shutdown".to_string(),
+                    cancelled_at_ms: 3,
+                })
+                .await?;
+            reconcile_stopped_jobs().await?;
+            reconcile_stopped_jobs().await?;
+            assert_eq!(
+                store
+                    .reclaim_expired_runtime_job_leases(current_timestamp_ms())
+                    .await?,
+                0
+            );
+            for name in ["queued", "leased", "running"] {
+                let job = store
+                    .get_runtime_job(&format!("job-{name}"))
+                    .await?
+                    .unwrap();
+                assert_eq!(job.status, RuntimeJobStatus::Cancelled);
+                assert_eq!(
+                    job.last_error.as_deref(),
+                    Some("runtime_server_recovered_interrupted")
+                );
+            }
+            let stale = store.get_runtime_job("job-service").await?.unwrap();
+            store
+                .claim_due_runtime_jobs(
+                    centaeris_core::session::reliability::ClaimDueRuntimeJobsRequest {
+                        now_ms: current_timestamp_ms(),
+                        worker_id: "competing-worker".to_string(),
+                        job_id: Some("job-service".to_string()),
+                        job_kind: None,
+                        session_id: None,
+                        limit: 1,
+                        lease_ms: 60_000,
+                    },
+                )
+                .await?;
+            assert!(
+                !stop_job(&store, &stale, "runtime_server_shutdown").await?,
+                "stale queued snapshot must not claim cancellation of an active owner"
+            );
+            assert_eq!(
+                store.get_runtime_job("job-service").await?.unwrap().status,
+                RuntimeJobStatus::Leased
+            );
+            assert_eq!(
+                message_log::project_agent_run("job-service")?
+                    .unwrap()
+                    .status,
+                "running"
+            );
+            stop_pending_jobs(&shutdown_jobs).await?;
+            for (id, expected) in [
+                ("job-user", "cancelled"),
+                ("job-service", "shutdown"),
+                ("job-service-queued", "shutdown"),
+            ] {
+                persist_agent_session_terminal_projection(
+                    &store,
+                    &hub.broadcaster(),
+                    id,
+                    &session.id,
+                    id,
+                    &shutdown_jobs,
+                )
+                .await?;
+                let path =
+                    crate::user_data_layout::find_session_log_file_path(&session.id)?.unwrap();
+                let document = message_log::read_session_document(&path)?;
+                let terminal = document
+                    .records
+                    .iter()
+                    .rev()
+                    .find(|record| record.agent_run_id.as_deref() == Some(id))
+                    .unwrap();
+                assert_eq!(terminal.payload["reasonType"], expected);
+            }
+            assert_eq!(
+                store
+                    .reclaim_expired_runtime_job_leases(current_timestamp_ms())
+                    .await?,
+                0
+            );
+            Ok::<(), String>(())
+        });
+        for (name, value) in previous {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
+        result.expect("job reconciliation and shutdown causes");
+    }
 }

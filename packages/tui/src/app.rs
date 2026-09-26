@@ -454,6 +454,7 @@ enum PendingModelRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RuntimeDisplayState {
     Idle,
+    ConnectionLost,
     Thinking,
     ToolRunning,
     ProviderWaiting,
@@ -2512,9 +2513,8 @@ fn stop_active_agent_runs(app: &mut App, reason: &str) -> Result<(), String> {
     for task_id in task_ids {
         cancel_agent_run(app, session_id.as_str(), task_id.as_str(), reason)?;
     }
-    finish_active_agent_run(app);
-    app.pending_question = None;
-    app.process_state = RuntimeDisplayState::Idle;
+    // A cancellation receipt is not a terminal event. Keep the run and its
+    // tool observations until the Runtime publishes the final outcome.
     Ok(())
 }
 
@@ -2567,15 +2567,23 @@ fn cancel_agent_run(
         .ok_or_else(|| {
             "_centaeris/session/agent-runs/cancel response agentRun missing status".to_string()
         })?;
-    if response.get("cancelled").and_then(Value::as_bool) == Some(false)
-        && !is_terminal_status(status)
-    {
+    let cancel_accepted = response
+        .get("cancelAccepted")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            "_centaeris/session/agent-runs/cancel response missing boolean cancelAccepted"
+                .to_string()
+        })?;
+    if !cancel_accepted && !is_terminal_status(status) {
         return Err(format!(
             "_centaeris/session/agent-runs/cancel did not cancel active AgentRun: {agent_run_id}"
         ));
     }
     if is_terminal_status(status) {
-        mark_agent_run_terminal(app, agent_run_id);
+        // A terminal receipt may arrive without the final transcript update.
+        // Reuse the authoritative history projection instead of sealing the
+        // currently visible partial text as a fabricated cancellation.
+        refresh_current_session_observation(app)?;
     }
     Ok(())
 }
@@ -3561,6 +3569,41 @@ fn ensure_runtime(app: &mut App) -> Result<(), String> {
         return Err("Runtime Server is still connecting; try again in a moment".to_string());
     }
     app.runtime = Some(start_initialized_runtime()?);
+    refresh_reconnected_observation(app)
+}
+
+fn refresh_reconnected_observation(app: &mut App) -> Result<(), String> {
+    if app.process_state == RuntimeDisplayState::ConnectionLost {
+        refresh_current_session_observation(app)?;
+    }
+    Ok(())
+}
+
+fn refresh_current_session_observation(app: &mut App) -> Result<(), String> {
+    // Runtime requests are synchronous on the TUI thread: the selected session
+    // cannot change between obtaining this snapshot and applying it.
+    let Some(session) = app.active_session.clone() else {
+        app.process_state = RuntimeDisplayState::Idle;
+        return Ok(());
+    };
+    let restore = match load_session_history(app, &session) {
+        Ok(restore) => restore,
+        Err(error) => {
+            app.runtime = None;
+            app.process_state = RuntimeDisplayState::ConnectionLost;
+            return Err(error);
+        }
+    };
+    app.transcript = restore.transcript;
+    app.transcript_history_len = app.transcript.len();
+    app.transcript_paging = Some(restore.transcript_paging);
+    clear_assistant_buffer(app);
+    app.pending_question = None;
+    restore_active_agent_runs(app, restore.active_agent_runs);
+    for item in restore.replay_items {
+        apply_stream_payload(app, &item);
+    }
+    invalidate_transcript_layout(app);
     Ok(())
 }
 
@@ -4556,18 +4599,10 @@ fn drain_runtime_events(app: &mut App) -> bool {
                 app.runtime_config_refresh_pending = true;
             }
             RuntimeEvent::Error(error) => {
-                seal_active_tool_calls(app);
-                commit_assistant_buffer(app);
                 app.transcript.push(TranscriptLine::Error(error));
                 app.runtime = None;
-                app.active_agent_run_id = None;
-                app.active_agent_run_ids.clear();
-                app.completed_agent_run_ids.clear();
-                app.tool_projection.clear();
-                app.pending_subagent_lines.clear();
-                app.agent_run_started_at = None;
-                app.tool_protocol_error = false;
-                app.process_state = RuntimeDisplayState::Idle;
+                // Connection loss says nothing about the run or its tools.
+                app.process_state = RuntimeDisplayState::ConnectionLost;
             }
         }
     }

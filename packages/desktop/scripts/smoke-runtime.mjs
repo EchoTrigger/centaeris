@@ -7,6 +7,7 @@ import path from "node:path";
 import readline from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import { createRuntimeHostTransport } from "../src/runtimeHostTransport.mjs";
+import { assertRuntimeLifecycle } from "./smoke-runtime-lifecycle.mjs";
 
 const hostRoot = path.resolve(import.meta.dirname, "..");
 const repoRoot = path.resolve(hostRoot, "..", "..");
@@ -1340,10 +1341,10 @@ const main = async () => {
         (agentRun) => agentRun.agentRunId === recoveryInput.agentRunId,
       );
       if (
-        recoveredAgentRun?.status !== "cancelled" ||
+        recoveredAgentRun?.status !== "stopped" ||
         recoveredAgentRuns.agentRuns?.some((agentRun) => !["succeeded", "failed", "cancelled", "stopped"].includes(agentRun.status))
       ) {
-        fail("runtime restart did not terminally cancel the interrupted AgentRun");
+        fail("runtime restart did not record the interrupted AgentRun as stopped");
       }
       const liveTextFiles = await fs.readdir(path.join(tempRoot, "runtime", "live-text"));
       if (liveTextFiles.length !== 0) {
@@ -1385,6 +1386,8 @@ const main = async () => {
     ) {
       fail("agent_runtime_config_reset did not emit one runtime/config-changed");
     }
+
+    await assertRuntimeLifecycle({ runtimeExe, repoRoot, tempRoot });
 
     const exitResult = await invoke(child, "app_exit", {});
     assertRecord(exitResult, "app_exit result");

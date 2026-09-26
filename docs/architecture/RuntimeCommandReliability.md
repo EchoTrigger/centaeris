@@ -56,7 +56,9 @@ by their names.
 ### Already naturally idempotent or identity-addressed
 
 - AgentRun attach uses a viewer/session set, detach removes that binding, and
-  cancel returns `cancelled: false` once the run is terminal.
+  cancel returns `cancelAccepted: false` once the run is terminal. A true value
+  acknowledges cancellation admission; the returned AgentRun status and its
+  subsequent terminal event establish completion.
 - Workspace activate and rename write a desired value; remove reports whether
   an entry was present. `workspace_get` is the reconcile query.
 - Runtime configuration set/reset and Plugin or Skill enabled-state changes

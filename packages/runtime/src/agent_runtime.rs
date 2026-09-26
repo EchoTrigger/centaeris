@@ -3,7 +3,6 @@ use crate::runtime_config;
 use crate::runtime_rpc_transport::EventWriter;
 use crate::runtime_server::{
     ActiveAgentRun, AgentRunLease, LiveTextJournal, LiveTextJournalKey, LiveTextOperation,
-    OwnerExitDisposition,
 };
 use crate::sqlite_store::SqliteRuntimeStore;
 use crate::{
@@ -373,7 +372,7 @@ pub(crate) fn cancel_agent_run(
     } else {
         cancel_agent_run_after_tool_closure(request)?
     };
-    if response.cancelled {
+    if response.cancel_accepted {
         if terminal_was_committed {
             let agent_run = response
                 .agent_run
@@ -447,6 +446,28 @@ fn close_incomplete_tool_calls(agent_run: &message_log::ProjectedAgentRun) -> Re
         )?;
     }
     Ok(())
+}
+
+pub(crate) fn stop_agent_run_after_tool_closure(
+    agent_run: &message_log::ProjectedAgentRun,
+    reason_type: &str,
+    reason: &str,
+) -> Result<agent_runs::AgentRunSummary, String> {
+    let current = message_log::project_agent_run(&agent_run.agent_run_id)?
+        .ok_or_else(|| format!("AgentRun not found: {}", agent_run.agent_run_id))?;
+    if !matches!(current.status.as_str(), "running" | "stalled") {
+        return Ok(agent_runs::into_summary(&current));
+    }
+    close_incomplete_tool_calls(&current)?;
+    let updated = message_log::append_agent_run_terminal(
+        &current.session_id,
+        &current.turn_id,
+        &current.agent_run_id,
+        reason_type,
+        Some(reason),
+        current_timestamp_ms(),
+    )?;
+    Ok(agent_runs::into_summary(&updated))
 }
 
 fn recover_incomplete_tool_calls_before_new_turn(session_id: &str) -> Result<(), String> {
@@ -557,26 +578,6 @@ fn schedule_child_job_cancellation(
                 eprintln!("centaeris Agent cancellation failed: {error}");
             }
         });
-    Ok(())
-}
-
-pub(crate) fn interrupt_owner_agent_runs(
-    event_writer: EventWriter,
-    dispositions: Vec<OwnerExitDisposition>,
-) -> Result<(), String> {
-    for disposition in dispositions {
-        let OwnerExitDisposition::Interrupt(lease) = disposition else {
-            continue;
-        };
-        let _ = cancel_agent_run(
-            event_writer.clone(),
-            agent_runs::AgentRunCancelRequest {
-                agent_run_id: Some(lease.agent_run_id),
-                session_id: Some(lease.session_id),
-                reason: Some(String::from("host_owner_exited")),
-            },
-        )?;
-    }
     Ok(())
 }
 
@@ -2408,22 +2409,28 @@ async fn run_session_agent_run(
             let reason = event_writer
                 .agent_run_cancellation_reason(agent_run_id.as_str())?
                 .unwrap_or_else(|| "user_interrupt".to_string());
-            let cancelled =
-                cancel_agent_run_after_tool_closure(agent_runs::AgentRunCancelRequest {
-                    agent_run_id: Some(agent_run_id.clone()),
-                    session_id: Some(session_id.clone()),
-                    reason: Some(reason),
-                })?;
-            if !cancelled.cancelled {
-                return Err("active AgentRun cancellation did not commit terminal".to_string());
-            }
-            emit_agent_run_terminal_payload(
-                &event_writer,
+            let shutdown = event_writer
+                .active_agent_run(agent_run_id.as_str())?
+                .map(|active| active.cancellation_reason_type())
+                .transpose()?
+                .flatten()
+                == Some("shutdown");
+            let terminal = if shutdown {
+                let current = message_log::project_agent_run(&agent_run_id)?
+                    .ok_or_else(|| "shutdown AgentRun is missing".to_string())?;
+                stop_agent_run_after_tool_closure(&current, "shutdown", &reason)?
+            } else {
+                let cancelled =
+                    cancel_agent_run_after_tool_closure(agent_runs::AgentRunCancelRequest {
+                        agent_run_id: Some(agent_run_id.clone()),
+                        session_id: Some(session_id.clone()),
+                        reason: Some(reason),
+                    })?;
                 cancelled
                     .agent_run
-                    .as_ref()
-                    .ok_or_else(|| "cancelled AgentRun terminal summary is missing".to_string())?,
-            )?;
+                    .ok_or_else(|| "cancelled AgentRun terminal summary is missing".to_string())?
+            };
+            emit_agent_run_terminal_payload(&event_writer, &terminal)?;
             Ok(())
         }
         Ok(stop @ (AgentRunStop::Finalized | AgentRunStop::TerminalTool)) => {
@@ -2644,7 +2651,7 @@ pub(crate) fn recover_unsealed_live_text_journals() -> Result<(), String> {
             )?;
             let agent_run_is_active = match agent_run.status.as_str() {
                 "running" | "stalled" => true,
-                "cancelled" | "succeeded" | "failed" => false,
+                "cancelled" | "succeeded" | "failed" | "stopped" => false,
                 status => {
                     return Err(format!(
                         "live text journal agent run has unsupported status {status}: {}",
@@ -2674,10 +2681,10 @@ pub(crate) fn recover_unsealed_live_text_journals() -> Result<(), String> {
             {
                 Some("done") => {
                     if agent_run_is_active {
-                        let _ = agent_runs::finish_agent_run(
-                            agent_run.agent_run_id.as_str(),
-                            agent_run.session_id.as_str(),
-                            agent_run.turn_id.as_str(),
+                        stop_agent_run_after_tool_closure(
+                            &agent_run,
+                            "stopped",
+                            "runtime_server_recovered_interrupted",
                         )?;
                     }
                 }
@@ -2705,34 +2712,19 @@ pub(crate) fn recover_unsealed_live_text_journals() -> Result<(), String> {
                             interrupted_at_ms,
                         )?;
                     }
-                    let cancelled =
-                        cancel_agent_run_after_tool_closure(agent_runs::AgentRunCancelRequest {
-                            agent_run_id: Some(agent_run.agent_run_id.clone()),
-                            session_id: Some(agent_run.session_id.clone()),
-                            reason: Some("runtime_server_recovered_interrupted".to_string()),
-                        })?;
-                    if !cancelled.cancelled {
-                        return Err(format!(
-                            "live text recovery did not cancel active agent run: {}",
-                            agent_run.agent_run_id
-                        ));
-                    }
+                    stop_agent_run_after_tool_closure(
+                        &agent_run,
+                        "stopped",
+                        "runtime_server_recovered_interrupted",
+                    )?;
                 }
                 Some("error") => {
                     if agent_run_is_active {
-                        let cancelled = cancel_agent_run_after_tool_closure(
-                            agent_runs::AgentRunCancelRequest {
-                                agent_run_id: Some(agent_run.agent_run_id.clone()),
-                                session_id: Some(agent_run.session_id.clone()),
-                                reason: Some("runtime_server_recovered_interrupted".to_string()),
-                            },
+                        stop_agent_run_after_tool_closure(
+                            &agent_run,
+                            "stopped",
+                            "runtime_server_recovered_interrupted",
                         )?;
-                        if !cancelled.cancelled {
-                            return Err(format!(
-                                "live text recovery did not cancel active agent run: {}",
-                                agent_run.agent_run_id
-                            ));
-                        }
                     }
                 }
                 Some(status) => {
@@ -2770,40 +2762,19 @@ pub(crate) fn recover_unsealed_live_text_journals() -> Result<(), String> {
             .as_ref()
             .and_then(|message| message.status.as_deref())
         {
-            Some("done") => {
-                let _ = agent_runs::finish_agent_run(
-                    agent_run.agent_run_id.as_str(),
-                    agent_run.session_id.as_str(),
-                    agent_run.turn_id.as_str(),
+            Some("done" | "error") => {
+                stop_agent_run_after_tool_closure(
+                    &agent_run,
+                    "stopped",
+                    "runtime_server_recovered_interrupted",
                 )?;
             }
-            Some("error") => {
-                let cancelled =
-                    cancel_agent_run_after_tool_closure(agent_runs::AgentRunCancelRequest {
-                        agent_run_id: Some(agent_run.agent_run_id.clone()),
-                        session_id: Some(agent_run.session_id.clone()),
-                        reason: Some("runtime_server_recovered_interrupted".to_string()),
-                    })?;
-                if !cancelled.cancelled {
-                    return Err(format!(
-                        "runtime server recovery did not cancel active agent run: {}",
-                        agent_run.agent_run_id
-                    ));
-                }
-            }
             None if assistant.is_none() => {
-                let cancelled =
-                    cancel_agent_run_after_tool_closure(agent_runs::AgentRunCancelRequest {
-                        agent_run_id: Some(agent_run.agent_run_id.clone()),
-                        session_id: Some(agent_run.session_id.clone()),
-                        reason: Some("runtime_server_recovered_interrupted".to_string()),
-                    })?;
-                if !cancelled.cancelled {
-                    return Err(format!(
-                        "runtime server recovery did not cancel active agent run: {}",
-                        agent_run.agent_run_id
-                    ));
-                }
+                stop_agent_run_after_tool_closure(
+                    &agent_run,
+                    "stopped",
+                    "runtime_server_recovered_interrupted",
+                )?;
             }
             Some(status) => {
                 return Err(format!(
@@ -3797,7 +3768,7 @@ mod tests {
                     session_id: Some(session.id.clone()),
                     reason: Some("host_owner_exited".to_string()),
                 })?;
-            if !cancelled.cancelled {
+            if !cancelled.cancel_accepted {
                 return Err("expected AgentRun cancellation".to_string());
             }
             if !message_log::project_incomplete_tool_calls(session.id.as_str(), agent_run_id)?
@@ -4184,7 +4155,7 @@ mod tests {
     }
 
     #[test]
-    fn server_recovery_seals_live_text_as_error_and_cancels_turn() {
+    fn server_recovery_seals_live_text_as_error_and_stops_turn_without_user_cancellation() {
         let guard = message_log::test_env_mutex()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -4253,10 +4224,91 @@ mod tests {
                 "start",
                 4,
             )?;
+            message_log::append_agent_run_started(
+                session.id.as_str(),
+                "turn-message-done",
+                "agent-run-message-done",
+                "start",
+                5,
+            )?;
+            message_log::append_assistant_message(
+                session.id.as_str(),
+                "turn-message-done",
+                Some("agent-run-message-done"),
+                "sealed message is not a Run terminal",
+                "done",
+                6,
+            )?;
+            for status in ["succeeded", "cancelled", "failed", "stopped"] {
+                let run_id = format!("agent-run-committed-{status}");
+                let turn_id = format!("turn-committed-{status}");
+                message_log::append_agent_run_started(
+                    session.id.as_str(),
+                    &turn_id,
+                    &run_id,
+                    "start",
+                    7,
+                )?;
+                message_log::append_assistant_message(
+                    session.id.as_str(),
+                    &turn_id,
+                    Some(&run_id),
+                    "sealed",
+                    "done",
+                    8,
+                )?;
+                message_log::append_agent_run_terminal(
+                    session.id.as_str(),
+                    &turn_id,
+                    &run_id,
+                    status,
+                    Some("committed cause"),
+                    9,
+                )?;
+            }
 
             fs::remove_dir_all(workspace.as_path()).expect("remove stale session cwd");
 
             recover_unsealed_live_text_journals()?;
+            let once = message_log::project_agent_runs_for_session(session.id.as_str())?;
+            for run in &once {
+                if let Some(status) = run.agent_run_id.strip_prefix("agent-run-committed-") {
+                    assert_eq!(
+                        run.status, status,
+                        "committed terminal must survive recovery"
+                    );
+                } else {
+                    assert_eq!(
+                        run.status, "stopped",
+                        "uncommitted Run must not become success or cancellation"
+                    );
+                }
+            }
+            let path = user_data_layout::find_session_log_file_path(session.id.as_str())?
+                .ok_or_else(|| "Session log missing".to_string())?;
+            let before = message_log::read_session_document(&path)?.records.len();
+            recover_unsealed_live_text_journals()?;
+            let document = message_log::read_session_document(&path)?;
+            assert_eq!(
+                document.records.len(),
+                before,
+                "recovery must be idempotent"
+            );
+            for record in &document.records {
+                if record.event_type
+                    == centaeris_core::session::SessionRecordType::AgentRunInterrupted
+                    && !record
+                        .agent_run_id
+                        .as_deref()
+                        .is_some_and(|id| id.starts_with("agent-run-committed-"))
+                {
+                    assert_eq!(record.payload["reasonType"], "stopped");
+                    assert_eq!(
+                        record.payload["message"],
+                        "runtime_server_recovered_interrupted"
+                    );
+                }
+            }
 
             let assistant = message_log::project_chat_messages(session.id.as_str())?
                 .into_iter()
@@ -4273,7 +4325,7 @@ mod tests {
             }
             let agent_run = message_log::project_agent_run("agent-run-live-text")?
                 .ok_or_else(|| "recovered AgentRun is missing".to_string())?;
-            if agent_run.status != "cancelled" {
+            if agent_run.status != "stopped" {
                 return Err(format!(
                     "unexpected recovered AgentRun status: {}",
                     agent_run.status
@@ -4282,7 +4334,7 @@ mod tests {
             let terminal_agent_run =
                 message_log::project_agent_run("agent-run-live-text-terminal")?
                     .ok_or_else(|| "terminal recovered AgentRun is missing".to_string())?;
-            if terminal_agent_run.status != "cancelled" {
+            if terminal_agent_run.status != "stopped" {
                 return Err(format!(
                     "unexpected terminal recovered AgentRun status: {}",
                     terminal_agent_run.status
@@ -4290,7 +4342,7 @@ mod tests {
             }
             let zero_token_agent_run = message_log::project_agent_run("agent-run-zero-token")?
                 .ok_or_else(|| "zero-token recovered AgentRun is missing".to_string())?;
-            if zero_token_agent_run.status != "cancelled" {
+            if zero_token_agent_run.status != "stopped" {
                 return Err(format!(
                     "unexpected zero-token recovered AgentRun status: {}",
                     zero_token_agent_run.status
@@ -4350,8 +4402,6 @@ mod tests {
                     session.id.as_str(),
                     agent_run_id,
                     turn_id,
-                    "runtime-client-test",
-                    crate::runtime_server::RuntimeClientKind::Desktop,
                     TurnControl::new(),
                 )
                 .map_err(|error| format!("start active AgentRun failed: {error:?}"))?;
@@ -4367,11 +4417,14 @@ mod tests {
                 },
                 "user_interrupt",
             )?;
-            if !response.cancelled
+            if !response.cancel_accepted
                 || response.agent_run.as_ref().map(|run| run.status.as_str()) != Some("running")
             {
                 return Err("Stop request must return the still-running AgentRun".to_string());
             }
+            let wire = serde_json::to_value(&response).map_err(|error| error.to_string())?;
+            assert_eq!(wire["cancelAccepted"], true);
+            assert!(wire.get("cancelled").is_none());
             let projected = message_log::project_agent_run(agent_run_id)?
                 .ok_or_else(|| "projected AgentRun missing".to_string())?;
             if projected.status != "running"
@@ -4379,6 +4432,66 @@ mod tests {
             {
                 return Err("Stop request committed terminal before cleanup".to_string());
             }
+            // Acceptance races with final publication. The committed terminal
+            // remains authoritative even when cancellation was requested first.
+            message_log::append_assistant_message(
+                &session.id,
+                turn_id,
+                Some(agent_run_id),
+                "finished",
+                "done",
+                2,
+            )?;
+            message_log::append_agent_run_terminal(
+                &session.id,
+                turn_id,
+                agent_run_id,
+                "succeeded",
+                None,
+                3,
+            )?;
+            let cancel_after_completion =
+                cancel_agent_run_after_tool_closure(agent_runs::AgentRunCancelRequest {
+                    agent_run_id: Some(agent_run_id.to_string()),
+                    session_id: Some(session.id.clone()),
+                    reason: Some("user_interrupt".to_string()),
+                })?;
+            assert!(!cancel_after_completion.cancel_accepted);
+            assert_eq!(
+                cancel_after_completion.agent_run.unwrap().status,
+                "succeeded"
+            );
+            let run_completed_first = "agent-run-completed-before-cancel";
+            message_log::append_agent_run_started(
+                &session.id,
+                run_completed_first,
+                run_completed_first,
+                "start",
+                4,
+            )?;
+            message_log::append_assistant_message(
+                &session.id,
+                run_completed_first,
+                Some(run_completed_first),
+                "finished",
+                "done",
+                5,
+            )?;
+            message_log::append_agent_run_terminal(
+                &session.id,
+                run_completed_first,
+                run_completed_first,
+                "succeeded",
+                None,
+                6,
+            )?;
+            let response = agent_runs::request_cancel(agent_runs::AgentRunCancelRequest {
+                agent_run_id: Some(run_completed_first.to_string()),
+                session_id: Some(session.id.clone()),
+                reason: Some("user_interrupt".to_string()),
+            })?;
+            assert!(!response.cancel_accepted);
+            assert_eq!(response.agent_run.unwrap().status, "succeeded");
             registry.finish(lease.lease_id.as_str())?;
             Ok::<(), String>(())
         })();

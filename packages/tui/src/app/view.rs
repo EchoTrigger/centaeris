@@ -2066,6 +2066,7 @@ pub(super) fn status_header(app: &App) -> String {
     }
     match app.process_state {
         RuntimeDisplayState::Idle => "Idle",
+        RuntimeDisplayState::ConnectionLost => "Connection lost; run status unknown",
         RuntimeDisplayState::Thinking => "Thinking",
         RuntimeDisplayState::ToolRunning => "Running tools",
         RuntimeDisplayState::ProviderWaiting => "Waiting for model",

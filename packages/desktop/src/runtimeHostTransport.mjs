@@ -637,7 +637,7 @@ export const createRuntimeHostTransport = ({
         }),
       ]);
     } catch {
-      // A host crash or socket close still produces the same owner-disconnect signal server-side.
+      // A client crash or socket close also detaches observation; the service retains active runs.
     } finally {
       if (timeoutId !== null) {
         clearTimeout(timeoutId);

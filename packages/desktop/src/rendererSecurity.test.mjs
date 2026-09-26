@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { requireHostCommand } from "./hostContract.mjs";
 import {
   createTrustedRendererPolicy,
   requireExternalHttpsUrl,
@@ -10,6 +11,11 @@ import {
 const policy = createTrustedRendererPolicy({
   filePath: "D:/Centaeris/ui-dist/index.html",
   devServerUrl: "http://127.0.0.1:5173",
+});
+
+test("renderer app exit cannot invoke service shutdown", () => {
+  assert.equal(requireHostCommand("app_exit").local, true);
+  assert.throws(() => requireHostCommand("runtime/shutdown"), /not registered for Electron/);
 });
 
 test("trusted renderer accepts only its exact file or loopback dev URL", () => {

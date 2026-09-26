@@ -298,6 +298,7 @@ authorization grant.
 | `session/load` | `read` | `safeRetry` | — |
 | `session/new` | `creation` | `sameOperationId` | `session/new` |
 | `session/prompt` | `creation` | `sameOperationId` | `session/prompt` |
+| `runtime/shutdown` | `oneShotAction` | `noAutomaticRetry` | — |
 
 ### Execution Host
 
@@ -391,28 +392,45 @@ does not embed credentials or configuration values.
 ## AgentRun ownership and shutdown
 
 At most one AgentRun is active for a Session. Starting one creates a lease owned
-by the initialized connection. Attach/detach operations must use that
+by the Runtime service. Attach/detach operations must use the initialized
 connection's `viewerId`; clients cannot detach another viewer by supplying its
 identifier.
 
-`app_exit` and an unclean connection loss follow the same ownership cleanup:
+`app_exit`, viewer detach, and an unclean connection loss end observation only.
+They do not cancel an AgentRun or transfer execution to another client. A later
+client discovers the same Session and AgentRun, reads its durable projection,
+and attaches for further updates without repeating the original prompt.
 
-- If a TUI-owned run loses its owner while exactly one Desktop connection is
-  available, the same lease transfers to that Desktop owner.
-- Otherwise the Runtime requests interruption of each run owned by the lost
-  connection.
-- An interrupted lease remains active until its Session actor persists the
-  terminal state, Core closes input admission, and the lease is released. A
-  second turn cannot race that cleanup. Failed input closure retains the lease;
-  unrelated Sessions remain available during closure.
-- Runs owned by other connected clients are unaffected.
+Explicit AgentRun cancellation returns `cancelAccepted` and an `agentRun`
+summary. Acceptance does not establish a terminal state: clients continue
+observing until the authoritative AgentRun status is terminal. Natural
+completion may win the cancellation race. An interrupted lease remains active
+until Core closes input admission and the task releases its lease; a second
+turn cannot race that cleanup. Failed input closure retains the lease.
+
+An initialized client can request service shutdown with `runtime/shutdown` and
+exact empty params `{}`. Its response is `{"disposition":"requested"}`; it
+acknowledges the request, not process termination.
+The Desktop renderer has no route for this service command; its `app_exit`
+continues to close only the application client. Shutdown stops admission,
+allows five seconds for active work to finish, then requests Core interruption
+with `reasonType: "shutdown"` and allows five seconds for cleanup. A committed
+shutdown interruption projects as `stopped`, distinct from user cancellation.
+These budgets bound service teardown; they do not prove external effects were
+undone or that every task committed a terminal before exit.
+
+After an abnormal exit, startup reconciles unfinished runs as `stopped` with
+`runtime_server_recovered_interrupted`, preserves already committed terminals,
+and uses Core's tool intent/receipt recovery without replaying unknown external
+effects. A completed assistant message alone never proves AgentRun success.
 
 The Runtime Server exits only after it has no connected clients, no active
-AgentRuns, and no queued, leased, or running background Runtime jobs for one
+AgentRuns or admitted host actions, and no queued, leased, or running background Runtime jobs for one
 continuous idle window. The current implementation uses five seconds; that
 duration is not a protocol identity and clients must not synchronize behavior
-to it. A client process ending does not permit an unowned run or child operation
-to remain indefinitely.
+to it. Active work keeps the service alive even when no client is connected.
+The profile writer lock remains held until the server process exits, including
+bounded executor teardown after a shutdown timeout.
 
 ## Failure and retry behavior
 

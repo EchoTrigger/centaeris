@@ -96,6 +96,7 @@ const harness = vi.hoisted(() => ({
       (request: AnswerAgentQuestionRequest) => Promise<AgentQuestionResponse>
     >(),
   cancelAgentRun: vi.fn(),
+  buildSessionHydrationSnapshot: vi.fn(),
 }));
 
 const runtimeConfig: AgentRuntimeConfig = {
@@ -143,6 +144,11 @@ vi.mock("../src/lib/chatBridge", () => ({
   sendAgentInput: harness.sendAgentInput,
   sendAgentSupplement: vi.fn(),
   setAgentRuntimeConfig: vi.fn(async () => runtimeConfig),
+}));
+
+vi.mock("../src/components/chat/chatRuntimeModel", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../src/components/chat/chatRuntimeModel")>(),
+  buildSessionHydrationSnapshot: harness.buildSessionHydrationSnapshot,
 }));
 
 vi.mock("../src/components/chat/useSessionHydration", () => ({
@@ -473,6 +479,7 @@ beforeEach(() => {
   harness.sendAgentInput.mockReset();
   harness.answerAgentQuestion.mockReset();
   harness.cancelAgentRun.mockReset();
+  harness.buildSessionHydrationSnapshot.mockReset();
   harness.getAgentContextUsage.mockReset();
   harness.getAgentContextUsage.mockImplementation(async (sessionId: string) => ({
     sessionId,
@@ -482,7 +489,7 @@ beforeEach(() => {
     isCompacting: false,
     updatedAt: 1,
   }));
-  harness.cancelAgentRun.mockResolvedValue({ cancelled: true });
+  harness.cancelAgentRun.mockResolvedValue({ cancelAccepted: true, agentRun: { agentRunId: "run-1", status: "running" } });
   harness.createSession.mockResolvedValue({
     id: "created-session",
     title: "Created session",
@@ -654,7 +661,7 @@ test("a queued prompt cannot cross into a newly selected session", async () => {
   await act(async () => renderer.unmount());
 });
 
-test("stopping restores the queued prompt and cancels the active run once", async () => {
+test("accepted stop restores queued input but keeps observing until a terminal fact", async () => {
   const renderer = await renderChat(session("one"));
 
   await submitPrompt("first prompt");
@@ -668,8 +675,8 @@ test("stopping restores the queued prompt and cancels the active run once", asyn
   });
 
   expect(getComposer().inputValue).toBe("queued prompt");
-  expect(getComposer().isStreaming).toBe(false);
-  expect(firstStream.close).toHaveBeenCalledTimes(1);
+  expect(getComposer().isStreaming).toBe(true);
+  expect(firstStream.close).not.toHaveBeenCalled();
   expect(harness.cancelAgentRun).toHaveBeenCalledTimes(1);
   expect(harness.cancelAgentRun).toHaveBeenCalledWith({
     agentRunId: "run-1",
@@ -677,6 +684,60 @@ test("stopping restores the queued prompt and cancels the active run once", asyn
     reason: "user_interrupt",
   });
 
+  await act(async () => {
+    getComposer().onComposerAction();
+    await flushAsyncWork();
+  });
+  expect(harness.cancelAgentRun).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    firstStream.onMessage(terminalPayload("one", "run-1", "AgentRunInterrupted", { reasonType: "cancelled" }));
+    await flushAsyncWork();
+  });
+  expect(getComposer().isStreaming).toBe(false);
+  expect(firstStream.close).toHaveBeenCalledTimes(1);
+  await act(async () => renderer.unmount());
+});
+
+test("a terminal cancellation response observes natural completion without a terminal notification", async () => {
+  const runningChanged = vi.fn();
+  harness.cancelAgentRun.mockResolvedValue({ cancelAccepted: false, agentRun: { agentRunId: "run-1", status: "succeeded", completedAtMs: 123 } });
+  harness.buildSessionHydrationSnapshot.mockResolvedValue({
+    messages: [{ id: "durable-answer", role: "assistant", turn: {
+      id: "durable-turn", agentRunId: "run-1", chunks: [{ id: "reason", kind: "reasoning", text: "Finished reasoning", status: "done" }],
+      finalAnswer: "Final text recovered from committed history", isStreaming: false, completedAtMs: 123,
+    } }], runtimeConfig, contextUsage: null, resolvedAutoContinueAfterResumeWait: false,
+    replayCursorsByAgentRunId: {}, pendingQuestionRequest: null, restoreMessageId: null, activeReplay: null,
+  });
+  const renderer = await renderChat(session("one"), { onAgentRunningChange: runningChanged });
+  await submitPrompt("finish naturally");
+  const stream = getStream(0);
+  await openStream(stream);
+  await act(async () => { stream.onMessage(questionRequiredPayload("one", "run-1")); await flushAsyncWork(); });
+  expect(renderer.root.findAllByProps({ "data-testid": "pending-question" })).toHaveLength(1);
+  await act(async () => { getComposer().onComposerAction(); await flushAsyncWork(); });
+  expect(getComposer().isStreaming).toBe(false);
+  expect(renderer.root.findAllByProps({ "data-testid": "pending-question" })).toHaveLength(0);
+  expect(harness.buildSessionHydrationSnapshot).toHaveBeenCalledTimes(1);
+  expect(getAssistantTurn("run-1").completedAtMs).toBe(123);
+  expect(getAssistantTurn("run-1").finalAnswer).toBe("Final text recovered from committed history");
+  expect(getAssistantTurn("run-1").chunks).toContainEqual(expect.objectContaining({ kind: "reasoning", status: "done" }));
+  expect(stream.close).toHaveBeenCalledTimes(1);
+  expect(runningChanged).toHaveBeenLastCalledWith("one", false);
+  await act(async () => renderer.unmount());
+});
+
+test("failed stop preserves observation and permits an explicit retry", async () => {
+  harness.cancelAgentRun.mockRejectedValueOnce(new Error("lost request"));
+  const renderer = await renderChat(session("one"));
+  await submitPrompt("continue if stop fails");
+  const stream = getStream(0);
+  await openStream(stream);
+  await act(async () => { getComposer().onComposerAction(); await flushAsyncWork(); });
+  expect(getComposer().isStreaming).toBe(true);
+  expect(stream.close).not.toHaveBeenCalled();
+  await act(async () => { getComposer().onComposerAction(); await flushAsyncWork(); });
+  expect(harness.cancelAgentRun).toHaveBeenCalledTimes(2);
+  expect(getComposer().isStreaming).toBe(true);
   await act(async () => renderer.unmount());
 });
 
@@ -702,7 +763,11 @@ test.each(["local stop", "AgentRunInterrupted"] as const)("%s seals live reasoni
   });
   expect(getAssistantTurn("run-1").chunks).toContainEqual(expect.objectContaining({ kind: "reasoning", status: "streaming" }));
   await act(async () => {
-    if (ending === "local stop") getComposer().onComposerAction();
+    if (ending === "local stop") {
+      getComposer().onComposerAction();
+      expect(getAssistantTurn("run-1").isStreaming).toBe(true);
+      stream.onMessage(terminalPayload("one", "run-1", "AgentRunInterrupted", { reasonType: "cancelled" }));
+    }
     else stream.onMessage(terminalPayload("one", "run-1", ending, { reasonType: "cancelled" }));
     await flushAsyncWork();
   });
@@ -720,7 +785,7 @@ test("a late stream-open callback cannot revive a stopped run", async () => {
   await openStream(firstStream);
 
   await act(async () => {
-    getComposer().onComposerAction();
+    firstStream.onMessage(terminalPayload("one", "run-1", "AgentRunInterrupted", { reasonType: "cancelled" }));
     await flushAsyncWork();
   });
   expect(getComposer().isStreaming).toBe(false);

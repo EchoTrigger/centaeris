@@ -372,7 +372,7 @@ export type AgentRunDetachResponse = {
 
 export type AgentRunCancelResponse = {
   agentRun?: AgentRunSummary | null;
-  cancelled: boolean;
+  cancelAccepted: boolean;
 };
 
 export type PluginDescriptorV1 = {

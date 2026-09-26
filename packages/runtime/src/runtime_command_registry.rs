@@ -92,6 +92,7 @@ macro_rules! runtime_commands {
             SessionGet, "session/load", SharedRuntime, Read, SafeRetry, None;
             SessionCreate, "session/new", SharedRuntime, Creation, SameOperationId, Some("session/new");
             AgentInput, "session/prompt", SharedRuntime, Creation, SameOperationId, Some("session/prompt");
+            RuntimeShutdown, "runtime/shutdown", SharedRuntime, OneShotAction, NoAutomaticRetry, None;
 
             ProcessCapture, "process_capture", ExecutionHost, OneShotAction, NoAutomaticRetry, None;
             SidecarList, "sidecar_list", ExecutionHost, Read, SafeRetry, None;
