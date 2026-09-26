@@ -15,7 +15,25 @@ const fallbacks = new Map([
       sha256: "0e80a2d229d2fd4fc7e8636142ec5d0ff0bc031f14c15b682e2ac01dfd5b5138",
     },
   ],
-  ...["win32-x64-msvc", "linux-x64-gnu", "darwin-arm64"].map((binding) => [
+  // Exact 1.1.5 package set audited against Rolldown's published metadata.
+  // npm may install both GNU and musl variants on the same Linux host.
+  ...[
+    "android-arm64",
+    "darwin-arm64",
+    "darwin-x64",
+    "freebsd-x64",
+    "linux-arm-gnueabihf",
+    "linux-arm64-gnu",
+    "linux-arm64-musl",
+    "linux-ppc64-gnu",
+    "linux-s390x-gnu",
+    "linux-x64-gnu",
+    "linux-x64-musl",
+    "openharmony-arm64",
+    "wasm32-wasi",
+    "win32-arm64-msvc",
+    "win32-x64-msvc",
+  ].map((binding) => [
     `npm:@rolldown/binding-${binding}@1.1.5`,
     {
       sourcePackage: "rolldown",
