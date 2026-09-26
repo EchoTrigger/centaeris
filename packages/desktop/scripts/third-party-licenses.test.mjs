@@ -9,9 +9,15 @@ import { fallbackFiles, writeThirdPartyLicenses } from "./third-party-licenses.m
 const hostRoot = path.resolve(import.meta.dirname, "..");
 const repoRoot = path.resolve(hostRoot, "..", "..");
 
-for (const binding of ["win32-x64-msvc", "linux-x64-gnu", "darwin-arm64"]) {
-  test(`audited Rolldown license fallback covers ${binding}`, async () => {
-    const item = { ecosystem: "npm", name: `@rolldown/binding-${binding}`, version: "1.1.5" };
+const lock = JSON.parse(await fs.readFile(path.join(repoRoot, "package-lock.json"), "utf8"));
+const rolldown = lock.packages["node_modules/rolldown"];
+assert.equal(rolldown.version, "1.1.5");
+assert.ok(Object.keys(rolldown.optionalDependencies).length > 0);
+
+for (const [name, version] of Object.entries(rolldown.optionalDependencies)) {
+  test(`audited Rolldown license fallback covers ${name}`, async () => {
+    assert.equal(lock.packages[`node_modules/${name}`].version, version);
+    const item = { ecosystem: "npm", name, version };
     const files = await fallbackFiles(item, repoRoot, hostRoot);
     assert.equal(files.length, 1);
     assert.equal(files[0].source, "rolldown@1.1.5/LICENSE");
