@@ -1,4 +1,5 @@
 {
+  "useChatPromptTransactions.stopRequested": "Stop requested; waiting for the run to finish",
   "app.unableToLoadWorkspaces": "Unable to load workspaces",
   "app.unableToLoadConversations": "Unable to load conversations",
   "app.unableToLoadModelConfiguration": "Unable to load model configuration",

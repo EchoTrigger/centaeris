@@ -74,7 +74,11 @@ fn run() -> Result<(), errors::RuntimeHostError> {
         return runtime_server_transport::print_endpoint();
     }
     if arguments == ["--runtime-server"] {
-        return runtime.block_on(runtime_server_transport::run_server());
+        let result = runtime.block_on(runtime_server_transport::run_server());
+        // Host/tool blocking tasks may outlive cooperative cancellation. Do not
+        // let Runtime::drop turn the bounded server drain into an unbounded wait.
+        runtime.shutdown_timeout(std::time::Duration::from_millis(100));
+        return result;
     }
     if !arguments.is_empty() {
         return Err(errors::RuntimeHostError::new(

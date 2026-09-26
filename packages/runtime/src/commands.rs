@@ -10,6 +10,12 @@ macro_rules! define_runtime_host_commands {
         }
 
         impl RuntimeHostCommand {
+            pub(crate) const fn operation_kind(self) -> crate::runtime_command_registry::RuntimeOperationKind {
+                match self {
+                    $( Self::$variant => crate::runtime_command_registry::RuntimeOperationKind::$operation_kind, )*
+                }
+            }
+
             pub(crate) fn parse(raw: &str) -> Result<Self, RuntimeHostError> {
                 match raw.trim() {
                     $( $command => Ok(Self::$variant), )*

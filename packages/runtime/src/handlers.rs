@@ -39,6 +39,19 @@ pub(crate) fn handle_request(
 ) -> Result<serde_json::Value, RuntimeHostError> {
     let command = RuntimeHostCommand::parse(request.command.as_str())?;
     match command {
+        RuntimeHostCommand::RuntimeShutdown => {
+            if !request
+                .payload
+                .as_object()
+                .is_some_and(|params| params.is_empty())
+            {
+                return Err(RuntimeHostError::invalid_request(
+                    "runtime/shutdown requires empty params",
+                ));
+            }
+            event_writer.request_service_shutdown()?;
+            Ok(serde_json::json!({ "disposition": "requested" }))
+        }
         RuntimeHostCommand::Initialize => {
             let payload = runtime_bridge::deserialize_request(request.payload)?;
             let response = runtime_bridge::initialize(&event_writer, payload)?;
@@ -386,9 +399,11 @@ pub(crate) fn handle_request(
         RuntimeHostCommand::AgentRunAttach => {
             let payload: agent_runs::AgentRunAttachRequest =
                 runtime_bridge::deserialize_request(request.payload)?;
-            event_writer.require_viewer_id(payload.viewer_id.as_deref().unwrap_or_default())?;
-            let response = agent_runs::attach(payload)
-                .map_err(|error| RuntimeHostError::new("agent_task_failed", error))?;
+            let viewer_id = payload.viewer_id.clone().unwrap_or_default();
+            let response = event_writer.with_registered_viewer(&viewer_id, || {
+                agent_runs::attach(payload)
+                    .map_err(|error| RuntimeHostError::new("agent_task_failed", error))
+            })?;
             serde_json::to_value(response).map_err(|error| {
                 RuntimeHostError::new("serialize_response_failed", error.to_string())
             })
@@ -396,9 +411,11 @@ pub(crate) fn handle_request(
         RuntimeHostCommand::AgentRunDetach => {
             let payload: agent_runs::AgentRunDetachRequest =
                 runtime_bridge::deserialize_request(request.payload)?;
-            event_writer.require_viewer_id(payload.viewer_id.as_deref().unwrap_or_default())?;
-            let response = agent_runs::detach(payload)
-                .map_err(|error| RuntimeHostError::new("agent_task_failed", error))?;
+            let viewer_id = payload.viewer_id.clone().unwrap_or_default();
+            let response = event_writer.with_registered_viewer(&viewer_id, || {
+                agent_runs::detach(payload)
+                    .map_err(|error| RuntimeHostError::new("agent_task_failed", error))
+            })?;
             serde_json::to_value(response).map_err(|error| {
                 RuntimeHostError::new("serialize_response_failed", error.to_string())
             })
@@ -406,9 +423,11 @@ pub(crate) fn handle_request(
         RuntimeHostCommand::AgentRunDetachViewer => {
             let payload: agent_runs::AgentRunDetachViewerRequest =
                 runtime_bridge::deserialize_request(request.payload)?;
-            event_writer.require_viewer_id(payload.viewer_id.as_str())?;
-            let response = agent_runs::detach_viewer(payload)
-                .map_err(|error| RuntimeHostError::new("agent_task_failed", error))?;
+            let viewer_id = payload.viewer_id.clone();
+            let response = event_writer.with_registered_viewer(&viewer_id, || {
+                agent_runs::detach_viewer(payload)
+                    .map_err(|error| RuntimeHostError::new("agent_task_failed", error))
+            })?;
             serde_json::to_value(response).map_err(|error| {
                 RuntimeHostError::new("serialize_response_failed", error.to_string())
             })
@@ -575,12 +594,7 @@ pub(crate) fn handle_request(
             })
         }
         RuntimeHostCommand::AppExit => {
-            event_writer.detach_registered_viewer()?;
-            let dispositions = event_writer
-                .owner_exited()
-                .map_err(RuntimeHostError::transport)?;
-            agent_runtime::interrupt_owner_agent_runs(event_writer, dispositions)
-                .map_err(|error| RuntimeHostError::new("owner_exit_interrupt_failed", error))?;
+            event_writer.client_exited()?;
             Ok(serde_json::json!({ "ok": true }))
         }
     }
@@ -776,6 +790,45 @@ mod tests {
     use crate::runtime_rpc_transport::RuntimeServerClientHub;
     use serde_json::json;
     use std::fs;
+
+    #[test]
+    fn service_shutdown_requires_empty_params_and_returns_only_acceptance() {
+        let clients = Arc::new(RuntimeServerClientHub::default());
+        let (writer, _outbound) = clients.connect().unwrap().unwrap();
+        writer
+            .register_client(
+                crate::runtime_server::RuntimeClientKind::Desktop,
+                "shutdown-test",
+            )
+            .unwrap();
+        let mut state = RuntimeHostState::default();
+        for payload in [json!({"force": true}), json!({"request": {}}), json!([])] {
+            let error = handle_request(
+                &mut state,
+                HostCommandRequest {
+                    command: "runtime/shutdown".into(),
+                    payload,
+                },
+                writer.clone(),
+            )
+            .expect_err("unknown shutdown parameters must fail");
+            assert_eq!(
+                error.to_runtime_rpc_error().data.unwrap()["code"],
+                "invalid_request"
+            );
+        }
+        let response = handle_request(
+            &mut state,
+            HostCommandRequest {
+                command: "runtime/shutdown".into(),
+                payload: json!({}),
+            },
+            writer,
+        )
+        .expect("request service shutdown");
+        assert_eq!(response, json!({"disposition": "requested"}));
+        assert!(clients.connect().unwrap().is_none());
+    }
 
     #[test]
     fn resource_settings_stores_do_not_wait_for_shared_runtime_host_state() {

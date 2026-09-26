@@ -915,9 +915,9 @@ pub(crate) fn append_agent_run_terminal(
             false,
             at_ms,
         )?,
-        "stopped" => state.interrupt(
+        "stopped" | "shutdown" => state.interrupt(
             turn_id.as_str(),
-            "stopped",
+            status,
             error.unwrap_or("AgentRun stopped"),
             false,
             at_ms,

@@ -149,7 +149,7 @@ pub(crate) struct AgentRunDetachViewerResponse {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct AgentRunCancelResponse {
     pub(crate) agent_run: Option<AgentRunSummary>,
-    pub(crate) cancelled: bool,
+    pub(crate) cancel_accepted: bool,
 }
 
 pub(crate) fn list(request: AgentRunListRequest) -> Result<AgentRunListResponse, String> {
@@ -299,13 +299,13 @@ pub(crate) fn cancel(request: AgentRunCancelRequest) -> Result<AgentRunCancelRes
     else {
         return Ok(AgentRunCancelResponse {
             agent_run: None,
-            cancelled: false,
+            cancel_accepted: false,
         });
     };
     if is_agent_run_terminal(agent_run.status.as_str()) {
         return Ok(AgentRunCancelResponse {
             agent_run: Some(into_summary(&agent_run)),
-            cancelled: false,
+            cancel_accepted: false,
         });
     }
     let cancelled_at_ms = current_timestamp_ms();
@@ -319,7 +319,7 @@ pub(crate) fn cancel(request: AgentRunCancelRequest) -> Result<AgentRunCancelRes
     )?;
     Ok(AgentRunCancelResponse {
         agent_run: Some(into_summary(&updated)),
-        cancelled: true,
+        cancel_accepted: true,
     })
 }
 
@@ -333,11 +333,11 @@ pub(crate) fn request_cancel(
     else {
         return Ok(AgentRunCancelResponse {
             agent_run: None,
-            cancelled: false,
+            cancel_accepted: false,
         });
     };
     Ok(AgentRunCancelResponse {
-        cancelled: !is_agent_run_terminal(agent_run.status.as_str()),
+        cancel_accepted: !is_agent_run_terminal(agent_run.status.as_str()),
         agent_run: Some(into_summary(&agent_run)),
     })
 }
@@ -871,17 +871,18 @@ mod tests {
                 session_id: Some(session_id.clone()),
                 reason: Some(String::from("host_owner_exited")),
             })?;
-            if !cancelled.cancelled {
+            if !cancelled.cancel_accepted {
                 return Err(String::from("expected detached agent_run to be cancelled"));
             }
             let cancel_response = serde_json::to_value(&cancelled)
                 .map_err(|error| format!("serialize cancel response failed: {error}"))?;
             if cancel_response.as_object().map(|object| object.len()) != Some(2)
                 || cancel_response.get("agentRun").is_none()
-                || cancel_response.get("cancelled").is_none()
+                || cancel_response.get("cancelAccepted").is_none()
+                || cancel_response.get("cancelled").is_some()
             {
                 return Err(String::from(
-                    "cancel response must contain only agentRun and cancelled",
+                    "cancel response must contain only agentRun and cancelAccepted",
                 ));
             }
             let terminal = message_log::terminal_agent_run_stream_projection("agent_run-viewer")?;

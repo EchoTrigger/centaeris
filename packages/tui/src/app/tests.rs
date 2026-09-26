@@ -4109,7 +4109,195 @@ fn disconnected_runtime_allows_exit_without_waiting_for_a_response() {
 }
 
 #[test]
-fn runtime_disconnect_clears_activity_and_drops_client_for_reconnect() {
+fn accepted_stop_keeps_observing_until_the_terminal_event() {
+    let workspace = unique_test_dir("workspace-stop-accepted");
+    let mut app = test_app("", workspace.clone(), workspace.clone());
+    app.active_session = Some(TuiSession {
+        id: "session-running".into(),
+        title: "Running".into(),
+        updated_at: 0,
+        last_message: None,
+        cwd: display_path(&workspace),
+        session_kind: TuiSessionKind::Main,
+        activity_state: TuiSessionActivityState::Idle,
+        is_unread: false,
+        is_pinned: false,
+    });
+    app.active_agent_run_id = Some("run-running".into());
+    app.active_agent_run_ids.insert("run-running".into());
+    app.process_state = RuntimeDisplayState::Working;
+    app.runtime = Some(RuntimeClient::from_test_request_handler(|frame| {
+        if frame["method"] == "agent_context_usage_get" {
+            return json!({});
+        }
+        assert_eq!(frame["method"], "_centaeris/session/agent-runs/cancel");
+        json!({"cancelAccepted": true, "agentRun": {"agentRunId": "run-running", "status": "running"}})
+    }));
+    stop_active_agent_runs(&mut app, "tui_user_stop").expect("stop accepted");
+    assert_eq!(app.active_agent_run_id.as_deref(), Some("run-running"));
+    assert!(app.active_agent_run_ids.contains("run-running"));
+    assert_ne!(app.process_state, RuntimeDisplayState::Idle);
+    run_event(
+        &mut app,
+        "run-running",
+        "terminal",
+        "AgentRunInterrupted",
+        json!({"reasonType": "cancelled"}),
+    );
+    assert!(app.active_agent_run_id.is_none());
+    assert!(app.active_agent_run_ids.is_empty());
+    let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[test]
+fn terminal_stop_response_recovers_final_text_from_history_without_a_notification() {
+    let workspace = unique_test_dir("workspace-stop-terminal-history");
+    let mut app = test_app("", workspace.clone(), workspace.clone());
+    app.active_session = Some(TuiSession {
+        id: "session-paged".into(),
+        title: "Running".into(),
+        updated_at: 0,
+        last_message: None,
+        cwd: display_path(&workspace),
+        session_kind: TuiSessionKind::Main,
+        activity_state: TuiSessionActivityState::Idle,
+        is_unread: false,
+        is_pinned: false,
+    });
+    app.active_agent_run_id = Some("run-running".into());
+    app.active_agent_run_ids.insert("run-running".into());
+    app.process_state = RuntimeDisplayState::Working;
+    app.transcript
+        .push(TranscriptLine::Summary("Incomplete live text".into()));
+    app.pending_question = Some(PendingQuestion {
+        id: "old-question".into(),
+        question: "Stale question".into(),
+        options: Vec::new(),
+        multi_select: false,
+        required: true,
+    });
+    app.runtime = Some(RuntimeClient::from_test_request_handler(
+        |frame| match frame["method"].as_str().unwrap() {
+            "_centaeris/session/agent-runs/cancel" => json!({"cancelAccepted": false,
+                "agentRun": {"agentRunId": "run-running", "status": "succeeded"}}),
+            "_centaeris/session/agent-runs/attach" => {
+                json!({"transitionReason": "viewer_attached"})
+            }
+            "_centaeris/session/agent-runs" => json!({"agentRuns": []}),
+            "transcript/page" => json!({
+                "schema": "transcript.page.rpc.v1", "projectionVersion": TRANSCRIPT_PROJECTION_VERSION_V1,
+                "projectionGeneration": "generation-paged", "projectedSourceHighWater": "12",
+                "targetSourceHighWater": "12", "targetReached": true,
+                "page": transcript_test_page(vec![transcript_test_block("answer", 1, 12,
+                    TranscriptBlockBodyV1::AssistantText {
+                        content: TranscriptTextContentV1::inline("Final answer from committed history".into()),
+                        status: TranscriptBlockStatusV1::Completed,
+                    })], None),
+            }),
+            "agent_context_usage_get" => json!({}),
+            other => panic!("unexpected stop reconciliation request {other}"),
+        },
+    ));
+    stop_active_agent_runs(&mut app, "tui_user_stop").expect("natural completion won");
+    assert_eq!(
+        app.transcript,
+        vec![TranscriptLine::Summary(
+            "Final answer from committed history".into()
+        )]
+    );
+    assert!(app.active_agent_run_id.is_none());
+    assert!(app.active_agent_run_ids.is_empty());
+    assert!(app.pending_question.is_none());
+    assert_eq!(app.process_state, RuntimeDisplayState::Idle);
+    assert!(
+        app.completed_agent_run_ids.is_empty(),
+        "history refresh must not fabricate cancellation events"
+    );
+    let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[test]
+fn cancel_receipt_rejects_the_unsupported_cancelled_field() {
+    let workspace = unique_test_dir("workspace-stop-accepted");
+    let mut app = test_app("", workspace.clone(), workspace.clone());
+    app.active_session = Some(TuiSession {
+        id: "session-running".into(),
+        title: "Running".into(),
+        updated_at: 0,
+        last_message: None,
+        cwd: display_path(&workspace),
+        session_kind: TuiSessionKind::Main,
+        activity_state: TuiSessionActivityState::Idle,
+        is_unread: false,
+        is_pinned: false,
+    });
+    app.active_agent_run_id = Some("run-running".into());
+    app.active_agent_run_ids.insert("run-running".into());
+    app.process_state = RuntimeDisplayState::Working;
+    app.runtime = Some(RuntimeClient::from_test_request_handler(|frame| {
+        if frame["method"] == "agent_context_usage_get" {
+            return json!({});
+        }
+        assert_eq!(frame["method"], "_centaeris/session/agent-runs/cancel");
+        json!({"cancelled": true, "agentRun": {"agentRunId": "run-running", "status": "running"}})
+    }));
+    let error =
+        stop_active_agent_runs(&mut app, "tui_user_stop").expect_err("old receipt must fail");
+    assert!(error.contains("cancelAccepted"), "{error}");
+    let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[test]
+fn failed_reconnect_refresh_preserves_unknown_state_and_can_retry() {
+    let workspace = unique_test_dir("workspace-reconnect-refresh");
+    let mut app = test_app("", workspace.clone(), workspace.clone());
+    app.active_session = Some(TuiSession {
+        id: "session-paged".into(),
+        title: "Running".into(),
+        updated_at: 0,
+        last_message: None,
+        cwd: display_path(&workspace),
+        session_kind: TuiSessionKind::Main,
+        activity_state: TuiSessionActivityState::Idle,
+        is_unread: false,
+        is_pinned: false,
+    });
+    app.active_agent_run_id = Some("run-running".into());
+    app.active_agent_run_ids.insert("run-running".into());
+    app.process_state = RuntimeDisplayState::ConnectionLost;
+    app.runtime = Some(RuntimeClient::from_test_request_handler(|_| json!({})));
+    assert!(refresh_reconnected_observation(&mut app).is_err());
+    assert!(
+        app.runtime.is_none(),
+        "failed refresh must permit a fresh connection"
+    );
+    assert_eq!(app.process_state, RuntimeDisplayState::ConnectionLost);
+    assert_eq!(app.active_agent_run_id.as_deref(), Some("run-running"));
+    app.runtime = Some(RuntimeClient::from_test_request_handler(
+        |frame| match frame["method"].as_str().unwrap() {
+            "_centaeris/session/agent-runs/attach" => {
+                json!({"transitionReason": "viewer_attached"})
+            }
+            "_centaeris/session/agent-runs" => json!({"agentRuns": []}),
+            "transcript/page" => json!({
+                "schema": "transcript.page.rpc.v1", "projectionVersion": TRANSCRIPT_PROJECTION_VERSION_V1,
+                "projectionGeneration": "generation-paged", "projectedSourceHighWater": "12",
+                "targetSourceHighWater": "12", "targetReached": true,
+                "page": transcript_test_page(Vec::new(), None),
+            }),
+            other => panic!("unexpected refresh request {other}"),
+        },
+    ));
+    refresh_reconnected_observation(&mut app).expect("authoritative refresh");
+    assert!(app.runtime.is_some());
+    assert_eq!(app.process_state, RuntimeDisplayState::Idle);
+    assert!(app.active_agent_run_id.is_none());
+    assert!(app.active_agent_run_ids.is_empty());
+    let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[test]
+fn runtime_disconnect_keeps_run_identity_and_marks_observation_unknown() {
     let workspace = unique_test_dir("workspace-runtime-disconnect");
     let data_root = unique_test_dir("data-runtime-disconnect");
     let mut app = test_app("", workspace.clone(), data_root.clone());
@@ -4128,10 +4316,13 @@ fn runtime_disconnect_clears_activity_and_drops_client_for_reconnect() {
 
     assert!(drain_runtime_events(&mut app));
     assert!(app.runtime.is_none(), "next command must reconnect");
-    assert!(app.active_agent_run_id.is_none());
-    assert!(app.active_agent_run_ids.is_empty());
-    assert!(app.agent_run_started_at.is_none());
-    assert_eq!(app.process_state, RuntimeDisplayState::Idle);
+    assert_eq!(
+        app.active_agent_run_id.as_deref(),
+        Some("agent-run-disconnected")
+    );
+    assert!(app.active_agent_run_ids.contains("agent-run-disconnected"));
+    assert!(app.agent_run_started_at.is_some());
+    assert_ne!(app.process_state, RuntimeDisplayState::Idle);
     assert!(matches!(
         app.transcript.last(),
         Some(TranscriptLine::Error(message)) if message == "Runtime Server connection closed"

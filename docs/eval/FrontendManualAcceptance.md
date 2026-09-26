@@ -71,8 +71,12 @@ stream-presentation tests protect its existing grapheme pacing and terminal drai
 
 - Open file, browser, terminal, and review surfaces from the Desktop UI and
   confirm only the intended trusted renderer receives the result.
-- Close, reopen, and exit the Desktop app with an active Session; confirm Runtime
-  ownership and tray/window state remain coherent.
+- Close, reopen, and exit the Desktop app with an active Session; confirm the
+  same AgentRun continues and tray/window state remains coherent. Reconnect a
+  second client, catch up the transcript, and explicitly stop that run.
+- After pressing Stop, retain the active display until an authoritative
+  terminal arrives. A cancellation receipt alone must not mark work completed.
+  Connection loss must not fabricate success or cancellation.
 
 ## TUI process and compact output
 

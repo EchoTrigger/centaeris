@@ -166,6 +166,8 @@ const electronCommandsRequiringRust = new Set(
 const expectedRuntimeCommandsWithoutElectronRoute = new Set([
   "initialize",
   "process_capture",
+  // Service control is available to profile clients, not the renderer's app exit.
+  "runtime/shutdown",
 ]);
 const runtimeCommandsWithoutElectronRoute = new Set(
   diff(runtimeHostCommands, electron.commands),

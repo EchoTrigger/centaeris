@@ -555,7 +555,7 @@ export function ChatArea({
     onAgentRunningChange,
   });
 
-  const { isHydratingSession, hydrationStage } =
+  const { isHydratingSession, hydrationStage, reconcileTerminalAgentRun } =
     useSessionViewHydrationController({
       view: {
         currentSessionId,
@@ -711,6 +711,7 @@ export function ChatArea({
       turnUpdates: assistantTurnUpdates,
       applyDurableTurnMessageIds,
       startStreamForAssistant,
+      reconcileTerminalAgentRun,
       refreshContextUsage,
     },
     queue: {

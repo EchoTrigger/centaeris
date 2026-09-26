@@ -42,7 +42,9 @@ Start the packaged TUI:
 ```
 
 Without `--workspace`, the current directory is used. Client disconnection
-releases only that connection; a Runtime used by Desktop keeps running. The TUI
+releases only that connection; active runs keep the Runtime alive even without
+a Desktop or TUI observer. Reconnecting clients read the existing Session and
+AgentRun rather than resubmitting work. The TUI
 package contains native `centa.exe`, native `centaeris-runtime.exe`, and combined
 third-party licenses.
 

@@ -101,8 +101,10 @@ isolation backends. Hosts report whether policy is enforced and explicit error
 categories. The [ExecutionHost contract](ExecutionHostContract.md) records the
 current native local Host and the macOS Runtime CI results.
 
-Process shutdown is owned by the Host and Runtime lifecycle. Closing the last
-local client must not leave an unowned Runtime or child process consuming work.
+Process shutdown is owned by the Host and Runtime lifecycle. AgentRuns belong
+to the Runtime service and survive the last local client disconnecting. Explicit
+cancel and service shutdown use Core interruption semantics; idle shutdown
+waits until active runs and background jobs have finished.
 
 ## Extensions
 

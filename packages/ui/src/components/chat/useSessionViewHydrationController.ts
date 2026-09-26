@@ -212,11 +212,29 @@ export const useSessionViewHydrationController = ({
     ],
   );
 
-  return useSessionHydration({
+  const reconcileTerminalAgentRun = useCallback(async (sessionId: string, agentRunId: string) => {
+    const expectedStream = getActiveStream();
+    const ownsObservation = () => visibleSessionIdRef.current === sessionId
+      && getActiveStream() === expectedStream && expectedStream?.agentRunId === agentRunId;
+    if (!ownsObservation()) return false;
+    const snapshot = await buildSessionHydrationSnapshot(sessionId, {
+      isCancelled: () => !ownsObservation(), yieldToUi: waitForNextPaint,
+    });
+    if (!ownsObservation()) return false;
+    closeActiveStream();
+    setPendingQuestion(null);
+    setPendingQuestionError("");
+    applyHydrationSnapshot(snapshot, sessionId);
+    setIsStreaming(Boolean(snapshot.activeReplay));
+    return !snapshot.activeReplay;
+  }, [applyHydrationSnapshot, closeActiveStream, getActiveStream, setIsStreaming, setPendingQuestion, setPendingQuestionError, visibleSessionIdRef]);
+
+  const hydration = useSessionHydration({
     currentSessionId,
     prepare: prepareSessionHydration,
     applySnapshot: applyHydrationSnapshot,
     refreshCachedSession: refreshCachedSessionFromTranscript,
     onError: handleSessionHydrationError,
   });
+  return { ...hydration, reconcileTerminalAgentRun };
 };

@@ -68,6 +68,7 @@ type ViewPort = {
 };
 
 type StreamPort = {
+  reconcileTerminalAgentRun: (sessionId: string, agentRunId: string) => Promise<boolean>;
   connection: Pick<
     AgentStreamConnection,
     "getActiveStream" | "isStreaming" | "closeActiveStream"
@@ -213,6 +214,7 @@ export const useChatPromptTransactions = ({
     turnUpdates,
     applyDurableTurnMessageIds,
     startStreamForAssistant,
+    reconcileTerminalAgentRun,
     refreshContextUsage,
   } = stream;
   const { getActiveStream, isStreaming, closeActiveStream } = connection;
@@ -232,6 +234,7 @@ export const useChatPromptTransactions = ({
     () => Promise.resolve(),
   );
   const stopActiveAgentRunRef = useRef<() => void>(() => {});
+  const stopRequestedAgentRunIdRef = useRef<string | null>(null);
   const submitEditedUserMessageRef = useRef<
     (messageId: string) => Promise<void>
   >(() => Promise.resolve());
@@ -331,6 +334,38 @@ export const useChatPromptTransactions = ({
     if (!active) {
       return;
     }
+    if (isNativeHostRuntime()) {
+      if (stopRequestedAgentRunIdRef.current === active.agentRunId) return;
+      stopRequestedAgentRunIdRef.current = active.agentRunId;
+      setInputValue(recoverQueuedPromptForStop(active.sessionId, inputValue));
+      updateAssistantTurn(active.assistantMessageId, (turn) => setTurnActivity(
+        turn, normalizeRuntimeActivity(t("useChatPromptTransactions.stopRequested"), "waiting"),
+      ));
+      // Acceptance is not a terminal fact. Keep observing completion, including
+      // a natural completion that races with this request.
+      void cancelAgentRun({
+        agentRunId: active.agentRunId,
+        sessionId: active.sessionId,
+        reason: "user_interrupt",
+      }).then(async (response) => {
+        if (!response.agentRun || !["succeeded", "failed", "cancelled", "stopped"].includes(response.agentRun.status)) return;
+        // The summary confirms the run ended, but its final text may not have
+        // arrived. Restore the existing committed transcript projection first.
+        if (await reconcileTerminalAgentRun(active.sessionId, active.agentRunId)) {
+          onAgentRunningChange?.(active.sessionId, false);
+        }
+      }).catch(() => {
+        if (stopRequestedAgentRunIdRef.current === active.agentRunId) stopRequestedAgentRunIdRef.current = null;
+        updateAssistantTurn(active.assistantMessageId, (turn) =>
+          appendNarrativeChunk(
+            turn,
+            t("useChatPromptTransactions.theStopRequestCouldNotBeSavedToThe"),
+            "error",
+          ),
+        );
+      });
+      return;
+    }
     stoppedAssistantMessageIdsRef.current.add(active.assistantMessageId);
     const now = Date.now();
     updateAssistantTurn(active.assistantMessageId, (turn) => ({
@@ -348,21 +383,6 @@ export const useChatPromptTransactions = ({
     visibleActiveReplayRef.current = null;
     onAgentRunningChange?.(active.sessionId, false);
     setInputValue(recoverQueuedPromptForStop(active.sessionId, inputValue));
-    if (isNativeHostRuntime()) {
-      void cancelAgentRun({
-        agentRunId: active.agentRunId,
-        sessionId: active.sessionId,
-        reason: "user_interrupt",
-      }).catch(() => {
-        updateAssistantTurn(active.assistantMessageId, (turn) =>
-          appendNarrativeChunk(
-            turn,
-            t("useChatPromptTransactions.theStopRequestCouldNotBeSavedToThe"),
-            "error",
-          ),
-        );
-      });
-    }
     closeActiveStream();
   }, [
     closeActiveStream,
@@ -371,6 +391,7 @@ export const useChatPromptTransactions = ({
     inputValue,
     onAgentRunningChange,
     recoverQueuedPromptForStop,
+    reconcileTerminalAgentRun,
     setInputValue,
     stoppedAssistantMessageIdsRef,
     updateAssistantTurn,
