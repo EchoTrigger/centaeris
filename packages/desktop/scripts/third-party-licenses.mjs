@@ -15,15 +15,15 @@ const fallbacks = new Map([
       sha256: "0e80a2d229d2fd4fc7e8636142ec5d0ff0bc031f14c15b682e2ac01dfd5b5138",
     },
   ],
-  [
-    "npm:@rolldown/binding-win32-x64-msvc@1.1.5",
+  ...["win32-x64-msvc", "linux-x64-gnu", "darwin-arm64"].map((binding) => [
+    `npm:@rolldown/binding-${binding}@1.1.5`,
     {
       sourcePackage: "rolldown",
       sourceVersion: "1.1.5",
       file: "LICENSE",
       sha256: "23ecfff35a5a2e80d92142f75228912c3b1abc4b5a8337a821ff4397e2f9f734",
     },
-  ],
+  ]),
   [
     "rust:rmcp@3.1.4",
     {
@@ -192,7 +192,7 @@ const rustPackages = async (repoRoot, rustPackageNames, rustTarget) => {
     }));
 };
 
-const fallbackFiles = async (item, repoRoot, hostRoot) => {
+export const fallbackFiles = async (item, repoRoot, hostRoot) => {
   const key = `${item.ecosystem}:${item.name}@${item.version}`;
   const fallback = fallbacks.get(key);
   if (!fallback) throw new Error(`third-party license files missing: ${key}`);
