@@ -54,16 +54,15 @@ may compile elsewhere, but that is not a release-platform claim.
 
 ## Build from source
 
-Requirements: Rust 1.94.1, Node.js 22.21.0, and npm 10.9.4. The full release
-gate also runs Python 3.9+ helper checks.
+Requirements: the Rust toolchain in `rust-toolchain.toml`, Node.js 22.21.0,
+npm 10.9.4 and Python 3.12.
 
-```powershell
-cargo test --locked -p centaeris-core query_loop
-npm ci
-npm run gate --workspace centaeris-ui
+```sh
+python3 scripts/ci.py Source --frontend-tests
 ```
 
-See [Windows setup](docs/getting-started/Windows.md) for the complete build and
+Use `python` on Windows. See [portable source development](docs/development/Building.md)
+for the common gates and [Windows setup](docs/getting-started/Windows.md) for the complete build and
 first-run paths. The runtime and tests do not require an installed Plugin. The
 Desktop and TUI distributions include the public System Skills in this tree;
 other extensions are separate versioned assets.

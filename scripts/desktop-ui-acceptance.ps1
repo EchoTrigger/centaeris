@@ -8,7 +8,8 @@ $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $true
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$env:ComSpec = Join-Path $env:SystemRoot "System32\cmd.exe"
+if ($IsWindows) { $env:ComSpec = Join-Path $env:SystemRoot "System32\cmd.exe" }
+if (-not $ValidationOnly -and -not $IsWindows) { throw "Packaged Desktop acceptance currently supports Windows only." }
 
 Push-Location $repoRoot
 try {

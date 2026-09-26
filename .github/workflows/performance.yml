@@ -42,7 +42,7 @@ jobs:
           persist-credentials: false
 
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.94.1 --profile minimal
+        run: rustup show active-toolchain
 
       - name: Run observation storage growth gate
         run: >-

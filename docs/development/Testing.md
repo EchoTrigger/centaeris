@@ -14,13 +14,16 @@ integration.
 
 ## Full local gate
 
-```powershell
-.\scripts\ci.ps1
+```sh
+python3 scripts/ci.py Source --frontend-tests
 ```
 
+On Windows use `python`. Windows distribution acceptance additionally runs
+`pwsh -File scripts/ci.ps1 Release`.
+
 The gate checks formatting, the Rust workspace, Clippy with warnings denied,
-focused Core and SQLite integration, all Rust tests, Desktop/UI acceptance, and
-the Windows TUI package.
+focused Core and SQLite integration, all Rust tests and Desktop/UI source checks.
+Packaging and packaged-application smoke checks remain in the Windows release stage.
 
 ## Test data
 
