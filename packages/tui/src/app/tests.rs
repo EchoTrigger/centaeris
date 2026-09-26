@@ -1461,7 +1461,9 @@ fn new_command_returns_to_welcome_without_creating_session() {
 fn state_command_opens_an_inline_diagnostic_page() {
     let workspace = unique_test_dir("workspace-state");
     let data_root = unique_test_dir("data-state");
-    let mut app = test_app("/state", workspace.clone(), data_root.clone());
+    // Exercise macOS-sized temporary paths on every host without creating them.
+    let displayed_workspace = workspace.join("long-workspace-component".repeat(8));
+    let mut app = test_app("/state", displayed_workspace, data_root.clone());
     app.model_provider_id = Some("openai".to_string());
     app.model_display = Some("gpt-5.5".to_string());
     app.model_effort = Some("high".to_string());
@@ -1469,13 +1471,26 @@ fn state_command_opens_an_inline_diagnostic_page() {
     assert!(!handle_enter(&mut app));
 
     assert!(app.show_state);
-    let state = rendered_lines_text(&state_lines(&app, 120));
+    let full_width = Line::from(app.workspace_root.as_str()).width() + 13;
+    let state = rendered_lines_text(&state_lines(&app, full_width));
     assert!(state.contains("MODEL       gpt-5.5"), "state: {state}");
     assert!(state.contains("PROVIDER    openai"), "state: {state}");
     assert!(
         state.contains(app.workspace_root.as_str()),
         "state: {state}"
     );
+    let narrow_lines = state_lines(&app, 120);
+    let workspace_line = narrow_lines.last().expect("workspace diagnostic row");
+    assert!(workspace_line.width() <= 120);
+    let workspace_text = rendered_lines_text(std::slice::from_ref(workspace_line));
+    let value = workspace_text
+        .strip_prefix("WORKSPACE   ")
+        .expect("workspace label");
+    let (prefix, suffix) = value.split_once("...").expect("long path is abbreviated");
+    assert!(!prefix.is_empty() && !suffix.is_empty());
+    assert!(app.workspace_root.starts_with(prefix));
+    assert!(app.workspace_root.ends_with(suffix));
+    assert!(!value.contains(app.workspace_root.as_str()));
     handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
     assert!(!app.show_state);
     let _ = std::fs::remove_dir_all(workspace);
