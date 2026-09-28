@@ -232,13 +232,13 @@ pub(super) fn preview_lines(
     let detail = app.output_preview.get(&tool.key).unwrap_or(&inline);
     if detail.pending.is_some() {
         return vec![Line::styled(
-            "    └ Loading…",
+            "  └ Loading…",
             Style::default().fg(theme().muted),
         )];
     }
     if let Some(error) = &detail.error {
         return vec![Line::styled(
-            format!("    └ Cannot read output: {error}"),
+            format!("  └ Cannot read output: {error}"),
             Style::default().fg(theme().muted),
         )];
     }
@@ -252,7 +252,7 @@ pub(super) fn preview_lines(
         .content
         .get(..available)
         .unwrap_or("Invalid output body range");
-    let usable = usize::from(width.saturating_sub(6).max(1));
+    let usable = usize::from(width.saturating_sub(4).max(1));
     let mut rows = Vec::new();
     let mut row = String::new();
     let mut used = 0;
@@ -292,7 +292,7 @@ pub(super) fn preview_lines(
                 if text.trim().is_empty() {
                     String::new()
                 } else {
-                    format!("{}{}", if index == 0 { "    └ " } else { "      " }, text)
+                    format!("{}{}", if index == 0 { "  └ " } else { "    " }, text)
                 },
                 Style::default().fg(theme().muted),
             )

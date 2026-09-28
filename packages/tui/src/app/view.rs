@@ -156,6 +156,10 @@ pub(super) fn render(frame: &mut Frame, app: &mut App, transcript_view: &Transcr
         return;
     }
 
+    if app.process_panel.is_some() {
+        process_ui::render(frame, app);
+        return;
+    }
     if app.session_picker_open {
         render_session_picker(frame, area, app);
         return;
@@ -574,20 +578,30 @@ fn render_transcript_selection(buffer: &mut Buffer, area: Rect, selection: Optio
     }
 }
 
-/// Summary 行渲染：折叠前导空行，并以空白缩进与 user/tool 行区分。
+/// Render one assistant message, marking only its first nonempty line.
 pub(super) fn render_summary_lines(text: &str, width: u16) -> Vec<Line<'static>> {
     let mut markdown = render_markdown_lines(text.trim_start(), width.saturating_sub(2), false).0;
-    indent_assistant_lines(&mut markdown);
+    indent_assistant_lines(&mut markdown, true, width);
     markdown
 }
 
-pub(super) fn indent_assistant_lines(markdown: &mut [Line<'static>]) {
+pub(super) fn indent_assistant_lines(
+    markdown: &mut Vec<Line<'static>>,
+    mut first: bool,
+    width: u16,
+) {
+    *markdown = hard_wrap_input_lines(
+        std::mem::take(markdown),
+        usize::from(width.saturating_sub(2).max(1)),
+    );
     for line in markdown.iter_mut().filter(|line| {
         line.spans
             .iter()
             .any(|span| !span.content.as_ref().is_empty())
     }) {
-        line.spans.insert(0, Span::raw("  "));
+        line.spans
+            .insert(0, Span::raw(if first { "● " } else { "  " }));
+        first = false;
     }
 }
 
@@ -663,7 +677,16 @@ pub(super) fn build_assistant_live_lines(app: &App, width: u16) -> Vec<Line<'sta
         width.saturating_sub(2),
         app.assistant_tail_in_code_block,
     );
-    indent_assistant_lines(&mut lines);
+    let prior = render_markdown_lines(
+        &app.assistant_buffer[..app.assistant_emitted_bytes],
+        width.saturating_sub(2),
+        false,
+    )
+    .0;
+    let first = !prior
+        .iter()
+        .any(|line| line.spans.iter().any(|span| !span.content.is_empty()));
+    indent_assistant_lines(&mut lines, first, width);
     lines
 }
 
@@ -678,12 +701,13 @@ pub(super) fn build_transcript_view(app: &App, width: u16) -> TranscriptView {
         match item {
             TranscriptLine::Tool(tool) => {
                 source_line_indices.push((tool.key.clone(), lines.len()));
-                lines.push(Line::from(format!("  {}", stable_tool_title(tool))));
+                lines.extend(super::presentation::tool_lines(tool, width));
                 lines.extend(output_preview::preview_lines(app, tool, width));
                 for image in &tool.images {
                     image_line_indices.push((image.key.clone(), lines.len()));
                     push_inline_image_lines(&mut lines, image.path.as_str(), width);
                 }
+                lines.push(Line::from(""));
             }
             TranscriptLine::ProcessEnd { key, label } => {
                 source_line_indices.push((key.clone(), lines.len()));
@@ -875,7 +899,7 @@ pub(super) fn render_inline_markdown(text: &str, width: u16) -> Vec<Span<'static
                 if !code_text.is_empty() {
                     spans.push(Span::styled(
                         code_text.to_string(),
-                        Style::default().bg(theme().inline_code_bg),
+                        Style::default().fg(theme().inline_code_fg),
                     ));
                 }
                 rest = &tail[1..];
@@ -1969,7 +1993,7 @@ pub(super) fn render_session_picker(frame: &mut Frame, area: Rect, app: &mut App
     } else if app.pending_delete.is_some() {
         "Enter delete · Esc cancel"
     } else {
-        "Tab workspace · ↑↓ select · Enter resume · P pin · R rename · D delete · Esc back"
+        "Tab workspace · ↑↓ select · N more · Enter resume · P pin · R rename · D delete · Esc back"
     };
     frame.render_widget(
         Paragraph::new(help).style(Style::default().fg(theme().muted)),
@@ -2112,8 +2136,12 @@ pub(super) fn transcript_to_lines_from(
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut live_in_code_block = false;
+    let mut live_has_content = false;
     for (index, item) in items.iter().enumerate() {
         let emit = index >= start;
+        if !matches!(item.content(), TranscriptLine::LiveAssistant { .. }) {
+            live_has_content = false;
+        }
         match item.content() {
             TranscriptLine::RunItem { .. }
             | TranscriptLine::RunBoundary { .. }
@@ -2149,7 +2177,11 @@ pub(super) fn transcript_to_lines_from(
                     width.saturating_sub(2),
                     live_in_code_block,
                 );
-                indent_assistant_lines(&mut rendered);
+                let has_content = rendered
+                    .iter()
+                    .any(|line| line.spans.iter().any(|span| !span.content.is_empty()));
+                indent_assistant_lines(&mut rendered, !live_has_content, width);
+                live_has_content |= has_content;
                 live_in_code_block = in_code_block;
                 if emit {
                     lines.extend(rendered);
@@ -2159,6 +2191,7 @@ pub(super) fn transcript_to_lines_from(
                 }
                 if *separator {
                     live_in_code_block = false;
+                    live_has_content = false;
                 }
             }
             TranscriptLine::Subagent(subagent) => {
@@ -2176,11 +2209,11 @@ pub(super) fn transcript_to_lines_from(
                     format!(": {}", subagent.summary)
                 };
                 lines.push(Line::from(vec![
-                    Span::styled("  ↳ ", style),
+                    Span::styled("● ", style),
                     Span::styled(
                         fit_middle(
                             &format!("{}{}", subagent.title, summary),
-                            width.saturating_sub(4) as usize,
+                            width.saturating_sub(2) as usize,
                         ),
                         style,
                     ),
@@ -2192,7 +2225,7 @@ pub(super) fn transcript_to_lines_from(
                 if emit {
                     lines.push(Line::from(vec![
                         Span::styled(
-                            "     └─ ",
+                            "  └ ",
                             Style::default()
                                 .fg(theme().muted)
                                 .add_modifier(Modifier::DIM),
@@ -2211,17 +2244,7 @@ pub(super) fn transcript_to_lines_from(
                 if !emit {
                     continue;
                 }
-                let indicator_style = Style::default().fg(theme().muted);
-                lines.push(Line::from(vec![
-                    Span::styled("  ", indicator_style),
-                    Span::styled(stable_tool_title(tool), Style::default()),
-                ]));
-                if tool.action_kind == ToolActionKind::Command && tool.description_title {
-                    push_text_result_block(
-                        &mut lines,
-                        &[tool.command.as_deref().unwrap_or_default().to_string()],
-                    );
-                }
+                lines.extend(super::presentation::tool_lines(tool, width));
                 let show_diff_path = tool_operation_paths(&tool.operations).len() > 1;
                 let result_detail = empty_tool_result_detail(tool);
                 let detail_replaces_blocks =
@@ -2240,7 +2263,7 @@ pub(super) fn transcript_to_lines_from(
                 live_in_code_block = false;
                 if emit {
                     lines.push(Line::from(vec![
-                        Span::styled("! ", Style::default().fg(theme().muted)),
+                        Span::styled("● Error: ", Style::default().fg(ratatui::style::Color::Red)),
                         Span::styled(text.clone(), Style::default().fg(theme().muted)),
                     ]));
                 }
@@ -2264,7 +2287,7 @@ pub(super) fn push_tool_result_block(
                 .iter()
                 .map(|result| match result {
                     TextResultLine::Text(text) => {
-                        fit_middle_columns(text, (width as usize).saturating_sub(6).max(1))
+                        fit_middle_columns(text, (width as usize).saturating_sub(4).max(1))
                     }
                     TextResultLine::Hidden(hidden) => format!("… {hidden} lines hidden"),
                 })
@@ -2272,15 +2295,13 @@ pub(super) fn push_tool_result_block(
             push_text_result_block(lines, &rendered);
         }
         ToolResultBlock::Diff { path, rows, .. } => {
-            let prefix = if show_diff_path {
+            if show_diff_path {
                 lines.push(Line::from(vec![
-                    Span::styled("  └─ ", tool_result_style()),
+                    Span::styled("  └ ", tool_result_style()),
                     Span::styled(path.clone(), tool_result_style()),
                 ]));
-                "      "
-            } else {
-                "    "
-            };
+            }
+            let prefix = "    ";
             let line_number_width = diff_line_number_width(rows);
             for row in rows {
                 lines.push(diff_row_line(
@@ -2296,7 +2317,7 @@ pub(super) fn push_tool_result_block(
 
 pub(super) fn push_text_result_block(lines: &mut Vec<Line<'static>>, result_lines: &[String]) {
     for (index, text) in result_lines.iter().enumerate() {
-        let prefix = if index == 0 { "  └─ " } else { "      " };
+        let prefix = if index == 0 { "  └ " } else { "    " };
         lines.push(Line::from(vec![
             Span::styled(prefix.to_string(), tool_result_style()),
             Span::styled(text.clone(), tool_result_style()),
