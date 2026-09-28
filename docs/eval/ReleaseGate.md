@@ -55,6 +55,19 @@ behavior checks.
 Use [FrontendManualAcceptance.md](FrontendManualAcceptance.md) for the retained
 Desktop interaction and appearance checks.
 
+Changes to Runtime-owned process sessions also run the native, isolated-profile
+transport acceptance after `cargo build --locked -p centaeris-runtime --bin
+centaeris-runtime`: `node scripts/test-process-sessions.mjs`. It covers two-client
+output cursors, duplicate start, Session deletion/start races, disconnect survival,
+scoped stop and explicit service-shutdown tree cleanup. It requires the existing
+local Bash setup and makes no model requests.
+
+Agent process adapter/completion changes also run `node scripts/test-process-agent.mjs`
+against the debug Runtime. It uses an isolated profile and a loopback mock model,
+covering automatic follow-up after client detach, busy-session deferral, output
+readback, lost-acknowledgement deduplication and cancellation suppression. It sends
+no model requests to external services.
+
 Persistent-format changes must also pass [persistence acceptance](PersistenceAcceptance.md).
 These Rust tests run in the existing workspace test gate. Product metadata and
 lockfiles must pass `python -B scripts/test_product_version.py`.
@@ -81,3 +94,17 @@ The repository must also pass these structural checks:
 - `Cargo.lock` and `package-lock.json` resolve only this repository's workspaces.
 
 The gate's Core/storage boundary checks protect dependency direction rather than preserving a migration blacklist: Core owns contracts and private semantics, while `runtime_sqlite` owns its implementation and the public Core-plus-SQLite integration coverage.
+
+Local SSH/scheduler changes additionally run `node scripts/test-host-automation.mjs`
+after building the debug Runtime. Its isolated profile, loopback model and SSH
+argv fixture cover concurrent clients, explicit model selection, one-shot/manual
+execution, overlap, client detach, lost-acknowledgement restart, missed intervals
+and process-start replay. It does not connect to a real remote SSH host.
+
+Agent scheduling changes also run `node scripts/test-agent-schedules.mjs`. A
+loopback model exercises context lookup, plan creation, service enablement and
+confirmation through actual Agent tool calls, without user CLI/config-file work.
+
+Local PTY changes additionally run `node scripts/test-terminal-sessions.mjs`
+after building the debug Runtime. This isolated-profile acceptance makes no model
+requests; see [LocalTerminals.md](../reference/LocalTerminals.md).

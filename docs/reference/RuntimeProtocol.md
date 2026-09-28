@@ -161,7 +161,7 @@ The result has this exact field set:
 | `profileId` | Non-empty identity of the user-data profile. |
 | `storeId` | Non-empty identity of the Runtime store. |
 | `storeSchemaVersion` | Positive storage schema version, currently `4`. |
-| `layoutSchemaVersion` | Positive user-data layout version, currently `1`. |
+| `layoutSchemaVersion` | Positive user-data layout version, currently `2`. |
 
 The v1 descriptor publishes these arrays:
 
@@ -294,11 +294,20 @@ authorization grant.
 | `plugin/reload` | `oneShotAction` | `noAutomaticRetry` | `plugin/catalog_state` |
 | `plugin/set_enabled` | `desiredStateWrite` | `noAutomaticRetry` | `plugin/detail` |
 | `plugin/source_ref` | `read` | `safeRetry` | — |
+| `session/catalog` | `read` | `safeRetry` | — |
 | `session/list` | `read` | `safeRetry` | — |
 | `session/load` | `read` | `safeRetry` | — |
 | `session/new` | `creation` | `sameOperationId` | `session/new` |
 | `session/prompt` | `creation` | `sameOperationId` | `session/prompt` |
 | `runtime/shutdown` | `oneShotAction` | `noAutomaticRetry` | — |
+| `terminal_manage` | `oneShotAction` | `noAutomaticRetry` | — |
+| `schedule_manage` | `oneShotAction` | `noAutomaticRetry` | `schedule_manage` |
+| `ssh_start` | `creation` | `sameOperationId` | — |
+| `process_session_start` | `creation` | `sameOperationId` | — |
+| `process_session_list` | `read` | `safeRetry` | — |
+| `process_session_get` | `read` | `safeRetry` | — |
+| `process_session_read` | `read` | `safeRetry` | — |
+| `process_session_stop` | `desiredStateWrite` | `safeRetry` | — |
 
 ### Execution Host
 
@@ -325,6 +334,12 @@ authorization grant.
 | `workspace_git_diff_get` | `read` | `safeRetry` | — |
 | `workspace_git_file_diff_get` | `read` | `safeRetry` | — |
 | `workspace_git_github_cli_status_get` | `read` | `safeRetry` | — |
+| `workspace_git_view_get` | `read` | `safeRetry` | — |
+| `workspace_git_review_get` | `read` | `safeRetry` | — |
+| `workspace_git_review_diff_get` | `read` | `safeRetry` | — |
+| `workspace_git_stage` | `desiredStateWrite` | `noAutomaticRetry` | `workspace_git_review_get` |
+| `workspace_git_unstage` | `desiredStateWrite` | `noAutomaticRetry` | `workspace_git_review_get` |
+| `workspace_git_commit` | `oneShotAction` | `noAutomaticRetry` | `workspace_git_review_get` |
 | `workspace_git_status_get` | `read` | `safeRetry` | — |
 | `workspace_open_folder` | `oneShotAction` | `noAutomaticRetry` | — |
 | `workspace_remove` | `identityMutation` | `noAutomaticRetry` | `workspace_get` |
@@ -464,3 +479,160 @@ For recognized file/directory reads, tool operations may contain `contentStartBy
 and `contentByteLength`: a UTF-8 byte range within the unchanged raw tool output.
 Readers show this range as the readable body and retain an explicit raw-output view.
 Unknown result formats retain their original text without heuristic header removal.
+
+
+## Runtime-owned process sessions
+
+These local Host methods use the existing `{ "request": { ... } } parameter
+wrapper. They do not change the model-visible `bash` tool or Core execution
+semantics. The Runtime owns the OS process tree; the conversation `sessionId`
+owns its logical record. Client connections and UI tabs are observers, so closing
+them does not stop a process. Manual Host starts have `source: "hostCommand"`;
+the native Agent adapter uses `source: "agentTool"` and retains the originating
+Session, AgentRun and tool-call identities in its completion outbox.
+
+| Method | Required request fields | Result |
+| --- | --- | --- |
+| `process_session_list` | `sessionId` | `serviceInstanceId`, ordered `processes` |
+| `process_session_start` | `sessionId`, `serviceInstanceId`, `operationId`, `program`, `args`, `timeoutMs` | Process snapshot |
+| `process_session_get` | `sessionId`, `processSessionId` | Process snapshot |
+| `process_session_read` | `sessionId`, `processSessionId`, `cursor`, `waitMs` | Snapshot and output page |
+| `process_session_stop` | `sessionId`, `processSessionId` | Current snapshot after stop request |
+
+Call list before starting and retain its `serviceInstanceId` with the start
+request. Reusing the same operation ID with identical arguments in the same
+service instance returns the original process; different arguments conflict.
+Spawn failures are also remembered. A service-instance mismatch rejects the start:
+a client must not blindly replace the instance ID and retry an uncertain command.
+Receipts last for the service lifetime, including after output/record eviction;
+retrying an evicted successful operation reports expiration without spawning again.
+These Host receipts and live process records are service-local. There is no
+OS-PID adoption or process restart. Agent completion/output retention is described below.
+
+`cwd` comes from the owning Session. `program` and `args` are an argv invocation;
+shell syntax requires explicitly invoking the shell. Existing local execution
+policy and process-tree ownership are reused. Standard input is closed. PTY,
+interactive input and resizing are outside this slice.
+
+Snapshots contain `processSessionId`, `sessionId`, `source`, `program`, `args`,
+`cwd`, `state`, nullable `exitCode`, nullable `terminationReason`,
+`cleanupComplete`, `outputComplete`, and nullable `error`. Stop is idempotent and
+requests tree termination: `running -> stopping -> exited`. Only observed root
+exit sets `exited`; pipe drainage and descendant cleanup are separate facts.
+Natural exit may go directly to `exited`. A stop/timeout racing natural exit may
+observe natural completion. Termination reasons are `stopped` or `timedOut` when
+termination was requested successfully; natural exit has no termination reason.
+A nonzero exit code is preserved. `cleanupComplete` records successful tree
+cleanup, not a durable guarantee against deliberately escaping OS containment.
+
+`timeoutMs` is the execution deadline (0 disables it, maximum 24 hours).
+`waitMs` only bounds one output read (0–30,000 ms); it never kills the process.
+Each observer maintains its own canonical decimal-string chunk cursor, initially
+`"0"`. A page has `process`, `chunks`, `nextCursor`, `earliestCursor`, `gap` and
+`hasMore`. Chunks contain `cursor`, `stream` (`stdout`/`stderr`) and `dataBase64`.
+Decode incrementally per stream: bytes can be non-UTF-8 or split across chunks.
+Ordering is pipe-observation order, not a claim of exact cross-stream OS ordering.
+Use `nextCursor` for the next read. An evicted prefix sets `gap: true`; a future
+cursor is rejected. `outputComplete` means the producer has finished draining,
+while `hasMore` means retained chunks remain after this page.
+
+Limits per Runtime: 32 active processes, 64 retained records, 4,096 start receipts,
+1 MiB / 4,096 chunks retained output per process (whichever limit is reached
+first), and 64 KiB per read. Completed records are evicted
+oldest-first when admitting new records; active/incompletely-cleaned records are
+never evicted. Receipt exhaustion rejects new starts rather than dropping retry
+protection. Active processes prevent idle shutdown. Explicit service shutdown
+closes admission and stops the owned process trees; failure to confirm cleanup is
+reported. Deleting a Session or its subtree is rejected while it owns active
+processes. Start and deletion share an admission gate; successful deletion discards
+closed process records but preserves receipt tombstones.
+
+Verification: `cargo test --locked -p centaeris-runtime --bin centaeris-runtime
+process_sessions`; after building the debug Runtime, run
+`node scripts/test-process-sessions.mjs` for isolated-profile, real Desktop/TUI
+transport checks, disconnect survival, deletion fencing and shutdown cleanup.
+
+
+Desktop and TUI process observers consume the same fixture in
+`packages/runtime/generated/process-session-samples.json`. Runtime serialization,
+Desktop decoding/requests and TUI decoding are covered by parity tests. Desktop
+Tasks tabs are bound to a Session, and TUI `/process` provides explicit background
+start/list/output/stop commands. Their view lifetimes never own process lifetimes.
+See [manual acceptance](../eval/FrontendManualAcceptance.md#background-process-observers-before-embedded-terminal).
+
+### Agent background commands and completion delivery
+
+The Local Runtime registers `process_start`, `process_list`, `process_read` and
+`process_stop` through Core's existing dynamic-tool provider port. Model arguments
+are exact lower_snake_case: start takes `program`, `args`, `timeout_ms`; read
+takes `process_session_id`, `cursor`; stop takes `process_session_id`; list takes
+no arguments. Session and AgentRun identities are supplied by the Host, never
+selected by tool arguments. The original foreground `bash` tool is unchanged.
+
+Start writes an admission intent before creating a process. Its identity derives
+from the originating AgentRun and tool call. Retries cannot launch another command,
+including after a Runtime restart. Uncertain starts/outcomes are reported explicitly;
+the Runtime never reconstructs a process by PID or guesses its exit code.
+
+The completion worker waits for observed exit and drained output, then atomically
+stores the result and bounded output pages below `runtime/process-completions`.
+Output uses a separate file, so scanning pending metadata does not repeatedly read
+logs. At most 256 Agent records are retained per profile, with the process output
+limits above; capacity rejects additional starts. Successful Session deletion
+cleans up its retained records and output. Manual Host/TUI starts do not opt into
+automatic Agent follow-up.
+
+Delivery waits until the owning Session is idle. A succeeded originating AgentRun
+permits follow-up; a missing, cancelled or failed origin suppresses it. A newer
+cancelled/failed run also suppresses automatic follow-up. Cancellation of an Agent
+does not stop its background processes: use `process_stop` for that separate action.
+Each result is submitted through normal idempotent run admission with a deterministic
+operation ID. The input is visibly labelled **Runtime background task completion —
+automatic notification, not a user request**. It uses the existing Session input
+representation; it is not a new Core event type. The message contains bounded
+status facts and an output reference, never an entire command log. `delivered`
+means a follow-up run was admitted, not that the model successfully interpreted it.
+A lost outbox acknowledgement reuses the same receipt and does not create a second run.
+
+Internal admission is independent of connected clients but shares the existing
+Session lease, deletion fence and service-draining lock. Desktop observes unknown
+same-Session runs by reloading the authoritative transcript and attaching to its
+active replay; workspace changes invalidate outstanding reloads. TUI ignores other
+Sessions' updates and attaches to an idle visible Session's new run. Closing a Task
+tab, switching workspaces or disconnecting clients does not control delivery.
+Service shutdown stops owned processes and flushes terminal results without starting
+new work. Restart preserves already-recorded results; unrecorded process outcomes
+remain explicitly unknown. Completed output can be read by cursor even after the
+live record has expired. Model-facing text is a lossy UTF-8 display; exact bytes
+remain in the retained output records.
+
+Run `node scripts/test-process-agent.mjs` after building the debug Runtime. Its
+isolated loopback model exercises tool start, busy-session deferral, client detach,
+automatic continuation/output read, duplicate acknowledgement and cancelled origin.
+
+## Local automation methods
+
+`ssh_start` returns an ordinary process-session snapshot and uses the same
+service-instance/operation identity boundary as `process_session_start`.
+`schedule_manage` accepts a strict action-tagged request; action-specific replay
+and revision rules are documented in [Local automation](LocalAutomation.md).
+It is conservatively classified as a non-automatically-retried Host action.
+Core JSON/events and the public `session/prompt` shape are unchanged.
+
+### Bounded Session catalog
+
+`session/catalog` receives `{ "request": { "mode": "recent", "cwd": "...", "limit": 50 } }`.
+Modes are `recent`, `pinned`, `changes`, and `lookup`. `cwd` is optional for recent
+and pinned pages; `lookup` requires `sessionId`. `limit` is 1–100 (default 50).
+Unknown fields or modes fail. Responses contain `items`, `deletedIds`, `revision`,
+`nextCursor`, and `reset`. Items have the existing Session summary shape.
+
+Begin observation with changes and no cursor, retain its revision, then load
+initial recent/pinned pages. Pass revision as cursor to changes; when nextCursor
+is present, continue from the returned revision. Recent/pinned nextCursor values
+are opaque and scoped. If reset is true, discard that cursor and reload the scope.
+A reconstructed index or expired changes cursor also returns reset. Cursors are
+local navigation state, not authoritative Session identities.
+
+`_centaeris/session/delete` returns `deletedSessionId` and `deletedSessionIds`.
+The latter enumerates the deleted parent and children for client view cleanup.

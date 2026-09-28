@@ -47,6 +47,7 @@ node_modules/
 **/build/
 **/coverage/
 **/test-results/
+/test-results-*.json
 **/playwright-report/
 **/blob-report/
 **/.playwright/
