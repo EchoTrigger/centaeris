@@ -1,4 +1,4 @@
-import { app, BrowserWindow, nativeTheme, session, WebContentsView } from "electron";
+import { app, BrowserWindow, nativeTheme, screen, session, WebContentsView } from "electron";
 import fs from "node:fs";
 import {
   createTrustedRendererPolicy,
@@ -26,6 +26,7 @@ export const createWindowShell = ({
   }
 
   let mainWindow = null;
+  let mainWindowCreation = null;
   let trustedRendererPolicy = null;
   let externalContentView = null;
 
@@ -102,7 +103,7 @@ export const createWindowShell = ({
     externalContentView.webContents.focus();
   };
 
-  const createMainWindow = async () => {
+  const loadMainWindow = async () => {
     const platformWindowOptions =
       process.platform === "darwin"
         ? { titleBarStyle: "hiddenInset" }
@@ -116,9 +117,10 @@ export const createWindowShell = ({
               },
             }
           : {};
+    const workArea = screen.getPrimaryDisplay().workAreaSize;
     mainWindow = new BrowserWindow({
-      width: 1180,
-      height: 820,
+      width: Math.min(1560, workArea.width),
+      height: Math.min(900, workArea.height),
       minWidth: 940,
       minHeight: 620,
       ...platformWindowOptions,
@@ -214,6 +216,18 @@ export const createWindowShell = ({
     await mainWindow.loadURL(uiDevServerUrl);
   };
 
+  // Startup, second-instance and tray activation share one renderer owner.
+  const createMainWindow = async () => {
+    if (mainWindowCreation) return mainWindowCreation;
+    if (mainWindow && !mainWindow.isDestroyed()) return;
+    mainWindowCreation = loadMainWindow();
+    try {
+      await mainWindowCreation;
+    } finally {
+      mainWindowCreation = null;
+    }
+  };
+
   const validateTrustedRendererEvent = (event) => {
     requireTrustedRendererEvent(event, mainWindow, trustedRendererPolicy);
   };
@@ -225,9 +239,7 @@ export const createWindowShell = ({
 
   const showMainWindow = async () => {
     await app.whenReady();
-    if (!mainWindow || mainWindow.isDestroyed()) {
-      await createMainWindow();
-    }
+    await createMainWindow();
     if (mainWindow?.isMinimized()) {
       mainWindow.restore();
     }

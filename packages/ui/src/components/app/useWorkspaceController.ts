@@ -8,6 +8,8 @@ import {
   getWorkspaceInfo,
   openWorkspaceFolder,
   resetWorkspaceCatalog,
+  renameWorkspace as renameWorkspaceEntry,
+  removeWorkspace as removeWorkspaceEntry,
   type WorkspaceGitHubCliStatusResponse,
   type WorkspaceGitStatusResponse,
   type WorkspaceOpenMode,
@@ -143,17 +145,17 @@ export function useWorkspaceController({
     }
   }, [applyOwnedSnapshot, beginAction, isActionOwner, reportCatalogFailure]);
 
-  const openWorkspace = useCallback(async (mode: WorkspaceOpenMode): Promise<boolean> => {
+  const openWorkspace = useCallback(async (mode: WorkspaceOpenMode): Promise<WorkspaceSnapshot | null> => {
     const revision = beginAction();
     try {
       const nextSnapshot = await openWorkspaceFolder(mode);
-      if (nextSnapshot.cancelled) return false;
-      return applyOwnedSnapshot(nextSnapshot, revision);
+      if (nextSnapshot.cancelled) return null;
+      return applyOwnedSnapshot(nextSnapshot, revision) ? nextSnapshot : null;
     } catch (error) {
       if (isActionOwner(revision)) {
         reportCatalogFailure(error, t("useWorkspaceController.unableToOpenWorkspace"));
       }
-      return false;
+      return null;
     }
   }, [applyOwnedSnapshot, beginAction, isActionOwner, reportCatalogFailure]);
 
@@ -165,6 +167,27 @@ export function useWorkspaceController({
       if (isActionOwner(revision)) {
         reportCatalogFailure(error, t("useWorkspaceController.unableToSwitchWorkspace"));
       }
+      return false;
+    }
+  }, [applyOwnedSnapshot, beginAction, isActionOwner, reportCatalogFailure]);
+
+  const renameWorkspace = useCallback(async (root: string, name: string): Promise<boolean> => {
+    const revision = beginAction();
+    try {
+      return applyOwnedSnapshot(await renameWorkspaceEntry(root, name), revision);
+    } catch (error) {
+      if (isActionOwner(revision)) reportCatalogFailure(error, "Unable to rename workspace");
+      return false;
+    }
+  }, [applyOwnedSnapshot, beginAction, isActionOwner, reportCatalogFailure]);
+
+  const removeWorkspace = useCallback(async (root: string): Promise<boolean> => {
+    const revision = beginAction();
+    try {
+      await removeWorkspaceEntry(root);
+      return applyOwnedSnapshot(await getWorkspaceInfo(), revision);
+    } catch (error) {
+      if (isActionOwner(revision)) reportCatalogFailure(error, "Unable to remove workspace");
       return false;
     }
   }, [applyOwnedSnapshot, beginAction, isActionOwner, reportCatalogFailure]);
@@ -213,6 +236,8 @@ export function useWorkspaceController({
     resetCatalog,
     retryCatalog,
     selectWorkspace,
+    renameWorkspace,
+    removeWorkspace,
   }), [
     applySnapshot,
     beginInitialization,
@@ -221,6 +246,8 @@ export function useWorkspaceController({
     resetCatalog,
     retryCatalog,
     selectWorkspace,
+    renameWorkspace,
+    removeWorkspace,
   ]);
 
   return {

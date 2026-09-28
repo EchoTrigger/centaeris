@@ -2,6 +2,7 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { beforeEach, expect, test, vi } from "vitest";
 import type { DesktopFilePreviewReadResponse } from "../src/lib/workspaceBridge";
 import type { SummaryPanelTab } from "../src/components/SummaryPanel";
+import { getWorkspaceGitStatus } from "../src/lib/workspaceBridge";
 
 type PreviewRequest = {
   path: string;
@@ -64,14 +65,18 @@ vi.mock("../src/components/ConfirmDialog", () => ({
   ConfirmDialog: () => null,
 }));
 
-vi.mock("../src/lib/chatBridge", () => ({
+vi.mock("../src/lib/chatBridge", async () => {
+ const { catalogFixture } = await import("./catalogFixture");
+ const bridge = {
   activateSession: vi.fn(async () => undefined),
   deleteSession: vi.fn(),
   getAgentRuntimeConfig: vi.fn(async () => ({ selectableModels: [{ model: "test" }] })),
   listenAgentRuntimeConfigChanges: vi.fn(async () => () => undefined),
   listSessions: vi.fn(async () => []),
   updateSession: vi.fn(),
-}));
+};
+ return {...bridge, querySessionCatalog: catalogFixture(bridge.listSessions)};
+});
 
 vi.mock("../src/lib/workspaceBridge", () => ({
   activateWorkspaceRoot: vi.fn(),
@@ -85,12 +90,14 @@ vi.mock("../src/lib/workspaceBridge", () => ({
   })),
   getWorkspaceInfo: vi.fn(async () => ({
     activeWorkspaceRoot: "D:\\Workspace",
-    workspaces: [{
-      root: "D:\\Workspace",
-      name: "Workspace",
-      sortOrder: 0,
-      updatedAt: 1,
-    }],
+    workspaces: [
+      {
+        root: "D:\\Workspace",
+        name: "Workspace",
+        sortOrder: 0,
+        updatedAt: 1,
+      },
+    ],
     cancelled: false,
   })),
   openWorkspaceFolder: vi.fn(),
@@ -135,9 +142,217 @@ const preview = (path: string, content: string): DesktopFilePreviewReadResponse 
 });
 
 beforeEach(() => {
+  vi.stubGlobal("document", {
+    documentElement: { dataset: {} },
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  });
   harness.chatProps = null;
   harness.summaryProps = null;
   harness.previewRequests.length = 0;
+});
+
+test("chat controls belong to the chat column beside the detail pane", async () => {
+  let renderer!: ReactTestRenderer;
+  await act(async () => { renderer = create(<App />); });
+  const chat = renderer.root.findByProps({ className: "thinChatColumn" });
+  expect(chat.findAllByProps({ "aria-label": "Workspace overview" })).toHaveLength(1);
+  await act(async () => getChatProps().onOpenAgentSession("agent", "Agent"));
+  expect(chat.findAllByProps({ "aria-label": "Workspace overview" })).toHaveLength(1);
+  expect(chat.findAllByProps({ "aria-label": "Preview" })).toHaveLength(0);
+  await act(async () => renderer.unmount());
+});
+
+test("workspace overview stays open when the user clicks outside", async () => {
+  let renderer!: ReactTestRenderer;
+  await act(async () => { renderer = create(<App />); });
+  await act(async () => renderer.root.findByProps({ "aria-label": "Workspace overview" }).props.onClick());
+  await act(async () => {
+    for (const [type, listener] of vi.mocked(document.addEventListener).mock.calls) {
+      if (type === "pointerdown" && typeof listener === "function") listener({ target: {} } as unknown as Event);
+    }
+  });
+  expect(renderer.root.findByProps({ "aria-label": "Workspace overview" }).props["aria-expanded"]).toBe(true);
+  await act(async () => renderer.unmount());
+});
+
+test("workspace split starts balanced, resizes by pointer and keyboard, and survives sidebar toggles", async () => {
+  let renderer!: ReactTestRenderer;
+  await act(async () => {
+    renderer = create(<App />);
+  });
+  await act(async () => getChatProps().onOpenAgentSession("agent-1", "Agent"));
+  const handle = () => renderer.root.findByProps({ role: "separator" });
+  expect(handle().props["aria-valuenow"]).toBe(50);
+  const target = {
+    setPointerCapture: vi.fn(),
+    releasePointerCapture: vi.fn(),
+    hasPointerCapture: () => true,
+    parentElement: { getBoundingClientRect: () => ({ left: 200, width: 1000 }) },
+  };
+  await act(async () =>
+    handle().props.onPointerDown({
+      button: 0,
+      pointerId: 1,
+      preventDefault: vi.fn(),
+      currentTarget: target,
+    }),
+  );
+  await act(async () =>
+    handle().props.onPointerMove({ pointerId: 1, clientX: 600, currentTarget: target }),
+  );
+  expect(handle().props["aria-valuenow"]).toBe(60);
+  await act(async () => handle().props.onPointerUp({ pointerId: 1, currentTarget: target }));
+  await act(async () =>
+    renderer.root.findByProps({ "aria-label": "Hide left sidebar" }).props.onClick(),
+  );
+  expect(handle().props["aria-valuenow"]).toBe(60);
+  await act(async () =>
+    handle().props.onKeyDown({ key: "ArrowRight", preventDefault: vi.fn(), currentTarget: target }),
+  );
+  expect(handle().props["aria-valuenow"]).toBe(58);
+  await act(async () => handle().props.onDoubleClick());
+  expect(handle().props["aria-valuenow"]).toBe(50);
+  await act(async () => renderer.unmount());
+});
+
+test("file browsing retains three files and replaces only the fourth preview slot", async () => {
+  let renderer!: ReactTestRenderer;
+  await act(async () => {
+    renderer = create(<App />);
+  });
+  await act(async () => {
+    renderer.root.findByProps({ "aria-label": "Workspace overview" }).props.onClick();
+  });
+  await act(async () =>
+    renderer.root.findByProps({ "aria-label": "Browse files" }).props.onClick(),
+  );
+  const operations: Promise<void>[] = [];
+  await act(async () => {
+    for (const path of ["a.md", "b.md", "c.md", "d.md", "e.md"]) {
+      operations.push(getChatProps().onOpenWorkspacePath(path));
+    }
+  });
+  expect(getSummaryProps().tabs.map((tab) => tab.title)).toEqual(["a.md", "b.md", "c.md", "e.md"]);
+  expect(getSummaryProps().tabs.map((tab) => Boolean(tab.isPreview))).toEqual([
+    false,
+    false,
+    false,
+    true,
+  ]);
+  await act(async () => {
+    for (const request of [...harness.previewRequests].reverse())
+      request.resolve(preview(request.path, request.path));
+    await Promise.all(operations);
+  });
+  expect(getSummaryProps().tabs.map((tab) => tab.content)).toEqual([
+    "a.md",
+    "b.md",
+    "c.md",
+    "e.md",
+  ]);
+  expect(getSummaryProps().tabs[3].isPreview).toBe(true);
+
+  await act(async () => {
+    await getChatProps().onOpenWorkspacePath("a.md");
+  });
+  expect(getSummaryProps().activeTabId).toBe(getSummaryProps().tabs[3].id);
+  expect(getSummaryProps().tabs.map((tab) => tab.title)).toEqual(["e.md", "b.md", "c.md", "a.md"]);
+  expect(harness.previewRequests).toHaveLength(5);
+  // A freed retained slot is filled before the reusable preview; other surfaces are untouched.
+  await act(async () => getSummaryProps().onCloseTab(getSummaryProps().tabs[1].id));
+  await act(async () => {
+    getChatProps().onOpenAgentSession("agent-1", "Agent");
+    void getChatProps().onOpenWorkspacePath("f.md");
+  });
+  expect(
+    getSummaryProps()
+      .tabs.filter((tab) => tab.kind === "file")
+      .map((tab) => tab.title),
+  ).toEqual(["e.md", "c.md", "f.md", "a.md"]);
+  expect(getSummaryProps().tabs.find((tab) => tab.title === "Agent")).toBeDefined();
+  await act(async () => renderer.unmount());
+});
+
+test("workspace overview opens a reusable files content tab", async () => {
+  let renderer!: ReactTestRenderer;
+  await act(async () => {
+    renderer = create(<App />);
+  });
+  const overview = renderer.root.findByProps({ "aria-label": "Workspace overview" });
+  await act(async () => overview.props.onClick());
+  await act(async () =>
+    renderer.root.findByProps({ "aria-label": "Browse files" }).props.onClick(),
+  );
+  expect(getSummaryProps().tabs).toMatchObject([{ kind: "files", title: "Files" }]);
+  await act(async () => overview.props.onClick());
+  await act(async () =>
+    renderer.root.findByProps({ "aria-label": "Browse files" }).props.onClick(),
+  );
+  expect(getSummaryProps().tabs).toHaveLength(1);
+  await act(async () => renderer.unmount());
+});
+
+test("opening the overview refreshes Git facts instead of keeping the initialization snapshot", async () => {
+  let renderer!: ReactTestRenderer;
+  await act(async () => {
+    renderer = create(<App />);
+  });
+  vi.mocked(getWorkspaceGitStatus).mockResolvedValueOnce({
+    workspaceRoot: "D:\\Workspace",
+    branch: "new-branch",
+    changedFiles: [],
+    totalAdded: 12,
+    totalRemoved: 1,
+    isGitRepository: true,
+  });
+  await act(async () =>
+    renderer.root.findByProps({ "aria-label": "Workspace overview" }).props.onClick(),
+  );
+  expect(JSON.stringify(renderer.toJSON())).toContain("new-branch");
+  await act(async () => renderer.unmount());
+});
+
+test("closing a loading file does not let its late response reopen the tab", async () => {
+  let renderer!: ReactTestRenderer;
+  await act(async () => {
+    renderer = create(<App />);
+  });
+  let operation!: Promise<void>;
+  await act(async () => {
+    operation = getChatProps().onOpenWorkspacePath("late.md");
+  });
+  const id = getSummaryProps().tabs[0].id;
+  await act(async () => getSummaryProps().onCloseTab(id));
+  await act(async () => {
+    harness.previewRequests[0].resolve(preview("late.md", "late"));
+    await operation;
+  });
+  expect(renderer.root.findByProps({ "aria-label": "Preview" }).props["aria-hidden"]).toBe(true);
+  await act(async () => renderer.unmount());
+});
+
+test("reopening a loaded file focuses its existing view without resetting it to loading", async () => {
+  let renderer!: ReactTestRenderer;
+  await act(async () => {
+    renderer = create(<App />);
+  });
+  let operation!: Promise<void>;
+  await act(async () => {
+    operation = getChatProps().onOpenWorkspacePath("readme.md");
+  });
+  await act(async () => {
+    harness.previewRequests[0].resolve(preview("readme.md", "readme"));
+    await operation;
+  });
+  await act(async () => getSummaryProps().onCollapse());
+  await act(async () => {
+    void getChatProps().onOpenWorkspacePath("readme.md");
+  });
+  expect(harness.previewRequests).toHaveLength(1);
+  expect(getSummaryProps().tabs).toMatchObject([{ content: "readme", loading: false }]);
+  expect(renderer.root.findByProps({ "aria-label": "Preview" }).props["aria-hidden"]).toBe(false);
+  await act(async () => renderer.unmount());
 });
 
 test("the latest request owns a file preview when reads finish out of order", async () => {

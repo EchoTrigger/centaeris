@@ -1,10 +1,13 @@
+import { SessionCatalogClient } from "../../lib/sessionCatalogClient";
+import { sortSessionCatalog as sortSessions } from "../sidebarSessions";
 import { t } from "../../i18n";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { UiSession } from "../../types/ui";
 import {
   activateSession,
   deleteSession,
-  listSessions,
+  querySessionCatalog,
+  reorderSessions,
   updateSession,
   type SessionItem,
 } from "../../lib/chatBridge";
@@ -48,15 +51,6 @@ const toUiSession = (item: SessionItem): UiSession => ({
   runtimeJobId: item.runtimeJobId,
 });
 
-const sortSessions = (sessions: UiSession[]): UiSession[] =>
-  [...sessions].sort((left, right) => {
-    if (Boolean(left.isPinned) !== Boolean(right.isPinned)) {
-      return left.isPinned ? -1 : 1;
-    }
-    const leftOrder = left.sortOrder ?? Number.MAX_SAFE_INTEGER;
-    const rightOrder = right.sortOrder ?? Number.MAX_SAFE_INTEGER;
-    return leftOrder - rightOrder || (right.updatedAt ?? 0) - (left.updatedAt ?? 0);
-  });
 
 export function useSessionController({
   activeWorkspaceRoot,
@@ -65,6 +59,10 @@ export function useSessionController({
   activeWorkspaceRoot: string | null;
   reportError: (message: string) => void;
 }) {
+  const catalogRef = useRef<SessionCatalogClient | null>(null);
+  if (!catalogRef.current) catalogRef.current = new SessionCatalogClient(querySessionCatalog);
+  const catalog = catalogRef.current;
+  const [catalogRevision, setCatalogRevision] = useState(0);
   const [sessions, setSessions] = useState<UiSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(new Set());
@@ -75,6 +73,7 @@ export function useSessionController({
   const selectionEpochRef = useRef(0);
   const refreshRequestIdRef = useRef(0);
   const catalogMutationRef = useRef(0);
+  const pendingPins = useRef(new Set<string>());
   inputsRef.current = { activeWorkspaceRoot, reportError };
   sessionsRef.current = sessions;
   currentSessionIdRef.current = currentSessionId;
@@ -94,6 +93,7 @@ export function useSessionController({
     const isCurrent = (): boolean => selectionEpochRef.current === ownerEpoch;
     return {
       isCurrent,
+      load: () => catalog.initialize(),
       applySessions: (items: SessionItem[], preferredSessionId?: string | null): boolean => {
         if (!isCurrent()) return false;
         catalogMutationRef.current += 1;
@@ -110,14 +110,20 @@ export function useSessionController({
         return true;
       },
     };
-  }, [setCurrentSession]);
+  }, [catalog, setCurrentSession]);
 
   const refresh = useCallback(async (preferredSessionId?: string | null) => {
     const requestId = refreshRequestIdRef.current + 1;
     refreshRequestIdRef.current = requestId;
     const selectionEpoch = selectionEpochRef.current;
     const selectedSessionId = currentSessionIdRef.current;
-    const fetched = sortSessions((await listSessions()).map(toUiSession));
+    const items = (await catalog.sync()).map(toUiSession);
+    const selected = sessionsRef.current.find(item => item.id === currentSessionIdRef.current);
+    if (selected && !items.some(item => item.id === selected.id)) {
+      const found = (await querySessionCatalog({mode:"lookup",sessionId:selected.id})).items[0];
+      if (found) items.push(toUiSession(found));
+    }
+    const fetched = sortSessions(items);
     if (refreshRequestIdRef.current !== requestId) return;
     sessionsRef.current = fetched;
     setSessions(fetched);
@@ -139,19 +145,25 @@ export function useSessionController({
     );
     const next = preferred ?? workspaceMatch ?? null;
     setCurrentSession(next?.id ?? null);
-  }, [setCurrentSession]);
+  }, [catalog, setCurrentSession]);
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof document === "undefined") return;
     let disposed = false;
     let pending = false;
     const discover = async () => {
-      if (disposed || pending || document.visibilityState === "hidden") return;
+      if (disposed || pending || pendingPins.current.size || document.visibilityState === "hidden") return;
       pending = true;
       const mutation = catalogMutationRef.current;
       const requestId = ++refreshRequestIdRef.current;
       try {
-        const fetched = sortSessions((await listSessions()).map(toUiSession));
+        const items = (await catalog.sync()).map(toUiSession);
+    const selected = sessionsRef.current.find(item => item.id === currentSessionIdRef.current);
+    if (selected && !items.some(item => item.id === selected.id)) {
+      const found = (await querySessionCatalog({mode:"lookup",sessionId:selected.id})).items[0];
+      if (found) items.push(toUiSession(found));
+    }
+    const fetched = sortSessions(items);
         if (disposed || mutation !== catalogMutationRef.current || requestId !== refreshRequestIdRef.current) return;
         const previous = sessionsRef.current;
         const unchanged = previous.length === fetched.length && fetched.every((session, index) =>
@@ -178,7 +190,7 @@ export function useSessionController({
       window.removeEventListener("focus", onVisible);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, []);
+  }, [catalog]);
 
   const selectSession = useCallback(async (
     sessionId: string,
@@ -188,10 +200,11 @@ export function useSessionController({
     let target = sessionsRef.current.find((session) => session.id === sessionId);
     if (!target) {
       try {
-        const fetched = sortSessions((await listSessions()).map(toUiSession));
+        const fetched = sortSessions((await querySessionCatalog({ mode: "lookup", sessionId })).items.map(toUiSession));
         if (selectionEpochRef.current !== selectionEpoch) return null;
-        sessionsRef.current = fetched;
-        setSessions(fetched);
+        const merged = sortSessions([...sessionsRef.current.filter(i => i.id !== sessionId), ...fetched]);
+        sessionsRef.current = merged;
+        setSessions(merged);
         target = fetched.find((session) => session.id === sessionId);
       } catch (error) {
         if (selectionEpochRef.current === selectionEpoch) {
@@ -248,6 +261,70 @@ export function useSessionController({
     }
   }, []);
 
+  const pinSession = useCallback(async (sessionId: string, isPinned: boolean) => {
+    if (pendingPins.current.has(sessionId)) return;
+    const previous = sessionsRef.current.find(item => item.id === sessionId);
+    if (!previous) return;
+    pendingPins.current.add(sessionId);
+    const apply = (item: UiSession) => {
+      catalogMutationRef.current += 1;
+      const next = sortSessions(sessionsRef.current.map(s => s.id === sessionId ? item : s));
+      sessionsRef.current = next;
+      setSessions(next);
+    };
+    apply({ ...previous, isPinned });
+    try {
+      apply(toUiSession(await updateSession(sessionId, { isPinned })));
+    } catch (error) {
+      // A timed-out write may already be durable. Observe once; never resend it.
+      try {
+        const observed = (await querySessionCatalog({ mode: "lookup", sessionId })).items[0];
+        if (observed) {
+          apply(toUiSession(observed));
+          if (Boolean(observed.isPinned) === isPinned) return;
+        } else apply(previous);
+      } catch { apply(previous); }
+      inputsRef.current.reportError(errorMessage(error, "Unable to verify pinned chat"));
+      throw error;
+    } finally {
+      pendingPins.current.delete(sessionId);
+    }
+  }, []);
+
+  const reorderPinnedSessions = useCallback(async (ids: string[]) => {
+    const pinned = sessionsRef.current.filter(session => session.isPinned && session.sessionKind === "main");
+    if (pendingPins.current.size || ids.length !== pinned.length || new Set(ids).size !== ids.length || ids.some(id => !pinned.some(session => session.id === id))) {
+      const error = new Error("Pinned chats changed; try sorting again");
+      inputsRef.current.reportError(error.message);
+      throw error;
+    }
+    const previousOrders = new Map(pinned.map(session => [session.id, session.sortOrder]));
+    const apply = (next: UiSession[]) => {
+      catalogMutationRef.current += 1;
+      sessionsRef.current = sortSessions(next);
+      setSessions(sessionsRef.current);
+    };
+    ids.forEach(id => pendingPins.current.add(id));
+    apply(sessionsRef.current.map(session => ids.includes(session.id) ? { ...session, sortOrder: ids.indexOf(session.id) } : session));
+    try {
+      const saved = new Map((await reorderSessions("pinned", ids)).map(item => [item.id, toUiSession(item)]));
+      apply(sessionsRef.current.map(session => saved.get(session.id) ?? session));
+    } catch (error) {
+      try {
+        const observed = (await catalog.initialize()).map(toUiSession);
+        apply(observed);
+        const actual = sortSessions(observed).filter(session => session.isPinned && session.sessionKind === "main").map(session => session.id);
+        if (actual.length === ids.length && actual.every((id, index) => id === ids[index])) return;
+      } catch {
+        apply(sessionsRef.current.map(session => previousOrders.has(session.id) ? { ...session, sortOrder: previousOrders.get(session.id) } : session));
+      }
+      inputsRef.current.reportError(errorMessage(error, "Unable to save pinned order"));
+      throw error;
+    } finally {
+      ids.forEach(id => pendingPins.current.delete(id));
+    }
+  }, [catalog]);
+
   const removeSession = useCallback(async (sessionId: string): Promise<ReadonlySet<string>> => {
     try {
       const currentSessions = sessionsRef.current;
@@ -257,11 +334,10 @@ export function useSessionController({
       if (response.deletedSessionId !== sessionId) {
         throw new Error(t("useSessionController.deleteResponseIdentityMismatchValue", { value1: response.deletedSessionId }));
       }
-      const deletedIds = new Set(
-        currentSessions
-          .filter((session) => session.id === sessionId || session.parentSessionId === sessionId)
-          .map((session) => session.id),
-      );
+      if (!Array.isArray(response.deletedSessionIds) || !response.deletedSessionIds.includes(sessionId)) {
+        throw new Error("Delete response missing deleted Session identities");
+      }
+      const deletedIds = new Set(response.deletedSessionIds);
       deletedIds.forEach((id) => sessionViewCacheStore.delete(id));
       setRunningSessionIds((items) => {
         const next = new Set(items);
@@ -321,23 +397,47 @@ export function useSessionController({
     void refresh(currentSessionIdRef.current).catch(() => undefined);
   }, [refresh]);
 
+  const expandWorkspace = useCallback(async (root: string) => {
+    try {
+      const items = await catalog.expand(root);
+      setSessions(previous => sortSessions([...previous.filter(p => !items.some(i => i.id === p.id)), ...items.map(toUiSession)]));
+      setCatalogRevision(value => value + 1);
+    } catch(error) { inputsRef.current.reportError(errorMessage(error, "Unable to load chats")); }
+  }, [catalog]);
+  const loadMore = useCallback(async (root: string) => {
+    try {
+      const items = await catalog.more(root);
+      setSessions(previous => sortSessions([...previous.filter(p => !items.some(i => i.id === p.id)), ...items.map(toUiSession)]));
+      setCatalogRevision(value => value + 1);
+    } catch(error) { inputsRef.current.reportError(errorMessage(error, "Unable to load chats")); }
+  }, [catalog]);
+  useEffect(() => { if (activeWorkspaceRoot) void expandWorkspace(activeWorkspaceRoot); }, [activeWorkspaceRoot, expandWorkspace]);
+
   const actions = useMemo(() => ({
+    expandWorkspace,
+    loadMore,
     beginInitialization,
     clearSelection,
     completeSession,
     refresh,
     removeSession,
     renameSession,
+    pinSession,
+    reorderPinnedSessions,
     resolveSession,
     selectSession,
     setRunning,
   }), [
+    expandWorkspace,
+    loadMore,
     beginInitialization,
     clearSelection,
     completeSession,
     refresh,
     removeSession,
     renameSession,
+    pinSession,
+    reorderPinnedSessions,
     resolveSession,
     selectSession,
     setRunning,
@@ -353,6 +453,7 @@ export function useSessionController({
   );
 
   return {
+    hasMore: (root: string) => { void catalogRevision; return catalog.hasMore(root); },
     sessions,
     currentSessionId,
     currentSession,

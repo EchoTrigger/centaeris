@@ -46,7 +46,7 @@ export const ComposerRuntimeControls = memo(function ComposerRuntimeControls({
   const breakdown = contextUsage?.breakdown;
   const reasoningLabel = reasoningEffort
     ?? selectableModels[activeModelIndex]?.modelThinkingMode
-    ?? "provider default";
+    ?? null;
   const maxContextTokens = contextUsage?.maxContextTokens ?? 0;
   const usedTokens = contextUsage?.usedTokens ?? 0;
   const usedPercentage = contextUsage?.usedPercentage ?? 0;
@@ -168,9 +168,9 @@ export const ComposerRuntimeControls = memo(function ComposerRuntimeControls({
                 </div>
               ) : null}
             </div>
-          ) : (
+          ) : reasoningLabel ? (
             <span className="composer-chip reasoning-chip">{reasoningLabel}</span>
-          )}
+          ) : null}
           <div className={`composerPicker contextWindowPicker ${activePanel === "context" ? "is-open" : ""}`}>
             <button
               type="button"

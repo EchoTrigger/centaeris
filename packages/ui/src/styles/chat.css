@@ -2454,7 +2454,7 @@ button.agent-tool-chip {
   background: var(--surface-variant);
   padding: 0.1em 0.4em;
   border-radius: 4px;
-  border: 1px solid var(--outline-variant);
+  border: 0;
 }
 
 .answer-content a {
@@ -2795,7 +2795,7 @@ button.agent-tool-chip {
 .answer-content pre {
   margin: 0.4em 0 0.75em;
   background: var(--surface-variant);
-  border: 1px solid var(--outline-variant);
+  border: 0;
   padding: 0.75em 1em;
   border-radius: var(--radius-md);
   overflow-x: auto;
@@ -2807,7 +2807,7 @@ button.agent-tool-chip {
 .markdown-code-block {
   margin: 0;
   background: var(--surface-variant);
-  border: 1px solid var(--outline-variant);
+  border: 0;
   padding: 10px 12px;
   border-radius: 8px;
   overflow-x: auto;

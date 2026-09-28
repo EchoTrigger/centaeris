@@ -253,6 +253,35 @@ test("a late hydration result cannot overwrite a newer selected session", async 
   await act(async () => renderer!.unmount());
 });
 
+test("a cached synchronization failure keeps messages and the composer available", async () => {
+  sessionViewCacheStore.write({
+    sessionId: "cached",
+    snapshot: {
+      messages: makeSnapshot("cached").messages,
+      contextUsage: null,
+      autoContinueAfterResumeWait: false,
+      pendingQuestion: null,
+      pendingQuestionError: "",
+      activeReplay: null,
+    },
+  });
+  let renderer: ReactTestRenderer;
+  await act(async () => {
+    renderer = create(<ChatArea currentSession={makeSession("cached")} currentSessionId="cached" workspaceName="Workspace" workspaceRoot="D:\\Workspace" />);
+  });
+  const request = getHydrationRequest("cached");
+  await act(async () => {
+    request.reject(new Error("projection identity invalid"));
+    await expect(request.promise).rejects.toThrow("projection identity invalid");
+  });
+  expect(useChatViewStore.getState().messageIds).toEqual(["message-cached"]);
+  expect(sessionViewCacheStore.get("cached")).not.toBeNull();
+  expect(renderer!.root.findAllByProps({ role: "alert" })).toHaveLength(0);
+  expect(renderer!.root.findAllByProps({ "data-testid": "chat-composer" })).toHaveLength(1);
+  expect(renderer!.root.findByProps({ role: "status" }).findByType("span").children.join(" ")).toContain("projection identity invalid");
+  await act(async () => renderer!.unmount());
+});
+
 test("a hydration failure clears stale state and renders the session error", async () => {
   let renderer: ReactTestRenderer | null = null;
 

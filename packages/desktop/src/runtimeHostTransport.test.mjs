@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 import {
+  waitForRuntimeSocket,
   createRuntimeResponseTracker,
   requireRuntimeDescriptor,
   stopStaleRuntimeSocket,
@@ -87,4 +88,38 @@ test("Runtime request timeout reports an unknown outcome and consumes one late r
   assert.deepEqual(tracker.take("electron-1"), { state: "abandoned" });
   assert.deepEqual(tracker.take("electron-1"), { state: "unknown" });
   assert.deepEqual(tracker.take("never-issued"), { state: "unknown" });
+});
+
+
+test("Runtime startup waits for profile recovery beyond five seconds", async () => {
+  let elapsed = 0;
+  const socket = {};
+  const result = await waitForRuntimeSocket({
+    connect: async () => { if (elapsed < 6500) throw new Error("connect ENOENT"); return socket; },
+    getStartFailure: () => null,
+    now: () => elapsed,
+    wait: async (ms) => { elapsed += ms; },
+  });
+  assert.equal(result, socket);
+  assert.equal(elapsed, 6500);
+});
+
+test("Runtime startup fails promptly with the server error and has a bounded deadline", async () => {
+  let elapsed = 0;
+  const failure = new Error("profile recovery failed");
+  await assert.rejects(waitForRuntimeSocket({
+    connect: async () => { throw new Error("connect ENOENT"); },
+    getStartFailure: () => elapsed >= 200 ? failure : null,
+    now: () => elapsed,
+    wait: async (ms) => { elapsed += ms; },
+  }), (error) => error === failure);
+  assert.equal(elapsed, 200);
+  elapsed = 0;
+  await assert.rejects(waitForRuntimeSocket({
+    connect: async () => { throw new Error("connect ENOENT"); },
+    getStartFailure: () => null,
+    now: () => elapsed,
+    wait: async (ms) => { elapsed += ms; },
+  }), /Runtime Server startup timed out after 30000 ms.*ENOENT/);
+  assert.equal(elapsed, 30000);
 });

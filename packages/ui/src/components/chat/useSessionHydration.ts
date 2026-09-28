@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { SessionViewCacheEntry } from "../../lib/sessionViewCache";
 import { waitForNextPaint } from "./chatAreaModel";
 import {
@@ -43,6 +43,10 @@ type UseSessionHydrationOptions = {
 type SessionHydrationState = {
   isHydratingSession: boolean;
   hydrationStage: string;
+  isSyncingSession: boolean;
+  syncError: string;
+  reportSyncError: (message: string) => void;
+  retrySessionSync: () => void;
 };
 
 export const useSessionHydration = ({
@@ -55,9 +59,19 @@ export const useSessionHydration = ({
   const requestIdRef = useRef(0);
   const [isHydratingSession, setIsHydratingSession] = useState(false);
   const [hydrationStage, setHydrationStage] = useState("");
+  const [isSyncingSession, setIsSyncingSession] = useState(false);
+  const [syncError, reportSyncError] = useState("");
+  const [retryRevision, setRetryRevision] = useState(0);
+  const retrySessionSync = useCallback(() => setRetryRevision((value) => value + 1), []);
+  const callbacks = useRef({ prepare, applySnapshot, refreshCachedSession, onError });
+  callbacks.current = { prepare, applySnapshot, refreshCachedSession, onError };
 
   useEffect(() => {
-    const plan = prepare(currentSessionId);
+    // Explicit retry is an identity-preserving synchronization request.
+    void retryRevision;
+    reportSyncError("");
+    setIsSyncingSession(false);
+    const plan = callbacks.current.prepare(currentSessionId);
     if (plan.kind === "preserved") {
       setIsHydratingSession(false);
       setHydrationStage("");
@@ -71,7 +85,10 @@ export const useSessionHydration = ({
       return undefined;
     }
 
+    setIsSyncingSession(true);
     let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let finishWait: (() => void) | undefined;
     const requestId = requestIdRef.current;
     const isLatest = () =>
       !cancelled && requestIdRef.current === requestId;
@@ -92,10 +109,18 @@ export const useSessionHydration = ({
     const hydrateSession = async () => {
       try {
         if (plan.kind === "cached") {
-          await refreshCachedSession(currentSessionId, plan.entry, {
-            isLatest,
-            onStage,
-          });
+          for (let attempt = 0; ; attempt += 1) {
+            try {
+              await callbacks.current.refreshCachedSession(currentSessionId, plan.entry, { isLatest, onStage });
+              break;
+            } catch (error) {
+              if (!isLatest()) return;
+              // Retry reads only, once. Contract/projection failures remain visible.
+              if (attempt > 0 || !/timed? ?out|disconnected|ECONNRESET|EPIPE|temporarily unavailable/i.test(String(error))) throw error;
+              await new Promise<void>((resolve) => { finishWait = resolve; retryTimer = setTimeout(resolve, 500); });
+              if (!isLatest()) return;
+            }
+          }
         } else {
           const snapshot = await buildSessionHydrationSnapshot(
             currentSessionId,
@@ -109,39 +134,42 @@ export const useSessionHydration = ({
             return;
           }
           onStage("applySnapshot");
-          applySnapshot(snapshot, currentSessionId);
+          callbacks.current.applySnapshot(snapshot, currentSessionId);
         }
         if (!isLatest()) {
           return;
         }
+        setIsSyncingSession(false);
         setIsHydratingSession(false);
         setHydrationStage("");
       } catch (error) {
         if (!isLatest()) {
           return;
         }
-        sessionViewCacheStore.delete(currentSessionId);
+        setIsSyncingSession(false);
         setIsHydratingSession(false);
         setHydrationStage("");
-        onError(formatExecutionError(error));
+        if (plan.kind === "cached") {
+          reportSyncError(formatExecutionError(error));
+        } else {
+          sessionViewCacheStore.delete(currentSessionId);
+          callbacks.current.onError(formatExecutionError(error));
+        }
       }
     };
 
     void hydrateSession();
     return () => {
       cancelled = true;
+      clearTimeout(retryTimer);
+      finishWait?.();
       if (requestIdRef.current === requestId) {
+        setIsSyncingSession(false);
         setIsHydratingSession(false);
         setHydrationStage("");
       }
     };
-  }, [
-    applySnapshot,
-    currentSessionId,
-    onError,
-    prepare,
-    refreshCachedSession,
-  ]);
+  }, [currentSessionId, retryRevision]);
 
-  return { isHydratingSession, hydrationStage };
+  return { isHydratingSession, isSyncingSession, hydrationStage, syncError, reportSyncError, retrySessionSync };
 };

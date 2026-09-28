@@ -4,7 +4,8 @@ import { createReadStream } from "node:fs";
 import net from "node:net";
 import { requireHostEventName } from "./hostContract.mjs";
 
-const RUNTIME_SERVER_CONNECT_ATTEMPTS = 50;
+// Profile recovery precedes the listener; cold starts can exceed five seconds.
+const RUNTIME_SERVER_STARTUP_TIMEOUT_MS = 30_000;
 const RUNTIME_SERVER_CONNECT_DELAY_MS = 100;
 const RUNTIME_SERVER_ENDPOINT_TIMEOUT_MS = 5_000;
 const RUNTIME_STALE_SERVER_SHUTDOWN_MS = 7_000;
@@ -31,6 +32,31 @@ const RUNTIME_DESCRIPTOR_FIELDS = new Set([
 const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 
 const sleep = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs));
+
+export async function waitForRuntimeSocket({
+  connect,
+  getStartFailure,
+  now = Date.now,
+  wait = sleep,
+}) {
+  const deadline = now() + RUNTIME_SERVER_STARTUP_TIMEOUT_MS;
+  let lastError = new Error("Runtime Server did not accept a connection");
+  while (now() < deadline) {
+    const failure = getStartFailure();
+    if (failure) throw failure;
+    try {
+      return await connect();
+    } catch (error) {
+      lastError = error;
+      await wait(Math.min(RUNTIME_SERVER_CONNECT_DELAY_MS, Math.max(0, deadline - now())));
+    }
+  }
+  throw getStartFailure() ?? new Error(
+    `Runtime Server startup timed out after ${RUNTIME_SERVER_STARTUP_TIMEOUT_MS} ms: ${lastError.message}`,
+    { cause: lastError },
+  );
+}
+
 
 export const createRuntimeResponseTracker = ({
   requestTimeoutMs = RUNTIME_REQUEST_TIMEOUT_MS,
@@ -508,19 +534,10 @@ export const createRuntimeHostTransport = ({
         runtimeServerStartFailure = null;
         startRuntimeServer();
       }
-      let lastError = new Error("Runtime Server did not accept a connection");
-      for (let attempt = 0; attempt < RUNTIME_SERVER_CONNECT_ATTEMPTS; attempt += 1) {
-        if (runtimeServerStartFailure) {
-          throw runtimeServerStartFailure;
-        }
-        try {
-          return await connectSocket(endpoint);
-        } catch (error) {
-          lastError = error;
-          await sleep(RUNTIME_SERVER_CONNECT_DELAY_MS);
-        }
-      }
-      throw runtimeServerStartFailure ?? lastError;
+      return waitForRuntimeSocket({
+        connect: () => connectSocket(endpoint),
+        getStartFailure: () => runtimeServerStartFailure,
+      });
     })();
     try {
       return await runtimeConnectPromise;

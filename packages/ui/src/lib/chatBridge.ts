@@ -81,6 +81,7 @@ export type SessionReorderSection = "pinned" | "recent";
 
 export type SessionDeleteResponse = {
   deletedSessionId: string;
+  deletedSessionIds: string[];
 };
 
 export type PersistedChatMessage = {
@@ -2099,3 +2100,6 @@ export const openAgentStream = (
     },
   };
 };
+
+export const querySessionCatalog = (request: import("./sessionCatalogClient").CatalogRequest): Promise<import("./sessionCatalogClient").CatalogPage> =>
+  invokeHost("session/catalog", {request});

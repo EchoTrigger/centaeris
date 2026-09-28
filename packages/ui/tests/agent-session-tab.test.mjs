@@ -11,7 +11,7 @@ test("opens each durable Agent session once in the preview tab strip", async () 
     readFile(path.join(rootDir, "src", "components", "chat", "chatRuntimeCore.ts"), "utf8"),
   ]);
 
-  assert.match(panelSource, /agentTabs\.map\(\(tab\)/);
+  // Retained-view behavior is covered by workspace-content-tabs.test.tsx.
   assert.match(panelSource, /className="summaryPanelCollapse"/);
   assert.match(previewSource, /snapshot\.activeReplay\?\.status === "queued"/);
   assert.match(previewSource, /agentSessionPreview\.reload/);

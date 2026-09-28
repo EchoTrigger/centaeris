@@ -1,4 +1,5 @@
 export const HOST_EVENT_NAMES = new Set([
+  "centaeris/navigation",
   "session/update",
   "runtime/config-changed",
   "centaeris/runtime-host-error",
@@ -6,7 +7,19 @@ export const HOST_EVENT_NAMES = new Set([
 ]);
 
 export const HOST_COMMANDS = new Map([
+  ["desktop_theme", { group: "app", local: true }],
+  ["desktop_menu", { group: "app", local: true }],
+  ["terminal_manage", { group: "terminal" }],
+  ["schedule_manage", { group: "schedule" }],
+  ["ssh_start", { group: "process-session" }],
+  ["process_session_start", { group: "process-session" }],
+  ["process_session_list", { group: "process-session" }],
+  ["process_session_get", { group: "process-session" }],
+  ["process_session_read", { group: "process-session" }],
+  ["process_session_stop", { group: "process-session" }],
+
   ["app_exit", { group: "app", local: true }],
+  ["session/catalog", { group: "session" }],
   ["session/list", { group: "session" }],
   ["_centaeris/session/diagnostics", { group: "session" }],
   ["session/load", { group: "session" }],
@@ -82,6 +95,12 @@ export const HOST_COMMANDS = new Map([
   ["workspace_reset", { group: "workspace" }],
   ["workspace_file_tree", { group: "workspace" }],
   ["workspace_read_file", { group: "workspace" }],
+  ["workspace_git_view_get", { group: "workspace-git" }],
+  ["workspace_git_review_get", { group: "workspace-git" }],
+  ["workspace_git_review_diff_get", { group: "workspace-git" }],
+  ["workspace_git_stage", { group: "workspace-git" }],
+  ["workspace_git_unstage", { group: "workspace-git" }],
+  ["workspace_git_commit", { group: "workspace-git" }],
   ["workspace_git_status_get", { group: "workspace-git" }],
   ["workspace_git_diff_get", { group: "workspace-git" }],
   ["workspace_git_file_diff_get", { group: "workspace-git" }],

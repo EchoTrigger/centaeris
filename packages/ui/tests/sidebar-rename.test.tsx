@@ -10,7 +10,7 @@ async function editing(onRenameSession = vi.fn(async () => {})) {
   const noop = () => {};
   await act(async () => {
     renderer = create(<Sidebar sessions={[{ id: "s", title: "Original", cwd: "D:/test", sessionKind: "main", messageCount: 1 }]}
-      currentSessionId="s" workspaces={[]} activeWorkspaceRoot={null} runningSessionIds={new Set()}
+      currentSessionId="s" workspaces={[{ root: "D:/test", name: "test", sortOrder: 0, updatedAt: 0 }]} activeWorkspaceRoot={null} runningSessionIds={new Set()}
       completedSessionIds={new Set()} workspaceCatalogError={null} onNewChat={noop} onOpenWorkspace={noop}
       onSelectWorkspace={noop} onRetryWorkspaceCatalog={async () => {}} onResetWorkspaceCatalog={async () => {}}
       onSelectSession={noop} onRenameSession={onRenameSession} onDeleteSession={async () => {}}
@@ -58,5 +58,17 @@ test("a blank name dismisses editing without replacing the original", async () =
   await act(async () => f.input().props.onBlur());
   expect(f.onRenameSession).not.toHaveBeenCalled();
   expect(f.renderer.root.findAllByType("input")).toHaveLength(0);
+  await act(async () => f.renderer.unmount());
+});
+
+test("sidebar uses application navigation and separate pinned/recent groups", async () => {
+  const f = await editing();
+  await act(async () => f.input().props.onKeyDown({ key: "Escape", preventDefault() {} }));
+  expect(f.renderer.root.findAllByProps({ "aria-label": "Current project" })).toHaveLength(0);
+  expect(f.renderer.root.findByProps({ "aria-label": "Scheduled" })).toBeTruthy();
+  expect(JSON.stringify(f.renderer.toJSON())).not.toContain("No chats");
+  expect(f.renderer.root.findByProps({ "aria-label": "Settings" })).toBeTruthy();
+  expect(f.renderer.root.findByProps({ "aria-label": "Pinned" })).toBeTruthy();
+  expect(f.renderer.root.findByProps({ "aria-label": "Recents" })).toBeTruthy();
   await act(async () => f.renderer.unmount());
 });

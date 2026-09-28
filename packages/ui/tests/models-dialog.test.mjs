@@ -8,8 +8,8 @@ import { ModelsDialog } from "../src/components/ModelsDialog.tsx";
 test("provider catalog is not the Models landing page", () => {
   const markup = renderToStaticMarkup(createElement(ModelsDialog, { onClose() {} }));
 
-  expect(markup).toContain("Select a provider");
-  expect(markup).toContain("Add provider");
+  expect(markup).toContain("Model services");
+  expect(markup).toContain("Add service");
   expect(markup).not.toContain("OAUTH SUBSCRIPTIONS");
 });
 

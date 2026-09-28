@@ -1,4 +1,6 @@
-import { useCallback } from "react";
+import { useCallback, useEffect, useRef } from "react";
+import { observeBackgroundRuns } from "./backgroundRunObservation";
+import { isNativeHostRuntime } from "../../host/hostBridge";
 import type { SessionViewCacheEntry } from "../../lib/sessionViewCache";
 import { waitForNextPaint } from "./chatAreaModel";
 import {
@@ -62,7 +64,7 @@ export const useSessionViewHydrationController = ({
   const refreshCachedSessionFromTranscript = useCallback(
     async (
       sessionId: string,
-      _cachedEntry: SessionViewCacheEntry<SessionViewSnapshot>,
+      cachedEntry: SessionViewCacheEntry<SessionViewSnapshot>,
       control: SessionHydrationControl,
     ) => {
       const hydrationControl = {
@@ -74,6 +76,7 @@ export const useSessionViewHydrationController = ({
       const snapshot = await buildSessionHydrationSnapshot(
         sessionId,
         hydrationControl,
+        cachedEntry.snapshot.transcriptView,
       );
       if (!control.isLatest()) {
         return;
@@ -100,7 +103,7 @@ export const useSessionViewHydrationController = ({
               agentRunId: activeStream.agentRunId,
             }
           : visibleActiveReplayRef.current;
-        setIsStreaming(false);
+        setIsStreaming(Boolean(activeStream));
         return { kind: "preserved" };
       }
       closeActiveStream();
@@ -219,7 +222,7 @@ export const useSessionViewHydrationController = ({
     if (!ownsObservation()) return false;
     const snapshot = await buildSessionHydrationSnapshot(sessionId, {
       isCancelled: () => !ownsObservation(), yieldToUi: waitForNextPaint,
-    });
+    }, transcriptViewRef.current);
     if (!ownsObservation()) return false;
     closeActiveStream();
     setPendingQuestion(null);
@@ -227,7 +230,7 @@ export const useSessionViewHydrationController = ({
     applyHydrationSnapshot(snapshot, sessionId);
     setIsStreaming(Boolean(snapshot.activeReplay));
     return !snapshot.activeReplay;
-  }, [applyHydrationSnapshot, closeActiveStream, getActiveStream, setIsStreaming, setPendingQuestion, setPendingQuestionError, visibleSessionIdRef]);
+  }, [applyHydrationSnapshot, closeActiveStream, getActiveStream, setIsStreaming, setPendingQuestion, setPendingQuestionError, visibleSessionIdRef, transcriptViewRef]);
 
   const hydration = useSessionHydration({
     currentSessionId,
@@ -236,5 +239,26 @@ export const useSessionViewHydrationController = ({
     refreshCachedSession: refreshCachedSessionFromTranscript,
     onError: handleSessionHydrationError,
   });
+  const observationRef = useRef({ getActiveStream, applyHydrationSnapshot });
+  observationRef.current = { getActiveStream, applyHydrationSnapshot };
+  const hydratingRef = useRef(hydration.isSyncingSession);
+  hydratingRef.current = hydration.isSyncingSession;
+  useEffect(() => {
+    if (!currentSessionId || !isNativeHostRuntime()) return;
+    return observeBackgroundRuns({
+      sessionId: currentSessionId,
+      isKnown: (id) => observationRef.current.getActiveStream()?.agentRunId === id || verifiedReplayAgentRunIdsRef.current.has(id),
+      canObserve: () => !hydratingRef.current && !observationRef.current.getActiveStream() && visibleSessionIdRef.current === currentSessionId,
+      recover: async (isCurrent) => {
+        const snapshot = await buildSessionHydrationSnapshot(currentSessionId, {
+          isCancelled: () => !isCurrent(), yieldToUi: waitForNextPaint,
+        }, transcriptViewRef.current);
+        if (!isCurrent()) throw new Error("Transcript synchronization cancelled");
+        observationRef.current.applyHydrationSnapshot(snapshot, currentSessionId);
+        hydration.reportSyncError("");
+      },
+      onError: (error) => hydration.reportSyncError(error),
+    });
+  }, [currentSessionId, verifiedReplayAgentRunIdsRef, visibleSessionIdRef, transcriptViewRef, hydration.reportSyncError]);
   return { ...hydration, reconcileTerminalAgentRun };
 };

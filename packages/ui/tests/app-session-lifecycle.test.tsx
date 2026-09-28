@@ -100,9 +100,11 @@ vi.mock("../src/components/SkillsDialog", () => ({ SkillsDialog: () => null }));
 vi.mock("../src/components/PluginsDialog", () => ({ PluginsDialog: () => null }));
 vi.mock("../src/components/ConfirmDialog", () => ({ ConfirmDialog: () => null }));
 
-vi.mock("../src/lib/chatBridge", () => ({
+vi.mock("../src/lib/chatBridge", async () => {
+ const { catalogFixture } = await import("./catalogFixture");
+ const bridge = {
   activateSession: vi.fn(async () => undefined),
-  deleteSession: vi.fn(async () => ({ deletedSessionId: harness.deleteResultId })),
+  deleteSession: vi.fn(async () => ({ deletedSessionId: harness.deleteResultId, deletedSessionIds: initialSessions.filter(i => i.id === harness.deleteResultId || i.parentSessionId === harness.deleteResultId).map(i => i.id) })),
   getAgentRuntimeConfig: vi.fn(async () => ({ selectableModels: [{ model: "test" }] })),
   listenAgentRuntimeConfigChanges: vi.fn(async () => () => undefined),
   listSessions: vi.fn(() => {
@@ -122,7 +124,9 @@ vi.mock("../src/lib/chatBridge", () => ({
     if (!session) throw new Error(`missing session ${sessionId}`);
     return session;
   }),
-}));
+};
+ return {...bridge, querySessionCatalog: catalogFixture(bridge.listSessions)};
+});
 
 vi.mock("../src/lib/workspaceBridge", () => ({
   activateWorkspaceRoot: vi.fn((root: string) => {
