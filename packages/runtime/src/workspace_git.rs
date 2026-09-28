@@ -5,6 +5,8 @@ use std::process::{Command, Output};
 
 const WORKSPACE_GIT_DIFF_MAX_BYTES: usize = 256 * 1024;
 
+pub(crate) mod workbench;
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct WorkspaceGitRootRequest {

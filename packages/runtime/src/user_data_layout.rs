@@ -3,8 +3,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
-pub(crate) const LAYOUT_SCHEMA_VERSION: u32 = 1;
+pub(crate) const LAYOUT_SCHEMA_VERSION: u32 = 2;
+static LAYOUT_MIGRATION_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -139,108 +141,14 @@ fn bundled_native_plugin_root() -> Option<PathBuf> {
 }
 
 pub(crate) fn find_session_log_file_path(session_id: &str) -> Result<Option<PathBuf>, String> {
-    let sessions_dir = sessions_dir_path();
-    if !sessions_dir.exists() {
-        return Ok(None);
-    }
-    let target_name = format!("{}.jsonl", sanitize_path_segment(session_id, "session"));
-    let mut matches = Vec::new();
-    for year_entry in fs::read_dir(sessions_dir.as_path())
-        .map_err(|error| format!("read sessions year dir failed: {error}"))?
-    {
-        let year_entry =
-            year_entry.map_err(|error| format!("read sessions year entry failed: {error}"))?;
-        let year_path = year_entry.path();
-        if !year_path.is_dir() {
-            continue;
-        }
-        for month_entry in fs::read_dir(year_path.as_path())
-            .map_err(|error| format!("read sessions month dir failed: {error}"))?
-        {
-            let month_entry = month_entry
-                .map_err(|error| format!("read sessions month entry failed: {error}"))?;
-            let month_path = month_entry.path();
-            if !month_path.is_dir() {
-                continue;
-            }
-            for day_entry in fs::read_dir(month_path.as_path())
-                .map_err(|error| format!("read sessions day dir failed: {error}"))?
-            {
-                let day_entry = day_entry
-                    .map_err(|error| format!("read sessions day entry failed: {error}"))?;
-                let candidate = day_entry.path().join(target_name.as_str());
-                if candidate.is_file() {
-                    matches.push(candidate);
-                }
-            }
-        }
-    }
-    matches.sort();
-    matches.dedup();
-    if matches.len() > 1 {
-        return Err(format!(
-            "multiple session logs found for sessionId={session_id}: {}",
-            matches
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-    Ok(matches.into_iter().next())
-}
-
-pub(crate) fn session_log_file_paths() -> Result<Vec<PathBuf>, String> {
-    let sessions_dir = sessions_dir_path();
-    if !sessions_dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut file_paths = Vec::new();
-    for year_entry in fs::read_dir(sessions_dir.as_path())
-        .map_err(|error| format!("read sessions year dir failed: {error}"))?
-    {
-        let year_entry =
-            year_entry.map_err(|error| format!("read sessions year entry failed: {error}"))?;
-        let year_path = year_entry.path();
-        if !year_path.is_dir() {
-            continue;
-        }
-        for month_entry in fs::read_dir(year_path.as_path())
-            .map_err(|error| format!("read sessions month dir failed: {error}"))?
-        {
-            let month_entry = month_entry
-                .map_err(|error| format!("read sessions month entry failed: {error}"))?;
-            let month_path = month_entry.path();
-            if !month_path.is_dir() {
-                continue;
-            }
-            for day_entry in fs::read_dir(month_path.as_path())
-                .map_err(|error| format!("read sessions day dir failed: {error}"))?
-            {
-                let day_entry = day_entry
-                    .map_err(|error| format!("read sessions day entry failed: {error}"))?;
-                let day_path = day_entry.path();
-                if !day_path.is_dir() {
-                    continue;
-                }
-                for file_entry in fs::read_dir(day_path.as_path())
-                    .map_err(|error| format!("read session log dir failed: {error}"))?
-                {
-                    let file_entry = file_entry
-                        .map_err(|error| format!("read session log file entry failed: {error}"))?;
-                    let path = file_entry.path();
-                    if path.extension().and_then(|value| value.to_str()) == Some("jsonl") {
-                        file_paths.push(path);
-                    }
-                }
-            }
-        }
-    }
-    file_paths.sort();
-    Ok(file_paths)
+    let _guard = crate::message_log::lock_session_logs_for_read()?;
+    crate::session_catalog::path_unlocked(&sessions_dir_path(), session_id)
 }
 
 fn ensure_layout_manifest_at(file_path: &Path) -> Result<(), String> {
+    let _guard = LAYOUT_MIGRATION_LOCK
+        .lock()
+        .map_err(|_| "layout migration lock poisoned")?;
     if file_path.exists() {
         if !file_path.is_file() {
             return Err(format!(
@@ -268,6 +176,7 @@ fn ensure_layout_manifest_at(file_path: &Path) -> Result<(), String> {
                 "user data layout schemaVersion must be an unsigned integer".to_string()
             })?;
         match schema_version {
+            1 => return migrate_layout_v1(file_path, &raw),
             value if value == u64::from(LAYOUT_SCHEMA_VERSION) => {}
             value if value < u64::from(LAYOUT_SCHEMA_VERSION) => {
                 return Err(format!(
@@ -298,6 +207,29 @@ fn ensure_layout_manifest_at(file_path: &Path) -> Result<(), String> {
         format!("{encoded}\n").as_str(),
         "layout manifest",
     )
+}
+
+// Version two prevents pre-catalog Runtime binaries from writing logs without
+// recording dirty intents. Only Host layout metadata changes; logs stay intact.
+fn migrate_layout_v1(file_path: &Path, raw: &str) -> Result<(), String> {
+    let mut manifest: UserDataLayoutManifest = serde_json::from_str(raw)
+        .map_err(|error| format!("parse user data layout v1 manifest failed: {error}"))?;
+    let backup = file_path.with_file_name("layout.json.pre-v1-to-v2.backup");
+    match fs::read(&backup) {
+        Ok(bytes) if bytes == raw.as_bytes() => {}
+        Ok(_) => return Err("layout migration backup differs from v1 source".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            crate::atomic_file::write_file_atomically(
+                &backup,
+                raw.as_bytes(),
+                "layout migration backup",
+            )?;
+        }
+        Err(error) => return Err(format!("read layout migration backup failed: {error}")),
+    }
+    manifest.schema_version = LAYOUT_SCHEMA_VERSION;
+    let encoded = serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
+    crate::atomic_file::write_file_atomically(file_path, &encoded, "user data layout migration")
 }
 
 fn config_dir_path() -> PathBuf {
@@ -373,28 +305,59 @@ fn write_seed_file_if_missing(path: &Path, content: &str, label: &str) -> Result
     fs::write(path, content).map_err(|error| format!("write {label} failed: {error}"))
 }
 
-pub(crate) fn sanitize_path_segment(value: &str, fallback: &str) -> String {
-    let sanitized = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    if sanitized.trim().is_empty() {
-        fallback.to_string()
-    } else {
-        sanitized
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn catalog_layout_migration_preserves_facts_and_blocks_legacy_writers() {
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-layout-catalog-upgrade-{}-{}",
+            std::process::id(),
+            current_timestamp_ms()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let manifest = root.join("layout.json");
+        let old = br#"{"schemaVersion":1,"createdAtMs":42}"#;
+        fs::write(&manifest, old).unwrap();
+        let source = root.join("authoritative.jsonl");
+        fs::write(&source, b"unchanged source").unwrap();
+        ensure_layout_manifest_at(&manifest).unwrap();
+        let upgraded: UserDataLayoutManifest =
+            serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+        assert_eq!(upgraded.schema_version, 2);
+        assert_eq!(upgraded.created_at_ms, 42);
+        assert_eq!(
+            fs::read(root.join("layout.json.pre-v1-to-v2.backup")).unwrap(),
+            old
+        );
+        assert_eq!(fs::read(&source).unwrap(), b"unchanged source");
+        let bytes = fs::read(&manifest).unwrap();
+        ensure_layout_manifest_at(&manifest).unwrap();
+        assert_eq!(fs::read(&manifest).unwrap(), bytes);
+        // Resume a crash after backup publication but before manifest replacement.
+        fs::write(&manifest, old).unwrap();
+        ensure_layout_manifest_at(&manifest).unwrap();
+        assert_eq!(fs::read(&manifest).unwrap(), bytes);
+        fs::write(&manifest, old).unwrap();
+        fs::write(root.join("layout.json.pre-v1-to-v2.backup"), b"conflict").unwrap();
+        assert!(ensure_layout_manifest_at(&manifest)
+            .unwrap_err()
+            .contains("backup differs"));
+        assert_eq!(fs::read(&manifest).unwrap(), old);
+        fs::write(root.join("layout.json.pre-v1-to-v2.backup"), old).unwrap();
+        // The previous Runtime rejects any layout version greater than one.
+        assert!(upgraded.schema_version > 1);
+        fs::write(
+            &manifest,
+            br#"{"schemaVersion":1,"createdAtMs":42,"unknown":true}"#,
+        )
+        .unwrap();
+        assert!(ensure_layout_manifest_at(&manifest).is_err());
+        assert!(fs::read_to_string(&manifest).unwrap().contains("unknown"));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn layout_creates_distinct_plugin_and_skill_directories() {
@@ -444,7 +407,7 @@ mod tests {
         assert!(ensure_layout_manifest_at(manifest.as_path())
             .expect_err("old layout")
             .contains("no user data layout forward migration exists"));
-        fs::write(&manifest, r#"{"schemaVersion":2,"createdAtMs":1}"#)
+        fs::write(&manifest, r#"{"schemaVersion":3,"createdAtMs":1}"#)
             .expect("write future layout");
         assert!(ensure_layout_manifest_at(manifest.as_path())
             .expect_err("future layout")

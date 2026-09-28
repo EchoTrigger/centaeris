@@ -141,11 +141,6 @@ async fn stop_job(
 /// reclaiming expired leases. Stopped child work is never made runnable again.
 pub(crate) async fn reconcile_stopped_jobs() -> Result<(), String> {
     let store = agent_runtime::agent_runtime_store_actor()?;
-    let stopped = message_log::project_agent_runs()?
-        .into_iter()
-        .filter(|run| !matches!(run.status.as_str(), "running" | "stalled"))
-        .map(|run| (run.agent_run_id, run.status))
-        .collect::<HashMap<_, _>>();
     let mut offset = 0;
     loop {
         let jobs = store
@@ -164,7 +159,9 @@ pub(crate) async fn reconcile_stopped_jobs() -> Result<(), String> {
             return Ok(());
         }
         for job in jobs {
-            if stopped.contains_key(&job.job_id) {
+            if message_log::project_agent_run(&job.job_id)?
+                .is_some_and(|run| !matches!(run.status.as_str(), "running" | "stalled"))
+            {
                 stop_job(&store, &job, "runtime_server_recovered_interrupted").await?;
             } else {
                 offset += 1;
@@ -529,7 +526,11 @@ impl ElectronSubagentRunner {
             auto_continue_after_resume_wait: Some(auto_continue_after_resume_wait),
             agent_run_identity: Some(agent_run_identity),
         };
-        let transport = ReqwestJsonHttpTransport::new(req.job.job_id.clone())?;
+        let transport = ReqwestJsonHttpTransport::for_session(
+            req.job.job_id.clone(),
+            &binding.child_session_id,
+            &config_store.config.provider_id,
+        )?;
         let stream_sink = {
             let event_writer = self.event_writer.clone();
             let runtime_job_id = req.job.job_id.clone();

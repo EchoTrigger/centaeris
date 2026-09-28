@@ -62,8 +62,30 @@ impl LocalExecutionHostRunner {
         program: String,
         args: Vec<String>,
         cwd: PathBuf,
+        environment: HashMap<String, String>,
+        policy: ExecutionPolicy,
+    ) -> Result<LocalOwnedProcess, ExecutionError> {
+        self.spawn_owned_process_io(program, args, cwd, environment, policy, false)
+    }
+
+    pub fn spawn_piped_process(
+        &self,
+        program: String,
+        args: Vec<String>,
+        cwd: PathBuf,
+        policy: ExecutionPolicy,
+    ) -> Result<LocalOwnedProcess, ExecutionError> {
+        self.spawn_owned_process_io(program, args, cwd, HashMap::new(), policy, true)
+    }
+
+    fn spawn_owned_process_io(
+        &self,
+        program: String,
+        args: Vec<String>,
+        cwd: PathBuf,
         mut environment: HashMap<String, String>,
         policy: ExecutionPolicy,
+        piped: bool,
     ) -> Result<LocalOwnedProcess, ExecutionError> {
         environment.extend(self.environment_overrides.clone());
         let req = ExecutionCommandRequest {
@@ -90,8 +112,8 @@ impl LocalExecutionHostRunner {
             prepared
                 .command
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
+                .stdout(if piped { Stdio::piped() } else { Stdio::null() })
+                .stderr(if piped { Stdio::piped() } else { Stdio::null() });
             configure_local_process(&mut prepared.command);
             let child = prepared
                 .command
@@ -110,8 +132,8 @@ impl LocalExecutionHostRunner {
                 .current_dir(req.cwd.as_path())
                 .envs(req.env.iter())
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
+                .stdout(if piped { Stdio::piped() } else { Stdio::null() })
+                .stderr(if piped { Stdio::piped() } else { Stdio::null() });
             configure_local_process(&mut command);
             let mut child = command
                 .spawn()
@@ -276,6 +298,7 @@ impl LocalExecutionHostRunner {
             req.timeout_ms,
             cancellation_probe,
             stdin_input.as_deref().map(|bytes| ProcessInput {
+                capture_stdout_bytes: false,
                 bytes,
                 output_limit: input.map(|_| 64 * 1024),
             }),
@@ -315,6 +338,13 @@ pub struct LocalOwnedProcess {
 }
 
 impl LocalOwnedProcess {
+    pub fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
+        self.child.stdout.take()
+    }
+    pub fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
+        self.child.stderr.take()
+    }
+
     pub fn id(&self) -> u32 {
         self.child.id()
     }
@@ -608,6 +638,7 @@ fn configure_local_process(command: &mut Command) {
 }
 
 struct CapturedProcessOutput {
+    stdout_bytes: Option<Vec<u8>>,
     exit_code: Option<i32>,
     stdout: String,
     stderr: String,
@@ -616,8 +647,61 @@ struct CapturedProcessOutput {
     timed_out: bool,
 }
 
+// Application adapters use the same bounded, process-tree-aware runner as local
+// execution, without creating an AgentRun or changing its execution semantics.
+pub struct ApplicationCommandCapture {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+}
+
+pub fn capture_application_command(
+    command: &mut Command,
+    input: &[u8],
+    timeout_ms: u64,
+    output_limit: usize,
+) -> Result<(ApplicationCommandCapture, bool), String> {
+    configure_local_process(command);
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = run_local_command_with_timeout(
+        command,
+        timeout_ms,
+        None,
+        Some(ProcessInput {
+            capture_stdout_bytes: true,
+            bytes: input,
+            output_limit: Some(output_limit),
+        }),
+    )
+    .map_err(|error| error.to_string())?;
+    let truncated = output.stdout_decode.raw_byte_length > output_limit;
+    // Git's NUL-delimited machine output is UTF-8, never heuristic UTF-16.
+    let bytes = output
+        .stdout_bytes
+        .ok_or("application_command_missing_stdout_bytes")?;
+    let stdout = if truncated {
+        String::from_utf8_lossy(&bytes).into_owned()
+    } else {
+        String::from_utf8(bytes).map_err(|_| "application_command_stdout_not_utf8")?
+    };
+    Ok((
+        ApplicationCommandCapture {
+            exit_code: output.exit_code,
+            stdout,
+            stderr: output.stderr,
+            timed_out: output.timed_out,
+        },
+        truncated,
+    ))
+}
+
 #[derive(Clone, Copy)]
 struct ProcessInput<'a> {
+    capture_stdout_bytes: bool,
     bytes: &'a [u8],
     output_limit: Option<usize>,
 }
@@ -803,6 +887,9 @@ fn run_local_command_with_timeout(
         );
     }
     Ok(CapturedProcessOutput {
+        stdout_bytes: stdin_input
+            .filter(|input| input.capture_stdout_bytes)
+            .map(|_| stdout.bytes),
         exit_code,
         stdout: stdout_decoded.text,
         stderr: stderr_decoded.text,
@@ -854,7 +941,7 @@ fn terminate_windows_process_job(
 }
 
 #[cfg(target_os = "windows")]
-struct WindowsProcessJob(HANDLE);
+pub struct WindowsProcessJob(HANDLE);
 
 // SAFETY: a job object handle is an owned kernel handle that may be used from
 // any thread; access is serialized by the owning `Mutex` in the sidecar store.
@@ -866,7 +953,7 @@ unsafe impl Sync for WindowsProcessJob {}
 
 #[cfg(target_os = "windows")]
 impl WindowsProcessJob {
-    fn new() -> Result<Self, ExecutionError> {
+    pub fn new() -> Result<Self, ExecutionError> {
         let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if handle.is_null() {
             return Err(ExecutionError::Io(format!(
@@ -883,6 +970,13 @@ impl WindowsProcessJob {
         self.assign_handle(child.as_raw_handle() as HANDLE)
     }
 
+    pub fn assign_process_handle(
+        &self,
+        process: std::os::windows::io::BorrowedHandle<'_>,
+    ) -> Result<(), ExecutionError> {
+        self.assign_handle(process.as_raw_handle() as HANDLE)
+    }
+
     fn assign_handle(&self, process: HANDLE) -> Result<(), ExecutionError> {
         let assigned = unsafe { AssignProcessToJobObject(self.0, process) };
         if assigned == 0 {
@@ -894,7 +988,7 @@ impl WindowsProcessJob {
         Ok(())
     }
 
-    fn terminate(&self) -> Result<(), ExecutionError> {
+    pub fn terminate(&self) -> Result<(), ExecutionError> {
         if unsafe { TerminateJobObject(self.0, 1) } == 0 {
             return Err(ExecutionError::Io(format!(
                 "terminate local process job failed: {}",

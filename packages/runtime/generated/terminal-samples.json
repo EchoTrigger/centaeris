@@ -1,0 +1,10 @@
+{
+  "terminalId": "terminal-1",
+  "workspaceRoot": "/workspace",
+  "sessionId": null,
+  "shell": "pwsh",
+  "state": "running",
+  "exitCode": null,
+  "outputComplete": false,
+  "error": null
+}

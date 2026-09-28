@@ -160,7 +160,8 @@ pub(crate) fn list(request: AgentRunListRequest) -> Result<AgentRunListResponse,
         .map(str::trim)
         .filter(|item| !item.is_empty())
         .map(ToString::to_string);
-    let mut agent_runs = message_log::project_agent_runs()?;
+    let mut agent_runs =
+        crate::session_catalog::runs(session_filter.as_deref(), None, !include_terminal)?;
     if let Some(session_id) = session_filter.as_deref() {
         agent_runs.retain(|item| item.session_id == session_id);
     }
@@ -178,7 +179,7 @@ pub(crate) fn list(request: AgentRunListRequest) -> Result<AgentRunListResponse,
 }
 
 pub(crate) fn idle_session_ids() -> Result<HashSet<String>, String> {
-    let mut session_ids = message_log::project_agent_runs()?
+    let mut session_ids = crate::session_catalog::runs(None, None, true)?
         .into_iter()
         .filter(|agent_run| !is_agent_run_terminal(agent_run.status.as_str()))
         .map(|agent_run| agent_run.session_id)
@@ -389,7 +390,7 @@ pub(crate) fn fail_agent_run(
 
 pub(crate) fn ensure_session_can_be_deleted(session_id: &str) -> Result<(), String> {
     let session_id = required_string(session_id, "sessionId")?;
-    if let Some(agent_run) = message_log::project_agent_runs()?
+    if let Some(agent_run) = crate::session_catalog::runs(Some(&session_id), None, true)?
         .into_iter()
         .find(|agent_run| {
             agent_run.session_id == session_id
@@ -466,15 +467,17 @@ fn find_agent_run(
     let Some(normalized_session_id) = normalized_session_id else {
         return Ok(None);
     };
-    Ok(message_log::project_agent_runs()?
-        .into_iter()
-        .filter(|agent_run| agent_run.session_id == normalized_session_id)
-        .max_by(|left, right| {
-            left.updated_at_ms
-                .cmp(&right.updated_at_ms)
-                .then_with(|| left.started_at_ms.cmp(&right.started_at_ms))
-                .then_with(|| right.agent_run_id.cmp(&left.agent_run_id))
-        }))
+    Ok(
+        crate::session_catalog::runs(Some(normalized_session_id), None, false)?
+            .into_iter()
+            .filter(|agent_run| agent_run.session_id == normalized_session_id)
+            .max_by(|left, right| {
+                left.updated_at_ms
+                    .cmp(&right.updated_at_ms)
+                    .then_with(|| left.started_at_ms.cmp(&right.started_at_ms))
+                    .then_with(|| right.agent_run_id.cmp(&left.agent_run_id))
+            }),
+    )
 }
 
 fn viewer_registry() -> Result<std::sync::MutexGuard<'static, ViewerRegistry>, String> {
