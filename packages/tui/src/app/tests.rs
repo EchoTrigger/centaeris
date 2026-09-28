@@ -1,4 +1,36 @@
 use super::*;
+
+#[test]
+fn automatic_followup_attaches_only_to_the_visible_session() {
+    let workspace = unique_test_dir("followup-workspace");
+    let data_root = unique_test_dir("followup-data");
+    let mut app = test_app("", workspace.clone(), data_root.clone());
+    app.active_session = Some(TuiSession {
+        id: "visible".into(),
+        title: "Visible".into(),
+        updated_at: 1,
+        last_message: None,
+        cwd: display_path(&workspace),
+        session_kind: TuiSessionKind::Main,
+        activity_state: TuiSessionActivityState::Idle,
+        is_unread: false,
+        is_pinned: false,
+    });
+    let update = |session: &str, run: &str| json!({"sessionId":session,"agentRunId":run,"payload":{"type":"runtime_event","event":{"id":format!("event:{run}"),"type":"ModelRequestStart","processState":"thinking","payload":{"purpose":"main","contextTokenEstimate":10,"initialContent":"follow-up"}}}});
+    apply_session_update(&mut app, &update("other", "other-run"));
+    assert!(app.assistant_buffer.is_empty());
+    assert!(app.active_agent_run_id.is_none());
+    apply_session_update(&mut app, &update("visible", "followup-run"));
+    assert_eq!(app.active_agent_run_id.as_deref(), Some("followup-run"));
+    assert_eq!(app.assistant_buffer, "follow-up");
+    apply_session_update(&mut app, &update("other", "other-run-2"));
+    assert!(!app
+        .transcript
+        .iter()
+        .any(|line| matches!(line, TranscriptLine::Error(_))));
+    let _ = std::fs::remove_dir_all(workspace);
+    let _ = std::fs::remove_dir_all(data_root);
+}
 use centaeris_core::session::transcript::{
     TranscriptBlockBodyV1, TranscriptBlockStatusV1, TranscriptBlockV1, TranscriptOrderKeyV1,
     TranscriptPageV1, TranscriptPatchV1, TranscriptResumeCursorV1, TranscriptTextContentV1,
@@ -717,7 +749,7 @@ fn subagent_lines_render_with_prefix_and_error_color() {
         .iter()
         .map(|span| span.content.as_ref())
         .collect::<String>();
-    assert_eq!(rendered, "  ↳ Researcher: done");
+    assert_eq!(rendered, "● Researcher: done");
     assert_eq!(lines[0].spans[0].style.fg, Some(theme().muted));
 }
 
@@ -1209,6 +1241,9 @@ fn command_table_has_no_aliases() {
             "/effort",
             "/state",
             "/stop",
+            "/process",
+            "/ssh",
+            "/schedule",
             "/plugins",
             "/mcp",
             "/clear",
@@ -1666,7 +1701,7 @@ fn user_message_leaves_one_row_before_assistant_text() {
 
     assert_eq!(rendered_line_text(&lines[0]), "│ hello");
     assert!(rendered_line_text(&lines[1]).is_empty());
-    assert_eq!(rendered_line_text(&lines[2]), "  reply");
+    assert_eq!(rendered_line_text(&lines[2]), "● reply");
 }
 
 #[test]
@@ -2437,7 +2472,7 @@ fn bash_description_is_the_title_while_the_command_remains_visible() {
     };
     assert_eq!(stable_tool_title(settled), "Run focused tests");
     let rendered = transcript_to_lines(&app.transcript, 100);
-    assert!(rendered_lines_text(&rendered).contains("└─ cargo test -p centaeris-tui"));
+    assert!(rendered_lines_text(&rendered).contains("● Ran cargo test -p centaeris-tui"));
 
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
@@ -2531,7 +2566,7 @@ fn result_hierarchy_uses_one_connector_per_text_block() {
 
     assert_eq!(
         lines.iter().map(rendered_line_text).collect::<Vec<_>>(),
-        vec!["  └─ first output", "      second output"]
+        vec!["  └ first output", "    second output"]
     );
 }
 
@@ -3415,7 +3450,7 @@ fn model_text_replace_discards_materialized_attempt_before_redraw() {
     assert_eq!(app.assistant_emitted_bytes, 0);
     assert_eq!(
         rendered_lines_text(&build_assistant_live_lines(&app, 80)),
-        "  replacement"
+        "● replacement"
     );
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
@@ -4434,10 +4469,10 @@ fn transcript_to_lines_renders_closed_turn_for_owned_viewport() {
         vec![
             "│ build".to_string(),
             String::new(),
-            "  searched files".to_string(),
+            "● searched files".to_string(),
             String::new(),
-            "     └─ 再检查 tests".to_string(),
-            "! boom".to_string(),
+            "  └ 再检查 tests".to_string(),
+            "● Error: boom".to_string(),
         ]
     );
 }
@@ -4473,7 +4508,10 @@ fn markdown_renders_fences_headings_lists_bold_and_inline_code() {
         rendered[7],
         ("before bold and code after".to_string(), true)
     );
-    assert!(lines[7].spans.iter().any(|span| span.style.bg.is_some()));
+    assert!(lines[7]
+        .spans
+        .iter()
+        .any(|span| span.style.fg == Some(theme().inline_code_fg)));
 }
 
 #[test]
@@ -4725,6 +4763,7 @@ fn test_app(input: &str, workspace_root: PathBuf, _data_root: PathBuf) -> App {
         context_usage: None,
         runtime: None,
         pending_model_request: None,
+        process_panel: None,
         runtime_config_refresh_pending: false,
         model_credential_prompt: None,
         model_panel: None,
@@ -4757,6 +4796,7 @@ fn test_app(input: &str, workspace_root: PathBuf, _data_root: PathBuf) -> App {
         session_catalog: Vec::new(),
         sessions: Vec::new(),
         session_workspaces: Vec::new(),
+        session_page_cursors: HashMap::new(),
         selected_session_workspace: 0,
         session_workspace_hit_regions: Vec::new(),
         session_list_area: None,
@@ -5293,11 +5333,14 @@ fn referenced_tool_renders_only_its_title_without_preview_hint_row() {
 }
 
 #[test]
-fn tool_visual_hierarchy_is_neutral_except_failures() {
+fn tool_visual_hierarchy_marks_outcome_and_emphasizes_action() {
     for (state, color) in [
-        (ToolResultState::SuccessWithOutput, theme().muted),
-        (ToolResultState::Failed, theme().muted),
-        (ToolResultState::Denied, theme().muted),
+        (
+            ToolResultState::SuccessWithOutput,
+            ratatui::style::Color::Green,
+        ),
+        (ToolResultState::Failed, ratatui::style::Color::Red),
+        (ToolResultState::Denied, ratatui::style::Color::Red),
     ] {
         let tool = test_tool_line(ToolActionKind::Read, "src/main.rs", vec![], vec![state]);
         let lines = transcript_to_lines(&[TranscriptLine::Tool(tool)], 100);
@@ -5305,7 +5348,7 @@ fn tool_visual_hierarchy_is_neutral_except_failures() {
         assert!(lines[0]
             .spans
             .iter()
-            .all(|span| !span.style.add_modifier.contains(Modifier::BOLD)));
+            .any(|span| span.style.add_modifier.contains(Modifier::BOLD)));
     }
 }
 
@@ -5801,4 +5844,284 @@ fn retired_tool_shortcuts_do_not_change_the_transcript_or_insert_control_charact
         );
     }
     assert_eq!(app.input, "npvq");
+}
+
+#[test]
+fn transcript_visual_contract_marks_messages_once_and_colors_code() {
+    let items = vec![
+        TranscriptLine::User("inspect".into()),
+        TranscriptLine::Summary("Checking `Cargo.toml`".into()),
+        TranscriptLine::LiveAssistant {
+            markdown: "First line\n".into(),
+            separator: false,
+        },
+        TranscriptLine::LiveAssistant {
+            markdown: "Second line".into(),
+            separator: true,
+        },
+        TranscriptLine::Summary("Finished".into()),
+    ];
+    let lines = transcript_to_lines(&items, 80);
+    let text = lines
+        .iter()
+        .map(rendered_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.starts_with("│ inspect"));
+    assert!(text.contains("● Checking Cargo.toml"));
+    assert!(text.contains("● First line\n  Second line"));
+    assert_eq!(text.matches("● ").count(), 3);
+    let code = lines
+        .iter()
+        .flat_map(|line| &line.spans)
+        .find(|span| span.content == "Cargo.toml")
+        .unwrap();
+    assert_eq!(code.style.fg, Some(ratatui::style::Color::Green));
+    assert!(code.style.bg.is_none());
+}
+
+#[test]
+fn command_visual_contract_uses_command_not_description_and_single_connector() {
+    let mut tool = test_tool_line(
+        ToolActionKind::Command,
+        "Friendly description",
+        vec![],
+        vec![ToolResultState::SuccessWithOutput],
+    );
+    tool.command = Some("Get-ChildItem -LiteralPath 'D:\\Projects' | Select-Object Name".into());
+    tool.description_title = true;
+    tool.full_text = Some("first\nsecond".into());
+    tool.result_blocks = vec![ToolResultBlock::Text {
+        lines: vec![
+            TextResultLine::Text("first".into()),
+            TextResultLine::Text("second".into()),
+        ],
+    }];
+    let lines = transcript_to_lines(&[TranscriptLine::Tool(tool.clone())], 100);
+    let text = lines
+        .iter()
+        .map(rendered_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.starts_with("● Ran Get-ChildItem"));
+    assert!(!text.contains("Friendly description"));
+    assert!(text.contains("  └ first\n    second"));
+    assert!(lines[0]
+        .spans
+        .iter()
+        .any(|s| s.style.add_modifier.contains(Modifier::BOLD)));
+    assert!(lines[0]
+        .spans
+        .iter()
+        .any(|s| s.content.contains("-LiteralPath") && s.style.fg.is_some()));
+    let root = unique_test_dir("visual-contract");
+    let mut app = test_app("", root.clone(), root.clone());
+    app.transcript.push(TranscriptLine::Tool(tool));
+    let view = build_transcript_view(&app, 100);
+    let actual = view
+        .lines
+        .iter()
+        .map(rendered_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(actual.starts_with("● Ran Get-ChildItem"));
+    assert!(actual.contains("  └ first\n    second"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn assistant_visual_contract_wraps_with_hanging_indent() {
+    let lines = render_summary_lines("abcdefghijklmnop", 8);
+    let text: Vec<_> = lines.iter().map(rendered_line_text).collect();
+    assert_eq!(text, ["● abcdef", "  ghijkl", "  mnop"]);
+}
+
+#[test]
+fn tool_visual_contract_wraps_command_with_hanging_indent() {
+    let mut tool = test_tool_line(
+        ToolActionKind::Command,
+        "abcdef ghijklmnop",
+        vec![],
+        vec![ToolResultState::SuccessNoOutput],
+    );
+    tool.command = Some("abcdef ghijklmnop".into());
+    let lines = presentation::tool_lines(&tool, 12);
+    let texts: Vec<_> = lines.iter().map(rendered_line_text).collect();
+    assert!(texts[0].starts_with("● Ran "));
+    assert!(texts[1].starts_with("  "));
+    assert!(texts.iter().all(|text| text.chars().count() <= 12));
+}
+
+#[test]
+fn process_commands_preserve_shell_text_and_require_explicit_targets() {
+    use super::process_ui::{parse, Action};
+    assert!(matches!(parse(""), Ok(Action::List)));
+    assert!(
+        matches!(parse("start printf 'a b'; sleep 2"), Ok(Action::Start(command)) if command == "printf 'a b'; sleep 2")
+    );
+    assert!(parse("stop").is_err());
+    assert!(parse("stop id extra").is_err());
+    assert!(
+        matches!(parse("output process-sample"), Ok(Action::Read(id)) if id == "process-sample")
+    );
+}
+
+#[test]
+fn process_output_is_scrollable_and_closing_it_does_not_stop_the_process() {
+    let workspace = unique_test_dir("process-view");
+    let mut app = test_app("", workspace.clone(), workspace.clone());
+    app.active_session = Some(TuiSession {
+        id: "session-sample".into(),
+        title: "Sample".into(),
+        updated_at: 0,
+        last_message: None,
+        cwd: display_path(&workspace),
+        session_kind: TuiSessionKind::Main,
+        activity_state: TuiSessionActivityState::Idle,
+        is_unread: false,
+        is_pinned: false,
+    });
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = calls.clone();
+    app.runtime = Some(RuntimeClient::from_test_request_handler(move |frame| {
+        recorded.lock().unwrap().push(frame.clone());
+        assert_eq!(frame["method"], "process_session_read");
+        assert_eq!(frame["params"]["request"]["sessionId"], "session-sample");
+        let sample: Value = serde_json::from_str(include_str!(
+            "../../../runtime/generated/process-session-samples.json"
+        ))
+        .unwrap();
+        let mut output = sample["output"].clone();
+        output["chunks"][0]["dataBase64"] = json!(general_purpose::STANDARD
+            .encode((0..80).map(|n| format!("line {n}\n")).collect::<String>()));
+        output
+    }));
+    process_ui::open(&mut app, "output process-sample").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !process_ui::poll(&mut app) {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(5));
+    }
+    let backend = ratatui::backend::TestBackend::new(100, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| process_ui::render(frame, &mut app))
+        .unwrap();
+    assert!(test_buffer_text(terminal.backend().buffer()).contains("line 0"));
+    handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE), &mut app);
+    terminal
+        .draw(|frame| process_ui::render(frame, &mut app))
+        .unwrap();
+    assert!(test_buffer_text(terminal.backend().buffer()).contains("line 79"));
+    handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
+    assert!(app.process_panel.is_none());
+    assert_eq!(calls.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn process_start_uses_service_fence_and_stop_targets_one_process() {
+    let workspace = unique_test_dir("process-start");
+    let mut app = test_app("", workspace.clone(), workspace.clone());
+    app.active_session = Some(TuiSession {
+        id: "session-sample".into(),
+        title: "Sample".into(),
+        updated_at: 0,
+        last_message: None,
+        cwd: display_path(&workspace),
+        session_kind: TuiSessionKind::Main,
+        activity_state: TuiSessionActivityState::Idle,
+        is_unread: false,
+        is_pinned: false,
+    });
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = calls.clone();
+    app.runtime = Some(RuntimeClient::from_test_request_handler(move |frame| {
+        recorded.lock().unwrap().push(frame.clone());
+        let sample: Value = serde_json::from_str(include_str!(
+            "../../../runtime/generated/process-session-samples.json"
+        ))
+        .unwrap();
+        match frame["method"].as_str().unwrap() {
+            "process_session_list" => sample["list"].clone(),
+            "process_session_start" => {
+                let r = &frame["params"]["request"];
+                assert_eq!(r["serviceInstanceId"], "service-sample");
+                assert_eq!(r["args"], json!(["-c", "echo 'a b'; sleep 1"]));
+                assert!(r["operationId"].as_str().is_some_and(|id| !id.is_empty()));
+                sample["snapshot"].clone()
+            }
+            "process_session_stop" => {
+                assert_eq!(frame["params"]["request"], sample["target"]);
+                let mut stopped = sample["snapshot"].clone();
+                stopped["state"] = json!("stopping");
+                stopped
+            }
+            other => panic!("unexpected request {other}"),
+        }
+    }));
+    process_ui::open(&mut app, "start echo 'a b'; sleep 1").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut completions = 0;
+    while completions < 2 {
+        completions += usize::from(process_ui::poll(&mut app));
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(5));
+    }
+    process_ui::open(&mut app, "stop process-sample").unwrap();
+    while !process_ui::poll(&mut app) {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(5));
+    }
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 20)).unwrap();
+    terminal
+        .draw(|frame| process_ui::render(frame, &mut app))
+        .unwrap();
+    assert!(test_buffer_text(terminal.backend().buffer()).contains("Stopping"));
+    assert_eq!(calls.lock().unwrap().len(), 3);
+}
+
+#[test]
+fn schedule_response_panel_does_not_offer_process_refresh() {
+    let mut app = test_app("", PathBuf::from("D:/workspace"), PathBuf::new());
+    process_ui::show_response(
+        &mut app,
+        "Schedules",
+        json!({"serviceEnabled":false,"schedules":[]}),
+    );
+    process_ui::key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+    );
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|f| process_ui::render(f, &mut app)).unwrap();
+    let rendered = test_buffer_text(terminal.backend().buffer());
+    assert!(rendered.contains("serviceEnabled"));
+    assert!(!rendered.contains("Runtime disconnected"));
+    assert!(!rendered.contains("r refresh"));
+}
+
+#[test]
+fn session_catalog_page_rejects_reset_and_preserves_cursor() {
+    let page = serde_json::json!({"items":[],"deletedIds":[],"revision":"r","nextCursor":"next","reset":false});
+    let (items, cursor) = parse_session_catalog_page(&page).unwrap();
+    assert!(items.is_empty());
+    assert_eq!(cursor.as_deref(), Some("next"));
+    assert!(parse_session_catalog_page(&serde_json::json!({"items":[],"reset":true})).is_err());
+}
+
+#[test]
+fn lazy_session_picker_keeps_unloaded_workspace_choices() {
+    let choices = session_workspace_choices(
+        json!({"activeWorkspaceRoot":"/a","cancelled":false,"workspaces":[
+            {"root":"/a","name":"A","activeSessionId":null,"sortOrder":0,"updatedAt":1},
+            {"root":"/b","name":"B","activeSessionId":null,"sortOrder":1,"updatedAt":1}
+        ]}),
+        "/a",
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        choices.iter().map(|w| w.root.as_str()).collect::<Vec<_>>(),
+        vec!["/a", "/b"]
+    );
 }

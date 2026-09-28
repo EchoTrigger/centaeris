@@ -1,13 +1,13 @@
 use ratatui::style::Color;
 
 /// Terminal-native semantic palette. Content inherits the user's foreground;
-/// only state uses ANSI status colors.
+/// Markdown code, shell tokens and status markers use terminal ANSI colors.
 pub(super) struct Theme {
     pub(super) accent: Color,
     pub(super) muted: Color,
     pub(super) heading: Color,
     pub(super) code_bg: Color,
-    pub(super) inline_code_bg: Color,
+    pub(super) inline_code_fg: Color,
     pub(super) diff_add_bg: Color,
     pub(super) diff_delete_bg: Color,
     pub(super) ghost: Color,
@@ -19,7 +19,7 @@ static THEME: Theme = Theme {
     muted: Color::DarkGray,
     heading: Color::Reset,
     code_bg: Color::Reset,
-    inline_code_bg: Color::Reset,
+    inline_code_fg: Color::Green,
     diff_add_bg: Color::Reset,
     diff_delete_bg: Color::Reset,
     ghost: Color::DarkGray,

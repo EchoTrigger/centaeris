@@ -30,6 +30,18 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         description: "Stop the running task",
     },
     SlashCommand {
+        name: "/process",
+        description: "List, start, read or stop background processes",
+    },
+    SlashCommand {
+        name: "/ssh",
+        description: "Execute a remote command using system OpenSSH",
+    },
+    SlashCommand {
+        name: "/schedule",
+        description: "Manage local schedules and background scheduling",
+    },
+    SlashCommand {
         name: "/plugins",
         description: "List or manage plugins",
     },

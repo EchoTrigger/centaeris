@@ -45,6 +45,8 @@ use sha2::{Digest as _, Sha256};
 mod commands;
 mod output_preview;
 mod paging;
+mod presentation;
+mod process_ui;
 mod reasoning;
 mod runs;
 mod session_transcript;
@@ -332,6 +334,7 @@ struct App {
     context_usage: Option<ContextUsage>,
     runtime: Option<RuntimeClient>,
     pending_model_request: Option<PendingModelRequest>,
+    process_panel: Option<process_ui::Panel>,
     runtime_config_refresh_pending: bool,
     model_credential_prompt: Option<ModelCredentialPrompt>,
     model_panel: Option<TuiModelPanel>,
@@ -364,6 +367,7 @@ struct App {
     session_catalog: Vec<TuiSession>,
     sessions: Vec<TuiSession>,
     session_workspaces: Vec<SessionWorkspace>,
+    session_page_cursors: HashMap<String, (Option<String>, Option<String>)>,
     selected_session_workspace: usize,
     session_workspace_hit_regions: Vec<Rect>,
     session_list_area: Option<Rect>,
@@ -648,6 +652,7 @@ impl App {
             context_usage: None,
             runtime: None,
             pending_model_request: None,
+            process_panel: None,
             runtime_config_refresh_pending: false,
             model_credential_prompt: None,
             model_panel: None,
@@ -680,6 +685,7 @@ impl App {
             session_catalog: Vec::new(),
             sessions: Vec::new(),
             session_workspaces: Vec::new(),
+            session_page_cursors: HashMap::new(),
             selected_session_workspace: 0,
             session_workspace_hit_regions: Vec::new(),
             session_list_area: None,
@@ -774,6 +780,7 @@ fn run_event_loop(
         redraw |= width != app.render_width;
         app.render_width = width;
         redraw |= drain_model_request(&mut app);
+        redraw |= process_ui::poll(&mut app);
         redraw |= drain_runtime_events(&mut app);
         redraw |= drain_image_preview(&mut app);
         redraw |= output_preview::poll(&mut app);
@@ -1437,6 +1444,10 @@ fn finish_image_preview_drag(preview: &mut ImagePreview, position: Position) {
 }
 
 fn handle_key(key: KeyEvent, app: &mut App) -> bool {
+    if app.process_panel.is_some() {
+        process_ui::key(app, key);
+        return false;
+    }
     if app.image_preview.is_some() {
         if matches!(key.code, KeyCode::Esc)
             || matches!(key.code, KeyCode::Char('c'))
@@ -1738,6 +1749,7 @@ fn handle_panel_click(mouse: MouseEvent, app: &mut App) -> bool {
             .position(|area| area.contains(position))
         {
             app.selected_session_workspace = index;
+            load_selected_session_workspace(app);
             app.message = None;
             refresh_visible_sessions(app);
             return true;
@@ -1905,6 +1917,18 @@ fn handle_panel_click(mouse: MouseEvent, app: &mut App) -> bool {
 }
 
 fn handle_mouse(mouse: MouseEvent, app: &mut App) {
+    if app.process_panel.is_some() {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                process_ui::key(app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            }
+            MouseEventKind::ScrollDown => {
+                process_ui::key(app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            }
+            _ => {}
+        }
+        return;
+    }
     if app.image_preview.is_some() {
         let position = Position::new(mouse.column, mouse.row);
         match mouse.kind {
@@ -2367,6 +2391,36 @@ fn handle_enter(app: &mut App) -> bool {
             clear_composer(app);
             if let Err(error) = stop_controlled_tasks(app, "tui_user_stop") {
                 show_message(app, error);
+            }
+            false
+        }
+        Some("/process") => {
+            if let Err(error) = process_ui::open(app, slash_command_args(input)) {
+                show_message(app, error);
+            }
+            false
+        }
+        Some("/ssh") => {
+            if let Err(error) = process_ui::open_ssh(app, slash_command_args(input)) {
+                show_message(app, error);
+            }
+            false
+        }
+        Some("/schedule") => {
+            let result = (|| -> Result<Value, String> {
+                let args =
+                    shell_words::split(slash_command_args(input)).map_err(|e| e.to_string())?;
+                let payload = crate::automation_cli::schedule_request(&args)?;
+                ensure_runtime(app)?;
+                app.runtime
+                    .as_mut()
+                    .ok_or("Runtime disconnected")?
+                    .request("schedule_manage", json!({"request":payload}))
+                    .map_err(|e| e.to_string())
+            })();
+            match result {
+                Ok(value) => process_ui::show_response(app, "Schedules", value),
+                Err(error) => show_message(app, error),
             }
             false
         }
@@ -3901,12 +3955,11 @@ fn apply_context_usage(app: &mut App, response: &Value) {
 
 fn resume_session(app: &mut App, query: &str) -> Result<(), String> {
     ensure_runtime(app)?;
-    let response = app
-        .runtime
-        .as_mut()
-        .ok_or_else(|| "runtime client is not connected".to_string())?
-        .request("session/list", json!({ "request": {} }))?;
-    let sessions = tui_session_catalog(&response)?;
+    app.session_page_cursors.clear();
+    app.session_catalog.clear();
+    let root = app.session_cwd.clone();
+    load_session_catalog_page(app, &root, false)?;
+    let sessions = app.session_catalog.clone();
 
     if query.is_empty() {
         let workspace_response = app
@@ -3923,6 +3976,18 @@ fn resume_session(app: &mut App, query: &str) -> Result<(), String> {
         return Ok(());
     }
 
+    let sessions = if query.is_empty() {
+        sessions
+    } else {
+        while app
+            .session_page_cursors
+            .get(&root)
+            .is_some_and(|(a, b)| a.is_some() || b.is_some())
+        {
+            load_session_catalog_page(app, &root, true)?;
+        }
+        app.session_catalog.clone()
+    };
     let exact_matches = sessions
         .iter()
         .filter(|session| {
@@ -3999,9 +4064,6 @@ fn session_workspace_choices(
     let mut workspaces = snapshot
         .workspaces
         .into_iter()
-        .filter(|workspace| {
-            workspace.root == current_workspace || session_roots.contains(&workspace.root.as_str())
-        })
         .map(|workspace| SessionWorkspace {
             root: workspace.root,
             name: workspace.name,
@@ -4060,6 +4122,7 @@ fn open_session_picker(
 fn close_session_picker(app: &mut App) {
     app.session_picker_open = false;
     app.session_catalog.clear();
+    app.session_page_cursors.clear();
     app.sessions.clear();
     app.session_workspaces.clear();
     app.selected_session_workspace = 0;
@@ -4102,6 +4165,7 @@ fn move_session_workspace(app: &mut App, delta: isize) {
         std::cmp::Ordering::Equal => current,
     };
     app.message = None;
+    load_selected_session_workspace(app);
     refresh_visible_sessions(app);
 }
 
@@ -4128,6 +4192,22 @@ fn handle_session_picker_key(key: KeyEvent, app: &mut App) -> bool {
         }
         KeyCode::Up => move_session_selection(app, -1),
         KeyCode::Down => move_session_selection(app, 1),
+        KeyCode::Char('n') => {
+            if let Some(root) = app
+                .session_workspaces
+                .get(app.selected_session_workspace)
+                .map(|w| w.root.clone())
+            {
+                let selected = app.selected_session;
+                match load_session_catalog_page(app, &root, true) {
+                    Ok(()) => {
+                        refresh_visible_sessions(app);
+                        app.selected_session = selected.min(app.sessions.len().saturating_sub(1));
+                    }
+                    Err(error) => app.message = Some(error),
+                }
+            }
+        }
         KeyCode::Tab => move_session_workspace(app, 1),
         KeyCode::BackTab => move_session_workspace(app, -1),
         KeyCode::Char('d') => begin_delete_selected_session(app),
@@ -4306,12 +4386,12 @@ fn update_session_metadata(
 fn refresh_session_list(app: &mut App) -> Result<(), String> {
     let selected_session_id = selected_session(app).map(|session| session.id);
     ensure_runtime(app)?;
-    let response = app
-        .runtime
-        .as_mut()
-        .ok_or_else(|| "runtime client is not connected".to_string())?
-        .request("session/list", json!({ "request": {} }))?;
-    app.session_catalog = tui_session_catalog(&response)?;
+    let root = app
+        .session_workspaces
+        .get(app.selected_session_workspace)
+        .map(|w| w.root.clone())
+        .unwrap_or_else(|| app.session_cwd.clone());
+    load_session_catalog_page(app, &root, false)?;
     refresh_visible_sessions(app);
     app.selected_session = selected_session_id
         .as_deref()
@@ -4617,7 +4697,28 @@ fn drain_runtime_events(app: &mut App) -> bool {
 }
 
 fn apply_session_update(app: &mut App, update: &Value) {
+    let Some(session) = app.active_session.as_ref() else {
+        return;
+    };
+    if update.get("sessionId").and_then(Value::as_str) != Some(session.id.as_str()) {
+        return;
+    }
     let update_agent_run_id = update.get("agentRunId").and_then(Value::as_str);
+    if app.active_agent_run_id.is_none()
+        && app.active_agent_run_ids.is_empty()
+        && matches!(
+            update
+                .pointer("/payload/event/type")
+                .and_then(Value::as_str),
+            Some("AgentRunStarted" | "ModelRequestStart")
+        )
+    {
+        if let Some(id) = update_agent_run_id.filter(|id| !id.is_empty()) {
+            app.active_agent_run_id = Some(id.to_string());
+            app.active_agent_run_ids.insert(id.to_string());
+            app.agent_run_started_at = Some(Instant::now());
+        }
+    }
     if !app.active_agent_run_ids.is_empty() {
         if !update_agent_run_id
             .is_some_and(|agent_run_id| app.active_agent_run_ids.contains(agent_run_id))
@@ -5374,3 +5475,83 @@ fn display_path(path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests;
+
+fn parse_session_catalog_page(value: &Value) -> Result<(Vec<TuiSession>, Option<String>), String> {
+    if value.get("reset").and_then(Value::as_bool) != Some(false) {
+        return Err("Session catalog changed; reload the list".into());
+    }
+    let items = tui_session_catalog(value.get("items").ok_or("catalog items missing")?)?;
+    let cursor = match value.get("nextCursor") {
+        Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        _ => return Err("catalog cursor missing".into()),
+    };
+    Ok((items, cursor))
+}
+fn load_selected_session_workspace(app: &mut App) {
+    if app.runtime.is_none() {
+        return;
+    }
+    if let Some(root) = app
+        .session_workspaces
+        .get(app.selected_session_workspace)
+        .map(|w| w.root.clone())
+    {
+        if !app.session_page_cursors.contains_key(&root) {
+            if let Err(error) = load_session_catalog_page(app, &root, false) {
+                app.message = Some(error);
+            }
+        }
+    }
+}
+fn load_session_catalog_page(app: &mut App, root: &str, append: bool) -> Result<(), String> {
+    let previous = app.session_page_cursors.get(root).cloned();
+    if append
+        && previous
+            .as_ref()
+            .is_some_and(|(a, b)| a.is_none() && b.is_none())
+    {
+        return Ok(());
+    }
+    let mut cursors = (None, None);
+    let mut items = vec![];
+    for (index, mode) in ["pinned", "recent"].into_iter().enumerate() {
+        let cursor = previous
+            .as_ref()
+            .and_then(|p| if index == 0 { p.0.clone() } else { p.1.clone() });
+        if append && previous.is_some() && cursor.is_none() {
+            continue;
+        }
+        let mut request = json!({"mode":mode,"limit":50});
+        request["cwd"] = json!(root);
+        if append {
+            if let Some(cursor) = cursor {
+                request["cursor"] = json!(cursor);
+            }
+        }
+        let runtime = app
+            .runtime
+            .as_mut()
+            .ok_or("runtime client is not connected")?;
+        let response = runtime.request("session/catalog", json!({"request":request}))?;
+        if response.get("reset").and_then(Value::as_bool) == Some(true) {
+            return load_session_catalog_page(app, root, false);
+        }
+        let (page, next) = parse_session_catalog_page(&response)?;
+        items.extend(page.into_iter().filter(|i| i.cwd == root));
+        if index == 0 {
+            cursors.0 = next;
+        } else {
+            cursors.1 = next;
+        }
+    }
+    if !append {
+        app.session_catalog.retain(|i| i.cwd != root);
+    }
+    for item in items {
+        app.session_catalog.retain(|i| i.id != item.id);
+        app.session_catalog.push(item);
+    }
+    app.session_page_cursors.insert(root.to_string(), cursors);
+    Ok(())
+}
