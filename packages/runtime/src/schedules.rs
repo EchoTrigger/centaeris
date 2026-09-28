@@ -1,8 +1,7 @@
 //! Profile-owned local schedules. Only the Runtime singleton dispatches Agent work.
 use crate::runtime_rpc_transport::EventWriter;
 use crate::{
-    agent_runtime, atomic_file, message_log, operation_receipts, runtime_config, sessions,
-    user_data_layout,
+    agent_runtime, message_log, operation_receipts, runtime_config, sessions, user_data_layout,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -15,9 +14,7 @@ use std::{
 };
 
 static LOCK: Mutex<()> = Mutex::new(());
-const MAX_PLANS: usize = 256;
-const MAX_RUNS: usize = 4096;
-const MISFIRE_GRACE_MS: i64 = 60_000;
+mod storage;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -55,6 +52,8 @@ pub(crate) struct Spec {
     pub prompt: String,
     pub cron: Option<String>,
     pub at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
     pub timezone: String,
     pub model: ModelSelection,
 }
@@ -67,6 +66,12 @@ impl Spec {
         }
     }
     fn validate(&self, now: i64) -> Result<i64, String> {
+        if self
+            .expires_at
+            .is_some_and(|expiry| self.at.is_none_or(|at| expiry < at) || self.cron.is_some())
+        {
+            return Err("expiresAt requires a one-shot and cannot precede at".into());
+        }
         if self.name.trim().is_empty()
             || self.name.len() > 200
             || self.prompt.trim().is_empty()
@@ -137,24 +142,6 @@ impl Default for Store {
 fn root() -> PathBuf {
     user_data_layout::desktop_data_root_dir().join("runtime/schedules.json")
 }
-fn load(path: &Path) -> Result<Store, String> {
-    let store: Store = match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string())?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Store::default(),
-        Err(e) => return Err(e.to_string()),
-    };
-    if store.schema_version != 1 {
-        return Err("unsupported schedule schema".into());
-    }
-    Ok(store)
-}
-fn save(path: &Path, store: &Store) -> Result<(), String> {
-    atomic_file::write_file_atomically(
-        path,
-        &serde_json::to_vec(store).map_err(|e| e.to_string())?,
-        "local schedules",
-    )
-}
 fn next_time(cron: &str, timezone: &str, after: i64) -> Result<i64, String> {
     if cron.split_whitespace().count() != 5 {
         return Err("cron requires five fields: minute hour day month weekday".into());
@@ -179,7 +166,10 @@ fn next_time(cron: &str, timezone: &str, after: i64) -> Result<i64, String> {
     deny_unknown_fields
 )]
 pub(crate) enum Request {
-    List {},
+    List {
+        limit: Option<usize>,
+        cursor: Option<String>,
+    },
     Create {
         operation_id: String,
         spec: Spec,
@@ -200,6 +190,8 @@ pub(crate) enum Request {
     },
     History {
         schedule_id: String,
+        limit: Option<usize>,
+        cursor: Option<String>,
     },
     Run {
         schedule_id: String,
@@ -243,19 +235,15 @@ fn occurrence(plan: &Plan, id: String, at: i64, status: &str) -> Run {
 pub(crate) fn manage(request: Request) -> Result<Value, String> {
     let _guard = LOCK.lock().map_err(|_| "schedule lock poisoned")?;
     let path = root();
-    let mut store = load(&path)?;
+    let mut store = storage::load_request(&path, &request)?;
     let now = Utc::now().timestamp_millis();
     let result = match request {
-        Request::List {} => {
-            return Ok(
-                json!({"serviceEnabled":store.service_enabled,"machineAwakeRequired":true,"schedules":store.plans.iter().filter(|p| !p.deleted).collect::<Vec<_>>()}),
-            )
-        }
-        Request::History { schedule_id } => {
-            return Ok(
-                json!({"runs":store.runs.iter().filter(|r| r.schedule_id == schedule_id).collect::<Vec<_>>()}),
-            )
-        }
+        Request::List { limit, cursor } => return storage::page(&path, None, limit, cursor),
+        Request::History {
+            schedule_id,
+            limit,
+            cursor,
+        } => return storage::page(&path, Some(&schedule_id), limit, cursor),
         Request::Create { operation_id, spec } => {
             operation(&operation_id)?;
             let id = operation_receipts::deterministic_identity(
@@ -270,9 +258,6 @@ pub(crate) fn manage(request: Request) -> Result<Value, String> {
                 } else {
                     Err("operationId conflict".into())
                 };
-            }
-            if store.plans.len() >= MAX_PLANS {
-                return Err("schedule capacity reached".into());
             }
             let next_at = spec.validate(now)?;
             let plan = Plan {
@@ -343,9 +328,6 @@ pub(crate) fn manage(request: Request) -> Result<Value, String> {
             if let Some(run) = store.runs.iter().find(|r| r.id == id) {
                 return Ok(json!(run));
             }
-            if store.runs.len() >= MAX_RUNS {
-                return Err("schedule history capacity reached".into());
-            }
             if store
                 .runs
                 .iter()
@@ -360,11 +342,10 @@ pub(crate) fn manage(request: Request) -> Result<Value, String> {
             result
         }
     };
-    save(&path, &store)?;
+    storage::save(&path, &store)?;
     Ok(result)
 }
-// Jump directly to the next future occurrence after a missed interval. One history
-// record represents the skipped interval; never replay an unbounded backlog.
+// Coalesce missed recurring occurrences into the latest due occurrence.
 fn plan_due(store: &mut Store, now: i64) -> Result<(), String> {
     if !store.service_enabled {
         return Ok(());
@@ -376,12 +357,26 @@ fn plan_due(store: &mut Store, now: i64) -> Result<(), String> {
         let Some(at) = p.next_at.filter(|t| *t <= now) else {
             continue;
         };
-        if store.runs.len() >= MAX_RUNS {
-            p.enabled = false;
-            continue;
-        }
-        let status = if now - at >= MISFIRE_GRACE_MS {
-            "skippedMissed"
+        let at = if let Some(cron) = &p.spec.cron {
+            let tz = p
+                .spec
+                .timezone
+                .parse::<chrono_tz::Tz>()
+                .map_err(|e| e.to_string())?;
+            let time = DateTime::<Utc>::from_timestamp_millis(now)
+                .ok_or("invalid schedule time")?
+                .with_timezone(&tz);
+            croner::Cron::from_str(cron)
+                .map_err(|e| e.to_string())?
+                .find_previous_occurrence(&time, true)
+                .map_err(|e| e.to_string())?
+                .timestamp_millis()
+                .max(at)
+        } else {
+            at
+        };
+        let status = if p.spec.expires_at.is_some_and(|expiry| now > expiry) {
+            "expired"
         } else if store
             .runs
             .iter()
@@ -412,12 +407,7 @@ pub(crate) fn keep_alive() -> bool {
     let Ok(_guard) = LOCK.try_lock() else {
         return true;
     };
-    load(&root())
-        .map(|s| {
-            s.runs.iter().any(Run::active)
-                || (s.service_enabled && s.plans.iter().any(|p| p.enabled && !p.deleted))
-        })
-        .unwrap_or(true)
+    storage::keep_alive(&root()).unwrap_or(true)
 }
 fn dispatch(writer: &EventWriter, run: &mut Run) -> Result<(), String> {
     if let Some(id) = &run.agent_run_id {
@@ -441,6 +431,14 @@ fn dispatch(writer: &EventWriter, run: &mut Run) -> Result<(), String> {
             "Previously admitted Session/AgentRun is no longer available; it was not recreated"
                 .into(),
         );
+        return Ok(());
+    }
+    if run
+        .spec
+        .expires_at
+        .is_some_and(|expiry| Utc::now().timestamp_millis() > expiry)
+    {
+        run.status = "expired".into();
         return Ok(());
     }
     let mut config = runtime_config::get(runtime_config::AgentRuntimeConfigGetRequest {})?;
@@ -485,7 +483,7 @@ fn dispatch(writer: &EventWriter, run: &mut Run) -> Result<(), String> {
 fn tick(writer: &EventWriter) -> Result<(), String> {
     let _guard = LOCK.lock().map_err(|_| "schedule lock poisoned")?;
     let path = root();
-    let mut store = load(&path)?;
+    let mut store = storage::load_work(&path, Utc::now().timestamp_millis())?;
     let mut saved = serde_json::to_vec(&store).map_err(|e| e.to_string())?;
     // Reconcile active receipts first, including after a crash between admission
     // and saving its acknowledgement. Retrying uses the same Session/Run keys.
@@ -499,14 +497,14 @@ fn tick(writer: &EventWriter) -> Result<(), String> {
         }
         let current = serde_json::to_vec(&store).map_err(|e| e.to_string())?;
         if current != saved {
-            save(&path, &store)?;
+            storage::save(&path, &store)?;
             saved = current;
         }
     }
     plan_due(&mut store, Utc::now().timestamp_millis())?;
     // Intent and next-fire advance are one atomic write, before external effects.
     if serde_json::to_vec(&store).map_err(|e| e.to_string())? != saved {
-        save(&path, &store)?;
+        storage::save(&path, &store)?;
     }
     Ok(())
 }

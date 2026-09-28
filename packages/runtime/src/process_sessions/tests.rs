@@ -365,3 +365,14 @@ fn desktop_and_tui_samples_match_process_wire_serialization() {
     };
     assert_eq!(serde_json::to_value(output).unwrap(), samples["output"]);
 }
+
+#[test]
+fn explicit_process_deadline_can_exceed_one_day() {
+    let manager = Manager::default();
+    let mut req = request(&manager, "long-deadline", "printf done");
+    req.timeout_ms = 86_400_001;
+    let id = manager
+        .start_at(req, std::env::current_dir().unwrap())
+        .unwrap();
+    assert_eq!(finished(&manager, &id).exit_code, Some(0));
+}

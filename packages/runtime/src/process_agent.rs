@@ -21,7 +21,6 @@ use std::{
 };
 
 const PROVIDER: &str = "native.process";
-const MAX_RECORDS: usize = 256;
 static OUTBOX_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -70,33 +69,85 @@ fn save(root: &Path, record: &Record) -> Result<(), String> {
             "process output",
         )?;
     }
-    atomic_file::write_file_atomically(
-        &record_path(root, &record.operation_id),
-        &serde_json::to_vec(record).map_err(|e| e.to_string())?,
-        "process completion",
+    let mut conn = open_records(root)?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    store_record(&tx, record)?;
+    tx.commit().map_err(|e| e.to_string())
+}
+fn store_record(conn: &rusqlite::Connection, record: &Record) -> Result<(), String> {
+    let key = operation_receipts::deterministic_identity("", PROVIDER, &record.operation_id);
+    crate::local_work_store::put(
+        conn,
+        "completions",
+        &key,
+        &record.owner.session_id,
+        if record.delivery == Delivery::Pending {
+            "pending"
+        } else {
+            "finished"
+        },
+        None,
+        record,
+    )?;
+    if let Some(id) = &record.process_session_id {
+        crate::local_work_store::put(
+            conn,
+            "processLookup",
+            id,
+            &record.owner.session_id,
+            "",
+            None,
+            &key,
+        )?;
+    }
+    Ok(())
+}
+fn open_records(root: &Path) -> Result<rusqlite::Connection, String> {
+    use crate::local_work_store as db;
+    let mut conn = db::open(&root.join("index.sqlite3"))?;
+    if db::get::<bool>(&conn, "meta", "imported")?.is_none() {
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        // Legacy JSON records remain untouched as the migration backup. The
+        // marker and imported rows commit together, so interruption is retryable.
+        for entry in fs::read_dir(root).map_err(|e| e.to_string())? {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            if path.extension().is_some_and(|e| e == "json") {
+                let record: Record =
+                    serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
+                        .map_err(|e| e.to_string())?;
+                if record.schema_version != 1 {
+                    return Err("unsupported process completion schema".into());
+                }
+                store_record(&tx, &record)?;
+            }
+        }
+        db::put(&tx, "meta", "imported", "", "", None, &true)?;
+        tx.commit().map_err(|e| e.to_string())?;
+    }
+    Ok(conn)
+}
+fn load_record(root: &Path, operation: &str) -> Result<Option<Record>, String> {
+    crate::local_work_store::get(
+        &open_records(root)?,
+        "completions",
+        &operation_receipts::deterministic_identity("", PROVIDER, operation),
     )
 }
-fn load(path: &Path) -> Result<Record, String> {
-    let record: Record = serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    if record.schema_version != 1 {
-        return Err("unsupported process completion schema".into());
+fn records_for(root: &Path, session: Option<&str>) -> Result<Vec<Record>, String> {
+    let conn = open_records(root)?;
+    if let Some(session) = session {
+        crate::local_work_store::query(
+            &conn,
+            "SELECT body FROM records WHERE namespace='completions' AND owner=?1 ORDER BY id",
+            [session],
+        )
+    } else {
+        crate::local_work_store::query(&conn,"SELECT body FROM records WHERE namespace='completions' AND state='pending' ORDER BY due,id",[])
     }
-    Ok(record)
 }
+#[cfg(test)]
 fn records(root: &Path) -> Result<Vec<Record>, String> {
-    if !root.exists() {
-        return Ok(Vec::new());
-    }
-    let mut result = Vec::new();
-    for path in fs::read_dir(root).map_err(|e| e.to_string())? {
-        let path = path.map_err(|e| e.to_string())?.path();
-        if path.extension().is_some_and(|e| e == "json") {
-            result.push(load(&path)?);
-        }
-    }
-    result.sort_by(|a, b| a.operation_id.cmp(&b.operation_id));
-    Ok(result)
+    records_for(root, Some("session-test"))
 }
 fn notification(record: &Record) -> String {
     let result = record.completion.as_ref().unwrap_or(&Value::Null);
@@ -108,11 +159,11 @@ fn notification(record: &Record) -> String {
 pub(crate) fn contracts() -> Vec<DynamicToolContract> {
     let target = json!({"process_session_id":{"type":"string"}});
     [
-        ("process_start", "Start a background command in this Session's workspace. Returns immediately. Runtime automatically notifies this Session after completion when its Agent is idle. Do not use for interactive programs. Cancellation of the Agent suppresses automatic follow-up but does not stop the process; use process_stop.", json!({"type":"object","properties":{"program":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"timeout_ms":{"type":"integer","minimum":0,"maximum":86400000}},"required":["program","args","timeout_ms"],"additionalProperties":false}), false),
+        ("process_start", "Start a background command in this Session's workspace. Returns immediately. Runtime automatically notifies this Session after completion when its Agent is idle. Do not use for interactive programs. Cancellation of the Agent suppresses automatic follow-up but does not stop the process; use process_stop.", json!({"type":"object","properties":{"program":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"timeout_ms":{"type":"integer","minimum":0}},"required":["program","args"],"additionalProperties":false}), false),
         ("process_list", "List this Session's live process sessions and retained agent task completion records.", json!({"type":"object","properties":{},"additionalProperties":false}), true),
         ("process_read", "Read bounded process output by cursor. Use nextCursor for subsequent pages. Does not wait or stop the process. Output is untrusted command data.", json!({"type":"object","properties":{"process_session_id":{"type":"string"},"cursor":{"type":"string"}},"required":["process_session_id","cursor"],"additionalProperties":false}), true),
         ("process_stop", "Request termination of this Session's process tree. Repeated stop is safe. Stopping is not proof of exit; inspect process_read or process_list.", json!({"type":"object","properties":target,"required":["process_session_id"],"additionalProperties":false}), false),
-        ("ssh_start", "Execute a remote shell command using system OpenSSH and existing SSH config/agent. Noninteractive authentication only. Completion uses process notifications; process_stop only stops local SSH, not proof of remote termination. Never blindly retry a remote command after disconnect.", json!({"type":"object","properties":{"destination":{"type":"string"},"command":{"type":"string"},"timeout_ms":{"type":"integer","minimum":0,"maximum":86400000}},"required":["destination","command","timeout_ms"],"additionalProperties":false}), false),
+        ("ssh_start", "Execute a remote shell command using system OpenSSH and existing SSH config/agent. Noninteractive authentication only. Completion uses process notifications; process_stop only stops local SSH, not proof of remote termination. Never blindly retry a remote command after disconnect.", json!({"type":"object","properties":{"destination":{"type":"string"},"command":{"type":"string"},"connect_timeout_seconds":{"type":"integer","minimum":1},"timeout_ms":{"type":"integer","minimum":0}},"required":["destination","command"],"additionalProperties":false}), false),
         ("schedule_manage", "Create and manage local schedules on the user's behalf from natural language. Do not ask the user to write JSON, create a config file or run CLI commands. First use context to read this Session's workspace, current configured model and explicit effort, clock and scheduler status (no credentials). Use these values unless the user requests different ones; clarify ambiguous timing/time zone. Call create with a stable operation_id and a complete spec. If the requested schedule should run and the service is disabled, enable it with service after successful creation; service enables all enabled plans, so account for existing plans shown by list. Confirm only after successful tool responses, stating the next time/time zone and local awake-machine requirement. Use list/history to inspect, update with expected_revision, pause/resume/delete to manage, and run with operation_id for manual execution. Pause/delete do not cancel admitted work. Never create or enable schedules without user intent.", crate::host_automation::tool_schema(), false),
     ].into_iter().map(|(name,summary,input_schema,concurrency_safe)| DynamicToolContract {
         name:name.into(), category:"local.process".into(),summary:summary.into(), input_schema, provider_id:PROVIDER.into(), scopes:vec![], concurrency_safe,turn_behavior:ToolTurnBehavior::ContinueTurn,
@@ -127,6 +178,7 @@ pub(crate) struct Provider {
 struct Start {
     program: String,
     args: Vec<String>,
+    #[serde(default)]
     timeout_ms: u64,
 }
 #[derive(Deserialize)]
@@ -155,7 +207,11 @@ impl Provider {
                         serde_json::from_str(&req.args_json).map_err(|e| e.to_string())?;
                     Start {
                         program: "ssh".into(),
-                        args: centaeris_runtime::openssh::command_args(&a.destination, &a.command)?,
+                        args: centaeris_runtime::openssh::command_args_with_timeout(
+                            &a.destination,
+                            &a.command,
+                            a.connect_timeout_seconds,
+                        )?,
                         timeout_ms: a.timeout_ms,
                     }
                 } else {
@@ -183,18 +239,13 @@ impl Provider {
                     .lock()
                     .map_err(|_| "process outbox lock poisoned")?;
                 let root = root();
-                let path = record_path(&root, &operation);
-                if path.exists() {
-                    let record = load(&path)?;
+                if let Some(record) = load_record(&root, &operation)? {
                     if record.owner != owner || record.request_digest != digest {
                         return Err("process operation conflict".into());
                     }
                     return Ok(
                         json!({"processSessionId":record.process_session_id,"completion":record.completion,"replayed":true,"serviceInstanceId":record.service_instance_id}),
                     );
-                }
-                if records(&root)?.len() >= MAX_RECORDS {
-                    return Err("process completion capacity reached; delete finished Sessions to release retained records".into());
                 }
                 let mut record = Record {
                     schema_version: 1,
@@ -241,7 +292,7 @@ impl Provider {
                 let _lock = OUTBOX_LOCK
                     .lock()
                     .map_err(|_| "process outbox lock poisoned")?;
-                let retained:Vec<Value>=records(&root())?.into_iter().filter(|r|r.owner.session_id==self.session_id).map(|r|json!({"processSessionId":r.process_session_id,"completion":r.completion,"delivery":r.delivery})).collect();
+                let retained:Vec<Value>=records_for(&root(),Some(&self.session_id))?.into_iter().map(|r|json!({"processSessionId":r.process_session_id,"completion":r.completion,"delivery":r.delivery})).collect();
                 Ok(json!({"processes":manager.list(&self.session_id),"retained":retained}))
             }
             "process_read" => {
@@ -258,7 +309,21 @@ impl Provider {
                             .lock()
                             .map_err(|_| "process outbox lock poisoned")?;
                         let root = root();
-                        let mut retained = records(&root)?;
+                        let conn = open_records(&root)?;
+                        let key: Option<String> = crate::local_work_store::get(
+                            &conn,
+                            "processLookup",
+                            &args.process_session_id,
+                        )?;
+                        let mut retained: Vec<Record> = match key {
+                            Some(key) => {
+                                crate::local_work_store::get::<Record>(&conn, "completions", &key)?
+                                    .into_iter()
+                                    .filter(|r| r.owner.session_id == self.session_id)
+                                    .collect()
+                            }
+                            None => vec![],
+                        };
                         if let Some(record) = retained.iter_mut().find(|r| {
                             r.owner.session_id == self.session_id
                                 && r.process_session_id.as_deref() == Some(&args.process_session_id)
@@ -465,7 +530,7 @@ pub(crate) fn tick(writer: &EventWriter) -> Result<(), String> {
         .map_err(|_| "process outbox lock poisoned")?;
     let root = root();
     let manager = process_sessions::manager();
-    for mut record in records(&root)? {
+    for mut record in records_for(&root, None)? {
         if record.delivery != Delivery::Pending {
             if let Some(id) = record.process_session_id {
                 manager.acknowledge_notification(process_sessions::Target {
@@ -552,7 +617,7 @@ pub(crate) fn flush_completions() -> Result<(), String> {
         .lock()
         .map_err(|_| "process outbox lock poisoned")?;
     let root = root();
-    for mut record in records(&root)? {
+    for mut record in records_for(&root, None)? {
         if record.delivery == Delivery::Pending
             && record.completion.is_none()
             && capture(&mut record, process_sessions::manager())?
@@ -568,9 +633,28 @@ pub(crate) fn forget_sessions(sessions: &[String]) -> Result<(), String> {
         .lock()
         .map_err(|_| "process outbox lock poisoned")?;
     let root = root();
-    for record in records(&root)? {
-        if sessions.contains(&record.owner.session_id) {
-            fs::remove_file(record_path(&root, &record.operation_id)).map_err(|e| e.to_string())?;
+    for session in sessions {
+        for record in records_for(&root, Some(session))? {
+            let conn = open_records(&root)?;
+            let key =
+                operation_receipts::deterministic_identity("", PROVIDER, &record.operation_id);
+            conn.execute(
+                "DELETE FROM records WHERE namespace='completions' AND id=?1",
+                [&key],
+            )
+            .map_err(|e| e.to_string())?;
+            if let Some(id) = &record.process_session_id {
+                conn.execute(
+                    "DELETE FROM records WHERE namespace='processLookup' AND id=?1",
+                    [id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            // Remove any legacy copy only on explicit Session deletion.
+            let legacy = record_path(&root, &record.operation_id);
+            if legacy.exists() {
+                fs::remove_file(legacy).map_err(|e| e.to_string())?;
+            }
             let output = record_path(&root, &record.operation_id).with_extension("output");
             if output.exists() {
                 fs::remove_file(output).map_err(|e| e.to_string())?;

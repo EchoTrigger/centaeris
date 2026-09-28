@@ -117,3 +117,40 @@ fn tool_contracts_have_exact_arguments_and_stable_identity() {
     )
     .is_err());
 }
+
+#[test]
+fn completed_outbox_history_does_not_enter_worker_pending_set() {
+    let manager = process_sessions::Manager::default();
+    let root = std::env::temp_dir().join(format!("outbox-index-{}", manager.service_instance_id()));
+    let mut r = record(&manager);
+    r.delivery = Delivery::Delivered;
+    // Verify explicit forward import of the old JSON layout.
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        record_path(&root, &r.operation_id),
+        serde_json::to_vec(&r).unwrap(),
+    )
+    .unwrap();
+    assert!(records_for(&root, None).unwrap().is_empty());
+    assert!(load_record(&root, &r.operation_id).unwrap().is_some());
+    let mut conn = open_records(&root).unwrap();
+    let tx = conn.transaction().unwrap();
+    for i in 0..300 {
+        r.operation_id = format!("done-{i}");
+        store_record(&tx, &r).unwrap();
+    }
+    tx.commit().unwrap();
+    conn.execute(
+        "UPDATE records SET body='not json' WHERE namespace='completions' AND state='finished'",
+        [],
+    )
+    .unwrap();
+    r.operation_id = "new-pending".into();
+    r.delivery = Delivery::Pending;
+    save(&root, &r).unwrap();
+    let pending = records_for(&root, None).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].operation_id, "new-pending");
+    drop(conn);
+    fs::remove_dir_all(root).unwrap();
+}

@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 // Local transport acceptance: mock model and an OpenSSH argv fixture, no remote host.
 import {createRuntimeHostTransport} from '../packages/desktop/src/runtimeHostTransport.mjs';
 import fs from 'node:fs/promises';
@@ -74,19 +75,23 @@ try{
  const ssh=await call(after,'ssh_start',sshRequest);assert.equal((await call(after,'ssh_start',sshRequest)).processSessionId,ssh.processSessionId);
  let page;await until(async()=>{page=await call(after,'process_session_read',{sessionId:sshSession.id,processSessionId:ssh.processSessionId,cursor:'0',waitMs:0});return page.process.outputComplete;},'SSH fixture output');
  const output=page.chunks.map(c=>Buffer.from(c.dataBase64,'base64').toString()).join('');
- assert.equal(page.process.exitCode,0,output);assert(output.includes('BatchMode=yes'));assert(output.includes(sshRequest.command));
+ assert.equal(page.process.exitCode,0,output);assert(output.includes('BatchMode=yes'));assert(!output.includes('ConnectTimeout='));assert(output.includes(sshRequest.command));
  await assert.rejects(call(after,'ssh_start',{...sshRequest,operationId:'invalid',destination:'-oProxyCommand=bad'}),/destination/);
  // Save a lost acknowledgement while offline, then prove deterministic recovery.
  await call(after,'runtime/shutdown',{});await until(()=>server.exitCode!==null,'shutdown');
- const file=path.join(profile,'runtime/schedules.json');const db=JSON.parse(await fs.readFile(file,'utf8'));
- const completed=db.runs.find(r=>r.scheduleId===one.id);completed.status='pending';completed.sessionId=null;
- // Also record an old missed minute; restarting must skip rather than flood.
- const fp=db.plans.find(p=>p.id===future.id);fp.spec.cron='* * * * *';fp.nextAt=Date.now()-600000;
- await fs.writeFile(file,JSON.stringify(db));
+ const db=new DatabaseSync(path.join(profile,'runtime/schedules.sqlite3'));
+ const completed=JSON.parse(db.prepare("SELECT body FROM records WHERE namespace='runs' AND owner=?").get(one.id).body);
+ completed.status='pending';completed.sessionId=null;
+ db.prepare("UPDATE records SET body=?,state='active' WHERE namespace='runs' AND id=?").run(JSON.stringify(completed),completed.id);
+ // Restart coalesces missed recurring times into one latest occurrence.
+ const fp=JSON.parse(db.prepare("SELECT body FROM records WHERE namespace='plans' AND id=?").get(future.id).body);
+ fp.spec.cron='* * * * *';fp.nextAt=Date.now()-600000;
+ db.prepare("UPDATE records SET body=?,due=? WHERE namespace='plans' AND id=?").run(JSON.stringify(fp),fp.nextAt,fp.id);
+ db.close();
  const restarted=client();await initialize(restarted);
  await until(async()=>(await history(restarted,one.id)).runs[0]?.status==='succeeded','lost acknowledgement recovery');
- await until(async()=>(await history(restarted,future.id)).runs.some(r=>r.status==='skippedMissed'),'missed interval');
- assert.equal(requests.length,2,'restart cannot resubmit admitted occurrence');
+ await until(async()=>(await history(restarted,future.id)).runs.some(r=>r.status==='succeeded'),'coalesced catch-up');
+ assert.equal(requests.length,3,'restart recovers admitted work and executes exactly one catch-up');
  assert((await history(restarted,one.id)).runs[0].sessionId,'recovered history links to Session');
  await manage(restarted,{action:'service',enabled:false});
  await call(restarted,'runtime/shutdown',{});

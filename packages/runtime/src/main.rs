@@ -12,6 +12,7 @@ mod local_attachments;
 mod local_execution_policy;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod local_hook_runner;
+mod local_work_store;
 mod mcp;
 mod message_log;
 mod operation_receipts;
