@@ -266,6 +266,8 @@ export function ChatArea({
     persistVisibleSessionViewCache,
     scheduleVisibleSessionViewCachePersist,
   } = useSessionViewCachePersistence({
+    transcriptViewRef,
+    transcriptHistoryMessageCountRef,
     currentSessionId,
     contextUsage,
     autoContinueAfterResumeWait,
@@ -555,7 +557,7 @@ export function ChatArea({
     onAgentRunningChange,
   });
 
-  const { isHydratingSession, hydrationStage, reconcileTerminalAgentRun } =
+  const { isHydratingSession, hydrationStage, reconcileTerminalAgentRun, syncError, retrySessionSync } =
     useSessionViewHydrationController({
       view: {
         currentSessionId,
@@ -920,6 +922,13 @@ export function ChatArea({
             <p>{t("chatArea.noSourcesYet")}</p>
           </div>
         </section>
+      ) : null}
+
+      {syncError && !sessionLoadError ? (
+        <div className="session-sync-status" role="status">
+          <span>{t("chatArea.syncPaused", { message: syncError })}</span>
+          <button type="button" onClick={retrySessionSync}>{t("chatArea.retrySync")}</button>
+        </div>
       ) : null}
 
       <div

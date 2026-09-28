@@ -21,6 +21,21 @@ const eventPayload = (event) => ({
   },
 });
 
+test("returning to a running session replays canonical runtime events without loss or duplication", () => {
+  const delta = { ...eventPayload({ id: "live-delta", type: "ModelTextDelta", at: 100, payload: { delta: "正在研究" } }), type: "runtime_event" };
+  const tool = { ...eventPayload({ id: "live-tool", type: "ToolCall", at: 101, toolName: "bash", status: "running", payload: { callId: "call-running", summary: "检查工作区" } }), type: "runtime_event" };
+  const items = [delta, delta, tool];
+  assert.deepEqual(restore.assertProjectionStreamPayloads("agent-run-restore", items), items);
+  const summary = { agentRunId: "agent-run-restore", sessionId: "session-restore", status: "running", startedAtMs: 100, updatedAtMs: 101 };
+  const replay = runtimeModel.buildAgentRunReplayMessage(summary, items);
+  assert.equal(replay.turn.isStreaming, true);
+  assert.equal(replay.turn.chunks.filter(c => c.kind === "task").length, 1);
+  assert.ok(JSON.stringify(replay.turn).includes("正在研究"));
+  const seen = runtimeModel.buildSeenSetsFromStreamPayloads(items);
+  assert.equal(seen.seenSessionEventIds.size, 2);
+  assert.throws(() => restore.buildAssistantTurnFromStreamItems([{ type: "unknown_event" }], "", 0), /unsupported/);
+});
+
 test("restores a canonical dynamic tool operation", () => {
   const turn = restore.buildAssistantTurnFromStreamItems(
     [

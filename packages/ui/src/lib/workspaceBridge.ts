@@ -153,9 +153,7 @@ export const getWorkspaceInfo = async (): Promise<WorkspaceSnapshot> => {
   return invokeHost<WorkspaceSnapshot>("workspace_get", {});
 };
 
-export const openWorkspaceFolder = async (
-  mode: WorkspaceOpenMode,
-): Promise<WorkspaceSnapshot> => {
+export const openWorkspaceFolder = async (mode: WorkspaceOpenMode): Promise<WorkspaceSnapshot> => {
   if (shouldUseWorkspaceMock("workspace_open_folder")) {
     return mockWorkspaceSnapshot;
   }
@@ -164,9 +162,7 @@ export const openWorkspaceFolder = async (
   });
 };
 
-export const activateWorkspaceRoot = async (
-  root: string,
-): Promise<WorkspaceSnapshot> => {
+export const activateWorkspaceRoot = async (root: string): Promise<WorkspaceSnapshot> => {
   if (shouldUseWorkspaceMock("workspace_activate")) {
     return {
       ...mockWorkspaceSnapshot,
@@ -180,9 +176,7 @@ export const activateWorkspaceRoot = async (
   });
 };
 
-export const revealWorkspaceFolder = async (
-  root: string,
-): Promise<WorkspaceSnapshot> => {
+export const revealWorkspaceFolder = async (root: string): Promise<WorkspaceSnapshot> => {
   if (shouldUseWorkspaceMock("workspace_reveal_folder")) {
     return mockWorkspaceSnapshot;
   }
@@ -193,10 +187,7 @@ export const revealWorkspaceFolder = async (
   });
 };
 
-export const renameWorkspace = async (
-  root: string,
-  name: string,
-): Promise<WorkspaceSnapshot> => {
+export const renameWorkspace = async (root: string, name: string): Promise<WorkspaceSnapshot> => {
   if (shouldUseWorkspaceMock("workspace_rename")) {
     return {
       ...mockWorkspaceSnapshot,
@@ -213,9 +204,7 @@ export const renameWorkspace = async (
   });
 };
 
-export const removeWorkspace = async (
-  root: string,
-): Promise<WorkspaceRemoveResponse> => {
+export const removeWorkspace = async (root: string): Promise<WorkspaceRemoveResponse> => {
   if (shouldUseWorkspaceMock("workspace_remove")) {
     return { removed: true };
   }
@@ -260,11 +249,8 @@ export const readWorkspaceFile = async (
 ): Promise<WorkspaceReadFileResponse> => {
   if (shouldUseWorkspaceMock("workspace_read_file")) {
     const normalizedPath = path.replace(/\\/g, "/");
-    const name =
-      normalizedPath.split("/").filter(Boolean).at(-1) || normalizedPath;
-    const content =
-      mockWorkspaceFiles[normalizedPath] ??
-      `// Mock preview for ${normalizedPath}\n`;
+    const name = normalizedPath.split("/").filter(Boolean).at(-1) || normalizedPath;
+    const content = mockWorkspaceFiles[normalizedPath] ?? `// Mock preview for ${normalizedPath}\n`;
     return {
       root: mockWorkspaceTree.root,
       path: normalizedPath,
@@ -292,11 +278,9 @@ export const readDesktopFilePreview = async (
 ): Promise<DesktopFilePreviewReadResponse> => {
   if (shouldUseWorkspaceMock("desktop_file_preview_read")) {
     const normalizedPath = path.replace(/\\/g, "/");
-    const name =
-      normalizedPath.split("/").filter(Boolean).at(-1) || normalizedPath;
+    const name = normalizedPath.split("/").filter(Boolean).at(-1) || normalizedPath;
     const content =
-      mockWorkspaceFiles[normalizedPath] ??
-      `// Mock desktop preview for ${normalizedPath}\n`;
+      mockWorkspaceFiles[normalizedPath] ?? `// Mock desktop preview for ${normalizedPath}\n`;
     return {
       root: options.basePath ?? options.workspaceRoot ?? mockWorkspaceTree.root,
       path: normalizedPath,
@@ -308,16 +292,13 @@ export const readDesktopFilePreview = async (
       mimeType: "text/plain; charset=utf-8",
     };
   }
-  return invokeHost<DesktopFilePreviewReadResponse>(
-    "desktop_file_preview_read",
-    {
-      request: {
-        path,
-        workspaceRoot: options.workspaceRoot,
-        basePath: options.basePath,
-      },
+  return invokeHost<DesktopFilePreviewReadResponse>("desktop_file_preview_read", {
+    request: {
+      path,
+      workspaceRoot: options.workspaceRoot,
+      basePath: options.basePath,
     },
-  );
+  });
 };
 
 const requireNativeGitWorkbench = (capability: string): void => {
@@ -353,22 +334,92 @@ export const getWorkspaceGitFileDiff = async (
   path: string,
 ): Promise<WorkspaceGitFileDiffResponse> => {
   requireNativeGitWorkbench("workspace git file diff");
-  return invokeHost<WorkspaceGitFileDiffResponse>(
-    "workspace_git_file_diff_get",
-    {
-      request: {
-        workspaceRoot,
-        path,
-      },
+  return invokeHost<WorkspaceGitFileDiffResponse>("workspace_git_file_diff_get", {
+    request: {
+      workspaceRoot,
+      path,
     },
-  );
+  });
 };
 
-export const getWorkspaceGitHubCliStatus =
-  async (): Promise<WorkspaceGitHubCliStatusResponse> => {
-    requireNativeGitWorkbench("workspace GitHub CLI status");
-    return invokeHost<WorkspaceGitHubCliStatusResponse>(
-      "workspace_git_github_cli_status_get",
-      {},
-    );
-  };
+export const getWorkspaceGitHubCliStatus = async (): Promise<WorkspaceGitHubCliStatusResponse> => {
+  requireNativeGitWorkbench("workspace GitHub CLI status");
+  return invokeHost<WorkspaceGitHubCliStatusResponse>("workspace_git_github_cli_status_get", {});
+};
+
+export type WorkspaceGitSnapshot = { head: string | null; indexFingerprint: string };
+export type WorkspaceGitReviewFile = { path: string; originalPath: string | null; status: string };
+export type WorkspaceGitReviewResponse = {
+  workspaceRoot: string;
+  branch: string | null;
+  snapshot: WorkspaceGitSnapshot;
+  staged: WorkspaceGitReviewFile[];
+  unstaged: WorkspaceGitReviewFile[];
+  untracked: WorkspaceGitReviewFile[];
+  conflicts: WorkspaceGitReviewFile[];
+};
+export const getWorkspaceGitReview = (
+  workspaceRoot: string,
+): Promise<WorkspaceGitReviewResponse> => {
+  requireNativeGitWorkbench("workspace Git review");
+  return invokeHost("workspace_git_review_get", { request: { workspaceRoot } });
+};
+export const getWorkspaceGitReviewDiff = (
+  workspaceRoot: string,
+  path: string,
+  side: "staged" | "unstaged",
+): Promise<WorkspaceGitFileDiffResponse> => {
+  requireNativeGitWorkbench("workspace Git review diff");
+  return invokeHost("workspace_git_review_diff_get", { request: { workspaceRoot, path, side } });
+};
+export const stageWorkspaceGitFile = (
+  workspaceRoot: string,
+  path: string,
+  expected: WorkspaceGitSnapshot,
+): Promise<WorkspaceGitReviewResponse> => {
+  requireNativeGitWorkbench("workspace Git stage");
+  return invokeHost("workspace_git_stage", { request: { workspaceRoot, path, expected } });
+};
+export const unstageWorkspaceGitFile = (
+  workspaceRoot: string,
+  path: string,
+  expected: WorkspaceGitSnapshot,
+): Promise<WorkspaceGitReviewResponse> => {
+  requireNativeGitWorkbench("workspace Git unstage");
+  return invokeHost("workspace_git_unstage", { request: { workspaceRoot, path, expected } });
+};
+export const commitWorkspaceGit = (
+  workspaceRoot: string,
+  message: string,
+  expected: WorkspaceGitSnapshot,
+): Promise<{ commitSha: string; output: string }> => {
+  requireNativeGitWorkbench("workspace Git commit");
+  return invokeHost("workspace_git_commit", { request: { workspaceRoot, message, expected } });
+};
+
+export type WorkspaceGitSource = "unstaged" | "staged" | "branch";
+export type WorkspaceGitViewFile = WorkspaceGitReviewFile & {
+  added: number | null;
+  removed: number | null;
+};
+export type WorkspaceGitView = {
+  workspaceRoot: string;
+  branch: string | null;
+  source: WorkspaceGitSource;
+  snapshot: WorkspaceGitSnapshot;
+  baseRef: string | null;
+  files: WorkspaceGitViewFile[];
+  hasConflicts: boolean;
+  diff: WorkspaceGitFileDiffResponse | null;
+};
+export const getWorkspaceGitView = (
+  workspaceRoot: string,
+  source: WorkspaceGitSource,
+  baseRef?: string,
+  path?: string,
+): Promise<WorkspaceGitView> => {
+  requireNativeGitWorkbench("workspace Git view");
+  return invokeHost("workspace_git_view_get", {
+    request: { workspaceRoot, source, baseRef, path },
+  });
+};

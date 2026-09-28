@@ -46,21 +46,8 @@ test("keeps other destructive actions in the lightweight React dialog", async ()
   assert.match(stylesSource, /background: color-mix\(in srgb, var\(--on-surface\) 16%, transparent\)/);
 });
 
-test("renders the project picker with the flat in-app menu style", async () => {
-  const [sidebarSource, stylesSource] = await Promise.all([
-    readFile(sidebarUrl, "utf8"),
-    readFile(stylesUrl, "utf8"),
-  ]);
-  const defaultIndex = sidebarSource.indexOf("Use default directory");
-  const customIndex = sidebarSource.indexOf("Custom path...");
-  const workspaceIndex = sidebarSource.indexOf("workspaces.map");
-
-  assert.ok(defaultIndex >= 0 && defaultIndex < customIndex);
-  assert.ok(customIndex < workspaceIndex);
-  assert.match(sidebarSource, /className="thinWorkspaceSelectPanel" role="menu"/);
-  assert.match(sidebarSource, /closeOnOutsidePointer/);
-  assert.match(sidebarSource, /event\.key === "Escape"/);
-  assert.doesNotMatch(sidebarSource, /<select/);
-  assert.match(stylesSource, /\.thinWorkspaceSelectPanel \{[\s\S]*?border: 1px solid var\(--outline-variant\);[\s\S]*?box-shadow: none/);
-  assert.doesNotMatch(sidebarSource, /thinOpenWorkspaceButton|<FolderOpen/);
+test("workspace selection is removed from the sidebar", async () => {
+  const source = await readFile(sidebarUrl, "utf8");
+  assert.doesNotMatch(source, /aria-label="Current project"/);
+  assert.match(source, /aria-label="Settings"/);
 });

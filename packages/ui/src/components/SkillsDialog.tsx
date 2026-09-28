@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Search,
+  Settings2,
   BookOpen,
   Check,
   FilePlus2,
-  FileText,
   FolderOpen,
   MapPin,
   PackagePlus,
@@ -30,11 +31,13 @@ import {
   type SkillSourcesConfig,
 } from "../lib/chatBridge";
 import { MarkdownContent } from "./chat/MarkdownContent";
+import { ResourceDetailDialog } from "./ResourceDetailDialog";
 import type { ConfirmAction } from "./ConfirmDialog";
 
 type SkillSelection =
   | { kind: "skill"; id: string }
   | { kind: "source"; id: string }
+  | { kind: "sources" }
   | { kind: "add" }
   | null;
 
@@ -78,6 +81,8 @@ const skillIcon = (name: string) => {
 };
 
 export function SkillsDialog({ workspaceRoot, confirmAction }: SkillsDialogProps) {
+  const [query, setQuery] = useState("");
+  const [scope, setScope] = useState<"personal" | "system">("personal");
   const [sources, setSources] = useState<SkillSourcesConfig>(emptySources);
   const [catalog, setCatalog] = useState<SkillCatalogSnapshot | null>(null);
   const [selection, setSelection] = useState<SkillSelection>(null);
@@ -124,16 +129,9 @@ export function SkillsDialog({ workspaceRoot, confirmAction }: SkillsDialogProps
     return normalizePath(source.workspaceRoot) === normalizePath(workspaceRoot);
   }), [sources.sources, workspaceRoot]);
 
-  const skillsBySource = useMemo(() => {
-    const groups = new Map<string, SkillEntry[]>();
-    for (const skill of catalog?.skills ?? []) {
-      const group = groups.get(skill.sourceId) ?? [];
-      group.push(skill);
-      groups.set(skill.sourceId, group);
-    }
-    for (const group of groups.values()) group.sort((left, right) => left.name.localeCompare(right.name));
-    return groups;
-  }, [catalog]);
+  const visibleSkills = useMemo(() => (catalog?.skills ?? []).filter(skill =>
+    (scope === "personal" ? skill.scope === "user" || skill.scope === "workspace" : skill.scope === "system") && `${skill.name} ${skill.description}`.toLowerCase().includes(query.trim().toLowerCase())
+  ).sort((a, b) => a.name.localeCompare(b.name)), [catalog, scope, query]);
 
   const selectedSource = selection?.kind === "source"
     ? visibleSources.find((source) => source.sourceId === selection.id) ?? null
@@ -178,58 +176,24 @@ export function SkillsDialog({ workspaceRoot, confirmAction }: SkillsDialogProps
   };
 
   return (
-    <div className="skillsDialogLayout">
-      <aside className="skillsSidebar">
-        <div className="skillsSourceList">
-          {visibleSources.length === 0 && !loading ? (
-            <p className="skillsEmptySidebar">No skill locations</p>
-          ) : null}
-          {visibleSources.map((source) => (
-            <section className="skillsSourceGroup" key={source.sourceId}>
-              <button
-                type="button"
-                className={selection?.kind === "source" && selection.id === source.sourceId ? "skillsSourceButton is-active" : "skillsSourceButton"}
-                onClick={() => selectWithoutDetail({ kind: "source", id: source.sourceId })}
-              >
-                <span className="skillsSourceIcon">{source.scope === "system" ? <BookOpen /> : source.kind === "skillFile" ? <FileText /> : <FolderOpen />}</span>
-                <span className="skillsSourceCopy">
-                  <strong>{pathLeaf(source.path)}</strong>
-                  <small>{scopeLabel(source)}</small>
-                </span>
-                <i className={source.enabled ? "is-enabled" : ""} aria-label={source.enabled ? "Enabled" : "Disabled"} />
-              </button>
-              <div className="skillsSourceChildren">
-                {(skillsBySource.get(source.sourceId) ?? []).map((skill) => (
-                  <button
-                    type="button"
-                    key={skill.skillId}
-                    className={selection?.kind === "skill" && selection.id === skill.skillId ? "is-active" : ""}
-                    onClick={() => void openSkill(skill)}
-                  >
-                    <span className="skillsItemLabel">{skillIcon(skill.name)}<span>{skill.name}</span></span>
-                    {skill.enabled && !skill.shadowedBy && skill.errors.length === 0 ? <Check /> : null}
-                  </button>
-                ))}
-                {source.enabled && (skillsBySource.get(source.sourceId) ?? []).length === 0 ? (
-                  <span className="skillsSourceEmpty">No valid skills</span>
-                ) : null}
-              </div>
-            </section>
-          ))}
-        </div>
-        <button type="button" className="modelsAddButton modelsAddProvider skillsAddLocation" onClick={() => selectWithoutDetail({ kind: "add" })}>
-          <Plus aria-hidden="true" /> Add location
-        </button>
-      </aside>
-
-      <main className="skillsMain">
-        <div className="skillsToolbar">
-          <span>{catalog ? `${catalog.skills.length} skills` : "Skills"}</span>
-          <button type="button" onClick={() => void load(true)} disabled={loading} title="Reload">
-            <RefreshCw aria-hidden="true" />
-          </button>
-        </div>
-        <div className="skillsMainScroll">
+    <div className="extensionSurface">
+      <div className="extensionScroll"><main className="extensionCatalog">
+        <header className="extensionToolbar"><h1>Skills</h1>
+          <label className="extensionSearch"><Search size={16} aria-hidden="true" /><input aria-label="Search skills" placeholder="Search skills" value={query} onChange={event => setQuery(event.target.value)} /></label>
+          <button type="button" aria-label="Reload skills" title="Reload skills" disabled={loading} onClick={() => void load(true)}><RefreshCw /></button>
+          <button type="button" aria-label="Manage skill locations" title="Manage skill locations" onClick={() => selectWithoutDetail({kind:"sources"})}><Settings2 /></button>
+          <button type="button" onClick={() => selectWithoutDetail({kind:"add"})}><Plus /> Add</button>
+        </header>
+        <div className="extensionFilters" role="group" aria-label="Skill scope">{([['personal','Personal'],['system','System']] as const).map(([value,label]) => <button type="button" key={value} aria-pressed={scope === value} onClick={() => setScope(value)}>{label}</button>)}</div>
+        <div className="extensionGrid" aria-busy={loading}>{visibleSkills.map(skill => <button type="button" key={skill.skillId} className="extensionRow" aria-label={`Open ${skill.name}`} onClick={() => void openSkill(skill)}>
+          <span className="extensionIcon">{skillIcon(skill.name)}</span><span className="extensionCopy"><strong>{skill.name}</strong><small>{skill.description}</small></span>
+          <span className="extensionStatus" aria-label={skill.errors.length ? "Needs attention" : skill.shadowedBy ? "Shadowed" : skill.enabled ? "Enabled" : "Disabled"}>{skill.errors.length ? "!" : skill.enabled && !skill.shadowedBy ? <Check size={16} /> : "—"}</span>
+        </button>)}</div>
+        {loading && !catalog ? <p className="extensionEmpty">Loading…</p> : !visibleSkills.length ? <p className="extensionEmpty">No skills match this view</p> : null}
+        {error && !selection ? <p role="status">{error}</p> : null}
+      </main></div>
+      {selection ? <ResourceDetailDialog title={selectedSkill?.name ?? (selection.kind === "add" ? "Add skill location" : "Skill locations")} onClose={() => selectWithoutDetail(null)}>
+        {selection.kind === "sources" ? <section className="skillsDetail"><h2>Skill locations</h2>{visibleSources.map(source => <button type="button" className="extensionSourceRow" key={source.sourceId} onClick={() => selectWithoutDetail({kind:"source",id:source.sourceId})}><FolderOpen size={18}/><span>{pathLeaf(source.path)}<small>{scopeLabel(source)} · {source.path}</small></span></button>)}{!visibleSources.length ? <p>No registered locations</p> : null}</section> : null}
           {selection?.kind === "add" ? (
             <AddSkillLocation
               workspaceRoot={workspaceRoot}
@@ -280,14 +244,9 @@ export function SkillsDialog({ workspaceRoot, confirmAction }: SkillsDialogProps
                 if (nextSkill && detail) setDetail({ ...detail, skill: nextSkill });
               })}
             />
-          ) : (
-            <div className="skillsEmptyMain">
-              <span>Select a skill</span>
-            </div>
-          )}
-        </div>
+          ) : null}
         {error ? <div className="skillsError" role="status">{error}</div> : null}
-      </main>
+      </ResourceDetailDialog> : null}
     </div>
   );
 }
@@ -399,7 +358,7 @@ function SkillDetailView({
   return (
     <article className="skillsDetail">
       <header className="skillsDetailHeader">
-        <div><span className="skillsEyebrow">{skill.scope} skill</span><h2>{skill.name}</h2><p>{skill.description}</p></div>
+        <div><span className="skillsEyebrow">{skill.scope === "workspace" ? "Personal · Current workspace only" : skill.scope === "user" ? "Personal" : skill.scope === "system" ? "System" : "Plugin"} skill</span><h2>{skill.name}</h2><p>{skill.description}</p></div>
         <button type="button" className="resourceSwitch" onClick={onToggle} disabled={pending || skill.errors.length > 0} aria-label={skill.enabled ? "Disable skill" : "Enable skill"} aria-pressed={skill.enabled}><span className={skill.enabled ? "is-on" : ""} /></button>
       </header>
       <div className="skillsBadges">

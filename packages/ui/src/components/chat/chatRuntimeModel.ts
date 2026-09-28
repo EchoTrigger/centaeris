@@ -38,8 +38,8 @@ import {
 } from "./chatTranscriptRestore";
 import {
   DesktopTranscriptView,
-  loadTranscriptPage,
 } from "./transcriptPaging";
+import { synchronizeSessionTranscript } from "./sessionTranscriptSync";
 export {
   appendGuidedSupplementChunk,
   appendPersistedNarrative,
@@ -615,6 +615,7 @@ const setHydrationStage = (
 export const buildSessionHydrationSnapshot = async (
   sessionId: string,
   control?: HydrationControl,
+  cachedTranscript?: DesktopTranscriptView | null,
 ): Promise<SessionHydrationSnapshot> => {
   const normalizedSessionId = sessionId.trim();
   if (!normalizedSessionId) {
@@ -622,11 +623,11 @@ export const buildSessionHydrationSnapshot = async (
   }
   assertHydrationNotCancelled(control);
   setHydrationStage(control, "fetchProjection");
-  const [transcriptPage, taskResponse, agentState, runtimeConfig, usage] =
+  const [transcriptView, taskResponse, agentState, runtimeConfig, usage] =
     await Promise.all([
       readHydrationValue(
         t("chatRuntimeModel.loadingHistoryConversationProjection"),
-        loadTranscriptPage({ sessionId: normalizedSessionId }),
+        synchronizeSessionTranscript(normalizedSessionId, cachedTranscript, control?.isCancelled),
       ),
       readHydrationValue(
         t("chatRuntimeModel.loadingAgentState"),
@@ -688,7 +689,6 @@ export const buildSessionHydrationSnapshot = async (
 
   setHydrationStage(control, "reduceMessages");
   await yieldHydration(control);
-  const transcriptView = DesktopTranscriptView.open(transcriptPage);
   const historyMessages = transcriptView.materializeMessages(
     Boolean(replayRun && isActiveAgentRun(replayRun)),
   );
@@ -737,7 +737,7 @@ export const buildSessionHydrationSnapshot = async (
 
   return {
     messages,
-    transcriptPage,
+    transcriptView,
     transcriptHistoryMessageCount: historyMessages.length,
     runtimeConfig,
     contextUsage: usage,

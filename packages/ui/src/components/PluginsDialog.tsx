@@ -1,5 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Blocks,
+  ChevronRight,
   FolderOpen,
   Package,
   Plus,
@@ -41,9 +43,11 @@ const EMPTY_STATE: PluginsDialogState = {
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error || "plugin request failed");
 
-export function PluginsDialog() {
+export function PluginsDialog({ selectedPluginId, onSelect }: { selectedPluginId?: string; onSelect?: (id: string) => void }) {
   const [query, setQuery] = useState("");
-  const [selectedId, setSelectedId] = useState("");
+  const [localSelectedId, setLocalSelectedId] = useState("");
+  const selectedId = selectedPluginId ?? localSelectedId;
+  const setSelectedId = (id: string) => { if (onSelect) onSelect(id); else setLocalSelectedId(id); };
   const [state, setState] = useState<PluginsDialogState>(EMPTY_STATE);
   const detailSequence = useRef(0);
 
@@ -52,7 +56,7 @@ export function PluginsDialog() {
     try {
       const items = await listPlugins();
       setState((previous) => ({ ...previous, items, loading: false, error: "" }));
-      setSelectedId((previous) => items.some((item) => item.id === previous) ? previous : "");
+
     } catch (error) {
       setState((previous) => ({
         ...previous,
@@ -183,67 +187,32 @@ export function PluginsDialog() {
   };
 
   return (
-    <main className="pluginsMain">
-      <div className="pluginsSplitLayout">
-        <aside className="pluginsSidebar" aria-label="Plugins">
-          <label className="pluginsSearch">
-            <Search size={16} aria-hidden="true" />
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search plugins"
-              aria-label="Search plugins"
-            />
-          </label>
-          <div className="pluginsList" aria-busy={state.loading}>
-            {state.loading && state.items.length === 0 ? <div className="pluginsSidebarEmpty">Loading…</div> : null}
-            {!state.loading && state.items.length === 0 ? <div className="pluginsSidebarEmpty">No plugins</div> : null}
-            {state.items.length > 0 && visibleItems.length === 0 ? <div className="pluginsSidebarEmpty">No matches</div> : null}
-            {visibleItems.map((item) => (
-              <button
-                type="button"
-                className={`pluginListItem ${item.id === selectedId ? "is-active" : ""}`}
-                key={item.id}
-                onClick={() => setSelectedId(item.id)}
-                aria-current={item.id === selectedId ? "true" : undefined}
-              >
-                <div className="pluginListCopy">
-                  <strong>{item.name}</strong>
-                </div>
-                <span
-                  className={`pluginStatus ${item.errors.length > 0 ? "is-diagnostic" : item.enabled ? "is-enabled" : ""}`}
-                  title={item.errors[0] || (item.enabled ? "Enabled" : "Disabled")}
-                />
-              </button>
-            ))}
+    <div className="extensionSurface">
+      <div className="extensionScroll" hidden={!!selectedId}>
+        <main className="extensionCatalog">
+          <header className="extensionToolbar"><h1>Plugins</h1>
+            <label className="extensionSearch"><Search size={16} aria-hidden="true" /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Search plugins" aria-label="Search plugins" /></label>
+            <button type="button" aria-label="Reload plugins" title="Reload plugins" disabled={state.loading} onClick={() => void reload()}><RefreshCw /></button>
+            <button type="button" disabled={state.loading} onClick={() => void install()}><Plus /> Install</button>
+          </header>
+          {state.error ? <p role="status">{state.error}</p> : null}
+          <div className="extensionGrid" aria-busy={state.loading}>
+            {visibleItems.map(item => <button type="button" className="extensionRow" key={item.id} aria-label={`Open ${item.name}`} onClick={() => setSelectedId(item.id)}>
+              <span className="extensionIcon"><Blocks /></span><span className="extensionCopy"><strong>{item.name}</strong><small>{item.description}</small></span>
+              <span className="extensionStatus" aria-label={item.errors.length ? "Needs attention" : item.enabled ? "Enabled" : "Disabled"}>{item.errors.length ? "!" : item.enabled ? "✓" : "—"}</span>
+            </button>)}
           </div>
-          <div className="pluginsSidebarActions">
-            <button type="button" className="modelsAddButton modelsAddProvider pluginsReload" onClick={() => void install()} disabled={state.loading}>
-              <Plus aria-hidden="true" /> Install plugin
-            </button>
-            <button type="button" className="modelsAddButton modelsAddProvider pluginsReload" onClick={() => void reload()} disabled={state.loading}>
-              <RefreshCw aria-hidden="true" /> Reload plugins
-            </button>
-          </div>
-        </aside>
-        <section className="pluginsDetailPane" aria-live="polite">
-          {state.error ? <section className="pluginsMessage"><strong>{state.error}</strong></section> : null}
-          {selectedItem ? (
-            <PluginDetailView
-              detail={selectedDetail}
-              item={selectedItem}
-              loading={state.detailLoading}
-              updatingId={state.updatingId}
-              onReveal={showSourceRef}
-              onRemove={remove}
-              onToggle={toggleEnabled}
-            />
-          ) : (
-            <div className="pluginsEmptyMain"><strong>Select a plugin</strong><span>Choose a plugin to inspect its capabilities and source.</span></div>
-          )}
-        </section>
+          {state.loading && !state.items.length ? <p className="extensionEmpty">Loading…</p> : !visibleItems.length ? <p className="extensionEmpty">{state.items.length ? "No matches" : "No plugins installed"}</p> : null}
+        </main>
       </div>
-    </main>
+      {selectedId ? <div className="extensionScroll">
+        <nav className="extensionBreadcrumb" aria-label="Plugin navigation"><button type="button" aria-label="Back to plugins" onClick={() => setSelectedId("")}>Plugins</button><ChevronRight size={14} /><span aria-current="page">{selectedItem?.name ?? "Plugin"}</span></nav>
+        <main className="extensionPluginDetail">
+          {state.error ? <p role="status">{state.error}</p> : null}
+          {selectedItem ? <PluginDetailView detail={selectedDetail} item={selectedItem} loading={state.detailLoading} updatingId={state.updatingId} onReveal={showSourceRef} onRemove={remove} onToggle={toggleEnabled} /> : <p>{state.loading ? "Loading…" : "Plugin is no longer available"}</p>}
+        </main>
+      </div> : null}
+    </div>
   );
 }
 

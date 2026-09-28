@@ -181,6 +181,7 @@ vi.mock("../src/components/chat/ChatPendingPanels", () => ({
 
 vi.mock("../src/host/hostBridge", () => ({
   isNativeHostRuntime: () => true,
+  listenHost: async () => () => {},
 }));
 
 import { ChatArea } from "../src/components/chat/ChatArea";

@@ -446,6 +446,76 @@ const runPackagedWindow = async ({
     }
 
     const smokeResult = await evaluate(client, expression, 30_000);
+    if (process.env.CENTAERIS_ELECTRON_LAYOUT_SMOKE === "1" && smokeResult.createdSession) {
+      const secondProject = path.join(runtimeDataDir, "Second project");
+      await fs.mkdir(secondProject, { recursive: true });
+      await evaluate(client, `(async () => {
+        const host = window.centaerisHost;
+        await host.invoke("workspace_activate", { request: { root: ${JSON.stringify(secondProject)} } });
+        const second = await host.invoke("session/new", { request: { operationId: "sidebar-pin", title: "Pinned reference", cwd: ${JSON.stringify(secondProject)} } });
+        await host.invoke("session/new", { request: { operationId: "sidebar-recent", title: "Recent project note", cwd: ${JSON.stringify(secondProject)} } });
+        const root = ${JSON.stringify(secondProject)};
+        const renamed = await host.invoke("workspace_rename", { request: { root, name: "Second renamed" } });
+        if (!renamed.workspaces.some(w => w.name === "Second renamed")) throw new Error("Workspace rename did not persist");
+        await host.invoke("workspace_remove", { request: { root } });
+        const removed = await host.invoke("workspace_get", {});
+        if (removed.workspaces.some(w => w.name === "Second renamed")) throw new Error("Workspace removal did not persist");
+        const retained = await host.invoke("session/list", { request: {} });
+        if (!retained.some(s => s.id === second.id)) throw new Error("Workspace removal deleted a session");
+        await host.invoke("workspace_activate", { request: { root } });
+        for (const id of [${JSON.stringify(smokeResult.createdSession.id)}, second.id]) await host.invoke("_centaeris/session/update_metadata", { request: { sessionId: id, isPinned: true } });
+      })()`);
+      await evaluate(client, `window.centaerisHost.invoke("workspace_activate", {request:{root:${JSON.stringify(smokeResult.layoutWorkspaceRoot)}}})`);
+      await client.call("Page.reload");
+      await waitForRendererReady(client);
+      const pinnedOrder = await evaluate(client, `(async () => {
+        const wait = () => new Promise(resolve => setTimeout(resolve, 100));
+        for (let i = 0; i < 100 && document.querySelectorAll(".pinnedDragHandle").length !== 2; i++) await wait();
+        const handles = [...document.querySelectorAll(".pinnedDragHandle")];
+        if (handles.length !== 2 || document.querySelectorAll(".sidebarWorkspaceGroup").length < 2) throw new Error("Project groups or global pinned list missing");
+        handles[1].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+        await wait();
+        for (let i = 0; i < 100 && document.querySelector(".pinnedDragHandle:disabled"); i++) await wait();
+        return [...document.querySelectorAll('[aria-label="Pinned"] .thinSessionCopy strong')].map(node => node.textContent);
+      })()`);
+      await client.call("Page.reload");
+      await waitForRendererReady(client);
+      await evaluate(client, `(async () => {
+        for (let i = 0; i < 100 && document.querySelectorAll(".pinnedDragHandle").length !== 2; i++) await new Promise(resolve => setTimeout(resolve, 100));
+        const titles = [...document.querySelectorAll('[aria-label="Pinned"] .thinSessionCopy strong')].map(node => node.textContent);
+        if (JSON.stringify(titles) !== ${JSON.stringify(JSON.stringify([]))}) {
+          if (JSON.stringify(titles) !== ${JSON.stringify(JSON.stringify(pinnedOrder))}) throw new Error("Pinned order did not survive reload");
+        } else throw new Error("Pinned list is empty after reload");
+      })()`);
+      try { await evaluate(client, `(async () => {
+        const wait = () => new Promise(resolve => setTimeout(resolve, 500));
+        const overview = document.querySelector('[aria-label="Workspace overview"]');
+        overview.click(); await wait();
+        document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+        if (overview.getAttribute("aria-expanded") !== "true") throw new Error("Overview dismissed by outside press");
+        document.querySelector('[aria-label="Browse files"]').click(); await wait();
+        const heading = document.querySelector(".thinChatColumn > .workspacePageHeader");
+        const tabs = document.querySelector(".summaryPanelTabStrip");
+        if (!heading || !tabs || Math.abs(heading.getBoundingClientRect().top - tabs.getBoundingClientRect().top) > 1) throw new Error("Chat heading and detail tabs are not aligned " + JSON.stringify({ heading: heading?.getBoundingClientRect(), tabs: tabs?.getBoundingClientRect(), panel: document.querySelector(".thinFilePane")?.getBoundingClientRect() }));
+        const panel = document.querySelector(".thinFilePane").getBoundingClientRect();
+        const chat = document.querySelector(".thinChatColumn").getBoundingClientRect();
+        if (chat.width < 400 || panel.width < 400 || panel.right > innerWidth + 1) throw new Error("Default workspace columns do not fit");
+        overview.click(); await wait();
+        const popover = document.querySelector(".workspaceOverviewPopover").getBoundingClientRect();
+        if (popover.right > chat.right + 1 || popover.top < heading.getBoundingClientRect().bottom) throw new Error("Overview overlaps detail pane or heading");
+      })()`); } catch (error) {
+        const failedCapture = await client.call("Page.captureScreenshot", { format: "png" });
+        const failedDir = path.resolve(hostRoot, "..", "..", "test-results");
+        await fs.mkdir(failedDir, { recursive: true });
+        await fs.writeFile(path.join(failedDir, "desktop-panel-layout.png"), Buffer.from(failedCapture.data, "base64"));
+        throw error;
+      }
+      const capture = await client.call("Page.captureScreenshot", { format: "png" });
+      const evidenceDir = path.resolve(hostRoot, "..", "..", "test-results");
+      await fs.mkdir(evidenceDir, { recursive: true });
+      await fs.writeFile(path.join(evidenceDir, "desktop-panel-layout.png"), Buffer.from(capture.data, "base64"));
+    }
+
 
     assertRecord(smokeResult, "renderer smoke result");
     if (smokeResult.hostKind !== "electron") {
@@ -461,8 +531,10 @@ const runPackagedWindow = async ({
       !smokeResult.shell.nativeTitlebar ||
       !smokeResult.shell.sidebar ||
       !smokeResult.shell.chatColumn ||
-      smokeResult.shell.resourceButtons.join(",") !== "Models,Skills,Plugins" ||
-      !smokeResult.shell.workspacePicker ||
+      smokeResult.shell.resourceButtons.join(",") !== "Settings" ||
+      smokeResult.shell.navigation.join(",") !== "New chat,Scheduled,Plugins" ||
+      smokeResult.shell.menus.join(",") !== "File,Edit,View,Help" ||
+      smokeResult.shell.workspacePicker ||
       smokeResult.shell.hasOpenWorkspaceButton
     ) {
       fail(`renderer did not expose the native-titlebar thin workspace shell: ${JSON.stringify(smokeResult.shell)}`);
@@ -542,6 +614,11 @@ const runPackagedWindow = async ({
 const FIRST_LAUNCH_EXPRESSION = `(async () => {
   const host = window.centaerisHost;
   const workspaceRoot = __WORKSPACE_ROOT__;
+  const scheduled = await host.invoke("schedule_manage", {request:{action:"list"}});
+  if (!Array.isArray(scheduled.schedules)) throw new Error("Scheduled list contract failed");
+  await host.invoke("desktop_theme", {preference:"dark"});
+  await host.invoke("desktop_theme", {preference:"system"});
+
   const runtimeHostErrors = [];
   const runtimeConfigChanges = [];
   const expectCommandFailure = async (command, expected, payload = { request: {} }) => {
@@ -565,6 +642,8 @@ const FIRST_LAUNCH_EXPRESSION = `(async () => {
     resourceButtons: Array.from(document.querySelectorAll(".thinSidebarFooter button span"))
       .map((element) => element.textContent?.trim())
       .filter(Boolean),
+    navigation: Array.from(document.querySelectorAll(".appNavigation button")).map(button => button.getAttribute("aria-label")),
+    menus: Array.from(document.querySelectorAll(".applicationMenus button")).map(button => button.textContent.trim()),
     workspacePicker: Boolean(document.querySelector(".thinWorkspaceSelectTrigger")),
     hasOpenWorkspaceButton: Boolean(document.querySelector(".thinOpenWorkspaceButton")),
   };
@@ -667,6 +746,7 @@ const FIRST_LAUNCH_EXPRESSION = `(async () => {
   unsubscribe();
   unsubscribeConfig();
   return {
+    layoutWorkspaceRoot: workspaceRoot,
     title: document.title,
     bodyTextLength: document.body.innerText.length,
     hostKind: host.kind,
@@ -708,6 +788,8 @@ const SECOND_LAUNCH_EXPRESSION = `(async () => {
     resourceButtons: Array.from(document.querySelectorAll(".thinSidebarFooter button span"))
       .map((element) => element.textContent?.trim())
       .filter(Boolean),
+    navigation: Array.from(document.querySelectorAll(".appNavigation button")).map(button => button.getAttribute("aria-label")),
+    menus: Array.from(document.querySelectorAll(".applicationMenus button")).map(button => button.textContent.trim()),
     workspacePicker: Boolean(document.querySelector(".thinWorkspaceSelectTrigger")),
     hasOpenWorkspaceButton: Boolean(document.querySelector(".thinOpenWorkspaceButton")),
   };
@@ -776,6 +858,7 @@ const SECOND_LAUNCH_EXPRESSION = `(async () => {
   const commandFailures = [];
   unsubscribe();
   return {
+    layoutWorkspaceRoot: workspaceRoot,
     title: document.title,
     bodyTextLength: document.body.innerText.length,
     hostKind: host.kind,

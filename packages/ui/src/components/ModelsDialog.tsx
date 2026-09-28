@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Eye, EyeOff, KeyRound, Plus, Search, X } from "lucide-react";
+import { Eye, EyeOff, KeyRound, Plus, Search, ChevronRight, MoreHorizontal } from "lucide-react";
 import {
   getAgentRuntimeConfig,
   resetAgentRuntimeConfig,
@@ -11,6 +11,7 @@ import {
   type ModelWireApi,
 } from "../lib/chatBridge";
 import type { ConfirmAction } from "./ConfirmDialog";
+import { ResourceDetailDialog } from "./ResourceDetailDialog";
 import { ProviderLogo } from "./ProviderLogo";
 
 type ModelsDialogProps = {
@@ -52,12 +53,6 @@ const API_OPTIONS: ModelWireApi[] = [
   "openai-responses",
   "anthropic-messages",
 ];
-
-const PROVIDER_TIERS = [
-  { id: "direct_api", label: "DIRECT API" },
-  { id: "coding_plan", label: "CODING PLANS" },
-  { id: "token_plan", label: "TOKEN PLANS" },
-] as const;
 
 let nextCustomModelKey = 1;
 
@@ -128,7 +123,9 @@ const testSummary = (result: ModelTestState): string => {
     .join(" · ");
 };
 
-export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDialogProps) {
+export function ModelsDialog({ onConfigured, confirmAction }: ModelsDialogProps) {
+  const [editing, setEditing] = useState(false);
+  const [modelQuery, setModelQuery] = useState("");
   const [config, setConfig] = useState<AgentRuntimeConfig | null>(null);
   const [customProviders, setCustomProviders] = useState<CustomProviderDraft[]>([]);
   const [selection, setSelection] = useState<Selection>({ kind: "empty" });
@@ -208,23 +205,11 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
     void load();
   }, [load]);
 
-  useEffect(() => {
-    if (!providerPickerOpen) return undefined;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setProviderPickerOpen(false);
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [providerPickerOpen]);
-
   const selectedProviderId = selection.kind === "empty" ? null : selection.providerId;
   const selectedCustomProvider = customProviders.find((provider) => provider.providerId === selectedProviderId);
   const selectedCustomModel = selection.kind === "model" && selectedCustomProvider
     ? selectedCustomProvider.models.find((model) => model.key === selection.modelKey)
     : undefined;
-  const selectedBuiltInProvider = config?.modelProviders.find((provider) => (
-    provider.builtIn && provider.providerId === selectedProviderId
-  ));
   const selectedModelId = selection.kind === "model"
     ? (typeof selection.modelKey === "string" ? selection.modelKey : selectedCustomModel?.model.trim())
     : undefined;
@@ -234,12 +219,6 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
       model.providerId === selection.providerId && model.model === selectedModelId
     ))
     : undefined;
-  const visibleBuiltIns = (config?.modelProviders ?? []).filter((provider) => (
-    provider.builtIn && (provider.configured
-    || provider.providerId === selectedProviderId
-    )
-  ));
-
   const updateCustomProvider = (patch: Partial<CustomProviderDraft>) => {
     if (!selectedCustomProvider) return;
     setCustomProviders((providers) => providers.map((provider) => (
@@ -255,41 +234,34 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
     setModelTest(null);
   };
 
+  const cancelEdit = () => {
+    if (savingSettings || credentialProviderId) return;
+    if (config) setCustomProviders(customDraftsFromConfig(config));
+    setApiKeys({}); setRevealedProviderId(null); setEditing(false); setMessage("");
+    select(selectedProviderId && config?.modelProviders.some(p => p.providerId === selectedProviderId)
+      ? {kind:"provider",providerId:selectedProviderId} : {kind:"empty"});
+  };
   const saveAll = async () => {
-    if (loading || savingSettings) return;
-    setSavingSettings(true);
-    setMessage("");
+    if (loading || savingSettings || !selectedProviderId) return;
+    setSavingSettings(true); setMessage("");
+    let settingsSaved = false;
     try {
-      const next = await setAgentRuntimeConfig({
-        customModelProviders: buildCustomProvidersInput(customProviders),
-      });
-      acceptConfig(next);
+      if (selectedCustomProvider) {
+        const next = await setAgentRuntimeConfig({customModelProviders: buildCustomProvidersInput(customProviders)});
+        acceptConfig(next); settingsSaved = true;
+      }
+      const key = apiKeys[selectedProviderId]?.trim();
+      if (key) {
+        const next = await setAgentRuntimeConfig({modelProviderId:selectedProviderId,modelApiKey:key});
+        acceptConfig(next);
+        setApiKeys({});
+      }
+      setEditing(false); setRevealedProviderId(null);
+      select({kind:"provider",providerId:selectedProviderId});
       setMessage("Saved");
     } catch (error) {
-      setMessage(errorText(error));
-    } finally {
-      setSavingSettings(false);
-    }
-  };
-
-  const saveCredential = async (providerId: string) => {
-    const apiKey = apiKeys[providerId]?.trim() ?? "";
-    if (!apiKey || credentialProviderId) return;
-    setCredentialProviderId(providerId);
-    setMessage("");
-    try {
-      const next = await setAgentRuntimeConfig({
-        modelProviderId: providerId,
-        modelApiKey: apiKey,
-      });
-      acceptConfig(next);
-      setApiKeys((keys) => ({ ...keys, [providerId]: "" }));
-      setMessage("Credential saved");
-    } catch (error) {
-      setMessage(errorText(error));
-    } finally {
-      setCredentialProviderId("");
-    }
+      setMessage(`${settingsSaved ? "Connection settings saved, but the API key was not saved. Retry saving the key. " : ""}${errorText(error)}`);
+    } finally { setSavingSettings(false); }
   };
 
   const clearCredential = async (providerId: string) => {
@@ -320,6 +292,7 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
       models: [],
     };
     setCustomProviders((providers) => [...providers, provider]);
+    setEditing(true);
     select({ kind: "provider", providerId: provider.providerId });
     setProviderPickerOpen(false);
     setMessage("");
@@ -332,6 +305,7 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
     setCustomProviders((providers) => providers.map((item) => item.providerId === providerId
       ? { ...item, models: [...item.models, model] }
       : item));
+    setEditing(true);
     select({ kind: "model", providerId, modelKey: model.key });
   };
 
@@ -341,12 +315,12 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
     try {
       const confirmed = await confirmAction({
         title: "Remove this model?",
-        message: `“${selectedCustomModel.model || "New model"}” will be removed when you save the provider settings.`,
+        message: `“${selectedCustomModel.model || "New model"}” will be removed from this provider.`,
       });
       if (!confirmed) return;
-      setCustomProviders((providers) => providers.map((provider) => provider.providerId !== selectedCustomProvider.providerId
-        ? provider
-        : { ...provider, models: provider.models.filter((model) => model.key !== selectedCustomModel.key) }));
+      const providers = customProviders.map(provider => provider.providerId !== selectedCustomProvider.providerId ? provider : { ...provider, models: provider.models.filter(model => model.key !== selectedCustomModel.key) });
+      const next = await setAgentRuntimeConfig({customModelProviders:buildCustomProvidersInput(providers)});
+      acceptConfig(next); setCustomProviders(customDraftsFromConfig(next)); setEditing(false);
       select({ kind: "provider", providerId: selectedCustomProvider.providerId });
     } catch (error) {
       setMessage(errorText(error));
@@ -359,28 +333,30 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
     try {
       const confirmed = await confirmAction({
         title: "Remove this provider?",
-        message: `“${selectedCustomProvider.name}” and its model drafts will be removed when you save the model settings.`,
+        message: `“${selectedCustomProvider.name}” and its models will be removed.`,
       });
       if (!confirmed) return;
-      setCustomProviders((providers) => providers.filter((provider) => provider.providerId !== selectedCustomProvider.providerId));
+      const next = await setAgentRuntimeConfig({customModelProviders:buildCustomProvidersInput(customProviders.filter(provider => provider.providerId !== selectedCustomProvider.providerId))});
+      acceptConfig(next); setCustomProviders(customDraftsFromConfig(next)); setEditing(false);
       select({ kind: "empty" });
     } catch (error) {
       setMessage(errorText(error));
     }
   };
 
-  const runTest = async () => {
-    if (!selectedCatalogModel || !selectedProviderId || selectedCatalogModel.diagnostic || testingModelId) return;
-    const testId = `${selectedProviderId}\0${selectedCatalogModel.model}`;
+  const runTest = async (modelId = selectedModelId) => {
+    const catalogModel = selectedProvider?.models.find(model => model.model === modelId);
+    if (!catalogModel || !selectedProviderId || catalogModel.diagnostic || testingModelId) return;
+    const testId = `${selectedProviderId}\0${catalogModel.model}`;
     setTestingModelId(testId);
     setMessage("");
     try {
-      const result = await testAgentRuntimeModel({ providerId: selectedProviderId, model: selectedCatalogModel.model });
-      setModelTest({ ...result, providerId: selectedProviderId, model: selectedCatalogModel.model });
+      const result = await testAgentRuntimeModel({ providerId: selectedProviderId, model: catalogModel.model });
+      setModelTest({ ...result, providerId: selectedProviderId, model: catalogModel.model });
     } catch (error) {
       setModelTest({
         providerId: selectedProviderId,
-        model: selectedCatalogModel.model,
+        model: catalogModel.model,
         httpStatus: null,
         latencyMs: 0,
         errorKeyword: errorText(error),
@@ -390,12 +366,8 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
     }
   };
 
-  const providerConfigured = selectedProvider?.configured ?? false;
   const providerStored = selectedProvider?.credentialSource === "stored";
-  const providerFromEnvironment = selectedProvider?.credentialSource === "environment";
-  const selectedProviderPersisted = Boolean(selectedBuiltInProvider) || Boolean(
-    selectedProviderId && config?.customModelProviders?.some((provider) => provider.providerId === selectedProviderId),
-  );
+  const credentialLabel = (provider: typeof selectedProvider) => provider?.credentialSource === "environment" ? "Using environment credentials" : provider?.credentialSource === "stored" ? "API key configured" : provider?.configured ? "Configured" : "No credential configured";
   const selectedTestId = selectedProviderId && selectedCatalogModel
     ? `${selectedProviderId}\0${selectedCatalogModel.model}`
     : "";
@@ -416,53 +388,41 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
     providerMatches(provider.name, "API key HTTPS"));
   const providerPickerEmpty = !customCandidateVisible
     && visibleApiProviders.length === 0;
-  return (
-    <div className="modelsDialogLayout">
-      <aside className="modelsProviderList">
-        {visibleBuiltIns.map((provider) => {
-          const active = selectedProviderId === provider.providerId;
-          return <div className="modelsProviderGroup" key={provider.providerId}>
-            <button type="button" className={active && selection.kind === "provider" ? "modelsProviderButton is-active" : "modelsProviderButton"} onClick={() => select({ kind: "provider", providerId: provider.providerId })}>
-              <span className="modelsProviderIdentity"><ProviderLogo svg={provider.logoSvg} name={provider.name} />{provider.name}</span>{provider.configured ? <span className="modelsConfiguredDot" aria-label="configured" /> : null}
-            </button>
-          </div>;
-        })}
-        {visibleBuiltIns.length && customProviders.length ? <div className="modelsTreeDivider" /> : null}
-        {customProviders.map((provider) => {
-          const providerConfig = config?.modelProviders.find((item) => item.providerId === provider.providerId);
-          const active = selectedProviderId === provider.providerId;
-          return <div className="modelsProviderGroup" key={provider.providerId}>
-            <button type="button" className={active && selection.kind === "provider" ? "modelsProviderButton is-active" : "modelsProviderButton"} onClick={() => select({ kind: "provider", providerId: provider.providerId })}>
-              <span>{provider.name}</span>{providerConfig?.configured ? <span className="modelsConfiguredDot" aria-label="configured" /> : null}
-            </button>
-            {providerConfig?.configured ? <div className="modelsProviderModels">{provider.models.map((model) => <button type="button" className={selection.kind === "model" && selection.providerId === provider.providerId && selection.modelKey === model.key ? "is-selected" : ""} key={model.key} onClick={() => select({ kind: "model", providerId: provider.providerId, modelKey: model.key })}>{model.model || "new model"}</button>)}<button type="button" onClick={() => addModel(provider.providerId)}><Plus aria-hidden="true" />model</button></div> : null}
-          </div>;
-        })}
-        <button type="button" className="modelsAddButton modelsAddProvider" onClick={() => { setProviderQuery(""); setProviderPickerOpen(true); }}><Plus aria-hidden="true" />Add provider</button>
-      </aside>
-
-      <section className="modelsEditor">
-        <div className="modelsEditorScroll">
-          {selection.kind === "empty" ? <div className="modelsEmptyState"><strong>Select a provider</strong><span>Choose an existing provider, or add a new one.</span></div> : null}
-
-          {selection.kind === "provider" && selectedBuiltInProvider ? <section className="modelsSection">
-            <div className="modelsSectionHeading"><span>API KEY</span><span className={providerConfigured ? "modelsCredentialStatus is-configured" : "modelsCredentialStatus"}><i />{providerConfigured ? "configured" : "not configured"}</span></div>
-            <p className="modelsSectionDescription">{providerStored ? "Enter a new key to replace the stored key." : providerFromEnvironment ? "Credential is supplied by the current process environment." : "Enter an API key to add this provider."}</p>
-            <div className="modelsCredentialRow"><div className="modelsKeyInput"><KeyRound aria-hidden="true" /><input type={revealedProviderId === selectedBuiltInProvider.providerId ? "text" : "password"} autoComplete="off" value={apiKeys[selectedBuiltInProvider.providerId] ?? ""} onChange={(event) => setApiKeys((keys) => ({ ...keys, [selectedBuiltInProvider.providerId]: event.target.value }))} placeholder={providerConfigured ? "Enter new key to replace…" : "sk-…"} /><button type="button" onClick={() => setRevealedProviderId((providerId) => providerId === selectedBuiltInProvider.providerId ? null : selectedBuiltInProvider.providerId)} aria-label="show API key">{revealedProviderId === selectedBuiltInProvider.providerId ? <EyeOff aria-hidden="true" /> : <Eye aria-hidden="true" />}</button></div><button type="button" className="modelsLocalSave" disabled={Boolean(credentialProviderId) || !(apiKeys[selectedBuiltInProvider.providerId]?.trim())} onClick={() => void saveCredential(selectedBuiltInProvider.providerId)}>{credentialProviderId === selectedBuiltInProvider.providerId ? "Saving…" : "Save"}</button></div>
-            {providerStored ? <button type="button" className="modelsDisconnect" disabled={Boolean(credentialProviderId)} onClick={() => void clearCredential(selectedBuiltInProvider.providerId)}>Remove credential</button> : null}
-          </section> : null}
-
-          {selection.kind === "provider" && selectedCustomProvider ? <section className="modelsSection">
-            <div className="modelsSectionHeading"><span>PROVIDER</span><button type="button" className="modelsDangerButton" onClick={() => void removeSelectedProvider()}>Delete</button></div>
-            <div className="modelsProviderForm">
-              <label><span>Provider name</span><input value={selectedCustomProvider.name} onChange={(event) => updateCustomProvider({ name: event.target.value })} /></label>
-              <label><span>Base URL</span><input value={selectedCustomProvider.baseUrl} onChange={(event) => updateCustomProvider({ baseUrl: event.target.value })} placeholder="https://api.example.com/v1" /></label>
-              <label><span>API Key</span><div className="modelsCredentialRow"><div className="modelsKeyInput"><KeyRound aria-hidden="true" /><input type={revealedProviderId === selectedCustomProvider.providerId ? "text" : "password"} autoComplete="off" value={apiKeys[selectedCustomProvider.providerId] ?? ""} onChange={(event) => setApiKeys((keys) => ({ ...keys, [selectedCustomProvider.providerId]: event.target.value }))} placeholder={providerConfigured ? "Enter new key to replace…" : "API key"} /><button type="button" onClick={() => setRevealedProviderId((providerId) => providerId === selectedCustomProvider.providerId ? null : selectedCustomProvider.providerId)} aria-label="show API key">{revealedProviderId === selectedCustomProvider.providerId ? <EyeOff aria-hidden="true" /> : <Eye aria-hidden="true" />}</button></div><button type="button" className="modelsLocalSave" disabled={!selectedProviderPersisted || Boolean(credentialProviderId) || !(apiKeys[selectedCustomProvider.providerId]?.trim())} onClick={() => void saveCredential(selectedCustomProvider.providerId)}>{credentialProviderId === selectedCustomProvider.providerId ? "Saving…" : "Save"}</button></div><small>{selectedProviderPersisted ? "Required before this provider's models become available." : "Save settings before storing a credential."}</small>{providerStored ? <button type="button" className="modelsDisconnect" disabled={Boolean(credentialProviderId)} onClick={() => void clearCredential(selectedCustomProvider.providerId)}>Remove credential</button> : null}</label>
-              <label><span>API</span><select value={selectedCustomProvider.api} onChange={(event) => updateCustomProvider({ api: event.target.value as ModelWireApi })}>{API_OPTIONS.map((api) => <option key={api} value={api}>{api}</option>)}</select></label>
-            </div>
-          </section> : null}
-
-          {selection.kind === "model" && selectedCustomModel ? <section className="modelsSection">
+  const busy = savingSettings || Boolean(credentialProviderId);
+  const openProvider = (providerId: string) => { setMessage(""); setModelQuery(""); setEditing(false); select({kind:"provider",providerId}); };
+  const listedProviders = (config?.modelProviders ?? []).filter(p => p.configured || !p.builtIn);
+  const modelRows = selectedCustomProvider ? selectedCustomProvider.models.map(m => ({key:m.key, id:m.model, name:m.displayName || m.model})) : (selectedProvider?.models ?? []).map(m => ({key:m.model,id:m.model,name:m.model}));
+  const saveButtons = <footer className="modelEditActions"><button type="button" onClick={cancelEdit} disabled={busy}>Cancel</button><button type="button" onClick={() => void saveAll()} disabled={busy || !config || (!selectedCustomProvider && !apiKeys[selectedProviderId ?? ""]?.trim())}>{busy ? "Saving…" : "Save"}</button></footer>;
+  return <div className="modelServices">
+    {selection.kind === "empty" ? <>
+      <header className="modelServicesHeading"><h1>Model services</h1><button type="button" disabled={!config || loading} onClick={() => {setProviderQuery("");setProviderPickerOpen(true);}}><Plus size={16}/> Add service</button></header>
+      <div className="modelServiceList">{listedProviders.map(provider => <button type="button" className="modelServiceRow" key={provider.providerId} aria-label={`Open ${provider.name}`} onClick={() => openProvider(provider.providerId)}>
+        <ProviderLogo svg={provider.logoSvg} name={provider.name}/><span><strong>{provider.name}</strong><small>{credentialLabel(provider)}</small></span><ChevronRight size={16}/>
+      </button>)}</div>
+      {!loading && config && !listedProviders.length ? <p className="pageDescription">Add a service to configure your models.</p> : null}
+    </> : <>
+      <nav className="extensionBreadcrumb" aria-label="Model service navigation"><button type="button" disabled={editing || busy} onClick={() => {select({kind:"empty"});setMessage("");}}>Model services</button><ChevronRight size={14}/><span>{selectedCustomProvider?.name ?? selectedProvider?.name}</span></nav>
+      <header className="modelServicesHeading"><h1>{selectedCustomProvider?.name ?? selectedProvider?.name}</h1>
+        {!editing ? <details className="modelServiceMenu"><summary aria-label="Service actions"><MoreHorizontal size={18}/></summary><div>{providerStored ? <button type="button" disabled={busy} onClick={() => void clearCredential(selectedProviderId!)}>Remove credential</button> : null}{selectedCustomProvider ? <button type="button" disabled={busy} onClick={() => void removeSelectedProvider()}>Remove service</button> : null}</div></details> : null}
+      </header>
+      <section className="modelConnection"><header><h2>Connection</h2>{!editing ? <button type="button" onClick={() => {setMessage("");setEditing(true);}}>Edit connection</button> : null}</header>
+        {editing && selection.kind === "provider" ? <>
+          <div className="modelConnectionForm">
+            {selectedCustomProvider ? <><label>Provider name<input aria-label="Provider name" value={selectedCustomProvider.name} onChange={e=>updateCustomProvider({name:e.target.value})}/></label><label>Base URL<input value={selectedCustomProvider.baseUrl} onChange={e=>updateCustomProvider({baseUrl:e.target.value})} placeholder="https://api.example.com/v1"/></label><label>API protocol<select value={selectedCustomProvider.api} onChange={e=>updateCustomProvider({api:e.target.value as ModelWireApi})}>{API_OPTIONS.map(api=><option key={api}>{api}</option>)}</select></label></> : null}
+            <label>API key<div className="modelsKeyInput"><KeyRound size={16}/><input aria-label="API key" autoComplete="off" type={revealedProviderId === selectedProviderId ? "text" : "password"} value={apiKeys[selectedProviderId!] ?? ""} onChange={e=>setApiKeys(keys=>({...keys,[selectedProviderId!]:e.target.value}))} placeholder={selectedProvider?.configured ? "Leave blank to keep current credential" : "Enter API key"}/><button type="button" aria-label="Toggle API key visibility" onClick={()=>setRevealedProviderId(revealedProviderId ? null : selectedProviderId)}>{revealedProviderId ? <EyeOff size={16}/> : <Eye size={16}/>}</button></div></label>
+          </div>{saveButtons}
+        </> : <dl className="modelConnectionFacts"><div><dt>Credential</dt><dd>{credentialLabel(selectedProvider)}</dd></div>{selectedCustomProvider ? <><div><dt>Base URL</dt><dd>{selectedCustomProvider.baseUrl}</dd></div><div><dt>API protocol</dt><dd>{selectedCustomProvider.api}</dd></div></> : null}</dl>}
+      </section>
+      {!editing || selection.kind === "model" ? <section className="modelServiceModels"><header><h2>Models</h2><label className="extensionSearch"><Search size={16}/><input aria-label="Search models" placeholder="Search models" value={modelQuery} onChange={e=>setModelQuery(e.target.value)}/></label>{selectedCustomProvider ? <button type="button" onClick={()=>addModel(selectedProviderId!)}><Plus size={16}/> Add model</button> : null}</header>
+        {modelRows.filter(m=>`${m.id} ${m.name}`.toLowerCase().includes(modelQuery.toLowerCase())).map(model=><div className="modelServiceModelRow" key={model.key}><button type="button" onClick={()=>{setMessage("");setEditing(true);select({kind:"model",providerId:selectedProviderId!,modelKey:model.key});}}>{model.name || "New model"}</button><small>{model.name !== model.id ? model.id : ""}</small><button type="button" aria-label={`Test ${model.id}`} disabled={!!testingModelId || !selectedProvider?.models.some(m => m.model === model.id && !m.diagnostic)} onClick={()=>void runTest(model.id)}>{testingModelId === `${selectedProviderId}\0${model.id}` ? "Testing…" : "Test"}</button></div>)}
+        {modelTest?.providerId === selectedProviderId && selection.kind === "provider" ? <p className="modelsTestSummary">{modelTest.model}: {testSummary(modelTest)}</p> : null}
+        {!modelRows.length ? <p className="pageDescription">No models added.</p> : null}
+      </section> : null}
+    </>}
+    {message || loading ? <p className="modelServiceMessage" role="status">{message || "Loading…"}</p> : null}
+    {canResetUnsupportedConfig ? <button type="button" disabled={loading || busy} onClick={()=>void resetUnsupportedConfig()}>Reset configuration…</button> : null}
+    {selection.kind === "model" ? <ResourceDetailDialog title={selectedModelId || "New model"} onClose={cancelEdit}>
+          {selectedCustomModel ? <section className="modelsSection">
             <div className="modelsSectionHeading"><span>MODEL</span><span className="modelsModelActions"><button type="button" className={testForSelectedModel && testSucceeded(testForSelectedModel) ? "modelsTestButton is-success" : "modelsTestButton"} disabled={!selectedCatalogModel || Boolean(selectedCatalogModel.diagnostic) || Boolean(testingModelId)} onClick={() => void runTest()}>{testingModelId === selectedTestId ? "Testing…" : testForSelectedModel ? (testSucceeded(testForSelectedModel) ? "OK" : testForSelectedModel.httpStatus ? `HTTP ${testForSelectedModel.httpStatus}` : "Failed") : "Test"}</button>{selectedCustomModel ? <button type="button" className="modelsDangerButton" onClick={() => void removeSelectedModel()}>Remove</button> : null}</span></div>
             {selectedCatalogModel?.diagnostic ? <div className="modelsDiagnostic">{selectedCatalogModel.diagnostic}</div> : null}
             {testForSelectedModel ? <div className={testSucceeded(testForSelectedModel) ? "modelsTestSummary is-success" : "modelsTestSummary"}>{testSummary(testForSelectedModel)}</div> : null}
@@ -475,32 +435,18 @@ export function ModelsDialog({ onClose, onConfigured, confirmAction }: ModelsDia
               <label><span>Image input</span><input type="checkbox" checked={selectedCustomModel.supportsVision} onChange={(event) => updateCustomModel(selectedCustomModel.key, { supportsVision: event.target.checked })} /></label>
             </div>
           </section> : null}
-        </div>
-        <footer className="modelsActions"><span className="resourceDialogMessage">{message || (loading ? "Loading…" : "")}</span>{canResetUnsupportedConfig ? <button type="button" className="modelsDangerButton" disabled={loading || savingSettings} onClick={() => void resetUnsupportedConfig()}>Reset configuration…</button> : null}<button type="button" onClick={onClose}>Cancel</button><button type="button" className="is-primary" onClick={() => void saveAll()} disabled={!config || loading || savingSettings}>{savingSettings ? "Saving…" : "Save"}</button></footer>
-      </section>
-
-      {providerPickerOpen ? <div className="modelsProviderPickerOverlay" role="presentation" onMouseDown={() => setProviderPickerOpen(false)}>
-        <section className="modelsProviderPickerDialog" role="dialog" aria-modal="true" aria-label="Add provider" onMouseDown={(event) => event.stopPropagation()}>
-          <header className="modelsProviderPickerHeader">
-            <Search aria-hidden="true" />
-            <input autoFocus aria-label="Search providers" placeholder="Search providers…" value={providerQuery} onChange={(event) => setProviderQuery(event.target.value)} />
-            <button type="button" aria-label="Close provider catalog" onClick={() => setProviderPickerOpen(false)}><X aria-hidden="true" /></button>
-          </header>
-          <div className="modelsProviderPickerScroll">
-            <div className="modelsProviderPicker">
-              {customCandidateVisible ? <section><h2>CUSTOM</h2><div className="modelsProviderCards"><button type="button" onClick={addCustomProvider}><strong>OpenAI / Anthropic compatible</strong><span>Custom endpoint · HTTP or HTTPS</span><Plus aria-hidden="true" /></button></div></section> : null}
-              {PROVIDER_TIERS.map((tier) => {
-                const providers = visibleApiProviders.filter((provider) => provider.tier === tier.id);
-                return providers.length ? <section key={tier.id}><h2>{tier.label}</h2><div className="modelsProviderCards">{providers.map((provider) => <button type="button" key={provider.providerId} onClick={() => { select({ kind: "provider", providerId: provider.providerId }); setProviderPickerOpen(false); }}><span className="modelsProviderIdentity"><ProviderLogo svg={provider.logoSvg} name={provider.name} /><strong>{provider.name}</strong></span></button>)}</div></section> : null;
-              })}
-              {providerPickerEmpty ? <div className="modelsProviderPickerEmpty">No providers found.</div> : null}
-            </div>
-          </div>
-        </section>
-      </div> : null}
-
-    </div>
-  );
+      {!selectedCustomModel ? <section><h2>{selectedModelId}</h2>{selectedCatalogModel?.diagnostic ? <p>{selectedCatalogModel.diagnostic}</p> : null}<button type="button" disabled={!selectedCatalogModel || !!selectedCatalogModel.diagnostic || !!testingModelId} onClick={()=>void runTest()}>{testingModelId ? "Testing…" : "Test"}</button>{testForSelectedModel ? <p className="modelsTestSummary">{testSummary(testForSelectedModel)}</p> : null}</section> : saveButtons}
+      {message ? <p role="status">{message}</p> : null}
+    </ResourceDetailDialog> : null}
+    {providerPickerOpen ? <ResourceDetailDialog title="Add service" onClose={()=>setProviderPickerOpen(false)}>
+      <h2>Add service</h2><label className="extensionSearch"><Search size={16}/><input aria-label="Search providers" placeholder="Search services" value={providerQuery} onChange={e=>setProviderQuery(e.target.value)}/></label>
+      <div className="modelServicePicker">
+        {customCandidateVisible ? <button type="button" onClick={addCustomProvider}><Plus size={16}/><span>Custom service<small>OpenAI / Anthropic compatible</small></span></button> : null}
+        {visibleApiProviders.map(provider=><button type="button" key={provider.providerId} onClick={()=>{openProvider(provider.providerId);setEditing(true);setProviderPickerOpen(false);}}><ProviderLogo svg={provider.logoSvg} name={provider.name}/><span>{provider.name}</span></button>)}
+        {providerPickerEmpty ? <p>No services found.</p> : null}
+      </div>
+    </ResourceDetailDialog> : null}
+  </div>;
 }
 
 export default ModelsDialog;

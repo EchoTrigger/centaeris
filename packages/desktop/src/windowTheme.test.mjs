@@ -7,8 +7,8 @@ import test, { mock } from "node:test";
 if (process.argv.includes("--theme-probe")) {
   let window;
   class FakeWindow extends EventEmitter {
-    constructor() {
-      super(); window = this; this.overlays = [];
+    constructor(options) {
+      super(); this.options = options; window = this; this.overlays = [];
       this.webContents = new EventEmitter();
       this.webContents.setWindowOpenHandler = () => {};
     }
@@ -19,11 +19,12 @@ if (process.argv.includes("--theme-probe")) {
   }
   mock.module("electron", { namedExports: {
     app: { isPackaged: false }, BrowserWindow: FakeWindow,
-    nativeTheme: { shouldUseDarkColors: false }, session: {}, WebContentsView: class {},
+    nativeTheme: { shouldUseDarkColors: false }, screen: { getPrimaryDisplay: () => ({ workAreaSize: { width: 1920, height: 1080 } }) }, session: {}, WebContentsView: class {},
   } });
   const { createWindowShell } = await import("./windowShell.mjs");
   const shell = createWindowShell({ preloadPath: "preload.cjs", packagedUiDistIndex: "missing.html", devUiDistIndex: "missing.html", uiDevServerUrl: "http://localhost:5117" });
   await shell.createMainWindow();
+  assert.equal(window.options.width, 1560);
   for (const color of ["#242424", "#F5F5F4", "#f5f5f4", null, "#ff0000"]) window.webContents.emit("did-change-theme-color", {}, color);
   assert.deepEqual(window.overlays, [
     { color: "#242424", symbolColor: "#ededed", height: 36 },

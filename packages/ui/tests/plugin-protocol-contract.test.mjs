@@ -15,7 +15,7 @@ test("Plugins uses the single-purpose plugin protocol", async () => {
   assert.match(dialogSource, /getPluginDetail\(\{ id: item\.id \}\)/);
   assert.match(dialogSource, /sequence !== detailSequence\.current/);
   assert.match(dialogSource, /setPluginEnabled\(\{ id: item\.id, enabled:/);
-  assert.match(dialogSource, /Select a plugin/);
+  // List/detail navigation is covered behaviorally in resource-navigation.test.tsx.
   assert.match(dialogSource, /Reload plugins/);
   assert.doesNotMatch(dialogSource, /pluginsHeader|iconText|sourcePath/);
   assert.match(bridgeSource, /"plugin\/list"/);

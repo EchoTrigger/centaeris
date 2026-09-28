@@ -3,8 +3,12 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { SessionItem } from "../src/lib/chatBridge";
 import { useSessionController } from "../src/components/app/useSessionController";
 
-const mocks = vi.hoisted(() => ({ list: vi.fn(), error: vi.fn() }));
-vi.mock("../src/lib/chatBridge", () => ({ listSessions: mocks.list, activateSession: vi.fn(async () => {}), deleteSession: vi.fn(), updateSession: vi.fn() }));
+const mocks = vi.hoisted(() => ({ list: vi.fn(), update: vi.fn(), error: vi.fn() }));
+vi.mock("../src/lib/chatBridge", async () => {
+ const { catalogFixture } = await import("./catalogFixture");
+ const bridge = { listSessions: mocks.list, activateSession: vi.fn(async () => {}), deleteSession: vi.fn(), updateSession: mocks.update };
+ return {...bridge, querySessionCatalog: catalogFixture(bridge.listSessions)};
+});
 vi.mock("../src/components/chat/chatRuntimeCore", () => ({ sessionViewCacheStore: new Map() }));
 vi.mock("../src/lib/workspaceBridge", () => ({ activateWorkspaceRoot: vi.fn() }));
 
@@ -72,3 +76,16 @@ test("unchanged discovery preserves list identity and unmount removes the refres
   await vi.advanceTimersByTimeAsync(10000);
   expect(mocks.list).toHaveBeenCalledTimes(calls);
 });
+
+ test("pin updates immediately and reconciles an uncertain write without resending", async () => {
+ let reject!: (error: Error) => void;
+ mocks.update.mockReturnValue(new Promise((_, fail) => { reject = fail; }));
+ mocks.list.mockResolvedValue([{...session("current"), isPinned:true}]);
+ let pending!: Promise<void>;
+ await act(async () => { pending = controller.actions.pinSession("current", true); });
+ expect(controller.sessions[0].isPinned).toBe(true);
+ await act(async () => { reject(new Error("Runtime request timed out with unknown outcome")); await pending; });
+ expect(controller.sessions[0].isPinned).toBe(true);
+ expect(mocks.update).toHaveBeenCalledTimes(1);
+ expect(mocks.error).not.toHaveBeenCalled();
+ });

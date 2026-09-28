@@ -1,4 +1,5 @@
-import { dialog, shell } from "electron";
+import { applicationMenuTemplate, applicationMenuPosition } from "./applicationMenu.mjs";
+import { dialog, shell, Menu } from "electron";
 import fs from "node:fs";
 import { requireHostCommand } from "./hostContract.mjs";
 import { ensureDefaultWorkspaceDirectory } from "./defaultWorkspace.mjs";
@@ -38,6 +39,14 @@ export const createLocalShellActions = ({
   if (typeof invokeRustHostCommand !== "function") {
     throw new Error("local shell actions require invokeRustHostCommand");
   }
+
+  const showApplicationMenu = (event, payload) => {
+    const { menu, anchor } = requireExactObjectKeys(payload, ["menu", "anchor"], "desktop_menu payload");
+    const owner = getRequestWindow(event);
+    const template = applicationMenuTemplate(menu, action => owner.webContents.send("host:event", { eventName: "centaeris/navigation", payload: { action } }));
+    Menu.buildFromTemplate(template).popup({ window: owner, ...applicationMenuPosition(owner, anchor) });
+    return { ok: true };
+  };
 
   const activateWorkspaceRoot = (root) => invokeRustHostCommand(
     "workspace_activate",
@@ -239,6 +248,7 @@ export const createLocalShellActions = ({
   };
 
   return {
+    showApplicationMenu,
     openWorkspaceFolder,
     revealWorkspaceFolder,
     revealPluginSourceRef,

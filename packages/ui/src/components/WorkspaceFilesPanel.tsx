@@ -1,6 +1,6 @@
 import { t } from "../i18n";
 import { type RefObject, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, FileText, Image } from "lucide-react";
+import { RefreshCw, ChevronRight, FileText, Image } from "lucide-react";
 import {
   getWorkspaceFileTree,
   type WorkspaceFileTreeEntry,
@@ -129,6 +129,14 @@ export function WorkspaceFilesPanel({
     error: "",
     loading: false,
   });
+  const [revision, setRevision] = useState(0);
+  useEffect(() => {
+    if (!isOpen || typeof window === "undefined") return;
+    const refresh = () => { if (document.visibilityState === "visible") setRevision(v => v + 1); };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => { window.removeEventListener("focus", refresh); document.removeEventListener("visibilitychange", refresh); };
+  }, [isOpen]);
   const selectedFileRef = useRef<HTMLButtonElement | null>(null);
   const normalizedFocusedPath = useMemo(
     () => normalizeEntryPath(focusedPath),
@@ -144,7 +152,7 @@ export function WorkspaceFilesPanel({
       return;
     }
     let cancelled = false;
-    setState({ tree: null, loading: true, error: "" });
+    setState(previous => ({ ...previous, loading: true, error: "" }));
     getWorkspaceFileTree(12, sessionId, workspaceRoot)
       .then((tree) => {
         if (cancelled) {
@@ -166,7 +174,7 @@ export function WorkspaceFilesPanel({
     return () => {
       cancelled = true;
     };
-  }, [sessionId, isOpen, workspaceRoot]);
+  }, [sessionId, isOpen, workspaceRoot, revision]);
 
   useEffect(() => {
     if (!isOpen || !normalizedFocusedPath || !state.tree) {
@@ -185,9 +193,9 @@ export function WorkspaceFilesPanel({
   return (
     <section className="workspaceFilesPanel">
       <header className="workspaceFilesHeader">
-        <button type="button" className="workspaceFilesScope" aria-label={t("workspaceFilesPanel.allFiles")}>
-          <span>{t("workspaceFilesPanel.allFiles")}</span>
-          <ChevronDown className="workspaceFilesScopeIcon" aria-hidden="true" />
+        <span className="workspaceFilesScope">{t("workspaceFilesPanel.allFiles")}</span>
+        <button type="button" aria-label="Refresh files" title="Refresh files" disabled={state.loading} onClick={() => setRevision(v => v + 1)}>
+          <RefreshCw className="workspaceFilesScopeIcon" aria-hidden="true" />
         </button>
         {focusedLine ? (
           <span className="workspaceFilesFocusLine">{t("workspaceFilesPanel.lines")}{" "}{focusedLine}</span>

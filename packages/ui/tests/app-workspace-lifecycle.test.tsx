@@ -173,7 +173,9 @@ vi.mock("../src/components/SkillsDialog", () => ({
 vi.mock("../src/components/ModelsDialog", () => ({ ModelsDialog: () => null }));
 vi.mock("../src/components/PluginsDialog", () => ({ PluginsDialog: () => null }));
 
-vi.mock("../src/lib/chatBridge", () => ({
+vi.mock("../src/lib/chatBridge", async () => {
+ const { catalogFixture } = await import("./catalogFixture");
+ const bridge = {
   activateSession: vi.fn(async () => undefined),
   deleteSession: vi.fn(),
   getAgentRuntimeConfig: vi.fn(() => {
@@ -194,7 +196,9 @@ vi.mock("../src/lib/chatBridge", () => ({
   }),
   listSessions: vi.fn(async () => [currentSession, externalSession]),
   updateSession: vi.fn(),
-}));
+};
+ return {...bridge, querySessionCatalog: catalogFixture(bridge.listSessions)};
+});
 
 vi.mock("../src/lib/workspaceBridge", () => ({
   activateWorkspaceRoot: vi.fn((root: string) => {
@@ -335,6 +339,17 @@ beforeEach(() => {
   harness.workspaceInfoCallCount = 0;
   harness.initialWorkspaceInfoRequest = null;
   harness.retryRequests.length = 0;
+});
+
+test("workspace and selected chat appear without waiting for model configuration", async () => {
+  harness.runtimeConfigCalls = 1;
+  harness.deferRuntimeConfigRefresh = true;
+  let renderer!: ReactTestRenderer;
+  await act(async () => { renderer = create(<App />); });
+  expect(harness.runtimeConfigRequests).toHaveLength(1);
+  expect(harness.sidebarProps?.activeWorkspaceRoot).toBe(currentSnapshot.activeWorkspaceRoot);
+  expect(harness.sidebarProps?.currentSessionId).toBe("current");
+  await act(async () => renderer.unmount());
 });
 
 test("late bootstrap cannot overwrite a workspace opened after mount", async () => {

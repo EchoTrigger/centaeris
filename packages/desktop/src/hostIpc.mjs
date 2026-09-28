@@ -1,4 +1,5 @@
-import { ipcMain } from "electron";
+import { applyDesktopTheme } from "./applicationMenu.mjs";
+import { ipcMain, nativeTheme } from "electron";
 import { requireHostCommand, requireHostEventName } from "./hostContract.mjs";
 
 let hostIpcRegistered = false;
@@ -45,6 +46,8 @@ export const registerHostIpc = ({
     if (isShuttingDown()) {
       throw new Error("Centaeris is shutting down");
     }
+    if (command === "desktop_theme") return applyDesktopTheme(nativeTheme, message?.payload);
+    if (command === "desktop_menu") return localShellActions.showApplicationMenu(event, message?.payload ?? {});
     if (command === "workspace_open_folder") {
       return localShellActions.openWorkspaceFolder(event, message?.payload ?? {});
     }

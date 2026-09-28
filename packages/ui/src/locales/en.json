@@ -50,6 +50,8 @@
   "chatArea.githubCliNotDetected": "GitHub CLI not detected",
   "chatArea.sources": "Sources",
   "chatArea.noSourcesYet": "No sources yet",
+  "chatArea.syncPaused": "Conversation sync paused: {{message}}",
+  "chatArea.retrySync": "Retry",
   "chatArea.unableToLoadConversation": "Unable to load conversation",
   "chatArea.restoringConversationValue": "Restoring conversation{{value1}}…",
   "chatArea.noMessagesInThisConversationYet": "No messages in this conversation yet",

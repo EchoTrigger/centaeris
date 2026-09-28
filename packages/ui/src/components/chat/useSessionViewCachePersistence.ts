@@ -1,3 +1,4 @@
+import type { DesktopTranscriptView } from "./transcriptPaging";
 import { useCallback, useEffect, useRef, type RefObject } from "react";
 import type { AgentContextUsageSummary } from "../../lib/chatBridge";
 import type { SessionReplayCursors } from "../../lib/sessionViewCache";
@@ -20,6 +21,8 @@ type CurrentViewState = {
 };
 
 type SessionViewCachePersistenceOptions = CurrentViewState & {
+  transcriptViewRef: RefObject<DesktopTranscriptView | null>;
+  transcriptHistoryMessageCountRef: RefObject<number>;
   getActiveStream: () => ActiveStreamState | null;
   messagesRef: RefObject<ChatMessage[]>;
   replayCursorsByAgentRunIdRef: RefObject<SessionReplayCursors>;
@@ -35,6 +38,8 @@ export const useSessionViewCachePersistence = ({
   pendingQuestion,
   pendingQuestionError,
   getActiveStream,
+  transcriptViewRef,
+  transcriptHistoryMessageCountRef,
   messagesRef,
   replayCursorsByAgentRunIdRef,
   verifiedReplayAgentRunIdsRef,
@@ -80,6 +85,8 @@ export const useSessionViewCachePersistence = ({
         sessionId: normalizedSessionId,
         snapshot: {
           messages: messagesRef.current,
+          transcriptView: transcriptViewRef.current,
+          transcriptHistoryMessageCount: transcriptHistoryMessageCountRef.current,
           contextUsage: currentViewState.contextUsage,
           autoContinueAfterResumeWait:
             currentViewState.autoContinueAfterResumeWait,
@@ -95,6 +102,8 @@ export const useSessionViewCachePersistence = ({
     },
     [
       getActiveStream,
+      transcriptViewRef,
+      transcriptHistoryMessageCountRef,
       messagesRef,
       replayCursorsByAgentRunIdRef,
       verifiedReplayAgentRunIdsRef,

@@ -1,3 +1,4 @@
+import type { DesktopTranscriptView } from "./transcriptPaging";
 import type { UiSession } from "../../types/ui";
 import type {
   AgentContextUsageSummary,
@@ -309,6 +310,8 @@ export type CachedActiveReplay = {
 };
 
 export type SessionViewSnapshot = {
+  transcriptView?: DesktopTranscriptView | null;
+  transcriptHistoryMessageCount?: number;
   messages: ChatMessage[];
   contextUsage: AgentContextUsageSummary | null;
   autoContinueAfterResumeWait: boolean | undefined;
@@ -327,6 +330,7 @@ export type AgentResultStreamProps = {
 };
 
 export type SessionHydrationSnapshot = {
+  transcriptView?: DesktopTranscriptView;
   messages: ChatMessage[];
   transcriptPage?: TranscriptPageV1;
   transcriptHistoryMessageCount?: number;

@@ -48,9 +48,9 @@ export const useSessionViewSnapshotActions = ({
       applyContextUsage(sessionId, snapshot.contextUsage);
       setPendingQuestion(snapshot.pendingQuestion);
       setPendingQuestionError(snapshot.pendingQuestionError);
-      transcriptViewRef.current = null;
-      transcriptHistoryMessageCountRef.current = 0;
-      setTranscriptHasOlder(false);
+      transcriptViewRef.current = snapshot.transcriptView ?? null;
+      transcriptHistoryMessageCountRef.current = snapshot.transcriptHistoryMessageCount ?? 0;
+      setTranscriptHasOlder(snapshot.transcriptView?.hasOlder ?? false);
       setMessages(snapshot.messages);
       setIsStreaming(Boolean(snapshot.activeReplay));
     },
@@ -115,9 +115,9 @@ export const useSessionViewSnapshotActions = ({
       }
       applyGlobalRuntimeConfig(snapshot.runtimeConfig);
       applyContextUsage(sessionId, snapshot.contextUsage);
-      const transcriptView = snapshot.transcriptPage
+      const transcriptView = snapshot.transcriptView ?? (snapshot.transcriptPage
         ? DesktopTranscriptView.open(snapshot.transcriptPage)
-        : null;
+        : null);
       transcriptViewRef.current = transcriptView;
       transcriptHistoryMessageCountRef.current =
         snapshot.transcriptHistoryMessageCount ?? 0;
@@ -140,6 +140,8 @@ export const useSessionViewSnapshotActions = ({
         sessionId,
         snapshot: {
           messages: hydratedMessages,
+          transcriptView,
+          transcriptHistoryMessageCount: snapshot.transcriptHistoryMessageCount,
           contextUsage: snapshot.contextUsage,
           autoContinueAfterResumeWait:
             snapshot.resolvedAutoContinueAfterResumeWait,

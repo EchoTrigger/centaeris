@@ -1,0 +1,33 @@
+import {act,create,type ReactTestRenderer} from "react-test-renderer";
+import {beforeEach,afterEach,expect,test,vi} from "vitest";
+import {WorkspaceOverview} from "../src/components/WorkspaceOverview";
+import {listProcesses} from "../src/lib/processBridge";
+vi.mock("../src/lib/processBridge",()=>({listProcesses:vi.fn()}));
+vi.mock("../src/lib/workspaceBridge",()=>({getWorkspaceGitStatus:vi.fn(async()=>({isGitRepository:false}))}));
+globalThis.IS_REACT_ACT_ENVIRONMENT=true;
+let view:ReactTestRenderer;
+const props={name:"Workspace",root:"root",agents:[],onFiles:vi.fn(),onReview:vi.fn(),onAgent:vi.fn(),onTasks:vi.fn()};
+beforeEach(()=>{vi.useFakeTimers();vi.resetAllMocks();vi.stubGlobal("document",{addEventListener:vi.fn(),removeEventListener:vi.fn()});});
+afterEach(async()=>{await act(async()=>view?.unmount());vi.useRealTimers();vi.unstubAllGlobals();});
+const task=()=>view.root.findAllByType("button").find(b=>b.props["aria-label"]==="Task");
+test("Task is absent when empty and appears when a process is discovered",async()=>{
+  vi.mocked(listProcesses).mockResolvedValue({serviceInstanceId:"epoch",processes:[]});
+  await act(async()=>{view=create(<WorkspaceOverview {...props} sessionId="s1"/>);});
+  await act(async()=>view.root.findByProps({"aria-label":"Workspace overview"}).props.onClick());
+  expect(task()).toBeUndefined();
+  vi.mocked(listProcesses).mockResolvedValue({serviceInstanceId:"epoch",processes:[{sessionId:"s1"} as never]});
+  await act(async()=>{await vi.advanceTimersByTimeAsync(1500);});
+  expect(task()).toBeDefined();
+  expect(task()!.findByType("svg").props.className).toContain("list-collapse");
+  await act(async()=>task()!.props.onClick());
+  expect(props.onTasks).toHaveBeenCalledOnce();
+});
+test("a late count from the old session cannot reveal Task in the new session",async()=>{
+  let resolve!: (value: Awaited<ReturnType<typeof listProcesses>>)=>void;
+  vi.mocked(listProcesses).mockImplementation(id=>id==="s1"?new Promise(r=>{resolve=r;}):Promise.resolve({serviceInstanceId:"epoch",processes:[]}));
+  await act(async()=>{view=create(<WorkspaceOverview {...props} sessionId="s1"/>);});
+  await act(async()=>view.root.findByProps({"aria-label":"Workspace overview"}).props.onClick());
+  await act(async()=>view.update(<WorkspaceOverview {...props} sessionId="s2"/>));
+  await act(async()=>resolve({serviceInstanceId:"epoch",processes:[{} as never]}));
+  expect(task()).toBeUndefined();
+});

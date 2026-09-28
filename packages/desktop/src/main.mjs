@@ -8,6 +8,7 @@ import { createRuntimeHostTransport } from "./runtimeHostTransport.mjs";
 import { runtimeArtifactPath } from "./runtimeArtifact.mjs";
 import { createTrayController } from "./tray.mjs";
 import { createWindowShell } from "./windowShell.mjs";
+import { startDesktop } from "./startup.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -151,8 +152,7 @@ if (!hasSingleInstanceLock) {
   });
 
   app.whenReady().then(async () => {
-    await initializeRuntimeHost();
-    await windowShell.createMainWindow();
+    await startDesktop(initializeRuntimeHost, windowShell.createMainWindow);
     trayController.ensureTray();
 
     app.on("activate", () => {

@@ -339,7 +339,7 @@ const formatStreamPayloadType = (value: unknown): string =>
 
 const isSupportedRestoreStreamPayloadType = (value: unknown): boolean => {
   const itemType = formatStreamPayloadType(value);
-  return itemType === "session_event" || itemType === "error";
+  return itemType === "runtime_event" || itemType === "session_event" || itemType === "error";
 };
 
 export const assertProjectionStreamPayloads = (
@@ -948,7 +948,7 @@ export const buildAssistantTurnFromStreamItems = (
       );
     }
 
-    if (item.type === "session_event" && isRecord(item.event)) {
+    if ((item.type === "runtime_event" || item.type === "session_event") && isRecord(item.event)) {
       const event = item.event as SessionEvent;
       const eventId = getSessionEventId(event);
       if (eventId) {
