@@ -4,6 +4,7 @@ use centaeris_core::session::reliability::{
 };
 use centaeris_runtime_sqlite::SqliteRuntimeStore;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn store() -> (SqliteRuntimeStore, PathBuf) {
@@ -11,8 +12,15 @@ fn store() -> (SqliteRuntimeStore, PathBuf) {
         .duration_since(UNIX_EPOCH)
         .expect("system time")
         .as_nanos();
+    store_at(unique)
+}
+
+fn store_at(unique: u128) -> (SqliteRuntimeStore, PathBuf) {
+    // Parallel tests may observe the same clock tick, regardless of its units.
+    static NEXT_STORE_ID: AtomicU64 = AtomicU64::new(0);
+    let store_id = NEXT_STORE_ID.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
-        "centaeris-core-local-handlers-{}-{unique}.db",
+        "centaeris-core-local-handlers-{}-{unique}-{store_id}.db",
         std::process::id()
     ));
     let store = SqliteRuntimeStore::new(path.as_path()).expect("store");
@@ -42,6 +50,32 @@ fn claim(owner: &str, now_ms: i64) -> AcquireResourceClaimRequest {
         ttl_ms: 30_000,
         metadata_json: "{}".to_string(),
     }
+}
+
+#[test]
+fn stores_created_in_the_same_clock_tick_have_independent_claims() {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    let (first, first_path) = store_at(timestamp);
+    first
+        .acquire_resource_claim(claim("task-a", 1_000))
+        .expect("first store claim");
+    let (second, second_path) = store_at(timestamp);
+    let second_claim = second
+        .get_resource_claim("file", "workspace/result.txt")
+        .expect("second store claim");
+    drop(first);
+    drop(second);
+    if second_path != first_path {
+        remove_store(second_path);
+    }
+    remove_store(first_path);
+    assert!(
+        second_claim.is_none(),
+        "independent test stores share claims"
+    );
 }
 
 #[test]
