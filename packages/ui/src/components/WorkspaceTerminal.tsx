@@ -45,8 +45,16 @@ export default function WorkspaceTerminal({
 			rendering = false,
 			ready = false,
 			running = true,
-			cursor = "0",
-			queued = 0;
+			cursor = "0";
+		let pendingInputs = 0;
+		const blockUserInput = (event: Event) => {
+			if (pendingInputs) {
+				event.preventDefault();
+				event.stopPropagation();
+			}
+		};
+		for (const name of ["keydown", "beforeinput", "paste"])
+			element.addEventListener(name, blockUserInput, true);
 		let queue = Promise.resolve();
 		let timer: ReturnType<typeof setTimeout>;
 		let sizing: ReturnType<typeof setTimeout>;
@@ -56,11 +64,10 @@ export default function WorkspaceTerminal({
 		};
 		const input = (bytes: Uint8Array) => {
 			if (blocked || (!ready && !rendering) || !running || disposed) return;
-			if (queued + bytes.length > 65536) {
-				fail("Input queue full. Input was not resent.");
-				return;
-			}
-			queued += bytes.length;
+			// The current paste is retained once; only one bounded chunk is in
+			// flight. Pause further user input until the writer catches up.
+			pendingInputs++;
+			if (term.textarea) term.textarea.readOnly = true;
 			queue = queue
 				.then(async () => {
 					if (disposed || blocked) return;
@@ -71,7 +78,9 @@ export default function WorkspaceTerminal({
 				})
 				.catch(fail)
 				.finally(() => {
-					queued -= bytes.length;
+					pendingInputs--;
+					if (!disposed && !blocked && !pendingInputs && term.textarea)
+						term.textarea.readOnly = false;
 				});
 		};
 		const data = term.onData((value) => input(new TextEncoder().encode(value)));
@@ -134,6 +143,8 @@ export default function WorkspaceTerminal({
 		void poll();
 		return () => {
 			disposed = true;
+			for (const name of ["keydown", "beforeinput", "paste"])
+				element.removeEventListener(name, blockUserInput, true);
 			clearTimeout(timer);
 			clearTimeout(sizing);
 			observer.disconnect();
