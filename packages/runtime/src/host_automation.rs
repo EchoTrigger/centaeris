@@ -7,7 +7,9 @@ use serde_json::{json, Value};
 pub(crate) struct SshTool {
     pub destination: String,
     pub command: String,
+    #[serde(default)]
     pub timeout_ms: u64,
+    pub connect_timeout_seconds: Option<u32>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -17,7 +19,9 @@ struct SshRequest {
     operation_id: String,
     destination: String,
     command: String,
+    #[serde(default)]
     timeout_ms: u64,
+    connect_timeout_seconds: Option<u32>,
 }
 pub(crate) fn handle(command: C, payload: Value) -> Result<Value, E> {
     let result = match command {
@@ -26,9 +30,12 @@ pub(crate) fn handle(command: C, payload: Value) -> Result<Value, E> {
         }
         C::SshStart => {
             let request: SshRequest = crate::runtime_bridge::deserialize_request(payload)?;
-            let args =
-                centaeris_runtime::openssh::command_args(&request.destination, &request.command)
-                    .map_err(E::invalid_request)?;
+            let args = centaeris_runtime::openssh::command_args_with_timeout(
+                &request.destination,
+                &request.command,
+                request.connect_timeout_seconds,
+            )
+            .map_err(E::invalid_request)?;
             crate::process_sessions::manager()
                 .start(crate::process_sessions::StartRequest {
                     session_id: request.session_id,
@@ -58,6 +65,7 @@ pub(crate) fn tool_request(value: Value) -> Value {
                         "expected_revision" => "expectedRevision",
                         "provider_id" => "providerId",
                         "thinking_mode" => "thinkingMode",
+                        "expires_at" => "expiresAt",
                         _ => &key,
                     }
                     .to_string();
@@ -88,14 +96,17 @@ pub(crate) fn schedule_tool(value: Value, session_id: &str) -> Result<Value, Str
             thinking_mode: config.model_thinking_mode.clone(),
         };
         model.apply(&mut config)?;
-        let status = crate::schedules::manage(crate::schedules::Request::List {})?;
+        let status = crate::schedules::manage(crate::schedules::Request::List {
+            limit: None,
+            cursor: None,
+        })?;
         return Ok(json!({
             "cwd": binding.cwd,
             "model": model,
             "now": chrono::Utc::now().to_rfc3339(),
             "localTime": chrono::Local::now().to_rfc3339(),
             "serviceEnabled": status["serviceEnabled"],
-            "scheduleCount": status["schedules"].as_array().map_or(0, Vec::len),
+            "scheduleCount": status["total"],
             "machineAwakeRequired": true
         }));
     }
@@ -106,10 +117,12 @@ pub(crate) fn schedule_tool(value: Value, session_id: &str) -> Result<Value, Str
 pub(crate) fn tool_schema() -> Value {
     json!({"type":"object","properties":{
         "action":{"type":"string","enum":["context","list","create","update","pause","resume","delete","history","run","service"]},
+        "limit":{"type":"integer","minimum":1,"maximum":100},"cursor":{"type":"string"},
         "operation_id":{"type":"string"},"schedule_id":{"type":"string"},"expected_revision":{"type":"integer","minimum":1},"enabled":{"type":"boolean"},
         "spec":{"type":"object","properties":{
             "name":{"type":"string"},"cwd":{"type":"string"},"prompt":{"type":"string"},
             "cron":{"type":["string","null"]},"at":{"type":["integer","null"],"description":"Unix timestamp in milliseconds for a one-shot; exactly one of at/cron must be non-null"},
+            "expires_at":{"type":["integer","null"],"description":"Optional absolute expiry in milliseconds for a one-shot; omitted means catch up once whenever the service resumes"},
             "timezone":{"type":"string","description":"IANA time zone, e.g. Asia/Taipei or UTC"},
             "model":{"type":"object","properties":{"provider_id":{"type":"string"},"model":{"type":"string"},"thinking_mode":{"type":["string","null"]}},"required":["provider_id","model","thinking_mode"],"additionalProperties":false}
         },"required":["name","cwd","prompt","cron","at","timezone","model"],"additionalProperties":false}

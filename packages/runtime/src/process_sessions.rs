@@ -12,7 +12,6 @@ use std::{
 
 const MAX_ACTIVE: usize = 32;
 const MAX_RECORDS: usize = 64;
-const MAX_RECEIPTS: usize = 4096;
 const OUTPUT_CAP: usize = 1024 * 1024;
 const CHUNK_BYTES: usize = 4096;
 const MAX_OUTPUT_CHUNKS: usize = 4096;
@@ -28,6 +27,7 @@ pub(crate) struct StartRequest {
     pub operation_id: String,
     pub program: String,
     pub args: Vec<String>,
+    #[serde(default)]
     pub timeout_ms: u64,
 }
 #[derive(Deserialize)]
@@ -137,16 +137,11 @@ impl Entry {
         self.changed.notify_all();
     }
 }
-struct Receipt {
-    request: StartRequest,
-    agent: bool,
-    result: Result<String, String>,
-}
 #[derive(Default)]
 struct Registry {
     entries: HashMap<String, Arc<Entry>>,
     order: VecDeque<String>,
-    receipts: HashMap<(String, String), Receipt>,
+    receipts: crate::local_work_store::Receipts,
     closing: bool,
 }
 pub(crate) struct Manager {
@@ -229,7 +224,6 @@ impl Manager {
             || request.program.len() > 4096
             || request.args.len() > 1024
             || request.args.iter().map(String::len).sum::<usize>() > 64 * 1024
-            || request.timeout_ms > 86_400_000
         {
             return Err("invalid_process_request".into());
         }
@@ -237,15 +231,21 @@ impl Manager {
         if r.closing {
             return Err("process_service_stopping".into());
         }
-        let key = (request.session_id.clone(), request.operation_id.clone());
-        if let Some(receipt) = r.receipts.get(&key) {
-            if receipt.request != request || receipt.agent != agent {
-                return Err("process_operation_conflict".into());
+        let key = crate::operation_receipts::deterministic_identity(
+            "",
+            &request.session_id,
+            &request.operation_id,
+        );
+        let namespace = format!("process:{}", self.service_instance_id);
+        let digest = crate::operation_receipts::request_digest(&(&request, agent))?;
+        if let Some(result) = r.receipts.get(&namespace, &key, &digest).map_err(|e| {
+            if e == "operation request conflict" {
+                "process_operation_conflict".into()
+            } else {
+                e
             }
-            return receipt.result.clone();
-        }
-        if r.receipts.len() >= MAX_RECEIPTS {
-            return Err("process_receipt_capacity_reached".into());
+        })? {
+            return result;
         }
         if r.entries.values().filter(|e| e.active()).count() >= MAX_ACTIVE {
             return Err("process_capacity_reached".into());
@@ -259,6 +259,12 @@ impl Manager {
             let id = r.order.remove(index).unwrap();
             r.entries.remove(&id);
         }
+        r.receipts.put(
+            &namespace,
+            &key,
+            &digest,
+            &Err("process_start_outcome_unknown".into()),
+        )?;
         let result = (|| {
             let id = identity()?;
             let runner =
@@ -354,14 +360,7 @@ impl Manager {
             r.entries.insert(id.clone(), entry);
             Ok(id)
         })();
-        r.receipts.insert(
-            key,
-            Receipt {
-                request,
-                agent,
-                result: result.clone(),
-            },
-        );
+        r.receipts.put(&namespace, &key, &digest, &result)?;
         result
     }
     fn entry(&self, target: &Target) -> Result<Arc<Entry>, String> {
@@ -390,12 +389,17 @@ impl Manager {
         session: &str,
         operation: &str,
     ) -> Option<Result<String, String>> {
-        self.registry
+        let key = crate::operation_receipts::deterministic_identity("", session, operation);
+        match self
+            .registry
             .lock()
             .unwrap()
             .receipts
-            .get(&(session.into(), operation.into()))
-            .map(|r| r.result.clone())
+            .result(&format!("process:{}", self.service_instance_id), &key)
+        {
+            Ok(result) => result,
+            Err(error) => Some(Err(error)),
+        }
     }
     pub(crate) fn acknowledge_notification(&self, target: Target) {
         if let Ok(entry) = self.entry(&target) {

@@ -1,10 +1,33 @@
 # Pre-publication parameter review
 
-Status: pending maintainer decisions. These values describe the current local
-implementation; their presence here does not approve them as product policy.
+Status: the maintainer approved the revised policy below. The original review
+tables are retained as the baseline findings, not the current implementation.
 Scope: unpublished changes since `36ff114` in the main Centaeris repository.
 Existing unchanged limits, test fixtures, schema versions and ordinary CSS
 dimensions are not treated as newly introduced product limits.
+
+## Approved policy and implementation
+
+- No cumulative admission ceilings for schedule plans/history, process completion
+  records or start receipts. Indexed SQLite storage keeps historical records off
+  worker paths while preserving operation identities.
+- Recurring missed times coalesce to the latest occurrence; one-shots catch up
+  once unless the Agent explicitly supplied expiry. Active prior work skips overlap.
+- OpenSSH configuration owns default connection timeout. An explicit Agent/Host
+  connection timeout is separate from the optional whole-command deadline.
+- 32 concurrent background processes; 8 concurrent terminals by default, explicitly
+  configurable. Completed in-memory entries retain the existing 64-entry budget.
+- Keep 1 MiB output tails, 2000 terminal scrollback lines, 64 KiB read pages,
+  50/default and 100/maximum catalog pages, 8 Session / estimated 64 MiB cache,
+  and visible-only 5-second catalog polling.
+- No 24-hour ceiling on explicit process deadlines. Omitted/zero means unlimited.
+- Large terminal paste drains serially in bounded pieces with Host backpressure;
+  a transport failure never automatically resends input.
+- Schedule JSON and completion JSON have explicit one-time transactional imports;
+  originals remain as backups. New databases are Host-private and reject unknown
+  schema versions. Core contracts and hosted Workspace are unchanged.
+
+## Original review findings
 
 ## Behavior limits requiring decisions
 

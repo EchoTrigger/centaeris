@@ -104,7 +104,7 @@ struct Entry {
 struct Registry {
     entries: HashMap<String, Arc<Entry>>,
     order: VecDeque<String>,
-    receipts: HashMap<String, (Start, Result<String, String>)>,
+    receipts: crate::local_work_store::Receipts,
     closing: bool,
 }
 #[derive(Default)]
@@ -218,27 +218,46 @@ impl Manager {
         if r.closing {
             return Err("terminal_service_stopping".into());
         }
-        if let Some((old, result)) = r.receipts.get(&request.operation_id) {
-            if old != &request {
-                return Err("terminal_operation_conflict".into());
-            }
-            let id = result.clone()?;
+        let namespace = format!("terminal:{}", instance());
+        let digest = crate::operation_receipts::request_digest(&request)?;
+        if let Some(result) = r
+            .receipts
+            .get(&namespace, &request.operation_id, &digest)
+            .map_err(|e| {
+                if e == "operation request conflict" {
+                    "terminal_operation_conflict".into()
+                } else {
+                    e
+                }
+            })?
+        {
+            let id = result?;
             return r
                 .entries
                 .get(&id)
                 .map(|e| serde_json::json!(*e.snapshot.lock().unwrap()))
                 .ok_or_else(|| "terminal_expired".into());
         }
-        if r.receipts.len() >= 4096
-            || r.entries
-                .values()
-                .filter(|e| e.snapshot.lock().unwrap().state != "exited")
-                .count()
-                >= 32
+        let max_active = std::env::var("CENTAERIS_TERMINAL_MAX_ACTIVE")
+            .ok()
+            .map(|s| {
+                s.parse::<usize>()
+                    .map_err(|_| "invalid CENTAERIS_TERMINAL_MAX_ACTIVE".to_string())
+            })
+            .transpose()?
+            .unwrap_or(8);
+        if max_active == 0 {
+            return Err("CENTAERIS_TERMINAL_MAX_ACTIVE must be positive".into());
+        }
+        if r.entries
+            .values()
+            .filter(|e| e.snapshot.lock().unwrap().state != "exited")
+            .count()
+            >= max_active
         {
             return Err("terminal_capacity_reached".into());
         }
-        while r.entries.len() >= 64 {
+        while r.entries.len() >= 64.max(max_active) {
             let Some(i) = r.order.iter().position(|id| {
                 let s = r.entries[id].snapshot.lock().unwrap();
                 s.state == "exited" && s.output_complete
@@ -248,6 +267,12 @@ impl Manager {
             let id = r.order.remove(i).unwrap();
             r.entries.remove(&id);
         }
+        r.receipts.put(
+            &namespace,
+            &request.operation_id,
+            &digest,
+            &Err("terminal_start_outcome_unknown".into()),
+        )?;
         let result = (|| {
             let mut random = [0u8; 16];
             getrandom::fill(&mut random).map_err(|e| e.to_string())?;
@@ -376,7 +401,7 @@ impl Manager {
             Ok(id)
         })();
         r.receipts
-            .insert(request.operation_id.clone(), (request, result.clone()));
+            .put(&namespace, &request.operation_id, &digest, &result)?;
         result.map(|id| serde_json::json!(*r.entries[&id].snapshot.lock().unwrap()))
     }
     fn execute(&self, request: Request) -> Result<serde_json::Value, String> {
@@ -428,7 +453,7 @@ impl Manager {
                     return Err("terminal_exited".into());
                 }
                 e.input
-                    .try_send(bytes)
+                    .send(bytes)
                     .map_err(|_| "terminal_input_not_accepted")?;
                 Ok(serde_json::json!({"accepted":true}))
             }

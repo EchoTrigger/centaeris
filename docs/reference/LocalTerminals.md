@@ -43,11 +43,15 @@ stateless attach/detach: viewers own no PTY lifetime or exclusive input lease.
 Multiple viewers share the terminal; the most recent resize changes its geometry.
 
 Each terminal retains at most 1 MiB / 4096 output chunks; read pages contain at
-most 16 chunks. There are at most 32 active terminals, 64 retained records and
-4096 creation receipts per service instance. Eviction retains receipt tombstones
-so a retry cannot silently create another shell. Input admission uses a bounded
-32-message queue and bounded messages. Desktop also limits pending input, stops
-sending after transport failure, and offers explicit reconnect without replaying
+most 16 chunks. The default is 8 active terminals; a positive
+`CENTAERIS_TERMINAL_MAX_ACTIVE` explicitly overrides it. The entry cache retains
+up to 64 entries (or the configured active limit if larger), evicting only fully
+ended terminals. Creation receipts live in indexed durable storage without a
+cumulative admission ceiling, so eviction cannot make retries create another
+shell. Input admission uses a bounded 32-message queue with blocking backpressure.
+Desktop sends one 8 KiB piece at a time, temporarily pauses user input while a
+paste is draining, and does not reject a paste just because it exceeds 64 KiB.
+It stops sending after transport failure and offers explicit reconnect without replaying
 user input. Terminal control replies such as ConPTY's initial cursor-position
 query remain enabled while replay is rendered.
 

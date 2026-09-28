@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 // Native isolated-profile acceptance. Only the loopback mock receives model calls.
 import { createRuntimeHostTransport } from "../packages/desktop/src/runtimeHostTransport.mjs";
 import fs from "node:fs/promises";
@@ -49,7 +50,17 @@ function client(){
 const call=(c,m,r)=>c.invokeCommand(m,m==="runtime/shutdown"?{}:{request:r});
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(f,label){const end=Date.now()+30000;while(Date.now()<end){if(await f())return;await pause(50);}throw Error(`timeout: ${label}`);}
-async function outbox(){const dir=path.join(profile,"runtime/process-completions");try{return await Promise.all((await fs.readdir(dir)).filter(n=>n.endsWith(".json")).map(async n=>JSON.parse(await fs.readFile(path.join(dir,n),"utf8"))));}catch(e){if(e.code==="ENOENT")return [];throw e;}}
+const outboxFile=path.join(profile,"runtime/process-completions/index.sqlite3");
+async function outbox(){
+  try { await fs.access(outboxFile); } catch(e) { if(e.code==="ENOENT")return [];throw e; }
+  const db=new DatabaseSync(outboxFile,{readOnly:true});
+  try { db.exec("PRAGMA busy_timeout=5000");return db.prepare("SELECT body FROM records WHERE namespace='completions' ORDER BY id").all().map(r=>JSON.parse(r.body)); } finally {db.close();}
+}
+function loseAcknowledgement(record){
+  const db=new DatabaseSync(outboxFile);
+  try {db.exec("PRAGMA busy_timeout=5000");db.prepare("UPDATE records SET body=?,state='pending' WHERE namespace='completions' AND owner=?").run(JSON.stringify(record),record.owner.sessionId);}finally{db.close();}
+}
+
 try{
   const c=client();await call(c,"initialize",{clientKind:"desktop",viewerId:"process-agent-desktop"});
   await call(c,"agent_runtime_config_set",{customModelProviders:[{providerId:"custom.process",name:"Process mock",baseUrl:`http://127.0.0.1:${mock.address().port}`,api:"openai-completions",models:[{model:"mock",displayName:"Mock",contextTokens:"32k",maxOutputTokens:"4k",supportsVision:false}]}]});
@@ -69,10 +80,8 @@ try{
   await pause(700);assert.equal(stage,4,"notification must not repeat after reconnect");
   const records=await outbox();assert.equal(records.length,1);assert.equal(records[0].completion.outputComplete,true);
   // Simulate losing the outbox acknowledgement after run admission committed.
-  const dir=path.join(profile,"runtime/process-completions");
-  const recordName=(await fs.readdir(dir)).find(n=>n.endsWith(".json"));
   const completed=records[0];completed.delivery="pending";
-  await fs.writeFile(path.join(dir,recordName),JSON.stringify(completed));
+  loseAcknowledgement(completed);
   await until(async()=>(await outbox())[0]?.delivery==="delivered","duplicate admission acknowledged");
   await pause(350);assert.equal(stage,4,"lost acknowledgement must not create another run");
 
@@ -86,7 +95,7 @@ try{
   await call(after,"runtime/shutdown",{});
   await until(()=>server.exitCode!==null,"Runtime shutdown");
   completed.delivery="pending";
-  await fs.writeFile(path.join(dir,recordName),JSON.stringify(completed));
+  loseAcknowledgement(completed);
   const restarted=client();await call(restarted,"initialize",{clientKind:"desktop",viewerId:"process-agent-restarted"});
   await until(async()=>(await outbox()).some(r=>r.owner.sessionId===session.id && r.delivery==="delivered"),"restart repairs lost acknowledgement");
   assert.equal(stage,2,"restart must not repeat an admitted continuation");

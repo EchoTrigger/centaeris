@@ -536,12 +536,13 @@ Use `nextCursor` for the next read. An evicted prefix sets `gap: true`; a future
 cursor is rejected. `outputComplete` means the producer has finished draining,
 while `hasMore` means retained chunks remain after this page.
 
-Limits per Runtime: 32 active processes, 64 retained records, 4,096 start receipts,
+Limits per Runtime: 32 active processes, 64 retained in-memory records,
 1 MiB / 4,096 chunks retained output per process (whichever limit is reached
 first), and 64 KiB per read. Completed records are evicted
 oldest-first when admitting new records; active/incompletely-cleaned records are
-never evicted. Receipt exhaustion rejects new starts rather than dropping retry
-protection. Active processes prevent idle shutdown. Explicit service shutdown
+never evicted. Start receipts are stored by service identity and operation key
+in `runtime/work-receipts.sqlite3`, without a cumulative count ceiling. A compact
+request digest and result preserve retry protection after entry eviction. Active processes prevent idle shutdown. Explicit service shutdown
 closes admission and stops the owned process trees; failure to confirm cleanup is
 reported. Deleting a Session or its subtree is rejected while it owns active
 processes. Start and deletion share an admission gate; successful deletion discards
@@ -576,9 +577,10 @@ the Runtime never reconstructs a process by PID or guesses its exit code.
 
 The completion worker waits for observed exit and drained output, then atomically
 stores the result and bounded output pages below `runtime/process-completions`.
-Output uses a separate file, so scanning pending metadata does not repeatedly read
-logs. At most 256 Agent records are retained per profile, with the process output
-limits above; capacity rejects additional starts. Successful Session deletion
+Output uses a separate file. `index.sqlite3` stores completion metadata; workers
+query only its pending index. Existing JSON records are imported atomically once
+and remain as migration backups. Completed history does not enter the worker
+query and has no cumulative admission ceiling. Successful Session deletion
 cleans up its retained records and output. Manual Host/TUI starts do not opt into
 automatic Agent follow-up.
 

@@ -30,7 +30,8 @@ Inside an existing TUI Session:
 ```
 
 Desktop and TUI Agents receive `ssh_start` with `destination`, `command` and
-`timeout_ms`; completion and output use the existing `process_list`,
+optional `timeout_ms` (zero/omitted means no deadline) and optional
+`connect_timeout_seconds`; completion and output use the existing `process_list`,
 `process_read` and `process_stop` tools. Agent starts receive automatic completion
 notifications; direct user CLI/TUI starts remain user-managed processes.
 
@@ -40,10 +41,14 @@ Its result is an ordinary process snapshot. Repeating the same request in the
 same service instance is idempotent. A different service instance is not allowed
 to adopt or replay the old process start.
 
-Managed execution uses `-T -o BatchMode=yes -o ConnectTimeout=15 --`, followed by
+Managed execution uses `-T -o BatchMode=yes --`, followed by
 the destination and one remote command string. The local Host does not interpret
 that string; the remote shell does. Destinations cannot inject SSH options.
 Interactive authentication is intentionally unavailable in managed execution.
+OpenSSH configuration controls the default connection timeout. Only an explicit
+`connectTimeoutSeconds` Host argument (`connect_timeout_seconds` tool argument)
+adds `-o ConnectTimeout=N`. This is separate from the optional whole-command
+`timeoutMs` / `timeout_ms`; explicit deadlines are no longer capped at 24 hours.
 Stopping local SSH, timeout, disconnection or exit 255 is not proof that a remote
 command stopped or had no effects. Do not blindly repeat a command after an
 unknown outcome. This is not a remote Runtime, remote workspace mount, SFTP
@@ -68,15 +73,17 @@ Listing, changing, pausing and deleting plans are also conversational actions.
 The CLI below is a development/diagnostic surface, not a required user workflow.
 
 Plans, immutable occurrence specifications and history are stored atomically in
-the active profile's `runtime/schedules.json` (schema version 1). No model secret
+the active profile's `runtime/schedules.sqlite3` (private schema version 1).
+The previous `schedules.json` is imported once in a transaction, with an exact
+`json.pre-sqlite.backup` and the original file preserved. No model secret
 is stored there. It is a Host-owned store, not an automatically executed project
 file. Unknown schema versions and fields fail loudly.
 
 ```text
 centa schedule create "C:/work/daily-review.json" review-plan-1
-centa schedule list
+centa schedule list [cursor]
 centa schedule service start
-centa schedule history <scheduleId>
+centa schedule history <scheduleId> [cursor]
 centa schedule run <scheduleId> manual-review-1
 centa schedule pause <scheduleId>
 centa schedule resume <scheduleId>
@@ -145,20 +152,24 @@ no separate scheduling form or remote-connection screen.
   identify automatic occurrences; manual runs use their operation identity.
   Intent and next-fire advancement commit before Session/Run admission. Recovery
   reconciles the same deterministic identities instead of creating replacements.
-- An occurrence delayed by at least 60 seconds is recorded as `skippedMissed`.
-  Missed intervals are coalesced into one skipped record and the clock advances
-  directly to the next future time. A still-active previous occurrence produces
-  `skippedOverlap`; there is no unbounded catch-up queue.
+- Missed recurring occurrences coalesce into the latest due occurrence, which
+  runs once; the clock advances directly to the next future time. A one-shot
+  runs once when the service resumes unless its explicit optional `expiresAt`
+  (`expires_at` in tool arguments) has passed, producing `expired`. There is no
+  implicit 60-second expiry. A still-active previous occurrence produces
+  `skippedOverlap`; no waiting backlog is accumulated.
 - History distinguishes `pending`, `running`, Agent terminal states,
   `failedAdmission`, skipped occurrences and `sessionDeleted`. Admission
   uncertainty retains its original identity and error for reconciliation.
   Deleting an admitted Session must not recreate it.
 - Pausing or deleting a plan affects future triggers. Existing occurrence
   history remains; use the ordinary Agent cancellation interface to stop a run.
-- Storage is bounded at 256 plan identities (including deletion tombstones) and
-  4,096 occurrence records per profile. Capacity is not silently pruned because
-  doing so would erase retry identities; new work is rejected or the due plan is
-  disabled on capacity exhaustion. History compaction is a future extension.
+- Historical counts do not disable schedules or reject admission. Workers query
+  indexed due plans and active occurrences only. Completed history and deleted
+  plan identities stay on disk for history and deduplication. `list` and `history`
+  return up to 50 rows by default (maximum 100), with `nextCursor`; pass that as
+  `cursor` to continue in the same scope. History is newest first. Desktop offers
+  Load more; Agent and diagnostic CLI callers can request subsequent pages.
 
 ## Validation
 

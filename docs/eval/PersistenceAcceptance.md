@@ -1,5 +1,23 @@
 # Persistence acceptance
 
+## Local work history and admission receipts
+
+`runtime/schedules.sqlite3` and `runtime/process-completions/index.sqlite3`
+are Host-private indexed stores. Their one-time imports preserve the previous
+schedule JSON backup and original completion JSON records. Import markers and
+records commit together. Completed history does not participate in scheduler or
+completion-worker queries. Start receipts use `runtime/work-receipts.sqlite3`,
+keyed by service identity and operation key; historical counts do not close
+admission and eviction does not permit a duplicate process start.
+
+The Runtime tests cover migration backup/reopen, more than the previous history
+ceilings, pending-only reads in the presence of invalid unrelated historical
+bodies, retained receipt identity and rejection of newer private schemas.
+`scripts/test-host-automation.mjs` and `scripts/test-process-agent.mjs` additionally
+exercise lost acknowledgements and restart against real Runtime transports.
+Only forward migration is supported; retained JSON files are recovery backups,
+not stores for concurrently running an older Runtime.
+
 Runtime creates the current SQLite schema in one transaction. Opening a database
 validates its schema version, history, tables, and indexes before using it.
 Unsupported or malformed stores fail without modifying stored facts.
