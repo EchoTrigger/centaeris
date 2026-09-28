@@ -38,6 +38,7 @@ impl HttpMcpClient {
             configured.insert(name, value);
         }
         let http = reqwest::Client::builder()
+            .user_agent(PRODUCT_USER_AGENT)
             .redirect(reqwest::redirect::Policy::none())
             .default_headers(configured)
             .connect_timeout(timeout)

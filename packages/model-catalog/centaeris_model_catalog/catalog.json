@@ -758,8 +758,12 @@
           "displayName": "GLM-5.3 Flash",
           "contextTokens": 1000000,
           "maxOutputTokens": 131072,
-          "thinkingMode": null,
-          "thinkingModes": [],
+          "thinkingMode": "high",
+          "thinkingModes": [
+            "low",
+            "high",
+            "max"
+          ],
           "supportsVision": false,
           "apiOverride": null,
           "apiBaseOverride": null
@@ -769,8 +773,12 @@
           "displayName": "DeepSeek V4.1 Flash",
           "contextTokens": 1000000,
           "maxOutputTokens": 384000,
-          "thinkingMode": null,
-          "thinkingModes": [],
+          "thinkingMode": "high",
+          "thinkingModes": [
+            "low",
+            "high",
+            "max"
+          ],
           "supportsVision": false,
           "apiOverride": null,
           "apiBaseOverride": null

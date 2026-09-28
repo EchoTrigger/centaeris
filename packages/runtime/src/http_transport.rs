@@ -26,8 +26,25 @@ pub(crate) struct ReqwestJsonHttpTransport {
 }
 
 impl ReqwestJsonHttpTransport {
-    pub(crate) fn new(run_id: String) -> Result<Self, String> {
+    pub(crate) fn for_session(
+        run_id: String,
+        session_id: &str,
+        provider_id: &str,
+    ) -> Result<Self, String> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        if provider_id == "opencode-go.default" {
+            if session_id.trim().is_empty() {
+                return Err("OpenCode requests require a conversation session ID".into());
+            }
+            headers.insert(
+                "x-opencode-session",
+                reqwest::header::HeaderValue::from_str(session_id)
+                    .map_err(|_| "invalid conversation session ID for OpenCode".to_string())?,
+            );
+        }
         let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .user_agent(concat!("centaeris/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|error| format!("build reqwest client failed: {error}"))?;
         Ok(Self {
@@ -320,6 +337,113 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
+
+    #[tokio::test]
+    async fn model_requests_send_product_user_agent_and_preserve_explicit_overrides() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for streaming in [false, true] {
+            for (header_name, provider, session, run) in [
+                (None, "opencode-go.default", "conversation-a", "run-1"),
+                (
+                    Some("User-Agent"),
+                    "opencode-go.default",
+                    "conversation-a",
+                    "run-2",
+                ),
+                (
+                    Some("uSeR-aGeNt"),
+                    "opencode-go.default",
+                    "conversation-b",
+                    "run-3",
+                ),
+                (None, "openai.default", "conversation-c", "run-4"),
+            ] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut wire = Vec::new();
+                    while !wire.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                        let mut chunk = [0; 1024];
+                        let count = socket.read(&mut chunk).await.unwrap();
+                        assert!(count > 0 && wire.len() < 65_536);
+                        wire.extend_from_slice(&chunk[..count]);
+                    }
+                    let (content_type, body) = if streaming {
+                        ("text/event-stream", "data: [DONE]\n\n")
+                    } else {
+                        ("application/json", "{}")
+                    };
+                    socket
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    String::from_utf8(wire).unwrap()
+                });
+                let request = JsonHttpRequest {
+                    method: "POST".into(),
+                    url: format!("http://{address}/model"),
+                    headers: header_name
+                        .map(|name| HashMap::from([(name.into(), "custom-agent/2".into())]))
+                        .unwrap_or_default(),
+                    timeout_ms: 5000,
+                    sse_idle_timeout_ms: 5000,
+                    max_retries: 0,
+                    retry_backoff_ms: 0,
+                    body_json: "{}".into(),
+                };
+                let client =
+                    ReqwestJsonHttpTransport::for_session(run.into(), session, provider).unwrap();
+                let response = if streaming {
+                    client.execute_sse(&request, &mut |_| {}).await
+                } else {
+                    client.execute_json(&request).await
+                }
+                .unwrap();
+                assert_eq!(response.status_code, 200);
+                let wire = tokio::time::timeout(Duration::from_secs(5), server)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let session_headers: Vec<_> = wire
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .filter(|(name, _)| name.eq_ignore_ascii_case("x-opencode-session"))
+                    .map(|(_, value)| value.trim())
+                    .collect();
+                assert_eq!(
+                    session_headers,
+                    if provider == "opencode-go.default" {
+                        vec![session]
+                    } else {
+                        vec![]
+                    }
+                );
+                let values: Vec<_> = wire
+                    .split("\r\n\r\n")
+                    .next()
+                    .unwrap()
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .filter(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
+                    .map(|(_, value)| value.trim())
+                    .collect();
+                let expected = if header_name.is_some() {
+                    "custom-agent/2"
+                } else {
+                    concat!("centaeris/", env!("CARGO_PKG_VERSION"))
+                };
+                assert_eq!(values, vec![expected], "streaming={streaming}");
+            }
+        }
+    }
 
     #[tokio::test]
     async fn independently_created_model_transports_share_runtime_capacity() {
