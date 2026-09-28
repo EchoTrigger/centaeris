@@ -220,7 +220,10 @@ mod tests {
             response.store_schema_version,
             crate::sqlite_store::STORE_SCHEMA_VERSION
         );
-        assert_eq!(response.layout_schema_version, 1);
+        assert_eq!(
+            response.layout_schema_version,
+            crate::user_data_layout::LAYOUT_SCHEMA_VERSION
+        );
     }
 
     #[test]

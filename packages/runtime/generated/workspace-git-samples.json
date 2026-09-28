@@ -1,0 +1,83 @@
+{
+  "pathRequest": {
+    "workspaceRoot": "sample-root",
+    "path": "a.txt",
+    "expected": {
+      "head": null,
+      "indexFingerprint": "index"
+    }
+  },
+  "commitRequest": {
+    "workspaceRoot": "sample-root",
+    "message": "Sample",
+    "expected": {
+      "head": null,
+      "indexFingerprint": "index"
+    }
+  },
+  "diffRequest": {
+    "workspaceRoot": "sample-root",
+    "path": "a.txt",
+    "side": "staged"
+  },
+  "review": {
+    "workspaceRoot": "sample-root",
+    "branch": "main",
+    "snapshot": {
+      "head": null,
+      "indexFingerprint": "index"
+    },
+    "staged": [
+      {
+        "path": "a.txt",
+        "originalPath": null,
+        "status": "A"
+      }
+    ],
+    "unstaged": [],
+    "untracked": [],
+    "conflicts": []
+  },
+  "commitResult": {
+    "commitSha": "sha",
+    "output": "committed"
+  },
+  "diff": {
+    "workspaceRoot": "sample-root",
+    "path": "a.txt",
+    "diffPreview": "+sample",
+    "truncated": false
+  },
+  "viewRequest": {
+    "workspaceRoot": "sample-root",
+    "source": "branch",
+    "baseRef": "main",
+    "path": "a.txt"
+  },
+  "view": {
+    "workspaceRoot": "sample-root",
+    "branch": "feature",
+    "source": "branch",
+    "snapshot": {
+      "head": null,
+      "indexFingerprint": "index"
+    },
+    "baseRef": "main",
+    "files": [
+      {
+        "path": "a.txt",
+        "originalPath": null,
+        "status": "A",
+        "added": 1,
+        "removed": 0
+      }
+    ],
+    "hasConflicts": false,
+    "diff": {
+      "workspaceRoot": "sample-root",
+      "path": "a.txt",
+      "diffPreview": "+sample",
+      "truncated": false
+    }
+  }
+}

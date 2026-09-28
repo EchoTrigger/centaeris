@@ -398,7 +398,7 @@ fn cancel_agent_run_after_tool_closure(
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty());
-            let mut matches = message_log::project_agent_runs()?
+            let mut matches = crate::session_catalog::runs(session_id, None, true)?
                 .into_iter()
                 .filter(|run| {
                     session_id.is_some_and(|value| run.session_id == value)
@@ -784,6 +784,8 @@ struct CanonicalAgentInputRequest<'a> {
     rewrite_expected_tail_message_id: Option<&'a str>,
     auto_continue_after_resume_wait: Option<bool>,
     attachments: Vec<CanonicalLocalImageInputRequest<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scheduled_model: Option<&'a crate::schedules::ModelSelection>,
 }
 
 #[derive(Serialize)]
@@ -796,6 +798,14 @@ struct CanonicalLocalImageInputRequest<'a> {
 pub(crate) fn input(
     event_writer: EventWriter,
     request: AgentInputRequest,
+) -> Result<AgentInputResponse, AgentInputCommandError> {
+    input_with_model(event_writer, request, None)
+}
+
+pub(crate) fn input_with_model(
+    event_writer: EventWriter,
+    request: AgentInputRequest,
+    scheduled_model: Option<crate::schedules::ModelSelection>,
 ) -> Result<AgentInputResponse, AgentInputCommandError> {
     let session_id = normalize_session_id(request.session_id.as_deref());
     let message = required_string(request.message.as_str(), "message")?;
@@ -811,6 +821,7 @@ pub(crate) fn input(
         "append"
     };
     let canonical = CanonicalAgentInputRequest {
+        scheduled_model: scheduled_model.as_ref(),
         session_id: session_id.as_str(),
         message: message.as_str(),
         tail_policy,
@@ -877,6 +888,7 @@ pub(crate) fn input(
             response,
             message,
             rewrite_last_user_input,
+            scheduled_model,
         );
     }
     let response = expected_response;
@@ -896,6 +908,7 @@ pub(crate) fn input(
         response,
         message,
         rewrite_last_user_input,
+        scheduled_model,
     )
 }
 
@@ -905,8 +918,10 @@ fn start_agent_input_from_receipt(
     response: AgentInputResponse,
     message: String,
     rewrite_last_user_input: Option<RewriteLastUserInput>,
+    scheduled_model: Option<crate::schedules::ModelSelection>,
 ) -> Result<AgentInputResponse, AgentInputCommandError> {
     let agent_run = start_agent_run(StartAgentRunRequest {
+        scheduled_model,
         event_writer,
         session_id: response.session_id.clone(),
         message,
@@ -1135,6 +1150,7 @@ pub(crate) async fn question_answer_async(
         });
     }
     let agent_run = start_agent_run_blocking(StartAgentRunRequest {
+        scheduled_model: None,
         event_writer,
         session_id: session_id.clone(),
         message: answer_message,
@@ -1155,6 +1171,7 @@ pub(crate) async fn question_answer_async(
 }
 
 struct StartAgentRunRequest {
+    scheduled_model: Option<crate::schedules::ModelSelection>,
     event_writer: EventWriter,
     session_id: String,
     message: String,
@@ -1263,15 +1280,18 @@ fn start_agent_run(mut request: StartAgentRunRequest) -> Result<StartedAgentRun,
     )?;
     recover_incomplete_tool_calls_before_new_turn(request.session_id.as_str())?;
     restore_runtime_snapshot_from_session(request.session_id.as_str())?;
-    let runtime_config = runtime_config::get(runtime_config::AgentRuntimeConfigGetRequest {})
+    let mut runtime_config = runtime_config::get(runtime_config::AgentRuntimeConfigGetRequest {})
         .map_err(|error| {
-            persist_agent_turn_setup_error(
-                request.session_id.as_str(),
-                turn_id.as_str(),
-                agent_run_id.as_str(),
-                error,
-            )
-        })?;
+        persist_agent_turn_setup_error(
+            request.session_id.as_str(),
+            turn_id.as_str(),
+            agent_run_id.as_str(),
+            error,
+        )
+    })?;
+    if let Some(selection) = &request.scheduled_model {
+        selection.apply(&mut runtime_config)?;
+    }
     if !request.attachments.is_empty() {
         ensure_selected_model_supports_vision(&runtime_config)?;
     }
@@ -1716,6 +1736,15 @@ pub(crate) fn build_agent_runtime(
                 Vec::new(),
             )
         });
+    let mut process_registry = (*dynamic_tool_registry).clone();
+    for contract in crate::process_agent::contracts() {
+        process_registry.register(contract)?;
+    }
+    let dynamic_tool_registry = Arc::new(process_registry);
+    let process_provider = Arc::new(crate::process_agent::Provider {
+        session_id: session_id.clone(),
+        agent_run_id: execution_owner.clone(),
+    });
     let local_runner = Arc::new(
         centaeris_runtime::local_execution_host::LocalExecutionHostRunner::new(bash_path)
             .and_then(|runner| runner.with_environment_overrides(command_environment))
@@ -1759,6 +1788,7 @@ pub(crate) fn build_agent_runtime(
     for provider in providers {
         tool_layer.register_dynamic_tool_provider(provider)?;
     }
+    tool_layer.register_dynamic_tool_provider(process_provider)?;
     if let Some(cancellation_probe) = execution_cancellation_probe {
         tool_layer = tool_layer.with_execution_cancellation_probe(cancellation_probe);
     }
@@ -2758,7 +2788,7 @@ pub(crate) fn recover_unsealed_live_text_journals() -> Result<(), String> {
             );
         }
     }
-    for agent_run in message_log::project_agent_runs()?
+    for agent_run in crate::session_catalog::runs(None, None, true)?
         .into_iter()
         .filter(|agent_run| matches!(agent_run.status.as_str(), "running" | "stalled"))
     {
@@ -4763,6 +4793,7 @@ mod tests {
             let session = environment.create_session("receipt crash window")?;
             let operation_id = "prompt-operation-receipt-crash-window";
             let request_digest = operation_receipts::request_digest(&CanonicalAgentInputRequest {
+                scheduled_model: None,
                 session_id: session.id.as_str(),
                 message: "hello",
                 tail_policy: "append",

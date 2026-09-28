@@ -77,6 +77,8 @@ pub(crate) async fn run_server() -> Result<(), RuntimeHostError> {
     let state = Arc::new(Mutex::new(RuntimeHostState::default()));
     let clients = Arc::new(RuntimeServerClientHub::default());
     let shutdown_jobs = Arc::new(subagent_scheduler::ShutdownJobs::default());
+    let schedule_worker = tokio::spawn(crate::schedules::run_worker(Arc::clone(&clients)));
+    let process_worker = tokio::spawn(crate::process_agent::run_worker(Arc::clone(&clients)));
     let background_worker = tokio::spawn(subagent_scheduler::run_background_worker(
         clients.broadcaster(),
         Arc::clone(&clients),
@@ -105,6 +107,8 @@ pub(crate) async fn run_server() -> Result<(), RuntimeHostError> {
         result = serve => result,
         _ = clients.service_shutdown_requested() => Ok(()),
     };
+    crate::terminal_sessions::manager().begin_shutdown();
+    crate::process_sessions::manager().begin_shutdown();
     // The listener may finish because a new connection observes draining at
     // the same instant as the shutdown notification. Both exits must drain.
     let result = if clients.is_draining() {
@@ -121,8 +125,18 @@ pub(crate) async fn run_server() -> Result<(), RuntimeHostError> {
         result
     };
     background_worker.abort();
+    process_worker.abort();
+    schedule_worker.abort();
     idle_monitor.abort();
-    result
+    let processes = tokio::task::spawn_blocking(|| {
+        crate::terminal_sessions::manager().shutdown()?;
+        crate::process_sessions::manager().shutdown()?;
+        crate::process_agent::flush_completions()
+    })
+    .await
+    .map_err(|e| RuntimeHostError::transport(e.to_string()))?
+    .map_err(|e| RuntimeHostError::new("process_shutdown_failed", e));
+    result.and(processes)
 }
 
 async fn drain_service_shutdown(
@@ -193,6 +207,9 @@ async fn wait_for_runtime_work(
             && clients.active_action_count() == 0
             && jobs.is_empty()
             && background_worker.is_finished()
+            && !crate::terminal_sessions::manager().has_active()
+            && !crate::process_sessions::manager().has_active()
+            && !crate::process_sessions::manager().has_pending_notifications()
         {
             return Ok(());
         }
@@ -253,7 +270,12 @@ async fn agent_run_idle_shutdown_monitor(
 async fn runtime_server_is_idle(
     clients: &RuntimeServerClientHub,
 ) -> Result<bool, RuntimeHostError> {
-    if clients.has_clients_or_active_agent_runs()? {
+    if crate::schedules::keep_alive()
+        || clients.has_clients_or_active_agent_runs()?
+        || crate::terminal_sessions::manager().has_active()
+        || crate::process_sessions::manager().has_active()
+        || crate::process_sessions::manager().has_pending_notifications()
+    {
         return Ok(false);
     }
     let store = agent_runtime::agent_runtime_store_actor()

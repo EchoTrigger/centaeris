@@ -65,6 +65,13 @@ impl RuntimeServerClientHub {
     pub(crate) fn broadcaster(self: &Arc<Self>) -> EventWriter {
         EventWriter::new(Arc::clone(self), 0)
     }
+    pub(crate) fn process_scheduler(self: &Arc<Self>) -> EventWriter {
+        EventWriter {
+            hub: Arc::clone(self),
+            client_id: 0,
+            internal_admission: true,
+        }
+    }
 
     pub(crate) fn disconnect(&self, event_writer: &EventWriter) -> Result<(), RuntimeHostError> {
         self.disconnect_with_detach(event_writer, detach_viewer)
@@ -280,7 +287,7 @@ impl RuntimeServerClientHub {
 
     fn start_agent_run(
         &self,
-        client_id: u64,
+        client_id: Option<u64>,
         session_id: &str,
         agent_run_id: &str,
         turn_id: &str,
@@ -295,11 +302,13 @@ impl RuntimeServerClientHub {
         if self.draining.load(Ordering::Acquire) {
             return Err("runtime_server_draining".to_string());
         }
-        let client = clients
-            .get(&client_id)
-            .ok_or_else(|| "runtime client disconnected before admission".to_string())?;
-        if client.exiting || client.registration.is_none() {
-            return Err("runtime client is not initialized or is exiting".to_string());
+        if let Some(client_id) = client_id {
+            let client = clients
+                .get(&client_id)
+                .ok_or_else(|| "runtime client disconnected before admission".to_string())?;
+            if client.exiting || client.registration.is_none() {
+                return Err("runtime client is not initialized or is exiting".to_string());
+            }
         }
         let lease = self
             .agent_runs
@@ -384,11 +393,16 @@ impl Drop for RuntimeActionPermit {
 pub(crate) struct EventWriter {
     hub: Arc<RuntimeServerClientHub>,
     client_id: u64,
+    internal_admission: bool,
 }
 
 impl EventWriter {
     fn new(hub: Arc<RuntimeServerClientHub>, client_id: u64) -> Self {
-        Self { hub, client_id }
+        Self {
+            hub,
+            client_id,
+            internal_admission: false,
+        }
     }
 
     pub(crate) fn for_agent_run(&self, lease_id: &str) -> Result<Self, String> {
@@ -398,6 +412,7 @@ impl EventWriter {
         Ok(Self {
             hub: Arc::clone(&self.hub),
             client_id: 0,
+            internal_admission: false,
         })
     }
 
@@ -417,8 +432,13 @@ impl EventWriter {
         turn_id: &str,
         control: TurnControl,
     ) -> Result<AgentRunLease, String> {
-        self.hub
-            .start_agent_run(self.client_id, session_id, agent_run_id, turn_id, control)
+        self.hub.start_agent_run(
+            (!self.internal_admission).then_some(self.client_id),
+            session_id,
+            agent_run_id,
+            turn_id,
+            control,
+        )
     }
 
     pub(crate) fn finish_agent_run(&self, lease_id: &str) -> Result<(), String> {
@@ -808,6 +828,39 @@ mod tests {
         );
         origin.finish_agent_run(&lease.lease_id).unwrap();
         assert!(hub.active_agent_runs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn process_scheduler_admission_is_client_independent_but_not_fence_independent() {
+        let hub = Arc::new(RuntimeServerClientHub::default());
+        let writer = hub.process_scheduler();
+        assert!(hub
+            .broadcaster()
+            .start_agent_run("s", "broadcast-run", "t", TurnControl::new())
+            .is_err());
+        let lease = writer
+            .start_agent_run("s", "internal-run", "t", TurnControl::new())
+            .unwrap();
+        assert!(writer
+            .start_agent_run("s", "other-run", "t2", TurnControl::new())
+            .is_err());
+        assert!(hub.has_clients_or_active_agent_runs().unwrap());
+        writer.finish_agent_run(&lease.lease_id).unwrap();
+        writer
+            .with_session_deletion(&["s".into()], || {
+                assert!(writer
+                    .start_agent_run("s", "deleted-run", "t3", TurnControl::new())
+                    .is_err());
+                Ok(())
+            })
+            .unwrap();
+        hub.request_service_shutdown().unwrap();
+        assert_eq!(
+            writer
+                .start_agent_run("s", "shutdown-run", "t4", TurnControl::new())
+                .unwrap_err(),
+            "runtime_server_draining"
+        );
     }
 
     #[test]

@@ -101,6 +101,7 @@ pub(crate) struct SessionDeleteRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SessionDeleteResponse {
     pub(crate) deleted_session_id: String,
+    pub(crate) deleted_session_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -311,9 +312,20 @@ pub(crate) fn delete(
     if session_id.is_empty() {
         return Err("sessionId is required".to_string());
     }
+    let process_manager = crate::process_sessions::manager();
+    let _process_deletion = process_manager
+        .deletion_gate
+        .lock()
+        .map_err(|_| "process deletion gate poisoned")?;
+    let process_scope = session_files()?
+        .deletion_items(session_id)?
+        .into_iter()
+        .map(|item| item.id)
+        .collect::<Vec<_>>();
+    process_manager.ensure_deletable(&process_scope)?;
     session_files()?.get(session_id)?;
     let requested_session_ids = vec![session_id.to_string()];
-    event_writer.with_session_deletion(requested_session_ids.as_slice(), || {
+    let result = event_writer.with_session_deletion(requested_session_ids.as_slice(), || {
         agent_runtime::cancel_agent_run(
             event_writer.clone(),
             agent_runs::AgentRunCancelRequest {
@@ -355,8 +367,15 @@ pub(crate) fn delete(
             for item in &deleted {
                 agent_runs::forget_session(item.id.as_str())?;
             }
+            process_manager.forget_closed(
+                &deleted
+                    .iter()
+                    .map(|item| item.id.clone())
+                    .collect::<Vec<_>>(),
+            );
             Ok(SessionDeleteResponse {
                 deleted_session_id: session_id.to_string(),
+                deleted_session_ids: deleted.iter().map(|i| i.id.clone()).collect(),
             })
         };
         if child_session_ids.is_empty() {
@@ -364,7 +383,12 @@ pub(crate) fn delete(
         } else {
             event_writer.with_session_deletion(child_session_ids.as_slice(), delete_items)
         }
-    })
+    });
+    drop(_process_deletion);
+    if result.is_ok() {
+        crate::process_agent::forget_sessions(&process_scope)?;
+    }
+    result
 }
 
 pub(crate) fn update(request: SessionUpdateRequest) -> Result<SessionItemResponse, String> {
@@ -505,10 +529,6 @@ pub(crate) fn record_session_activity(
 pub(crate) fn cwd_for_session_id(session_id: &str) -> Result<String, String> {
     let item = session_files()?.get(session_id)?;
     resolve_cwd(&item)
-}
-
-pub(crate) fn persisted_cwd_for_session_id(session_id: &str) -> Result<String, String> {
-    Ok(session_files()?.get(session_id)?.cwd)
 }
 
 pub(crate) fn runtime_binding_for_session_id(
@@ -1196,4 +1216,33 @@ mod tests {
         let error = result.expect_err("missing cwd must fail");
         assert!(error.contains("not a directory"));
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CatalogResponse {
+    items: Vec<SessionItemResponse>,
+    deleted_ids: Vec<String>,
+    revision: String,
+    next_cursor: Option<String>,
+    reset: bool,
+}
+pub(crate) fn catalog(
+    request: crate::session_catalog::paging::Request,
+) -> Result<CatalogResponse, String> {
+    user_data_layout::ensure_user_data_layout()?;
+    let page =
+        crate::session_catalog::paging::query(&user_data_layout::sessions_dir_path(), request)?;
+    let idle = agent_runs::idle_session_ids()?;
+    Ok(CatalogResponse {
+        items: page
+            .items
+            .iter()
+            .map(|i| to_response_with_activity(i, &idle))
+            .collect::<Result<_, _>>()?,
+        deleted_ids: page.deleted_ids,
+        revision: page.revision,
+        next_cursor: page.next_cursor,
+        reset: page.reset,
+    })
 }

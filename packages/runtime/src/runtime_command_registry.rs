@@ -88,12 +88,21 @@ macro_rules! runtime_commands {
             PluginReload, "plugin/reload", SharedRuntime, OneShotAction, NoAutomaticRetry, Some("plugin/catalog_state");
             PluginSetEnabled, "plugin/set_enabled", SharedRuntime, DesiredStateWrite, NoAutomaticRetry, Some("plugin/detail");
             PluginSourceRef, "plugin/source_ref", SharedRuntime, Read, SafeRetry, None;
+            SessionCatalog, "session/catalog", SharedRuntime, Read, SafeRetry, None;
             SessionList, "session/list", SharedRuntime, Read, SafeRetry, None;
             SessionGet, "session/load", SharedRuntime, Read, SafeRetry, None;
             SessionCreate, "session/new", SharedRuntime, Creation, SameOperationId, Some("session/new");
             AgentInput, "session/prompt", SharedRuntime, Creation, SameOperationId, Some("session/prompt");
             RuntimeShutdown, "runtime/shutdown", SharedRuntime, OneShotAction, NoAutomaticRetry, None;
 
+            TerminalManage, "terminal_manage", SharedRuntime, OneShotAction, NoAutomaticRetry, None;
+            ScheduleManage, "schedule_manage", SharedRuntime, OneShotAction, NoAutomaticRetry, Some("schedule_manage");
+            SshStart, "ssh_start", SharedRuntime, Creation, SameOperationId, None;
+            ProcessSessionStart, "process_session_start", SharedRuntime, Creation, SameOperationId, None;
+            ProcessSessionList, "process_session_list", SharedRuntime, Read, SafeRetry, None;
+            ProcessSessionGet, "process_session_get", SharedRuntime, Read, SafeRetry, None;
+            ProcessSessionRead, "process_session_read", SharedRuntime, Read, SafeRetry, None;
+            ProcessSessionStop, "process_session_stop", SharedRuntime, DesiredStateWrite, SafeRetry, None;
             ProcessCapture, "process_capture", ExecutionHost, OneShotAction, NoAutomaticRetry, None;
             SidecarList, "sidecar_list", ExecutionHost, Read, SafeRetry, None;
             SidecarStart, "sidecar_start", ExecutionHost, Creation, NoAutomaticRetry, Some("sidecar_list");
@@ -111,6 +120,12 @@ macro_rules! runtime_commands {
             WorkspaceGitDiffGet, "workspace_git_diff_get", HostSurface, Read, SafeRetry, None;
             WorkspaceGitFileDiffGet, "workspace_git_file_diff_get", HostSurface, Read, SafeRetry, None;
             WorkspaceGitHubCliStatusGet, "workspace_git_github_cli_status_get", HostSurface, Read, SafeRetry, None;
+            WorkspaceGitViewGet, "workspace_git_view_get", HostSurface, Read, SafeRetry, None;
+            WorkspaceGitReviewGet, "workspace_git_review_get", HostSurface, Read, SafeRetry, None;
+            WorkspaceGitReviewDiffGet, "workspace_git_review_diff_get", HostSurface, Read, SafeRetry, None;
+            WorkspaceGitStage, "workspace_git_stage", HostSurface, DesiredStateWrite, NoAutomaticRetry, Some("workspace_git_review_get");
+            WorkspaceGitUnstage, "workspace_git_unstage", HostSurface, DesiredStateWrite, NoAutomaticRetry, Some("workspace_git_review_get");
+            WorkspaceGitCommit, "workspace_git_commit", HostSurface, OneShotAction, NoAutomaticRetry, Some("workspace_git_review_get");
             WorkspaceGitStatusGet, "workspace_git_status_get", HostSurface, Read, SafeRetry, None;
             WorkspaceOpenFolder, "workspace_open_folder", HostSurface, OneShotAction, NoAutomaticRetry, None;
             WorkspaceRemove, "workspace_remove", HostSurface, IdentityMutation, NoAutomaticRetry, Some("workspace_get");

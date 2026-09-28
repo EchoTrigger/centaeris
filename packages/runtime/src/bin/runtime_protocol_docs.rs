@@ -304,15 +304,22 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
             same_operation_id,
-            std::collections::BTreeSet::from(["session/new", "session/prompt"])
+            std::collections::BTreeSet::from([
+                "process_session_start",
+                "ssh_start",
+                "session/new",
+                "session/prompt"
+            ])
         );
 
         for descriptor in COMMANDS {
-            if descriptor.operation_kind == super::RuntimeOperationKind::Read {
+            if descriptor.operation_kind == super::RuntimeOperationKind::Read
+                || descriptor.command == "process_session_stop"
+            {
                 assert_eq!(
                     descriptor.retry_policy,
                     super::RuntimeRetryPolicy::SafeRetry,
-                    "read command must be safely retryable: {}",
+                    "read or proven idempotent stop must be safely retryable: {}",
                     descriptor.command
                 );
             } else if !same_operation_id.contains(descriptor.command) {

@@ -30,6 +30,12 @@ use std::sync::{OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Instant, SystemTime};
 
 mod observation_cas;
+pub(crate) mod read_state;
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_DOCUMENT_READS: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 
 static SESSION_LOG_LOCK: OnceLock<RwLock<()>> = OnceLock::new();
 static TOOL_OUTPUT_INDEX: OnceLock<RwLock<HashMap<String, ToolOutputIndex>>> = OnceLock::new();
@@ -317,7 +323,23 @@ fn with_transcript_content_index<T>(
         by_event_id,
     };
     let result = read(&index);
-    indexes.insert(session_id.to_string(), index);
+    while indexes.len() >= 8
+        || indexes
+            .values()
+            .map(|i| i.by_event_id.len() + i.by_call_id.len())
+            .sum::<usize>()
+            + index.by_event_id.len()
+            + index.by_call_id.len()
+            > 100_000
+    {
+        let Some(key) = indexes.keys().next().cloned() else {
+            break;
+        };
+        indexes.remove(&key);
+    }
+    if index.by_event_id.len() + index.by_call_id.len() <= 100_000 {
+        indexes.insert(session_id.to_string(), index);
+    }
     result
 }
 
@@ -380,6 +402,9 @@ fn refresh_tool_output_index_after_append(
     }
     index.by_event_id.extend(event_locators);
     index.identity = next_identity;
+    if index.by_event_id.len() + index.by_call_id.len() > 100_000 {
+        indexes.remove(session_id);
+    }
 }
 
 fn read_utf8_file_range(
@@ -434,7 +459,8 @@ pub(crate) struct ProjectedChatMessage {
     pub(crate) image_data: Option<Value>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ProjectedAgentRun {
     pub(crate) agent_run_id: String,
     pub(crate) session_id: String,
@@ -523,6 +549,7 @@ pub(crate) fn create_session_document(
         .map_err(|error| error.to_string())?,
     )
     .map_err(|error| format!("serialize session metadata failed: {error}"))?;
+    crate::session_catalog::mark_dirty(path, &[])?;
     let mut file = OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -567,17 +594,12 @@ pub(crate) fn append_session_metadata(
 ) -> Result<(), String> {
     let session_id = required_string(session_id, "sessionId")?;
     let _guard = lock_session_logs_for_write()?;
-    let existing = read_records_from_path_unlocked(path, Some(session_id.as_str()))?;
-    let sequence = u64::try_from(existing.len() + 1)
-        .map_err(|_| "session record sequence overflow".to_string())?;
+    let state = read_state::take(path)?;
+    let sequence = state.sequence as u64 + 1;
+    read_state::put(path, state);
     metadata.record_id = format!("session:{session_id}:meta:{sequence}");
     let record = session_metadata_record(session_id.as_str(), metadata, sequence, created_at_ms)?;
-    append_records_unlocked(
-        session_id.as_str(),
-        existing.as_slice(),
-        vec![record],
-        Some(path),
-    )
+    append_incremental(path, vec![record])
 }
 
 pub(crate) fn read_session_document(path: &Path) -> Result<SessionDocument, String> {
@@ -587,6 +609,8 @@ pub(crate) fn read_session_document(path: &Path) -> Result<SessionDocument, Stri
 
 pub(crate) fn delete_session_document(path: &Path, session_id: &str) -> Result<(), String> {
     let _guard = lock_session_logs_for_write()?;
+    crate::session_catalog::mark_dirty(path, &[])?;
+    read_state::invalidate(path);
     observation_cas::delete_session_document(path, session_id)
 }
 
@@ -610,17 +634,9 @@ pub(crate) fn agent_run_session_state(
     session_id: &str,
     agent_run_id: &str,
 ) -> Result<centaeris_core::session::AgentRunSessionState, String> {
-    let mut state = centaeris_core::session::AgentRunSessionState::new(session_id, agent_run_id)?;
-    for event in read_session_records(session_id)?
-        .into_iter()
-        .filter(|event| event.agent_run_id.as_deref() == Some(agent_run_id))
-    {
-        state.restore(SequencedSessionRecord {
-            sequence: state.next_sequence() + 1,
-            event,
-        })?;
-    }
-    Ok(state)
+    let path = existing_session_log_file_path(session_id)?;
+    let _guard = lock_session_logs_for_read()?;
+    read_state::run_state(&path, session_id, agent_run_id)
 }
 
 pub(crate) fn append_agent_run_records(
@@ -655,9 +671,9 @@ pub(crate) fn append_user_message(
         at_ms,
     )?;
     append_agent_run_records(session_id, records)?;
-    project_chat_messages(session_id)?
-        .into_iter()
-        .find(|message| message.id == format!("message:{turn_id}:user"))
+    let path = existing_session_log_file_path(session_id)?;
+    let _guard = lock_session_logs_for_read()?;
+    read_state::message(&path, Some(&format!("message:{turn_id}:user")), None)?
         .ok_or_else(|| format!("projected user message missing after append: {turn_id}"))
 }
 
@@ -754,9 +770,9 @@ pub(crate) fn append_assistant_message(
     if let Some(record) = state.assistant(turn_id, content, Vec::new(), status, at_ms)? {
         append_agent_run_records(session_id, vec![record])?;
     }
-    project_chat_messages(session_id)?
-        .into_iter()
-        .find(|message| message.id == format!("message:{turn_id}:assistant"))
+    let path = existing_session_log_file_path(session_id)?;
+    let _guard = lock_session_logs_for_read()?;
+    read_state::message(&path, Some(&format!("message:{turn_id}:assistant")), None)?
         .ok_or_else(|| format!("projected assistant message missing after append: {turn_id}"))
 }
 
@@ -1009,20 +1025,15 @@ pub(crate) fn project_agent_run_assistant(
     agent_run_id: &str,
 ) -> Result<Option<ProjectedChatMessage>, String> {
     let agent_run_id = required_string(agent_run_id, "agentRunId")?;
-    Ok(project_chat_messages(session_id)?
-        .into_iter()
-        .find(|message| {
-            message.role == "assistant"
-                && message.agent_run_id.as_deref() == Some(agent_run_id.as_str())
-        }))
+    let path = existing_session_log_file_path(session_id)?;
+    let _guard = lock_session_logs_for_read()?;
+    read_state::message(&path, None, Some(&agent_run_id))
 }
 
 pub(crate) fn project_session_agent_runs(
     session_id: &str,
 ) -> Result<Vec<ProjectedAgentRun>, String> {
-    let session_id = required_string(session_id, "sessionId")?;
-    let records = active_records(read_session_records(session_id.as_str())?.as_slice())?;
-    project_agent_runs_from_records(records.as_slice())
+    project_agent_runs_for_session(session_id)
 }
 
 pub(crate) fn restore_runtime_snapshot(
@@ -1079,87 +1090,44 @@ pub(crate) fn project_agent_context_state(
     session_id: &str,
 ) -> Result<ProjectedAgentContextState, String> {
     let session_id = required_string(session_id, "sessionId")?;
-    let records = active_records(read_session_records(session_id.as_str())?.as_slice())?;
-    let projection = reduce_events(session_id.as_str(), records.iter())?;
-    Ok(ProjectedAgentContextState {
-        provider_usage: projection.provider_usage(),
-        context_token_estimate: projection.context_token_estimate(),
-        context_token_breakdown: projection.context_token_breakdown().cloned(),
-        context_token_estimate_updated_at_ms: projection.context_token_estimate_updated_at_ms(),
-        latest_provider_usage_context_token_estimate: projection
-            .latest_provider_usage_context_token_estimate(),
-        is_compacting: projection.is_compacting(),
-    })
+    let path = existing_session_log_file_path(&session_id)?;
+    let _guard = lock_session_logs_for_read()?;
+    read_state::context(&path)
 }
 
+#[cfg(test)]
 pub(crate) fn project_agent_runs() -> Result<Vec<ProjectedAgentRun>, String> {
-    let mut agent_runs = Vec::new();
-    for file_path in crate::user_data_layout::session_log_file_paths()? {
-        let projected = read_records_from_path(file_path.as_path(), None)
-            .and_then(|records| active_records(records.as_slice()))
-            .and_then(|records| project_agent_runs_from_records(records.as_slice()));
-        match projected {
-            Ok(mut projected) => agent_runs.append(&mut projected),
-            Err(error) => eprintln!(
-                "session_agent_run_projection_isolated: path={} error={error}",
-                file_path.display()
-            ),
-        }
-    }
-    agent_runs.sort_by(|left, right| {
-        left.started_at_ms
-            .cmp(&right.started_at_ms)
-            .then_with(|| left.agent_run_id.cmp(&right.agent_run_id))
-    });
-    Ok(agent_runs)
+    crate::session_catalog::runs(None, None, false)
 }
 
 pub(crate) fn project_agent_runs_for_session(
     session_id: &str,
 ) -> Result<Vec<ProjectedAgentRun>, String> {
     let session_id = required_string(session_id, "sessionId")?;
-    let records = active_records(read_session_records(session_id.as_str())?.as_slice())?;
-    project_agent_runs_from_records(records.as_slice())
+    crate::session_catalog::runs(Some(&session_id), None, false)
 }
 
 pub(crate) fn project_agent_run(agent_run_id: &str) -> Result<Option<ProjectedAgentRun>, String> {
     let agent_run_id = required_string(agent_run_id, "agentRunId")?;
-    Ok(project_agent_runs()?
-        .into_iter()
-        .find(|agent_run| agent_run.agent_run_id == agent_run_id))
+    Ok(
+        crate::session_catalog::runs(None, Some(&agent_run_id), false)?
+            .into_iter()
+            .next(),
+    )
 }
 
 pub(crate) fn terminal_agent_run_stream_projection(agent_run_id: &str) -> Result<Value, String> {
     let agent_run = project_agent_run(agent_run_id)?
         .ok_or_else(|| format!("AgentRun not found: {agent_run_id}"))?;
-    let records = active_records(read_session_records(agent_run.session_id.as_str())?.as_slice())?;
-    let terminal = records
-        .iter()
-        .rev()
-        .find(|record| {
-            record.agent_run_id.as_deref() == Some(agent_run.agent_run_id.as_str())
-                && matches!(
-                    record.event_type,
-                    SessionRecordType::AgentRunCompleted
-                        | SessionRecordType::AgentRunFailed
-                        | SessionRecordType::AgentRunInterrupted
-                )
-        })
-        .ok_or_else(|| format!("agent_run has no committed terminal record: {agent_run_id}"))?;
-    let items = agent_run_replay_items(records.as_slice(), &agent_run)?;
-    let index = items
-        .iter()
-        .position(|item| {
-            item.pointer("/event/id").and_then(Value::as_str) == Some(terminal.event_id.as_str())
-        })
-        .ok_or_else(|| format!("terminal session_event projection missing: {agent_run_id}"))?;
-    let projection = items[index].clone();
-    if projection.get("type").and_then(Value::as_str) != Some("session_event") {
-        return Err(format!(
-            "terminal stream projection is invalid: {agent_run_id}"
-        ));
-    }
-    Ok(projection)
+    let path = existing_session_log_file_path(&agent_run.session_id)?;
+    let id = {
+        let _guard = lock_session_logs_for_read()?;
+        read_state::terminal_id(&path, agent_run_id)?
+    };
+    projected_stream_items_for_event_ids(&agent_run.session_id, agent_run_id, &[id])?
+        .into_iter()
+        .next()
+        .ok_or("terminal session_event projection missing".into())
 }
 
 fn project_chat_messages_from_records(
@@ -1214,84 +1182,19 @@ fn project_chat_messages_from_records(
     Ok(messages.into_iter().map(|(_, message)| message).collect())
 }
 
-fn project_agent_runs_from_records(
+pub(crate) fn project_agent_runs_from_records(
     records: &[SessionLogRecord],
 ) -> Result<Vec<ProjectedAgentRun>, String> {
     let mut agent_runs = HashMap::<String, ProjectedAgentRun>::new();
+    let cwd = records
+        .iter()
+        .rev()
+        .find(|item| item.event_type == SessionRecordType::SessionMeta)
+        .and_then(|item| item.payload.get("cwd"))
+        .and_then(Value::as_str)
+        .ok_or("session metadata cwd is missing")?;
     for record in records {
-        let Some(agent_run_id) = record.agent_run_id.as_deref() else {
-            continue;
-        };
-        if record.event_type == SessionRecordType::AgentRunStarted {
-            let turn_id = record
-                .turn_id
-                .clone()
-                .ok_or_else(|| format!("agent_run_started missing turnId: {}", record.event_id))?;
-            let cwd = Some(crate::sessions::persisted_cwd_for_session_id(
-                record.session_id.as_str(),
-            )?);
-            agent_runs
-                .entry(agent_run_id.to_string())
-                .or_insert_with(|| ProjectedAgentRun {
-                    agent_run_id: agent_run_id.to_string(),
-                    session_id: record.session_id.clone(),
-                    turn_id,
-                    cwd,
-                    status: "running".to_string(),
-                    started_at_ms: record.created_at_ms,
-                    updated_at_ms: record.created_at_ms,
-                    completed_at_ms: None,
-                    last_event_at_ms: Some(record.created_at_ms),
-                    error: None,
-                });
-        }
-        let Some(agent_run) = agent_runs.get_mut(agent_run_id) else {
-            if record.event_type == SessionRecordType::SessionMeta {
-                continue;
-            }
-            return Err(format!(
-                "agent_run record appears before agent_run_started: {}",
-                record.event_id
-            ));
-        };
-        agent_run.updated_at_ms = agent_run.updated_at_ms.max(record.created_at_ms);
-        agent_run.last_event_at_ms = Some(
-            agent_run
-                .last_event_at_ms
-                .unwrap_or(0)
-                .max(record.created_at_ms),
-        );
-        match record.event_type {
-            SessionRecordType::AgentRunCompleted => {
-                agent_run.status = "succeeded".to_string();
-                agent_run.completed_at_ms = Some(record.created_at_ms);
-            }
-            SessionRecordType::AgentRunFailed => {
-                agent_run.status = "failed".to_string();
-                agent_run.error = record
-                    .payload
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-                agent_run.completed_at_ms = Some(record.created_at_ms);
-            }
-            SessionRecordType::AgentRunInterrupted => {
-                agent_run.status = match record.payload.get("reasonType").and_then(Value::as_str) {
-                    Some("cancelled") => "cancelled",
-                    Some("stopped" | "shutdown" | "provider_interrupted") => "stopped",
-                    Some(other) => return Err(format!("unsupported interruption reason: {other}")),
-                    None => return Err("agent_run_interrupted reasonType is required".to_string()),
-                }
-                .to_string();
-                agent_run.error = record
-                    .payload
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-                agent_run.completed_at_ms = Some(record.created_at_ms);
-            }
-            _ => {}
-        }
+        apply_run_record(&mut agent_runs, cwd, record)?;
     }
     let mut agent_runs = agent_runs.into_values().collect::<Vec<_>>();
     agent_runs.sort_by(|left, right| {
@@ -1302,25 +1205,82 @@ fn project_agent_runs_from_records(
     Ok(agent_runs)
 }
 
-fn agent_run_replay_items(
-    records: &[SessionLogRecord],
-    agent_run: &ProjectedAgentRun,
-) -> Result<Vec<Value>, String> {
-    let mut items = Vec::new();
-    for record in records
-        .iter()
-        .filter(|record| record.agent_run_id.as_deref() == Some(agent_run.agent_run_id.as_str()))
-    {
-        if !session_record_projects_to_agent_run_stream(record.event_type) {
-            continue;
-        }
-        let projection = project_committed_session_record(record, items.len() as u64)?;
-        items.push(
-            serde_json::to_value(projection)
-                .map_err(|error| format!("serialize session_event projection failed: {error}"))?,
-        );
+fn apply_run_record(
+    agent_runs: &mut HashMap<String, ProjectedAgentRun>,
+    cwd: &str,
+    record: &SessionLogRecord,
+) -> Result<(), String> {
+    let Some(agent_run_id) = record.agent_run_id.as_deref() else {
+        return Ok(());
+    };
+    if record.event_type == SessionRecordType::AgentRunStarted {
+        let turn_id = record
+            .turn_id
+            .clone()
+            .ok_or_else(|| format!("agent_run_started missing turnId: {}", record.event_id))?;
+        agent_runs
+            .entry(agent_run_id.to_string())
+            .or_insert_with(|| ProjectedAgentRun {
+                agent_run_id: agent_run_id.to_string(),
+                session_id: record.session_id.clone(),
+                turn_id,
+                cwd: Some(cwd.to_string()),
+                status: "running".to_string(),
+                started_at_ms: record.created_at_ms,
+                updated_at_ms: record.created_at_ms,
+                completed_at_ms: None,
+                last_event_at_ms: Some(record.created_at_ms),
+                error: None,
+            });
     }
-    Ok(items)
+    let Some(agent_run) = agent_runs.get_mut(agent_run_id) else {
+        if record.event_type == SessionRecordType::SessionMeta {
+            return Ok(());
+        }
+        return Err(format!(
+            "agent_run record appears before agent_run_started: {}",
+            record.event_id
+        ));
+    };
+    agent_run.updated_at_ms = agent_run.updated_at_ms.max(record.created_at_ms);
+    agent_run.last_event_at_ms = Some(
+        agent_run
+            .last_event_at_ms
+            .unwrap_or(0)
+            .max(record.created_at_ms),
+    );
+    match record.event_type {
+        SessionRecordType::AgentRunCompleted => {
+            agent_run.status = "succeeded".to_string();
+            agent_run.completed_at_ms = Some(record.created_at_ms);
+        }
+        SessionRecordType::AgentRunFailed => {
+            agent_run.status = "failed".to_string();
+            agent_run.error = record
+                .payload
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            agent_run.completed_at_ms = Some(record.created_at_ms);
+        }
+        SessionRecordType::AgentRunInterrupted => {
+            agent_run.status = match record.payload.get("reasonType").and_then(Value::as_str) {
+                Some("cancelled") => "cancelled",
+                Some("stopped" | "shutdown" | "provider_interrupted") => "stopped",
+                Some(other) => return Err(format!("unsupported interruption reason: {other}")),
+                None => return Err("agent_run_interrupted reasonType is required".to_string()),
+            }
+            .to_string();
+            agent_run.error = record
+                .payload
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            agent_run.completed_at_ms = Some(record.created_at_ms);
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn projected_stream_items_for_event_ids(
@@ -1328,38 +1288,38 @@ fn projected_stream_items_for_event_ids(
     agent_run_id: &str,
     event_ids: &[String],
 ) -> Result<Vec<Value>, String> {
-    let wanted = event_ids.iter().map(String::as_str).collect::<HashSet<_>>();
-    let agent_run = project_agent_run(agent_run_id)?
-        .ok_or_else(|| format!("AgentRun not found: {agent_run_id}"))?;
-    if agent_run.session_id != session_id {
-        return Err(format!("AgentRun sessionId mismatch: {agent_run_id}"));
+    let path = existing_session_log_file_path(session_id)?;
+    let _guard = lock_session_logs_for_read()?;
+    let indices = read_state::stream_indices(&path, agent_run_id, event_ids)?;
+    let mut source = fs::File::open(&path).map_err(|e| e.to_string())?;
+    let mut items = vec![];
+    for (id, index) in indices {
+        let (offset, length) = with_transcript_content_index(session_id, &path, |lookup| {
+            lookup
+                .by_event_id
+                .get(&id)
+                .copied()
+                .ok_or("stream event location missing".into())
+        })?;
+        source
+            .seek(SeekFrom::Start(offset))
+            .map_err(|e| e.to_string())?;
+        let mut bytes = vec![0; length];
+        source.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+        let mut wires = vec![serde_json::from_slice::<Value>(&bytes).map_err(|e| e.to_string())?];
+        observation_cas::hydrate_wires(&path, session_id, &mut wires)?;
+        let record = parse_wire_record(&wires[0]).map_err(|e| e.to_string())?;
+        let projection = project_committed_session_record(&record.event, index)?;
+        items.push(serde_json::to_value(projection).map_err(|e| e.to_string())?);
     }
-    let records = active_records(read_session_records(session_id)?.as_slice())?;
-    let items = agent_run_replay_items(records.as_slice(), &agent_run)?;
-    let projected = items
-        .into_iter()
-        .filter(|item| {
-            item.get("event")
-                .and_then(|event| event.get("id"))
-                .and_then(Value::as_str)
-                .is_some_and(|event_id| wanted.contains(event_id))
-        })
-        .collect::<Vec<_>>();
-    if projected.len() != wanted.len() {
-        return Err(format!(
-            "committed stream projection count mismatch: expected {}, got {}",
-            wanted.len(),
-            projected.len()
-        ));
-    }
-    Ok(projected)
+    Ok(items)
 }
 
 fn append_records(session_id: &str, records: Vec<SessionLogRecord>) -> Result<(), String> {
     let session_id = required_string(session_id, "sessionId")?;
     let _guard = lock_session_logs_for_write()?;
-    let existing = read_session_records_unlocked(session_id.as_str())?;
-    append_records_unlocked(session_id.as_str(), existing.as_slice(), records, None)
+    let path = existing_session_log_file_path(&session_id)?;
+    append_incremental(&path, records)
 }
 
 fn append_records_unlocked(
@@ -1408,11 +1368,40 @@ fn append_records_unlocked(
     let file_path = path
         .map(Path::to_path_buf)
         .map_or_else(|| existing_session_log_file_path(session_id), Ok)?;
+    write_pending(session_id, &file_path, existing.len(), pending)
+}
+
+fn append_incremental(path: &Path, records: Vec<SessionLogRecord>) -> Result<(), String> {
+    let mut state = read_state::take(path)?;
+    let pending = state.prepare(records)?;
+    let count = pending.len();
+    if count > 0 {
+        let session_id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or("invalid Session path")?;
+        write_pending(session_id, path, state.sequence, pending)?;
+        state.committed(path, count)?;
+    }
+    read_state::put(path, state);
+    Ok(())
+}
+
+fn write_pending(
+    session_id: &str,
+    file_path: &Path,
+    sequence: usize,
+    pending: Vec<SessionLogRecord>,
+) -> Result<(), String> {
+    let pending_run_ids: HashSet<String> = pending
+        .iter()
+        .filter_map(|record| record.agent_run_id.clone())
+        .collect();
     let mut wires = pending
         .into_iter()
         .enumerate()
         .map(|(offset, record)| {
-            let sequence = u64::try_from(existing.len() + offset + 1)
+            let sequence = u64::try_from(sequence + offset + 1)
                 .map_err(|_| "session record sequence overflow".to_string())?;
             wire_record_value(&SequencedSessionRecord {
                 sequence,
@@ -1421,12 +1410,10 @@ fn append_records_unlocked(
             .map_err(|error| error.to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
-    observation_cas::compact_and_install_wires(
-        file_path.as_path(),
-        session_id,
-        wires.as_mut_slice(),
-    )?;
-    let previous_identity = session_log_identity(file_path.as_path())?;
+    let run_ids: Vec<_> = pending_run_ids.iter().map(String::as_str).collect();
+    crate::session_catalog::mark_dirty(file_path, &run_ids)?;
+    observation_cas::compact_and_install_wires(file_path, session_id, wires.as_mut_slice())?;
+    let previous_identity = session_log_identity(file_path)?;
     let mut next_record_offset = previous_identity.byte_length;
     let mut appended_tool_outputs = Vec::new();
     let mut appended_events = Vec::new();
@@ -1445,7 +1432,7 @@ fn append_records_unlocked(
     }
     let mut file = OpenOptions::new()
         .append(true)
-        .open(file_path.as_path())
+        .open(file_path)
         .map_err(|error| {
             format!(
                 "open session log for append failed for {}: {error}",
@@ -1461,10 +1448,10 @@ fn append_records_unlocked(
     file.sync_data()
         .map_err(|error| format!("sync session log failed: {error}"))?;
     drop(file);
-    let next_identity = session_log_identity(file_path.as_path())?;
+    let next_identity = session_log_identity(file_path)?;
     refresh_tool_output_index_after_append(
         session_id,
-        file_path.as_path(),
+        file_path,
         &previous_identity,
         next_identity,
         appended_tool_outputs,
@@ -1865,14 +1852,6 @@ fn scan_transcript_rebuild_wires(
     Ok(())
 }
 
-fn read_records_from_path(
-    path: &Path,
-    expected_session_id: Option<&str>,
-) -> Result<Vec<SessionLogRecord>, String> {
-    let _guard = lock_session_logs_for_read()?;
-    read_records_from_path_unlocked(path, expected_session_id)
-}
-
 fn read_records_from_path_unlocked(
     path: &Path,
     expected_session_id: Option<&str>,
@@ -1880,10 +1859,12 @@ fn read_records_from_path_unlocked(
     Ok(read_session_document_unlocked(path, expected_session_id)?.records)
 }
 
-fn read_session_document_unlocked(
+pub(crate) fn read_session_document_unlocked(
     path: &Path,
     expected_session_id: Option<&str>,
 ) -> Result<SessionDocument, String> {
+    #[cfg(test)]
+    TEST_DOCUMENT_READS.with(|reads| reads.borrow_mut().push(path.to_path_buf()));
     let contents = fs::read_to_string(path)
         .map_err(|error| format!("read session log failed for {}: {error}", path.display()))?;
     if contents.is_empty() {
@@ -1961,8 +1942,11 @@ fn active_records(records: &[SessionLogRecord]) -> Result<Vec<SessionLogRecord>,
 }
 
 fn existing_session_log_file_path(session_id: &str) -> Result<PathBuf, String> {
-    crate::user_data_layout::find_session_log_file_path(session_id)?
-        .ok_or_else(|| format!("session log not found: {session_id}"))
+    crate::session_catalog::path_unlocked(
+        &crate::user_data_layout::sessions_dir_path(),
+        session_id,
+    )?
+    .ok_or_else(|| format!("session log not found: {session_id}"))
 }
 
 fn session_metadata_record(
@@ -1984,7 +1968,7 @@ fn session_metadata_record(
     )
 }
 
-fn lock_session_logs_for_read() -> Result<RwLockReadGuard<'static, ()>, String> {
+pub(crate) fn lock_session_logs_for_read() -> Result<RwLockReadGuard<'static, ()>, String> {
     SESSION_LOG_LOCK
         .get_or_init(|| RwLock::new(()))
         .read()
@@ -2980,7 +2964,12 @@ mod tests {
                 .map_err(|error| format!("create orphan CAS fixture failed: {error}"))?;
             fs::write(orphan.join(format!("{}.json", "a".repeat(64))), "{}")
                 .map_err(|error| format!("write orphan CAS fixture failed: {error}"))?;
-            crate::session_files::SessionFiles::new(sessions_dir.clone()).list()?;
+            let catalog = crate::session_files::SessionFiles::new(sessions_dir.clone());
+            catalog.list()?;
+            if !orphan.exists() {
+                return Err("ordinary catalog reads must not perform orphan GC".into());
+            }
+            catalog.diagnostics()?;
             if orphan.exists() {
                 return Err("orphan observation CAS cleanup did not run".to_string());
             }

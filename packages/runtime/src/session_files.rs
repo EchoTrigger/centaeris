@@ -9,12 +9,13 @@ use crate::message_log;
 use centaeris_core::session::{
     reduce_events, SessionManifestV1, SessionMetadataV1, SessionRecordType,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 static SESSION_FILES_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 const MAX_SESSION_FILE_DIAGNOSTICS: usize = 128;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionFileItem {
     pub id: String,
     pub title: String,
@@ -71,6 +72,7 @@ impl SessionFiles {
 
     pub fn diagnostics(&self) -> Result<Vec<SessionFileDiagnostic>, String> {
         let _guard = lock_session_files()?;
+        message_log::cleanup_orphan_observation_content_directories(&self.sessions_dir)?;
         let (_, mut diagnostics) = self.load_all_isolated()?;
         diagnostics.sort_by(|left, right| {
             left.code
@@ -224,9 +226,7 @@ impl SessionFiles {
     pub fn get(&self, session_id: &str) -> Result<SessionFileItem, String> {
         let session_id = required_session_id(session_id)?;
         let _guard = lock_session_files()?;
-        self.load_all()?
-            .into_iter()
-            .find(|item| item.id == session_id)
+        crate::session_catalog::session(&self.sessions_dir, &session_id)?
             .ok_or_else(|| format!("session not found: {session_id}"))
     }
 
@@ -370,18 +370,7 @@ impl SessionFiles {
     }
 
     fn load_all(&self) -> Result<Vec<SessionFileItem>, String> {
-        message_log::cleanup_orphan_observation_content_directories(self.sessions_dir.as_path())?;
-        let (items, diagnostics) = self.load_all_isolated()?;
-        for diagnostic in diagnostics {
-            eprintln!(
-                "session_file_isolated: code={} sessionId={} path={} error={}",
-                diagnostic.code,
-                diagnostic.session_id.as_deref().unwrap_or("unknown"),
-                diagnostic.path,
-                diagnostic.message
-            );
-        }
-        Ok(items)
+        crate::session_catalog::sessions(&self.sessions_dir)
     }
 
     fn load_all_isolated(
@@ -450,6 +439,14 @@ impl SessionFiles {
 
     fn load_path(&self, path: &Path) -> Result<SessionFileItem, String> {
         let document = message_log::read_session_document(path)?;
+        self.project_document(path, document)
+    }
+
+    pub(crate) fn project_document(
+        &self,
+        path: &Path,
+        document: message_log::SessionDocument,
+    ) -> Result<SessionFileItem, String> {
         let first = document
             .records
             .first()
@@ -484,10 +481,32 @@ impl SessionFiles {
             document.manifest.session_id.as_str(),
             document.records.iter(),
         )?;
-        let latest_message = projection
-            .messages
-            .values()
-            .max_by_key(|message| message.updated_at_ms);
+        self.project_summary(
+            path,
+            &document.manifest,
+            &metadata,
+            (
+                projection.messages.len(),
+                projection.messages.values().max_by_key(|m| m.updated_at_ms),
+            ),
+            document
+                .records
+                .iter()
+                .map(|r| r.created_at_ms)
+                .max()
+                .unwrap_or(document.manifest.created_at_ms),
+        )
+    }
+
+    pub(crate) fn project_summary(
+        &self,
+        path: &Path,
+        manifest: &SessionManifestV1,
+        metadata: &SessionMetadataV1,
+        messages: (usize, Option<&centaeris_core::session::ReducedMessage>),
+        updated_at: i64,
+    ) -> Result<SessionFileItem, String> {
+        let (message_count, latest_message) = messages;
         let relative = path
             .strip_prefix(self.sessions_dir.as_path())
             .map_err(|_| {
@@ -497,25 +516,20 @@ impl SessionFiles {
                 )
             })?;
         Ok(SessionFileItem {
-            id: document.manifest.session_id,
-            title: metadata.title,
-            created_at: document.manifest.created_at_ms,
-            updated_at: document
-                .records
-                .iter()
-                .map(|record| record.created_at_ms)
-                .max()
-                .unwrap_or(document.manifest.created_at_ms),
+            id: manifest.session_id.clone(),
+            title: metadata.title.clone(),
+            created_at: manifest.created_at_ms,
+            updated_at,
             last_message: latest_message.map(|message| compact_preview(message.text.as_str())),
-            cwd: metadata.cwd,
+            cwd: metadata.cwd.clone(),
             session_path: format!("sessions/{}", relative.to_string_lossy().replace('\\', "/")),
-            session_kind: metadata.session_kind,
-            parent_session_id: metadata.parent_session_id,
-            runtime_job_id: metadata.runtime_job_id,
+            session_kind: metadata.session_kind.clone(),
+            parent_session_id: metadata.parent_session_id.clone(),
+            runtime_job_id: metadata.runtime_job_id.clone(),
             sort_order: metadata.sort_order,
             is_pinned: metadata.is_pinned,
             is_unread: metadata.is_unread,
-            message_count: projection.messages.len(),
+            message_count,
         })
     }
 
@@ -586,7 +600,7 @@ fn deletion_items(
         .collect())
 }
 
-fn session_log_file_paths(sessions_dir: &Path) -> Result<Vec<PathBuf>, String> {
+pub(crate) fn session_log_file_paths(sessions_dir: &Path) -> Result<Vec<PathBuf>, String> {
     if !sessions_dir.exists() {
         return Ok(Vec::new());
     }
@@ -792,6 +806,58 @@ fn lock_session_files() -> Result<MutexGuard<'static, ()>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_reads_do_not_read_unrelated_history() {
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-catalog-isolation-{}-{}",
+            std::process::id(),
+            centaeris_core::runtime::contracts::current_timestamp_ms()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let store = SessionFiles::new(root.join("sessions"));
+        let a = store
+            .create(Some("a"), root.to_str().unwrap(), 1_800_000_000_000)
+            .unwrap();
+        let b = store
+            .create(Some("b"), root.to_str().unwrap(), 1_800_000_000_001)
+            .unwrap();
+        store.list().unwrap();
+        message_log::TEST_DOCUMENT_READS.with(|reads| reads.borrow_mut().clear());
+        let reopened = SessionFiles::new(root.join("sessions"));
+        assert_eq!(reopened.get(&a.id).unwrap().title, "a");
+        assert_eq!(reopened.list().unwrap().len(), 2);
+        message_log::TEST_DOCUMENT_READS.with(|reads| {
+            assert!(
+                reads.borrow().is_empty(),
+                "warm catalog must not read source logs: {:?}",
+                reads.borrow()
+            )
+        });
+        reopened
+            .update(
+                &a.id,
+                SessionMetadataPatch {
+                    title: Some("renamed".into()),
+                    ..Default::default()
+                },
+                1_800_000_000_002,
+            )
+            .unwrap();
+        message_log::TEST_DOCUMENT_READS.with(|reads| {
+            assert!(
+                reads
+                    .borrow()
+                    .iter()
+                    .all(|path| path.file_stem().unwrap() != b.id.as_str()),
+                "mutation must not read another session"
+            )
+        });
+        assert_eq!(reopened.get(&a.id).unwrap().title, "renamed");
+        reopened.delete(&a.id).unwrap();
+        assert_eq!(reopened.list().unwrap().len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn jsonl_alone_restores_metadata_and_creates_no_lock_files() {

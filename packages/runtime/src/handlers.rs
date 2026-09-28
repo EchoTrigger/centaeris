@@ -59,6 +59,13 @@ pub(crate) fn handle_request(
                 RuntimeHostError::new("serialize_response_failed", error.to_string())
             })
         }
+        RuntimeHostCommand::SessionCatalog => {
+            let payload = runtime_bridge::deserialize_request(request.payload)?;
+            let response = sessions::catalog(payload)
+                .map_err(|e| RuntimeHostError::new("session_failed", e))?;
+            serde_json::to_value(response)
+                .map_err(|e| RuntimeHostError::new("serialize_response_failed", e.to_string()))
+        }
         RuntimeHostCommand::SessionList => {
             let payload = runtime_bridge::deserialize_request(request.payload)?;
             let response = sessions::list(payload)
@@ -464,6 +471,17 @@ pub(crate) fn handle_request(
             "async_handler_required",
             "agent_dead_letter_replay must be handled by handle_request_async",
         )),
+        RuntimeHostCommand::ScheduleManage | RuntimeHostCommand::SshStart => {
+            crate::host_automation::handle(command, request.payload)
+        }
+        RuntimeHostCommand::TerminalManage => crate::terminal_sessions::handle(request.payload),
+        RuntimeHostCommand::ProcessSessionStart
+        | RuntimeHostCommand::ProcessSessionList
+        | RuntimeHostCommand::ProcessSessionGet
+        | RuntimeHostCommand::ProcessSessionRead
+        | RuntimeHostCommand::ProcessSessionStop => {
+            crate::process_sessions::handle(command, request.payload)
+        }
         RuntimeHostCommand::ProcessCapture => {
             let payload = serde_json::from_value(request.payload)?;
             let response = runtime_bridge::process_capture(payload)?;
@@ -551,6 +569,54 @@ pub(crate) fn handle_request(
         RuntimeHostCommand::WorkspaceReadFile => {
             let payload = runtime_bridge::deserialize_request(request.payload)?;
             let response = workspaces::read_file(payload).map_err(workspace_runtime_host_error)?;
+            serde_json::to_value(response).map_err(|error| {
+                RuntimeHostError::new("serialize_response_failed", error.to_string())
+            })
+        }
+        RuntimeHostCommand::WorkspaceGitViewGet => {
+            let payload = runtime_bridge::deserialize_request(request.payload)?;
+            let response = workspace_git::workbench::view::get(payload)
+                .map_err(|error| RuntimeHostError::new("workspace_git_failed", error))?;
+            serde_json::to_value(response).map_err(|error| {
+                RuntimeHostError::new("serialize_response_failed", error.to_string())
+            })
+        }
+        RuntimeHostCommand::WorkspaceGitReviewGet => {
+            let payload = runtime_bridge::deserialize_request(request.payload)?;
+            let response = workspace_git::workbench::review(payload)
+                .map_err(|error| RuntimeHostError::new("workspace_git_failed", error))?;
+            serde_json::to_value(response).map_err(|error| {
+                RuntimeHostError::new("serialize_response_failed", error.to_string())
+            })
+        }
+        RuntimeHostCommand::WorkspaceGitReviewDiffGet => {
+            let payload = runtime_bridge::deserialize_request(request.payload)?;
+            let response = workspace_git::workbench::file_diff(payload)
+                .map_err(|error| RuntimeHostError::new("workspace_git_failed", error))?;
+            serde_json::to_value(response).map_err(|error| {
+                RuntimeHostError::new("serialize_response_failed", error.to_string())
+            })
+        }
+        RuntimeHostCommand::WorkspaceGitStage => {
+            let payload = runtime_bridge::deserialize_request(request.payload)?;
+            let response = workspace_git::workbench::stage(payload)
+                .map_err(|error| RuntimeHostError::new("workspace_git_failed", error))?;
+            serde_json::to_value(response).map_err(|error| {
+                RuntimeHostError::new("serialize_response_failed", error.to_string())
+            })
+        }
+        RuntimeHostCommand::WorkspaceGitUnstage => {
+            let payload = runtime_bridge::deserialize_request(request.payload)?;
+            let response = workspace_git::workbench::unstage(payload)
+                .map_err(|error| RuntimeHostError::new("workspace_git_failed", error))?;
+            serde_json::to_value(response).map_err(|error| {
+                RuntimeHostError::new("serialize_response_failed", error.to_string())
+            })
+        }
+        RuntimeHostCommand::WorkspaceGitCommit => {
+            let payload = runtime_bridge::deserialize_request(request.payload)?;
+            let response = workspace_git::workbench::commit(payload)
+                .map_err(|error| RuntimeHostError::new("workspace_git_failed", error))?;
             serde_json::to_value(response).map_err(|error| {
                 RuntimeHostError::new("serialize_response_failed", error.to_string())
             })
@@ -697,6 +763,42 @@ pub(crate) async fn handle_request_async(
                 RuntimeHostError::new("serialize_response_failed", error.to_string())
             })
         }
+        RuntimeHostCommand::TerminalManage => {
+            tokio::task::spawn_blocking(move || crate::terminal_sessions::handle(request.payload))
+                .await
+                .map_err(|e| RuntimeHostError::transport(e.to_string()))?
+        }
+        RuntimeHostCommand::ProcessSessionStart
+        | RuntimeHostCommand::ProcessSessionList
+        | RuntimeHostCommand::ProcessSessionGet
+        | RuntimeHostCommand::ProcessSessionRead
+        | RuntimeHostCommand::ProcessSessionStop
+        | RuntimeHostCommand::ScheduleManage
+        | RuntimeHostCommand::SshStart => tokio::task::spawn_blocking(move || {
+            if matches!(
+                command,
+                RuntimeHostCommand::ScheduleManage | RuntimeHostCommand::SshStart
+            ) {
+                crate::host_automation::handle(command, request.payload)
+            } else {
+                crate::process_sessions::handle(command, request.payload)
+            }
+        })
+        .await
+        .map_err(|e| RuntimeHostError::transport(format!("process handler join failed: {e}")))?,
+        RuntimeHostCommand::WorkspaceGitViewGet
+        | RuntimeHostCommand::WorkspaceGitReviewGet
+        | RuntimeHostCommand::WorkspaceGitReviewDiffGet
+        | RuntimeHostCommand::WorkspaceGitStage
+        | RuntimeHostCommand::WorkspaceGitUnstage
+        | RuntimeHostCommand::WorkspaceGitCommit => tokio::task::spawn_blocking(move || {
+            // Git and hooks must not hold the Runtime's global state lock.
+            handle_request(&mut RuntimeHostState::default(), request, event_writer)
+        })
+        .await
+        .map_err(|error| {
+            RuntimeHostError::transport(format!("Git handler join failed: {error}"))
+        })?,
         _ if command_owns_store_lock(command) => tokio::task::spawn_blocking(move || {
             let mut isolated_state = RuntimeHostState::default();
             handle_request(&mut isolated_state, request, event_writer)

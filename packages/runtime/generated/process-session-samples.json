@@ -1,0 +1,109 @@
+{
+  "snapshot": {
+    "processSessionId": "process-sample",
+    "sessionId": "session-sample",
+    "program": "bash",
+    "args": [
+      "-c",
+      "echo hello"
+    ],
+    "cwd": "sample-root",
+    "state": "exited",
+    "source": "hostCommand",
+    "cleanupComplete": true,
+    "exitCode": 0,
+    "terminationReason": null,
+    "outputComplete": true,
+    "error": null
+  },
+  "list": {
+    "serviceInstanceId": "service-sample",
+    "processes": [
+      {
+        "processSessionId": "process-sample",
+        "sessionId": "session-sample",
+        "program": "bash",
+        "args": [
+          "-c",
+          "echo hello"
+        ],
+        "cwd": "sample-root",
+        "state": "exited",
+        "source": "hostCommand",
+        "cleanupComplete": true,
+        "exitCode": 0,
+        "terminationReason": null,
+        "outputComplete": true,
+        "error": null
+      }
+    ]
+  },
+  "output": {
+    "process": {
+      "processSessionId": "process-sample",
+      "sessionId": "session-sample",
+      "program": "bash",
+      "args": [
+        "-c",
+        "echo hello"
+      ],
+      "cwd": "sample-root",
+      "state": "exited",
+      "source": "hostCommand",
+      "cleanupComplete": true,
+      "exitCode": 0,
+      "terminationReason": null,
+      "outputComplete": true,
+      "error": null
+    },
+    "chunks": [
+      {
+        "cursor": "0",
+        "stream": "stdout",
+        "dataBase64": "aGVsbG8K"
+      }
+    ],
+    "nextCursor": "1",
+    "earliestCursor": "0",
+    "gap": false,
+    "hasMore": false
+  },
+  "startRequest": {
+    "sessionId": "session-sample",
+    "serviceInstanceId": "service-sample",
+    "operationId": "operation-sample",
+    "program": "bash",
+    "args": [
+      "-c",
+      "echo hello"
+    ],
+    "timeoutMs": 0
+  },
+  "target": {
+    "sessionId": "session-sample",
+    "processSessionId": "process-sample"
+  },
+  "readRequest": {
+    "sessionId": "session-sample",
+    "processSessionId": "process-sample",
+    "cursor": "0",
+    "waitMs": 1000
+  },
+  "agentSnapshot": {
+    "processSessionId": "process-sample",
+    "sessionId": "session-sample",
+    "program": "bash",
+    "args": [
+      "-c",
+      "echo hello"
+    ],
+    "cwd": "sample-root",
+    "state": "exited",
+    "source": "agentTool",
+    "cleanupComplete": true,
+    "exitCode": 0,
+    "terminationReason": null,
+    "outputComplete": true,
+    "error": null
+  }
+}

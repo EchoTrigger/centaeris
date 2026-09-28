@@ -344,6 +344,13 @@
       "scope": "sharedRuntime"
     },
     {
+      "name": "session/catalog",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
       "name": "session/list",
       "operationKind": "read",
       "reconcileMethod": null,
@@ -376,6 +383,62 @@
       "operationKind": "oneShotAction",
       "reconcileMethod": null,
       "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "terminal_manage",
+      "operationKind": "oneShotAction",
+      "reconcileMethod": null,
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "schedule_manage",
+      "operationKind": "oneShotAction",
+      "reconcileMethod": "schedule_manage",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "ssh_start",
+      "operationKind": "creation",
+      "reconcileMethod": null,
+      "retryPolicy": "sameOperationId",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "process_session_start",
+      "operationKind": "creation",
+      "reconcileMethod": null,
+      "retryPolicy": "sameOperationId",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "process_session_list",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "process_session_get",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "process_session_read",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "process_session_stop",
+      "operationKind": "desiredStateWrite",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
       "scope": "sharedRuntime"
     },
     {
@@ -488,6 +551,48 @@
       "operationKind": "read",
       "reconcileMethod": null,
       "retryPolicy": "safeRetry",
+      "scope": "hostSurface"
+    },
+    {
+      "name": "workspace_git_view_get",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "hostSurface"
+    },
+    {
+      "name": "workspace_git_review_get",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "hostSurface"
+    },
+    {
+      "name": "workspace_git_review_diff_get",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "hostSurface"
+    },
+    {
+      "name": "workspace_git_stage",
+      "operationKind": "desiredStateWrite",
+      "reconcileMethod": "workspace_git_review_get",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "hostSurface"
+    },
+    {
+      "name": "workspace_git_unstage",
+      "operationKind": "desiredStateWrite",
+      "reconcileMethod": "workspace_git_review_get",
+      "retryPolicy": "noAutomaticRetry",
+      "scope": "hostSurface"
+    },
+    {
+      "name": "workspace_git_commit",
+      "operationKind": "oneShotAction",
+      "reconcileMethod": "workspace_git_review_get",
+      "retryPolicy": "noAutomaticRetry",
       "scope": "hostSurface"
     },
     {
