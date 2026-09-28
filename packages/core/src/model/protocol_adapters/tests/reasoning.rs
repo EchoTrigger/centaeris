@@ -149,3 +149,25 @@ async fn provider_reasoning_completion_corpus() {
         }
     }
 }
+
+#[tokio::test]
+async fn go_compatible_models_send_each_explicit_reasoning_effort() {
+    for model in ["glm-5.3-flash", "deepseek-v4.1-flash"] {
+        for effort in ["low", "high", "max"] {
+            let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+                status_code: 200,
+                headers: HashMap::new(),
+                body_json: json!({"choices":[{"message":{"content":"ok"}}]}).to_string(),
+            }));
+            let client = OpenAiCompatibleModelClient::new(ModelProviderRegistry::new(), transport);
+            let mut request = build_model_request("custom.openai_compatible");
+            request.session_config.model = model.into();
+            request.session_config.thinking_mode = Some(effort.into());
+            client.generate(&request).await.unwrap();
+            let requests = client.transport.take_requests();
+            let body: Value = serde_json::from_str(&requests[0].body_json).unwrap();
+            assert_eq!(body["reasoning_effort"], effort);
+            assert_eq!(body["model"], model);
+        }
+    }
+}

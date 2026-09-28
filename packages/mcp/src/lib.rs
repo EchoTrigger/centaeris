@@ -27,6 +27,7 @@ use tokio::sync::Mutex;
 
 const RETRYABLE_CONNECT_FAILURE_COOLDOWN: Duration = Duration::from_millis(250);
 const MAX_DISCOVERY_PAGES: usize = 256;
+const PRODUCT_USER_AGENT: &str = concat!("centaeris/", env!("CARGO_PKG_VERSION"));
 
 mod http_client;
 mod transport;
@@ -325,6 +326,7 @@ fn bounded_http_transport(
     bearer_token: Option<&str>,
 ) -> Result<StreamableHttpClientTransport<transport::BoundedHttpClient>, McpConnectError> {
     let client = reqwest::Client::builder()
+        .user_agent(PRODUCT_USER_AGENT)
         .pool_max_idle_per_host(0)
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -1491,11 +1493,20 @@ mod tests {
                     .await
                     .expect("listener");
                 let address = listener.local_addr().expect("listener address");
+                let observed_headers = Arc::new(std::sync::Mutex::new(Vec::new()));
+                let capture_headers = observed_headers.clone();
                 let router = axum::Router::new()
                     .merge(
                         axum::Router::new()
                             .nest_service("/mcp", service)
-                            .layer(axum::middleware::from_fn(require_test_bearer)),
+                            .layer(axum::middleware::from_fn(require_test_bearer))
+                            .layer(axum::middleware::from_fn(
+                                move |request: axum::extract::Request,
+                                      next: axum::middleware::Next| {
+                                    capture_headers.lock().unwrap().push(request.headers().clone());
+                                    async move { next.run(request).await }
+                                },
+                            )),
                     )
                     .route(
                         "/unauthorized",
@@ -1585,6 +1596,24 @@ mod tests {
                 .await
                 .is_err());
                 drop(host_client);
+                let headers = observed_headers.lock().unwrap().clone();
+                for host_owned in [false, true] {
+                    let requests: Vec<_> = headers
+                        .iter()
+                        .filter(|headers| headers.contains_key("x-host-call-id") == host_owned)
+                        .collect();
+                    assert!(requests.len() >= 3, "initialize, discovery and tool call");
+                    for headers in requests {
+                        assert_eq!(
+                            headers
+                                .get("user-agent")
+                                .and_then(|value| value.to_str().ok()),
+                            Some(concat!("centaeris/", env!("CARGO_PKG_VERSION"))),
+                            "host_owned={host_owned}"
+                        );
+                        assert_eq!(headers.get_all("user-agent").iter().count(), 1);
+                    }
+                }
                 for path in ["unauthorized", "forbidden", "redirect"] {
                     let transport =
                         bounded_http_transport(format!("http://{address}/{path}").as_str(), None)

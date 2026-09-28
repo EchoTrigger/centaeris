@@ -193,7 +193,8 @@ mod tests {
         assert!(go
             .models
             .iter()
-            .all(|model| model.thinking_mode.is_none() && model.thinking_modes.is_empty()));
+            .all(|model| model.thinking_mode.as_deref() == Some("high")
+                && model.thinking_modes == ["low", "high", "max"]));
         assert_eq!(
             catalog
                 .providers

@@ -1951,6 +1951,41 @@ mod tests {
     }
 
     #[test]
+    fn opencode_go_models_resolve_concrete_effort_without_provider_default() {
+        for model in ["glm-5.3-flash", "deepseek-v4.1-flash"] {
+            let mut state = PersistedRuntimeConfigState {
+                active_model: Some(ActiveModelRef {
+                    provider_id: "opencode-go.default".into(),
+                    model: model.into(),
+                    model_thinking_mode: None,
+                }),
+                ..Default::default()
+            };
+            assert_eq!(
+                default_record(&state).model_thinking_mode.as_deref(),
+                Some("high")
+            );
+            let item = model_catalog(&state)
+                .into_iter()
+                .find(|item| item.provider_id == "opencode-go.default" && item.model == model)
+                .unwrap();
+            assert_eq!(item.model_thinking_modes, ["low", "high", "max"]);
+            apply_model_thinking_mode_request(
+                &mut state,
+                &AgentRuntimeConfigSetRequest {
+                    model_thinking_mode: Some("max".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                default_record(&state).model_thinking_mode.as_deref(),
+                Some("max")
+            );
+        }
+    }
+
+    #[test]
     fn opencode_go_catalog_exposes_only_the_approved_two_models() {
         let models = model_catalog(&PersistedRuntimeConfigState::default())
             .into_iter()

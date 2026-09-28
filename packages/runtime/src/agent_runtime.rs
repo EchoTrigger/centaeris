@@ -1533,7 +1533,11 @@ async fn run_agent_query_loop(
         .ok_or_else(|| "model admission requires AgentRun identity".to_string())?
         .agent_run_id
         .clone();
-    let transport = ReqwestJsonHttpTransport::new(run_id)?;
+    let transport = ReqwestJsonHttpTransport::for_session(
+        run_id,
+        &request.session_id,
+        &model_config.provider_id,
+    )?;
     match model_config_wire_api(&registry, &model_config)? {
         WireApi::AnthropicMessages => {
             let client = AnthropicMessagesModelClient::new(registry, transport);
@@ -1598,7 +1602,11 @@ async fn run_manual_context_compaction(
         session_id: session_id.to_string(),
         config: model_config.clone(),
     };
-    let transport = ReqwestJsonHttpTransport::new(format!("compact:{session_id}:{turn_id}"))?;
+    let transport = ReqwestJsonHttpTransport::for_session(
+        format!("compact:{session_id}:{turn_id}"),
+        session_id,
+        &model_config.provider_id,
+    )?;
     match model_config_wire_api(&registry, &model_config)? {
         WireApi::AnthropicMessages => {
             let client = AnthropicMessagesModelClient::new(registry, transport);
@@ -3247,8 +3255,11 @@ pub(crate) async fn test_model(request: ModelTestRequest) -> Result<ModelTestRes
         prepared_prompt: prompt,
         session_config: config.clone(),
     };
-    let transport =
-        ModelTestTransport::new(ReqwestJsonHttpTransport::new("model-test".to_string())?);
+    let transport = ModelTestTransport::new(ReqwestJsonHttpTransport::for_session(
+        "model-test".to_string(),
+        &request.session_id,
+        &config.provider_id,
+    )?);
     let http_status = transport.http_status.clone();
     let result = match model_config_wire_api(&registry, &config)? {
         WireApi::AnthropicMessages => {
