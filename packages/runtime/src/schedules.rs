@@ -414,10 +414,9 @@ fn dispatch(writer: &EventWriter, run: &mut Run) -> Result<(), String> {
         if let Some(existing) = message_log::project_agent_run(id)? {
             run.session_id = Some(existing.session_id.clone());
             run.error = None;
-            run.status = if matches!(
-                existing.status.as_str(),
-                "succeeded" | "failed" | "cancelled"
-            ) {
+            // The authoritative projection marks every terminal outcome completed,
+            // including interrupted runs projected as stopped.
+            run.status = if existing.completed_at_ms.is_some() {
                 existing.status
             } else {
                 "running".into()
@@ -481,9 +480,12 @@ fn dispatch(writer: &EventWriter, run: &mut Run) -> Result<(), String> {
     Ok(())
 }
 fn tick(writer: &EventWriter) -> Result<(), String> {
+    tick_with_clock(writer, || Utc::now().timestamp_millis())
+}
+fn tick_with_clock(writer: &EventWriter, now: impl Fn() -> i64) -> Result<(), String> {
     let _guard = LOCK.lock().map_err(|_| "schedule lock poisoned")?;
     let path = root();
-    let mut store = storage::load_work(&path, Utc::now().timestamp_millis())?;
+    let mut store = storage::load_work(&path, now())?;
     let mut saved = serde_json::to_vec(&store).map_err(|e| e.to_string())?;
     // Reconcile active receipts first, including after a crash between admission
     // and saving its acknowledgement. Retrying uses the same Session/Run keys.
@@ -501,7 +503,7 @@ fn tick(writer: &EventWriter) -> Result<(), String> {
             saved = current;
         }
     }
-    plan_due(&mut store, Utc::now().timestamp_millis())?;
+    plan_due(&mut store, now())?;
     // Intent and next-fire advance are one atomic write, before external effects.
     if serde_json::to_vec(&store).map_err(|e| e.to_string())? != saved {
         storage::save(&path, &store)?;

@@ -272,3 +272,342 @@ fn scheduler_plan_pages_are_bounded_and_cursor_scoped() {
     assert!(storage::page(&path, Some("other"), None, Some(cursor)).is_err());
     fs::remove_dir_all(root).unwrap();
 }
+
+struct ReconciliationProfile {
+    root: PathBuf,
+    previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl ReconciliationProfile {
+    fn new() -> Self {
+        let root = std::env::temp_dir()
+            .join(crate::process_sessions::Manager::default().service_instance_id());
+        fs::create_dir_all(root.join("workspace")).unwrap();
+        let previous = [
+            ("CENTAERIS_DESKTOP_DATA_DIR", root.clone()),
+            ("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR", root.join("sessions")),
+        ]
+        .into_iter()
+        .map(|(name, value)| {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            (name, previous)
+        })
+        .collect();
+        Self { root, previous }
+    }
+
+    fn admitted(&self, store: &Store, receipt_status: &str, queued: bool) -> Run {
+        let session = crate::session_files::SessionFiles::new(self.root.join("sessions"))
+            .create(
+                Some("scheduled"),
+                self.root.join("workspace").to_str().unwrap(),
+                1_800_000_000_000,
+            )
+            .unwrap();
+        let id = operation_receipts::deterministic_identity(
+            "occurrence-",
+            &store.plans[0].id,
+            "admitted",
+        );
+        let mut run = occurrence(&store.plans[0], id, 30_000, receipt_status);
+        let run_id = run.agent_run_id.as_deref().unwrap();
+        message_log::append_agent_turn_queued(
+            &session.id,
+            "turn",
+            run_id,
+            "inspect",
+            1_800_000_000_001,
+        )
+        .unwrap();
+        if !queued {
+            message_log::append_agent_turn_running(&session.id, run_id).unwrap();
+        }
+        if receipt_status == "running" {
+            run.session_id = Some(session.id);
+        }
+        run
+    }
+
+    fn terminal(&self, run: &Run, reason: &str) -> message_log::ProjectedAgentRun {
+        let run_id = run.agent_run_id.as_deref().unwrap();
+        let session_id = message_log::project_agent_run(run_id)
+            .unwrap()
+            .unwrap()
+            .session_id;
+        if reason == "succeeded" {
+            message_log::append_assistant_message(
+                &session_id,
+                "turn",
+                Some(run_id),
+                "complete",
+                "done",
+                1_800_000_000_002,
+            )
+            .unwrap();
+        }
+        let mut state = message_log::agent_run_session_state(&session_id, run_id).unwrap();
+        let terminal = match reason {
+            "succeeded" => state.complete("turn", "finalized", 1_800_000_000_003),
+            "failed" => state.fail(
+                "turn",
+                "runtime_error",
+                "synthetic failure",
+                1_800_000_000_003,
+            ),
+            _ => state.interrupt(
+                "turn",
+                reason,
+                "synthetic terminal",
+                false,
+                1_800_000_000_003,
+            ),
+        }
+        .unwrap();
+        message_log::append_agent_run_records(&session_id, vec![terminal]).unwrap();
+        message_log::project_agent_run(run_id).unwrap().unwrap()
+    }
+}
+
+impl Drop for ReconciliationProfile {
+    fn drop(&mut self) {
+        for (name, previous) in &self.previous {
+            match previous {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+#[test]
+fn stopped_projection_releases_persisted_scheduler_receipt() {
+    let _env = message_log::test_env_mutex()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for reason in ["stopped", "shutdown", "provider_interrupted"] {
+        for receipt_status in ["pending", "running"] {
+            for legacy_json in [false, true] {
+                assert_terminal_receipt_reconciles(reason, "stopped", receipt_status, legacy_json);
+            }
+        }
+    }
+}
+
+#[test]
+fn normal_terminal_projections_release_persisted_scheduler_receipts() {
+    let _env = message_log::test_env_mutex()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for status in ["succeeded", "failed", "cancelled"] {
+        for receipt_status in ["pending", "running"] {
+            for legacy_json in [false, true] {
+                assert_terminal_receipt_reconciles(status, status, receipt_status, legacy_json);
+            }
+        }
+    }
+}
+
+fn manual_run(schedule_id: &str, operation_id: &str) -> Result<Value, String> {
+    manage(Request::Run {
+        schedule_id: schedule_id.into(),
+        operation_id: operation_id.into(),
+    })
+}
+
+fn history(schedule_id: &str) -> Value {
+    manage(Request::History {
+        schedule_id: schedule_id.into(),
+        limit: None,
+        cursor: None,
+    })
+    .unwrap()
+}
+
+fn assert_terminal_receipt_reconciles(
+    reason: &str,
+    expected: &str,
+    receipt_status: &str,
+    legacy_json: bool,
+) {
+    let profile = ReconciliationProfile::new();
+    let mut store = fixture();
+    store.service_enabled = false;
+    // A pending receipt without a Session ID models an admission acknowledgement
+    // that was not saved; reconciliation must reuse the admitted identities.
+    let run = profile.admitted(&store, receipt_status, false);
+    let terminal = profile.terminal(&run, reason);
+    assert_eq!(terminal.status, expected);
+    assert_eq!(terminal.completed_at_ms, Some(1_800_000_000_003));
+    store.runs.push(run.clone());
+    let original = serde_json::to_vec(&store).unwrap();
+    if legacy_json {
+        fs::create_dir_all(root().parent().unwrap()).unwrap();
+        fs::write(root(), &original).unwrap();
+    } else {
+        storage::save(&root(), &store).unwrap();
+    }
+
+    let writer = Arc::new(crate::runtime_rpc_transport::RuntimeServerClientHub::default())
+        .process_scheduler();
+    tick_with_clock(&writer, || 60_000).unwrap();
+    let result = history(&run.schedule_id);
+    assert_eq!(result["runs"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        result["runs"][0]["status"], expected,
+        "{reason}/{receipt_status}/legacy={legacy_json}"
+    );
+    assert_eq!(result["runs"][0]["sessionId"], terminal.session_id);
+    assert_eq!(result["runs"][0]["agentRunId"], terminal.agent_run_id);
+    assert!(storage::load_work(&root(), 60_000).unwrap().runs.is_empty());
+    assert!(!storage::keep_alive(&root()).unwrap());
+    tick_with_clock(&writer, || 60_000).unwrap();
+    assert_eq!(history(&run.schedule_id), result);
+    if legacy_json {
+        assert_eq!(
+            fs::read(root().with_extension("json.pre-sqlite.backup")).unwrap(),
+            original
+        );
+    }
+    assert_eq!(
+        manual_run(&run.schedule_id, "admitted").unwrap(),
+        result["runs"][0]
+    );
+    let manual = manual_run(&run.schedule_id, "next-manual").unwrap();
+    assert_eq!(manual["status"], "pending");
+    assert_ne!(manual["id"], run.id);
+    assert_eq!(manual_run(&run.schedule_id, "next-manual").unwrap(), manual);
+    assert_eq!(
+        manual_run(&run.schedule_id, "overlap").unwrap_err(),
+        "previous occurrence is still active"
+    );
+    assert_eq!(storage::load_work(&root(), 60_000).unwrap().runs.len(), 1);
+    assert_eq!(
+        message_log::project_agent_runs_for_session(&terminal.session_id)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn stopped_projection_unblocks_next_periodic_occurrence() {
+    let _env = message_log::test_env_mutex()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for reason in ["stopped", "shutdown", "provider_interrupted"] {
+        let profile = ReconciliationProfile::new();
+        let mut store = fixture();
+        let run = profile.admitted(&store, "running", false);
+        let terminal = profile.terminal(&run, reason);
+        store.runs.push(run.clone());
+        storage::save(&root(), &store).unwrap();
+        let writer = Arc::new(crate::runtime_rpc_transport::RuntimeServerClientHub::default())
+            .process_scheduler();
+        tick_with_clock(&writer, || 60_000).unwrap();
+
+        let result = history(&run.schedule_id);
+        assert_eq!(result["runs"].as_array().unwrap().len(), 2);
+        let completed = result["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == run.id)
+            .unwrap();
+        assert_eq!(completed["status"], "stopped");
+        assert_eq!(completed["sessionId"], terminal.session_id);
+        let work = storage::load_work(&root(), 0).unwrap();
+        assert_eq!(work.runs.len(), 1);
+        let next = &work.runs[0];
+        assert_eq!(next.status, "pending");
+        assert_eq!(
+            next.id,
+            operation_receipts::deterministic_identity(
+                "occurrence-",
+                &run.schedule_id,
+                &format!("{}:{}", run.revision, next.scheduled_at)
+            )
+        );
+        let mut due = storage::load_request(
+            &root(),
+            &Request::Pause {
+                schedule_id: run.schedule_id.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(due.plans[0].next_at, Some(next.scheduled_at + 60_000));
+        let scheduled_at = next.scheduled_at;
+        due.runs = work.runs;
+        // Replanning the same due time does not enqueue another occurrence.
+        plan_due(&mut due, scheduled_at).unwrap();
+        assert_eq!(due.runs.len(), 1);
+        assert_eq!(
+            manual_run(&run.schedule_id, "admitted").unwrap(),
+            *completed
+        );
+        assert_eq!(
+            manual_run(&run.schedule_id, "overlap").unwrap_err(),
+            "previous occurrence is still active"
+        );
+    }
+}
+
+#[test]
+fn queued_and_running_projections_remain_active_and_reject_unknown_interruption() {
+    let _env = message_log::test_env_mutex()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for queued in [true, false] {
+        for receipt_status in ["pending", "running"] {
+            let profile = ReconciliationProfile::new();
+            let mut store = fixture();
+            let run = profile.admitted(&store, receipt_status, queued);
+            let run_id = run.agent_run_id.as_deref().unwrap();
+            let projected = message_log::project_agent_run(run_id).unwrap().unwrap();
+            assert_eq!(projected.completed_at_ms, None);
+            let mut state =
+                message_log::agent_run_session_state(&projected.session_id, run_id).unwrap();
+            assert!(state
+                .interrupt("turn", "unknown", "unsupported", false, 1_800_000_000_003)
+                .is_err());
+            store.runs.push(run.clone());
+            storage::save(&root(), &store).unwrap();
+            let writer = Arc::new(crate::runtime_rpc_transport::RuntimeServerClientHub::default())
+                .process_scheduler();
+            tick_with_clock(&writer, || 60_000).unwrap();
+
+            let result = history(&run.schedule_id);
+            assert_eq!(result["runs"].as_array().unwrap().len(), 2);
+            assert!(result["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["status"] == "skippedOverlap"));
+            let work = storage::load_work(&root(), 0).unwrap();
+            assert_eq!(work.runs.len(), 1);
+            assert_eq!(work.runs[0].id, run.id);
+            assert_eq!(work.runs[0].status, "running");
+            assert_eq!(
+                work.runs[0].session_id.as_deref(),
+                Some(projected.session_id.as_str())
+            );
+            assert!(storage::keep_alive(&root()).unwrap());
+            assert_eq!(
+                manual_run(&run.schedule_id, "admitted").unwrap()["id"],
+                run.id
+            );
+            assert_eq!(
+                manual_run(&run.schedule_id, "overlap").unwrap_err(),
+                "previous occurrence is still active"
+            );
+            assert_eq!(
+                message_log::project_agent_run(run_id)
+                    .unwrap()
+                    .unwrap()
+                    .completed_at_ms,
+                None
+            );
+        }
+    }
+}
