@@ -8,6 +8,7 @@ import readline from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import { createRuntimeHostTransport } from "../src/runtimeHostTransport.mjs";
 import { assertRuntimeLifecycle } from "./smoke-runtime-lifecycle.mjs";
+import { assertCleanExit, waitForExit, withCleanup } from "./smoke-runtime-cleanup.mjs";
 
 const hostRoot = path.resolve(import.meta.dirname, "..");
 const repoRoot = path.resolve(hostRoot, "..", "..");
@@ -20,8 +21,6 @@ const defaultRuntimeExe = path.join(
 );
 const runtimeExe = process.env.CENTAERIS_ELECTRON_SMOKE_RUNTIME_EXE || defaultRuntimeExe;
 const REQUEST_TIMEOUT_MS = 30_000;
-const PROCESS_TIMEOUT_MS = 30_000;
-const RUNTIME_SERVER_IDLE_CLEANUP_MS = 7_000;
 
 const requiredResponses = new Map();
 const events = [];
@@ -154,7 +153,7 @@ const assertHostTransportIsolatesInvalidLiveText = async (tempRoot) => {
     isSmokeRun: true,
     onRuntimeServerStarted: (child) => { startedServer = child; },
   });
-  try {
+  await withCleanup(async () => {
     const descriptor = await transport.invokeCommand("initialize", {
       request: { clientKind: "desktop", viewerId: "desktop-live-text-isolation-smoke" },
     });
@@ -165,15 +164,10 @@ const assertHostTransportIsolatesInvalidLiveText = async (tempRoot) => {
     if (!Array.isArray(sessions)) {
       fail("Runtime Host transport did not remain usable after live text isolation");
     }
-  } finally {
-    await transport.requestAppExit();
-    await delay(RUNTIME_SERVER_IDLE_CLEANUP_MS);
-    if (startedServer && startedServer.exitCode === null && startedServer.signalCode === null) {
-      startedServer.kill();
-      await waitForExit(startedServer);
-      fail("Runtime Server remained alive after live text isolation transport exit");
-    }
-  }
+  },
+  () => transport.requestAppExit(),
+  () => assertCleanExit(startedServer, "live text isolation Runtime Server"),
+  );
 };
 
 const assertHostTransportReconnectsAfterRuntimeExit = async (tempRoot) => {
@@ -201,8 +195,6 @@ const assertHostTransportReconnectsAfterRuntimeExit = async (tempRoot) => {
     windowsHide: true,
   });
   server.stderr.on("data", appendStderr);
-  const connection = await waitForRuntimeServer(endpoint);
-  connection.destroy();
   let markDisconnected;
   let reconnectedServer = null;
   const disconnected = new Promise((resolve) => { markDisconnected = resolve; });
@@ -221,7 +213,9 @@ const assertHostTransportReconnectsAfterRuntimeExit = async (tempRoot) => {
     isSmokeRun: true,
     onRuntimeServerStarted: (child) => { reconnectedServer = child; },
   });
-  try {
+  await withCleanup(async () => {
+    const connection = await waitForRuntimeServer(endpoint);
+    connection.destroy();
     await transport.invokeCommand("initialize", {
       request: { clientKind: "desktop", viewerId: "desktop-reconnect-smoke" },
     });
@@ -257,20 +251,16 @@ const assertHostTransportReconnectsAfterRuntimeExit = async (tempRoot) => {
     if (loaded.id !== created.id) {
       fail("Runtime Host transport did not continue the existing session after reconnect");
     }
-  } finally {
-    await transport.requestAppExit();
-    await delay(RUNTIME_SERVER_IDLE_CLEANUP_MS);
-    if (reconnectedServer
-      && reconnectedServer.exitCode === null && reconnectedServer.signalCode === null) {
-      reconnectedServer.kill();
-      await waitForExit(reconnectedServer);
-      fail("Runtime Server remained alive after reconnect transport exit");
-    }
+  },
+  () => transport.requestAppExit(),
+  () => assertCleanExit(reconnectedServer, "reconnected Runtime Server"),
+  async () => {
     if (server.exitCode === null && server.signalCode === null) {
       server.kill();
       await waitForExit(server);
     }
-  }
+  },
+  );
 };
 
 const assertHostTransportReplacesMismatchedRuntime = async (tempRoot) => {
@@ -299,8 +289,6 @@ const assertHostTransportReplacesMismatchedRuntime = async (tempRoot) => {
     windowsHide: true,
   });
   staleServer.stderr.on("data", appendStderr);
-  const connection = await waitForRuntimeServer(endpoint);
-  connection.destroy();
   let replacementServer = null;
   const transport = createRuntimeHostTransport({
     executablePath: runtimeExe,
@@ -312,7 +300,9 @@ const assertHostTransportReplacesMismatchedRuntime = async (tempRoot) => {
     isSmokeRun: true,
     onRuntimeServerStarted: (child) => { replacementServer = child; },
   });
-  try {
+  await withCleanup(async () => {
+    const connection = await waitForRuntimeServer(endpoint);
+    connection.destroy();
     const descriptor = await transport.invokeCommand("initialize", {
       request: { clientKind: "desktop", viewerId: "desktop-build-replacement-smoke" },
     });
@@ -324,20 +314,16 @@ const assertHostTransportReplacesMismatchedRuntime = async (tempRoot) => {
     if (staleExit.code !== 0) {
       fail(`stale Runtime did not exit cleanly: code=${staleExit.code} signal=${staleExit.signal}`);
     }
-  } finally {
-    await transport.requestAppExit();
-    await delay(RUNTIME_SERVER_IDLE_CLEANUP_MS);
-    if (replacementServer
-      && replacementServer.exitCode === null && replacementServer.signalCode === null) {
-      replacementServer.kill();
-      await waitForExit(replacementServer);
-      fail("replacement Runtime Server remained alive after transport exit");
-    }
+  },
+  () => transport.requestAppExit(),
+  () => assertCleanExit(replacementServer, "replacement Runtime Server"),
+  async () => {
     if (staleServer.exitCode === null && staleServer.signalCode === null) {
       staleServer.kill();
       await waitForExit(staleServer);
     }
-  }
+  },
+  );
 };
 
 const assertUnsupportedRuntimeStoreFailsBeforeListening = async (tempRoot, environment) => {
@@ -722,21 +708,6 @@ const startOpenAiCompatibleMockServer = async () => {
   };
 };
 
-const waitForExit = async (child) => {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return { code: child.exitCode, signal: child.signalCode };
-  }
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      child.kill();
-      reject(new Error(`Runtime Host did not exit within ${PROCESS_TIMEOUT_MS}ms`));
-    }, PROCESS_TIMEOUT_MS);
-    child.once("exit", (code, signal) => {
-      clearTimeout(timeout);
-      resolve({ code, signal });
-    });
-  });
-};
 
 const slowCaptureRequest = () => {
   if (process.platform === "win32") {
@@ -805,9 +776,8 @@ const main = async () => {
     await startRuntimeServer();
     await invoke(child, "initialize", initializePayload);
   };
-  await startRuntimeServer();
-
-  try {
+  await withCleanup(async () => {
+    await startRuntimeServer();
     const descriptor = await invoke(child, "initialize", initializePayload);
     assertRecord(descriptor, "initialize result");
     if (
@@ -1468,15 +1438,17 @@ const main = async () => {
         2,
       ),
     );
-  } finally {
+  },
+  async () => {
     lines?.close();
     socket?.destroy();
     if (server && server.exitCode === null && server.signalCode === null) {
       server.kill();
       await waitForExit(server);
     }
-    await removeTempRoot(tempRoot);
-  }
+  },
+  () => removeTempRoot(tempRoot),
+  );
 };
 
 await main();
