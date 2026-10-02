@@ -228,7 +228,9 @@ fn run_request(session_id: &str, turn_id: &str) -> AgentRunRequest {
             authorization_digest: format!("sha256:{}", "b".repeat(64)),
         }),
         initial_turn_id: turn_id.to_string(),
-        user_message: "exercise snapshot fault boundary".to_string(),
+        initial_input: centaeris_core::runtime::AgentRunInitialInput::UserMessage(
+            "exercise snapshot fault boundary".to_string(),
+        ),
         runtime_scope: PromptCompactionScopeV1::main(),
         resume_from_turn_id: None,
         auto_continue_after_resume_wait: None,
@@ -317,7 +319,9 @@ async fn durable_turn_supplement_is_not_acked_when_prompt_snapshot_fails() {
                     authorization_digest,
                 }),
                 initial_turn_id: "turn-durable-supplement".to_string(),
-                user_message: "Start the durable run.".to_string(),
+                initial_input: centaeris_core::runtime::AgentRunInitialInput::UserMessage(
+                    "Start the durable run.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
                 auto_continue_after_resume_wait: None,

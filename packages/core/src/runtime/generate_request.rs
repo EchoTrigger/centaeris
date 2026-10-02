@@ -195,6 +195,8 @@ impl<
         let mut session = self.session_manager.load_or_create_session(session_id)?;
         if input.semantic_kind() == MESSAGE_SEMANTIC_USER_REQUEST {
             clear_prompt_compaction_failure_metadata(&mut session);
+        }
+        if matches!(input, TurnInput::UserMessage(_) | TurnInput::HostEvent(_)) {
             self.close_unpaired_tool_calls_for_new_turn(
                 &mut session,
                 session_id,
@@ -334,9 +336,12 @@ impl<
         crate::runtime::context_window::validate_context_window_materialization(&session)?;
         let (context_messages, runtime_context_anchor_message_id) = build_model_context_messages(
             session.context_window.as_slice(),
-            session_id,
-            turn_id,
-            input.user_message(),
+            match input {
+                TurnInput::HostEvent(input) => Some(input.chat_message(session_id, now_ms())?),
+                _ => input.user_message().map(|message| {
+                    prompt_projection::build_current_user_message(session_id, turn_id, message)
+                }),
+            },
         )?;
         for message in &context_messages {
             if session
@@ -683,6 +688,28 @@ impl<
     ) -> Result<(), String> {
         if input.output_token_recovery_partial().is_some() {
             return Ok(());
+        }
+        if let TurnInput::HostEvent(input) = input {
+            let message = input.chat_message(session_id, now_ms())?;
+            if let Some(existing) = session
+                .messages
+                .iter()
+                .find(|m| m.message_id == message.message_id)
+            {
+                if crate::session::host_event_input::host_event_origin(session_id, existing)?
+                    .as_ref()
+                    != Some(input)
+                {
+                    return Err("host_event_input_identity_conflict".to_string());
+                }
+                return Ok(());
+            }
+            session
+                .model_semantics
+                .insert(message.message_id.clone(), ModelMessageSemanticsV1::Plain);
+            session.messages.push(message);
+            refresh_session_context_window(session);
+            return self.session_manager.save_session(session);
         }
         let user_message = input.user_message();
         if user_message.is_none() {
@@ -1035,11 +1062,9 @@ fn skill_catalog_prompt_budget_chars(context_limit_tokens: u32) -> usize {
 
 fn build_model_context_messages(
     base_context_window: &[ChatMessage],
-    session_id: &str,
-    turn_id: &str,
-    user_message: Option<&str>,
+    current_input: Option<ChatMessage>,
 ) -> Result<(Vec<ChatMessage>, String), String> {
-    let continuation_anchor = if user_message.is_none() {
+    let continuation_anchor = if current_input.is_none() {
         let (last_model_message_index, last_model_message) = base_context_window
             .iter()
             .enumerate()
@@ -1092,9 +1117,7 @@ fn build_model_context_messages(
             context_messages.splice(anchor_index..anchor_index, lifecycle_contexts);
         }
     }
-    let anchor_message_id = if let Some(user_message) = user_message {
-        let current =
-            prompt_projection::build_current_user_message(session_id, turn_id, user_message);
+    let anchor_message_id = if let Some(current) = current_input {
         let message_id = current.message_id.clone();
         match context_messages
             .iter()
