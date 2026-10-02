@@ -201,6 +201,7 @@ impl<
                 &mut session,
                 session_id,
                 turn_id,
+                input,
                 tool_safe_point,
             )
             .await?;
@@ -749,6 +750,7 @@ impl<
         session: &mut SessionStateSnapshot,
         session_id: &str,
         turn_id: &str,
+        input: &TurnInput,
         tool_safe_point: Option<&ToolSafePointDispatcher<'_>>,
     ) -> Result<usize, String> {
         let open_tool_call_ids =
@@ -826,6 +828,7 @@ impl<
                     tool_call_id,
                     call.as_ref(),
                     permission.as_ref(),
+                    matches!(input, TurnInput::HostEvent(_)),
                     now,
                 ),
             );
@@ -939,6 +942,7 @@ impl<
                             tool_call_id.as_str(),
                             Some(&call),
                             Some(&permission),
+                            false,
                             now_ms,
                         ),
                     )
@@ -1008,6 +1012,7 @@ fn unpaired_tool_call_closed_result(
     tool_call_id: &str,
     call: Option<&crate::runtime::contracts::ToolCall>,
     permission: Option<&PermissionDecision>,
+    is_host_event: bool,
     now_ms: i64,
 ) -> ToolExecutionResult {
     let tool_name = call
@@ -1019,6 +1024,17 @@ fn unpaired_tool_call_closed_result(
     let permission_decision = permission
         .map(PermissionDecision::audit_json)
         .unwrap_or(Value::Null);
+    let (reason, message) = if is_host_event {
+        (
+            "unpaired_tool_call_closed_by_host_event",
+            "The previous tool call had no recorded tool result before a host event turn started; the tool call was not executed by this recovery step.",
+        )
+    } else {
+        (
+            "unpaired_tool_call_closed_by_new_user_turn",
+            "The previous tool call had no recorded tool result before a new user turn started; the tool call was not executed by this recovery step.",
+        )
+    };
     ToolExecutionResult {
         tool_call_id: tool_call_id.to_string(),
         tool_name: tool_name.clone(),
@@ -1029,8 +1045,8 @@ fn unpaired_tool_call_closed_result(
         details: json!({
             "schema": "tool_result_tombstone_v1",
             "status": "blocked",
-            "reason": "unpaired_tool_call_closed_by_new_user_turn",
-            "message": "The previous tool call had no recorded tool result before a new user turn started; the tool call was not executed by this recovery step.",
+            "reason": reason,
+            "message": message,
             "sessionId": session_id,
             "turnId": trigger_turn_id,
             "toolCallId": tool_call_id,
@@ -1048,7 +1064,7 @@ fn unpaired_tool_call_closed_result(
         completed_at_ms: now_ms,
         latency_ms: 0,
         parallel_group: None,
-        transition_reason: Some("unpaired_tool_call_closed_by_new_user_turn".to_string()),
+        transition_reason: Some(reason.to_string()),
     }
 }
 
@@ -1196,4 +1212,42 @@ fn validate_model_input_budget(
         ));
     }
     Ok(estimated_tokens)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_loop_repair_tombstone_diagnostics_match_trigger() {
+        for (is_host_event, trigger, expected_reason) in [
+            (
+                false,
+                "a new user turn",
+                "unpaired_tool_call_closed_by_new_user_turn",
+            ),
+            (
+                true,
+                "a host event turn",
+                "unpaired_tool_call_closed_by_host_event",
+            ),
+        ] {
+            let result = unpaired_tool_call_closed_result(
+                "session",
+                "turn",
+                "call",
+                None,
+                None,
+                is_host_event,
+                42,
+            );
+            assert_eq!(result.details["schema"], "tool_result_tombstone_v1");
+            assert_eq!(result.status, "blocked");
+            assert_eq!(result.details["reason"], expected_reason);
+            assert_eq!(result.transition_reason.as_deref(), Some(expected_reason));
+            assert_eq!(result.details["message"], format!(
+                "The previous tool call had no recorded tool result before {trigger} started; the tool call was not executed by this recovery step."
+            ));
+        }
+    }
 }

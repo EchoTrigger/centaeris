@@ -1017,15 +1017,19 @@ async fn assert_host_event_repairs_unpaired_tool_before_provider(reject_commit: 
             .count(),
         1
     );
-    assert!(persisted
+    let repaired_message = persisted
         .messages
         .iter()
-        .any(|message| tool_message_matches_transition(
-            &persisted,
-            message,
-            "old-call",
-            "unpaired_tool_call_closed_by_new_user_turn"
-        )));
+        .find(|message| {
+            model_tool_result_semantics(&persisted, message)
+                .is_some_and(|trace| trace["toolCallId"] == "old-call")
+        })
+        .expect("interrupted tool must have a repair result");
+    let repaired_trace = model_tool_result_semantics(&persisted, repaired_message).unwrap();
+    assert_eq!(
+        repaired_trace["transitionReason"], "unpaired_tool_call_closed_by_host_event",
+        "HostEvent repair must not be diagnosed as a new user turn"
+    );
     assert!(updates.iter().all(|update| !matches!(update,
         TurnUpdate::RuntimeEvent { event } if event.event_type == "UserMessage")));
 }
@@ -1038,6 +1042,90 @@ async fn query_loop_host_event_repairs_interrupted_tool_before_first_generation(
 #[tokio::test]
 async fn query_loop_host_event_rejected_repair_observation_commit_prevents_provider_call() {
     assert_host_event_repairs_unpaired_tool_before_provider(true).await;
+}
+
+#[tokio::test]
+async fn query_loop_unpaired_tool_repair_diagnostic_distinguishes_host_and_user_turns() {
+    let session_id = "repair-diagnostic";
+    for (input, expected_reason) in [
+        (
+            TurnInput::UserMessage("New user request".into()),
+            "unpaired_tool_call_closed_by_new_user_turn",
+        ),
+        (
+            TurnInput::HostEvent(host_input(session_id, "notice-a")),
+            "unpaired_tool_call_closed_by_host_event",
+        ),
+    ] {
+        let executions = Arc::new(AtomicUsize::new(0));
+        let engine = AgentRuntime::new_for_test_with_tools(
+            AgentRuntimeTestStore::new(),
+            stream_execution_boundary_tool_layer(executions.clone()),
+            AgentRuntimeConfig::default(),
+        );
+        let mut session = SessionStateSnapshot::new(session_id.into(), 1);
+        engine
+            .message_handler
+            .push_user_message(&mut session, "Approved task", JsonMap::new());
+        let generate_result = GenerateResult {
+            content: "Interrupted before tool execution".into(),
+            tool_calls: vec![crate::model::ToolCallEnvelope {
+                id: "old-call".into(),
+                name: "stream_boundary_test_tool".into(),
+                args_json: json!({"value":"must not execute"}).to_string(),
+            }],
+            continuation_reasoning_content: None,
+            reasoning_content: None,
+            input_tokens: None,
+            total_tokens: None,
+            prompt_cache_hit_tokens: None,
+            prompt_cache_miss_tokens: None,
+        };
+        engine.message_handler.push_model_assistant_message(
+            &mut session,
+            &generate_result.content,
+            JsonMap::new(),
+            build_model_assistant_semantics(&generate_result),
+        );
+        engine.session_manager.save_session(&session).unwrap();
+        let response = engine
+            .process_turn_with_stream_sink_async(
+                ProcessTurnRequest {
+                    session_id: session_id.into(),
+                    agent_run_identity: None,
+                    turn_id: "new-turn".into(),
+                    input,
+                    generate_result: GenerateResult {
+                        tool_calls: vec![],
+                        ..generate_result
+                    },
+                    agent_run_resource_usage: AgentRunResourceUsageV1::default(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let repaired_message = response
+            .session_snapshot
+            .messages
+            .iter()
+            .find(|message| {
+                model_tool_result_semantics(&response.session_snapshot, message)
+                    .is_some_and(|trace| trace["toolCallId"] == "old-call")
+            })
+            .unwrap();
+        assert!(tool_message_matches_transition(
+            &response.session_snapshot,
+            repaired_message,
+            "old-call",
+            expected_reason,
+        ));
+        assert_eq!(
+            repaired_message.content,
+            "The previous unpaired tool call was closed before execution; it was not replayed."
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[tokio::test]
