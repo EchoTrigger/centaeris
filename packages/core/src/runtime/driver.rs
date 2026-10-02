@@ -1081,13 +1081,30 @@ fn context_token_breakdown(
 
 /// The only admitted initial inputs; internal continuations are not Run inputs.
 ///
+/// ```
+/// use centaeris_core::runtime::AgentRunInitialInput;
+/// use centaeris_core::session::host_event_input::HostEventInput;
+///
+/// let user = AgentRunInitialInput::UserMessage("Inspect the approved report".into());
+/// assert!(matches!(user, AgentRunInitialInput::UserMessage(_)));
+/// let notice = HostEventInput::new(
+///     "session-a", "notice-a".into(), "source".into(), "Report changed.".into(),
+/// ).unwrap();
+/// let initial = AgentRunInitialInput::HostEvent(notice);
+/// assert!(matches!(initial, AgentRunInitialInput::HostEvent(_)));
+/// ```
+///
 /// ```compile_fail
 /// use centaeris_core::runtime::{AgentRunInitialInput, TurnInput};
 /// let initial: AgentRunInitialInput = TurnInput::ToolContinuation { objective: "continue".into() };
 /// ```
 #[derive(Debug, Clone)]
 pub enum AgentRunInitialInput {
+    /// A user request, using the ordinary user-input and `UserPromptSubmit` path.
     UserMessage(String),
+    /// Non-authoritative notification data for the accepted task. It does not
+    /// replace the objective or permissions, invoke `UserPromptSubmit`, or create
+    /// a user transcript bubble. The Host owns admission and durable recording.
     HostEvent(crate::session::host_event_input::HostEventInput),
 }
 
@@ -1104,9 +1121,14 @@ impl AgentRunInitialInput {
 pub struct AgentRunRequest {
     pub session_id: String,
     pub initial_turn_id: String,
+    /// The admitted initial input; notification data supplies no new authority.
     pub initial_input: AgentRunInitialInput,
+    /// Execution identity. HostEvent wait recovery requires the original input's
+    /// owning Run and the existing wait's authorization identity to match.
     pub agent_run_identity: Option<RuntimeAgentRunIdentityV1>,
     pub runtime_scope: PromptCompactionScopeV1,
+    /// Existing wait to resume. A new HostEvent, or an input owned by another Run,
+    /// cannot resume it; recovery reuses the original accepted input and wait state.
     pub resume_from_turn_id: Option<String>,
     pub auto_continue_after_resume_wait: Option<bool>,
 }

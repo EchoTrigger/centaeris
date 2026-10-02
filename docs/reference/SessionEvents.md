@@ -139,14 +139,19 @@ lease fence, and authorization state. For a host-driven Run, record
 `agent_run_started` with the objective from accepted task state, then append
 `host_event_input` under the same admission fence. Do not create a `user_message`
 for the notification. `AgentRunSessionState::host_event_input_record` preserves
-the accepted input when rebuilt after an uncertain append.
+the accepted input when rebuilt after an uncertain append. Its `Some` result
+advances the in-memory ledger and supplies a record for durable append; `None`
+means that ledger already tracks the same input and turn. Neither return value
+alone proves a committed append. After an uncertain result, rebuild the ledger
+from confirmed committed records before retrying the original input.
 
 `host_event_input.inputId` is a non-empty opaque identifier of at most 160 UTF-8
 bytes; `source` is an opaque correlation label of at most 128 bytes. Neither may
 have surrounding whitespace or control characters. Core does not interpret or
-dereference `source`, and it grants no authority. `content` is non-empty data,
-bounded to 72,000 characters and preserved without trimming. `messageId` is the
-stable Core identity derived from Session and input IDs by `HostEventInput::new`;
+dereference `source`, and it grants no authority. `content` must contain
+non-whitespace text, is bounded to 72,000 Unicode scalar values, and is preserved
+without trimming. `messageId` is the stable Core identity derived from Session
+and input IDs by `HostEventInput::new`;
 changing its payload or owning turn conflicts with the original input.
 
 The provider sees an explicit non-authoritative JSON notification wrapper even
@@ -159,7 +164,14 @@ task state remain the source of objectives and permissions.
 Runtime snapshots and wait checkpoints retain their existing fields and typed
 enums. Notification origin is derived into existing message metadata from the
 authoritative input record by stable message ID, including restoration from
-main request observations. Readers of older logs preserve their original records;
+main request observations. `host_event_origin` checks the derived message's
+consistency; it does not authenticate `source`, check Run ownership or permissions,
+or prove durable admission. Missing origin metadata is not proof of user input.
+Reconstruction from Session records does not restore all snapshot metadata or
+wait routing; recovery still needs the existing persisted wait metadata and
+checkpoint, plus Run and authorization state.
+
+Readers of older logs preserve their original records;
 no old notification is backfilled as read or handled. Earlier readers reject the
 new record type. This requires no layout or SQLite schema change, and does not
 expand support for older unsupported schemas.
@@ -169,7 +181,15 @@ message observation is evidence that the input entered the main prompt at that
 record's `createdAtMs`. Compaction requests, missing IDs, provider receipt, and
 business handling are separate facts. Core adds no Read/handled record. A new
 notification cannot resume an existing wait; infrastructure recovery reuses the
-original input and Run identity. Hosts own busy deferral and eventual idle admission.
+original input and Run identity. Reusing an input owned by another Run cannot
+resume the wait, even with the same input or message ID; the existing wait's
+authorization identity must also match. Hosts own busy deferral and eventual
+idle admission.
+
+Wait resumption within the running Server uses the original lease. Runtime
+Server startup after an abnormal exit conservatively marks unfinished Runs as
+`stopped`, as described in
+[AgentRun ownership and shutdown](RuntimeProtocol.md#agentrun-ownership-and-shutdown).
 
 `session_meta.sessionKind` is `main` or `subagent`. A main Session has null
 `parentSessionId` and `runtimeJobId` and a non-null `sortOrder`. A subagent has

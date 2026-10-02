@@ -522,8 +522,48 @@ impl AgentRunSessionState {
         self.committed_supplement_ids.contains(supplement_id)
     }
 
-    /// Rebuild this ledger from committed records after an uncertain append.
-    /// Reusing the accepted input is idempotent; a changed payload or turn fails.
+    /// Track a notification input under this ledger's Session and Run identity.
+    ///
+    /// `Some` advances the in-memory ledger and returns a new sequenced record
+    /// for the Host to append durably under its admission fence. `None` means
+    /// the ledger already tracks the same turn and complete input; it does not
+    /// by itself prove that an earlier append committed. A new timestamp alone
+    /// does not change the accepted identity.
+    ///
+    /// After an uncertain append, rebuild with [`Self::restore`] from confirmed
+    /// committed records in sequence order before reusing the original input.
+    ///
+    /// # Errors
+    ///
+    /// Returns `host_event_input_identity_conflict` for a changed input or owning
+    /// turn. Propagates input validation and Session record construction errors.
+    ///
+    /// # Example
+    ///
+    /// No storage call is made here; the Host must independently confirm which
+    /// records committed before restoring them.
+    ///
+    /// ```
+    /// use centaeris_core::session::AgentRunSessionState;
+    /// use centaeris_core::session::host_event_input::HostEventInput;
+    ///
+    /// let input = HostEventInput::new(
+    ///     "session-a", "notice-a".into(), "source".into(), "Report changed.".into(),
+    /// ).unwrap();
+    /// let mut ledger = AgentRunSessionState::new("session-a", "run-a").unwrap();
+    /// let committed = ledger.host_event_input_record("turn-a", &input, 42)
+    ///     .unwrap().unwrap();
+    /// // Assume the Host has confirmed that this record committed.
+    /// let mut recovered = AgentRunSessionState::new("session-a", "run-a").unwrap();
+    /// recovered.restore(committed).unwrap();
+    /// assert!(recovered.host_event_input_record("turn-a", &input, 99)
+    ///     .unwrap().is_none());
+    /// assert_eq!(recovered.next_sequence(), 1);
+    /// assert!(recovered.host_event_input_record("other-turn", &input, 99).is_err());
+    /// let mut conflicting = input;
+    /// conflicting.content.push_str(" changed");
+    /// assert!(recovered.host_event_input_record("turn-a", &conflicting, 99).is_err());
+    /// ```
     pub fn host_event_input_record(
         &mut self,
         turn_id: &str,
@@ -2185,6 +2225,18 @@ pub fn active_session_records(
         .collect())
 }
 
+/// Reconstruct message history and model semantics from active Session records
+/// and the latest main request's observations. HostEvent origins and owning Runs
+/// are derived from authoritative input records, including for observed messages.
+///
+/// This does not reconstruct all Session metadata, accepted task state, or wait
+/// routing. Resuming a waiting Run still requires its existing persisted wait
+/// metadata and checkpoint, together with matching Run and authorization identity.
+///
+/// # Errors
+///
+/// Returns errors for invalid Session records or conflicting message observations,
+/// including HostEvent projections inconsistent with their authoritative input.
 pub fn restore_runtime_snapshot_from_session_records(
     expected_session_id: &str,
     events: &[SessionLogRecord],

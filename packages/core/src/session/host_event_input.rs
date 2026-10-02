@@ -1,3 +1,9 @@
+//! Host notification inputs and their authoritative Session records.
+//!
+//! Hosts own admission and fenced durable appends. A notification record binds
+//! input identity and content; its source and content do not grant authority.
+//! These records do not create user transcript bubbles or AgentRun stream items.
+
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::contracts::JsonMap;
@@ -9,6 +15,8 @@ use crate::session::{
 pub(crate) const HOST_EVENT_SEMANTIC_KIND: &str = "host_event_input";
 const ORIGIN_METADATA_KEY: &str = "host_event_input_v1_json";
 const RUN_METADATA_KEY: &str = "host_event_agent_run_id";
+/// Maximum notification content length, counted as Unicode scalar values by
+/// [`str::chars`], rather than UTF-8 bytes or grapheme clusters.
 pub const HOST_EVENT_INPUT_MAX_CONTENT_CHARS: usize = 72_000;
 
 /// An opaque host notification. Its source is correlation data, never authority.
@@ -16,13 +24,48 @@ pub const HOST_EVENT_INPUT_MAX_CONTENT_CHARS: usize = 72_000;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HostEventInput {
+    /// Host-supplied opaque identity, at most 160 UTF-8 bytes.
     pub input_id: String,
+    /// Stable identity derived from the Session and input IDs by [`Self::new`].
     pub message_id: String,
+    /// Opaque correlation label, at most 128 UTF-8 bytes; never dereferenced.
     pub source: String,
+    /// Non-authoritative data, preserved verbatim and containing non-whitespace text.
     pub content: String,
 }
 
 impl HostEventInput {
+    /// Construct a validated notification bound to the supplied Session.
+    ///
+    /// The same Session and input IDs produce the same message ID. The source
+    /// is correlation data, not an authenticated identity or trusted instruction.
+    /// Content is preserved without trimming. This does not admit or persist a Run.
+    ///
+    /// # Errors
+    ///
+    /// Returns the input, source, Session/message identity, or content errors
+    /// described by [`Self::validate`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use centaeris_core::session::host_event_input::HostEventInput;
+    ///
+    /// let input = HostEventInput::new(
+    ///     "session-a", "notice-a".into(), "opaque://source".into(),
+    ///     "  Report changed.\n".into(),
+    /// ).unwrap();
+    /// assert_eq!(input.content, "  Report changed.\n");
+    /// let same = HostEventInput::new(
+    ///     "session-a", "notice-a".into(), "opaque://source".into(),
+    ///     "  Report changed.\n".into(),
+    /// ).unwrap();
+    /// assert_eq!(input.message_id, same.message_id);
+    /// assert!(input.validate("session-b").is_err());
+    /// assert!(HostEventInput::new(
+    ///     "session-a", "notice-a".into(), "source".into(), " \n".into(),
+    /// ).is_err());
+    /// ```
     pub fn new(
         session_id: &str,
         input_id: String,
@@ -39,6 +82,22 @@ impl HostEventInput {
         Ok(input)
     }
 
+    /// Validate field limits and the message identity's binding to this Session.
+    ///
+    /// Public field construction and deserialization do not perform this semantic
+    /// validation. JSON uses exact `camelCase` fields and rejects unknown fields.
+    ///
+    /// # Errors
+    ///
+    /// - `host_event_input_inputId_invalid`: empty input ID, surrounding whitespace,
+    ///   control characters, or more than 160 UTF-8 bytes.
+    /// - `host_event_input_source_invalid`: the same restrictions on source, with
+    ///   a limit of 128 UTF-8 bytes.
+    /// - `host_event_input_message_id_invalid`: a whitespace-only Session ID, or a
+    ///   message ID that differs from the one derived from the supplied Session
+    ///   and input IDs. Derivation uses the supplied Session ID without trimming.
+    /// - `host_event_input_content_invalid`: whitespace-only content, or more than
+    ///   [`HOST_EVENT_INPUT_MAX_CONTENT_CHARS`] Unicode scalar values.
     pub fn validate(&self, session_id: &str) -> Result<(), String> {
         for (field, value, limit) in [
             ("inputId", self.input_id.as_str(), 160),
@@ -90,6 +149,19 @@ impl HostEventInput {
     }
 }
 
+/// Construct an uncommitted, shape-validated notification record for a turn and Run.
+///
+/// The event ID is stable for the Session and input IDs. This function neither
+/// deduplicates records nor advances a ledger. The Host must admit the Run and
+/// durably append under its existing authorization and lease fence; construction
+/// alone proves neither admission nor persistence.
+/// Use [`crate::session::AgentRunSessionState::host_event_input_record`] to track
+/// input identity within a Run. See [`host_event_origin`] for a reconstruction example.
+///
+/// # Errors
+///
+/// Propagates [`HostEventInput::validate`] and canonical Session record shape
+/// errors, including missing turn or Run identity.
 pub fn host_event_input_record(
     session_id: &str,
     turn_id: &str,
@@ -109,6 +181,51 @@ pub fn host_event_input_record(
     )
 }
 
+/// Read notification origin metadata and check the message projection's consistency.
+///
+/// Returns `Some` when origin metadata decodes, validates for this Session, and
+/// agrees with the message ID, role, and content. Returns `None` when origin
+/// metadata is absent; absence does not establish that the message is user input.
+///
+/// This does not authenticate the source, check Run ownership or authorization,
+/// or prove durable admission, provider receipt, or business handling. Use
+/// authoritative Session records for accepted input identity and ownership;
+/// accepted task state and Agent instructions remain the authority for actions.
+///
+/// # Errors
+///
+/// Returns `decode host event origin failed: ...` for malformed origin metadata,
+/// propagates [`HostEventInput::validate`] errors, or returns
+/// `host_event_input_projection_identity_conflict` for a mismatched projection.
+/// An invalid origin must not be treated as ordinary user input.
+///
+/// # Example
+///
+/// This example constructs and restores messages in memory. It performs no
+/// durable append and does not reconstruct a complete waiting Run.
+///
+/// ```
+/// use centaeris_core::session::restore_runtime_snapshot_from_session_records;
+/// use centaeris_core::session::host_event_input::{
+///     HostEventInput, host_event_input_record, host_event_origin,
+/// };
+///
+/// let input = HostEventInput::new(
+///     "session-a", "notice-a".into(), "source".into(), "Report changed.".into(),
+/// ).unwrap();
+/// let record = host_event_input_record("session-a", "turn-a", "run-a", &input, 42)
+///     .unwrap();
+/// let restored = restore_runtime_snapshot_from_session_records("session-a", &[record])
+///     .unwrap();
+/// let message = &restored.messages[0];
+/// assert_eq!(host_event_origin("session-a", message).unwrap(), Some(input));
+/// let mut corrupted = message.clone();
+/// corrupted.content.push_str(" changed");
+/// assert!(host_event_origin("session-a", &corrupted).is_err());
+/// let mut without_origin = message.clone();
+/// without_origin.metadata.clear();
+/// assert_eq!(host_event_origin("session-a", &without_origin).unwrap(), None);
+/// ```
 pub fn host_event_origin(
     session_id: &str,
     message: &ChatMessage,
