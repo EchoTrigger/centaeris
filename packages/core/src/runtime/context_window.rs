@@ -130,6 +130,7 @@ pub(crate) fn is_reliable_tool_chain_user_anchor(message: &ChatMessage) -> bool 
                 super::MESSAGE_SEMANTIC_USER_REQUEST
                     | super::MESSAGE_SEMANTIC_TURN_SUPPLEMENT
                     | super::MESSAGE_SEMANTIC_ANSWER_NOW
+                    | crate::session::host_event_input::HOST_EVENT_SEMANTIC_KIND
             )
         )
 }

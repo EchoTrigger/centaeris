@@ -7,6 +7,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 pub mod external_context;
+pub mod host_event_input;
 pub mod manager;
 pub mod reliability;
 pub mod state;
@@ -113,6 +114,7 @@ pub enum SessionRecordType {
     AgentRunExecutionStarted,
     AgentRunExecutionEnded,
     UserMessage,
+    HostEventInput,
     TurnSupplement,
     AssistantMessage,
     ToolCall,
@@ -147,6 +149,7 @@ impl SessionRecordType {
             "agent_run_execution_started",
             "agent_run_execution_ended",
             "user_message",
+            "host_event_input",
             "turn_supplement",
             "assistant_message",
             "tool_call",
@@ -177,6 +180,7 @@ impl SessionRecordType {
             Self::AgentRunExecutionStarted => "agent_run_execution_started",
             Self::AgentRunExecutionEnded => "agent_run_execution_ended",
             Self::UserMessage => "user_message",
+            Self::HostEventInput => "host_event_input",
             Self::TurnSupplement => "turn_supplement",
             Self::AssistantMessage => "assistant_message",
             Self::ToolCall => "tool_call",
@@ -335,6 +339,7 @@ pub struct AgentRunSessionState {
     agent_composition_digest: Option<String>,
     provider_usages: HashMap<String, Value>,
     committed_supplement_ids: HashSet<String>,
+    host_event_inputs: HashMap<String, (String, host_event_input::HostEventInput)>,
     committed_checkpoint_ids: HashSet<String>,
     tool_ledger_checkpointed: bool,
     citation_identities: HashMap<String, Value>,
@@ -378,6 +383,7 @@ impl AgentRunSessionState {
             agent_composition_digest: None,
             provider_usages: HashMap::new(),
             committed_supplement_ids: HashSet::new(),
+            host_event_inputs: HashMap::new(),
             committed_checkpoint_ids: HashSet::new(),
             tool_ledger_checkpointed: false,
             citation_identities: HashMap::new(),
@@ -514,6 +520,32 @@ impl AgentRunSessionState {
 
     pub fn has_supplement(&self, supplement_id: &str) -> bool {
         self.committed_supplement_ids.contains(supplement_id)
+    }
+
+    /// Rebuild this ledger from committed records after an uncertain append.
+    /// Reusing the accepted input is idempotent; a changed payload or turn fails.
+    pub fn host_event_input_record(
+        &mut self,
+        turn_id: &str,
+        input: &host_event_input::HostEventInput,
+        created_at_ms: i64,
+    ) -> Result<Option<SequencedSessionRecord>, String> {
+        input.validate(&self.session_id)?;
+        if let Some((accepted_turn_id, accepted)) = self.host_event_inputs.get(&input.message_id) {
+            return if accepted_turn_id == turn_id && accepted == input {
+                Ok(None)
+            } else {
+                Err("host_event_input_identity_conflict".to_string())
+            };
+        }
+        self.record(host_event_input::host_event_input_record(
+            &self.session_id,
+            turn_id,
+            &self.agent_run_id,
+            input,
+            created_at_ms,
+        )?)
+        .map(Some)
     }
 
     pub fn assistant_is_final(&self, message_id: &str) -> bool {
@@ -1089,6 +1121,18 @@ impl AgentRunSessionState {
                     ));
                 }
             }
+            SessionRecordType::HostEventInput => {
+                let input: host_event_input::HostEventInput =
+                    serde_json::from_value(event.payload.clone())
+                        .map_err(|e| format!("decode host event input failed: {e}"))?;
+                input.validate(&self.session_id)?;
+                let turn_id = required_event_turn_id(event)?;
+                if self.host_event_inputs.contains_key(&input.message_id) {
+                    return Err("host_event_input_identity_duplicated".to_string());
+                }
+                self.host_event_inputs
+                    .insert(input.message_id.clone(), (turn_id, input));
+            }
             SessionRecordType::CitationRecorded => {
                 register_citation_identity(&mut self.citation_identities, &event.payload)?;
                 self.citation_products
@@ -1579,6 +1623,7 @@ pub fn session_record_projects_to_agent_run_stream(event_type: SessionRecordType
         | SessionRecordType::CheckpointRef
         | SessionRecordType::ToolCallClosure
         | SessionRecordType::FileFact => false,
+        SessionRecordType::HostEventInput => false,
     }
 }
 
@@ -1805,6 +1850,9 @@ fn committed_runtime_projection(
         SessionRecordType::SessionMeta => {
             return Err("session_meta has no AgentRun stream projection".to_string())
         }
+        SessionRecordType::HostEventInput => {
+            return Err("host_event_input has no AgentRun stream projection".to_string())
+        }
     };
     let event = RuntimeEventProjection {
         event_id: record.event_id.clone(),
@@ -1936,6 +1984,8 @@ pub enum ReducedAgentRunState {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionProjection {
     reasoning: reasoning::ReasoningLedger,
+    pub host_event_inputs: BTreeMap<String, host_event_input::HostEventInput>,
+    host_event_owning_runs: BTreeMap<String, String>,
     pub messages: BTreeMap<String, ReducedMessage>,
     pub tool_calls: BTreeMap<String, ReducedToolCall>,
     pub agent_runs: BTreeMap<String, ReducedAgentRun>,
@@ -2042,6 +2092,14 @@ pub fn validate_event_shape(event: &SessionLogRecord) -> Result<(), String> {
         SessionRecordType::AgentRunExecutionStarted => validate_agent_run_execution_started(event),
         SessionRecordType::AgentRunExecutionEnded => validate_agent_run_execution_ended(event),
         SessionRecordType::UserMessage => validate_user_message(event),
+        SessionRecordType::HostEventInput => {
+            required_event_turn_id(event)?;
+            required_event_agent_run_id(event)?;
+            let input: host_event_input::HostEventInput =
+                serde_json::from_value(event.payload.clone())
+                    .map_err(|e| format!("decode host event input failed: {e}"))?;
+            input.validate(&event.session_id)
+        }
         SessionRecordType::TurnSupplement => validate_turn_supplement(event),
         SessionRecordType::AssistantMessage => validate_assistant_message(event),
         SessionRecordType::ToolCall => validate_tool_call(event),
@@ -2281,6 +2339,16 @@ pub fn restore_runtime_snapshot_from_session_records(
                 "text",
                 MessageRole::User,
             )?,
+            SessionRecordType::HostEventInput => {
+                let input: host_event_input::HostEventInput =
+                    serde_json::from_value(event.payload.clone())
+                        .map_err(|e| format!("decode host event input failed: {e}"))?;
+                append_restored_message(
+                    &mut snapshot,
+                    input.chat_message(expected_session_id, event.created_at_ms)?,
+                    ModelMessageSemanticsV1::Plain,
+                )?;
+            }
             SessionRecordType::TurnSupplement => append_plain_session_message(
                 &mut snapshot,
                 event,
@@ -2395,6 +2463,11 @@ pub fn restore_runtime_snapshot_from_session_records(
             );
         }
     }
+    host_event_input::restore_origins(
+        &mut snapshot,
+        &projection.host_event_inputs,
+        &projection.host_event_owning_runs,
+    )?;
     snapshot.context_window = snapshot.messages.clone();
     Ok(snapshot)
 }
@@ -2783,6 +2856,22 @@ pub fn reduce_event(
             reduce_agent_run_execution_ended(projection, event)?
         }
         SessionRecordType::UserMessage => reduce_user_message(projection, event)?,
+        SessionRecordType::HostEventInput => {
+            let input: host_event_input::HostEventInput =
+                serde_json::from_value(event.payload.clone())
+                    .map_err(|e| format!("decode host event input failed: {e}"))?;
+            projection.host_event_owning_runs.insert(
+                input.message_id.clone(),
+                required_event_agent_run_id(event)?,
+            );
+            if projection
+                .host_event_inputs
+                .insert(input.message_id.clone(), input)
+                .is_some()
+            {
+                return Err("host_event_input_identity_duplicated".to_string());
+            }
+        }
         SessionRecordType::TurnSupplement => reduce_turn_supplement(projection, event)?,
         SessionRecordType::AssistantMessage => reduce_assistant_message(projection, event)?,
         SessionRecordType::ToolCallClosure => {

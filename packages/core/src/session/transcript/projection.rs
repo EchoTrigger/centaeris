@@ -807,6 +807,7 @@ impl TranscriptProjectorV1 {
             | SessionRecordType::Compaction
             | SessionRecordType::CheckpointRef
             | SessionRecordType::FileFact => None,
+            SessionRecordType::HostEventInput => None,
             SessionRecordType::Tombstone => unreachable!("tombstone handled before projection"),
         };
         if let Some(block) = block.as_mut() {

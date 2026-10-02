@@ -14,6 +14,7 @@ use std::collections::VecDeque;
 #[derive(Debug, Clone)]
 pub enum TurnInput {
     UserMessage(String),
+    HostEvent(crate::session::host_event_input::HostEventInput),
     TurnSupplement {
         message: String,
         supplement_ids: Vec<String>,
@@ -41,6 +42,7 @@ impl TurnInput {
             | Self::OutputTokenRecovery { message, .. } => message,
             Self::ToolContinuation { objective } => objective,
             Self::AnswerNow { message, .. } => message,
+            Self::HostEvent(_) => "",
         }
     }
 
@@ -50,13 +52,14 @@ impl TurnInput {
             Self::AnswerNow { message, .. } | Self::OutputTokenRecovery { message, .. } => {
                 Some(message)
             }
-            Self::ToolContinuation { .. } => None,
+            Self::ToolContinuation { .. } | Self::HostEvent(_) => None,
         }
     }
 
     pub fn semantic_kind(&self) -> &'static str {
         match self {
             Self::UserMessage(_) => MESSAGE_SEMANTIC_USER_REQUEST,
+            Self::HostEvent(_) => crate::session::host_event_input::HOST_EVENT_SEMANTIC_KIND,
             Self::TurnSupplement { .. } => MESSAGE_SEMANTIC_TURN_SUPPLEMENT,
             Self::ToolContinuation { .. } => MESSAGE_SEMANTIC_TOOL_CONTINUATION,
             Self::OutputTokenRecovery { .. } => MESSAGE_SEMANTIC_OUTPUT_TOKEN_RECOVERY,
@@ -1076,11 +1079,32 @@ fn context_token_breakdown(
     })
 }
 
+/// The only admitted initial inputs; internal continuations are not Run inputs.
+///
+/// ```compile_fail
+/// use centaeris_core::runtime::{AgentRunInitialInput, TurnInput};
+/// let initial: AgentRunInitialInput = TurnInput::ToolContinuation { objective: "continue".into() };
+/// ```
+#[derive(Debug, Clone)]
+pub enum AgentRunInitialInput {
+    UserMessage(String),
+    HostEvent(crate::session::host_event_input::HostEventInput),
+}
+
+impl AgentRunInitialInput {
+    pub(super) fn turn_input(&self) -> TurnInput {
+        match self {
+            Self::UserMessage(message) => TurnInput::UserMessage(message.clone()),
+            Self::HostEvent(input) => TurnInput::HostEvent(input.clone()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentRunRequest {
     pub session_id: String,
     pub initial_turn_id: String,
-    pub user_message: String,
+    pub initial_input: AgentRunInitialInput,
     pub agent_run_identity: Option<RuntimeAgentRunIdentityV1>,
     pub runtime_scope: PromptCompactionScopeV1,
     pub resume_from_turn_id: Option<String>,

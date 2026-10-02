@@ -109,10 +109,13 @@ Session. `Stream` says whether the record is projected into AgentRun replay.
 | `agent_run_execution_ended` | turn + run | no | `executionId`, `outcome`, `reasonCode`, `retryable`, `lastCheckpointId`, `indeterminateToolCallIds` |
 | `agent_run_recovery_attempted` | turn + run | no | `attempt`, `checkpointId` |
 | `user_message` | turn + run | yes | `messageId`, `text`, `attachments` |
+| `host_event_input` | turn + run | no | `inputId`, `messageId`, `source`, `content` |
 | `turn_supplement` | turn + run | yes | `supplementId`, `messageId`, `message` |
 | `assistant_message` | turn + run | yes | `messageId`, `modelMarkdown`, `artifactRefs`, `status` |
 | `tool_call` | turn + run | yes | `callId`, `toolName`, `toolContractDigest`, `providerId`, `normalizedInput`, `displayTarget` |
 | `tool_result` | turn + run | yes | `callId`, `toolName`, `resultState`, `modelContent`, `fullOutputPath`, `outputStartByte`, `outputByteLength`, `outputComplete`, `summary`, `operations`, `modelInputImages`, `latencyMs` |
+| `tool_call_closure` | turn + run | no | tool result fields plus `recovery`, `callEventId`, `triggerAgentRunId`, `triggerTurnId` |
+| `reasoning_block` | turn + run | yes | `blockId`, `requestId`, `text`, `status` |
 | `model_request_started` | turn + run | no | `requestId`, `purpose`, `loopIndex`, `toolChoice`, `maxOutputTokens`, `promptCacheKey`, `promptCacheRetention`, `preparedPromptSchema`, `contextTokenEstimate`, `contextTokenBreakdown`, `agentComposition`, `observations` |
 | `provider_usage` | turn + run | no | `inputTokens`, `outputTokens`, `totalTokens`, `promptCacheHitTokens`, `promptCacheMissTokens` |
 | `phase_event` | turn + run | yes | `stage`, `message` |
@@ -128,6 +131,45 @@ Session. `Stream` says whether the record is projected into AgentRun replay.
 | `agent_run_interrupted` | turn + run | yes | `reasonType`, `message`, `retryable` |
 
 ### Metadata and message rules
+
+`AgentRunRequest.initial_input` is a Rust-only `AgentRunInitialInput`, restricted
+to `UserMessage` and `HostEvent`. It is not a persisted request or a new Runtime
+transport operation. Hosts admit idle work using the existing Run, Session log,
+lease fence, and authorization state. For a host-driven Run, record
+`agent_run_started` with the objective from accepted task state, then append
+`host_event_input` under the same admission fence. Do not create a `user_message`
+for the notification. `AgentRunSessionState::host_event_input_record` preserves
+the accepted input when rebuilt after an uncertain append.
+
+`host_event_input.inputId` is a non-empty opaque identifier of at most 160 UTF-8
+bytes; `source` is an opaque correlation label of at most 128 bytes. Neither may
+have surrounding whitespace or control characters. Core does not interpret or
+dereference `source`, and it grants no authority. `content` is non-empty data,
+bounded to 72,000 characters and preserved without trimming. `messageId` is the
+stable Core identity derived from Session and input IDs by `HostEventInput::new`;
+changing its payload or owning turn conflicts with the original input.
+
+The provider sees an explicit non-authoritative JSON notification wrapper even
+when the provider protocol represents it with the user role. It does not replace
+the accepted user objective, run `UserPromptSubmit`, create a user transcript
+bubble, or participate in real-user compaction replay. It can anchor its own tool
+continuation and live compaction suffix. Trusted Agent instructions and accepted
+task state remain the source of objectives and permissions.
+
+Runtime snapshots and wait checkpoints retain their existing fields and typed
+enums. Notification origin is derived into existing message metadata from the
+authoritative input record by stable message ID, including restoration from
+main request observations. Readers of older logs preserve their original records;
+no old notification is backfilled as read or handled. Earlier readers reject the
+new record type. This requires no layout or SQLite schema change, and does not
+expand support for older unsupported schemas.
+
+A matching `model_request_started` record with `purpose: "main"` and a matching
+message observation is evidence that the input entered the main prompt at that
+record's `createdAtMs`. Compaction requests, missing IDs, provider receipt, and
+business handling are separate facts. Core adds no Read/handled record. A new
+notification cannot resume an existing wait; infrastructure recovery reuses the
+original input and Run identity. Hosts own busy deferral and eventual idle admission.
 
 `session_meta.sessionKind` is `main` or `subagent`. A main Session has null
 `parentSessionId` and `runtimeJobId` and a non-null `sortOrder`. A subagent has

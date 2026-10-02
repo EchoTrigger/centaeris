@@ -49,7 +49,7 @@ use serde_json::{json, Value};
 pub use self::checkpoint::*;
 pub use self::config::AgentRuntimeConfig;
 pub use self::driver::{
-    AgentRunRequest, AgentRunResult, AgentRunResumeIntent, AgentRunStop,
+    AgentRunInitialInput, AgentRunRequest, AgentRunResult, AgentRunResumeIntent, AgentRunStop,
     AnswerNowEnqueueDisposition, AsyncGenerateDriver, ContextTokenBreakdownV1,
     ContextToolTokenEstimateV1, DurableTurnControlBinding, GenerateDriverError,
     GenerateDriverFuture, GenerateDriverOutcome, GenerateDriverPromptCompactionFuture,
@@ -1505,6 +1505,11 @@ fn update_active_objective_for_message(
     user_message: &str,
 ) -> Result<String, String> {
     let trimmed = user_message.trim();
+    if semantic_kind == crate::session::host_event_input::HOST_EVENT_SEMANTIC_KIND {
+        return Ok(read_active_objective_state(session)
+            .map(|state| state.objective)
+            .unwrap_or_default());
+    }
     if semantic_kind == MESSAGE_SEMANTIC_USER_REQUEST {
         let now = now_ms();
         let state = ActiveObjectiveState {
@@ -1600,7 +1605,7 @@ fn build_subagent_query_loop_request(
     Ok(AgentRunRequest {
         session_id: work_packet.run_context.branch_id.clone(),
         initial_turn_id: work_packet.run_context.turn_id.clone(),
-        user_message,
+        initial_input: AgentRunInitialInput::UserMessage(user_message),
         agent_run_identity: config.agent_run_identity.clone(),
         runtime_scope,
         resume_from_turn_id: None,

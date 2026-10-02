@@ -37,6 +37,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod host_event_tests;
+
 #[derive(Clone, Debug, Default)]
 struct AgentRuntimeTestState {
     checkpoints: Vec<CheckpointRecord>,
@@ -2187,7 +2189,7 @@ async fn output_token_limit_continues_in_a_new_turn_and_preserves_partial_conten
             AgentRunRequest {
                 session_id: "chat-output-token-recovery".to_string(),
                 initial_turn_id: "turn-output-token-initial".to_string(),
-                user_message: "finish the task".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage("finish the task".to_string()),
                 agent_run_identity: None,
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
@@ -2294,7 +2296,7 @@ async fn query_loop_recovery_surfaces_one_terminal_error_after_five_attempts() {
             AgentRunRequest {
                 session_id: "chat-output-token-exhausted".to_string(),
                 initial_turn_id: "turn-output-token-exhausted".to_string(),
-                user_message: "finish the task".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage("finish the task".to_string()),
                 agent_run_identity: None,
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
@@ -2373,7 +2375,7 @@ async fn truncated_tool_identity_is_a_recovery_observation_without_execution() {
             AgentRunRequest {
                 session_id: "chat-truncated-tool-call".to_string(),
                 initial_turn_id: "turn-truncated-tool-call".to_string(),
-                user_message: "inspect the project".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage("inspect the project".to_string()),
                 agent_run_identity: None,
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
@@ -2481,7 +2483,7 @@ async fn incomplete_truncated_tool_identity_uses_protocol_recovery_without_fake_
             AgentRunRequest {
                 session_id: "chat-incomplete-tool-identity".to_string(),
                 initial_turn_id: "turn-incomplete-tool-identity".to_string(),
-                user_message: "inspect the project".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage("inspect the project".to_string()),
                 agent_run_identity: None,
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
@@ -7596,7 +7598,7 @@ async fn query_loop_continues_until_natural_final_while_usage_remains_observatio
                     authorization_digest: format!("sha256:{}", "a".repeat(64)),
                 }),
                 initial_turn_id: "turn-unbounded-tool-loop".to_string(),
-                user_message,
+                initial_input: AgentRunInitialInput::UserMessage(user_message),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
                 auto_continue_after_resume_wait: None,
@@ -7719,7 +7721,9 @@ async fn query_loop_external_cancel_stops_before_another_provider_request() {
                 session_id: "chat-cancelled-long-tool-loop".to_string(),
                 agent_run_identity: None,
                 initial_turn_id: "turn-cancelled-long-tool-loop".to_string(),
-                user_message: "Keep working until externally cancelled.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage(
+                    "Keep working until externally cancelled.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
                 auto_continue_after_resume_wait: None,
@@ -7833,7 +7837,7 @@ async fn query_loop_cancellation_removes_queued_model_attempt_before_provider_ca
             AgentRunRequest {
                 session_id: "cancel-model-admission".into(),
                 initial_turn_id: "turn-admission".into(),
-                user_message: "cancel while queued".into(),
+                initial_input: AgentRunInitialInput::UserMessage("cancel while queued".into()),
                 agent_run_identity: None,
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
@@ -7895,7 +7899,9 @@ async fn cancellation_drops_in_flight_provider_request_and_keeps_session_input()
                 session_id: "chat-cancel-in-flight-provider".to_string(),
                 agent_run_identity: None,
                 initial_turn_id: "turn-cancel-in-flight-provider".to_string(),
-                user_message: "Keep this input after Stop.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage(
+                    "Keep this input after Stop.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
                 auto_continue_after_resume_wait: None,
@@ -7954,7 +7960,9 @@ async fn query_loop_tool_executes_only_after_model_response_completes() {
                 session_id: "chat-stream-boundary".to_string(),
                 agent_run_identity: None,
                 initial_turn_id: "turn-stream-boundary".to_string(),
-                user_message: "Run the tool, then finish.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage(
+                    "Run the tool, then finish.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
                 auto_continue_after_resume_wait: None,
@@ -8003,7 +8011,9 @@ async fn turn_supplement_waits_for_tool_batch_and_continues_the_same_loop() {
                 session_id: "chat-turn-supplement-safe-point".to_string(),
                 agent_run_identity: None,
                 initial_turn_id: "turn-supplement-safe-point".to_string(),
-                user_message: "Run the tool, then follow my update.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage(
+                    "Run the tool, then follow my update.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
                 auto_continue_after_resume_wait: None,
@@ -8062,7 +8072,9 @@ async fn turn_supplement_replaces_a_toolless_final_at_the_provider_boundary() {
                 session_id: "chat-turn-supplement-provider-boundary".to_string(),
                 agent_run_identity: None,
                 initial_turn_id: "turn-supplement-provider-boundary".to_string(),
-                user_message: "Answer, but accept an update before finalizing.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage(
+                    "Answer, but accept an update before finalizing.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
                 auto_continue_after_resume_wait: None,
@@ -8124,7 +8136,9 @@ async fn answer_now_during_natural_final_does_not_abort_replace_or_restart_provi
                 session_id: "chat-answer-now-natural".to_string(),
                 agent_run_identity: None,
                 initial_turn_id: "turn-answer-now-natural".to_string(),
-                user_message: "Research, unless the current answer is enough.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage(
+                    "Research, unless the current answer is enough.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
                 auto_continue_after_resume_wait: None,
@@ -8181,7 +8195,9 @@ async fn answer_now_waits_for_tool_terminal_then_runs_one_toolless_convergence_r
                 session_id: "chat-answer-now-tool".to_string(),
                 agent_run_identity: None,
                 initial_turn_id: "turn-answer-now-tool".to_string(),
-                user_message: "Use one tool, then answer.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage(
+                    "Use one tool, then answer.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
                 auto_continue_after_resume_wait: None,
@@ -8283,7 +8299,9 @@ async fn answer_now_requested_fact_recovers_after_memory_loss() {
                     authorization_digest: format!("sha256:{}", "c".repeat(64)),
                 }),
                 initial_turn_id: "turn-answer-now-recovered".to_string(),
-                user_message: "Use one tool, then answer immediately.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage(
+                    "Use one tool, then answer immediately.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
                 auto_continue_after_resume_wait: None,
@@ -8402,7 +8420,9 @@ async fn query_loop_runtime_job_wait_resumes_once_with_one_terminal_tool_result(
                 session_id: "chat-runtime-wait".to_string(),
                 agent_run_identity: Some(agent_run_identity.clone()),
                 initial_turn_id: "turn-runtime-wait".to_string(),
-                user_message: "Wait for the durable result, then answer.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage(
+                    "Wait for the durable result, then answer.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
                 auto_continue_after_resume_wait: None,
@@ -8443,7 +8463,9 @@ async fn query_loop_runtime_job_wait_resumes_once_with_one_terminal_tool_result(
                 session_id: "chat-runtime-wait".to_string(),
                 agent_run_identity: Some(agent_run_identity.clone()),
                 initial_turn_id: "turn-runtime-wait-wrong-scope".to_string(),
-                user_message: "Wait for the durable result, then answer.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage(
+                    "Wait for the durable result, then answer.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: Some("turn-runtime-wait".to_string()),
                 auto_continue_after_resume_wait: None,
@@ -8462,7 +8484,9 @@ async fn query_loop_runtime_job_wait_resumes_once_with_one_terminal_tool_result(
                 session_id: "chat-runtime-wait".to_string(),
                 agent_run_identity: Some(agent_run_identity.clone()),
                 initial_turn_id: "turn-runtime-wait-resumed".to_string(),
-                user_message: "Wait for the durable result, then answer.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage(
+                    "Wait for the durable result, then answer.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: Some("turn-runtime-wait".to_string()),
                 auto_continue_after_resume_wait: None,
@@ -8589,7 +8613,9 @@ async fn runtime_job_wait_restores_checkpoint_from_durable_pending_batch() {
                 session_id: "chat-runtime-wait-restore".to_string(),
                 agent_run_identity: Some(agent_run_identity.clone()),
                 initial_turn_id: "turn-runtime-wait-restore".to_string(),
-                user_message: "Start the durable background tool.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage(
+                    "Start the durable background tool.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
                 auto_continue_after_resume_wait: None,
@@ -8632,7 +8658,9 @@ async fn runtime_job_wait_restores_checkpoint_from_durable_pending_batch() {
                 session_id: "chat-runtime-wait-restore".to_string(),
                 agent_run_identity: Some(agent_run_identity),
                 initial_turn_id: "turn-runtime-wait-restore-resume".to_string(),
-                user_message: "Resume the same wait.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage(
+                    "Resume the same wait.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: Some("turn-runtime-wait-restore".to_string()),
                 auto_continue_after_resume_wait: None,
@@ -8677,7 +8705,9 @@ async fn answer_now_abandons_only_the_runtime_job_waiter() {
                 session_id: "chat-runtime-wait".to_string(),
                 agent_run_identity: Some(agent_run_identity.clone()),
                 initial_turn_id: "turn-runtime-wait".to_string(),
-                user_message: "Start the background investigation.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage(
+                    "Start the background investigation.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
                 auto_continue_after_resume_wait: None,
@@ -8716,7 +8746,9 @@ async fn answer_now_abandons_only_the_runtime_job_waiter() {
                 session_id: "chat-runtime-wait".to_string(),
                 agent_run_identity: Some(agent_run_identity),
                 initial_turn_id: "turn-runtime-wait-answer-now".to_string(),
-                user_message: "Answer with what is already available.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage(
+                    "Answer with what is already available.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: Some("turn-runtime-wait".to_string()),
                 auto_continue_after_resume_wait: None,
@@ -8810,7 +8842,9 @@ async fn agent_run_cancellation_abandons_runtime_job_waiter_before_terminal_comm
                 session_id: "chat-cancel-runtime-wait".to_string(),
                 agent_run_identity: Some(agent_run_identity.clone()),
                 initial_turn_id: "turn-cancel-runtime-wait".to_string(),
-                user_message: "Start a background job.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage(
+                    "Start a background job.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
                 auto_continue_after_resume_wait: None,
@@ -8841,7 +8875,9 @@ async fn agent_run_cancellation_abandons_runtime_job_waiter_before_terminal_comm
                 session_id: "chat-cancel-runtime-wait".to_string(),
                 agent_run_identity: Some(agent_run_identity),
                 initial_turn_id: "turn-cancel-runtime-wait".to_string(),
-                user_message: "Start a background job.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage(
+                    "Start a background job.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
                 auto_continue_after_resume_wait: None,
@@ -8954,7 +8990,9 @@ async fn query_loop_answer_now_closes_question_wait_before_toolless_convergence(
                 session_id: "chat-answer-now-question".to_string(),
                 agent_run_identity: Some(agent_run_identity),
                 initial_turn_id: "turn-answer-now-question-resume".to_string(),
-                user_message: "Answer now instead of waiting.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage(
+                    "Answer now instead of waiting.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: Some(wait_turn_id.to_string()),
                 auto_continue_after_resume_wait: None,
@@ -9069,7 +9107,9 @@ async fn runtime_job_wait_rechecks_a_precompleted_job_before_yielding() {
                 session_id: "chat-runtime-wait".to_string(),
                 agent_run_identity: Some(agent_run_identity),
                 initial_turn_id: "turn-runtime-wait".to_string(),
-                user_message: "Use the completed background result.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage(
+                    "Use the completed background result.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
                 auto_continue_after_resume_wait: None,
@@ -9126,7 +9166,9 @@ async fn cancellation_discards_queued_supplement_before_another_provider_or_tool
                 session_id: "chat-turn-supplement-cancel".to_string(),
                 agent_run_identity: None,
                 initial_turn_id: "turn-supplement-cancel".to_string(),
-                user_message: "Run one tool, then stop.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage(
+                    "Run one tool, then stop.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
                 auto_continue_after_resume_wait: None,
@@ -9179,7 +9221,9 @@ async fn four_independent_calls_execute_as_one_batch_before_one_follow_up_reques
                 session_id: "chat-complete-four-tool-batch".to_string(),
                 agent_run_identity: None,
                 initial_turn_id: "turn-complete-four-tool-batch".to_string(),
-                user_message: "Collect four facts, then verify once.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage(
+                    "Collect four facts, then verify once.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
                 auto_continue_after_resume_wait: None,
@@ -9229,7 +9273,7 @@ async fn complete_turn_tool_success_stops_and_resume_replays_no_side_effects() {
                 session_id: "chat-complete-turn".to_string(),
                 agent_run_identity: None,
                 initial_turn_id: "turn-complete-turn".to_string(),
-                user_message: "Complete this turn.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage("Complete this turn.".to_string()),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
                 auto_continue_after_resume_wait: None,
@@ -9278,7 +9322,9 @@ async fn complete_turn_tool_failure_continues_to_provider() {
                 session_id: "chat-complete-turn-failure".to_string(),
                 agent_run_identity: None,
                 initial_turn_id: "turn-complete-turn-failure".to_string(),
-                user_message: "Try the complete-turn tool.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage(
+                    "Try the complete-turn tool.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
                 auto_continue_after_resume_wait: None,
@@ -9327,7 +9373,9 @@ async fn complete_turn_tool_sibling_fails_before_route_or_execution() {
                     session_id: session_id.clone(),
                     agent_run_identity: None,
                     initial_turn_id: turn_id.clone(),
-                    user_message: "Return an invalid sibling call.".to_string(),
+                    initial_input: AgentRunInitialInput::UserMessage(
+                        "Return an invalid sibling call.".to_string(),
+                    ),
                     runtime_scope: PromptCompactionScopeV1::main(),
                     resume_from_turn_id: None,
                     auto_continue_after_resume_wait: None,
@@ -9460,7 +9508,9 @@ async fn p7_model_prompt_compaction_online_loop_commits_summary_and_continues_ma
                 session_id: "chat-p7-model-compact-success".to_string(),
                 agent_run_identity: None,
                 initial_turn_id: "turn-p7-model-compact-success".to_string(),
-                user_message: "Continue the P7 compaction smoke.".to_string(),
+                initial_input: AgentRunInitialInput::UserMessage(
+                    "Continue the P7 compaction smoke.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
                 auto_continue_after_resume_wait: None,
@@ -9632,7 +9682,9 @@ async fn p7_model_prompt_compaction_online_loop_rejects_empty_or_oversized_markd
                     session_id: session_id.clone(),
                     agent_run_identity: None,
                     initial_turn_id: format!("turn-p7-model-compact-fail-{case_name}"),
-                    user_message: "Continue despite model compaction failure.".to_string(),
+                    initial_input: AgentRunInitialInput::UserMessage(
+                        "Continue despite model compaction failure.".to_string(),
+                    ),
                     runtime_scope: PromptCompactionScopeV1::main(),
                     resume_from_turn_id: None,
                     auto_continue_after_resume_wait: None,

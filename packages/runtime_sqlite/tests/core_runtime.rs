@@ -142,7 +142,9 @@ async fn public_agent_runtime_persists_through_sqlite_adapter() {
                 session_id: "chat-core-runtime-integration".to_string(),
                 agent_run_identity: None,
                 initial_turn_id: "turn-core-runtime-integration".to_string(),
-                user_message: "Complete one public runtime turn.".to_string(),
+                initial_input: centaeris_core::runtime::AgentRunInitialInput::UserMessage(
+                    "Complete one public runtime turn.".to_string(),
+                ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
                 auto_continue_after_resume_wait: None,

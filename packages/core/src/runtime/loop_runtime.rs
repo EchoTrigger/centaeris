@@ -1641,7 +1641,7 @@ impl<
         let AgentRunRequest {
             session_id,
             initial_turn_id,
-            user_message,
+            initial_input,
             agent_run_identity,
             runtime_scope,
             resume_from_turn_id,
@@ -1666,7 +1666,13 @@ impl<
             })
             .transpose()?
             .flatten();
-        let root_user_message = user_message.clone();
+        let root_user_message = match &initial_input {
+            AgentRunInitialInput::UserMessage(message) => message.clone(),
+            AgentRunInitialInput::HostEvent(input) => {
+                input.validate(&session_id)?;
+                String::new()
+            }
+        };
         let mut agent_run_resource_usage = AgentRunResourceUsageV1::default();
         let auto_continue_after_resume_wait =
             auto_continue_after_resume_wait.unwrap_or(self.config.auto_continue_after_resume_wait);
@@ -1679,6 +1685,52 @@ impl<
         let pending_runtime_wait_turn_id =
             pending_runtime_tool_batch(&resume_session)?.map(|pending| pending.turn_id);
 
+        let host_input_already_accepted =
+            if let AgentRunInitialInput::HostEvent(input) = &initial_input {
+                let known_input = resume_session
+                    .messages
+                    .iter()
+                    .find(|message| message.message_id == input.message_id)
+                    .map(|message| {
+                        crate::session::host_event_input::host_event_origin(&session_id, message)
+                    })
+                    .transpose()?
+                    .flatten();
+                if let Some(existing) = &known_input {
+                    if existing != input {
+                        return Err("host_event_input_identity_conflict".to_string());
+                    }
+                }
+                if known_input.is_some() {
+                    let message = resume_session
+                        .messages
+                        .iter()
+                        .find(|message| message.message_id == input.message_id)
+                        .expect("known HostEvent message was found above");
+                    if crate::session::host_event_input::owning_run(message)
+                        != agent_run_identity
+                            .as_ref()
+                            .map(|identity| identity.agent_run_id.as_str())
+                    {
+                        return Err("host_event_input_cannot_resume_unrelated_wait".to_string());
+                    }
+                }
+                if let Some(pending) = pending_runtime_tool_batch(&resume_session)? {
+                    if known_input.is_none()
+                        || agent_run_identity.as_ref().is_none_or(|identity| {
+                            identity.agent_run_id != pending.wait_checkpoint.agent_run_id
+                                || identity.authorization_digest
+                                    != pending.wait_checkpoint.authorization_digest
+                        })
+                    {
+                        return Err("host_event_input_cannot_resume_unrelated_wait".to_string());
+                    }
+                }
+                known_input.is_some()
+            } else {
+                true
+            };
+
         let effective_resume_turn_id = if let Some(resume_turn_id) = resume_from_turn_id {
             Some(resume_turn_id)
         } else if pending_runtime_wait_turn_id.is_some() {
@@ -1690,6 +1742,10 @@ impl<
                 .filter(|checkpoint| checkpoint.done_reason.as_deref() == Some("runtime_job"))
                 .map(|checkpoint| checkpoint.turn_id)
         };
+
+        if effective_resume_turn_id.is_some() && !host_input_already_accepted {
+            return Err("host_event_input_cannot_resume_unrelated_wait".to_string());
+        }
 
         if let Some(resume_turn_id) = effective_resume_turn_id.as_deref() {
             self.restore_pending_runtime_job_wait_if_needed(
@@ -1834,7 +1890,7 @@ impl<
             }
             let mut applied_intervention_events = None;
             let input = if responses.is_empty() && loop_index == 0 {
-                TurnInput::UserMessage(user_message.clone())
+                initial_input.turn_input()
             } else if let Some(pending) = pending_answer_now.take() {
                 let boundary_response = responses
                     .last()
@@ -1896,6 +1952,17 @@ impl<
                     driver,
                 )
                 .await?;
+            if let (TurnInput::HostEvent(input), Some(identity)) = (&input, &agent_run_identity) {
+                let mut session = self.session_manager.load_or_create_session(&session_id)?;
+                let message = session
+                    .messages
+                    .iter_mut()
+                    .find(|message| message.message_id == input.message_id)
+                    .ok_or("host_event_input_message_missing")?;
+                crate::session::host_event_input::bind_owning_run(message, &identity.agent_run_id);
+                refresh_session_context_window(&mut session);
+                self.session_manager.save_session(&session)?;
+            }
             if let Some(control) = turn_control {
                 control.acknowledge_supplements(input.supplement_ids())?;
             }
