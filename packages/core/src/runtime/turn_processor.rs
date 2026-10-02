@@ -37,6 +37,7 @@ impl<
             &mut session,
             req.session_id.as_str(),
             req.turn_id.as_str(),
+            &req.input,
             tool_safe_point,
         )
         .await?;
