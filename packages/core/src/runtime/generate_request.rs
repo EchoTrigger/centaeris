@@ -6,6 +6,13 @@ type ResolvedModelInputImages = (
     Vec<ModelInputImageV1>,
     Vec<ModelInputImageObservationV1>,
 );
+pub(super) struct PreparedRequestInputs {
+    pub agent_run_id: String,
+    pub input_ids: Vec<String>,
+}
+
+type MainRequestIntake<'a> =
+    dyn FnMut(&mut TurnInput) -> Result<Option<PreparedRequestInputs>, String> + Send + 'a;
 use crate::model::prepared_prompt::{
     project_session_messages_to_model_messages, ModelInputImageObservationV1, ModelInputImageRefV1,
     ModelInputImageSourceRefV1, ModelInputImageV1, ModelMessageRoleV1, ModelMessageV1,
@@ -147,6 +154,7 @@ impl<
             input,
             loop_index,
             compression_stats_json,
+            None,
         )
     }
 
@@ -161,16 +169,17 @@ impl<
     ) -> Result<GenerateDriverRequest, String> {
         let session = self.session_manager.load_or_create_session(session_id)?;
         self.session_manager.save_session(&session)?;
-        let input = TurnInput::UserMessage(user_message.to_string());
+        let mut input = TurnInput::UserMessage(user_message.to_string());
         self.build_generate_driver_request_with_async_driver_and_runtime_scope(
             session_id,
             turn_id,
-            &input,
+            &mut input,
             loop_index,
             PromptCompactionScopeV1::main(),
             None,
             None,
             driver,
+            None,
         )
         .await
     }
@@ -185,18 +194,24 @@ impl<
         &self,
         session_id: &str,
         turn_id: &str,
-        input: &TurnInput,
+        input: &mut TurnInput,
         loop_index: u32,
         runtime_scope: PromptCompactionScopeV1,
         agent_run_resource_usage: Option<&mut AgentRunResourceUsageV1>,
         tool_safe_point: Option<&ToolSafePointDispatcher<'_>>,
         driver: &D,
+        intake: Option<&mut MainRequestIntake<'_>>,
     ) -> Result<GenerateDriverRequest, String> {
         let mut session = self.session_manager.load_or_create_session(session_id)?;
         if input.semantic_kind() == MESSAGE_SEMANTIC_USER_REQUEST {
             clear_prompt_compaction_failure_metadata(&mut session);
         }
-        if matches!(input, TurnInput::UserMessage(_) | TurnInput::HostEvent(_)) {
+        if matches!(
+            input,
+            TurnInput::UserMessage(_)
+                | TurnInput::UserMessageBatch { .. }
+                | TurnInput::HostEvent(_)
+        ) {
             self.close_unpaired_tool_calls_for_new_turn(
                 &mut session,
                 session_id,
@@ -238,6 +253,13 @@ impl<
             *usage = tracked_resource_usage;
         }
         self.session_manager.save_session(&session)?;
+        let prepared_inputs = if let Some(intake) = intake {
+            let prepared = intake(input)?;
+            session = self.session_manager.load_or_create_session(session_id)?;
+            prepared
+        } else {
+            None
+        };
         self.build_generate_driver_request_from_session(
             session,
             session_id,
@@ -245,9 +267,14 @@ impl<
             input,
             loop_index,
             compaction_result.stats_json,
+            prepared_inputs,
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "request preparation keeps frozen intake and compaction state explicit"
+    )]
     pub(super) fn build_generate_driver_request_from_session(
         &self,
         session: SessionStateSnapshot,
@@ -256,6 +283,7 @@ impl<
         input: &TurnInput,
         loop_index: u32,
         compression_stats_json: Option<String>,
+        prepared_inputs: Option<PreparedRequestInputs>,
     ) -> Result<GenerateDriverRequest, String> {
         let (request, mut session) = self.project_generate_driver_request_from_session(
             session,
@@ -270,7 +298,20 @@ impl<
             self.config.model_context_tokens,
             self.config.model_max_output_tokens,
         )?;
-        self.persist_generate_driver_input_messages(&mut session, session_id, turn_id, input)?;
+        if let Some(prepared) = &prepared_inputs {
+            crate::session::turn_input::recovery::freeze_prepared(
+                &mut session,
+                &prepared.agent_run_id,
+                turn_id,
+                &prepared.input_ids,
+            )?;
+        }
+        let input_changed =
+            self.stage_generate_driver_input_messages(&mut session, session_id, turn_id, input)?;
+        if input_changed || prepared_inputs.is_some() {
+            // The immutable body and its intake membership share one snapshot write.
+            self.session_manager.save_session(&session)?;
+        }
         Ok(request)
     }
 
@@ -339,9 +380,9 @@ impl<
             session.context_window.as_slice(),
             match input {
                 TurnInput::HostEvent(input) => Some(input.chat_message(session_id, now_ms())?),
-                _ => input.user_message().map(|message| {
-                    prompt_projection::build_current_user_message(session_id, turn_id, message)
-                }),
+                _ => input
+                    .user_message()
+                    .map(|message| build_input_user_message(session_id, turn_id, input, message)),
             },
         )?;
         for message in &context_messages {
@@ -680,15 +721,15 @@ impl<
         }
     }
 
-    pub(super) fn persist_generate_driver_input_messages(
+    fn stage_generate_driver_input_messages(
         &self,
         session: &mut SessionStateSnapshot,
         session_id: &str,
         turn_id: &str,
         input: &TurnInput,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         if input.output_token_recovery_partial().is_some() {
-            return Ok(());
+            return Ok(false);
         }
         if let TurnInput::HostEvent(input) = input {
             let message = input.chat_message(session_id, now_ms())?;
@@ -703,25 +744,26 @@ impl<
                 {
                     return Err("host_event_input_identity_conflict".to_string());
                 }
-                return Ok(());
+                return Ok(false);
             }
             session
                 .model_semantics
                 .insert(message.message_id.clone(), ModelMessageSemanticsV1::Plain);
             session.messages.push(message);
             refresh_session_context_window(session);
-            return self.session_manager.save_session(session);
+            return Ok(true);
         }
         let user_message = input.user_message();
         if user_message.is_none() {
-            return Ok(());
+            return Ok(false);
         }
         if model_input_already_persisted(session, session_id, turn_id) {
-            return Ok(());
+            return Ok(false);
         }
-        let mut input_messages = vec![prompt_projection::build_current_user_message(
+        let mut input_messages = vec![build_input_user_message(
             session_id,
             turn_id,
+            input,
             user_message.expect("user message is checked above"),
         )];
         if let Some(user_message) = input_messages
@@ -742,7 +784,7 @@ impl<
         }
         session.messages.extend(input_messages);
         refresh_session_context_window(session);
-        self.session_manager.save_session(session)
+        Ok(true)
     }
 
     pub(super) async fn close_unpaired_tool_calls_for_new_turn(
@@ -972,6 +1014,22 @@ impl<
     }
 }
 
+fn build_input_user_message(
+    session_id: &str,
+    turn_id: &str,
+    input: &TurnInput,
+    message: &str,
+) -> ChatMessage {
+    let mut current = prompt_projection::build_current_user_message(session_id, turn_id, message);
+    if matches!(
+        input,
+        TurnInput::UserMessageBatch { .. } | TurnInput::TurnSupplement { .. }
+    ) {
+        current.content = message.to_owned();
+    }
+    current
+}
+
 fn locate_tool_call_record(
     session_records: &[crate::session::SessionLogRecord],
     tool_call_id: &str,
@@ -1151,7 +1209,7 @@ fn build_model_context_messages(
     Ok((context_messages, anchor_message_id))
 }
 
-fn estimate_prepared_prompt_input_tokens(
+pub(super) fn estimate_prepared_prompt_input_tokens(
     prepared_prompt: &PreparedPromptV1,
 ) -> Result<u32, String> {
     let system_tokens = prepared_prompt

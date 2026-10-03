@@ -476,6 +476,7 @@ fn query_loop_host_event_compaction_keeps_live_anchor_and_never_replays_host_dat
             },
             1,
             None,
+            None,
         )
         .unwrap();
     assert_eq!(

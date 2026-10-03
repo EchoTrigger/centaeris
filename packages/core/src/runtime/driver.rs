@@ -4,9 +4,11 @@ use crate::model::prepared_prompt::{
 };
 use crate::model::ModelClientRequest;
 use crate::session::supplement::{
-    AcknowledgeTurnSupplementsRequest, ClaimTurnSupplementsRequest,
-    CloseTurnSupplementQueueRequest, DurableTurnSupplement, TurnSupplementStorePort,
-    MAX_PENDING_TURN_SUPPLEMENTS,
+    DurableTurnSupplement, TurnSupplementStorePort, MAX_PENDING_TURN_SUPPLEMENTS,
+};
+use crate::session::turn_input::{
+    AcknowledgeTurnInputsRequest, ClaimTurnInputsRequest, CloseTurnInputQueueRequest,
+    DurableTurnInput, SupplementInputStore, TurnInputPayload, TurnInputStorePort,
 };
 use crate::tool::ModelToolDefinition;
 use std::collections::VecDeque;
@@ -14,6 +16,10 @@ use std::collections::VecDeque;
 #[derive(Debug, Clone)]
 pub enum TurnInput {
     UserMessage(String),
+    UserMessageBatch {
+        message: String,
+        supplement_ids: Vec<String>,
+    },
     HostEvent(crate::session::host_event_input::HostEventInput),
     TurnSupplement {
         message: String,
@@ -38,6 +44,7 @@ impl TurnInput {
     pub fn objective(&self) -> &str {
         match self {
             Self::UserMessage(message)
+            | Self::UserMessageBatch { message, .. }
             | Self::TurnSupplement { message, .. }
             | Self::OutputTokenRecovery { message, .. } => message,
             Self::ToolContinuation { objective } => objective,
@@ -48,7 +55,9 @@ impl TurnInput {
 
     pub fn user_message(&self) -> Option<&str> {
         match self {
-            Self::UserMessage(message) | Self::TurnSupplement { message, .. } => Some(message),
+            Self::UserMessage(message)
+            | Self::UserMessageBatch { message, .. }
+            | Self::TurnSupplement { message, .. } => Some(message),
             Self::AnswerNow { message, .. } | Self::OutputTokenRecovery { message, .. } => {
                 Some(message)
             }
@@ -58,7 +67,7 @@ impl TurnInput {
 
     pub fn semantic_kind(&self) -> &'static str {
         match self {
-            Self::UserMessage(_) => MESSAGE_SEMANTIC_USER_REQUEST,
+            Self::UserMessage(_) | Self::UserMessageBatch { .. } => MESSAGE_SEMANTIC_USER_REQUEST,
             Self::HostEvent(_) => crate::session::host_event_input::HOST_EVENT_SEMANTIC_KIND,
             Self::TurnSupplement { .. } => MESSAGE_SEMANTIC_TURN_SUPPLEMENT,
             Self::ToolContinuation { .. } => MESSAGE_SEMANTIC_TOOL_CONTINUATION,
@@ -144,6 +153,7 @@ impl TurnInput {
     pub(super) fn supplement_ids(&self) -> &[String] {
         match self {
             Self::TurnSupplement { supplement_ids, .. }
+            | Self::UserMessageBatch { supplement_ids, .. }
             | Self::AnswerNow { supplement_ids, .. } => supplement_ids,
             _ => &[],
         }
@@ -166,6 +176,7 @@ struct TurnControlState {
 #[derive(Debug, Clone)]
 pub(super) enum TurnControlInput {
     Supplement(TurnSupplementInput),
+    HostEvent(crate::session::host_event_input::HostEventInput),
     AnswerNow(AgentRunInterventionV1),
 }
 
@@ -184,6 +195,7 @@ pub enum AnswerNowEnqueueDisposition {
 
 type TurnSupplementMaterializer =
     dyn Fn(&str, &[DurableTurnSupplement]) -> Result<(), String> + Send + Sync;
+type TurnInputMaterializer = dyn Fn(&str, &[DurableTurnInput]) -> Result<(), String> + Send + Sync;
 
 #[derive(Debug, Clone)]
 pub struct DurableTurnControlBinding {
@@ -204,13 +216,23 @@ pub struct TurnControl {
 }
 
 struct DurableTurnControl {
-    store: Arc<dyn TurnSupplementStorePort>,
+    store: Arc<dyn TurnInputStorePort>,
+    materialize: Arc<TurnInputMaterializer>,
+    claimed_input_ids: Mutex<HashSet<String>>,
+    recovery: Mutex<DurableInputRecovery>,
     agent_run_id: String,
     lifecycle_job_id: String,
     session_id: String,
     authorization_digest: String,
     lease_owner: String,
     claim_token: String,
+}
+
+#[derive(Default)]
+struct DurableInputRecovery {
+    committed_ids: HashSet<String>,
+    prepared_turn: Option<(String, HashSet<String>)>,
+    deferred: Vec<DurableTurnInput>,
 }
 
 impl std::fmt::Debug for TurnControl {
@@ -253,6 +275,27 @@ impl TurnControl {
         binding: DurableTurnControlBinding,
         materialize: Arc<TurnSupplementMaterializer>,
     ) -> Result<Self, String> {
+        Self::new_durable_inputs(
+            Arc::new(SupplementInputStore(store)),
+            binding,
+            Arc::new(move |turn_id, inputs| {
+                let supplements = inputs
+                    .iter()
+                    .filter_map(DurableTurnInput::user_supplement)
+                    .collect::<Vec<_>>();
+                materialize(turn_id, &supplements)
+            }),
+        )
+    }
+
+    /// Construct a control for a fenced, Run-owned queue. Materialization
+    /// commits each native input under the Host's existing owner fence and
+    /// reuses its original identity on recovery; it does not establish Read.
+    pub fn new_durable_inputs(
+        store: Arc<dyn TurnInputStorePort>,
+        binding: DurableTurnControlBinding,
+        materialize: Arc<TurnInputMaterializer>,
+    ) -> Result<Self, String> {
         let DurableTurnControlBinding {
             agent_run_id,
             lifecycle_job_id,
@@ -276,6 +319,9 @@ impl TurnControl {
         let mut control = Self::new();
         control.durable = Some(Arc::new(DurableTurnControl {
             store,
+            materialize,
+            claimed_input_ids: Mutex::new(HashSet::new()),
+            recovery: Mutex::new(DurableInputRecovery::default()),
             agent_run_id,
             lifecycle_job_id,
             session_id,
@@ -283,7 +329,6 @@ impl TurnControl {
             lease_owner,
             claim_token,
         }));
-        control.materialize = Some(materialize);
         Ok(control)
     }
 
@@ -368,7 +413,7 @@ impl TurnControl {
         if let Some(durable) = self.durable.as_ref() {
             durable
                 .store
-                .close_turn_supplement_queue(CloseTurnSupplementQueueRequest {
+                .close_turn_input_queue(CloseTurnInputQueueRequest {
                     agent_run_id: durable.agent_run_id.clone(),
                     lifecycle_job_id: durable.lifecycle_job_id.clone(),
                     session_id: durable.session_id.clone(),
@@ -414,7 +459,7 @@ impl TurnControl {
         if let Some(durable) = self.durable.as_ref() {
             durable
                 .store
-                .close_turn_supplement_queue(CloseTurnSupplementQueueRequest {
+                .close_turn_input_queue(CloseTurnInputQueueRequest {
                     agent_run_id: durable.agent_run_id.clone(),
                     lifecycle_job_id: durable.lifecycle_job_id.clone(),
                     session_id: durable.session_id.clone(),
@@ -500,7 +545,7 @@ impl TurnControl {
         }
         match input {
             TurnControlInput::Supplement(supplement) => Ok(Some(supplement.message)),
-            TurnControlInput::AnswerNow(_) => {
+            TurnControlInput::AnswerNow(_) | TurnControlInput::HostEvent(_) => {
                 Err("turn control resume input changed while locked".to_string())
             }
         }
@@ -512,6 +557,24 @@ impl TurnControl {
         Ok(pending)
     }
 
+    pub(super) fn validate_runtime_owner(
+        &self,
+        session_id: &str,
+        identity: Option<&RuntimeAgentRunIdentityV1>,
+    ) -> Result<(), String> {
+        if let Some(durable) = &self.durable {
+            if durable.session_id != session_id
+                || identity.is_none_or(|identity| {
+                    identity.agent_run_id != durable.agent_run_id
+                        || identity.authorization_digest != durable.authorization_digest
+                })
+            {
+                return Err("turn_input_runtime_owner_mismatch".into());
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn take_pending_or_close(
         &self,
         turn_id: &str,
@@ -521,27 +584,78 @@ impl TurnControl {
         Ok(pending)
     }
 
-    pub(super) fn acknowledge_supplements(&self, supplement_ids: &[String]) -> Result<(), String> {
-        if supplement_ids.is_empty() || self.durable.is_none() {
+    pub(super) fn acknowledge_inputs(&self, input_ids: &[String]) -> Result<(), String> {
+        if input_ids.is_empty() || self.durable.is_none() {
             return Ok(());
         }
         let durable = self
             .durable
             .as_ref()
             .expect("durable turn control checked above");
+        let mut claimed = durable
+            .claimed_input_ids
+            .lock()
+            .map_err(|_| "turn input claim lock poisoned")?;
+        // An initial input can enter the request directly from Run admission.
+        // Only IDs claimed through this queue are acknowledged through it.
+        let queued_ids = input_ids
+            .iter()
+            .filter(|id| claimed.contains(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if queued_ids.is_empty() {
+            return Ok(());
+        }
         durable
             .store
-            .acknowledge_turn_supplements(AcknowledgeTurnSupplementsRequest {
+            .acknowledge_turn_inputs(AcknowledgeTurnInputsRequest {
                 agent_run_id: durable.agent_run_id.clone(),
                 lifecycle_job_id: durable.lifecycle_job_id.clone(),
                 session_id: durable.session_id.clone(),
                 authorization_digest: durable.authorization_digest.clone(),
                 lease_owner: durable.lease_owner.clone(),
                 claim_token: durable.claim_token.clone(),
-                supplement_ids: supplement_ids.to_vec(),
+                input_ids: queued_ids.clone(),
                 acknowledged_at_ms: now_ms(),
             })
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        for id in queued_ids {
+            claimed.remove(&id);
+        }
+        Ok(())
+    }
+
+    pub(super) fn configure_input_recovery(
+        &self,
+        committed_ids: HashSet<String>,
+        prepared_turn: Option<(String, Vec<String>)>,
+    ) -> Result<(), String> {
+        if let Some(durable) = &self.durable {
+            let mut recovery = durable
+                .recovery
+                .lock()
+                .map_err(|_| "turn input recovery lock poisoned")?;
+            recovery.committed_ids = committed_ids;
+            recovery.prepared_turn =
+                prepared_turn.map(|(turn, ids)| (turn, ids.into_iter().collect()));
+        }
+        Ok(())
+    }
+
+    pub(super) fn uses_durable_inputs(&self) -> bool {
+        self.durable.is_some()
+    }
+
+    pub(super) fn record_committed_input_ids(&self, input_ids: &[String]) -> Result<(), String> {
+        if let Some(durable) = &self.durable {
+            durable
+                .recovery
+                .lock()
+                .map_err(|_| "turn input recovery lock poisoned")?
+                .committed_ids
+                .extend(input_ids.iter().cloned());
+        }
+        Ok(())
     }
 
     fn claim_durable(
@@ -552,9 +666,9 @@ impl TurnControl {
         let Some(durable) = self.durable.as_ref() else {
             return Ok(Vec::new());
         };
-        let claimed = durable
+        let mut claimed = durable
             .store
-            .claim_turn_supplements(ClaimTurnSupplementsRequest {
+            .claim_turn_inputs(ClaimTurnInputsRequest {
                 agent_run_id: durable.agent_run_id.clone(),
                 lifecycle_job_id: durable.lifecycle_job_id.clone(),
                 session_id: durable.session_id.clone(),
@@ -566,18 +680,65 @@ impl TurnControl {
                 limit: MAX_PENDING_TURN_SUPPLEMENTS,
             })
             .map_err(|error| error.to_string())?;
-        if claimed.is_empty() {
+        let mut recovery = durable
+            .recovery
+            .lock()
+            .map_err(|_| "turn input recovery lock poisoned")?;
+        claimed.append(&mut recovery.deferred);
+        for input in &claimed {
+            input.payload.validate(&durable.session_id)?;
+        }
+        claimed.sort_by_key(|input| {
+            (
+                matches!(input.payload, TurnInputPayload::HostEvent(_)),
+                input.sequence,
+            )
+        });
+        durable
+            .claimed_input_ids
+            .lock()
+            .map_err(|_| "turn input claim lock poisoned")?
+            .extend(
+                claimed
+                    .iter()
+                    .map(|input| input.payload.input_id().to_owned()),
+            );
+        let mut ready = Vec::new();
+        let mut consumed = Vec::new();
+        for input in claimed {
+            let id = input.payload.input_id();
+            if recovery.committed_ids.contains(id) {
+                consumed.push(id.to_owned());
+            } else if recovery
+                .prepared_turn
+                .as_ref()
+                .is_some_and(|(turn, ids)| turn == turn_id && !ids.contains(id))
+            {
+                recovery.deferred.push(input);
+            } else {
+                ready.push(input);
+            }
+        }
+        drop(recovery);
+        // Reconcile lost acknowledgements under the new fence without repeating
+        // materialization or intake. The original main fact remains authoritative.
+        self.acknowledge_inputs(&consumed)?;
+        if ready.is_empty() {
             return Ok(Vec::new());
         }
-        self.materialize_supplements(turn_id, claimed.as_slice())?;
-        Ok(claimed
+        (durable.materialize)(turn_id, &ready)?;
+        Ok(ready
             .into_iter()
-            .map(|supplement| {
-                TurnControlInput::Supplement(TurnSupplementInput {
-                    supplement_id: supplement.supplement_id,
-                    message: supplement.message,
-                    created_at_ms: supplement.created_at_ms,
-                })
+            .map(|input| match input.payload {
+                TurnInputPayload::UserSupplement {
+                    supplement_id,
+                    message,
+                } => TurnControlInput::Supplement(TurnSupplementInput {
+                    supplement_id,
+                    message,
+                    created_at_ms: input.created_at_ms,
+                }),
+                TurnInputPayload::HostEvent(input) => TurnControlInput::HostEvent(input),
             })
             .collect())
     }
@@ -622,7 +783,7 @@ impl TurnControl {
                     claim_token: None,
                     claim_lease_owner: None,
                 }),
-                TurnControlInput::AnswerNow(_) => None,
+                TurnControlInput::AnswerNow(_) | TurnControlInput::HostEvent(_) => None,
             })
             .collect::<Vec<_>>();
         self.materialize_supplements(turn_id, supplements.as_slice())
@@ -740,6 +901,11 @@ pub enum ModelObservationV1 {
     CompactionPrompt {
         message: ModelMessageV1,
     },
+    /// Inputs incorporated into this main request. Persistence of the request,
+    /// rather than admission or a queue acknowledgement, establishes uptake.
+    InputUptake {
+        input_ids: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -820,6 +986,19 @@ impl ModelRequestStartedV1 {
         crate::extension::composition::validate_resolved_agent_composition(&agent_composition)?;
         let context_token_breakdown = context_token_breakdown(request, &agent_composition)?;
         context_token_breakdown.validate(request.context_token_estimate)?;
+        let uptake = observations
+            .iter()
+            .filter_map(|item| match item {
+                ModelObservationV1::InputUptake { input_ids } => Some(input_ids),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if uptake.len() > 1 || !uptake.is_empty() && purpose != ModelRequestPurposeV1::Main {
+            return Err("model request input uptake is only valid once on a main request".into());
+        }
+        if let Some(ids) = uptake.first() {
+            validate_input_uptake_ids(ids)?;
+        }
         for observation in &observations {
             match observation {
                 ModelObservationV1::SystemPrompt { content }
@@ -974,6 +1153,16 @@ impl ModelRequestStartedV1 {
         self.purpose
     }
 
+    pub fn input_ids(&self) -> &[String] {
+        self.observations
+            .iter()
+            .find_map(|item| match item {
+                ModelObservationV1::InputUptake { input_ids } => Some(input_ids.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
+
     pub fn context_token_estimate(&self) -> u32 {
         self.context_token_estimate
     }
@@ -981,6 +1170,18 @@ impl ModelRequestStartedV1 {
     pub fn context_token_breakdown(&self) -> &ContextTokenBreakdownV1 {
         &self.context_token_breakdown
     }
+}
+
+pub(crate) fn validate_input_uptake_ids(ids: &[String]) -> Result<(), String> {
+    let mut seen = HashSet::new();
+    if ids.is_empty()
+        || ids.iter().any(|id| {
+            id.is_empty() || id != id.trim() || id.chars().any(char::is_control) || !seen.insert(id)
+        })
+    {
+        return Err("model request input uptake IDs are empty, invalid or duplicated".into());
+    }
+    Ok(())
 }
 
 fn context_token_breakdown(
@@ -1102,6 +1303,9 @@ fn context_token_breakdown(
 pub enum AgentRunInitialInput {
     /// A user request, using the ordinary user-input and `UserPromptSubmit` path.
     UserMessage(String),
+    /// A hosted user request with its immutable input identity. It follows the
+    /// ordinary user-request hook path and retains the admitted body verbatim.
+    UserInput { input_id: String, message: String },
     /// Non-authoritative notification data for the accepted task. It does not
     /// replace the objective or permissions, invoke `UserPromptSubmit`, or create
     /// a user transcript bubble. The Host owns admission and durable recording.
@@ -1112,7 +1316,19 @@ impl AgentRunInitialInput {
     pub(super) fn turn_input(&self) -> TurnInput {
         match self {
             Self::UserMessage(message) => TurnInput::UserMessage(message.clone()),
+            Self::UserInput { input_id, message } => TurnInput::UserMessageBatch {
+                message: message.clone(),
+                supplement_ids: vec![input_id.clone()],
+            },
             Self::HostEvent(input) => TurnInput::HostEvent(input.clone()),
+        }
+    }
+
+    pub fn input_id(&self) -> Option<&str> {
+        match self {
+            Self::UserMessage(_) => None,
+            Self::UserInput { input_id, .. } => Some(input_id),
+            Self::HostEvent(input) => Some(&input.input_id),
         }
     }
 }

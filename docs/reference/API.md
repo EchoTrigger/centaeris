@@ -10,7 +10,8 @@ Core constants and contract implementations are the source of truth for runtime 
 - `packages/core/src/session.rs` and `packages/core/src/session/wire.rs` for session events and manifests;
 - `packages/core/src/runtime/event.rs` for runtime events;
 - `packages/core/src/runtime/driver.rs` (re-exported by `runtime.rs`) and
-  `packages/core/src/session/host_event_input.rs` for Rust HostEvent initial-input
+  `packages/core/src/session/host_event_input.rs` and
+  `packages/core/src/session/turn_input.rs` for Rust initial and active input
   APIs; see [Session input rules](SessionEvents.md#metadata-and-message-rules);
 - `packages/core/src/extension/` for extension contracts;
 - `packages/core/src/tool/` for model-visible tool contracts.

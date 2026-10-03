@@ -432,15 +432,6 @@ async fn generate_prompt_compaction_summary_with_model_client_async<
             resource_usage: AgentRunResourceUsageV1::default(),
         };
     }
-    if request.prompt_token_estimate > request.input_limit_tokens {
-        return super::GenerateDriverPromptCompactionOutcome {
-            result: Err(PromptCompactionError::provider(format!(
-                "model compaction input budget exceeded: estimatedTokens={} inputLimitTokens={}",
-                request.prompt_token_estimate, request.input_limit_tokens
-            ))),
-            resource_usage: AgentRunResourceUsageV1::default(),
-        };
-    }
     let summary_max_output_tokens = request.max_output_tokens;
     let prepared_prompt = match crate::model::prepared_prompt::PreparedPromptV1::new(
         None,
@@ -464,6 +455,17 @@ async fn generate_prompt_compaction_summary_with_model_client_async<
             };
         }
     };
+    let context_token_estimate = match super::generate_request::estimate_prepared_prompt_input_tokens(&prepared_prompt) {
+        Ok(tokens) if tokens <= request.input_limit_tokens => tokens,
+        Ok(tokens) => return super::GenerateDriverPromptCompactionOutcome {
+            result: Err(PromptCompactionError::provider(format!(
+                "model compaction input budget exceeded: estimatedTokens={tokens} inputLimitTokens={}", request.input_limit_tokens
+            ))), resource_usage: AgentRunResourceUsageV1::default(),
+        },
+        Err(error) => return super::GenerateDriverPromptCompactionOutcome {
+            result: Err(PromptCompactionError::provider(error)), resource_usage: AgentRunResourceUsageV1::default(),
+        },
+    };
     session_config.max_output_tokens = Some(summary_max_output_tokens);
     session_config.timeout_ms = session_config
         .timeout_ms
@@ -477,7 +479,7 @@ async fn generate_prompt_compaction_summary_with_model_client_async<
         provider_prompt_cache_retention: None,
         system_prompt_manifest_json: None,
         compression_stats_json: None,
-        context_token_estimate: request.prompt_token_estimate,
+        context_token_estimate,
         prepared_prompt,
         session_config,
     };
@@ -517,7 +519,7 @@ async fn generate_prompt_compaction_summary_with_model_client_async<
             let mut resource_usage = AgentRunResourceUsageV1::default();
             resource_usage.record_completed_provider_round(
                 &response.generate_result,
-                request.prompt_token_estimate,
+                context_token_estimate,
                 response.provider_attempts,
             );
             super::GenerateDriverPromptCompactionOutcome {
@@ -527,8 +529,7 @@ async fn generate_prompt_compaction_summary_with_model_client_async<
         }
         Err(err) => {
             let mut resource_usage = AgentRunResourceUsageV1::default();
-            resource_usage
-                .record_provider_attempts(request.prompt_token_estimate, err.provider_attempts);
+            resource_usage.record_provider_attempts(context_token_estimate, err.provider_attempts);
             super::GenerateDriverPromptCompactionOutcome {
                 result: Err(PromptCompactionError::provider(format!(
                     "model compaction request failed(kind={},retryable={}): {}",

@@ -4,6 +4,7 @@ mod config;
 pub(crate) mod context_window;
 pub mod contracts;
 mod driver;
+pub(crate) use driver::validate_input_uptake_ids;
 mod engine_state;
 pub mod event;
 mod events;
@@ -180,8 +181,8 @@ const SYSTEM_PROMPT_MANIFEST_META_KEY: &str = runtime_metadata_keys::SYSTEM_PROM
 const SUBAGENT_RESULT_PROJECTION_META_KEY: &str = runtime_metadata_keys::SUBAGENT_RESULT_PROJECTION;
 const MESSAGE_SEMANTIC_KIND_META_KEY: &str = runtime_metadata_keys::MESSAGE_SEMANTIC_KIND;
 const ACTIVE_OBJECTIVE_META_KEY: &str = runtime_metadata_keys::ACTIVE_OBJECTIVE;
-const MESSAGE_SEMANTIC_USER_REQUEST: &str = "user_request";
-const MESSAGE_SEMANTIC_TURN_SUPPLEMENT: &str = "turn_supplement";
+pub(crate) const MESSAGE_SEMANTIC_USER_REQUEST: &str = "user_request";
+pub(crate) const MESSAGE_SEMANTIC_TURN_SUPPLEMENT: &str = "turn_supplement";
 const MESSAGE_SEMANTIC_TOOL_CONTINUATION: &str = "tool_continuation";
 const MESSAGE_SEMANTIC_OUTPUT_TOKEN_RECOVERY: &str = "output_token_recovery";
 const MESSAGE_SEMANTIC_ANSWER_NOW: &str = "answer_now";
