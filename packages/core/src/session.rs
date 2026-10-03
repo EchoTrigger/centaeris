@@ -14,6 +14,7 @@ pub mod state;
 pub mod store;
 pub mod supplement;
 pub mod transcript;
+pub mod turn_input;
 
 use crate::execution::MAX_PUBLISHED_ARTIFACT_BYTES;
 use crate::model::prepared_prompt::{ModelMessageRoleV1, ModelMessageV1, PREPARED_PROMPT_SCHEMA};
@@ -1514,7 +1515,7 @@ pub fn turn_supplement_record(
 ) -> Result<SessionLogRecord, String> {
     let supplement_id = crate::session::supplement::validate_turn_supplement_id(supplement_id)
         .map_err(|error| error.to_string())?;
-    let message = crate::session::supplement::validate_turn_supplement_message(message)
+    crate::session::supplement::validate_turn_supplement_message(message)
         .map_err(|error| error.to_string())?;
     let event_identity = format!("{session_id}\0{turn_id}\0{supplement_id}");
     canonical_session_record(
@@ -2492,27 +2493,41 @@ pub fn restore_runtime_snapshot_from_session_records(
         }
     }
 
-    for event in active
-        .iter()
-        .filter(|event| event.event_type == SessionRecordType::UserMessage)
-    {
+    for event in active.iter().filter(|event| {
+        matches!(
+            event.event_type,
+            SessionRecordType::UserMessage | SessionRecordType::TurnSupplement
+        )
+    }) {
         let payload = payload_object(event)?;
         let message_id = required_payload_string(payload, "messageId", event)?;
         let images = model_input_image_refs(payload)?;
-        if images.is_empty() {
-            continue;
-        }
         if let Some(message) = snapshot
             .messages
             .iter_mut()
             .find(|message| message.message_id == message_id)
         {
-            message.metadata.insert(
-                crate::runtime::keys::metadata::MODEL_INPUT_IMAGES.to_string(),
-                serde_json::to_string(&images).map_err(|error| {
-                    format!("encode restored model input images failed: {error}")
-                })?,
-            );
+            // Restore the incoming kind from its committed origin, not merely
+            // from the model-visible User role, which also represents host data.
+            if message.role == MessageRole::User {
+                let kind = if event.event_type == SessionRecordType::UserMessage {
+                    crate::runtime::MESSAGE_SEMANTIC_USER_REQUEST
+                } else {
+                    crate::runtime::MESSAGE_SEMANTIC_TURN_SUPPLEMENT
+                };
+                message.metadata.insert(
+                    crate::runtime::keys::metadata::MESSAGE_SEMANTIC_KIND.to_string(),
+                    kind.to_owned(),
+                );
+            }
+            if !images.is_empty() {
+                message.metadata.insert(
+                    crate::runtime::keys::metadata::MODEL_INPUT_IMAGES.to_string(),
+                    serde_json::to_string(&images).map_err(|error| {
+                        format!("encode restored model input images failed: {error}")
+                    })?,
+                );
+            }
         }
     }
     host_event_input::restore_origins(
@@ -2520,6 +2535,50 @@ pub fn restore_runtime_snapshot_from_session_records(
         &projection.host_event_inputs,
         &projection.host_event_owning_runs,
     )?;
+    let current_request = latest_request_index.map(|index| &active[index]);
+    let mut current_input_ids = Vec::new();
+    for record in &active {
+        if record.event_type != SessionRecordType::ModelRequestStarted
+            || record.payload.get("purpose").and_then(Value::as_str) != Some("main")
+        {
+            continue;
+        }
+        let observations = serde_json::from_value::<Vec<ModelObservationV1>>(
+            record.payload["observations"].clone(),
+        )
+        .map_err(|error| format!("decode Session model observations failed: {error}"))?;
+        for observation in observations {
+            if let ModelObservationV1::InputUptake { input_ids } = observation {
+                if current_request.is_some_and(|current| {
+                    current.agent_run_id == record.agent_run_id && current.turn_id == record.turn_id
+                }) {
+                    for id in &input_ids {
+                        if !current_input_ids.contains(id) {
+                            current_input_ids.push(id.clone());
+                        }
+                    }
+                }
+                turn_input::recovery::record_committed(
+                    &mut snapshot,
+                    required_event_agent_run_id(record)?.as_str(),
+                    &input_ids,
+                )?;
+            }
+        }
+    }
+    if let Some(current) = current_request {
+        // A retry can have no new uptake while retaining its original membership.
+        // Other turns contribute Read history, never the current preparation.
+        turn_input::recovery::freeze_prepared(
+            &mut snapshot,
+            required_event_agent_run_id(current)?.as_str(),
+            current
+                .turn_id
+                .as_deref()
+                .ok_or("model request turn is missing")?,
+            &current_input_ids,
+        )?;
+    }
     snapshot.context_window = snapshot.messages.clone();
     Ok(snapshot)
 }
@@ -3797,6 +3856,9 @@ fn validate_model_observation(
     event: &SessionLogRecord,
 ) -> Result<(), String> {
     match observation {
+        ModelObservationV1::InputUptake { input_ids } => {
+            crate::runtime::validate_input_uptake_ids(input_ids)?;
+        }
         ModelObservationV1::SystemPrompt { content } => {
             if content.trim().is_empty() {
                 return Err(format!(
@@ -3941,8 +4003,13 @@ fn validate_model_request_started(event: &SessionLogRecord) -> Result<(), String
         let mut last_rank = 0;
         let mut system_prompts = 0;
         let mut tool_catalogs = 0;
+        let mut input_uptakes = 0;
         for observation in &observations {
             let rank = match observation {
+                ModelObservationV1::InputUptake { .. } => {
+                    input_uptakes += 1;
+                    4
+                }
                 ModelObservationV1::SystemPrompt { .. } => {
                     system_prompts += 1;
                     0
@@ -3960,7 +4027,7 @@ fn validate_model_request_started(event: &SessionLogRecord) -> Result<(), String
                     ));
                 }
             };
-            if rank < last_rank || system_prompts > 1 || tool_catalogs > 1 {
+            if rank < last_rank || system_prompts > 1 || tool_catalogs > 1 || input_uptakes > 1 {
                 return Err(format!(
                     "session.event.v1 {} model observations are not canonical",
                     event.event_id

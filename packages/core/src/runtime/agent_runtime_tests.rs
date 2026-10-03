@@ -37,6 +37,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod active_input_tests;
 mod host_event_tests;
 
 #[derive(Clone, Debug, Default)]
@@ -44,6 +45,7 @@ struct AgentRuntimeTestState {
     checkpoints: Vec<CheckpointRecord>,
     events: Vec<RuntimeEvent>,
     snapshots: HashMap<String, String>,
+    fail_after_input_snapshot: Option<String>,
     external_objects: HashMap<String, ExternalContextObject>,
     external_links: Vec<ExternalContextObjectLink>,
     jobs: HashMap<String, RuntimeJobRecord>,
@@ -322,9 +324,22 @@ impl AgentRuntimeSnapshotStorePort for AgentRuntimeTestStore {
         snapshot_json: &str,
         _updated_at_ms: i64,
     ) -> Result<(), String> {
-        self.state()?
+        let mut state = self.state()?;
+        state
             .snapshots
             .insert(session_id.to_string(), snapshot_json.to_string());
+        if let Some(message_id) = &state.fail_after_input_snapshot {
+            let snapshot: SessionStateSnapshot = serde_json::from_str(snapshot_json)
+                .map_err(|error| format!("decode injected snapshot failed: {error}"))?;
+            if snapshot
+                .messages
+                .iter()
+                .any(|message| &message.message_id == message_id)
+            {
+                state.fail_after_input_snapshot = None;
+                return Err("injected_prepared_snapshot_response_failure".into());
+            }
+        }
         Ok(())
     }
 }
@@ -3930,12 +3945,13 @@ async fn new_user_generate_preflight_pairs_interrupted_tool_intent_before_materi
         .build_generate_driver_request_with_async_driver_and_runtime_scope(
             session_id,
             "turn-continue",
-            &TurnInput::UserMessage("continue".to_string()),
+            &mut TurnInput::UserMessage("continue".to_string()),
             0,
             PromptCompactionScopeV1::main(),
             None,
             Some(&safe_point),
             &TestPromptCompactionAsyncDriver,
+            None,
         )
         .await
         .expect("new user request should materialize after repairing the open tool call");
@@ -7049,7 +7065,7 @@ async fn prompt_compaction_runs_before_tool_loop_continuation_generate() {
         .build_generate_driver_request_with_async_driver_and_runtime_scope(
             "chat-tool-continuation-pressure",
             "turn-tool-continuation-pressure",
-            &TurnInput::ToolContinuation {
+            &mut TurnInput::ToolContinuation {
                 objective: "continue after the large read".to_string(),
             },
             1,
@@ -7057,6 +7073,7 @@ async fn prompt_compaction_runs_before_tool_loop_continuation_generate() {
             None,
             None,
             &TestPromptCompactionAsyncDriver,
+            None,
         )
         .await
         .expect("tool continuation should compact before generate");
@@ -7491,7 +7508,7 @@ async fn query_loop_over_budget_continuation_preserves_history_when_compaction_c
             .build_generate_driver_request_with_async_driver_and_runtime_scope(
                 session_id,
                 turn_id,
-                &TurnInput::ToolContinuation {
+                &mut TurnInput::ToolContinuation {
                     objective: "Continue without dropping history.".to_string(),
                 },
                 1,
@@ -7499,6 +7516,7 @@ async fn query_loop_over_budget_continuation_preserves_history_when_compaction_c
                 None,
                 None,
                 &driver,
+                None,
             )
             .await
             .expect_err("over-budget continuation must reject without truncation");
@@ -9629,12 +9647,13 @@ async fn prompt_compaction_uses_context_pressure_and_preserves_large_usage_telem
         .build_generate_driver_request_with_async_driver_and_runtime_scope(
             "chat-prompt-compaction-usage",
             "turn-prompt-compaction-usage",
-            &TurnInput::UserMessage("Continue after context compaction.".to_string()),
+            &mut TurnInput::UserMessage("Continue after context compaction.".to_string()),
             0,
             PromptCompactionScopeV1::main(),
             Some(&mut usage),
             None,
             &driver,
+            None,
         )
         .await
         .expect("context pressure should compact independently of cumulative usage");

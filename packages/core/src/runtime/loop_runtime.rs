@@ -1401,8 +1401,53 @@ impl<
         turn_control: &TurnControl,
         tool_safe_point: &mut (dyn FnMut(ToolSafePoint) -> Result<(), String> + Send),
     ) -> Result<AgentRunResult, String> {
+        let recovery_run = req
+            .agent_run_identity
+            .as_ref()
+            .map(|identity| identity.agent_run_id.clone());
+        let mut commit_with_input_ack = |mut point: ToolSafePoint| {
+            if let (Some(run), ToolSafePoint::ModelRequestStarted(started)) =
+                (&recovery_run, &mut point)
+            {
+                if turn_control.uses_durable_inputs() {
+                    let session = self
+                        .session_manager
+                        .load_or_create_session(&started.session_id)?;
+                    let committed =
+                        crate::session::turn_input::recovery::committed_ids(&session, run)?;
+                    for observation in &mut started.observations {
+                        if let ModelObservationV1::InputUptake { input_ids } = observation {
+                            input_ids.retain(|id| !committed.contains(id));
+                        }
+                    }
+                    started.observations.retain(|observation| !matches!(observation, ModelObservationV1::InputUptake { input_ids } if input_ids.is_empty()));
+                }
+            }
+            let ids = match &point {
+                ToolSafePoint::ModelRequestStarted(started) => started.input_ids().to_vec(),
+                _ => vec![],
+            };
+            let committed_session = match &point {
+                ToolSafePoint::ModelRequestStarted(started) => Some(started.session_id.clone()),
+                _ => None,
+            };
+            tool_safe_point(point)?;
+            if turn_control.uses_durable_inputs() && !ids.is_empty() {
+                if let (Some(run), Some(session_id)) = (&recovery_run, committed_session) {
+                    let mut session = self.session_manager.load_or_create_session(&session_id)?;
+                    crate::session::turn_input::recovery::record_committed(
+                        &mut session,
+                        run,
+                        &ids,
+                    )?;
+                    self.session_manager.save_session(&session)?;
+                    turn_control.record_committed_input_ids(&ids)?;
+                }
+            }
+            turn_control.acknowledge_inputs(&ids)
+        };
         let tool_safe_point = ToolSafePointDispatcher {
-            sink: Mutex::new(tool_safe_point),
+            sink: Mutex::new(&mut commit_with_input_ack),
         };
         let composition_environment = self.agent_composition_environment()?;
         let driver = ModelClientGenerateDriver::new_with_tool_safe_point(
@@ -1647,12 +1692,16 @@ impl<
             resume_from_turn_id,
             auto_continue_after_resume_wait,
         } = req;
+        if let Some(control) = turn_control {
+            control.validate_runtime_owner(&session_id, agent_run_identity.as_ref())?;
+        }
         let _active_agent_run_guard = self.acquire_active_agent_run(session_id.as_str())?;
         let mut turn_control_close_guard = TurnControlCloseGuard::new(turn_control);
 
         let mut responses = vec![];
         let mut next_turn_id = initial_turn_id.clone();
         let mut next_turn_supplements = Vec::new();
+        let mut next_host_events = Vec::new();
         let mut pending_answer_now = agent_run_identity
             .as_ref()
             .map(|identity| {
@@ -1668,6 +1717,13 @@ impl<
             .flatten();
         let root_user_message = match &initial_input {
             AgentRunInitialInput::UserMessage(message) => message.clone(),
+            AgentRunInitialInput::UserInput { input_id, message } => {
+                crate::session::supplement::validate_turn_supplement_id(input_id)
+                    .map_err(|e| e.to_string())?;
+                crate::session::supplement::validate_turn_supplement_message(message)
+                    .map_err(|e| e.to_string())?;
+                message.clone()
+            }
             AgentRunInitialInput::HostEvent(input) => {
                 input.validate(&session_id)?;
                 String::new()
@@ -1840,10 +1896,14 @@ impl<
                         collect_turn_control_inputs(
                             control.take_pending_or_close(next_turn_id.as_str())?,
                             &mut next_turn_supplements,
+                            &mut next_host_events,
                             &mut pending_answer_now,
                         )?;
                     }
-                    if next_turn_supplements.is_empty() && pending_answer_now.is_none() {
+                    if next_turn_supplements.is_empty()
+                        && next_host_events.is_empty()
+                        && pending_answer_now.is_none()
+                    {
                         return Ok(AgentRunResult::new(responses, stop));
                     }
                 } else {
@@ -1878,19 +1938,75 @@ impl<
                 ));
             }
 
-            let turn_id = next_turn_id.clone();
-            if !(responses.is_empty() && loop_index == 0) {
-                if let Some(control) = turn_control {
-                    collect_turn_control_inputs(
-                        control.take_pending(turn_id.as_str())?,
-                        &mut next_turn_supplements,
-                        &mut pending_answer_now,
-                    )?;
+            if responses.is_empty() && loop_index == 0 {
+                if let (Some(control), Some(identity)) = (turn_control, agent_run_identity.as_ref())
+                {
+                    if control.uses_durable_inputs() {
+                        let session = self.session_manager.load_or_create_session(&session_id)?;
+                        if let Some(current) =
+                            crate::session::turn_input::recovery::current_prepared_turn(
+                                &session,
+                                &identity.agent_run_id,
+                            )?
+                        {
+                            next_turn_id = current;
+                        }
+                    }
                 }
             }
+            let turn_id = next_turn_id.clone();
+            let mut prepared_ids = None;
+            let mut recovery_session = None;
+            if let (Some(control), Some(identity)) = (turn_control, agent_run_identity.as_ref()) {
+                if control.uses_durable_inputs() {
+                    let session = self.session_manager.load_or_create_session(&session_id)?;
+                    prepared_ids = crate::session::turn_input::recovery::prepared_ids(
+                        &session,
+                        &identity.agent_run_id,
+                        &turn_id,
+                    )?;
+                    control.configure_input_recovery(
+                        crate::session::turn_input::recovery::committed_ids(
+                            &session,
+                            &identity.agent_run_id,
+                        )?,
+                        prepared_ids.clone().map(|ids| (turn_id.clone(), ids)),
+                    )?;
+                    recovery_session = Some(session);
+                }
+            }
+            if let Some(control) = turn_control {
+                collect_turn_control_inputs(
+                    control.take_pending(turn_id.as_str())?,
+                    &mut next_turn_supplements,
+                    &mut next_host_events,
+                    &mut pending_answer_now,
+                )?;
+            }
             let mut applied_intervention_events = None;
-            let input = if responses.is_empty() && loop_index == 0 {
-                initial_input.turn_input()
+            let mut input_ids = Vec::new();
+            let mut input = if responses.is_empty() && loop_index == 0 {
+                if let Some(id) = initial_input.input_id() {
+                    input_ids.push(id.to_owned());
+                    exclude_initial_queue_input(
+                        &initial_input,
+                        &mut next_turn_supplements,
+                        &mut next_host_events,
+                    )?;
+                }
+                if let (Some(session), Some(ids)) = (&recovery_session, &prepared_ids) {
+                    restore_prepared_input(
+                        session,
+                        &turn_id,
+                        &initial_input,
+                        ids,
+                        &mut next_turn_supplements,
+                    )?
+                } else {
+                    let mut input = initial_input.turn_input();
+                    merge_user_input_batch(&mut input, &mut next_turn_supplements, &mut input_ids);
+                    input
+                }
             } else if let Some(pending) = pending_answer_now.take() {
                 let boundary_response = responses
                     .last()
@@ -1934,24 +2050,88 @@ impl<
                 )
             } else if !next_turn_supplements.is_empty() {
                 TurnInput::turn_supplement(std::mem::take(&mut next_turn_supplements))
+            } else if let Some(input) = next_host_events.first() {
+                TurnInput::HostEvent(input.clone())
             } else {
                 TurnInput::ToolContinuation {
                     objective: root_user_message.clone(),
                 }
             };
-
-            let generate_req = self
+            if input_ids.is_empty() {
+                input_ids.extend_from_slice(input.supplement_ids());
+            }
+            let mut intake = |input: &mut TurnInput| {
+                if let Some(control) = turn_control {
+                    collect_turn_control_inputs(
+                        control.take_pending(turn_id.as_str())?,
+                        &mut next_turn_supplements,
+                        &mut next_host_events,
+                        &mut pending_answer_now,
+                    )?;
+                    if responses.is_empty() && loop_index == 0 {
+                        exclude_initial_queue_input(
+                            &initial_input,
+                            &mut next_turn_supplements,
+                            &mut next_host_events,
+                        )?;
+                    }
+                    if let TurnInput::HostEvent(initial_host) = input {
+                        if !next_turn_supplements.is_empty() {
+                            self.materialize_active_host_inputs(
+                                &session_id,
+                                agent_run_identity.as_ref(),
+                                &mut vec![initial_host.clone()],
+                                &mut Vec::new(),
+                            )?;
+                            *input = TurnInput::ToolContinuation {
+                                objective: root_user_message.clone(),
+                            };
+                        }
+                    }
+                    merge_user_input_batch(input, &mut next_turn_supplements, &mut input_ids);
+                    self.materialize_active_host_inputs(
+                        &session_id,
+                        agent_run_identity.as_ref(),
+                        &mut next_host_events,
+                        &mut input_ids,
+                    )?;
+                }
+                if let (Some(control), Some(identity)) = (turn_control, agent_run_identity.as_ref())
+                {
+                    if control.uses_durable_inputs() {
+                        if let Some(prepared) = &prepared_ids {
+                            input_ids = prepared.clone();
+                        }
+                        return Ok(Some(super::generate_request::PreparedRequestInputs {
+                            agent_run_id: identity.agent_run_id.clone(),
+                            input_ids: input_ids.clone(),
+                        }));
+                    }
+                }
+                Ok(None)
+            };
+            let mut generate_req = self
                 .build_generate_driver_request_with_async_driver_and_runtime_scope(
                     session_id.as_str(),
                     turn_id.as_str(),
-                    &input,
+                    &mut input,
                     loop_index as u32,
                     runtime_scope.clone(),
                     Some(&mut agent_run_resource_usage),
                     tool_safe_point,
                     driver,
+                    if turn_control.is_some() {
+                        Some(&mut intake)
+                    } else {
+                        None
+                    },
                 )
                 .await?;
+            if !input_ids.is_empty() {
+                generate_req
+                    .observations
+                    .push(ModelObservationV1::InputUptake { input_ids });
+            }
             if let (TurnInput::HostEvent(input), Some(identity)) = (&input, &agent_run_identity) {
                 let mut session = self.session_manager.load_or_create_session(&session_id)?;
                 let message = session
@@ -1962,9 +2142,6 @@ impl<
                 crate::session::host_event_input::bind_owning_run(message, &identity.agent_run_id);
                 refresh_session_context_window(&mut session);
                 self.session_manager.save_session(&session)?;
-            }
-            if let Some(control) = turn_control {
-                control.acknowledge_supplements(input.supplement_ids())?;
             }
             let context_token_estimate = generate_req.context_token_estimate;
             let recovery_content_prefix = input
@@ -2113,6 +2290,7 @@ impl<
                     collect_turn_control_inputs(
                         control.take_pending_or_close(next_turn_id.as_str())?,
                         &mut next_turn_supplements,
+                        &mut next_host_events,
                         &mut pending_answer_now,
                     )?;
                 }
@@ -2193,15 +2371,22 @@ impl<
             }
 
             if let Some(stop) = stop {
+                if continuation == QueryContinuation::Finalize && !next_host_events.is_empty() {
+                    continue;
+                }
                 if matches!(continuation, QueryContinuation::CompleteTerminalTool) {
                     if let Some(control) = turn_control {
                         collect_turn_control_inputs(
                             control.take_pending_or_close(next_turn_id.as_str())?,
                             &mut next_turn_supplements,
+                            &mut next_host_events,
                             &mut pending_answer_now,
                         )?;
                     }
-                    if !next_turn_supplements.is_empty() || pending_answer_now.is_some() {
+                    if !next_turn_supplements.is_empty()
+                        || !next_host_events.is_empty()
+                        || pending_answer_now.is_some()
+                    {
                         continue;
                     }
                 } else if matches!(
@@ -2251,6 +2436,7 @@ impl<
                             collect_turn_control_inputs(
                                 control.take_pending(next_turn_id.as_str())?,
                                 &mut next_turn_supplements,
+                                &mut next_host_events,
                                 &mut pending_answer_now,
                             )?;
                         }
@@ -2299,6 +2485,53 @@ impl<
         }
     }
 
+    fn materialize_active_host_inputs(
+        &self,
+        session_id: &str,
+        identity: Option<&RuntimeAgentRunIdentityV1>,
+        inputs: &mut Vec<crate::session::host_event_input::HostEventInput>,
+        input_ids: &mut Vec<String>,
+    ) -> Result<(), String> {
+        if inputs.is_empty() {
+            return Ok(());
+        }
+        let identity = identity.ok_or("turn_input_runtime_owner_mismatch")?;
+        let mut session = self.session_manager.load_or_create_session(session_id)?;
+        for input in inputs.iter() {
+            input.validate(session_id)?;
+            if let Some(existing) = session
+                .messages
+                .iter()
+                .find(|message| message.message_id == input.message_id)
+            {
+                if crate::session::host_event_input::host_event_origin(session_id, existing)?
+                    .as_ref()
+                    != Some(input)
+                    || crate::session::host_event_input::owning_run(existing)
+                        != Some(identity.agent_run_id.as_str())
+                {
+                    return Err("host_event_input_identity_conflict".into());
+                }
+            } else {
+                let mut message = input.chat_message(session_id, now_ms())?;
+                crate::session::host_event_input::bind_owning_run(
+                    &mut message,
+                    &identity.agent_run_id,
+                );
+                session.model_semantics.insert(
+                    message.message_id.clone(),
+                    crate::session::state::ModelMessageSemanticsV1::Plain,
+                );
+                session.messages.push(message);
+            }
+            input_ids.push(input.input_id.clone());
+        }
+        refresh_session_context_window(&mut session);
+        self.session_manager.save_session(&session)?;
+        inputs.clear();
+        Ok(())
+    }
+
     pub(super) async fn route_after_generate_with_retry(
         &self,
         req: RouteGenerateResultRequest,
@@ -2332,13 +2565,154 @@ impl<
     }
 }
 
+fn merge_user_input_batch(
+    input: &mut TurnInput,
+    supplements: &mut Vec<super::driver::TurnSupplementInput>,
+    input_ids: &mut Vec<String>,
+) {
+    if supplements.is_empty()
+        || matches!(
+            input,
+            TurnInput::HostEvent(_)
+                | TurnInput::AnswerNow { .. }
+                | TurnInput::OutputTokenRecovery { .. }
+        )
+    {
+        return;
+    }
+    let batch = TurnInput::turn_supplement(std::mem::take(supplements));
+    input_ids.extend_from_slice(batch.supplement_ids());
+    match input {
+        TurnInput::UserMessage(message) => {
+            *input = TurnInput::UserMessageBatch {
+                message: format!(
+                    "{message}\n\n{}",
+                    batch.user_message().expect("user input batch")
+                ),
+                supplement_ids: batch.supplement_ids().to_vec(),
+            };
+        }
+        TurnInput::UserMessageBatch {
+            message,
+            supplement_ids,
+        }
+        | TurnInput::TurnSupplement {
+            message,
+            supplement_ids,
+        } => {
+            message.push_str("\n\n");
+            message.push_str(batch.user_message().expect("user input batch"));
+            supplement_ids.extend_from_slice(batch.supplement_ids());
+        }
+        TurnInput::ToolContinuation { .. } => *input = batch,
+        _ => unreachable!("ineligible batch inputs checked above"),
+    }
+}
+
+fn restore_prepared_input(
+    session: &SessionStateSnapshot,
+    turn_id: &str,
+    initial: &AgentRunInitialInput,
+    input_ids: &[String],
+    supplements: &mut Vec<super::driver::TurnSupplementInput>,
+) -> Result<TurnInput, String> {
+    let driver_id = prompt_projection::driver_user_message_id(&session.session_id, turn_id);
+    if let Some(message) = session
+        .messages
+        .iter()
+        .find(|message| message.message_id == driver_id)
+    {
+        let mut user_ids = supplements
+            .iter()
+            .map(|input| input.supplement_id.clone())
+            .collect::<Vec<_>>();
+        supplements.clear();
+        return match initial {
+            AgentRunInitialInput::HostEvent(_) => Ok(TurnInput::TurnSupplement {
+                message: message.content.clone(),
+                supplement_ids: user_ids,
+            }),
+            AgentRunInitialInput::UserMessage(_) | AgentRunInitialInput::UserInput { .. } => {
+                if let Some(id) = initial.input_id() {
+                    if !user_ids.iter().any(|existing| existing == id) {
+                        user_ids.insert(0, id.to_owned());
+                    }
+                }
+                Ok(TurnInput::UserMessageBatch {
+                    message: message.content.clone(),
+                    supplement_ids: user_ids,
+                })
+            }
+        };
+    }
+    for id in input_ids {
+        for message in &session.messages {
+            if let Some(input) =
+                crate::session::host_event_input::host_event_origin(&session.session_id, message)?
+            {
+                if &input.input_id == id {
+                    return Ok(TurnInput::HostEvent(input));
+                }
+            }
+        }
+    }
+    // A committed tool continuation has no incoming input batch or driver user
+    // message. Its current context already contains the completed tool result.
+    if input_ids.is_empty()
+        && session.context_window.last().is_some_and(|message| {
+            message.role == MessageRole::Tool
+                && matches!(
+                    session.model_semantics.get(&message.message_id),
+                    Some(ModelMessageSemanticsV1::ToolResult { .. })
+                )
+        })
+    {
+        return Ok(TurnInput::ToolContinuation {
+            objective: initial.turn_input().objective().to_owned(),
+        });
+    }
+    Err("turn_input_prepared_message_missing".into())
+}
+
+fn exclude_initial_queue_input(
+    initial: &AgentRunInitialInput,
+    supplements: &mut Vec<super::driver::TurnSupplementInput>,
+    host_events: &mut Vec<crate::session::host_event_input::HostEventInput>,
+) -> Result<(), String> {
+    if let AgentRunInitialInput::UserInput { input_id, message } = initial {
+        for supplement in supplements
+            .iter()
+            .filter(|input| &input.supplement_id == input_id)
+        {
+            if &supplement.message != message {
+                return Err("turn_input_initial_identity_conflict".into());
+            }
+        }
+        supplements.retain(|input| &input.supplement_id != input_id);
+    }
+    if let AgentRunInitialInput::HostEvent(initial) = initial {
+        for input in host_events
+            .iter()
+            .filter(|input| input.input_id == initial.input_id)
+        {
+            if input != initial {
+                return Err("turn_input_initial_identity_conflict".into());
+            }
+        }
+        host_events.retain(|input| input.input_id != initial.input_id);
+    }
+    Ok(())
+}
+
 fn collect_turn_control_inputs(
     inputs: Vec<TurnControlInput>,
     supplements: &mut Vec<super::driver::TurnSupplementInput>,
+    host_events: &mut Vec<crate::session::host_event_input::HostEventInput>,
     answer_now: &mut Option<PendingAnswerNow>,
 ) -> Result<(), String> {
     for input in inputs {
         match input {
+            TurnControlInput::HostEvent(input) => host_events.push(input),
             TurnControlInput::Supplement(supplement) if answer_now.is_none() => {
                 supplements.push(supplement)
             }

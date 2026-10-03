@@ -133,7 +133,10 @@ Session. `Stream` says whether the record is projected into AgentRun replay.
 ### Metadata and message rules
 
 `AgentRunRequest.initial_input` is a Rust-only `AgentRunInitialInput`, restricted
-to `UserMessage` and `HostEvent`. It is not a persisted request or a new Runtime
+to `UserMessage`, identified `UserInput { input_id, message }`, and `HostEvent`.
+`UserMessage` retains the ordinary Session path; `UserInput` retains its admitted
+body and stable hosted ID and follows the same user-request hook path.
+It is not a persisted request or a new Runtime
 transport operation. Hosts admit idle work using the existing Run, Session log,
 lease fence, and authorization state. For a host-driven Run, record
 `agent_run_started` with the objective from accepted task state, then append
@@ -183,7 +186,7 @@ business handling are separate facts. Core adds no Read/handled record. A new
 notification cannot resume an existing wait; infrastructure recovery reuses the
 original input and Run identity. Reusing an input owned by another Run cannot
 resume the wait, even with the same input or message ID; the existing wait's
-authorization identity must also match. Hosts own busy deferral and eventual
+authorization identity must also match. Hosts own admission and eventual
 idle admission.
 
 Wait resumption within the running Server uses the original lease. Runtime
@@ -259,11 +262,42 @@ observation records do not exist.
 
 Main observations are in canonical groups: at most one `system_prompt`, then
 zero or more `message`, then zero or more `input_image`, then at most one
-`tool_catalog`. A compaction request contains exactly one `compaction_prompt`
+`tool_catalog`, then at most one `input_uptake` with a non-empty, unique,
+ordered `inputIds` list. A compaction request contains exactly one `compaction_prompt`
 observation, uses `toolChoice: {"type":"none"}`, and has no tool catalog.
 Observation unions and their nested message, image, and tool-definition shapes
 are the strict v1 types in `packages/core/src/runtime/driver.rs` and
 `packages/core/src/model/prepared_prompt.rs`.
+
+An identified initial input and queued active inputs enter `input_uptake` only
+on the main request that incorporates them. An initial item also returned by
+the queue is matched by exact identity and body and included once. Active
+HostEvents keep their native message identity and non-authoritative origin;
+they do not replace the Run's original `initial_input` or accepted objective.
+Preparation checks the queue once before compaction and once after compaction,
+before sealing the main request. Later arrivals wait for the next legal boundary;
+they do not cancel a provider call or interrupt a side-effecting tool batch.
+An already generated tool batch may commit before the next intake.
+
+`TurnControl::new_durable_inputs` accepts one `TurnInputStorePort` and the
+existing Run, lifecycle job, Session, authorization and lease/claim binding.
+The port returns typed `UserSupplement` or `HostEvent` payloads, prioritizes
+users and preserves sequence within each kind. The Host durably materializes
+inputs under that fence, reusing their original committed input records during
+recovery. An initial input reuses its admission record rather than becoming a
+new supplement. Queue admission, claim and materialization establish no Read.
+Core acknowledges queue-held IDs only after the main request safe-point commit
+succeeds. The immutable Read reference is that record's `eventId`, `requestId`
+and `createdAtMs`; a lost queue acknowledgement does not erase this fact.
+Historical requests without `input_uptake` remain valid and do not acquire new
+Read facts during reconstruction. Core adds no Read or handled table.
+
+The port's `close_if_empty` atomically tests both input kinds and closes admission
+only when the shared queue has no pending item. This fence coordinates Final
+and a racing input; Hosts retain the existing coordinator owner chain for idle
+admission and handoff. Pending input keeps an active Run eligible to continue
+after a completed tool turn. Ordinary text and HostEvent arrival do not approve,
+answer or resolve existing approval, question or RuntimeJob waits.
 
 `maxOutputTokens` is positive. `preparedPromptSchema` equals the Core v1
 prepared-prompt identity. `contextTokenBreakdown` sums exactly to
