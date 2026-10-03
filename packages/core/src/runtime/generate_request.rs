@@ -469,6 +469,9 @@ impl<
         if let Some(message) = skill_catalog_message {
             runtime_context_messages.push(message);
         }
+        // Replayed main observations already contain these exact Core messages.
+        // Keep their committed copy; conflicting identities still fail validation.
+        runtime_context_messages.retain(|message| !model_messages.contains(message));
         if let Some(partial_content) = input.output_token_recovery_partial() {
             let rejected_tool_calls = input.output_token_recovery_tool_calls();
             if !partial_content.is_empty() || !rejected_tool_calls.is_empty() {
