@@ -1,6 +1,7 @@
 use super::*;
 
 mod compacted_context_tests;
+mod runtime_context_tests;
 mod tool_context_tests;
 
 #[derive(Debug)]
