@@ -15,6 +15,7 @@ mod local_hook_runner;
 mod local_work_store;
 mod mcp;
 mod message_log;
+mod model_budget;
 mod operation_receipts;
 mod plugins;
 mod process_agent;

@@ -2553,6 +2553,8 @@ fn agent_runtime_config(
     config.model_max_output_tokens = runtime_config
         .model_max_output_tokens
         .unwrap_or(config.model_max_output_tokens);
+    (config.model_context_tokens, config.model_max_output_tokens) =
+        crate::model_budget::from_env(config.model_context_tokens, config.model_max_output_tokens)?;
     config.tool_parallelism = runtime_config
         .tool_parallelism
         .unwrap_or(config.tool_parallelism);
@@ -3188,6 +3190,11 @@ pub(crate) fn model_session_config_and_registry_for(
                 "custom model maxOutputTokens is missing: providerId={provider_id} model={model}"
             )
         })?;
+    let context_capacity = selected_catalog_item.model_context_tokens.ok_or_else(|| {
+        format!("model context capacity is missing: providerId={provider_id} model={model}")
+    })?;
+    let (_, max_output_tokens) =
+        crate::model_budget::from_env(context_capacity, max_output_tokens)?;
     let config = ModelSessionConfig {
         provider_kind: provider.provider_kind.clone(),
         provider_id: provider_id.clone(),
