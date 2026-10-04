@@ -1,0 +1,466 @@
+{
+  "job_name": "centaeris-tb21-full-pass5",
+  "jobs_dir": "jobs",
+  "n_attempts": 5,
+  "n_concurrent_trials": 2,
+  "timeout_multiplier": 1.0,
+  "retry": {
+    "max_retries": 0
+  },
+  "environment": {
+    "type": "docker",
+    "delete": true
+  },
+  "agents": [
+    {
+      "import_path": "centaeris_agent:CentaerisAgent"
+    }
+  ],
+  "tasks": [
+    {
+      "path": "tasks/adaptive-rejection-sampler",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/bn-fit-modify",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/break-filter-js-from-html",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/build-cython-ext",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/build-pmars",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/build-pov-ray",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/caffe-cifar-10",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/cancel-async-tasks",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/chess-best-move",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/circuit-fibsqrt",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/cobol-modernization",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/code-from-image",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/compile-compcert",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/configure-git-webserver",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/constraints-scheduling",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/count-dataset-tokens",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/crack-7z-hash",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/custom-memory-heap-crash",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/db-wal-recovery",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/distribution-search",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/dna-assembly",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/dna-insert",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/extract-elf",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/extract-moves-from-video",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/feal-differential-cryptanalysis",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/feal-linear-cryptanalysis",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/filter-js-from-html",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/financial-document-processor",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/fix-code-vulnerability",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/fix-git",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/fix-ocaml-gc",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/gcode-to-text",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/git-leak-recovery",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/git-multibranch",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/gpt2-codegolf",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/headless-terminal",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/hf-model-inference",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/install-windows-3.11",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/kv-store-grpc",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/large-scale-text-editing",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/largest-eigenval",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/llm-inference-batching-scheduler",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/log-summary-date-ranges",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/mailman",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/make-doom-for-mips",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/make-mips-interpreter",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/mcmc-sampling-stan",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/merge-diff-arc-agi-task",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/model-extraction-relu-logits",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/modernize-scientific-stack",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/mteb-leaderboard",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/mteb-retrieve",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/multi-source-data-merger",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/nginx-request-logging",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/openssl-selfsigned-cert",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/overfull-hbox",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/password-recovery",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/path-tracing",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/path-tracing-reverse",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/polyglot-c-py",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/polyglot-rust-c",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/portfolio-optimization",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/protein-assembly",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/prove-plus-comm",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/pypi-server",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/pytorch-model-cli",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/pytorch-model-recovery",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/qemu-alpine-ssh",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/qemu-startup",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/query-optimize",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/raman-fitting",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/regex-chess",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/regex-log",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/reshard-c4-data",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/rstan-to-pystan",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/sam-cell-seg",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/sanitize-git-repo",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/schemelike-metacircular-eval",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/sparql-university",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/sqlite-db-truncate",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/sqlite-with-gcov",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/torch-pipeline-parallelism",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/torch-tensor-parallelism",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/train-fasttext",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/tune-mjcf",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/video-processing",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/vulnerable-secret",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/winning-avg-corewars",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/write-compressor",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    }
+  ]
+}

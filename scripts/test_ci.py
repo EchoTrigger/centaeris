@@ -14,6 +14,8 @@ class PortableGateTests(unittest.TestCase):
             calls = []
             ci.run_gate("Rust", lambda args, **kw: calls.append(args) or "", platform=platform)
             self.assertIn(["cargo", "test", "--locked", "-p", "centaeris-core", "query_loop"], calls)
+            self.assertIn([ci.sys.executable, "-B", "-m", "unittest", "discover", "-s",
+                           "scripts/harbor", "-p", "test_runner.py"], calls)
             self.assertIn(["cargo", "test", "--locked", "-p", "centaeris-runtime-sqlite", "--test", "core_runtime"], calls)
             self.assertIn(["cargo", "run", "--locked", "-p", "centaeris-runtime", "--bin", "centaeris-runtime-protocol-docs", "--", "--check"], calls)
             self.assertEqual(calls[-1], ["cargo", "test", "--workspace", "--locked"])

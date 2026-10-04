@@ -66,6 +66,7 @@ packages/ui/vite.config.d.ts
 .DS_Store
 Thumbs.db
 /AGENTS.md
+/jobs/
 /.claude/
 .centaeris
 tmp/

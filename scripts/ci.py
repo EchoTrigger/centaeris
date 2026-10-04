@@ -37,6 +37,8 @@ def run_gate(stage, run=run_command, platform=sys.platform, frontend_tests=False
     npm = "npm.cmd" if platform == "win32" else "npm"
     run([sys.executable, "-B", "scripts/test_product_version.py"])
     if stage in ("Rust", "Source"):
+        run([sys.executable, "-B", "-m", "unittest", "discover", "-s",
+             "scripts/harbor", "-p", "test_runner.py"])
         for args in (
             ["fmt", "--all", "--", "--check"],
             ["check", "--workspace", "--locked"],
