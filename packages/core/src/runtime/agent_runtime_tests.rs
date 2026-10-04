@@ -2856,20 +2856,20 @@ impl AsyncGenerateDriver for TestPromptCompactionAsyncDriver {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum P7PromptCompactionModelBehavior {
+enum PromptCompactionModelBehavior {
     Valid,
     Empty,
     Oversized,
 }
 
 #[derive(Debug)]
-struct P7PromptCompactionModelClient {
-    behavior: P7PromptCompactionModelBehavior,
+struct OnlinePromptCompactionModelClient {
+    behavior: PromptCompactionModelBehavior,
     requests: Mutex<Vec<ModelClientRequest>>,
 }
 
-impl P7PromptCompactionModelClient {
-    fn new(behavior: P7PromptCompactionModelBehavior) -> Self {
+impl OnlinePromptCompactionModelClient {
+    fn new(behavior: PromptCompactionModelBehavior) -> Self {
         Self {
             behavior,
             requests: Mutex::new(vec![]),
@@ -2879,22 +2879,22 @@ impl P7PromptCompactionModelClient {
     fn requests(&self) -> Vec<ModelClientRequest> {
         self.requests
             .lock()
-            .expect("p7 model client requests lock")
+            .expect("prompt compaction model client requests lock")
             .clone()
     }
 
     fn compaction_summary_content(&self, prompt: &str) -> String {
         assert!(prompt.contains("Return only a concise Markdown summary"));
         match self.behavior {
-            P7PromptCompactionModelBehavior::Valid =>
+            PromptCompactionModelBehavior::Valid =>
                 "# Goal\n\nContinue the pre-release compaction work.\n\n## Next Steps\n\nVerify the recent suffix.".to_string(),
-            P7PromptCompactionModelBehavior::Empty => "  ".to_string(),
-            P7PromptCompactionModelBehavior::Oversized => "summary ".repeat(20_000),
+            PromptCompactionModelBehavior::Empty => "  ".to_string(),
+            PromptCompactionModelBehavior::Oversized => "summary ".repeat(20_000),
         }
     }
 }
 
-impl ModelClient for P7PromptCompactionModelClient {
+impl ModelClient for OnlinePromptCompactionModelClient {
     fn generate<'a>(
         &'a self,
         request: &'a ModelClientRequest,
@@ -2902,7 +2902,7 @@ impl ModelClient for P7PromptCompactionModelClient {
         Box::pin(async move {
             self.requests
                 .lock()
-                .expect("p7 model client requests lock")
+                .expect("prompt compaction model client requests lock")
                 .push(request.clone());
             if request.prepared_prompt.tool_choice == ModelToolChoice::None
                 && request.prepared_prompt.messages.len() == 1
@@ -2925,7 +2925,7 @@ impl ModelClient for P7PromptCompactionModelClient {
                         prompt_cache_hit_tokens: None,
                         prompt_cache_miss_tokens: None,
                     },
-                    provider_request_id: Some("p7-provider-request-compact".to_string()),
+                    provider_request_id: Some("compaction-provider-request-compact".to_string()),
                     provider_latency_ms: Some(7),
                     provider_attempts: 1,
                 });
@@ -2933,7 +2933,7 @@ impl ModelClient for P7PromptCompactionModelClient {
 
             Ok(ModelClientResponse {
                 generate_result: GenerateResult {
-                    content: "p7 main response after compaction".to_string(),
+                    content: "main response after compaction".to_string(),
                     tool_calls: vec![],
                     continuation_reasoning_content: None,
                     reasoning_content: None,
@@ -2944,7 +2944,7 @@ impl ModelClient for P7PromptCompactionModelClient {
                     prompt_cache_hit_tokens: None,
                     prompt_cache_miss_tokens: None,
                 },
-                provider_request_id: Some("p7-provider-request-main".to_string()),
+                provider_request_id: Some("compaction-provider-request-main".to_string()),
                 provider_latency_ms: Some(9),
                 provider_attempts: 1,
             })
@@ -4916,7 +4916,7 @@ fn model_prompt_compaction_session(session_id: &str) -> SessionStateSnapshot {
     session
 }
 
-fn p7_large_context_compaction_config() -> AgentRuntimeConfig {
+fn large_context_compaction_config() -> AgentRuntimeConfig {
     AgentRuntimeConfig {
         model_context_tokens: 22_000,
         model_max_output_tokens: 4_000,
@@ -4927,7 +4927,7 @@ fn p7_large_context_compaction_config() -> AgentRuntimeConfig {
     }
 }
 
-fn p7_large_context_session(session_id: &str) -> SessionStateSnapshot {
+fn large_context_session(session_id: &str) -> SessionStateSnapshot {
     let mut session = SessionStateSnapshot::new(session_id.to_string(), 0);
     let large_user_context =
         "old prefix user details about model compaction pressure and chain fidelity. ".repeat(180);
@@ -4936,32 +4936,32 @@ fn p7_large_context_session(session_id: &str) -> SessionStateSnapshot {
             .repeat(180);
     let messages = [
         (
-            "msg-p7-old-user-1",
+            "msg-compaction-old-user-1",
             MessageRole::User,
             format!("alpha {large_user_context}"),
         ),
         (
-            "msg-p7-old-assistant-1",
+            "msg-compaction-old-assistant-1",
             MessageRole::Assistant,
             format!("beta {large_assistant_context}"),
         ),
         (
-            "msg-p7-old-user-2",
+            "msg-compaction-old-user-2",
             MessageRole::User,
             format!("gamma {large_user_context}"),
         ),
         (
-            "msg-p7-old-assistant-2",
+            "msg-compaction-old-assistant-2",
             MessageRole::Assistant,
             format!("delta {large_assistant_context}"),
         ),
         (
-            "msg-p7-recent-user",
+            "msg-compaction-recent-user",
             MessageRole::User,
             "recent user suffix must remain visible after compaction.".to_string(),
         ),
         (
-            "msg-p7-recent-assistant",
+            "msg-compaction-recent-assistant",
             MessageRole::Assistant,
             "recent assistant suffix must remain visible after compaction.".to_string(),
         ),
@@ -5271,7 +5271,7 @@ fn generate_driver_request_projects_explicit_skill_metadata_without_extra_tools(
         explicit_workspace_skill_catalog_config(skill_root.as_path(), skill_root.as_path()),
     )
     .with_cwd(skill_root.clone())
-    .expect("set stage7 workspace root");
+    .expect("set skill catalog workspace root");
     assert_eq!(
         tool_layer.skill_index().entries().len(),
         1,
@@ -6670,7 +6670,7 @@ fn skills_cli_smoke_projects_metadata_and_preserves_bash_output_and_events() {
         explicit_workspace_skill_catalog_config(skill_root.as_path(), skill_root.as_path()),
     )
     .with_cwd(skill_root.clone())
-    .expect("set stage7 workspace root");
+    .expect("set skill catalog workspace root");
     let engine = AgentRuntime::new_for_test_with_tools(store.clone(), tool_layer, config);
 
     let request = engine
@@ -9506,16 +9506,16 @@ fn complete_turn_tool_rejects_call_and_tool_identity_mismatches() {
 }
 
 #[tokio::test]
-async fn p7_model_prompt_compaction_online_loop_commits_summary_and_continues_main_response() {
+async fn model_prompt_compaction_online_loop_commits_summary_and_continues_main_response() {
     let store = AgentRuntimeTestStore::new();
     let session_manager = SessionManager::new(store.clone());
-    let session = p7_large_context_session("chat-p7-model-compact-success");
+    let session = large_context_session("chat-model-compact-success");
     session_manager
         .save_session(&session)
-        .expect("save p7 model compaction session");
+        .expect("save online prompt compaction session");
 
-    let engine = AgentRuntime::new_for_test(store.clone(), p7_large_context_compaction_config());
-    let model_client = P7PromptCompactionModelClient::new(P7PromptCompactionModelBehavior::Valid);
+    let engine = AgentRuntime::new_for_test(store.clone(), large_context_compaction_config());
+    let model_client = OnlinePromptCompactionModelClient::new(PromptCompactionModelBehavior::Valid);
     let config_store = StaticModelSessionConfigStore {
         config: Some(ModelSessionConfig::default()),
     };
@@ -9523,11 +9523,11 @@ async fn p7_model_prompt_compaction_online_loop_commits_summary_and_continues_ma
     let response = engine
         .process_turn_loop_online_with_model_client_async(
             AgentRunRequest {
-                session_id: "chat-p7-model-compact-success".to_string(),
+                session_id: "chat-model-compact-success".to_string(),
                 agent_run_identity: None,
-                initial_turn_id: "turn-p7-model-compact-success".to_string(),
+                initial_turn_id: "turn-model-compact-success".to_string(),
                 initial_input: AgentRunInitialInput::UserMessage(
-                    "Continue the P7 compaction smoke.".to_string(),
+                    "Continue the prompt compaction smoke.".to_string(),
                 ),
                 runtime_scope: PromptCompactionScopeV1::main(),
                 resume_from_turn_id: None,
@@ -9574,7 +9574,7 @@ async fn p7_model_prompt_compaction_online_loop_commits_summary_and_continues_ma
     );
 
     let main_request = &model_requests[1];
-    assert_eq!(main_request.turn_id, "turn-p7-model-compact-success");
+    assert_eq!(main_request.turn_id, "turn-model-compact-success");
     assert!(main_request
         .prepared_prompt
         .messages
@@ -9587,8 +9587,8 @@ async fn p7_model_prompt_compaction_online_loop_commits_summary_and_continues_ma
     }));
 
     let saved_session = session_manager
-        .load_or_create_session("chat-p7-model-compact-success")
-        .expect("load p7 model compaction session");
+        .load_or_create_session("chat-model-compact-success")
+        .expect("load online prompt compaction session");
     let summary_message = saved_session
         .messages
         .iter()
@@ -9600,7 +9600,7 @@ async fn p7_model_prompt_compaction_online_loop_commits_summary_and_continues_ma
     assert!(saved_session
         .messages
         .iter()
-        .any(|message| message.content == "p7 main response after compaction"));
+        .any(|message| message.content == "main response after compaction"));
 
     let stats_json = saved_session
         .metadata
@@ -9628,9 +9628,9 @@ async fn prompt_compaction_uses_context_pressure_and_preserves_large_usage_telem
     let store = AgentRuntimeTestStore::new();
     let session_manager = SessionManager::new(store.clone());
     session_manager
-        .save_session(&p7_large_context_session("chat-prompt-compaction-usage"))
+        .save_session(&large_context_session("chat-prompt-compaction-usage"))
         .expect("save prompt compaction usage session");
-    let engine = AgentRuntime::new_for_test(store.clone(), p7_large_context_compaction_config());
+    let engine = AgentRuntime::new_for_test(store.clone(), large_context_compaction_config());
     let driver = TestPromptCompactionAsyncDriver;
     let mut usage = AgentRunResourceUsageV1 {
         provider_attempts: 40,
@@ -9675,22 +9675,21 @@ async fn prompt_compaction_uses_context_pressure_and_preserves_large_usage_telem
 }
 
 #[tokio::test]
-async fn p7_model_prompt_compaction_online_loop_rejects_empty_or_oversized_markdown() {
+async fn model_prompt_compaction_online_loop_rejects_empty_or_oversized_markdown() {
     for (case_name, behavior) in [
-        ("empty", P7PromptCompactionModelBehavior::Empty),
-        ("oversized", P7PromptCompactionModelBehavior::Oversized),
+        ("empty", PromptCompactionModelBehavior::Empty),
+        ("oversized", PromptCompactionModelBehavior::Oversized),
     ] {
         let store = AgentRuntimeTestStore::new();
         let session_manager = SessionManager::new(store.clone());
-        let session_id = format!("chat-p7-model-compact-fail-{case_name}");
-        let session = p7_large_context_session(session_id.as_str());
+        let session_id = format!("chat-model-compact-fail-{case_name}");
+        let session = large_context_session(session_id.as_str());
         session_manager
             .save_session(&session)
-            .expect("save p7 failure session");
+            .expect("save prompt compaction failure session");
 
-        let engine =
-            AgentRuntime::new_for_test(store.clone(), p7_large_context_compaction_config());
-        let model_client = P7PromptCompactionModelClient::new(behavior);
+        let engine = AgentRuntime::new_for_test(store.clone(), large_context_compaction_config());
+        let model_client = OnlinePromptCompactionModelClient::new(behavior);
         let config_store = StaticModelSessionConfigStore {
             config: Some(ModelSessionConfig::default()),
         };
@@ -9700,7 +9699,7 @@ async fn p7_model_prompt_compaction_online_loop_rejects_empty_or_oversized_markd
                 AgentRunRequest {
                     session_id: session_id.clone(),
                     agent_run_identity: None,
-                    initial_turn_id: format!("turn-p7-model-compact-fail-{case_name}"),
+                    initial_turn_id: format!("turn-model-compact-fail-{case_name}"),
                     initial_input: AgentRunInitialInput::UserMessage(
                         "Continue despite model compaction failure.".to_string(),
                     ),
@@ -9726,7 +9725,7 @@ async fn p7_model_prompt_compaction_online_loop_rejects_empty_or_oversized_markd
         );
         assert_eq!(
             model_requests[1].turn_id,
-            format!("turn-p7-model-compact-fail-{case_name}")
+            format!("turn-model-compact-fail-{case_name}")
         );
         assert!(model_requests[1]
             .prepared_prompt
@@ -9740,7 +9739,7 @@ async fn p7_model_prompt_compaction_online_loop_rejects_empty_or_oversized_markd
 
         let saved_session = session_manager
             .load_or_create_session(session_id.as_str())
-            .expect("load p7 failure session");
+            .expect("load prompt compaction failure session");
         let messages_text = saved_session
             .messages
             .iter()
@@ -9766,11 +9765,11 @@ async fn p7_model_prompt_compaction_online_loop_rejects_empty_or_oversized_markd
         assert!(saved_session
             .messages
             .iter()
-            .any(|message| message.content == "p7 main response after compaction"));
+            .any(|message| message.content == "main response after compaction"));
 
         let events = store
             .list_events(session_id.as_str(), 100, 0)
-            .expect("list p7 failure events");
+            .expect("list prompt compaction failure events");
         assert!(
             events
                 .iter()
