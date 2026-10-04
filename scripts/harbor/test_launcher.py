@@ -38,7 +38,7 @@ class LauncherTests(unittest.TestCase):
             commands.mkdir()
             (commands / "docker.ps1").write_text("'linux'\nexit 0\n")
             (commands / "harbor.ps1").write_text("""
-@{ arguments = @($args); keyInherited = ([Environment]::GetEnvironmentVariable($env:CENTAERIS_BENCH_CREDENTIAL_ENV, 'Process') -eq 'fake-test-key') } |
+@{ arguments = @($args); pythonEncoding = $env:PYTHONIOENCODING; pythonUtf8 = $env:PYTHONUTF8; keyInherited = ([Environment]::GetEnvironmentVariable($env:CENTAERIS_BENCH_CREDENTIAL_ENV, 'Process') -eq 'fake-test-key') } |
     ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:LAUNCH_TEST_ROOT 'invoked.json')
 (@{ arguments = @($args) } | ConvertTo-Json -Compress) |
     Add-Content -LiteralPath (Join-Path $env:LAUNCH_TEST_ROOT 'invocations.jsonl')
@@ -51,6 +51,7 @@ exit 0
 """)
             env = {**os.environ, "PATH": str(commands) + os.pathsep + os.environ["PATH"],
                    "CENTAERIS_RUNTIME_BINARY": str(binary),
+                   "CENTAERIS_BENCH_PROXY_URL": "socks5h://127.0.0.1:10808",
                    "LAUNCH_TEST_ROOT": str(root)}
             control = root / "jobs/control/centaeris-tb21-five-tasks-pass5"
             try:
@@ -69,6 +70,8 @@ exit 0
                 invoked = json.loads((root / "invoked.json").read_text(encoding="utf-8-sig"))
                 self.assertEqual(invoked["arguments"][:2], ["jobs", "resume"])
                 self.assertTrue(invoked["keyInherited"])
+                self.assertEqual(invoked["pythonEncoding"], "utf-8")
+                self.assertEqual(invoked["pythonUtf8"], "1")
                 self.assertFalse((control / "finished.json").exists())
                 (root / "release").touch()
                 deadline = time.monotonic() + 12
@@ -106,6 +109,8 @@ exit 0
             resolved = json.loads((settings.parent / "resolved-full-tasks.json").read_text(encoding="utf-8-sig"))
             self.assertEqual(resolved["agents"][0]["kwargs"]["credential_env"], key_name)
             self.assertNotIn("fake-test-key", json.dumps(resolved))
+            self.assertEqual(resolved["verifier"]["env"]["HTTPS_PROXY"], "socks5h://host.docker.internal:10808")
+            self.assertEqual(resolved["verifier"]["env"]["CURL_HOME"], "/installed-agent/centaeris-network")
 
 
 if __name__ == "__main__":

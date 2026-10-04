@@ -83,6 +83,14 @@ class CentaerisAgent(BaseInstalledAgent):
                 f"{shlex.quote(self.remote)} {shlex.quote(self.remote_logs)}"))
         await environment.upload_file(self.binary, self.remote + "/centaeris-runtime")
         await environment.upload_file(Path(__file__).with_name("runner.py"), self.remote + "/runner.py")
+        network_dir = '/installed-agent/centaeris-network'
+        result = await self.exec_as_root(environment, command=f'mkdir -p {network_dir}')
+        if result.return_code:
+            raise RuntimeError('creating verifier network configuration failed')
+        await environment.upload_file(Path(__file__).with_name('verifier.curlrc'), network_dir + '/.curlrc')
+        result = await self.exec_as_root(environment, command=f'chmod a+rx {network_dir}; chmod a+r {network_dir}/.curlrc')
+        if result.return_code:
+            raise RuntimeError('setting verifier network configuration permissions failed')
         skills = Path(__file__).resolve().parents[2] / "system-skills"
         await environment.upload_dir(skills, self.remote + "/system-skills")
         result = await self.exec_as_root(environment, command=(
@@ -131,10 +139,15 @@ class CentaerisAgent(BaseInstalledAgent):
             if not result.stdout.strip():
                 raise RuntimeError("headless supervisor returned no result")
             payload = json.loads(result.stdout)
+            usage = payload.get('providerUsage', {}).get('totals', {})
+            context.n_input_tokens = usage.get('inputTokens')
+            context.n_output_tokens = usage.get('outputTokens')
+            context.n_cache_tokens = usage.get('promptCacheHitTokens')
             context.metadata = {"runtimeBuildId": self._version,
                                 "modelBudget": payload.get("modelBudget"),
                                 "sessionId": payload.get("sessionId"),
                                 "agentRunId": payload.get("agentRunId")}
+            context.metadata['providerUsage'] = payload.get('providerUsage')
             if result.return_code or payload["status"] != "succeeded":
                 raise RuntimeError("Centaeris run failed: " + str(payload.get("error", payload["status"])))
         except BaseException as primary:

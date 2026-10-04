@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from runner import connect, run_trial
+from runner import connect, run_trial, collect_provider_usage
 
 
 @unittest.skipUnless(os.name == "posix" and os.environ.get("CENTAERIS_RUNTIME_BINARY"),
@@ -16,6 +16,8 @@ class NativeTrialTests(unittest.IsolatedAsyncioTestCase):
     async def test_budget_and_background_service_survive_completed_agent(self):
         requests = []
         proxy_domains = []
+        child_started = asyncio.Event()
+        child_marker = 'CENTAERIS_CHILD_BUDGET_TEST'
         with tempfile.TemporaryDirectory(prefix="cb-") as directory:
             root = Path(directory)
             fifo = root / "service-control"
@@ -28,6 +30,8 @@ class NativeTrialTests(unittest.IsolatedAsyncioTestCase):
                                   if line.lower().startswith(b"content-length:"))
                     request = json.loads(await reader.readexactly(length))
                     requests.append(request)
+                    is_child = any(child_marker in str(message.get('content', ''))
+                                   for message in request['messages'] if message.get('role') == 'user')
                     if len(requests) == 1:
                         delta = {"tool_calls": [{"index": 0, "id": "service-start", "type": "function",
                                  "function": {"name": "process_start", "arguments": json.dumps({
@@ -35,13 +39,22 @@ class NativeTrialTests(unittest.IsolatedAsyncioTestCase):
                                                                    "service", str(fifo)],
                                      "timeout_ms": 30000})}}]}
                         finish = "tool_calls"
+                        delta['tool_calls'].append({'index': 1, 'id': 'child-budget', 'type': 'function',
+                            'function': {'name': 'agent', 'arguments': json.dumps({
+                                'prompt': child_marker + ': Reply ready.',
+                                'description': 'Verify child model budgets'})}})
                     else:
+                        if is_child:
+                            child_started.set()
+                        else:
+                            await asyncio.wait_for(child_started.wait(), 12)
                         delta, finish = {"content": "Service is ready for verification."}, "stop"
                     frames = [{"id": "mock", "choices": [{"index": 0, "delta": delta,
                                "finish_reason": None}]},
                               {"id": "mock", "choices": [{"index": 0, "delta": {},
                                "finish_reason": finish}], "usage": {
-                                   "prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20}}]
+                                   "prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20,
+                                   "prompt_cache_hit_tokens": 6, "prompt_cache_miss_tokens": 4}}]
                     body = "".join("data: " + json.dumps(frame) + "\n\n" for frame in frames)
                     body += "data: [DONE]\n\n"
                     writer.write(("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
@@ -118,7 +131,17 @@ class NativeTrialTests(unittest.IsolatedAsyncioTestCase):
                                                  str(root), "mock", "custom.benchmark-mock", "max", 25,
                                                  api_key="local-mock-only")
                         self.assertEqual(result["status"], "succeeded", result)
+                        usage = collect_provider_usage(root, result['sessionId'], result['agentRunId'])
+                        self.assertEqual(usage['nRequests'], len(requests))
+                        self.assertEqual(usage['totals']['inputTokens'], 10 * len(requests))
+                        self.assertEqual(usage['totals']['outputTokens'], 10 * len(requests))
+                        self.assertEqual(usage['totals']['promptCacheHitRate'], 0.6)
+                        self.assertEqual(len(usage['subagents']), 1)
+                        self.assertEqual(usage['subagents'][0]['nRequests'], 1)
+                        self.assertEqual(usage['mainAgent']['nRequests'], len(requests) - 1)
+                        self.assertTrue(child_started.is_set(), 'child must reach the model provider')
                         self.assertGreaterEqual(len(requests), 2)
+                        self.assertIn('agent', {tool['function']['name'] for tool in requests[0]['tools']})
                         self.assertEqual(proxy_domains, ["benchmark-model.invalid"] * len(requests))
                         for request in requests:
                             self.assertEqual(request["max_tokens"], 64000)
