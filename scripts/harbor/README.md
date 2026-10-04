@@ -145,6 +145,23 @@ and exceptions. Agent logs include `result.json`, the persisted conversation,
 raw Runtime notifications in `events.jsonl`, Runtime logs, and a SHA-256 Runtime
 build identity in Harbor agent metadata. Native Runtime logs are not ATIF format.
 Token/cost fields are left unknown unless provided explicitly; they are not zero.
+The supervisor exports the admitted run's committed `provider_usage` records
+before container deletion. Token totals require the field in every request;
+cache hit rate is summed hit tokens divided by summed hit plus miss tokens,
+and remains unknown if any request omits either cache field. The export separates
+`mainAgent`, each child session in `subagents`, and the combined `totals`. These
+are accumulated usage, not a shared context limit: each agent prepares its own
+prompt under the process-scoped per-request context and output limits. Subagent
+tools remain available. Harbor receives
+the exported input, output, and cache-hit token totals. Costs remain unknown.
+
+The Windows launcher sets process-scoped Python UTF-8 output for redirected
+Harbor reports and restores the caller's settings. Resolved local verifier
+configuration forwards the host proxy using Docker's host address. Only verifier
+curl downloads use a bounded retry configuration (five retries, 120-second
+retry window); model requests are not retried by this facility. Task tests and
+their pinned upstream content are unchanged. Failed verifier dependencies must
+still be reported separately from model solution failures.
 
 For this pilot, with exactly five attempts per task, pass@5 is the fraction of
 tasks with at least one verifier reward of 1. Report infrastructure errors and

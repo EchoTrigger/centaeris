@@ -25,6 +25,48 @@ def write_json(path: Path, value: dict) -> None:
     temporary.replace(path)
 
 
+def collect_provider_usage(profile: Path, session_id: str, agent_run_id: str) -> dict:
+    """Export only Core's committed usage records, never configuration or secrets."""
+    parent_paths = list((profile / 'sessions').rglob(session_id + '.jsonl'))
+    if len(parent_paths) != 1:
+        raise ValueError('expected exactly one authoritative session log')
+    paths = parent_paths + list((profile / 'sessions').rglob('session-agent-*.jsonl'))
+    fields = ('inputTokens', 'outputTokens', 'totalTokens',
+              'promptCacheHitTokens', 'promptCacheMissTokens')
+    turns = {}
+    for path in paths:
+        for line in path.read_text(encoding='utf-8').splitlines():
+            event = json.loads(line)
+            if event.get('type') != 'provider_usage':
+                continue
+            if path in parent_paths and event.get('agentRunId') != agent_run_id:
+                continue
+            if event.get('schemaVersion') != 'session.event.v1' or event.get('sessionId') != path.stem:
+                raise ValueError('unsupported provider usage record')
+            turn = (event['sessionId'], event['turnId'])
+            if turn in turns:
+                raise ValueError('duplicate committed provider usage turn')
+            value = {field: event['payload'].get(field) for field in fields}
+            if any(v is not None and (type(v) is not int or v < 0) for v in value.values()):
+                raise ValueError('invalid provider token count')
+            turns[turn] = value
+    def summarize(rows):
+        totals = {field: (sum(row[field] for row in rows)
+                         if rows and all(row[field] is not None for row in rows) else None)
+                  for field in fields}
+        hit, miss = totals['promptCacheHitTokens'], totals['promptCacheMissTokens']
+        totals['promptCacheHitRate'] = hit / (hit + miss) if hit is not None and miss is not None and hit + miss else None
+        return {'nRequests': len(rows), 'totals': totals}
+
+    def session_summary(identity):
+        return {'sessionId': identity, **summarize([value for (session, _), value in turns.items() if session == identity])}
+
+    return {**summarize(list(turns.values())),
+            'mainAgent': session_summary(session_id),
+            'subagents': [session_summary(identity) for identity in sorted({path.stem for path in paths} - {session_id})],
+            'turns': [{'sessionId': session, 'turnId': turn, **value} for (session, turn), value in turns.items()]}
+
+
 class Rpc:
     def __init__(self, reader, writer, events):
         self.reader, self.writer, self.events = reader, writer, events
@@ -178,6 +220,8 @@ async def supervise(args):
                                      api_key=os.environ[args.credential_env])
             result["modelBudget"] = {"contextTokens": args.context_tokens,
                                      "maxOutputTokens": args.output_tokens}
+            if result.get('sessionId'):
+                result['providerUsage'] = collect_provider_usage(profile, result['sessionId'], result['agentRunId'])
             write_json(root / "result.json", result)
             if result["status"] == "succeeded":
                 # Keep the initialized connection and Runtime-owned task services alive

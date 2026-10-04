@@ -32,7 +32,9 @@ class Environment:
         if " wait " in command:
             return SimpleNamespace(return_code=0 if self.status == "succeeded" else 1,
                                    stdout=json.dumps({"status": self.status, "sessionId": "session",
-                                                      "agentRunId": "run", "modelBudget": {
+                                                      "agentRunId": "run", 'providerUsage': {'totals': {
+                                                          'inputTokens': 120, 'outputTokens': 30,
+                                                          'promptCacheHitTokens': 90}}, "modelBudget": {
                                                           "contextTokens": 500000, "maxOutputTokens": 64000}}))
         return SimpleNamespace(return_code=0, stdout="", stderr="")
 
@@ -85,6 +87,9 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             agent = CentaerisAgent(logs_dir=Path(directory), runtime_binary=str(binary))
             environment = Environment()
             await agent.install(environment)
+            network = next(data for target, data in environment.uploads if target.endswith('/.curlrc'))
+            self.assertIn(b'retry-all-errors', network)
+            self.assertIn(b'retry-max-time = 120', network)
             command, options = next(call for call in environment.calls if "mkdir -p" in call[0])
             self.assertEqual(options.get("user"), "root")
             self.assertTrue(any("chown -R 1000" in command for command, _ in environment.calls))
@@ -101,6 +106,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(options["env"]["TEST_MODEL_KEY"], "fake-test-key")
             self.assertIn("--context-tokens 500000 --output-tokens 64000", command)
             self.assertEqual(context.metadata["agentRunId"], "run")
+            self.assertEqual((context.n_input_tokens, context.n_output_tokens, context.n_cache_tokens), (120, 30, 90))
             self.assertEqual(environment.uploads[0][1], b"Solve task")
 
     async def test_failed_result_is_recorded_and_cancelled(self):

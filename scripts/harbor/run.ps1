@@ -2,6 +2,8 @@ param([switch]$CheckOnly, [switch]$Resume, [switch]$Foreground, [switch]$FollowW
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $previousPythonPath = $env:PYTHONPATH
+$previousPythonEncoding = $env:PYTHONIOENCODING
+$previousPythonUtf8 = $env:PYTHONUTF8
 if (-not $SettingsPath) { $SettingsPath = $env:CENTAERIS_BENCH_SETTINGS }
 if (-not $SettingsPath) { $SettingsPath = [Environment]::GetEnvironmentVariable('CENTAERIS_BENCH_SETTINGS', 'User') }
 if (-not $SettingsPath) { $SettingsPath = Join-Path $env:LOCALAPPDATA 'Centaeris/benchmarks/settings.json' }
@@ -16,6 +18,8 @@ $previousCredentialEnv = $env:CENTAERIS_BENCH_CREDENTIAL_ENV
 $previousBinary = $env:CENTAERIS_RUNTIME_BINARY
 Push-Location $repoRoot
 try {
+    $env:PYTHONIOENCODING = 'utf-8'
+    $env:PYTHONUTF8 = '1'
     if (-not $env:CENTAERIS_RUNTIME_BINARY) {
         $env:CENTAERIS_RUNTIME_BINARY = Join-Path $repoRoot 'target/harbor-bookworm/debug/centaeris-runtime'
     }
@@ -35,6 +39,18 @@ try {
     if ((Test-Path -LiteralPath (Join-Path $jobPath 'config.json'))) { $Resume = $true }
     $settingsDirectory = Split-Path (Resolve-Path -LiteralPath $SettingsPath).Path -Parent
     $resolvedConfigs = @{}
+    $verifierEnv = @{ CURL_HOME = '/installed-agent/centaeris-network'; UV_HTTP_RETRIES = '5'; NO_PROXY = '127.0.0.1,localhost,::1' }
+    foreach ($proxyName in @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY')) {
+        $proxyValue = $env:CENTAERIS_BENCH_PROXY_URL
+        if (-not $proxyValue) { $proxyValue = [Environment]::GetEnvironmentVariable($proxyName, 'Process') }
+        if ($proxyValue) {
+            $proxyValue = $proxyValue -replace '(?<=://)(127\.0\.0\.1|localhost|\[::1\])(?=[:/]|$)', 'host.docker.internal'
+            $verifierEnv[$proxyName] = $proxyValue
+            $verifierEnv[$proxyName.ToLowerInvariant()] = $proxyValue
+        }
+    }
+    if ($env:NO_PROXY) { $verifierEnv.NO_PROXY += ',' + $env:NO_PROXY }
+    $verifierEnv['no_proxy'] = $verifierEnv.NO_PROXY
     foreach ($name in @('five-tasks', 'full-tasks')) {
         $config = Get-Content -LiteralPath (Join-Path $adapterPath "$name.json") -Raw | ConvertFrom-Json -AsHashtable
         $config.agents[0].model_name = $settings.model
@@ -43,6 +59,8 @@ try {
             reasoning_effort = $settings.reasoningEffort
             context_tokens = $settings.contextTokens; max_output_tokens = $settings.maxOutputTokens
         }
+        if (-not $config.verifier) { $config.verifier = @{} }
+        $config.verifier.env = $verifierEnv
         $resolvedConfigs[$name] = Join-Path $settingsDirectory "resolved-$name.json"
         $config | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath $resolvedConfigs[$name]
     }
@@ -119,6 +137,8 @@ try {
     if ($harborExit -ne 0) { throw "Harbor exited with code $harborExit" }
 }
 finally {
+    $env:PYTHONIOENCODING = $previousPythonEncoding
+    $env:PYTHONUTF8 = $previousPythonUtf8
     $env:PYTHONPATH = $previousPythonPath
     [Environment]::SetEnvironmentVariable($credentialEnv, $previousKey, 'Process')
     $env:CENTAERIS_BENCH_CREDENTIAL_ENV = $previousCredentialEnv

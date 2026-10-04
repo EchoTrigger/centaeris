@@ -4,9 +4,14 @@ import io
 import json
 import tempfile
 import unittest
+import os
+import shutil
+import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from runner import Rpc, run_trial, trial_profile
+from runner import Rpc, run_trial, trial_profile, collect_provider_usage
 
 
 class FakeRpc:
@@ -31,6 +36,73 @@ class FakeRpc:
 
 
 class TrialTests(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipUnless(shutil.which('curl'), 'requires curl')
+    def test_verifier_download_recovers_from_partial_transfer(self):
+        requests = []
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                requests.append(self.path)
+                self.send_response(200)
+                self.send_header('Content-Length', '10' if len(requests) == 1 else '2')
+                self.end_headers()
+                self.wfile.write(b'ok')
+                self.close_connection = True
+            def log_message(self, *args):
+                pass
+        with tempfile.TemporaryDirectory() as directory:
+            shutil.copyfile(Path(__file__).with_name('verifier.curlrc'), Path(directory) / '.curlrc')
+            server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            try:
+                output = Path(directory) / 'download'
+                result = subprocess.run([shutil.which('curl'), '--noproxy', '*', '-sSf',
+                                         '-o', str(output), f'http://127.0.0.1:{server.server_port}/asset'],
+                                        env={**os.environ, 'CURL_HOME': directory},
+                                        capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(output.read_bytes(), b'ok')
+                self.assertEqual(len(requests), 2)
+            finally:
+                server.shutdown()
+                thread.join()
+                server.server_close()
+
+    def test_usage_export_sums_authoritative_turns_and_preserves_missing_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sessions = root / 'sessions/day'
+            sessions.mkdir(parents=True)
+            records = [{'schemaVersion': 'session.event.v1', 'type': 'provider_usage',
+                        'sessionId': 'session-test', 'agentRunId': 'run-test', 'turnId': turn,
+                        'payload': {'inputTokens': 100, 'outputTokens': 20,
+                                    'promptCacheHitTokens': hit, 'promptCacheMissTokens': miss}}
+                       for turn, hit, miss in [('first', 80, 20), ('second', 80, 20)]]
+            records.append({**records[0], 'agentRunId': 'other-run', 'turnId': 'other'})
+            (sessions / 'session-test.jsonl').write_text('\n'.join(map(json.dumps, records)), encoding='utf-8')
+            result = collect_provider_usage(root, 'session-test', 'run-test')
+            self.assertEqual(result['totals']['inputTokens'], 200)
+            self.assertEqual(result['totals']['outputTokens'], 40)
+            self.assertEqual(result['totals']['promptCacheHitRate'], 0.8)
+            self.assertIsNone(result['totals']['totalTokens'])
+            self.assertEqual(result['nRequests'], 2)
+            child = {**records[0], 'sessionId': 'session-agent-test', 'agentRunId': 'subagent-test'}
+            (sessions / 'session-agent-test.jsonl').write_text(json.dumps(child), encoding='utf-8')
+            combined = collect_provider_usage(root, 'session-test', 'run-test')
+            self.assertEqual(combined['nRequests'], 3)
+            self.assertEqual(combined['totals']['inputTokens'], 300)
+            self.assertEqual(combined['mainAgent']['totals']['inputTokens'], 200)
+            self.assertEqual(combined['mainAgent']['nRequests'], 2)
+            self.assertEqual(combined['subagents'][0]['sessionId'], 'session-agent-test')
+            self.assertEqual(combined['subagents'][0]['totals']['inputTokens'], 100)
+            self.assertEqual(combined['subagents'][0]['nRequests'], 1)
+            records[1]['payload']['promptCacheHitTokens'] = None
+            (sessions / 'session-test.jsonl').write_text('\n'.join(map(json.dumps, records)), encoding='utf-8')
+            incomplete = collect_provider_usage(root, 'session-test', 'run-test')
+            self.assertIsNone(incomplete['totals']['promptCacheHitRate'])
+            self.assertIsNone(incomplete['mainAgent']['totals']['promptCacheHitRate'])
+            self.assertEqual(incomplete['subagents'][0]['totals']['promptCacheHitRate'], 0.8)
+
     async def test_credential_mutation_is_separate_and_not_written_to_result(self):
         rpc = FakeRpc(["succeeded"])
         result = await run_trial(rpc, "task", "/app", "mock", "custom.test", None,
