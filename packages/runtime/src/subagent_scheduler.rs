@@ -236,7 +236,7 @@ async fn run_parent_batch(
             cwd: cwd.clone(),
             execution_owner: worker_id.clone(),
             bash_path: runtime_config.bash_path.as_deref().map(PathBuf::from),
-            runtime_config: subagent_engine_config(&runtime_config, None),
+            runtime_config: subagent_engine_config(&runtime_config, None)?,
             native_plugin_activation: None,
             execution_cancellation_probe: None,
             file_mutation_commit_port: None,
@@ -495,7 +495,7 @@ impl ElectronSubagentRunner {
         )?;
         let native_plugin_activation = mcp::connect_enabled_plugins().await?;
         let mut engine_config =
-            subagent_engine_config(&runtime_config, Some(binding.allowed_tools.clone()));
+            subagent_engine_config(&runtime_config, Some(binding.allowed_tools.clone()))?;
         engine_config.plugin_activation_digest = Some(native_plugin_activation.digest.clone());
         let runtime =
             agent_runtime::build_agent_runtime(agent_runtime::AgentRuntimeBuildRequest {
@@ -598,7 +598,7 @@ impl ElectronSubagentRunner {
 fn subagent_engine_config(
     runtime_config: &runtime_config::AgentRuntimeConfigResponse,
     allowed_tools: Option<Vec<String>>,
-) -> AgentRuntimeConfig {
+) -> Result<AgentRuntimeConfig, String> {
     let mut engine_config = AgentRuntimeConfig::default();
     engine_config.auto_continue_after_resume_wait = runtime_config.auto_continue_after_resume_wait;
     engine_config.model_context_tokens = runtime_config
@@ -607,11 +607,18 @@ fn subagent_engine_config(
     engine_config.model_max_output_tokens = runtime_config
         .model_max_output_tokens
         .unwrap_or(engine_config.model_max_output_tokens);
+    (
+        engine_config.model_context_tokens,
+        engine_config.model_max_output_tokens,
+    ) = crate::model_budget::from_env(
+        engine_config.model_context_tokens,
+        engine_config.model_max_output_tokens,
+    )?;
     engine_config.tool_parallelism = runtime_config
         .tool_parallelism
         .unwrap_or(engine_config.tool_parallelism);
     engine_config.allowed_tools = allowed_tools;
-    engine_config
+    Ok(engine_config)
 }
 
 #[cfg(test)]
@@ -620,6 +627,48 @@ mod tests {
     use centaeris_core::session::reliability::{
         CancelRuntimeJobRequest, ScheduleRuntimeJobRequest,
     };
+
+    #[test]
+    fn subagent_prompt_preparation_uses_process_scoped_model_budgets() {
+        let _guard = message_log::test_env_mutex()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root =
+            std::env::temp_dir().join(format!("centaeris-subagent-budget-{}", std::process::id()));
+        let previous = [
+            (
+                "CENTAERIS_DESKTOP_DATA_DIR",
+                root.to_string_lossy().to_string(),
+            ),
+            (
+                "CENTAERIS_MODEL_CONTEXT_BUDGET_TOKENS",
+                "500000".to_string(),
+            ),
+            ("CENTAERIS_MODEL_OUTPUT_BUDGET_TOKENS", "64000".to_string()),
+        ]
+        .into_iter()
+        .map(|(name, value)| {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            (name, previous)
+        })
+        .collect::<Vec<_>>();
+        let result = (|| -> Result<(u32, u32), String> {
+            let mut config = runtime_config::get(runtime_config::AgentRuntimeConfigGetRequest {})?;
+            config.model_context_tokens = Some(1_000_000);
+            config.model_max_output_tokens = Some(384_000);
+            let engine = subagent_engine_config(&config, Some(vec!["process_start".to_string()]))?;
+            Ok((engine.model_context_tokens, engine.model_max_output_tokens))
+        })();
+        for (name, value) in previous {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(result.unwrap(), (500_000, 64_000));
+    }
 
     #[test]
     fn service_stop_and_restart_reconciliation_do_not_reclaim_stopped_jobs_or_spoof_user_cause() {
