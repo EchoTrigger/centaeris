@@ -55,6 +55,10 @@ behavior checks.
 Use [FrontendManualAcceptance.md](FrontendManualAcceptance.md) for the retained
 Desktop interaction and appearance checks.
 
+The portable Rust gate also runs the headless benchmark client's standard-library
+behavior tests without external model requests. The Linux mock-model acceptance
+and Harbor adapter checks are described in [the adapter guide](../../scripts/harbor/README.md).
+
 Changes to Runtime-owned process sessions also run the native, isolated-profile
 transport acceptance after `cargo build --locked -p centaeris-runtime --bin
 centaeris-runtime`: `node scripts/test-process-sessions.mjs`. It covers two-client

@@ -1,0 +1,46 @@
+{
+  "job_name": "centaeris-tb21-five-tasks-pass5",
+  "jobs_dir": "jobs",
+  "n_attempts": 5,
+  "n_concurrent_trials": 2,
+  "timeout_multiplier": 1.0,
+  "retry": {
+    "max_retries": 0
+  },
+  "environment": {
+    "type": "docker",
+    "delete": true
+  },
+  "agents": [
+    {
+      "import_path": "centaeris_agent:CentaerisAgent"
+    }
+  ],
+  "tasks": [
+    {
+      "path": "tasks/regex-log",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/log-summary-date-ranges",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/openssl-selfsigned-cert",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/kv-store-grpc",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    },
+    {
+      "path": "tasks/write-compressor",
+      "git_url": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+      "git_commit_id": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    }
+  ]
+}
