@@ -5609,6 +5609,205 @@ fn query_loop_image_tool_continuation_keeps_required_observation_after_tool_resu
 }
 
 #[test]
+fn query_loop_unavailable_attached_image_keeps_request_available_but_rejects_invalid_refs() {
+    struct UnavailableImage;
+    impl crate::model::prepared_prompt::ModelInputImageResolverPort for UnavailableImage {
+        fn resolve(&self, _: &str, _: &str) -> Result<Vec<u8>, String> {
+            Err("attachment temporarily unavailable".to_string())
+        }
+    }
+    let store = AgentRuntimeTestStore::new();
+    let manager = SessionManager::new(store.clone());
+    let mut session = SessionStateSnapshot::new("chat-unavailable-image".to_string(), 0);
+    let handler = MessageHandler::new(MessageHandlerConfig {
+        max_message_chars: 10_000,
+    });
+    let mut metadata = JsonMap::new();
+    metadata.insert(
+        MESSAGE_SEMANTIC_KIND_META_KEY.to_string(),
+        MESSAGE_SEMANTIC_USER_REQUEST.to_string(),
+    );
+    metadata.insert(crate::runtime::keys::metadata::MODEL_INPUT_IMAGES.to_string(), json!([{
+        "inputRef": "attachment:test", "contentType": "image/png", "placeholder": "[Attached image]"
+    }]).to_string());
+    handler.push_user_message(&mut session, "Describe [Attached image]", metadata);
+    manager
+        .save_session(&session)
+        .expect("save attachment history");
+    let engine = AgentRuntime::new_for_test(
+        store.clone(),
+        AgentRuntimeConfig {
+            enable_prompt_compaction: false,
+            ..Default::default()
+        },
+    )
+    .with_model_input_image_resolver(Arc::new(UnavailableImage));
+    let build = || {
+        engine.build_generate_driver_request_with_runtime_scope(
+            "chat-unavailable-image",
+            "turn-attachment",
+            &TurnInput::UserMessage("Continue describing the attachment".to_string()),
+            1,
+            PromptCompactionScopeV1::main(),
+        )
+    };
+    let request = build().expect("unavailable attachment does not abort request");
+    assert!(request.prepared_prompt.input_images.is_empty());
+    assert!(request
+        .prepared_prompt
+        .messages
+        .iter()
+        .any(
+            |message| message.content.contains("Image observation unavailable")
+                && message
+                    .content
+                    .contains("attachment temporarily unavailable")
+        ));
+    let without_resolver = AgentRuntime::new_for_test(
+        store,
+        AgentRuntimeConfig {
+            enable_prompt_compaction: false,
+            ..Default::default()
+        },
+    );
+    let no_resolver_request = without_resolver
+        .build_generate_driver_request_with_runtime_scope(
+            "chat-unavailable-image",
+            "turn-no-image-resolver",
+            &TurnInput::UserMessage("Continue describing the attachment".to_string()),
+            1,
+            PromptCompactionScopeV1::main(),
+        )
+        .expect("missing image facility does not abort request");
+    assert!(no_resolver_request
+        .prepared_prompt
+        .messages
+        .iter()
+        .any(|message| message
+            .content
+            .contains("model_input_image_resolver_missing")));
+    session
+        .messages
+        .last_mut()
+        .expect("user message")
+        .metadata
+        .insert(
+            crate::runtime::keys::metadata::MODEL_INPUT_IMAGES.to_string(),
+            json!([{
+                "inputRef": "", "contentType": "image/png", "placeholder": "[Attached image]"
+            }])
+            .to_string(),
+        );
+    manager
+        .save_session(&session)
+        .expect("save invalid reference fixture");
+    assert!(build()
+        .expect_err("invalid wire reference must fail")
+        .contains("model_input_image_source_ref_invalid"));
+}
+
+#[test]
+fn query_loop_deleted_image_history_keeps_continuation_available() {
+    assert_unavailable_image_history(|path| {
+        std::fs::remove_file(path).expect("delete previously read image");
+    });
+}
+
+#[test]
+fn query_loop_changed_image_history_does_not_send_different_pixels() {
+    assert_unavailable_image_history(|path| {
+        image::DynamicImage::new_rgb8(4, 5)
+            .save_with_format(path, image::ImageFormat::Png)
+            .expect("replace previously read image");
+    });
+}
+
+fn assert_unavailable_image_history(change: impl FnOnce(&std::path::Path)) {
+    let workspace_root = temp_dir_path("deleted_image_prepared_prompt_workspace");
+    std::fs::create_dir_all(workspace_root.as_path()).expect("create workspace root");
+    image::DynamicImage::new_rgb8(2, 3)
+        .save_with_format(workspace_root.join("page.png"), image::ImageFormat::Png)
+        .expect("write image fixture");
+    let tool_layer = ToolLayer::new()
+        .with_cwd(workspace_root.clone())
+        .expect("bind workspace root");
+    let report = tool_layer.execute(ToolInvocationRequest {
+        tool_call_id: "call-read-image".to_string(),
+        tool_name: "read".to_string(),
+        args_json: json!({"path": "page.png"}).to_string(),
+    });
+    assert_eq!(report.status, "ok", "report={report:#?}");
+    assert_eq!(report.details["contentType"], "image/png");
+    assert_eq!(report.details["widthPx"], 2);
+    assert_eq!(report.details["heightPx"], 3);
+    assert!(!report.details.to_string().contains("dataBase64"));
+
+    let store = AgentRuntimeTestStore::new();
+    let session_manager = SessionManager::new(store.clone());
+    let mut session = SessionStateSnapshot::new("chat-read-image".to_string(), 0);
+    let handler = MessageHandler::new(MessageHandlerConfig {
+        max_message_chars: 10_000,
+    });
+    let mut user_metadata = JsonMap::new();
+    user_metadata.insert(
+        MESSAGE_SEMANTIC_KIND_META_KEY.to_string(),
+        MESSAGE_SEMANTIC_USER_REQUEST.to_string(),
+    );
+    handler.push_user_message(&mut session, "Read and describe page.png.", user_metadata);
+    handler.push_model_assistant_message(
+        &mut session,
+        "",
+        JsonMap::new(),
+        ModelMessageSemanticsV1::Assistant {
+            reasoning_content: None,
+            tool_calls: vec![ModelToolCallStateV1 {
+                id: "call-read-image".to_string(),
+                name: "read".to_string(),
+                args_json: json!({"path": "page.png"}).to_string(),
+            }],
+        },
+    );
+    write_tool_results_to_context(&handler, &mut session, std::slice::from_ref(&report))
+        .expect("write image tool result");
+    session_manager
+        .save_session(&session)
+        .expect("save image session");
+
+    let config = AgentRuntimeConfig {
+        enable_prompt_compaction: false,
+        ..Default::default()
+    };
+    let engine = AgentRuntime::new_for_test_with_tools(store, tool_layer, config);
+    change(&workspace_root.join("page.png"));
+    let request = engine
+        .build_generate_driver_request_with_runtime_scope(
+            "chat-read-image",
+            "turn-after-image",
+            &TurnInput::ToolContinuation {
+                objective: "Read and describe page.png.".to_string(),
+            },
+            1,
+            PromptCompactionScopeV1::main(),
+        )
+        .expect("build request with image observation");
+
+    assert!(request.prepared_prompt.input_images.is_empty());
+    assert!(request
+        .prepared_prompt
+        .messages
+        .iter()
+        .any(
+            |message| message.content.contains("Image observation unavailable")
+                && message.content.contains("page.png")
+        ));
+    assert!(!request
+        .observations
+        .iter()
+        .any(|observation| matches!(observation, ModelObservationV1::InputImage { .. })));
+    let _ = std::fs::remove_dir_all(workspace_root);
+}
+
+#[test]
 fn agents_file_is_ephemeral_user_context_and_part_of_cache_identity() {
     let workspace_root = temp_dir_path("agents_user_context_workspace");
     std::fs::create_dir_all(workspace_root.as_path()).expect("create workspace root");

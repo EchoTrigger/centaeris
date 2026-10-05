@@ -6,6 +6,11 @@ type ResolvedModelInputImages = (
     Vec<ModelInputImageV1>,
     Vec<ModelInputImageObservationV1>,
 );
+enum ResolvedImageSource {
+    Available(String, String, Vec<u8>),
+    Unavailable(String),
+}
+
 pub(super) struct PreparedRequestInputs {
     pub agent_run_id: String,
     pub input_ids: Vec<String>,
@@ -577,7 +582,7 @@ impl<
     fn resolve_model_input_images(
         &self,
         messages: &[ChatMessage],
-        model_messages: Vec<ModelMessageV1>,
+        mut model_messages: Vec<ModelMessageV1>,
     ) -> Result<ResolvedModelInputImages, String> {
         let mut images = Vec::new();
         let mut observations = Vec::new();
@@ -595,7 +600,20 @@ impl<
                         placeholder: reference.placeholder,
                     };
                     let (content_type, placeholder, bytes) =
-                        self.resolve_model_input_image_source(&source)?;
+                        match self.resolve_model_input_image_source(&source)? {
+                            ResolvedImageSource::Available(content_type, placeholder, bytes) => {
+                                (content_type, placeholder, bytes)
+                            }
+                            ResolvedImageSource::Unavailable(notice) => {
+                                if let Some(projected) = model_messages
+                                    .iter_mut()
+                                    .find(|projected| projected.message_id == message.message_id)
+                                {
+                                    projected.content.push_str(&format!("\n{notice}"));
+                                }
+                                continue;
+                            }
+                        };
                     images.push(ModelInputImageV1 {
                         message_id: message.message_id.clone(),
                         content_type,
@@ -621,7 +639,20 @@ impl<
                 .map_err(|error| format!("decode model input image sources failed: {error}"))?;
             for source in sources {
                 let (content_type, placeholder, bytes) =
-                    self.resolve_model_input_image_source(&source)?;
+                    match self.resolve_model_input_image_source(&source)? {
+                        ResolvedImageSource::Available(content_type, placeholder, bytes) => {
+                            (content_type, placeholder, bytes)
+                        }
+                        ResolvedImageSource::Unavailable(notice) => {
+                            if let Some(projected) = model_messages
+                                .iter_mut()
+                                .find(|projected| projected.message_id == message.message_id)
+                            {
+                                projected.content.push_str(&format!("\n{notice}"));
+                            }
+                            continue;
+                        }
+                    };
                 images.push(ModelInputImageV1 {
                     message_id: message.message_id.clone(),
                     content_type,
@@ -665,7 +696,15 @@ impl<
             );
             for source in pending_tool_sources.drain(..) {
                 let (content_type, placeholder, bytes) =
-                    self.resolve_model_input_image_source(&source)?;
+                    match self.resolve_model_input_image_source(&source)? {
+                        ResolvedImageSource::Available(content_type, placeholder, bytes) => {
+                            (content_type, placeholder, bytes)
+                        }
+                        ResolvedImageSource::Unavailable(notice) => {
+                            content.push_str(&format!("{notice}\n"));
+                            continue;
+                        }
+                    };
                 let label = match &source {
                     ModelInputImageSourceRefV1::InputRef { .. } => "attached input",
                     ModelInputImageSourceRefV1::ExecutionFile { image } => image.path.as_str(),
@@ -697,31 +736,46 @@ impl<
     fn resolve_model_input_image_source(
         &self,
         source: &ModelInputImageSourceRefV1,
-    ) -> Result<(String, String, Vec<u8>), String> {
-        match source {
+    ) -> Result<ResolvedImageSource, String> {
+        // Wire validity is separate from the availability of an external image.
+        // Historical observations must not make the AgentRun depend on a mutable file.
+        source.validate()?;
+        let (content_type, placeholder, label, resolved) = match source {
             ModelInputImageSourceRefV1::InputRef {
                 input_ref,
                 content_type,
                 placeholder,
             } => {
-                let resolver = self
-                    .model_input_image_resolver
-                    .as_ref()
-                    .ok_or_else(|| "model_input_image_resolver_missing".to_string())?;
-                let bytes = resolver.resolve(input_ref.as_str(), content_type.as_str())?;
-                let (actual_content_type, _, _) =
-                    crate::model::prepared_prompt::inspect_model_input_image(bytes.as_slice())?;
-                if actual_content_type != content_type {
-                    return Err("model_input_image_content_type_mismatch".to_string());
-                }
-                Ok((content_type.clone(), placeholder.clone(), bytes))
+                let resolved = match self.model_input_image_resolver.as_ref() {
+                    Some(resolver) => resolver
+                        .resolve(input_ref.as_str(), content_type.as_str())
+                        .and_then(|bytes| {
+                            let (actual_content_type, _, _) =
+                                crate::model::prepared_prompt::inspect_model_input_image(
+                                    bytes.as_slice(),
+                                )?;
+                            if actual_content_type != content_type {
+                                return Err("model_input_image_content_type_mismatch".to_string());
+                            }
+                            Ok(bytes)
+                        }),
+                    None => Err("model_input_image_resolver_missing".to_string()),
+                };
+                (content_type, placeholder, input_ref.as_str(), resolved)
             }
-            ModelInputImageSourceRefV1::ExecutionFile { image } => Ok((
-                image.content_type.clone(),
-                image.placeholder.clone(),
-                self.tools_port.resolve_execution_model_input_image(image)?,
+            ModelInputImageSourceRefV1::ExecutionFile { image } => (
+                &image.content_type,
+                &image.placeholder,
+                image.path.as_str(),
+                self.tools_port.resolve_execution_model_input_image(image),
+            ),
+        };
+        Ok(match resolved {
+            Ok(bytes) => ResolvedImageSource::Available(content_type.clone(), placeholder.clone(), bytes),
+            Err(error) => ResolvedImageSource::Unavailable(format!(
+                "{placeholder} Image observation unavailable: {label}. {error}. The original pixels are not included in this request; re-read the source if needed."
             )),
-        }
+        })
     }
 
     fn stage_generate_driver_input_messages(
