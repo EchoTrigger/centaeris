@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import sys
 import time
+import tempfile
 import uuid
 
 
@@ -68,8 +69,14 @@ def collect_provider_usage(profile: Path, session_id: str, agent_run_id: str) ->
 
 
 class Rpc:
-    def __init__(self, reader, writer, events):
+    def __init__(self, reader, writer, events, event_spool=None):
         self.reader, self.writer, self.events = reader, writer, events
+        self.event_spool = event_spool if event_spool is not None else tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+        self.owns_event_spool = event_spool is None
+        self.event_log_error = None
+        self.mirror_unavailable = False
+        self.event_spool_error = None
+        self.unspooled_events = 0
         self.pending = {}
         self.next_id = 0
         self.failure = None
@@ -87,8 +94,7 @@ class Rpc:
                         else:
                             future.set_result(frame["result"])
                 else:
-                    self.events.write(json.dumps(frame, ensure_ascii=False) + "\n")
-                    self.events.flush()
+                    self.record_event(frame)
             raise ConnectionError("Runtime connection closed")
         except Exception as error:
             self.failure = error
@@ -96,6 +102,68 @@ class Rpc:
                 if not future.done():
                     future.set_exception(error)
             self.pending.clear()
+
+    def record_event(self, frame):
+        line = json.dumps(frame, ensure_ascii=False) + "\n"
+        try:
+            self.event_spool.write(line)
+            self.event_spool.flush()
+        except OSError as error:
+            self.event_spool_error = error
+            self.unspooled_events += 1
+        if not self.mirror_unavailable:
+            try:
+                self.events.write(line)
+                self.events.flush()
+            except OSError as error:
+                self.event_log_error = error
+                self.mirror_unavailable = True
+                try:
+                    print(f"Trajectory mirror unavailable (errno={error.errno}); RPC continues; persistence status is recorded", file=sys.stderr)
+                except OSError:
+                    # stderr may share the same failed host mount.
+                    pass
+
+    def restore_event_log(self):
+        restored = False
+        if self.event_log_error is not None and self.event_spool_error is None:
+            try:
+                self.event_spool.seek(0)
+                self.events.seek(0)
+                self.events.truncate()
+                while chunk := self.event_spool.read(1024 * 1024):
+                    self.events.write(chunk)
+                self.events.flush()
+                restored = True
+                self.mirror_unavailable = False
+            except OSError:
+                pass
+            finally:
+                try:
+                    self.event_spool.seek(0, 2)
+                except OSError as error:
+                    self.event_spool_error = error
+        return {"mirrorErrorErrno": self.event_log_error.errno if self.event_log_error else None,
+                "spoolErrorErrno": self.event_spool_error.errno if self.event_spool_error else None,
+                "unspooledEvents": self.unspooled_events, "mirrorRestored": restored}
+
+    def snapshot_event_spool(self, path):
+        if self.event_spool_error is not None:
+            return False
+        try:
+            self.event_spool.seek(0)
+            with Path(path).open("w", encoding="utf-8") as output:
+                while chunk := self.event_spool.read(1024 * 1024):
+                    output.write(chunk)
+            return True
+        except OSError as error:
+            self.event_spool_error = error
+            return False
+        finally:
+            try:
+                self.event_spool.seek(0, 2)
+            except OSError as error:
+                self.event_spool_error = error
 
     async def call(self, method, request, timeout=30):
         if self.failure:
@@ -118,6 +186,8 @@ class Rpc:
         await self.writer.wait_closed()
         self.task.cancel()
         await asyncio.gather(self.task, return_exceptions=True)
+        if self.owns_event_spool:
+            self.event_spool.close()
 
 
 async def run_trial(rpc, instruction, cwd, model, provider, effort, timeout,
@@ -143,9 +213,9 @@ async def run_trial(rpc, instruction, cwd, model, provider, effort, timeout,
     identity = {"sessionId": session["id"], "agentRunId": prompt["agentRunId"]}
     if state_path:
         write_json(state_path, {**identity, "pid": os.getpid()})
-    deadline = time.monotonic() + timeout
+    deadline = None if timeout is None else time.monotonic() + timeout
     try:
-        while time.monotonic() < deadline:
+        while deadline is None or time.monotonic() < deadline:
             response = await rpc.call("_centaeris/session/agent-runs", {
                 "sessionId": session["id"], "includeTerminal": True})
             runs = [run for run in response["agentRuns"]
@@ -172,12 +242,12 @@ async def run_trial(rpc, instruction, cwd, model, provider, effort, timeout,
         raise
 
 
-async def connect(endpoint, events, startup_timeout=30):
+async def connect(endpoint, events, startup_timeout=30, event_spool=None):
     deadline = time.monotonic() + startup_timeout
     while True:
         try:
             reader, writer = await asyncio.open_unix_connection(endpoint, limit=16 * 1024 * 1024)
-            rpc = Rpc(reader, writer, events)
+            rpc = Rpc(reader, writer, events, event_spool=event_spool)
             descriptor = await rpc.call("initialize", {"clientKind": "tui",
                                                        "viewerId": str(uuid.uuid4())})
             expected = {"status": "ok", "protocol": "centaeris.runtime", "protocolVersion": 1,
@@ -208,12 +278,12 @@ async def supervise(args):
         raise RuntimeError(stderr.decode())
     endpoint = json.loads(stdout)["endpoint"]
     write_json(root / "endpoint.json", {"endpoint": endpoint, "pid": os.getpid()})
-    with (root / "runtime.log").open("wb") as runtime_log, (root / "events.jsonl").open("w", encoding="utf-8") as events:
+    with (root / "runtime.log").open("wb") as runtime_log, (root / "events.jsonl").open("w", encoding="utf-8") as events, (profile / "events.jsonl").open("w+", encoding="utf-8") as event_spool:
         runtime = await asyncio.create_subprocess_exec(args.runtime, "--runtime-server", env=env,
                                                        stdout=runtime_log, stderr=runtime_log)
         rpc = None
         try:
-            rpc = await connect(endpoint, events)
+            rpc = await connect(endpoint, events, event_spool=event_spool)
             result = await run_trial(rpc, Path(args.instruction).read_text(encoding="utf-8"),
                                      args.cwd, args.model, args.provider, args.effort,
                                      args.timeout, state_path=root / "state.json",
@@ -222,11 +292,19 @@ async def supervise(args):
                                      "maxOutputTokens": args.output_tokens}
             if result.get('sessionId'):
                 result['providerUsage'] = collect_provider_usage(profile, result['sessionId'], result['agentRunId'])
+            health = rpc.restore_event_log()
+            if health["mirrorErrorErrno"] is not None and not health["mirrorRestored"]:
+                health["spoolSnapshotSaved"] = rpc.snapshot_event_spool(profile / "events-terminal.jsonl")
+                health["spoolErrorErrno"] = rpc.event_spool_error.errno if rpc.event_spool_error else None
+            result["trajectoryPersistence"] = health
             write_json(root / "result.json", result)
             if result["status"] == "succeeded":
                 # Keep the initialized connection and Runtime-owned task services alive
                 # while Harbor verifies. Container teardown ultimately owns cleanup.
-                await asyncio.sleep(args.linger)
+                if args.keep_alive:
+                    await asyncio.Event().wait()
+                else:
+                    await asyncio.sleep(args.linger)
         finally:
             try:
                 if rpc:
@@ -244,9 +322,9 @@ async def supervise(args):
 
 
 def wait_result(args):
-    deadline = time.monotonic() + args.timeout
+    deadline = None if args.timeout is None else time.monotonic() + args.timeout
     result = Path(args.logs) / "result.json"
-    while time.monotonic() < deadline:
+    while deadline is None or time.monotonic() < deadline:
         if result.exists():
             value = json.loads(result.read_text(encoding="utf-8"))
             print(json.dumps(value, ensure_ascii=False))
@@ -262,14 +340,24 @@ async def cancel(args):
         return
     endpoint = json.loads(endpoint_path.read_text(encoding="utf-8"))
     with (root / "cancel-events.jsonl").open("w", encoding="utf-8") as events:
-        rpc = await connect(endpoint["endpoint"], events, startup_timeout=2)
+        try:
+            # Include initialize in the deadline. Debug Runtime initialization
+            # hashes the executable and can take ten seconds on a 1-CPU task.
+            rpc = await asyncio.wait_for(
+                connect(endpoint["endpoint"], events, startup_timeout=2), timeout=15)
+        except (TimeoutError, FileNotFoundError, ConnectionRefusedError):
+            result_path = root / "result.json"
+            if result_path.exists() and json.loads(result_path.read_text(encoding="utf-8")).get("status") in (
+                    "succeeded", "failed", "cancelled", "timedOut"):
+                return
+            raise
         try:
             if (root / "state.json").exists():
                 state = json.loads((root / "state.json").read_text(encoding="utf-8"))
                 await rpc.call("_centaeris/session/agent-runs/cancel", {
                     "sessionId": state["sessionId"], "agentRunId": state["agentRunId"],
-                    "reason": "harbor_cancelled"})
-            await rpc.call("runtime/shutdown", {}, timeout=12)
+                    "reason": "harbor_cancelled"}, timeout=6)
+            await rpc.call("runtime/shutdown", {}, timeout=6)
         finally:
             await rpc.close()
 
@@ -289,8 +377,14 @@ def main():
     parser.add_argument("--context-tokens", type=int, default=500_000)
     parser.add_argument("--output-tokens", type=int, default=64_000)
     parser.add_argument("--timeout", type=float, default=900)
+    parser.add_argument("--no-timeout", action="store_true",
+                        help="Let the embedding trial orchestrator own the deadline")
+    parser.add_argument("--keep-alive", action="store_true",
+                        help="Retain successful Runtime services until external teardown")
     parser.add_argument("--linger", type=float, default=1200)
     args = parser.parse_args()
+    if args.no_timeout:
+        args.timeout = None
     if args.action == "wait":
         return wait_result(args)
     if args.action == "cancel":

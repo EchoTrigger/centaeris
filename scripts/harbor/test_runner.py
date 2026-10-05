@@ -11,7 +11,9 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from runner import Rpc, run_trial, trial_profile, collect_provider_usage
+from runner import Rpc, run_trial, trial_profile, collect_provider_usage, cancel
+from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
 
 
 class FakeRpc:
@@ -36,6 +38,43 @@ class FakeRpc:
 
 
 class TrialTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancel_rpc_deadlines_fit_the_adapter_cleanup_window(self):
+        rpc = SimpleNamespace(call=AsyncMock(return_value={}), close=AsyncMock())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "endpoint.json").write_text(json.dumps({"endpoint": "/runtime"}))
+            (root / "state.json").write_text(json.dumps({"sessionId": "session", "agentRunId": "run"}))
+            with patch("runner.connect", AsyncMock(return_value=rpc)):
+                await cancel(SimpleNamespace(logs=directory))
+        calls = rpc.call.await_args_list
+        self.assertEqual(calls[0].args[1]["agentRunId"], "run")
+        self.assertLessEqual(calls[0].kwargs.get("timeout", 30), 6)
+        self.assertLessEqual(calls[1].kwargs.get("timeout", 30), 6)
+        rpc.close.assert_awaited_once()
+
+    async def test_external_deadline_has_no_internal_900_second_limit(self):
+        rpc = FakeRpc(["running", "succeeded"])
+        result = await run_trial(rpc, "task", "/app", "mock", "custom.test", None,
+                                 None, poll_interval=0)
+        self.assertEqual(result["status"], "succeeded")
+        self.assertFalse(any(method.endswith("/cancel") for method, _ in rpc.calls))
+
+    async def test_cancel_of_terminal_result_with_closed_runtime_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "endpoint.json").write_text(json.dumps({"endpoint": "/gone"}))
+            (root / "result.json").write_text(json.dumps({"status": "failed"}))
+            with patch("runner.connect", AsyncMock(side_effect=TimeoutError("gone"))):
+                await cancel(SimpleNamespace(logs=directory))
+
+    async def test_cancel_does_not_hide_closed_runtime_without_terminal_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "endpoint.json").write_text(json.dumps({"endpoint": "/gone"}))
+            with patch("runner.connect", AsyncMock(side_effect=TimeoutError("gone"))):
+                with self.assertRaisesRegex(TimeoutError, "gone"):
+                    await cancel(SimpleNamespace(logs=directory))
+
     @unittest.skipUnless(shutil.which('curl'), 'requires curl')
     def test_verifier_download_recovers_from_partial_transfer(self):
         requests = []
@@ -199,6 +238,77 @@ class RpcTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(json.loads(events.getvalue())["method"], "event")
             finally:
                 await rpc.close()
+
+    async def test_event_disk_error_does_not_break_rpc_and_preserves_notification(self):
+        class BrokenDisk(io.StringIO):
+            def write(self, value):
+                raise OSError(5, "Input/output error")
+        async def peer(reader, writer):
+            while line := await reader.readline():
+                request = json.loads(line)
+                writer.write((json.dumps({"method": "event", "params": {"sequence": request["id"]}}) + "\n").encode())
+                writer.write((json.dumps({"id": request["id"], "result": request["method"]}) + "\n").encode())
+                await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+        async with await asyncio.start_server(peer, "127.0.0.1", 0) as server:
+            reader, writer = await asyncio.open_connection(*server.sockets[0].getsockname())
+            rpc = Rpc(reader, writer, BrokenDisk())
+            try:
+                with patch("runner.sys.stderr", BrokenDisk()):
+                    self.assertEqual(await rpc.call("first", {}), "first")
+                    self.assertEqual(await rpc.call("second", {}), "second")
+                self.assertIsNone(rpc.failure)
+                self.assertEqual(rpc.event_log_error.errno, 5)
+                rpc.event_spool.seek(0)
+                self.assertEqual([json.loads(line)["params"]["sequence"] for line in rpc.event_spool], [1, 2])
+                with tempfile.TemporaryDirectory() as directory:
+                    artifact = Path(directory) / 'recovered.jsonl'
+                    self.assertTrue(rpc.snapshot_event_spool(artifact))
+                    self.assertEqual([json.loads(line)['params']['sequence']
+                                      for line in artifact.read_text().splitlines()], [1, 2])
+            finally:
+                await rpc.close()
+
+    async def test_partial_mirror_flush_is_rebuilt_without_duplicates(self):
+        class FailedFlush(io.StringIO):
+            fail = True
+            def flush(self):
+                if self.fail:
+                    raise OSError(5, "Input/output error")
+        reader = asyncio.StreamReader()
+        writer = SimpleNamespace()
+        events = FailedFlush()
+        rpc = Rpc(reader, writer, events)
+        try:
+            rpc.record_event({"method": "one"})
+            rpc.record_event({"method": "two"})
+            events.fail = False
+            health = rpc.restore_event_log()
+            self.assertTrue(health["mirrorRestored"])
+            self.assertEqual(health["mirrorErrorErrno"], 5)
+            rpc.record_event({"method": "three"})
+            self.assertEqual([json.loads(line)["method"] for line in events.getvalue().splitlines()], ["one", "two", "three"])
+        finally:
+            rpc.task.cancel()
+            await asyncio.gather(rpc.task, return_exceptions=True)
+            rpc.event_spool.close()
+
+    async def test_both_event_sinks_failing_reports_loss_without_poisoning_rpc(self):
+        class BrokenDisk(io.StringIO):
+            def write(self, value):
+                raise OSError(28, "No space left on device")
+        rpc = Rpc(asyncio.StreamReader(), SimpleNamespace(), BrokenDisk(), event_spool=BrokenDisk())
+        try:
+            rpc.record_event({"method": "one"})
+            self.assertIsNone(rpc.failure)
+            health = rpc.restore_event_log()
+            self.assertEqual(health["unspooledEvents"], 1)
+            self.assertEqual(health["spoolErrorErrno"], 28)
+            self.assertFalse(health["mirrorRestored"])
+        finally:
+            rpc.task.cancel()
+            await asyncio.gather(rpc.task, return_exceptions=True)
 
     async def test_closed_connection_rejects_pending_and_future_calls(self):
         async def peer(reader, writer):
