@@ -779,7 +779,7 @@
             "high",
             "max"
           ],
-          "supportsVision": false,
+          "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
         }
