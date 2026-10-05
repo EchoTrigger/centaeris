@@ -275,6 +275,21 @@ mod tests {
     }
 
     #[test]
+    fn coding_plan_flash_advertises_native_image_input() {
+        let provider = model_catalog()
+            .providers
+            .iter()
+            .find(|provider| provider.catalog_id == "opencode_zen_go")
+            .unwrap();
+        let model = provider
+            .models
+            .iter()
+            .find(|model| model.model == "deepseek-v4.1-flash")
+            .unwrap();
+        assert!(model.supports_vision);
+    }
+
+    #[test]
     fn configured_second_wave_reasoning_levels_and_limits() {
         let catalog = model_catalog();
         let expected = [
