@@ -1,4 +1,5 @@
 """Harbor adapter contract tests, using fake execs and no model credentials."""
+import asyncio
 import json
 from pathlib import Path
 import tempfile
@@ -41,6 +42,31 @@ class Environment:
 
 @unittest.skipUnless(CentaerisAgent, "requires Harbor 0.21.0")
 class AgentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_deadline_cleanup_failure_preserves_cancellation_and_other_trial(self):
+        class BrokenCleanupEnvironment(Environment):
+            async def exec(self, command, **kwargs):
+                if " wait " in command:
+                    raise asyncio.CancelledError()
+                if " cancel " in command:
+                    raise RuntimeError("Command timed out after 20 seconds")
+                return await super().exec(command, **kwargs)
+        with tempfile.TemporaryDirectory() as directory:
+            agent = CentaerisAgent(logs_dir=Path(directory), model_name="mock",
+                                   provider_id="custom.test", credential_env="TEST_MODEL_KEY",
+                                   extra_env={"TEST_MODEL_KEY": "fake-test-key"})
+            context = AgentContext()
+            completed = []
+            async def other_trial():
+                await asyncio.sleep(0)
+                completed.append(True)
+            async with asyncio.TaskGroup() as group:
+                cancelled = group.create_task(agent.run("task", BrokenCleanupEnvironment(), context))
+                group.create_task(other_trial())
+            self.assertTrue(cancelled.cancelled())
+            self.assertEqual(completed, [True])
+            self.assertEqual(context.metadata["cancellationCleanupError"]["type"], "RuntimeError")
+            self.assertIn("20 seconds", context.metadata["cancellationCleanupError"]["message"])
+
     async def test_bridge_accepts_an_explicit_provider_and_credential_variable(self):
         with tempfile.TemporaryDirectory() as directory:
             agent = CentaerisAgent(logs_dir=Path(directory), model_name="mock",
@@ -109,7 +135,40 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((context.n_input_tokens, context.n_output_tokens, context.n_cache_tokens), (120, 30, 90))
             self.assertEqual(environment.uploads[0][1], b"Solve task")
 
-    async def test_failed_result_is_recorded_and_cancelled(self):
+    async def test_trajectory_storage_failure_is_metadata_without_cancelling_success(self):
+        health = {"mirrorErrorErrno": 5, "spoolErrorErrno": None,
+                  "unspooledEvents": 0, "mirrorRestored": False, "spoolSnapshotSaved": True}
+        recovery_fails = False
+        class FailedMirrorEnvironment(Environment):
+            async def download_file(self, source_path, target_path):
+                if recovery_fails:
+                    raise OSError(5, "Artifact transport failed")
+                Path(target_path).write_text("{}\n", encoding="utf-8")
+
+            async def exec(self, command, **kwargs):
+                result = await super().exec(command, **kwargs)
+                if " wait " in command:
+                    payload = json.loads(result.stdout)
+                    payload["trajectoryPersistence"] = health
+                    result.stdout = json.dumps(payload)
+                return result
+        for recovery_fails in (False, True):
+            with tempfile.TemporaryDirectory() as directory:
+                agent = CentaerisAgent(logs_dir=Path(directory), model_name="mock",
+                                       provider_id="custom.test", credential_env="TEST_MODEL_KEY",
+                                       extra_env={"TEST_MODEL_KEY": "fake-test-key"})
+                context, environment = AgentContext(), FailedMirrorEnvironment()
+                await agent.run("task", environment, context)
+                recorded = context.metadata["trajectoryPersistence"]
+                self.assertEqual({key: recorded[key] for key in health}, health)
+                if recovery_fails:
+                    self.assertEqual(recorded["recoveryErrorType"], "OSError")
+                else:
+                    artifact = Path(directory) / recorded["recoveredArtifactPath"]
+                    self.assertEqual(artifact.read_text(), "{}\n")
+                self.assertFalse(any(" cancel " in command for command, _ in environment.calls))
+
+    async def test_terminal_failure_is_recorded_without_redundant_cancellation(self):
         with tempfile.TemporaryDirectory() as directory:
             agent = CentaerisAgent(logs_dir=Path(directory), model_name="mock",
                                    provider_id="custom.test", credential_env="TEST_MODEL_KEY", reasoning_effort="max",
@@ -118,7 +177,52 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "Centaeris run failed: failed"):
                 await agent.run("task", environment, context)
             self.assertEqual(context.metadata["agentRunId"], "run")
+            self.assertFalse(any(" cancel " in command for command, _ in environment.calls))
+
+    async def test_harbor_owns_deadline_and_completed_service_lifetime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent = CentaerisAgent(logs_dir=Path(directory), model_name="mock",
+                                   provider_id="custom.test", credential_env="TEST_MODEL_KEY",
+                                   extra_env={"TEST_MODEL_KEY": "fake-test-key"})
+            environment = Environment()
+            await agent.run("task", environment, AgentContext())
+            launch = next(command for command, _ in environment.calls if command.startswith("nohup "))
+            wait, options = next(call for call in environment.calls if " wait " in call[0])
+            self.assertIn("--no-timeout", launch)
+            self.assertIn("--keep-alive", launch)
+            self.assertIn("--no-timeout", wait)
+            self.assertNotIn("timeout_sec", options)
+
+    async def test_transport_failure_still_cancels_the_admitted_run(self):
+        class BrokenEnvironment(Environment):
+            async def exec(self, command, **kwargs):
+                if " wait " in command:
+                    raise ConnectionError("lost transport")
+                return await super().exec(command, **kwargs)
+        with tempfile.TemporaryDirectory() as directory:
+            agent = CentaerisAgent(logs_dir=Path(directory), model_name="mock",
+                                   provider_id="custom.test", credential_env="TEST_MODEL_KEY",
+                                   extra_env={"TEST_MODEL_KEY": "fake-test-key"})
+            environment = BrokenEnvironment()
+            with self.assertRaisesRegex(ConnectionError, "lost transport"):
+                await agent.run("task", environment, AgentContext())
             self.assertTrue(any(" cancel " in command for command, _ in environment.calls))
+
+    async def test_terminal_provider_error_retains_its_diagnostic(self):
+        class FailedEnvironment(Environment):
+            async def exec(self, command, **kwargs):
+                result = await super().exec(command, **kwargs)
+                if " wait " in command:
+                    payload = json.loads(result.stdout)
+                    payload["run"] = {"status": "failed", "error": "model input rejected"}
+                    result.stdout = json.dumps(payload)
+                return result
+        with tempfile.TemporaryDirectory() as directory:
+            agent = CentaerisAgent(logs_dir=Path(directory), model_name="mock",
+                                   provider_id="custom.test", credential_env="TEST_MODEL_KEY",
+                                   extra_env={"TEST_MODEL_KEY": "fake-test-key"})
+            with self.assertRaisesRegex(RuntimeError, "model input rejected"):
+                await agent.run("task", FailedEnvironment("failed"), AgentContext())
 
 
 if __name__ == "__main__":

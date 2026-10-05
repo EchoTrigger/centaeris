@@ -121,7 +121,7 @@ class CentaerisAgent(BaseInstalledAgent):
                   "--instruction", self.remote + "/instruction.txt", "--model", self.model_name,
                   "--provider", self.provider, "--credential-env", self.credential_env,
                   "--context-tokens", str(self.context_tokens), "--output-tokens", str(self.output_tokens),
-                  "--cwd", "/app"]
+                  "--cwd", "/app", "--no-timeout", "--keep-alive"]
         if self.effort is not None:
             runner.extend(["--effort", self.effort])
         # Secrets are passed as an exec environment, never interpolated into a command.
@@ -132,13 +132,15 @@ class CentaerisAgent(BaseInstalledAgent):
             "CENTAERIS_SYSTEM_SKILLS_SOURCE": self.remote + "/system-skills"})
         if launched.return_code:
             raise RuntimeError("starting the headless supervisor failed")
+        terminal_result = False
         try:
             result = await environment.exec(command=shlex.join([
                 "python3", self.remote + "/runner.py", "wait", "--logs", self.remote_logs,
-                "--timeout", "950"]), timeout_sec=960)
+                "--no-timeout"]))
             if not result.stdout.strip():
                 raise RuntimeError("headless supervisor returned no result")
             payload = json.loads(result.stdout)
+            terminal_result = payload.get("status") in ("succeeded", "failed", "cancelled", "timedOut")
             usage = payload.get('providerUsage', {}).get('totals', {})
             context.n_input_tokens = usage.get('inputTokens')
             context.n_output_tokens = usage.get('outputTokens')
@@ -148,13 +150,37 @@ class CentaerisAgent(BaseInstalledAgent):
                                 "sessionId": payload.get("sessionId"),
                                 "agentRunId": payload.get("agentRunId")}
             context.metadata['providerUsage'] = payload.get('providerUsage')
+            context.metadata['trajectoryPersistence'] = payload.get('trajectoryPersistence')
+            health = context.metadata['trajectoryPersistence']
+            if health and health.get('spoolSnapshotSaved'):
+                recovered = self.logs_dir / ('centaeris-' + self.attempt) / 'events.recovered.jsonl'
+                try:
+                    recovered.parent.mkdir(parents=True, exist_ok=True)
+                    await environment.download_file(
+                        f"/tmp/centaeris-bench/{self.attempt}/events-terminal.jsonl", recovered)
+                    health['recoveredArtifactPath'] = str(recovered.relative_to(self.logs_dir))
+                except Exception as error:
+                    # Artifact transport is independent of the committed AgentRun outcome.
+                    health['recoveryErrorType'] = type(error).__name__
             if result.return_code or payload["status"] != "succeeded":
-                raise RuntimeError("Centaeris run failed: " + str(payload.get("error", payload["status"])))
+                diagnostic = payload.get("error") or payload.get("run", {}).get("error") or payload["status"]
+                raise RuntimeError("Centaeris run failed: " + str(diagnostic))
         except BaseException as primary:
+            if terminal_result:
+                raise
             try:
                 await asyncio.shield(self.exec_as_agent(environment, command=shlex.join([
                     "python3", self.remote + "/runner.py", "cancel", "--logs", self.remote_logs]),
-                    timeout_sec=20))
+                    timeout_sec=35))
             except BaseException as cleanup:
+                if isinstance(primary, asyncio.CancelledError):
+                    # Harbor must receive cancellation itself to enforce the task
+                    # deadline. A BaseExceptionGroup would escape its per-trial
+                    # handlers and cancel unrelated trials in the job TaskGroup.
+                    context.metadata = dict(context.metadata or {})
+                    context.metadata["cancellationCleanupError"] = {
+                        "type": type(cleanup).__name__, "message": str(cleanup)}
+                    primary.add_note("Cancellation cleanup failed: " + repr(cleanup))
+                    raise primary from cleanup
                 raise BaseExceptionGroup("agent run and cancellation failed", [primary, cleanup])
             raise

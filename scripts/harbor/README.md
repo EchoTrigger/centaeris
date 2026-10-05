@@ -117,6 +117,10 @@ The command schedules **25 paid attempts**. The adapter retains an initialized R
 completion so Runtime-owned services survive the shared-container verifier.
 Harbor container teardown releases that process; cancellation requests target the
 admitted AgentRun and shut down its Runtime.
+Harbor owns each task's configured agent deadline; the embedded client does not
+impose a separate fixed deadline. Successful Runtime services remain alive until
+external teardown, including for verifiers longer than twenty minutes. Terminal
+failures retain their original error without cancelling an already finished run.
 
 For an explicitly authorized pilot-review-then-full run, use
 `.\scripts\harbor\run.ps1 -FollowWithFull`. After the pilot succeeds, the worker
@@ -167,3 +171,23 @@ For this pilot, with exactly five attempts per task, pass@5 is the fraction of
 tasks with at least one verifier reward of 1. Report infrastructure errors and
 missing verifier results separately. A successful AgentRun alone is not a passed
 task. Five selected tasks are a pilot, not the full benchmark leaderboard score.
+
+Trajectory persistence is independent of RPC reception. The headless client spools
+notifications in its container-local profile and mirrors them to Harbor's log
+directory. A mirror I/O failure does not cancel the AgentRun; terminal publication
+attempts to rebuild the mirror from the spool. If the mirror remains unavailable,
+a terminal spool snapshot is downloaded as `events.recovered.jsonl`; recovery
+transport failures are reported without cancelling the completed AgentRun.
+`trajectoryPersistence` in the
+headless result reports mirror/spool errors and unspooled event counts, so an
+incomplete trajectory remains an infrastructure issue instead of a silent pass.
+
+When Harbor cancels an attempt, cancellation remains the primary exception even
+if the cleanup command fails. The adapter records `cancellationCleanupError` in
+agent metadata and retains the cleanup diagnostic on the cancellation exception,
+so Harbor can finalize that attempt without cancelling the whole job. Cancellation
+connect/initialize, cancel RPC, and shutdown waits are bounded to fit within the
+adapter's 35-second cleanup command window (15 seconds for connection and
+initialize, six each for cancel and shutdown, plus transport overhead). Docker
+teardown remains Harbor-owned. Deadline-terminated attempts can lack exported
+provider usage; absent token counts are unknown, never zero.

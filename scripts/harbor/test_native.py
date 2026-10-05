@@ -1,29 +1,59 @@
 """Linux Runtime acceptance with a loopback model; never uses provider credentials."""
 import asyncio
+import base64
 import io
 import json
 import os
+import shlex
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
 
-from runner import connect, run_trial, collect_provider_usage
+from runner import connect, run_trial, collect_provider_usage, cancel
 
 
 @unittest.skipUnless(os.name == "posix" and os.environ.get("CENTAERIS_RUNTIME_BINARY"),
                      "requires a built Linux Runtime")
 class NativeTrialTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancel_initializes_real_runtime_and_shuts_it_down_within_outer_budget(self):
+        with tempfile.TemporaryDirectory(prefix="cancel-") as directory:
+            root = Path(directory)
+            env = {**os.environ, "CENTAERIS_DESKTOP_DATA_DIR": directory}
+            binary = os.environ["CENTAERIS_RUNTIME_BINARY"]
+            endpoint_process = await asyncio.create_subprocess_exec(
+                binary, "--runtime-server-endpoint", env=env, stdout=asyncio.subprocess.PIPE)
+            stdout, _ = await endpoint_process.communicate()
+            self.assertEqual(endpoint_process.returncode, 0)
+            (root / "endpoint.json").write_bytes(stdout)
+            runtime = await asyncio.create_subprocess_exec(
+                binary, "--runtime-server", env=env,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            try:
+                await asyncio.wait_for(cancel(SimpleNamespace(logs=directory)), 35)
+                self.assertEqual(await asyncio.wait_for(runtime.wait(), 6), 0)
+            finally:
+                if runtime.returncode is None:
+                    runtime.kill()
+                    await runtime.wait()
+
     async def test_budget_and_background_service_survive_completed_agent(self):
         requests = []
         proxy_domains = []
         child_started = asyncio.Event()
+        cleanup_requested = False
         child_marker = 'CENTAERIS_CHILD_BUDGET_TEST'
         with tempfile.TemporaryDirectory(prefix="cb-") as directory:
             root = Path(directory)
             fifo = root / "service-control"
             os.mkfifo(fifo)
+            image = root / "input.png"
+            image.write_bytes(base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAIAAAA2iEnWAAAAIElEQVR4AQEVAOr/"
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAABUAAUzUbJkAAAAASUVORK5CYII="))
 
             async def model(reader, writer):
+                nonlocal cleanup_requested
                 try:
                     head = await reader.readuntil(b"\r\n\r\n")
                     length = next(int(line.split(b":", 1)[1]) for line in head.split(b"\r\n")
@@ -43,12 +73,22 @@ class NativeTrialTests(unittest.IsolatedAsyncioTestCase):
                             'function': {'name': 'agent', 'arguments': json.dumps({
                                 'prompt': child_marker + ': Reply ready.',
                                 'description': 'Verify child model budgets'})}})
+                        delta['tool_calls'].append({'index': 2, 'id': 'image-read', 'type': 'function',
+                            'function': {'name': 'read', 'arguments': json.dumps({'path': str(image)})}})
                     else:
                         if is_child:
                             child_started.set()
                         else:
                             await asyncio.wait_for(child_started.wait(), 12)
-                        delta, finish = {"content": "Service is ready for verification."}, "stop"
+                        if not is_child and not cleanup_requested:
+                            cleanup_requested = True
+                            delta = {"tool_calls": [{"index": 0, "id": "image-cleanup", "type": "function",
+                                "function": {"name": "bash", "arguments": json.dumps({
+                                    "command": "rm -- " + shlex.quote(str(image)),
+                                    "description": "Remove the previously observed image"})}}]}
+                            finish = "tool_calls"
+                        else:
+                            delta, finish = {"content": "Service is ready for verification."}, "stop"
                     frames = [{"id": "mock", "choices": [{"index": 0, "delta": delta,
                                "finish_reason": None}]},
                               {"id": "mock", "choices": [{"index": 0, "delta": {},
@@ -120,17 +160,23 @@ class NativeTrialTests(unittest.IsolatedAsyncioTestCase):
                         binary, "--runtime-server", env=env, stdout=log, stderr=log)
                     rpc = None
                     try:
-                        rpc = await connect(endpoint, io.StringIO())
+                        class BrokenMirror(io.StringIO):
+                            def write(self, value):
+                                raise OSError(5, 'Injected host-mount write failure')
+                        rpc = await connect(endpoint, BrokenMirror())
                         port = server.sockets[0].getsockname()[1]
                         await rpc.call("agent_runtime_config_set", {"customModelProviders": [{
                             "providerId": "custom.benchmark-mock", "name": "Benchmark mock",
                             "baseUrl": f"http://benchmark-model.invalid:{port}", "api": "openai-completions",
                             "models": [{"model": "mock", "displayName": "Mock", "contextTokens": "1000000",
-                                        "maxOutputTokens": "384000", "supportsVision": False}]}]})
+                                        "maxOutputTokens": "384000", "supportsVision": True}]}]})
                         result = await run_trial(rpc, "Start the background verification service.",
                                                  str(root), "mock", "custom.benchmark-mock", "max", 25,
                                                  api_key="local-mock-only")
                         self.assertEqual(result["status"], "succeeded", result)
+                        self.assertIsNone(rpc.failure)
+                        self.assertEqual(rpc.event_log_error.errno, 5)
+                        self.assertGreater(rpc.event_spool.tell(), 0, 'local spool must preserve events')
                         usage = collect_provider_usage(root, result['sessionId'], result['agentRunId'])
                         self.assertEqual(usage['nRequests'], len(requests))
                         self.assertEqual(usage['totals']['inputTokens'], 10 * len(requests))
@@ -139,7 +185,16 @@ class NativeTrialTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(len(usage['subagents']), 1)
                         self.assertEqual(usage['subagents'][0]['nRequests'], 1)
                         self.assertEqual(usage['mainAgent']['nRequests'], len(requests) - 1)
+                        self.assertFalse(image.exists(), 'agent must delete the observed source')
+                        self.assertTrue(any('Image observation unavailable' in str(message.get('content', ''))
+                                            for message in requests[-1]['messages']))
                         self.assertTrue(child_started.is_set(), 'child must reach the model provider')
+                        image_parts = [part for request in requests for message in request['messages']
+                                       if isinstance(message.get('content'), list)
+                                       for part in message['content'] if part.get('type') == 'image_url']
+                        self.assertTrue(image_parts, 'read image must reach the provider')
+                        self.assertTrue(all(part['image_url']['url'].startswith('data:image/png;base64,')
+                                            for part in image_parts))
                         self.assertGreaterEqual(len(requests), 2)
                         self.assertIn('agent', {tool['function']['name'] for tool in requests[0]['tools']})
                         self.assertEqual(proxy_domains, ["benchmark-model.invalid"] * len(requests))
