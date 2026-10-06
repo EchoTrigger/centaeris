@@ -19,13 +19,18 @@ pub enum TurnInput {
     UserMessageBatch {
         message: String,
         supplement_ids: Vec<String>,
+        attachments: Vec<crate::session::turn_input::attachments::UserInputAttachment>,
     },
     HostEvent(crate::session::host_event_input::HostEventInput),
     TurnSupplement {
         message: String,
         supplement_ids: Vec<String>,
+        attachments: Vec<crate::session::turn_input::attachments::UserInputAttachment>,
     },
     ToolContinuation {
+        objective: String,
+    },
+    CompletionDeliveryRepair {
         objective: String,
     },
     OutputTokenRecovery {
@@ -37,6 +42,7 @@ pub enum TurnInput {
         message: String,
         intervention: AgentRunInterventionV1,
         supplement_ids: Vec<String>,
+        attachments: Vec<crate::session::turn_input::attachments::UserInputAttachment>,
     },
 }
 
@@ -47,7 +53,9 @@ impl TurnInput {
             | Self::UserMessageBatch { message, .. }
             | Self::TurnSupplement { message, .. }
             | Self::OutputTokenRecovery { message, .. } => message,
-            Self::ToolContinuation { objective } => objective,
+            Self::ToolContinuation { objective } | Self::CompletionDeliveryRepair { objective } => {
+                objective
+            }
             Self::AnswerNow { message, .. } => message,
             Self::HostEvent(_) => "",
         }
@@ -61,7 +69,9 @@ impl TurnInput {
             Self::AnswerNow { message, .. } | Self::OutputTokenRecovery { message, .. } => {
                 Some(message)
             }
-            Self::ToolContinuation { .. } | Self::HostEvent(_) => None,
+            Self::ToolContinuation { .. }
+            | Self::CompletionDeliveryRepair { .. }
+            | Self::HostEvent(_) => None,
         }
     }
 
@@ -71,6 +81,7 @@ impl TurnInput {
             Self::HostEvent(_) => crate::session::host_event_input::HOST_EVENT_SEMANTIC_KIND,
             Self::TurnSupplement { .. } => MESSAGE_SEMANTIC_TURN_SUPPLEMENT,
             Self::ToolContinuation { .. } => MESSAGE_SEMANTIC_TOOL_CONTINUATION,
+            Self::CompletionDeliveryRepair { .. } => "completion_delivery_repair",
             Self::OutputTokenRecovery { .. } => MESSAGE_SEMANTIC_OUTPUT_TOKEN_RECOVERY,
             Self::AnswerNow { .. } => MESSAGE_SEMANTIC_ANSWER_NOW,
         }
@@ -83,9 +94,13 @@ impl TurnInput {
                 .map(|supplement| supplement.message.as_str())
                 .collect::<Vec<_>>()
                 .join("\n\n"),
+            attachments: supplements
+                .iter()
+                .flat_map(|supplement| supplement.attachments.clone())
+                .collect(),
             supplement_ids: supplements
-                .into_iter()
-                .map(|supplement| supplement.supplement_id)
+                .iter()
+                .map(|supplement| supplement.supplement_id.clone())
                 .collect(),
         }
     }
@@ -105,6 +120,10 @@ impl TurnInput {
         Self::AnswerNow {
             message: parts.join("\n\n"),
             intervention,
+            attachments: supplements
+                .iter()
+                .flat_map(|supplement| supplement.attachments.clone())
+                .collect(),
             supplement_ids: supplements
                 .into_iter()
                 .map(|supplement| supplement.supplement_id)
@@ -158,6 +177,17 @@ impl TurnInput {
             _ => &[],
         }
     }
+
+    pub(super) fn attachments(
+        &self,
+    ) -> &[crate::session::turn_input::attachments::UserInputAttachment] {
+        match self {
+            Self::UserMessageBatch { attachments, .. }
+            | Self::TurnSupplement { attachments, .. }
+            | Self::AnswerNow { attachments, .. } => attachments,
+            _ => &[],
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,6 +215,7 @@ pub(super) struct TurnSupplementInput {
     pub(super) supplement_id: String,
     pub(super) message: String,
     pub(super) created_at_ms: i64,
+    pub(super) attachments: Vec<crate::session::turn_input::attachments::UserInputAttachment>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,6 +396,7 @@ impl TurnControl {
                 supplement_id: format!("supplement-{}", new_turn_id()),
                 message,
                 created_at_ms: now_ms(),
+                attachments: Vec::new(),
             }));
         let pending_len = state.pending.len();
         drop(state);
@@ -733,10 +765,12 @@ impl TurnControl {
                 TurnInputPayload::UserSupplement {
                     supplement_id,
                     message,
+                    attachments,
                 } => TurnControlInput::Supplement(TurnSupplementInput {
                     supplement_id,
                     message,
                     created_at_ms: input.created_at_ms,
+                    attachments,
                 }),
                 TurnInputPayload::HostEvent(input) => TurnControlInput::HostEvent(input),
             })
@@ -905,6 +939,10 @@ pub enum ModelObservationV1 {
     /// rather than admission or a queue acknowledgement, establishes uptake.
     InputUptake {
         input_ids: Vec<String>,
+    },
+    /// Operational delivery state bound to this canonical main request.
+    RequiredCompletionDelivery {
+        state: RequiredCompletionDeliveryV1,
     },
 }
 
@@ -1305,7 +1343,11 @@ pub enum AgentRunInitialInput {
     UserMessage(String),
     /// A hosted user request with its immutable input identity. It follows the
     /// ordinary user-request hook path and retains the admitted body verbatim.
-    UserInput { input_id: String, message: String },
+    UserInput {
+        input_id: String,
+        message: String,
+        attachments: Vec<crate::session::turn_input::attachments::UserInputAttachment>,
+    },
     /// Non-authoritative notification data for the accepted task. It does not
     /// replace the objective or permissions, invoke `UserPromptSubmit`, or create
     /// a user transcript bubble. The Host owns admission and durable recording.
@@ -1316,9 +1358,14 @@ impl AgentRunInitialInput {
     pub(super) fn turn_input(&self) -> TurnInput {
         match self {
             Self::UserMessage(message) => TurnInput::UserMessage(message.clone()),
-            Self::UserInput { input_id, message } => TurnInput::UserMessageBatch {
+            Self::UserInput {
+                input_id,
+                message,
+                attachments,
+            } => TurnInput::UserMessageBatch {
                 message: message.clone(),
                 supplement_ids: vec![input_id.clone()],
+                attachments: attachments.clone(),
             },
             Self::HostEvent(input) => TurnInput::HostEvent(input.clone()),
         }

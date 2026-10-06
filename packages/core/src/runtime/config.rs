@@ -17,6 +17,9 @@ pub struct AgentRuntimeConfig {
     pub enable_tool_use_summary: bool,
     pub auto_continue_after_resume_wait: bool,
     pub allowed_tools: Option<Vec<String>>,
+    /// A user-input run may require a committed successful call before Final.
+    /// Hosts configure the tool; Core owns enforcement and durable recovery.
+    pub required_completion_tool: Option<String>,
     pub plugin_activation_digest: Option<String>,
     pub resolved_model_binding: Option<crate::extension::composition::ResolvedModelBindingV1>,
 }
@@ -42,6 +45,7 @@ impl Default for AgentRuntimeConfig {
             enable_tool_use_summary: true,
             auto_continue_after_resume_wait: false,
             allowed_tools: None,
+            required_completion_tool: None,
             plugin_activation_digest: None,
             resolved_model_binding: None,
         }

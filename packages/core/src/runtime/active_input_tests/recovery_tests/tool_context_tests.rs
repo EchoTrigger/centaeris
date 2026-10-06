@@ -49,6 +49,8 @@ async fn query_loop_current_tool_context_with_empty_uptake_recovers_without_reex
         TurnInputPayload::UserSupplement {
             supplement_id: "initial-user".into(),
             message: "  accepted objective\n".into(),
+
+            attachments: Vec::new(),
         },
         1,
     );
@@ -91,6 +93,8 @@ async fn query_loop_current_tool_context_with_empty_uptake_recovers_without_reex
     request.initial_input = AgentRunInitialInput::UserInput {
         input_id: "initial-user".into(),
         message: "  accepted objective\n".into(),
+
+        attachments: Vec::new(),
     };
     let model = ToolThenFailModel {
         requests: Mutex::new(vec![]),
@@ -173,6 +177,8 @@ async fn query_loop_current_tool_context_with_empty_uptake_recovers_without_reex
         TurnInputPayload::UserSupplement {
             supplement_id: "after-tool-failure".into(),
             message: "  deferred update\n".into(),
+
+            attachments: Vec::new(),
         },
         2,
     );

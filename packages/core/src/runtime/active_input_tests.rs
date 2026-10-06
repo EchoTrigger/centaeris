@@ -1,4 +1,5 @@
 use super::*;
+mod attachment_tests;
 use crate::session::host_event_input::{host_event_origin, HostEventInput};
 use crate::session::turn_input::*;
 
@@ -169,6 +170,8 @@ async fn query_loop_initial_user_identity_and_active_batch_are_read_once_without
         TurnInputPayload::UserSupplement {
             supplement_id: "initial-user".into(),
             message: "  initial body\n".into(),
+
+            attachments: Vec::new(),
         },
         1,
     );
@@ -176,6 +179,8 @@ async fn query_loop_initial_user_identity_and_active_batch_are_read_once_without
         TurnInputPayload::UserSupplement {
             supplement_id: "next-user".into(),
             message: "  next body\n".into(),
+
+            attachments: Vec::new(),
         },
         2,
     );
@@ -196,6 +201,8 @@ async fn query_loop_initial_user_identity_and_active_batch_are_read_once_without
     request.initial_input = AgentRunInitialInput::UserInput {
         input_id: "initial-user".into(),
         message: "  initial body\n".into(),
+
+        attachments: Vec::new(),
     };
     let mut records = vec![];
     let result = engine
@@ -408,6 +415,8 @@ impl ModelClient for ActiveInputModel {
                         TurnInputPayload::UserSupplement {
                             supplement_id: "user-update".into(),
                             message: "  exact user update\n".into(),
+
+                            attachments: Vec::new(),
                         },
                         3,
                     );
@@ -678,6 +687,8 @@ async fn query_loop_failed_main_commit_does_not_ack_or_start_provider_and_recove
         TurnInputPayload::UserSupplement {
             supplement_id: "user-update".into(),
             message: "retained update".into(),
+
+            attachments: Vec::new(),
         },
         1,
     );

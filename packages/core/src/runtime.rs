@@ -1,5 +1,6 @@
 pub(crate) mod canonical_json;
 mod checkpoint;
+pub(crate) mod completion_delivery;
 mod config;
 pub(crate) mod context_window;
 pub mod contracts;
@@ -49,6 +50,7 @@ use serde_json::{json, Value};
 
 pub use self::checkpoint::*;
 pub use self::config::AgentRuntimeConfig;
+pub use self::contracts::RequiredCompletionDeliveryV1;
 pub use self::driver::{
     AgentRunInitialInput, AgentRunRequest, AgentRunResult, AgentRunResumeIntent, AgentRunStop,
     AnswerNowEnqueueDisposition, AsyncGenerateDriver, ContextTokenBreakdownV1,

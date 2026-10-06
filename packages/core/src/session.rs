@@ -776,15 +776,27 @@ impl AgentRunSessionState {
         message: &str,
         created_at_ms: i64,
     ) -> Result<Option<SequencedSessionRecord>, String> {
+        self.supplement_with_attachments(turn_id, supplement_id, message, &[], created_at_ms)
+    }
+
+    pub fn supplement_with_attachments(
+        &mut self,
+        turn_id: &str,
+        supplement_id: &str,
+        message: &str,
+        attachments: &[turn_input::attachments::UserInputAttachment],
+        created_at_ms: i64,
+    ) -> Result<Option<SequencedSessionRecord>, String> {
         if self.has_supplement(supplement_id) {
             return Ok(None);
         }
-        self.record(turn_supplement_record(
+        self.record(turn_supplement_record_with_attachments(
             self.session_id.as_str(),
             turn_id,
             self.agent_run_id.as_str(),
             supplement_id,
             message,
+            attachments,
             created_at_ms,
         )?)
         .map(Some)
@@ -1513,10 +1525,37 @@ pub fn turn_supplement_record(
     message: &str,
     created_at_ms: i64,
 ) -> Result<SessionLogRecord, String> {
+    turn_supplement_record_with_attachments(
+        session_id,
+        turn_id,
+        agent_run_id,
+        supplement_id,
+        message,
+        &[],
+        created_at_ms,
+    )
+}
+
+pub fn turn_supplement_record_with_attachments(
+    session_id: &str,
+    turn_id: &str,
+    agent_run_id: &str,
+    supplement_id: &str,
+    message: &str,
+    attachments: &[turn_input::attachments::UserInputAttachment],
+    created_at_ms: i64,
+) -> Result<SessionLogRecord, String> {
     let supplement_id = crate::session::supplement::validate_turn_supplement_id(supplement_id)
         .map_err(|error| error.to_string())?;
-    crate::session::supplement::validate_turn_supplement_message(message)
-        .map_err(|error| error.to_string())?;
+    turn_input::attachments::validate_user_input(message, attachments)?;
+    let mut payload = serde_json::json!({
+        "supplementId": supplement_id,
+        "messageId": format!("message:{turn_id}:supplement:{supplement_id}"),
+        "message": message,
+    });
+    if !attachments.is_empty() {
+        payload["attachments"] = serde_json::to_value(attachments).map_err(|e| e.to_string())?;
+    }
     let event_identity = format!("{session_id}\0{turn_id}\0{supplement_id}");
     canonical_session_record(
         format!(
@@ -1528,11 +1567,7 @@ pub fn turn_supplement_record(
         Some(turn_id.to_string()),
         Some(agent_run_id.to_string()),
         created_at_ms,
-        serde_json::json!({
-            "supplementId": supplement_id,
-            "messageId": format!("message:{turn_id}:supplement:{supplement_id}"),
-            "message": message,
-        }),
+        payload,
     )
 }
 
@@ -2548,6 +2583,17 @@ pub fn restore_runtime_snapshot_from_session_records(
         )
         .map_err(|error| format!("decode Session model observations failed: {error}"))?;
         for observation in observations {
+            if let ModelObservationV1::RequiredCompletionDelivery { ref state } = observation {
+                crate::runtime::completion_delivery::restore_observation(
+                    &mut snapshot,
+                    state,
+                    required_event_agent_run_id(record)?.as_str(),
+                    record
+                        .turn_id
+                        .as_deref()
+                        .ok_or("completion_tool_delivery_observation_turn_missing")?,
+                )?;
+            }
             if let ModelObservationV1::InputUptake { input_ids } = observation {
                 if current_request.is_some_and(|current| {
                     current.agent_run_id == record.agent_run_id && current.turn_id == record.turn_id
@@ -2748,17 +2794,23 @@ fn append_plain_session_message(
             );
         }
     }
-    append_restored_message(
-        snapshot,
-        ChatMessage {
-            message_id,
-            role,
-            content: required_payload_string_allow_empty(payload, content_field, event)?,
-            created_at_ms: event.created_at_ms,
-            metadata,
-        },
-        ModelMessageSemanticsV1::Plain,
-    )
+    let mut message = ChatMessage {
+        message_id,
+        role,
+        content: required_payload_string_allow_empty(payload, content_field, event)?,
+        created_at_ms: event.created_at_ms,
+        metadata,
+    };
+    if event.event_type == SessionRecordType::TurnSupplement {
+        let attachments: Vec<turn_input::attachments::UserInputAttachment> = payload
+            .get("attachments")
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default();
+        turn_input::attachments::apply_user_input_attachments(&mut message, &attachments);
+    }
+    append_restored_message(snapshot, message, ModelMessageSemanticsV1::Plain)
 }
 
 fn model_input_image_refs(
@@ -3506,13 +3558,26 @@ fn validate_turn_supplement(event: &SessionLogRecord) -> Result<(), String> {
     required_event_turn_id(event)?;
     required_event_agent_run_id(event)?;
     let payload = payload_object(event)?;
-    require_exact_payload_fields(payload, &["supplementId", "messageId", "message"], event)?;
+    if payload.contains_key("attachments") {
+        require_exact_payload_fields(
+            payload,
+            &["supplementId", "messageId", "message", "attachments"],
+            event,
+        )?;
+    } else {
+        require_exact_payload_fields(payload, &["supplementId", "messageId", "message"], event)?;
+    }
     let supplement_id = required_payload_string(payload, "supplementId", event)?;
     crate::session::supplement::validate_turn_supplement_id(supplement_id.as_str())
         .map_err(|error| error.to_string())?;
-    let message = required_payload_string(payload, "message", event)?;
-    crate::session::supplement::validate_turn_supplement_message(message.as_str())
-        .map_err(|error| error.to_string())?;
+    let message = required_payload_string_allow_empty(payload, "message", event)?;
+    let attachments: Vec<turn_input::attachments::UserInputAttachment> = payload
+        .get("attachments")
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    turn_input::attachments::validate_user_input(&message, &attachments)?;
     let expected_message_id = format!(
         "message:{}:supplement:{}",
         required_event_turn_id(event)?,
@@ -3856,6 +3921,17 @@ fn validate_model_observation(
     event: &SessionLogRecord,
 ) -> Result<(), String> {
     match observation {
+        ModelObservationV1::RequiredCompletionDelivery { state } => {
+            state.validate()?;
+            if event.agent_run_id.as_deref() != Some(state.agent_run_id.as_str())
+                || !state
+                    .turn_ids
+                    .iter()
+                    .any(|id| event.turn_id.as_deref() == Some(id.as_str()))
+            {
+                return Err("completion_tool_delivery_observation_owner_mismatch".into());
+            }
+        }
         ModelObservationV1::InputUptake { input_ids } => {
             crate::runtime::validate_input_uptake_ids(input_ids)?;
         }
@@ -4004,10 +4080,15 @@ fn validate_model_request_started(event: &SessionLogRecord) -> Result<(), String
         let mut system_prompts = 0;
         let mut tool_catalogs = 0;
         let mut input_uptakes = 0;
+        let mut completion_deliveries = 0;
         for observation in &observations {
             let rank = match observation {
                 ModelObservationV1::InputUptake { .. } => {
                     input_uptakes += 1;
+                    5
+                }
+                ModelObservationV1::RequiredCompletionDelivery { .. } => {
+                    completion_deliveries += 1;
                     4
                 }
                 ModelObservationV1::SystemPrompt { .. } => {
@@ -4027,7 +4108,12 @@ fn validate_model_request_started(event: &SessionLogRecord) -> Result<(), String
                     ));
                 }
             };
-            if rank < last_rank || system_prompts > 1 || tool_catalogs > 1 || input_uptakes > 1 {
+            if rank < last_rank
+                || system_prompts > 1
+                || tool_catalogs > 1
+                || input_uptakes > 1
+                || completion_deliveries > 1
+            {
                 return Err(format!(
                     "session.event.v1 {} model observations are not canonical",
                     event.event_id
@@ -4488,7 +4574,7 @@ fn reduce_turn_supplement(
 ) -> Result<(), String> {
     let payload = payload_object(event)?;
     let message_id = required_payload_string(payload, "messageId", event)?;
-    let text = required_payload_string(payload, "message", event)?;
+    let text = required_payload_string_allow_empty(payload, "message", event)?;
     if projection.messages.contains_key(message_id.as_str()) {
         return Err(format!(
             "session.event.v1 {} turn supplement messageId is duplicated",

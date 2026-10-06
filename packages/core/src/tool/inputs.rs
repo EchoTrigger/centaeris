@@ -217,6 +217,7 @@ pub struct ResolvedInputState {
     agent_run_id: String,
     authorization_digest: String,
     declared_inputs: Vec<DeclaredInput>,
+    admitted_inputs: Mutex<Vec<DeclaredInput>>,
     manifest: Mutex<ResolvedInputManifest>,
     resolver: Option<Arc<dyn DeferredInputResolverPort>>,
 }
@@ -241,6 +242,7 @@ impl ResolvedInputState {
             agent_run_id,
             authorization_digest,
             declared_inputs,
+            admitted_inputs: Mutex::new(Vec::new()),
             manifest: Mutex::new(manifest),
             resolver,
         })
@@ -293,7 +295,7 @@ impl ResolvedInputState {
 
     pub fn display_name_by_ref(&self, input_ref: &str) -> Result<Option<String>, String> {
         if let Some(reference) = self
-            .declared_inputs
+            .declared_inputs()
             .iter()
             .find(|reference| reference.input_ref == input_ref)
         {
@@ -303,14 +305,58 @@ impl ResolvedInputState {
     }
 
     pub fn declared_input_by_ref(&self, input_ref: &str) -> Option<DeclaredInput> {
-        self.declared_inputs
+        self.declared_inputs()
             .iter()
             .find(|reference| reference.input_ref == input_ref)
             .cloned()
     }
 
     pub fn declared_inputs(&self) -> Vec<DeclaredInput> {
-        self.declared_inputs.clone()
+        let mut inputs = self.declared_inputs.clone();
+        inputs.extend(
+            self.admitted_inputs
+                .lock()
+                .expect("admitted input lock poisoned")
+                .iter()
+                .cloned(),
+        );
+        inputs
+    }
+
+    /// Only the host may admit immutable independently authorized inputs bound
+    /// to this Run. Existing declarations cannot be replaced.
+    pub fn admit_declared_inputs(&self, inputs: &[DeclaredInput]) -> Result<(), String> {
+        validate_declared_inputs(inputs)?;
+        let mut admitted = self
+            .admitted_inputs
+            .lock()
+            .map_err(|_| "admitted input lock poisoned".to_string())?;
+        let mut next = self.declared_inputs.clone();
+        next.extend(admitted.iter().cloned());
+        for input in inputs {
+            if let Some(existing) = next
+                .iter()
+                .find(|existing| existing.input_ref == input.input_ref)
+            {
+                if existing != input {
+                    return Err("admitted_input_identity_conflict".into());
+                }
+            } else {
+                next.push(input.clone());
+            }
+        }
+        next.sort_by(|left, right| left.input_ref.cmp(&right.input_ref));
+        validate_declared_inputs(&next)?;
+        *admitted = next
+            .into_iter()
+            .filter(|item| {
+                !self
+                    .declared_inputs
+                    .iter()
+                    .any(|existing| existing.input_ref == item.input_ref)
+            })
+            .collect();
+        Ok(())
     }
 
     pub fn resolve_input(
@@ -318,7 +364,7 @@ impl ResolvedInputState {
         input_ref: &str,
     ) -> Result<ResolvedInput, DeferredInputResolutionError> {
         let reference = self
-            .declared_inputs
+            .declared_inputs()
             .iter()
             .find(|reference| reference.input_ref == input_ref)
             .cloned()
@@ -617,5 +663,49 @@ mod tests {
                 &[declared_input()]
             )
             .is_err());
+    }
+
+    #[test]
+    fn admitted_inputs_extend_host_authority_without_replacing_a_captured_identity() {
+        let initial = declared_input();
+        let digest = format!("sha256:{}", "b".repeat(64));
+        let state = ResolvedInputState::new(
+            "agent_run_1".into(),
+            digest.clone(),
+            vec![initial.clone()],
+            ResolvedInputManifest {
+                schema: RESOLVED_INPUT_MANIFEST_SCHEMA.into(),
+                agent_run_id: "agent_run_1".into(),
+                authorization_digest: digest,
+                inputs: vec![],
+            },
+            None,
+        )
+        .unwrap();
+        let mut later = initial.clone();
+        later.input_ref = "input_2".into();
+        state
+            .admit_declared_inputs(std::slice::from_ref(&later))
+            .unwrap();
+        state
+            .admit_declared_inputs(std::slice::from_ref(&later))
+            .unwrap();
+        assert_eq!(state.declared_inputs(), [initial.clone(), later.clone()]);
+        assert_eq!(state.declared_input_by_ref("input_2"), Some(later.clone()));
+        later.input_identity.generation += 1;
+        assert_eq!(
+            state.admit_declared_inputs(&[later]).unwrap_err(),
+            "admitted_input_identity_conflict"
+        );
+        assert_eq!(state.declared_input_by_ref("input_1"), Some(initial));
+        assert_eq!(
+            state
+                .declared_input_by_ref("input_2")
+                .unwrap()
+                .input_identity
+                .generation,
+            1
+        );
+        assert!(state.declared_input_by_ref("unaccepted-input").is_none());
     }
 }
