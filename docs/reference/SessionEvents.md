@@ -262,7 +262,7 @@ observation records do not exist.
 
 Main observations are in canonical groups: at most one `system_prompt`, then
 zero or more `message`, then zero or more `input_image`, then at most one
-`tool_catalog`, then at most one `input_uptake` with a non-empty, unique,
+`tool_catalog`, then at most one `required_completion_delivery`, then at most one `input_uptake` with a non-empty, unique,
 ordered `inputIds` list. A compaction request contains exactly one `compaction_prompt`
 observation, uses `toolChoice: {"type":"none"}`, and has no tool catalog.
 Observation unions and their nested message, image, and tool-definition shapes

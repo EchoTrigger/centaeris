@@ -235,15 +235,23 @@ impl TranscriptProjectorV1 {
         if self.invalidated {
             return Err("transcript projection view is invalidated".to_string());
         }
-        let mut open_tools = self
+        let mut ordered_tools = self
             .tools
             .iter()
-            .map(|(call_id, tool)| TranscriptProjectionOpenToolV1 {
-                call_id: call_id.clone(),
-                block: tool.block.clone(),
+            .map(|(call_id, tool)| {
+                Ok((
+                    (
+                        tool.order_key.source_sequence_value()?,
+                        tool.order_key.ordinal,
+                    ),
+                    TranscriptProjectionOpenToolV1 {
+                        call_id: call_id.clone(),
+                        block: tool.block.clone(),
+                    },
+                ))
             })
-            .collect::<Vec<_>>();
-        open_tools.sort_by(|left, right| left.block.order_key.cmp(&right.block.order_key));
+            .collect::<Result<Vec<_>, String>>()?;
+        ordered_tools.sort_by_key(|(order, _)| *order);
         let frontier = TranscriptProjectionFrontierV1 {
             schema: TRANSCRIPT_FRONTIER_SCHEMA_V1.to_string(),
             frontier_ref: frontier_ref.to_string(),
@@ -251,7 +259,7 @@ impl TranscriptProjectorV1 {
             projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.to_string(),
             projection_generation: self.index.projection_generation().to_string(),
             source_high_water: self.last_sequence.to_string(),
-            open_tools,
+            open_tools: ordered_tools.into_iter().map(|(_, tool)| tool).collect(),
         };
         let checkpoint = TranscriptProjectionCheckpointV1 {
             schema: TRANSCRIPT_CHECKPOINT_SCHEMA_V1.to_string(),
