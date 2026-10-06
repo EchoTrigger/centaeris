@@ -38,6 +38,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod active_input_tests;
+mod completion_delivery_tests;
 mod host_event_tests;
 
 #[derive(Clone, Debug, Default)]
@@ -5889,6 +5890,7 @@ fn agents_file_is_ephemeral_user_context_and_part_of_cache_identity() {
             "chat-agents-context",
             "turn-agents-answer-now",
             &TurnInput::AnswerNow {
+                attachments: Vec::new(),
                 message: "answer now".to_string(),
                 intervention: AgentRunInterventionV1::answer_now("intervention-1", "agent-run-1"),
                 supplement_ids: vec![],

@@ -5,10 +5,10 @@ mod runtime_context_tests;
 mod tool_context_tests;
 
 #[derive(Debug)]
-struct AckOnceFailQueue {
-    queue: Arc<InputQueue>,
-    fail_next_ack: AtomicBool,
-    ack_attempts: Mutex<Vec<AcknowledgeTurnInputsRequest>>,
+pub(super) struct AckOnceFailQueue {
+    pub(super) queue: Arc<InputQueue>,
+    pub(super) fail_next_ack: AtomicBool,
+    pub(super) ack_attempts: Mutex<Vec<AcknowledgeTurnInputsRequest>>,
 }
 
 impl TurnInputStorePort for AckOnceFailQueue {
@@ -33,12 +33,12 @@ impl TurnInputStorePort for AckOnceFailQueue {
 }
 
 #[derive(Default)]
-struct RecoveryJournal {
+pub(super) struct RecoveryJournal {
     records: Mutex<Vec<crate::session::SessionLogRecord>>,
 }
 
 impl RecoveryJournal {
-    fn materialize(
+    pub(super) fn materialize(
         &self,
         turn_id: &str,
         inputs: &[DurableTurnInput],
@@ -54,12 +54,14 @@ impl RecoveryJournal {
                 TurnInputPayload::UserSupplement {
                     supplement_id,
                     message,
-                } => crate::session::turn_supplement_record(
+                    attachments,
+                } => crate::session::turn_supplement_record_with_attachments(
                     "active-input",
                     turn_id,
                     "input-run",
                     supplement_id,
                     message,
+                    attachments,
                     input.created_at_ms,
                 )?,
                 TurnInputPayload::HostEvent(input) => {
@@ -87,7 +89,7 @@ impl RecoveryJournal {
         Ok(())
     }
 
-    fn commit_main(
+    pub(super) fn commit_main(
         &self,
         started: &ModelRequestStartedV1,
         store: &AgentRuntimeTestStore,
@@ -107,7 +109,7 @@ impl RecoveryJournal {
         SessionManager::new(store.clone()).save_session(&restored)
     }
 
-    fn read_facts(&self) -> Vec<crate::session::SessionLogRecord> {
+    pub(super) fn read_facts(&self) -> Vec<crate::session::SessionLogRecord> {
         self.records
             .lock()
             .unwrap()
@@ -132,6 +134,8 @@ async fn query_loop_committed_input_uptake_survives_ack_failure_and_same_run_rec
             TurnInputPayload::UserSupplement {
                 supplement_id: id.into(),
                 message: message.into(),
+
+                attachments: Vec::new(),
             },
             sequence,
         );
@@ -166,6 +170,8 @@ async fn query_loop_committed_input_uptake_survives_ack_failure_and_same_run_rec
         request.initial_input = AgentRunInitialInput::UserInput {
             input_id: "initial-user".into(),
             message: "  initial body\n".into(),
+
+            attachments: Vec::new(),
         };
         let result = engine
             .process_turn_loop_online_with_model_client_stream_controlled_and_tool_safe_point_async(
@@ -302,6 +308,8 @@ async fn assert_prepared_batch_recovery(lose_snapshot_response: bool) {
         TurnInputPayload::UserSupplement {
             supplement_id: "user-update".into(),
             message: "  retained update\n".into(),
+
+            attachments: Vec::new(),
         },
         1,
     );
@@ -325,6 +333,8 @@ async fn assert_prepared_batch_recovery(lose_snapshot_response: bool) {
                 TurnInputPayload::UserSupplement {
                     supplement_id: "user-after-failure".into(),
                     message: "  newer update\n".into(),
+
+                    attachments: Vec::new(),
                 },
                 3,
             );

@@ -4,6 +4,7 @@
 use super::host_event_input::HostEventInput;
 use super::supplement::*;
 
+pub mod attachments;
 pub(crate) mod recovery;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11,6 +12,7 @@ pub enum TurnInputPayload {
     UserSupplement {
         supplement_id: String,
         message: String,
+        attachments: Vec<attachments::UserInputAttachment>,
     },
     HostEvent(HostEventInput),
 }
@@ -28,9 +30,10 @@ impl TurnInputPayload {
             Self::UserSupplement {
                 supplement_id,
                 message,
+                attachments,
             } => {
                 validate_turn_supplement_id(supplement_id).map_err(|e| e.to_string())?;
-                validate_turn_supplement_message(message).map_err(|e| e.to_string())?;
+                attachments::validate_user_input(message, attachments)?;
                 Ok(())
             }
             Self::HostEvent(input) => input.validate(session_id),
@@ -161,6 +164,7 @@ impl From<DurableTurnSupplement> for DurableTurnInput {
             payload: TurnInputPayload::UserSupplement {
                 supplement_id: input.supplement_id,
                 message: input.message,
+                attachments: Vec::new(),
             },
             sequence: input.sequence,
             created_at_ms: input.created_at_ms,
@@ -176,7 +180,8 @@ impl DurableTurnInput {
             TurnInputPayload::UserSupplement {
                 supplement_id,
                 message,
-            } => Some(DurableTurnSupplement {
+                attachments,
+            } if attachments.is_empty() => Some(DurableTurnSupplement {
                 supplement_id: supplement_id.clone(),
                 message: message.clone(),
                 sequence: self.sequence,
@@ -184,7 +189,7 @@ impl DurableTurnInput {
                 claim_token: self.claim_token.clone(),
                 claim_lease_owner: self.claim_lease_owner.clone(),
             }),
-            TurnInputPayload::HostEvent(_) => None,
+            TurnInputPayload::HostEvent(_) | TurnInputPayload::UserSupplement { .. } => None,
         }
     }
 }

@@ -745,6 +745,57 @@ impl<
         Ok(facts)
     }
 
+    /// Replay only real successful receipts belonging to this input's admitted
+    /// turns. The Host commit is idempotent, including a crash before ACK.
+    pub(super) fn replay_completion_delivery_receipt(
+        &self,
+        session_id: &str,
+        turn_ids: &[String],
+        identity: &RuntimeAgentRunIdentityV1,
+        tool: &str,
+        sink: Option<&ToolSafePointDispatcher<'_>>,
+    ) -> Result<Option<String>, String> {
+        for turn_id in turn_ids {
+            let facts = Self::load_tool_execution_facts(&self.runtime_store, session_id, turn_id)?;
+            for (call_id, intent) in &facts.intents {
+                if intent.source_tool_name != tool
+                    || intent.agent_run_identity.as_ref().is_none_or(|known| {
+                        known.agent_run_id != identity.agent_run_id
+                            || known.authorization_digest != identity.authorization_digest
+                    })
+                {
+                    continue;
+                }
+                let Some(receipt) = facts.receipts.get(call_id) else {
+                    continue;
+                };
+                let result = receipt.decode_result()?;
+                if result.error.is_some() || !result.result_state().is_success() {
+                    continue;
+                }
+                let sink = sink.ok_or("completion_tool_commit_port_required")?;
+                let call = ToolCallEnvelope {
+                    id: call_id.clone(),
+                    name: intent.source_tool_name.clone(),
+                    args_json: intent.effective_args_json.clone(),
+                };
+                commit_session_tool_call(
+                    Some(sink),
+                    session_id,
+                    turn_id,
+                    intent.agent_run_identity.as_ref(),
+                    &call,
+                    &intent.provider_id,
+                    &intent.tool_contract_digest,
+                    intent.recorded_at_ms,
+                )?;
+                notify_tool_safe_point(Some(sink), intent, &call, &result)?;
+                return Ok(Some(call_id.clone()));
+            }
+        }
+        Ok(None)
+    }
+
     /// Reads the durable execution facts for an unpaired call without writing
     /// anything. Returns `None` when the call never reached the execution host.
     pub(super) fn read_unpaired_tool_call_evidence(

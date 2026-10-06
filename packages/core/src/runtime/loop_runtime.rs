@@ -1717,11 +1717,14 @@ impl<
             .flatten();
         let root_user_message = match &initial_input {
             AgentRunInitialInput::UserMessage(message) => message.clone(),
-            AgentRunInitialInput::UserInput { input_id, message } => {
+            AgentRunInitialInput::UserInput {
+                input_id,
+                message,
+                attachments,
+            } => {
                 crate::session::supplement::validate_turn_supplement_id(input_id)
                     .map_err(|e| e.to_string())?;
-                crate::session::supplement::validate_turn_supplement_message(message)
-                    .map_err(|e| e.to_string())?;
+                crate::session::turn_input::attachments::validate_user_input(message, attachments)?;
                 message.clone()
             }
             AgentRunInitialInput::HostEvent(input) => {
@@ -1892,6 +1895,12 @@ impl<
                 ) {
                     // Recovery strategy is explicitly configured to continue after wait states.
                 } else if resumed_continuation == QueryContinuation::CompleteTerminalTool {
+                    self.require_completion_delivery_before_terminal(
+                        &session_id,
+                        agent_run_identity.as_ref(),
+                        tool_safe_point,
+                        &runtime_scope,
+                    )?;
                     if let Some(control) = turn_control {
                         collect_turn_control_inputs(
                             control.take_pending_or_close(next_turn_id.as_str())?,
@@ -1995,13 +2004,24 @@ impl<
                     )?;
                 }
                 if let (Some(session), Some(ids)) = (&recovery_session, &prepared_ids) {
-                    restore_prepared_input(
-                        session,
-                        &turn_id,
-                        &initial_input,
-                        ids,
-                        &mut next_turn_supplements,
-                    )?
+                    if ids.is_empty()
+                        && self.completion_delivery_repair_pending(
+                            &session_id,
+                            agent_run_identity.as_ref(),
+                        )?
+                    {
+                        TurnInput::CompletionDeliveryRepair {
+                            objective: root_user_message.clone(),
+                        }
+                    } else {
+                        restore_prepared_input(
+                            session,
+                            &turn_id,
+                            &initial_input,
+                            ids,
+                            &mut next_turn_supplements,
+                        )?
+                    }
                 } else {
                     let mut input = initial_input.turn_input();
                     merge_user_input_batch(&mut input, &mut next_turn_supplements, &mut input_ids);
@@ -2052,6 +2072,12 @@ impl<
                 TurnInput::turn_supplement(std::mem::take(&mut next_turn_supplements))
             } else if let Some(input) = next_host_events.first() {
                 TurnInput::HostEvent(input.clone())
+            } else if self
+                .completion_delivery_repair_pending(&session_id, agent_run_identity.as_ref())?
+            {
+                TurnInput::CompletionDeliveryRepair {
+                    objective: root_user_message.clone(),
+                }
             } else {
                 TurnInput::ToolContinuation {
                     objective: root_user_message.clone(),
@@ -2143,6 +2169,15 @@ impl<
                 refresh_session_context_window(&mut session);
                 self.session_manager.save_session(&session)?;
             }
+            self.prepare_completion_delivery(
+                &session_id,
+                &turn_id,
+                &input,
+                agent_run_identity.as_ref(),
+                &mut generate_req,
+                tool_safe_point,
+                &runtime_scope,
+            )?;
             let context_token_estimate = generate_req.context_token_estimate;
             let recovery_content_prefix = input
                 .output_token_recovery_partial()
@@ -2284,6 +2319,23 @@ impl<
                 ));
             }
 
+            if turn_req.generate_result.tool_calls.is_empty()
+                && self.repair_undelivered_final(
+                    &session_id,
+                    agent_run_identity.as_ref(),
+                    &turn_req.generate_result.content,
+                    &runtime_scope,
+                )?
+            {
+                if let Some(sink) = stream_sink.as_deref_mut() {
+                    sink(TurnUpdate::ReplaceContent {
+                        session_id: session_id.clone(),
+                        turn_id: turn_id.clone(),
+                        content: String::new(),
+                    });
+                }
+                continue;
+            }
             let mut satisfied_by_final = None;
             if turn_req.generate_result.tool_calls.is_empty() {
                 if let Some(control) = turn_control {
@@ -2375,6 +2427,12 @@ impl<
                     continue;
                 }
                 if matches!(continuation, QueryContinuation::CompleteTerminalTool) {
+                    self.require_completion_delivery_before_terminal(
+                        &session_id,
+                        agent_run_identity.as_ref(),
+                        tool_safe_point,
+                        &runtime_scope,
+                    )?;
                     if let Some(control) = turn_control {
                         collect_turn_control_inputs(
                             control.take_pending_or_close(next_turn_id.as_str())?,
@@ -2590,21 +2648,27 @@ fn merge_user_input_batch(
                     batch.user_message().expect("user input batch")
                 ),
                 supplement_ids: batch.supplement_ids().to_vec(),
+                attachments: batch.attachments().to_vec(),
             };
         }
         TurnInput::UserMessageBatch {
             message,
             supplement_ids,
+            attachments,
         }
         | TurnInput::TurnSupplement {
             message,
             supplement_ids,
+            attachments,
         } => {
             message.push_str("\n\n");
             message.push_str(batch.user_message().expect("user input batch"));
             supplement_ids.extend_from_slice(batch.supplement_ids());
+            attachments.extend_from_slice(batch.attachments());
         }
-        TurnInput::ToolContinuation { .. } => *input = batch,
+        TurnInput::ToolContinuation { .. } | TurnInput::CompletionDeliveryRepair { .. } => {
+            *input = batch
+        }
         _ => unreachable!("ineligible batch inputs checked above"),
     }
 }
@@ -2631,6 +2695,7 @@ fn restore_prepared_input(
             AgentRunInitialInput::HostEvent(_) => Ok(TurnInput::TurnSupplement {
                 message: message.content.clone(),
                 supplement_ids: user_ids,
+                attachments: Vec::new(),
             }),
             AgentRunInitialInput::UserMessage(_) | AgentRunInitialInput::UserInput { .. } => {
                 if let Some(id) = initial.input_id() {
@@ -2641,6 +2706,7 @@ fn restore_prepared_input(
                 Ok(TurnInput::UserMessageBatch {
                     message: message.content.clone(),
                     supplement_ids: user_ids,
+                    attachments: Vec::new(),
                 })
             }
         };
@@ -2679,12 +2745,17 @@ fn exclude_initial_queue_input(
     supplements: &mut Vec<super::driver::TurnSupplementInput>,
     host_events: &mut Vec<crate::session::host_event_input::HostEventInput>,
 ) -> Result<(), String> {
-    if let AgentRunInitialInput::UserInput { input_id, message } = initial {
+    if let AgentRunInitialInput::UserInput {
+        input_id,
+        message,
+        attachments,
+    } = initial
+    {
         for supplement in supplements
             .iter()
             .filter(|input| &input.supplement_id == input_id)
         {
-            if &supplement.message != message {
+            if &supplement.message != message || &supplement.attachments != attachments {
                 return Err("turn_input_initial_identity_conflict".into());
             }
         }

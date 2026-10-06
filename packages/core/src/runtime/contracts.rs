@@ -10,6 +10,59 @@ use crate::execution::ExecutionWorkspaceGeneration;
 pub type TimestampMs = i64;
 pub type JsonMap = HashMap<String, String>;
 
+/// A main request's host-configured delivery obligation. This observation is
+/// restored with the canonical request before any real receipt is replayed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RequiredCompletionDeliveryV1 {
+    pub schema: String,
+    pub agent_run_id: String,
+    pub authorization_digest: String,
+    pub tool_name: String,
+    pub input_key: String,
+    pub turn_ids: Vec<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub delivered_call_id: Option<String>,
+    pub repair_attempted: bool,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub draft: Option<String>,
+}
+
+impl RequiredCompletionDeliveryV1 {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.schema != "runtime.completion_delivery.v1"
+            || self.agent_run_id.trim().is_empty()
+            || !valid_sha256_digest(&self.authorization_digest)
+            || !valid_sha256_digest(&self.input_key)
+            || self.tool_name.is_empty()
+            || self
+                .tool_name
+                .bytes()
+                .any(|b| !(b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'))
+            || self.turn_ids.is_empty()
+            || self.turn_ids.iter().any(|id| id.trim().is_empty())
+            || self.turn_ids.iter().collect::<HashSet<_>>().len() != self.turn_ids.len()
+            || self
+                .delivered_call_id
+                .as_ref()
+                .is_some_and(|id| id.trim().is_empty())
+            || self.draft.is_some() && !self.repair_attempted
+        {
+            return Err("completion_tool_delivery_state_invalid".into());
+        }
+        Ok(())
+    }
+}
+
+fn valid_sha256_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+
 static NEXT_TURN_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub fn current_unix_epoch_ms_u128() -> u128 {

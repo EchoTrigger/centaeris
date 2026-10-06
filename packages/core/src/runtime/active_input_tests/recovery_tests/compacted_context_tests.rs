@@ -66,6 +66,8 @@ impl ModelClient for CompactedRecoveryModel {
                             TurnInputPayload::UserSupplement {
                                 supplement_id: "active-anchor".into(),
                                 message: "  recent accepted anchor\n".into(),
+
+                                attachments: Vec::new(),
                             },
                             2,
                         );
@@ -150,6 +152,8 @@ async fn assert_compacted_context_recovery(
         TurnInputPayload::UserSupplement {
             supplement_id: "initial-user".into(),
             message: initial_body.clone(),
+
+            attachments: Vec::new(),
         },
         1,
     );
@@ -178,6 +182,8 @@ async fn assert_compacted_context_recovery(
     request.initial_input = AgentRunInitialInput::UserInput {
         input_id: "initial-user".into(),
         message: initial_body.clone(),
+
+        attachments: Vec::new(),
     };
     let model = CompactedRecoveryModel {
         queue: queue.clone(),
@@ -298,6 +304,8 @@ async fn assert_compacted_context_recovery(
         TurnInputPayload::UserSupplement {
             supplement_id: "after-provider-failure".into(),
             message: "  later arrival\n".into(),
+
+            attachments: Vec::new(),
         },
         4,
     );

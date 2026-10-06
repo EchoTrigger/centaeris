@@ -20,6 +20,8 @@ async fn assert_runtime_context_recovery(conflicting_context: bool) {
             TurnInputPayload::UserSupplement {
                 supplement_id: id.into(),
                 message: message.into(),
+
+                attachments: Vec::new(),
             },
             sequence,
         );
@@ -88,6 +90,8 @@ async fn assert_runtime_context_recovery(conflicting_context: bool) {
         request.initial_input = AgentRunInitialInput::UserInput {
             input_id: "initial-user".into(),
             message: "  initial body\n".into(),
+
+            attachments: Vec::new(),
         };
         let result = engine
             .process_turn_loop_online_with_model_client_stream_controlled_and_tool_safe_point_async(

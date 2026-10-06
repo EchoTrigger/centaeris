@@ -385,6 +385,18 @@ impl<
             session.context_window.as_slice(),
             match input {
                 TurnInput::HostEvent(input) => Some(input.chat_message(session_id, now_ms())?),
+                TurnInput::CompletionDeliveryRepair { .. } => Some(
+                    session
+                        .context_window
+                        .iter()
+                        .rfind(|message| {
+                            crate::runtime::context_window::is_reliable_tool_chain_user_anchor(
+                                message,
+                            )
+                        })
+                        .cloned()
+                        .ok_or("completion_delivery_user_anchor_missing")?,
+                ),
                 _ => input
                     .user_message()
                     .map(|message| build_input_user_message(session_id, turn_id, input, message)),
@@ -1084,6 +1096,10 @@ fn build_input_user_message(
     ) {
         current.content = message.to_owned();
     }
+    crate::session::turn_input::attachments::apply_user_input_attachments(
+        &mut current,
+        input.attachments(),
+    );
     current
 }
 
