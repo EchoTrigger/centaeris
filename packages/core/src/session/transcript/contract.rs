@@ -62,7 +62,7 @@ impl Default for TranscriptPagePolicyV1 {
 }
 
 #[cfg_attr(feature = "contract-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TranscriptOrderKeyV1 {
     pub source_sequence: String,

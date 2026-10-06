@@ -428,6 +428,145 @@ fn projector_restores_unsettled_tool_state_from_a_bounded_frontier() {
     assert_eq!(decoded.source_high_water, "100");
 }
 
+fn tool_record_for_call(
+    mut record: SequencedSessionRecord,
+    call_id: &str,
+) -> SequencedSessionRecord {
+    record.event.event_id = format!("event-{}-{call_id}", record.sequence);
+    record.event.payload["callId"] = json!(call_id);
+    record
+}
+
+fn assert_parallel_tools_recover_across_decimal_boundary(first_sequence: u64) {
+    let mut projector =
+        TranscriptProjectorV1::new("session-1".into(), "generation-1".into()).unwrap();
+    let calls = [first_sequence, first_sequence + 1, first_sequence + 2];
+    for sequence in calls {
+        let record = tool_record_for_call(tool_call(sequence), &format!("call-{sequence}"));
+        projector
+            .apply(&record, "run-1", &format!("cursor-{sequence}"))
+            .unwrap();
+    }
+
+    let recovery = projector
+        .checkpoint_recovery("frontier-boundary", "block-index-boundary")
+        .expect("parallel tools must produce a valid numerically ordered checkpoint");
+    assert_eq!(
+        recovery
+            .frontier
+            .open_tools
+            .iter()
+            .map(|tool| tool.block.order_key.source_sequence_value().unwrap())
+            .collect::<Vec<_>>(),
+        calls,
+    );
+    let recovery = serde_json::from_slice(&serde_json::to_vec(&recovery).unwrap()).unwrap();
+    let mut restored = TranscriptProjectorV1::from_checkpoint_recovery(recovery).unwrap();
+
+    // Results may finish in reverse order; presentation order remains the call order.
+    for (offset, call_sequence) in calls.into_iter().rev().enumerate() {
+        let sequence = first_sequence + 3 + offset as u64;
+        let record = tool_record_for_call(tool_result(sequence), &format!("call-{call_sequence}"));
+        let cursor = format!("cursor-{sequence}");
+        let original = projector.apply(&record, "run-1", &cursor).unwrap();
+        let recovered = restored.apply(&record, "run-1", &cursor).unwrap();
+        assert_eq!(original, recovered);
+        restored
+            .checkpoint_recovery("frontier-next", "block-index-boundary")
+            .expect("recovered tools can keep checkpointing after every result");
+    }
+
+    let waterline = first_sequence + 5;
+    let page = restored
+        .page_at(waterline, None, TranscriptPagePolicyV1::default())
+        .unwrap();
+    assert_eq!(
+        page,
+        projector
+            .page_at(waterline, None, TranscriptPagePolicyV1::default())
+            .unwrap(),
+    );
+    assert_eq!(page.resume_cursors[0].cursor, format!("cursor-{waterline}"));
+    assert!(page.blocks.iter().all(|block| matches!(
+        block.body,
+        TranscriptBlockBodyV1::Tool {
+            status: TranscriptBlockStatusV1::Completed,
+            ..
+        }
+    )));
+    let policy = TranscriptPagePolicyV1 {
+        max_blocks: 2,
+        ..TranscriptPagePolicyV1::default()
+    };
+    let tail = restored.page_at(waterline, None, policy).unwrap();
+    let older = restored
+        .page_at(waterline, tail.older_cursor.as_deref(), policy)
+        .unwrap();
+    let all_blocks = older
+        .blocks
+        .into_iter()
+        .chain(tail.blocks)
+        .collect::<Vec<_>>();
+    assert_eq!(all_blocks, page.blocks);
+    assert!(!older.has_older);
+    assert!(restored
+        .checkpoint_recovery("frontier-settled", "block-index-boundary")
+        .unwrap()
+        .frontier
+        .open_tools
+        .is_empty());
+}
+
+#[test]
+fn parallel_tool_checkpoint_recovers_across_sequence_9_to_10() {
+    assert_parallel_tools_recover_across_decimal_boundary(9);
+}
+
+#[test]
+fn parallel_tool_checkpoint_recovers_across_sequence_99_to_100() {
+    assert_parallel_tools_recover_across_decimal_boundary(99);
+}
+
+#[test]
+fn parallel_tool_checkpoint_recovers_across_sequence_999_to_1000() {
+    assert_parallel_tools_recover_across_decimal_boundary(999);
+}
+
+#[test]
+fn recovered_parallel_tools_preserve_same_sequence_ordinal_order() {
+    let mut projector =
+        TranscriptProjectorV1::new("session-1".into(), "generation-1".into()).unwrap();
+    for sequence in 100..=102 {
+        projector
+            .apply(
+                &tool_record_for_call(tool_call(sequence), &format!("call-{sequence}")),
+                "run-1",
+                &format!("cursor-{sequence}"),
+            )
+            .unwrap();
+    }
+    let mut recovery = projector
+        .checkpoint_recovery("frontier-ordinals", "block-index-ordinals")
+        .unwrap();
+    recovery.frontier.open_tools[1]
+        .block
+        .order_key
+        .source_sequence = "100".into();
+    recovery.frontier.open_tools[1].block.order_key.ordinal = 1;
+    recovery.validate().unwrap();
+    let mut reversed = recovery.clone();
+    reversed.frontier.open_tools.swap(0, 1);
+    assert!(reversed.validate().unwrap_err().contains("not ordered"));
+
+    let restored = TranscriptProjectorV1::from_checkpoint_recovery(recovery.clone()).unwrap();
+    assert_eq!(
+        restored
+            .checkpoint_recovery("frontier-ordinals", "block-index-ordinals")
+            .unwrap(),
+        recovery,
+    );
+}
+
 #[test]
 fn long_answer_reference_round_trips_exact_markdown_and_rejects_foreign_sources() {
     use centaeris_core::session::transcript::*;
