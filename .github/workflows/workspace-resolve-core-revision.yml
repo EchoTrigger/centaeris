@@ -1,0 +1,32 @@
+name: Resolve pinned public Core revision
+
+on:
+  workflow_call:
+    outputs:
+      revision:
+        description: Pinned public Core SHA shared by all consumers in this run
+        value: ${{ jobs.resolve.outputs.revision }}
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      revision: ${{ steps.core.outputs.revision }}
+    steps:
+      - name: Check out Workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.21.0
+
+      - name: Read pinned public Core revision
+        id: core
+        run: node scripts/resolve-core-revision.mjs

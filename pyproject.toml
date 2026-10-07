@@ -1,0 +1,17 @@
+[project]
+name = "centaeris-workspace"
+version = "0.1.0"
+license = "AGPL-3.0-only"
+requires-python = "==3.12.10"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = [
+  "packages/api",
+  "packages/document_processor",
+  "packages/hosted_execution",
+  "packages/worker",
+]

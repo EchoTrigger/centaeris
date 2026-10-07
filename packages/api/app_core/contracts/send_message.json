@@ -1,0 +1,19 @@
+{
+  "name": "send_message",
+  "category": "runtime.output",
+  "summary": "Post one complete message to this Agent's own conversation. Include the full body and optional authorized resource refs. A successful Session commit makes the message visible; continue working after sending. Finish the run with Final without repeating posted text.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "body": {"type": "string", "minLength": 1, "maxLength": 65536},
+      "session_refs": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+      "file_refs": {"type": "array", "items": {"type": "string"}, "maxItems": 8}
+    },
+    "required": ["body", "session_refs", "file_refs"],
+    "additionalProperties": false
+  },
+  "providerId": "workspace.agent_messages",
+  "scopes": [],
+  "concurrencySafe": false,
+  "turnBehavior": "continueTurn"
+}

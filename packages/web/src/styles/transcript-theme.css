@@ -1,0 +1,48 @@
+/* Web chat roles. Shared desktop typography remains untouched. */
+@import "./chat-typography.css";
+:root[data-theme] :is(.markdownContent,.workspaceUserMessage,.workspaceComposer textarea,.workProgressStatus,.workProgressSummary,.workspaceActivityGroup,.workspaceLiveStatus,.reasoningPreview,.workspaceLiveStatusElapsed,.agent-operation-summary,.agent-tool-node-action,.agent-tool-bash-status,.agent-tool-command-label,.workspaceToolOutputStatus,.workspaceStageSummary) {
+  font-size: var(--chat-body-size); line-height: var(--chat-body-leading);
+}
+:root[data-theme] :is(.workspaceUserMessageMeta,.workspaceAssistantMessageMeta,.workspaceCitationSources,.workspaceArtifactInline,.filePreviewHeader nav,.filePreviewHeader nav strong,.filePreviewState) {
+  font-size: var(--chat-meta-size); line-height: var(--chat-meta-leading);
+}
+:root[data-theme] :is(.workspaceUserMessageMeta,.workspaceAssistantMessageMeta) svg {
+  width: var(--chat-meta-size); height: var(--chat-meta-size);
+}
+:root[data-theme] :is(.workspaceStageSummary,.workspaceStageSummary .markdownContent) {
+  color: var(--text);
+}
+:root[data-theme] .workspaceReasoningBody .markdownContent {
+  color: var(--process-text); font-size: var(--chat-body-size); line-height: var(--chat-body-leading);
+}
+:root[data-theme] :is(.markdownContent pre,.markdownContent code,.agent-operation-body pre,.agent-operation-body code,.workspaceToolOutputScroll) {
+  font-size: var(--chat-code-size); line-height: var(--chat-code-leading);
+}
+:root[data-theme] .workspaceFilePreviewPanel .documentTextPreview > pre {
+  font-family: var(--font-content); font-size: var(--chat-body-size); line-height: var(--chat-body-leading);
+}
+:root[data-theme] :is(.agent-operation-summary-toggle,button.workspaceActivityGroup):hover { background:transparent; color:var(--on-surface); }
+:root[data-theme] .markdownTable :is(th,td) { white-space:normal; overflow-wrap:anywhere; }
+:root[data-theme] :is(.agent-tool-bash-output,.agent-tool-output-block).is-error,
+:root[data-theme] .activityOperationOutput.isError { color:var(--error); }
+:root[data-theme] :is(.summaryCodePreviewDiffAdded,.activityDiffLine.isAdded) { background:var(--diff-add-bg); }
+:root[data-theme] :is(.summaryCodePreviewDiffRemoved,.activityDiffLine.isRemoved) { background:var(--diff-remove-bg); }
+:root[data-theme] .cm-selectionBackground { background:color-mix(in srgb,var(--primary-color) 25%,transparent); }
+:root[data-theme] :is(.markdown-content,.markdownContent) a { text-underline-offset:3px; }
+
+.workspaceCitationSources {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin: 6px 0 6px 24px;
+  color: var(--process-text);
+}
+.workspaceCitationSources button {
+  background: none;
+  border: 0;
+  padding: 2px;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}

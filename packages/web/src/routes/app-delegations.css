@@ -1,0 +1,80 @@
+.appDelegations { font-size: 14px; color: var(--on-surface); }
+.appDelegations [hidden] { display: none; }
+.appDelegations p { font-size: 14px; line-height: 1.65; max-width: 76ch; }
+.appDelegations > p, .appDelegationSection > p, .appDelegationDetailPanel > p, .appDelegationGuide > p { color: var(--process-text); }
+.appDelegationPageHeader { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.appDelegationSection { margin-top: 28px; padding-top: 22px; border-top: 1px solid var(--outline-variant); }
+.appDelegationSection h2, .appDelegationDetailHeader h2 { margin: 0 0 12px; font-size: 18px; font-weight: 600; }
+.appDelegations h3 { margin: 0 0 14px; font-size: 16px; font-weight: 600; }
+.appDelegations h4 { margin: 22px 0 10px; font-size: 14px; font-weight: 600; }
+.appDelegations h5 { margin: 12px 0 6px; font-size: 14px; }
+.appDelegationForm { display: grid; gap: 16px; max-width: 680px; }
+.appDelegationForm > label { display: grid; gap: 7px; font-size: 14px; }
+.appDelegationForm input:not([type="checkbox"]), .appDelegationForm select { width: 100%; height: 38px; border: 1px solid var(--outline-variant); border-radius: 6px; background: var(--surface-color); color: var(--on-surface); padding: 0 10px; font: inherit; }
+.appDelegationForm small, .appDelegationRow small, .appDelegationBranch small, .appDelegationSessionTree small, .appDelegationDetailHeader small { color: var(--process-text); font-size: 12px; line-height: 1.6; }
+.appDelegationForm fieldset { display: grid; gap: 12px; margin: 0; padding: 14px; border: 1px solid var(--outline-variant); border-radius: 6px; }
+.appDelegationForm legend { font-size: 14px; }
+.appDelegationScope { display: flex; align-items: start; gap: 9px; cursor: pointer; font-size: 14px; }
+.appDelegationScope input { flex: none; margin: 4px 0 0; }
+.appDelegationRow > div:first-child { display: grid; gap: 4px; min-width: 0; }
+.appDelegations code { color: var(--on-surface); font-size: 14px; overflow-wrap: anywhere; }
+.appDelegations button { min-height: 36px; border: 1px solid var(--outline-variant); border-radius: 6px; background: var(--surface-color); color: var(--on-surface); padding: 8px 12px; font: inherit; cursor: pointer; }
+.appDelegations button:hover:not(:disabled) { background: var(--surface-hover); }
+.appDelegations button:disabled { opacity: .5; cursor: default; }
+.appDelegations button:focus-visible, .appDelegations a:focus-visible, .appDelegations summary:focus-visible, .appDelegationDetailPanel:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 3px; }
+.appDelegationForm > button { background: var(--solid-surface); color: var(--solid-text); line-height: 1.6; }
+.appDelegationGroup { margin-top: 24px; }
+.appDelegationGroup h3 { padding-bottom: 10px; margin: 0; border-bottom: 1px solid var(--outline-variant); }
+.appDelegationRow { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 16px 0; border-bottom: 1px solid var(--outline-variant); font-size: 14px; }
+.appDelegationRow > button { flex: none; }
+.appDelegationActions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.appDelegationToken { padding: 14px; border-radius: 6px; background: var(--surface-container); color: var(--on-surface); white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; }
+.appDelegationDetails { margin-top: 24px; }
+.appDelegations .appDelegationBack { padding-left: 0; border-color: transparent; color: var(--process-text); }
+.appDelegationDetailHeader { margin: 20px 0 26px; }
+.appDelegationDetailHeader p { margin: 0 0 6px; color: var(--on-surface); }
+.appDelegationDetailLayout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; }
+.appDelegationDetailNav { display: flex; flex-wrap: wrap; align-items: stretch; gap: 5px; padding-bottom: 12px; border-bottom: 1px solid var(--outline-variant); }
+.appDelegationDetailNav button { border-color: transparent; text-align: left; }
+.appDelegationDetailNav button[aria-selected="true"] { background: var(--surface-container); font-weight: 600; }
+.appDelegationDetailPanel { min-width: 0; }
+.appDelegationFacts { display: grid; grid-template-columns: minmax(110px, .7fr) minmax(0, 2fr); gap: 15px 20px; margin: 24px 0; }
+.appDelegationFacts dt { color: var(--process-text); }
+.appDelegationFacts dd { display: grid; gap: 5px; min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.appDelegationInlineLink, .appDelegationBranchView a { color: var(--primary-color); text-underline-offset: 3px; }
+.appDelegationDeveloperDetails { margin: 16px 0; font-size: 14px; }
+.appDelegations summary { cursor: pointer; color: var(--process-text); }
+.appDelegationDeveloperDetails > code { display: block; margin-top: 7px; }
+.appDelegationGuideSteps { padding-left: 22px; }
+.appDelegationGuideSteps > li { padding-bottom: 18px; border-bottom: 1px solid var(--outline-variant); }
+.appDelegationGuideSteps h4 { margin-top: 18px; }
+.appDelegationEndpoint { display: block; margin-bottom: 12px; }
+.appDelegationGuide pre { max-width: 100%; padding: 14px; border-radius: 6px; background: var(--surface-variant); color: var(--on-surface); font-size: 14px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.appDelegationExampleHeader { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+.appDelegationExampleHeader button { padding: 6px 10px; font-size: 12px; }
+.appDelegationExampleHeader button[aria-pressed="true"] { background: var(--surface-container); }
+.appDelegationGuide ol:not(.appDelegationGuideSteps) { padding-left: 22px; line-height: 1.65; }
+.appDelegationGuide ol:not(.appDelegationGuideSteps) li { margin-bottom: 10px; }
+.appDelegationBranchView { margin-top: 0; padding-top: 0; border-top: 0; }
+.appDelegationBranches { list-style: none; margin: 22px 0 0; padding: 0 0 0 14px; border-left: 1px solid var(--outline-variant); }
+.appDelegationBranch { display: grid; gap: 7px; padding: 16px 0; border-bottom: 1px solid var(--outline-variant); }
+.appDelegationBranch strong { min-width: 0; overflow-wrap: anywhere; }
+.appDelegations .appDelegationBranchToggle { display: flex; align-items: start; gap: 7px; min-width: 0; border: 0; padding: 5px 0; text-align: left; }
+.appDelegationBranch dt { color: var(--process-text); font-size: 12px; }
+.appDelegationBranch dl { display: grid; grid-template-columns: minmax(100px, .8fr) minmax(0, 2fr); gap: 6px 14px; margin: 0; }
+.appDelegationBranch dd { min-width: 0; margin: 0; }
+.appDelegationSessionTree ul { list-style: none; margin: 10px 0; padding-left: 16px; border-left: 1px solid var(--outline-variant); }
+.appDelegationSessionTree li { display: grid; gap: 5px; padding: 12px 0; }
+.appDelegationSessionTree [role="alert"] { color: var(--error); }
+@media (max-width: 700px) {
+  .isApplicationSettings { flex-direction: column; }
+  .isApplicationSettings .workspaceSettingsNav { width: 100%; min-width: 0; flex: none; padding: 44px 12px 12px; border-bottom: 1px solid var(--outline-variant); }
+  .isApplicationSettings .workspaceSettingsNav nav { display: flex; flex-wrap: wrap; gap: 4px; }
+  .isApplicationSettings .workspaceSettingsContent { min-height: 0; }
+  .appDelegationDetailLayout { grid-template-columns: minmax(0, 1fr); gap: 22px; }
+  .appDelegationDetailNav { flex-direction: row; flex-wrap: wrap; gap: 4px; padding-bottom: 12px; border-bottom: 1px solid var(--outline-variant); }
+  .appDelegationDetailNav button { padding: 8px 10px; }
+  .appDelegationDetailPanel { border-left: 0; padding-left: 0; }
+  .appDelegationFacts { grid-template-columns: minmax(95px, .8fr) minmax(0, 2fr); gap: 14px; }
+  .appDelegationRow { align-items: start; flex-direction: column; }
+}

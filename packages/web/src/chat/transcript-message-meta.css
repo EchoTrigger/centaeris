@@ -1,0 +1,14 @@
+.workspaceTranscriptUser { justify-items: end; gap: 7px; }
+.workspaceTranscriptUser > .workspaceUserMessage { width: fit-content; }
+.workspaceUserMessageOrigin { color: var(--process-text); font-size: var(--chat-meta-size); line-height: var(--chat-meta-leading); text-align: end; overflow-wrap: anywhere; }
+.workspaceTranscriptBlock:hover > .transcriptMessageMeta,
+.workspaceTranscriptBlock:focus-within > .transcriptMessageMeta,
+.transcriptMessageMeta.isFailed { opacity: 1; pointer-events: auto; }
+.transcriptMessageMeta { flex-wrap: wrap; }
+.workspaceTranscriptUser > .transcriptMessageMeta { justify-content: flex-end; }
+.transcriptMessageMeta button:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+.transcriptMessageMeta button[aria-disabled="true"] { cursor: progress; }
+.transcriptMessageCopyStatus { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.transcriptMessageCopyError { color: var(--danger); }
+@media (hover: none) { .transcriptMessageMeta { opacity: 1; pointer-events: auto; } }
+@media (prefers-reduced-motion: reduce) { .transcriptMessageMeta { transition: none; } }

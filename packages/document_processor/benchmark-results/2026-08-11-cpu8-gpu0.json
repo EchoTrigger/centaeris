@@ -1,0 +1,133 @@
+{
+  "schema": "centaeris.ocr_ab.v1",
+  "generatedAt": "2026-08-10T18:07:17.6981690Z",
+  "cpuImage": "centaeris-document-processor:1.0.0-cpu8",
+  "cpuImageDigest": "sha256:2d4811397fee55cfb726ab76dad169f8016374d22c08320108ac77366d63da8c",
+  "cpuImageSizeBytes": 835404329,
+  "gpuImage": "centaeris-document-processor:1.0.0-gpu0-cu126",
+  "gpuImageDigest": "sha256:29ae4b74dcede5eca4e596bad8ebbc0c7957375e598877afaa9ef8ce7199b4f8",
+  "gpuImageSizeBytes": 4694578145,
+  "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU, 610.74, 8188",
+  "results": [
+    {
+      "sample": "apollo-11-retrospective-pages-1-2-raster-only.pdf",
+      "sampleSha256": "46bc37bd4655552640c13f85dc513586ab1cf5c086d37a06b7c4cef36f481184",
+      "pages": 2,
+      "order": 1,
+      "profile": "cpu8",
+      "elapsedMs": 82802,
+      "canonicalSha256": "9173ee9e6b6166d49232ba3159b014293f2e1bfc9267782af4ec5e07afff942a",
+      "routes": ["ppOcrV6Medium", "ppOcrV6Medium"]
+    },
+    {
+      "sample": "apollo-11-retrospective-pages-1-2-raster-only.pdf",
+      "sampleSha256": "46bc37bd4655552640c13f85dc513586ab1cf5c086d37a06b7c4cef36f481184",
+      "pages": 2,
+      "order": 2,
+      "profile": "gpu0",
+      "elapsedMs": 8604,
+      "canonicalSha256": "9173ee9e6b6166d49232ba3159b014293f2e1bfc9267782af4ec5e07afff942a",
+      "routes": ["ppOcrV6Medium", "ppOcrV6Medium"]
+    },
+    {
+      "sample": "apollo-11-retrospective-pages-1-2-raster-only.pdf",
+      "sampleSha256": "46bc37bd4655552640c13f85dc513586ab1cf5c086d37a06b7c4cef36f481184",
+      "pages": 2,
+      "order": 3,
+      "profile": "gpu0",
+      "elapsedMs": 8005,
+      "canonicalSha256": "9173ee9e6b6166d49232ba3159b014293f2e1bfc9267782af4ec5e07afff942a",
+      "routes": ["ppOcrV6Medium", "ppOcrV6Medium"]
+    },
+    {
+      "sample": "apollo-11-retrospective-pages-1-2-raster-only.pdf",
+      "sampleSha256": "46bc37bd4655552640c13f85dc513586ab1cf5c086d37a06b7c4cef36f481184",
+      "pages": 2,
+      "order": 4,
+      "profile": "cpu8",
+      "elapsedMs": 79917,
+      "canonicalSha256": "9173ee9e6b6166d49232ba3159b014293f2e1bfc9267782af4ec5e07afff942a",
+      "routes": ["ppOcrV6Medium", "ppOcrV6Medium"]
+    },
+    {
+      "sample": "apollo-11-retrospective-pages-1-2-raster-only.pdf",
+      "sampleSha256": "46bc37bd4655552640c13f85dc513586ab1cf5c086d37a06b7c4cef36f481184",
+      "pages": 2,
+      "order": 5,
+      "profile": "cpu8",
+      "elapsedMs": 79042,
+      "canonicalSha256": "9173ee9e6b6166d49232ba3159b014293f2e1bfc9267782af4ec5e07afff942a",
+      "routes": ["ppOcrV6Medium", "ppOcrV6Medium"]
+    },
+    {
+      "sample": "apollo-11-retrospective-pages-1-2-raster-only.pdf",
+      "sampleSha256": "46bc37bd4655552640c13f85dc513586ab1cf5c086d37a06b7c4cef36f481184",
+      "pages": 2,
+      "order": 6,
+      "profile": "gpu0",
+      "elapsedMs": 8232,
+      "canonicalSha256": "9173ee9e6b6166d49232ba3159b014293f2e1bfc9267782af4ec5e07afff942a",
+      "routes": ["ppOcrV6Medium", "ppOcrV6Medium"]
+    },
+    {
+      "sample": "apollo-11-retrospective-raster-only.pdf",
+      "sampleSha256": "0b9ccb188dac76e58a44955455dc7f0f2f5fda0a800832501af8129f6f13c7bc",
+      "pages": 9,
+      "order": 1,
+      "profile": "cpu8",
+      "elapsedMs": 355054,
+      "canonicalSha256": "0a34464c965cedc29165c0bae4cc67b0c105cf4a4a09d88f178b5e7588575f87",
+      "routes": ["ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium"]
+    },
+    {
+      "sample": "apollo-11-retrospective-raster-only.pdf",
+      "sampleSha256": "0b9ccb188dac76e58a44955455dc7f0f2f5fda0a800832501af8129f6f13c7bc",
+      "pages": 9,
+      "order": 2,
+      "profile": "gpu0",
+      "elapsedMs": 14974,
+      "canonicalSha256": "0a34464c965cedc29165c0bae4cc67b0c105cf4a4a09d88f178b5e7588575f87",
+      "routes": ["ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium"]
+    },
+    {
+      "sample": "apollo-11-retrospective-raster-only.pdf",
+      "sampleSha256": "0b9ccb188dac76e58a44955455dc7f0f2f5fda0a800832501af8129f6f13c7bc",
+      "pages": 9,
+      "order": 3,
+      "profile": "gpu0",
+      "elapsedMs": 14992,
+      "canonicalSha256": "0a34464c965cedc29165c0bae4cc67b0c105cf4a4a09d88f178b5e7588575f87",
+      "routes": ["ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium"]
+    },
+    {
+      "sample": "apollo-11-retrospective-raster-only.pdf",
+      "sampleSha256": "0b9ccb188dac76e58a44955455dc7f0f2f5fda0a800832501af8129f6f13c7bc",
+      "pages": 9,
+      "order": 4,
+      "profile": "cpu8",
+      "elapsedMs": 359177,
+      "canonicalSha256": "0a34464c965cedc29165c0bae4cc67b0c105cf4a4a09d88f178b5e7588575f87",
+      "routes": ["ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium"]
+    },
+    {
+      "sample": "apollo-11-retrospective-raster-only.pdf",
+      "sampleSha256": "0b9ccb188dac76e58a44955455dc7f0f2f5fda0a800832501af8129f6f13c7bc",
+      "pages": 9,
+      "order": 5,
+      "profile": "cpu8",
+      "elapsedMs": 359195,
+      "canonicalSha256": "0a34464c965cedc29165c0bae4cc67b0c105cf4a4a09d88f178b5e7588575f87",
+      "routes": ["ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium"]
+    },
+    {
+      "sample": "apollo-11-retrospective-raster-only.pdf",
+      "sampleSha256": "0b9ccb188dac76e58a44955455dc7f0f2f5fda0a800832501af8129f6f13c7bc",
+      "pages": 9,
+      "order": 6,
+      "profile": "gpu0",
+      "elapsedMs": 14717,
+      "canonicalSha256": "0a34464c965cedc29165c0bae4cc67b0c105cf4a4a09d88f178b5e7588575f87",
+      "routes": ["ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium", "ppOcrV6Medium"]
+    }
+  ]
+}

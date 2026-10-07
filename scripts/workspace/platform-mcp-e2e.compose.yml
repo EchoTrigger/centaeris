@@ -1,0 +1,29 @@
+# Isolated acceptance overlay; no deployment secrets or model credentials.
+services:
+  api-init:
+    image: centaeris-platform-mcp-e2e-api:local
+  api:
+    image: centaeris-platform-mcp-e2e-api:local
+    ports: !override ["127.0.0.1:0:8000"]
+    environment:
+      PLATFORM_MCP_ALLOWED_HOSTS: localhost,127.0.0.1,api
+      MCP_E2E_ISOLATED: "1"
+      WEB_ORIGIN: http://127.0.0.1:43108
+    volumes:
+      - ./scripts/platform-mcp-live-run.py:/app/scripts/platform-mcp-live-run.py:ro
+  runtime:
+    image: centaeris-platform-mcp-e2e-runtime:local
+    environment:
+      WORKSPACE_GENERAL_IMAGE: centaeris-platform-mcp-e2e-general:local
+  workspace-general:
+    image: centaeris-platform-mcp-e2e-general:local
+  document-processor:
+    image: centaeris-platform-mcp-e2e-processor:local
+  worker:
+    image: centaeris-platform-mcp-e2e-worker:local
+    environment:
+      WORKER_SLOT_COUNT: "1"
+  material-worker:
+    image: centaeris-platform-mcp-e2e-api:local
+    environment:
+      MATERIAL_PROCESSOR_IMAGE: centaeris-platform-mcp-e2e-processor:local

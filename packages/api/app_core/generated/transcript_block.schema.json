@@ -1,0 +1,301 @@
+{
+  "$defs": {
+    "TranscriptBlockBodyV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "content": {
+              "$ref": "#/$defs/TranscriptTextContentV1"
+            },
+            "kind": {
+              "const": "userText",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "content"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "content": {
+              "$ref": "#/$defs/TranscriptTextContentV1"
+            },
+            "kind": {
+              "const": "assistantText",
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/TranscriptBlockStatusV1"
+            }
+          },
+          "required": [
+            "kind",
+            "content",
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "content": {
+              "$ref": "#/$defs/TranscriptTextContentV1"
+            },
+            "kind": {
+              "const": "reasoning",
+              "type": "string"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/TranscriptBlockStatusV1"
+            }
+          },
+          "required": [
+            "kind",
+            "requestId",
+            "content",
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "callId": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "tool",
+              "type": "string"
+            },
+            "outputRef": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TranscriptContentRefV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "$ref": "#/$defs/TranscriptBlockStatusV1"
+            },
+            "summary": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "summaryRef": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TranscriptContentRefV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "toolName": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "callId",
+            "toolName",
+            "status",
+            "summary",
+            "summaryRef",
+            "outputRef"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "content": {
+              "$ref": "#/$defs/TranscriptTextContentV1"
+            },
+            "kind": {
+              "const": "notice",
+              "type": "string"
+            },
+            "noticeType": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/TranscriptBlockStatusV1"
+            }
+          },
+          "required": [
+            "kind",
+            "noticeType",
+            "content",
+            "status"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TranscriptBlockStatusV1": {
+      "enum": [
+        "queued",
+        "running",
+        "completed",
+        "failed",
+        "interrupted"
+      ],
+      "type": "string"
+    },
+    "TranscriptContentRefV1": {
+      "additionalProperties": false,
+      "properties": {
+        "byteLength": {
+          "type": "string"
+        },
+        "refId": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "refId",
+        "revision",
+        "byteLength"
+      ],
+      "type": "object"
+    },
+    "TranscriptOrderKeyV1": {
+      "additionalProperties": false,
+      "properties": {
+        "ordinal": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sourceSequence": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sourceSequence",
+        "ordinal"
+      ],
+      "type": "object"
+    },
+    "TranscriptPresentationV1": {
+      "additionalProperties": false,
+      "description": "Optional display facts. Missing facts remain unknown; no history repair is implied.",
+      "properties": {
+        "agentRunId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "displayTarget": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "durationMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "observedAtMs": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "operation": true,
+        "sourceType": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "agentRunId",
+        "sourceType",
+        "observedAtMs",
+        "displayTarget",
+        "durationMs",
+        "operation"
+      ],
+      "type": "object"
+    },
+    "TranscriptTextContentV1": {
+      "additionalProperties": false,
+      "properties": {
+        "inlineContent": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sourceRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TranscriptContentRefV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "inlineContent",
+        "sourceRef"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "blockId": {
+      "type": "string"
+    },
+    "blockRevision": {
+      "type": "string"
+    },
+    "body": {
+      "$ref": "#/$defs/TranscriptBlockBodyV1"
+    },
+    "orderKey": {
+      "$ref": "#/$defs/TranscriptOrderKeyV1"
+    },
+    "presentation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TranscriptPresentationV1"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "blockId",
+    "blockRevision",
+    "orderKey",
+    "body"
+  ],
+  "title": "TranscriptBlockV1",
+  "type": "object"
+}

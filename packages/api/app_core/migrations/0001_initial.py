@@ -1,0 +1,1333 @@
+import app_core.models
+import django.db.models.deletion
+from django.conf import settings
+from django.db import migrations, models
+
+
+def create_tool_result_lookup_index(_apps, schema_editor):
+    if schema_editor.connection.vendor == "sqlite":
+        return
+    if schema_editor.connection.vendor != "postgresql":
+        raise RuntimeError("session event tool-result index requires PostgreSQL")
+    schema_editor.execute(
+        """
+        CREATE INDEX session_event_tool_result_lookup
+        ON app_core_sessionevent (
+            session_id,
+            ((payload #>> '{payload,callId}'))
+        )
+        WHERE payload ->> 'type' = 'tool_result'
+        """
+    )
+
+
+def drop_tool_result_lookup_index(_apps, schema_editor):
+    if schema_editor.connection.vendor == "sqlite":
+        return
+    if schema_editor.connection.vendor != "postgresql":
+        raise RuntimeError("session event tool-result index requires PostgreSQL")
+    schema_editor.execute("DROP INDEX session_event_tool_result_lookup")
+
+
+class Migration(migrations.Migration):
+
+    initial = True
+
+    dependencies = [
+        migrations.swappable_dependency(settings.AUTH_USER_MODEL),
+    ]
+
+    operations = [
+        migrations.CreateModel(
+            name='AgentInput',
+            fields=[
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('input_id', models.CharField(max_length=64)),
+                ('membership_ref', models.CharField(editable=False, max_length=64)),
+                ('sequence', models.PositiveBigIntegerField()),
+                ('body', models.TextField()),
+                ('created_at_ms', models.BigIntegerField()),
+                ('accepted_source_sequence', models.PositiveIntegerField()),
+            ],
+        ),
+        migrations.CreateModel(
+            name='AgentRun',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_agent_run_id, max_length=64, primary_key=True, serialize=False)),
+                ('turn_id', models.CharField(default=app_core.models.new_turn_id, max_length=64, unique=True)),
+                ('membership_ref', models.CharField(editable=False, max_length=64)),
+                ('thinkingMode', models.CharField(blank=True, default='', max_length=64)),
+                ('prompt', models.TextField()),
+                ('agent_instructions', models.TextField(blank=True, default='')),
+                ('tailPolicy', models.CharField(default='append', max_length=32)),
+                ('rewriteTargetMessageId', models.CharField(blank=True, default='', max_length=160)),
+                ('rewriteExpectedTailMessageId', models.CharField(blank=True, default='', max_length=160)),
+                ('status', models.CharField(default='queued', max_length=32)),
+                ('transitionReason', models.CharField(default='agent_run_created', max_length=160)),
+                ('startedAt', models.DateTimeField(blank=True, null=True)),
+                ('completedAt', models.DateTimeField(blank=True, null=True)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('updatedAt', models.DateTimeField(auto_now=True)),
+                ('preAdmissionCancelledAt', models.DateTimeField(blank=True, editable=False, null=True)),
+            ],
+        ),
+        migrations.CreateModel(
+            name='Session',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_session_id, max_length=64, primary_key=True, serialize=False)),
+                ('title', models.CharField(default='New chat', max_length=200)),
+                ('origin', models.CharField(default='user', max_length=32)),
+                ('status', models.CharField(default='active', max_length=32)),
+                ('deletedAt', models.DateTimeField(blank=True, null=True)),
+                ('purgedAt', models.DateTimeField(blank=True, null=True)),
+                ('isPinned', models.BooleanField(default=False)),
+                ('isUnread', models.BooleanField(default=False)),
+                ('workspaceGeneration', models.PositiveBigIntegerField(default=0)),
+                ('workspaceStorageKey', models.CharField(blank=True, default='', max_length=1000)),
+                ('workspaceSnapshotSha256', models.CharField(blank=True, default='', max_length=71)),
+                ('workspaceSnapshotSizeBytes', models.PositiveBigIntegerField(default=0)),
+                ('workspaceExpandedSizeBytes', models.PositiveBigIntegerField(default=0)),
+                ('workspaceFileCount', models.PositiveIntegerField(default=0)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('updatedAt', models.DateTimeField(auto_now=True)),
+            ],
+        ),
+        migrations.CreateModel(
+            name='DerivedRepresentation',
+            fields=[
+                ('representationId', models.CharField(max_length=96, primary_key=True, serialize=False)),
+                ('ownerKind', models.CharField(max_length=32)),
+                ('ownerId', models.CharField(max_length=64)),
+                ('ownerContentGeneration', models.PositiveBigIntegerField()),
+                ('ownerSha256', models.CharField(max_length=71)),
+                ('pageCount', models.PositiveIntegerField()),
+                ('canonicalTextKey', models.CharField(max_length=1000)),
+                ('canonicalTextSizeBytes', models.PositiveBigIntegerField()),
+                ('canonicalTextSha256', models.CharField(max_length=71)),
+                ('previewPdfKey', models.CharField(blank=True, default='', max_length=1000)),
+                ('previewPdfSizeBytes', models.PositiveBigIntegerField(default=0)),
+                ('previewPdfSha256', models.CharField(blank=True, default='', max_length=71)),
+                ('workbookPreviewKey', models.CharField(blank=True, default='', max_length=1000)),
+                ('workbookPreviewSizeBytes', models.PositiveBigIntegerField(default=0)),
+                ('workbookPreviewSha256', models.CharField(blank=True, default='', max_length=71)),
+                ('manifest', models.JSONField()),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+            ],
+        ),
+        migrations.CreateModel(
+            name='MaterialProcessingTask',
+            fields=[
+                ('representationId', models.CharField(max_length=96, primary_key=True, serialize=False)),
+                ('processingSpecification', models.JSONField()),
+                ('payload', models.JSONField()),
+                ('status', models.CharField(db_index=True, default='pending', max_length=16)),
+                ('errorCode', models.CharField(blank=True, default='', max_length=96)),
+                ('executionBackend', models.CharField(db_index=True, default='platform', max_length=16)),
+                ('leaseOwner', models.CharField(blank=True, default='', max_length=128)),
+                ('leaseExpiresAt', models.DateTimeField(blank=True, null=True)),
+                ('leaseEpoch', models.PositiveBigIntegerField(default=0)),
+                ('attemptCount', models.PositiveIntegerField(default=0)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('updatedAt', models.DateTimeField(auto_now=True)),
+            ],
+        ),
+        migrations.CreateModel(
+            name='ModelConfig',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_model_id, max_length=64, primary_key=True, serialize=False)),
+                ('familyId', models.CharField(default=app_core.models.new_model_id, max_length=64)),
+                ('revision', models.PositiveIntegerField(default=1)),
+                ('isCurrent', models.BooleanField(default=True)),
+                ('displayName', models.CharField(blank=True, default='', max_length=160)),
+                ('modelName', models.CharField(default='fake-model', max_length=160)),
+                ('apiOverride', models.CharField(blank=True, max_length=32, null=True)),
+                ('resolvedApi', models.CharField(blank=True, default='', max_length=32)),
+                ('resolvedApiBase', models.CharField(blank=True, default='', max_length=512)),
+                ('contextTokens', models.PositiveIntegerField(default=200000)),
+                ('maxOutputTokens', models.PositiveIntegerField(default=32768)),
+                ('thinkingMode', models.CharField(blank=True, default='', max_length=64)),
+                ('thinkingModes', models.JSONField(default=list)),
+                ('enabled', models.BooleanField(default=True)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('updatedAt', models.DateTimeField(auto_now=True)),
+            ],
+        ),
+        migrations.CreateModel(
+            name='ProcessingSpecification',
+            fields=[
+                ('specDigest', models.CharField(max_length=71, primary_key=True, serialize=False)),
+                ('payload', models.JSONField()),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+            ],
+        ),
+        migrations.CreateModel(
+            name='SessionEvent',
+            fields=[
+                ('eventId', models.CharField(max_length=160, primary_key=True, serialize=False)),
+                ('sequence', models.PositiveIntegerField()),
+                ('agent_run_sequence', models.PositiveIntegerField(blank=True, null=True)),
+                ('session_level', models.BooleanField(db_default=False, default=False)),
+                ('projects_to_agent_run_stream', models.BooleanField()),
+                ('payload', models.JSONField()),
+                ('createdAtMs', models.BigIntegerField()),
+                ('insertedAt', models.DateTimeField(auto_now_add=True)),
+            ],
+        ),
+        migrations.CreateModel(
+            name='TranscriptOutputChunk',
+            fields=[
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('index', models.PositiveIntegerField()),
+                ('data', models.BinaryField()),
+                ('sha256', models.CharField(max_length=71)),
+            ],
+        ),
+        migrations.CreateModel(
+            name='AgentDefinition',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_agent_definition_id, max_length=64, primary_key=True, serialize=False)),
+                ('name', models.CharField(max_length=255)),
+                ('description', models.CharField(blank=True, default='', max_length=128)),
+                ('instructions', models.TextField(blank=True, default='')),
+                ('avatar_kind', models.CharField(default='centaeris', max_length=16)),
+                ('status', models.CharField(default='active', max_length=16)),
+                ('availability_scope', models.CharField(default='none', max_length=16)),
+                ('created_at', models.DateTimeField(auto_now_add=True)),
+                ('updated_at', models.DateTimeField(auto_now=True)),
+                ('plugin_names', models.JSONField(default=list)),
+                ('created_by', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='+', to=settings.AUTH_USER_MODEL)),
+            ],
+        ),
+        migrations.CreateModel(
+            name='Agent',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_agent_id, max_length=64, primary_key=True, serialize=False)),
+                ('name', models.CharField(max_length=255)),
+                ('description', models.CharField(blank=True, default='', max_length=128)),
+                ('instructions', models.TextField(blank=True, default='')),
+                ('avatar_kind', models.CharField(default='centaeris', max_length=16)),
+                ('status', models.CharField(default='active', max_length=16)),
+                ('deletedAt', models.DateTimeField(blank=True, null=True)),
+                ('purgedAt', models.DateTimeField(blank=True, null=True)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('updatedAt', models.DateTimeField(auto_now=True)),
+                ('thinking_mode', models.CharField(blank=True, default='', max_length=64)),
+                ('deletedBy', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='+', to=settings.AUTH_USER_MODEL)),
+                ('owner', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='agents', to=settings.AUTH_USER_MODEL)),
+                ('definition', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='instances', to='app_core.agentdefinition')),
+                ('model_config', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='configured_agents', to='app_core.modelconfig')),
+            ],
+        ),
+        migrations.CreateModel(
+            name='AgentDefinitionVersion',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_agent_definition_version_id, max_length=64, primary_key=True, serialize=False)),
+                ('version', models.PositiveIntegerField()),
+                ('name', models.CharField(max_length=255)),
+                ('description', models.CharField(blank=True, default='', max_length=128)),
+                ('instructions', models.TextField(blank=True, default='')),
+                ('avatar_kind', models.CharField(default='centaeris', max_length=16)),
+                ('published_at', models.DateTimeField(auto_now_add=True)),
+                ('plugin_activation', models.JSONField(default=app_core.models.empty_plugin_activation)),
+                ('definition', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='versions', to='app_core.agentdefinition')),
+                ('published_by', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='+', to=settings.AUTH_USER_MODEL)),
+            ],
+        ),
+        migrations.AddField(
+            model_name='agentdefinition',
+            name='published_version',
+            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='+', to='app_core.agentdefinitionversion'),
+        ),
+        migrations.CreateModel(
+            name='AgentInputDelivery',
+            fields=[
+                ('input', models.OneToOneField(on_delete=django.db.models.deletion.CASCADE, primary_key=True, related_name='delivery', serialize=False, to='app_core.agentinput')),
+                ('claim_token', models.TextField(blank=True, null=True)),
+                ('claim_lease_owner', models.TextField(blank=True, null=True)),
+                ('acknowledged_at_ms', models.BigIntegerField(blank=True, null=True)),
+            ],
+        ),
+        migrations.AddField(
+            model_name='agentinput',
+            name='agent',
+            field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='inputs', to='app_core.agent'),
+        ),
+        migrations.CreateModel(
+            name='AgentInputQueue',
+            fields=[
+                ('agent_run', models.OneToOneField(on_delete=django.db.models.deletion.PROTECT, primary_key=True, related_name='agent_input_queue', serialize=False, to='app_core.agentrun')),
+                ('authorization_digest', models.CharField(max_length=71)),
+                ('accepting', models.BooleanField(default=True)),
+                ('closed_reason', models.CharField(blank=True, default='', max_length=64)),
+                ('closed_at_ms', models.BigIntegerField(blank=True, null=True)),
+            ],
+        ),
+        migrations.AddField(
+            model_name='agentrun',
+            name='definition_version',
+            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='agent_runs', to='app_core.agentdefinitionversion'),
+        ),
+        migrations.AddField(
+            model_name='agentrun',
+            name='user',
+            field=models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to=settings.AUTH_USER_MODEL),
+        ),
+        migrations.CreateModel(
+            name='AgentRunAuthorization',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_agent_run_authorization_id, max_length=64, primary_key=True, serialize=False)),
+                ('payload', models.JSONField()),
+                ('digest', models.CharField(max_length=71)),
+                ('signature', models.CharField(max_length=76)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('agent_run', models.OneToOneField(on_delete=django.db.models.deletion.PROTECT, related_name='authorization', to='app_core.agentrun')),
+            ],
+        ),
+        migrations.CreateModel(
+            name='AgentWorkReturn',
+            fields=[
+                ('id', models.CharField(max_length=96, primary_key=True, serialize=False)),
+                ('fact_kind', models.CharField(max_length=32)),
+                ('fact_ref', models.CharField(max_length=256)),
+                ('payload', models.JSONField()),
+                ('delivered_at', models.DateTimeField(auto_now_add=True)),
+                ('child_run', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='work_returns', to='app_core.agentrun')),
+            ],
+        ),
+        migrations.CreateModel(
+            name='AgentWorkSession',
+            fields=[
+                ('session', models.OneToOneField(on_delete=django.db.models.deletion.CASCADE, primary_key=True, related_name='work_binding', serialize=False, to='app_core.session')),
+                ('source_turn_id', models.CharField(max_length=160)),
+                ('source_call_id', models.CharField(max_length=160)),
+                ('source_event_id', models.CharField(max_length=160, unique=True)),
+                ('created_at', models.DateTimeField(auto_now_add=True)),
+            ],
+        ),
+        migrations.AddField(
+            model_name='session',
+            name='agent',
+            field=models.ForeignKey(db_column='agent_id', on_delete=django.db.models.deletion.PROTECT, related_name='sessions', to='app_core.agent'),
+        ),
+        migrations.AddField(
+            model_name='session',
+            name='deletedBy',
+            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='+', to=settings.AUTH_USER_MODEL),
+        ),
+        migrations.AddField(
+            model_name='session',
+            name='owner',
+            field=models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to=settings.AUTH_USER_MODEL),
+        ),
+        migrations.AddField(
+            model_name='session',
+            name='workspaceLastAdvancedAgentRun',
+            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='+', to='app_core.agentrun'),
+        ),
+        migrations.AddField(
+            model_name='agentrun',
+            name='session',
+            field=models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='agent_runs', to='app_core.session'),
+        ),
+        migrations.AddField(
+            model_name='agentinput',
+            name='session',
+            field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='agent_inputs', to='app_core.session'),
+        ),
+        migrations.CreateModel(
+            name='Artifact',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_artifact_id, max_length=64, primary_key=True, serialize=False)),
+                ('displayName', models.CharField(max_length=255)),
+                ('safeFilename', models.CharField(max_length=255)),
+                ('contentType', models.CharField(default='application/octet-stream', max_length=160)),
+                ('sizeBytes', models.BigIntegerField()),
+                ('sha256', models.CharField(max_length=71)),
+                ('contentGeneration', models.PositiveBigIntegerField(default=1)),
+                ('storageKey', models.CharField(max_length=1000)),
+                ('status', models.CharField(default='staging', max_length=32)),
+                ('publishedAt', models.DateTimeField(blank=True, null=True)),
+                ('failureReason', models.TextField(blank=True, default='')),
+                ('deletedAt', models.DateTimeField(blank=True, null=True)),
+                ('deletionGeneration', models.PositiveIntegerField(default=0)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('agent_run', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='artifacts', to='app_core.agentrun')),
+                ('createdBy', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to=settings.AUTH_USER_MODEL)),
+                ('session', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to='app_core.session')),
+            ],
+        ),
+        migrations.CreateModel(
+            name='ArtifactPublication',
+            fields=[
+                ('publicationId', models.CharField(max_length=96, primary_key=True, serialize=False)),
+                ('authorizationDigest', models.CharField(max_length=71)),
+                ('toolCallId', models.CharField(max_length=160)),
+                ('filename', models.CharField(max_length=255)),
+                ('sizeBytes', models.BigIntegerField()),
+                ('sha256', models.CharField(max_length=71)),
+                ('status', models.CharField(default='staging', max_length=32)),
+                ('publishedAt', models.DateTimeField(blank=True, null=True)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('agent_run', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='artifactPublications', to='app_core.agentrun')),
+                ('artifact', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='publications', to='app_core.artifact')),
+            ],
+        ),
+        migrations.CreateModel(
+            name='BusinessApplication',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_business_app_id, max_length=64, primary_key=True, serialize=False)),
+                ('name', models.CharField(max_length=160)),
+                ('status', models.CharField(default='pending', max_length=16)),
+                ('created_at', models.DateTimeField(auto_now_add=True)),
+                ('updated_at', models.DateTimeField(auto_now=True)),
+                ('created_by', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='registered_business_apps', to=settings.AUTH_USER_MODEL)),
+            ],
+        ),
+        migrations.AddField(
+            model_name='agentrun',
+            name='acting_app',
+            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='agent_runs', to='app_core.businessapplication'),
+        ),
+        migrations.CreateModel(
+            name='CredentialAuditEvent',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_credential_audit_id, max_length=64, primary_key=True, serialize=False)),
+                ('credentialId', models.CharField(max_length=64)),
+                ('provider', models.CharField(max_length=80)),
+                ('displayName', models.CharField(max_length=160)),
+                ('action', models.CharField(max_length=32)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('actor', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to=settings.AUTH_USER_MODEL)),
+            ],
+        ),
+        migrations.CreateModel(
+            name='DerivedResource',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_derived_resource_id, max_length=64, primary_key=True, serialize=False)),
+                ('ownerKind', models.CharField(max_length=32)),
+                ('ownerId', models.CharField(max_length=64)),
+                ('ownerContentGeneration', models.PositiveBigIntegerField()),
+                ('deletionGeneration', models.PositiveIntegerField(default=0)),
+                ('resourceKind', models.CharField(max_length=32)),
+                ('resourceKey', models.CharField(max_length=1000)),
+                ('state', models.CharField(default='active', max_length=32)),
+                ('tombstonedAt', models.DateTimeField(blank=True, null=True)),
+                ('leaseOwner', models.CharField(blank=True, default='', max_length=96)),
+                ('leaseExpiresAt', models.DateTimeField(blank=True, null=True)),
+                ('cleanupAttempts', models.PositiveIntegerField(default=0)),
+                ('lastFailure', models.TextField(blank=True, default='')),
+                ('cleanedAt', models.DateTimeField(blank=True, null=True)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('updatedAt', models.DateTimeField(auto_now=True)),
+            ],
+            options={
+                'indexes': [models.Index(fields=['state', 'tombstonedAt'], name='derived_resource_gc_due')],
+                'constraints': [models.UniqueConstraint(fields=('ownerKind', 'ownerId', 'ownerContentGeneration', 'deletionGeneration', 'resourceKind', 'resourceKey'), name='unique_derived_resource_owner_generation')],
+            },
+        ),
+        migrations.CreateModel(
+            name='HostedOperationReceipt',
+            fields=[
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('command', models.CharField(max_length=32)),
+                ('operationId', models.CharField(max_length=128)),
+                ('requestDigest', models.CharField(max_length=64)),
+                ('sessionId', models.CharField(max_length=64)),
+                ('agentRunId', models.CharField(max_length=64, null=True)),
+                ('turnId', models.CharField(max_length=64, null=True)),
+                ('acceptedAt', models.DateTimeField(auto_now_add=True)),
+                ('acting_app', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='operation_receipts', to='app_core.businessapplication')),
+                ('user', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to=settings.AUTH_USER_MODEL)),
+            ],
+        ),
+        migrations.CreateModel(
+            name='AgentWorkConsumeAttempt',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_agent_run_id, max_length=64, primary_key=True, serialize=False)),
+                ('input_binding', models.JSONField()),
+                ('delivery_sequence', models.PositiveBigIntegerField()),
+                ('created_at_ms', models.BigIntegerField(default=0)),
+                ('claim_token', models.TextField(blank=True, null=True)),
+                ('claim_lease_owner', models.TextField(blank=True, null=True)),
+                ('acknowledged_at_ms', models.BigIntegerField(blank=True, null=True)),
+                ('coordinator_run', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='work_consumes', to='app_core.agentrun')),
+                ('notice', models.OneToOneField(on_delete=django.db.models.deletion.PROTECT, related_name='first_consume', to='app_core.agentworkreturn')),
+                ('operation', models.OneToOneField(on_delete=django.db.models.deletion.PROTECT, related_name='work_consume', to='app_core.hostedoperationreceipt')),
+            ],
+        ),
+        migrations.CreateModel(
+            name='KnowledgeSegment',
+            fields=[
+                ('segmentId', models.CharField(max_length=96, primary_key=True, serialize=False)),
+                ('ordinal', models.PositiveIntegerField()),
+                ('boundedText', models.TextField()),
+                ('textSha256', models.CharField(max_length=71)),
+                ('locator', models.JSONField()),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('representation', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='segments', to='app_core.derivedrepresentation')),
+            ],
+        ),
+        migrations.CreateModel(
+            name='MaterialOperation',
+            fields=[
+                ('id', models.CharField(max_length=96, primary_key=True, serialize=False)),
+                ('inputRef', models.CharField(max_length=1024)),
+                ('cancelledAt', models.DateTimeField(blank=True, null=True)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('agent_run', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to='app_core.agentrun')),
+                ('task', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='operations', to='app_core.materialprocessingtask')),
+            ],
+        ),
+        migrations.CreateModel(
+            name='MaterialStagedObject',
+            fields=[
+                ('storageKey', models.CharField(max_length=1000, primary_key=True, serialize=False)),
+                ('sizeBytes', models.PositiveBigIntegerField()),
+                ('sha256', models.CharField(max_length=71)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('task', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to='app_core.materialprocessingtask')),
+            ],
+        ),
+        migrations.CreateModel(
+            name='McpBearerCredential',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_mcp_bearer_credential_id, max_length=64, primary_key=True, serialize=False)),
+                ('plugin_name', models.CharField(max_length=64)),
+                ('credential_ref', models.CharField(max_length=64)),
+                ('display_name', models.CharField(max_length=160)),
+                ('encrypted_secret', models.TextField()),
+                ('version', models.PositiveIntegerField(default=1)),
+                ('created_at', models.DateTimeField(auto_now_add=True)),
+                ('updated_at', models.DateTimeField(auto_now=True)),
+                ('created_by', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='created_mcp_bearer_credentials', to=settings.AUTH_USER_MODEL)),
+                ('updated_by', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='updated_mcp_bearer_credentials', to=settings.AUTH_USER_MODEL)),
+            ],
+            options={
+                'db_table': 'app_core_mcp_bearer_credential',
+            },
+        ),
+        migrations.CreateModel(
+            name='McpCredentialAuditEvent',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_mcp_credential_audit_id, max_length=64, primary_key=True, serialize=False)),
+                ('credential_id', models.CharField(max_length=64)),
+                ('plugin_name', models.CharField(max_length=64)),
+                ('credential_ref', models.CharField(max_length=64)),
+                ('display_name', models.CharField(max_length=160)),
+                ('action', models.CharField(max_length=32)),
+                ('created_at', models.DateTimeField(auto_now_add=True)),
+                ('actor', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to=settings.AUTH_USER_MODEL)),
+            ],
+            options={
+                'db_table': 'app_core_mcp_credential_audit_event',
+            },
+        ),
+        migrations.AddField(
+            model_name='agentrun',
+            name='modelConfig',
+            field=models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to='app_core.modelconfig'),
+        ),
+        migrations.CreateModel(
+            name='ModelProvider',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_provider_id, max_length=64, primary_key=True, serialize=False)),
+                ('displayName', models.CharField(max_length=160)),
+                ('template_id', models.CharField(blank=True, max_length=64, null=True)),
+                ('api', models.CharField(max_length=32)),
+                ('apiBase', models.CharField(max_length=512)),
+                ('enabled', models.BooleanField(default=True)),
+                ('archivedAt', models.DateTimeField(blank=True, null=True)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('updatedAt', models.DateTimeField(auto_now=True)),
+            ],
+            options={
+                'constraints': [models.UniqueConstraint(condition=models.Q(('archivedAt__isnull', True), ('template_id__isnull', False)), fields=('template_id',), name='model_provider_active_template_unique')],
+            },
+        ),
+        migrations.AddField(
+            model_name='modelconfig',
+            name='provider',
+            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='models', to='app_core.modelprovider'),
+        ),
+        migrations.CreateModel(
+            name='ModelQuotaDomain',
+            fields=[
+                ('key', models.AutoField(primary_key=True, serialize=False)),
+                ('id', models.CharField(max_length=64, unique=True)),
+                ('maxConcurrent', models.PositiveSmallIntegerField()),
+                ('enabled', models.BooleanField(default=False)),
+                ('cooldownUntilMs', models.BigIntegerField(default=0)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('updatedAt', models.DateTimeField(auto_now=True)),
+            ],
+            options={
+                'constraints': [models.CheckConstraint(condition=models.Q(('maxConcurrent__gte', 1), ('maxConcurrent__lte', 64)), name='model_quota_domain_concurrency_valid')],
+            },
+        ),
+        migrations.CreateModel(
+            name='ModelRunLog',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_model_run_id, max_length=64, primary_key=True, serialize=False)),
+                ('agentRunId', models.CharField(max_length=64)),
+                ('status', models.CharField(max_length=32)),
+                ('promptTokens', models.IntegerField(blank=True, null=True)),
+                ('completionTokens', models.IntegerField(blank=True, null=True)),
+                ('totalTokens', models.IntegerField(blank=True, null=True)),
+                ('promptCacheHitTokens', models.IntegerField(blank=True, null=True)),
+                ('promptCacheMissTokens', models.IntegerField(blank=True, null=True)),
+                ('error', models.TextField(blank=True, default='')),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('modelConfig', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to='app_core.modelconfig')),
+            ],
+        ),
+        migrations.CreateModel(
+            name='PasswordResetMail',
+            fields=[
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('email_digest', models.CharField(max_length=71)),
+                ('ip_digest', models.CharField(max_length=71)),
+                ('password_state_digest', models.CharField(blank=True, default='', max_length=71)),
+                ('status', models.CharField(default='pending', max_length=16)),
+                ('attempt_count', models.PositiveIntegerField(default=0)),
+                ('next_attempt_at', models.DateTimeField()),
+                ('last_attempt_at', models.DateTimeField(blank=True, null=True)),
+                ('last_error_kind', models.CharField(blank=True, default='', max_length=160)),
+                ('requested_at', models.DateTimeField(auto_now_add=True)),
+                ('sent_at', models.DateTimeField(blank=True, null=True)),
+                ('user', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='password_reset_mails', to=settings.AUTH_USER_MODEL)),
+            ],
+        ),
+        migrations.CreateModel(
+            name='MaterialProcessor',
+            fields=[
+                ('name', models.CharField(max_length=64, primary_key=True, serialize=False)),
+                ('specification', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to='app_core.processingspecification')),
+            ],
+        ),
+        migrations.AddField(
+            model_name='derivedrepresentation',
+            name='processingSpecification',
+            field=models.ForeignKey(db_column='specDigest', on_delete=django.db.models.deletion.PROTECT, related_name='representations', to='app_core.processingspecification'),
+        ),
+        migrations.CreateModel(
+            name='ProviderCredential',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_credential_id, max_length=64, primary_key=True, serialize=False)),
+                ('displayName', models.CharField(max_length=160)),
+                ('encryptedSecret', models.TextField()),
+                ('version', models.PositiveIntegerField(default=1)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('updatedAt', models.DateTimeField(auto_now=True)),
+                ('createdBy', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='createdCredentials', to=settings.AUTH_USER_MODEL)),
+                ('provider', models.OneToOneField(on_delete=django.db.models.deletion.PROTECT, related_name='credential', to='app_core.modelprovider')),
+                ('quotaDomain', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='credentials', to='app_core.modelquotadomain')),
+                ('updatedBy', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='updatedCredentials', to=settings.AUTH_USER_MODEL)),
+            ],
+        ),
+        migrations.CreateModel(
+            name='TranscriptOutputCapture',
+            fields=[
+                ('event', models.OneToOneField(on_delete=django.db.models.deletion.CASCADE, primary_key=True, serialize=False, to='app_core.sessionevent')),
+                ('executionId', models.CharField(max_length=160)),
+                ('sha256', models.CharField(max_length=71)),
+                ('byteLength', models.PositiveBigIntegerField()),
+                ('chunkSize', models.PositiveIntegerField()),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('purgedAt', models.DateTimeField(null=True)),
+            ],
+        ),
+        migrations.AddField(
+            model_name='sessionevent',
+            name='agent_run',
+            field=models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='events', to='app_core.agentrun'),
+        ),
+        migrations.AddField(
+            model_name='sessionevent',
+            name='session',
+            field=models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='events', to='app_core.session'),
+        ),
+        migrations.CreateModel(
+            name='MaterialResultSnapshot',
+            fields=[
+                ('id', models.CharField(max_length=96, primary_key=True, serialize=False)),
+                ('payload', models.JSONField()),
+                ('sha256', models.CharField(max_length=71)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('call', models.OneToOneField(on_delete=django.db.models.deletion.CASCADE, related_name='materialResult', to='app_core.sessionevent')),
+            ],
+        ),
+        migrations.CreateModel(
+            name='MaterialEvidenceReceipt',
+            fields=[
+                ('id', models.CharField(max_length=96, primary_key=True, serialize=False)),
+                ('authorizationDigest', models.CharField(max_length=71)),
+                ('responseText', models.TextField()),
+                ('modelProjection', models.JSONField()),
+                ('evidence', models.JSONField()),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('call', models.OneToOneField(on_delete=django.db.models.deletion.CASCADE, related_name='materialReceipt', to='app_core.sessionevent')),
+            ],
+        ),
+        migrations.CreateModel(
+            name='SessionProject',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_session_project_id, max_length=64, primary_key=True, serialize=False)),
+                ('name', models.CharField(max_length=100)),
+                ('created_at', models.DateTimeField(auto_now_add=True)),
+                ('agent', models.ForeignKey(db_column='agent_id', on_delete=django.db.models.deletion.PROTECT, related_name='session_projects', to='app_core.agent')),
+                ('owner', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='session_projects', to=settings.AUTH_USER_MODEL)),
+            ],
+        ),
+        migrations.AddField(
+            model_name='session',
+            name='project',
+            field=models.ForeignKey(blank=True, db_column='project_id', null=True, on_delete=django.db.models.deletion.PROTECT, related_name='sessions', to='app_core.sessionproject'),
+        ),
+        migrations.CreateModel(
+            name='Source',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_source_id, max_length=64, primary_key=True, serialize=False)),
+                ('sourceType', models.CharField(max_length=32)),
+                ('name', models.CharField(max_length=255)),
+                ('status', models.CharField(default='processing', max_length=32)),
+                ('deletedAt', models.DateTimeField(blank=True, null=True)),
+                ('purgedAt', models.DateTimeField(blank=True, null=True)),
+                ('deletedFromStatus', models.CharField(blank=True, default='', max_length=32)),
+                ('lastSyncedAt', models.DateTimeField(blank=True, null=True)),
+                ('lastIndexedAt', models.DateTimeField(blank=True, null=True)),
+                ('failureReason', models.TextField(blank=True, default='')),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('updatedAt', models.DateTimeField(auto_now=True)),
+                ('createdBy', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to=settings.AUTH_USER_MODEL)),
+                ('deletedBy', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='+', to=settings.AUTH_USER_MODEL)),
+            ],
+        ),
+        migrations.CreateModel(
+            name='UserAppDelegation',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_app_delegation_id, max_length=64, primary_key=True, serialize=False)),
+                ('membership_ref', models.CharField(editable=False, max_length=64)),
+                ('issuer', models.CharField(default='centaeris-workspace', editable=False, max_length=100)),
+                ('audience', models.CharField(default='centaeris-workspace-api', editable=False, max_length=100)),
+                ('scopes', models.JSONField()),
+                ('token_digest', models.CharField(editable=False, max_length=71, unique=True)),
+                ('expires_at', models.DateTimeField()),
+                ('revoked_at', models.DateTimeField(blank=True, null=True)),
+                ('created_at', models.DateTimeField(auto_now_add=True)),
+                ('app', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='delegations', to='app_core.businessapplication')),
+                ('definition', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='app_delegations', to='app_core.agentdefinition')),
+                ('user', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='app_delegations', to=settings.AUTH_USER_MODEL)),
+            ],
+        ),
+        migrations.AddField(
+            model_name='hostedoperationreceipt',
+            name='app_delegation',
+            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='operation_receipts', to='app_core.userappdelegation'),
+        ),
+        migrations.AddField(
+            model_name='agentrun',
+            name='app_delegation',
+            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='agent_runs', to='app_core.userappdelegation'),
+        ),
+        migrations.CreateModel(
+            name='UserLibraryObject',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_library_object_id, max_length=64, primary_key=True, serialize=False)),
+                ('displayName', models.CharField(max_length=255)),
+                ('objectKind', models.CharField(max_length=32)),
+                ('contentType', models.CharField(blank=True, default='', max_length=160)),
+                ('sizeBytes', models.BigIntegerField(blank=True, null=True)),
+                ('sha256', models.CharField(blank=True, default='', max_length=71)),
+                ('storageKey', models.CharField(blank=True, default='', max_length=1000)),
+                ('status', models.CharField(default='processing', max_length=32)),
+                ('failureReason', models.TextField(blank=True, default='')),
+                ('deletedAt', models.DateTimeField(blank=True, null=True)),
+                ('purgedAt', models.DateTimeField(blank=True, null=True)),
+                ('deletedFromStatus', models.CharField(blank=True, default='', max_length=32)),
+                ('deletionGeneration', models.PositiveIntegerField(default=0)),
+                ('contentGeneration', models.PositiveBigIntegerField(default=0)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('updatedAt', models.DateTimeField(auto_now=True)),
+                ('deletedBy', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='+', to=settings.AUTH_USER_MODEL)),
+                ('owner', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='libraryObjects', to=settings.AUTH_USER_MODEL)),
+                ('parentFolder', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='children', to='app_core.userlibraryobject')),
+            ],
+        ),
+        migrations.CreateModel(
+            name='UserLibraryLink',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_library_link_id, max_length=64, primary_key=True, serialize=False)),
+                ('sourceKind', models.CharField(max_length=32)),
+                ('sourceRefId', models.CharField(blank=True, default='', max_length=160)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('libraryObject', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='provenanceLinks', to='app_core.userlibraryobject')),
+            ],
+        ),
+        migrations.CreateModel(
+            name='Workspace',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_workspace_id, max_length=64, primary_key=True, serialize=False)),
+                ('name', models.CharField(max_length=160)),
+                ('description', models.TextField(blank=True, default='')),
+                ('status', models.CharField(default='active', max_length=32)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('updatedAt', models.DateTimeField(auto_now=True)),
+                ('createdBy', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='created_workspaces', to=settings.AUTH_USER_MODEL)),
+            ],
+        ),
+        migrations.AddField(
+            model_name='userappdelegation',
+            name='workspace',
+            field=models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='app_delegations', to='app_core.workspace'),
+        ),
+        migrations.CreateModel(
+            name='SourceObject',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_source_object_id, max_length=64, primary_key=True, serialize=False)),
+                ('objectType', models.CharField(max_length=16)),
+                ('displayPath', models.CharField(max_length=1000)),
+                ('displayName', models.CharField(max_length=255)),
+                ('contentType', models.CharField(blank=True, default='', max_length=160)),
+                ('sizeBytes', models.BigIntegerField(blank=True, null=True)),
+                ('sha256', models.CharField(blank=True, default='', max_length=71)),
+                ('storageKey', models.CharField(blank=True, default='', max_length=1000)),
+                ('sourceVersion', models.CharField(max_length=160)),
+                ('contentGeneration', models.PositiveBigIntegerField(default=1)),
+                ('status', models.CharField(default='processing', max_length=32)),
+                ('failureReason', models.TextField(blank=True, default='')),
+                ('deletedAt', models.DateTimeField(blank=True, null=True)),
+                ('deletionGeneration', models.PositiveIntegerField(default=0)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('updatedAt', models.DateTimeField(auto_now=True)),
+                ('source', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='sourceObjects', to='app_core.source')),
+                ('workspace', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to='app_core.workspace')),
+            ],
+        ),
+        migrations.AddField(
+            model_name='source',
+            name='workspace',
+            field=models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='sources', to='app_core.workspace'),
+        ),
+        migrations.AddField(
+            model_name='sessionproject',
+            name='workspace',
+            field=models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='session_projects', to='app_core.workspace'),
+        ),
+        migrations.AddField(
+            model_name='sessionevent',
+            name='workspace',
+            field=models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to='app_core.workspace'),
+        ),
+        migrations.CreateModel(
+            name='SessionCitationProjection',
+            fields=[
+                ('citationId', models.CharField(max_length=160, primary_key=True, serialize=False)),
+                ('sequence', models.PositiveIntegerField()),
+                ('inputRef', models.CharField(max_length=1024)),
+                ('ownerRef', models.CharField(max_length=160)),
+                ('ownerKind', models.CharField(max_length=32)),
+                ('displayName', models.CharField(max_length=255)),
+                ('evidenceKind', models.CharField(max_length=32)),
+                ('ownerSha256', models.CharField(max_length=71)),
+                ('ownerGeneration', models.PositiveBigIntegerField(default=1)),
+                ('representationId', models.CharField(blank=True, default='', max_length=96)),
+                ('specDigest', models.CharField(blank=True, default='', max_length=71)),
+                ('evidenceSha256', models.CharField(blank=True, default='', max_length=71)),
+                ('sourceToolName', models.CharField(default='read', max_length=64)),
+                ('sourceToolCallId', models.CharField(max_length=160)),
+                ('locator', models.JSONField()),
+                ('agent_run', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='citationProjections', to='app_core.agentrun')),
+                ('session', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='citationProjections', to='app_core.session')),
+                ('workspace', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to='app_core.workspace')),
+            ],
+        ),
+        migrations.CreateModel(
+            name='SessionAssetLink',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_session_asset_link_id, max_length=64, primary_key=True, serialize=False)),
+                ('capturedDisplayName', models.CharField(max_length=255)),
+                ('capturedContentType', models.CharField(max_length=160)),
+                ('capturedOwnerKind', models.CharField(max_length=32)),
+                ('capturedOwnerId', models.CharField(max_length=64)),
+                ('capturedContentGeneration', models.PositiveBigIntegerField()),
+                ('capturedSizeBytes', models.BigIntegerField()),
+                ('capturedSha256', models.CharField(max_length=71)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('artifact', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, to='app_core.artifact')),
+                ('attachedBy', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to=settings.AUTH_USER_MODEL)),
+                ('session', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='assetLinks', to='app_core.session')),
+                ('sourceObject', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, to='app_core.sourceobject')),
+                ('userLibraryObject', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, to='app_core.userlibraryobject')),
+                ('workspace', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to='app_core.workspace')),
+            ],
+        ),
+        migrations.AddField(
+            model_name='session',
+            name='workspace',
+            field=models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='sessions', to='app_core.workspace'),
+        ),
+        migrations.AddField(
+            model_name='hostedoperationreceipt',
+            name='workspace',
+            field=models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to='app_core.workspace'),
+        ),
+        migrations.AddField(
+            model_name='artifact',
+            name='workspace',
+            field=models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to='app_core.workspace'),
+        ),
+        migrations.AddField(
+            model_name='agentrun',
+            name='workspace',
+            field=models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to='app_core.workspace'),
+        ),
+        migrations.AddField(
+            model_name='agentdefinition',
+            name='workspace',
+            field=models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='agent_definitions', to='app_core.workspace'),
+        ),
+        migrations.CreateModel(
+            name='AgentConnectorCredentialApproval',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_agent_connector_approval_id, max_length=64, primary_key=True, serialize=False)),
+                ('plugin_name', models.CharField(max_length=64)),
+                ('server_id', models.CharField(max_length=64)),
+                ('resource_path', models.CharField(max_length=255)),
+                ('resource_digest', models.CharField(max_length=71)),
+                ('credential_version', models.PositiveIntegerField()),
+                ('approved_at', models.DateTimeField(auto_now_add=True)),
+                ('revoked_at', models.DateTimeField(blank=True, null=True)),
+                ('approved_by', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='+', to=settings.AUTH_USER_MODEL)),
+                ('definition', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='connector_approvals', to='app_core.agentdefinition')),
+                ('credential', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='assistant_approvals', to='app_core.mcpbearercredential')),
+                ('workspace', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='connector_approvals', to='app_core.workspace')),
+            ],
+        ),
+        migrations.CreateModel(
+            name='AgentConnectorBinding',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_agent_connector_binding_id, max_length=64, primary_key=True, serialize=False)),
+                ('plugin_name', models.CharField(max_length=64)),
+                ('server_id', models.CharField(max_length=64)),
+                ('updated_at', models.DateTimeField(auto_now=True)),
+                ('updated_by', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='+', to=settings.AUTH_USER_MODEL)),
+                ('approval', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='bindings', to='app_core.agentconnectorcredentialapproval')),
+                ('definition', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='connector_bindings', to='app_core.agentdefinition')),
+                ('workspace', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='connector_bindings', to='app_core.workspace')),
+            ],
+        ),
+        migrations.AddField(
+            model_name='agent',
+            name='workspace',
+            field=models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='agents', to='app_core.workspace'),
+        ),
+        migrations.CreateModel(
+            name='WorkspaceGroup',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_workspace_group_id, max_length=64, primary_key=True, serialize=False)),
+                ('name', models.CharField(max_length=160)),
+                ('kind', models.CharField(default='custom', max_length=32)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('createdBy', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to=settings.AUTH_USER_MODEL)),
+                ('workspace', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='groups', to='app_core.workspace')),
+            ],
+        ),
+        migrations.CreateModel(
+            name='SourceGrant',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_source_grant_id, max_length=64, primary_key=True, serialize=False)),
+                ('accessLevel', models.CharField(default='read', max_length=16)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('createdBy', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to=settings.AUTH_USER_MODEL)),
+                ('source', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='grants', to='app_core.source')),
+                ('workspace', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to='app_core.workspace')),
+                ('workspaceGroup', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to='app_core.workspacegroup')),
+            ],
+        ),
+        migrations.CreateModel(
+            name='WorkspaceInvitation',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_workspace_invitation_id, max_length=64, primary_key=True, serialize=False)),
+                ('email', models.EmailField(max_length=254)),
+                ('role', models.CharField(max_length=16)),
+                ('status', models.CharField(default='pending', max_length=16)),
+                ('token_digest', models.CharField(editable=False, max_length=71, unique=True)),
+                ('accepted_membership_ref', models.CharField(blank=True, default='', max_length=64)),
+                ('expires_at', models.DateTimeField()),
+                ('created_at', models.DateTimeField(auto_now_add=True)),
+                ('updated_at', models.DateTimeField(auto_now=True)),
+                ('accepted_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='accepted_workspace_invitations', to=settings.AUTH_USER_MODEL)),
+                ('invited_by', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='issued_workspace_invitations', to=settings.AUTH_USER_MODEL)),
+                ('revoked_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='revoked_workspace_invitations', to=settings.AUTH_USER_MODEL)),
+                ('workspace', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='invitations', to='app_core.workspace')),
+            ],
+        ),
+        migrations.CreateModel(
+            name='WorkspaceMembership',
+            fields=[
+                ('id', models.CharField(default=app_core.models.new_workspace_membership_id, max_length=64, primary_key=True, serialize=False)),
+                ('role', models.CharField(default='member', max_length=16)),
+                ('created_at', models.DateTimeField(auto_now_add=True)),
+                ('updated_at', models.DateTimeField(auto_now=True)),
+                ('invited_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='invited_workspace_memberships', to=settings.AUTH_USER_MODEL)),
+                ('user', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='workspace_memberships', to=settings.AUTH_USER_MODEL)),
+                ('workspace', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='memberships', to='app_core.workspace')),
+            ],
+        ),
+        migrations.AddField(
+            model_name='workspacegroup',
+            name='members',
+            field=models.ManyToManyField(related_name='workspace_groups', to='app_core.workspacemembership'),
+        ),
+        migrations.AddField(
+            model_name='workspace',
+            name='members',
+            field=models.ManyToManyField(related_name='workspaces', through='app_core.WorkspaceMembership', through_fields=('workspace', 'user'), to=settings.AUTH_USER_MODEL),
+        ),
+        migrations.CreateModel(
+            name='AgentDefinitionMember',
+            fields=[
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('definition', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='member_grants', to='app_core.agentdefinition')),
+                ('membership', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='agent_definition_grants', to='app_core.workspacemembership')),
+            ],
+        ),
+        migrations.CreateModel(
+            name='WorkspacePluginEnablement',
+            fields=[
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('pluginName', models.CharField(max_length=64)),
+                ('createdAt', models.DateTimeField(auto_now_add=True)),
+                ('workspace', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='pluginEnablements', to='app_core.workspace')),
+            ],
+        ),
+        migrations.CreateModel(
+            name='AgentCoordinationSession',
+            fields=[
+                ('agent', models.OneToOneField(on_delete=django.db.models.deletion.CASCADE, primary_key=True, related_name='coordination_binding', serialize=False, to='app_core.agent')),
+                ('created_at', models.DateTimeField(auto_now_add=True)),
+                ('session', models.OneToOneField(on_delete=django.db.models.deletion.CASCADE, related_name='coordination_binding', to='app_core.session')),
+            ],
+        ),
+        migrations.AddConstraint(
+            model_name='agentdefinitionversion',
+            constraint=models.UniqueConstraint(fields=('definition', 'version'), name='agent_definition_version_unique'),
+        ),
+        migrations.AddConstraint(
+            model_name='agentdefinitionversion',
+            constraint=models.CheckConstraint(condition=models.Q(('version__gt', 0)), name='agent_definition_version_positive'),
+        ),
+        migrations.AddConstraint(
+            model_name='agentdefinitionversion',
+            constraint=models.CheckConstraint(condition=models.Q(('avatar_kind__in', ('centaeris', 'banana'))), name='agent_definition_version_avatar'),
+        ),
+        migrations.AddField(
+            model_name='agentinputqueue',
+            name='initial_host',
+            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='initial_queues', to='app_core.agentworkconsumeattempt'),
+        ),
+        migrations.AddField(
+            model_name='agentinputqueue',
+            name='initial_input',
+            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='initial_queues', to='app_core.agentinput'),
+        ),
+        migrations.AddField(
+            model_name='agentinputdelivery',
+            name='queue',
+            field=models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='deliveries', to='app_core.agentinputqueue'),
+        ),
+        migrations.AddField(
+            model_name='agentworksession',
+            name='coordination_session',
+            field=models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='dispatched_work', to='app_core.session'),
+        ),
+        migrations.AddField(
+            model_name='agentworksession',
+            name='operation',
+            field=models.OneToOneField(on_delete=django.db.models.deletion.PROTECT, related_name='work_binding', to='app_core.hostedoperationreceipt'),
+        ),
+        migrations.AddField(
+            model_name='agentworksession',
+            name='source_run',
+            field=models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='dispatched_work', to='app_core.agentrun'),
+        ),
+        migrations.AddField(
+            model_name='agentworkreturn',
+            name='work',
+            field=models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='returns', to='app_core.agentworksession'),
+        ),
+        migrations.AddIndex(
+            model_name='agentinput',
+            index=models.Index(fields=['session', 'accepted_source_sequence', 'sequence'], name='agent_input_history_order'),
+        ),
+        migrations.AddConstraint(
+            model_name='agentinput',
+            constraint=models.UniqueConstraint(fields=('agent', 'input_id'), name='agent_input_identity_unique'),
+        ),
+        migrations.AddConstraint(
+            model_name='agentinput',
+            constraint=models.UniqueConstraint(fields=('agent', 'sequence'), name='agent_input_sequence_unique'),
+        ),
+        migrations.AddConstraint(
+            model_name='agentinput',
+            constraint=models.CheckConstraint(condition=models.Q(('sequence__gt', 0)), name='agent_input_sequence_positive'),
+        ),
+        migrations.AddConstraint(
+            model_name='agentinput',
+            constraint=models.CheckConstraint(condition=models.Q(('membership_ref', ''), _negated=True), name='agent_input_membership_required'),
+        ),
+        migrations.AddConstraint(
+            model_name='artifactpublication',
+            constraint=models.UniqueConstraint(fields=('agent_run', 'toolCallId'), name='unique_artifact_publication_agent_run_tool_call'),
+        ),
+        migrations.AddConstraint(
+            model_name='businessapplication',
+            constraint=models.CheckConstraint(condition=models.Q(('status__in', ('pending', 'active', 'revoked'))), name='business_app_status_valid'),
+        ),
+        migrations.AddConstraint(
+            model_name='knowledgesegment',
+            constraint=models.UniqueConstraint(fields=('representation', 'ordinal'), name='unique_knowledge_segment_ordinal'),
+        ),
+        migrations.AddConstraint(
+            model_name='materialoperation',
+            constraint=models.UniqueConstraint(fields=('agent_run', 'task'), name='unique_run_material_operation'),
+        ),
+        migrations.AddConstraint(
+            model_name='mcpbearercredential',
+            constraint=models.UniqueConstraint(fields=('plugin_name', 'credential_ref'), name='mcp_bearer_credential_plugin_ref_unique'),
+        ),
+        migrations.AddConstraint(
+            model_name='modelconfig',
+            constraint=models.UniqueConstraint(fields=('familyId', 'revision'), name='model_config_family_revision_unique'),
+        ),
+        migrations.AddConstraint(
+            model_name='modelconfig',
+            constraint=models.UniqueConstraint(condition=models.Q(('isCurrent', True), ('provider__isnull', False)), fields=('provider', 'modelName'), name='model_config_current_provider_model_unique'),
+        ),
+        migrations.AddIndex(
+            model_name='passwordresetmail',
+            index=models.Index(fields=['status', 'next_attempt_at'], name='password_reset_mail_due'),
+        ),
+        migrations.AddIndex(
+            model_name='passwordresetmail',
+            index=models.Index(fields=['email_digest', 'requested_at'], name='password_reset_mail_email_rate'),
+        ),
+        migrations.AddIndex(
+            model_name='passwordresetmail',
+            index=models.Index(fields=['ip_digest', 'requested_at'], name='password_reset_mail_ip_rate'),
+        ),
+        migrations.AddConstraint(
+            model_name='passwordresetmail',
+            constraint=models.CheckConstraint(condition=models.Q(('status__in', ('pending', 'sent', 'suppressed'))), name='password_reset_mail_status_valid'),
+        ),
+        migrations.AddConstraint(
+            model_name='passwordresetmail',
+            constraint=models.UniqueConstraint(condition=models.Q(('status', 'pending')), fields=('email_digest',), name='unique_pending_password_reset_mail'),
+        ),
+        migrations.AddIndex(
+            model_name='derivedrepresentation',
+            index=models.Index(fields=['ownerKind', 'ownerId', 'ownerContentGeneration'], name='representation_owner_identity'),
+        ),
+        migrations.AddConstraint(
+            model_name='derivedrepresentation',
+            constraint=models.UniqueConstraint(fields=('ownerKind', 'ownerId', 'ownerContentGeneration', 'ownerSha256', 'processingSpecification'), name='unique_representation_input_spec'),
+        ),
+        migrations.AddField(
+            model_name='transcriptoutputchunk',
+            name='capture',
+            field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='chunks', to='app_core.transcriptoutputcapture'),
+        ),
+        migrations.AddConstraint(
+            model_name='userlibraryobject',
+            constraint=models.CheckConstraint(condition=models.Q(models.Q(('deletedAt__isnull', False), ('deletedFromStatus__in', ('processing', 'ready', 'failed')), ('status', 'deleted'), models.Q(('purgedAt__isnull', True), ('purgedAt__gte', models.F('deletedAt')), _connector='OR')), models.Q(models.Q(('status', 'deleted'), _negated=True), ('deletedAt__isnull', True), ('deletedFromStatus', ''), ('purgedAt__isnull', True)), _connector='OR'), name='library_object_deletion_consistency'),
+        ),
+        migrations.AddConstraint(
+            model_name='userappdelegation',
+            constraint=models.CheckConstraint(condition=models.Q(('membership_ref', ''), _negated=True), name='app_delegation_membership_required'),
+        ),
+        migrations.AddConstraint(
+            model_name='sourceobject',
+            constraint=models.UniqueConstraint(fields=('source', 'displayPath'), name='unique_source_object_path'),
+        ),
+        migrations.AddConstraint(
+            model_name='source',
+            constraint=models.CheckConstraint(condition=models.Q(('status__in', ('processing', 'ready', 'failed', 'deleted'))), name='source_status_valid'),
+        ),
+        migrations.AddConstraint(
+            model_name='source',
+            constraint=models.CheckConstraint(condition=models.Q(models.Q(('deletedAt__isnull', True), ('deletedFromStatus', ''), ('purgedAt__isnull', True), ('status__in', ('processing', 'ready', 'failed'))), models.Q(('deletedAt__isnull', False), ('deletedFromStatus__in', ('processing', 'ready', 'failed')), ('status', 'deleted'), models.Q(('purgedAt__isnull', True), ('purgedAt__gte', models.F('deletedAt')), _connector='OR')), _connector='OR'), name='source_lifecycle_shape_valid'),
+        ),
+        migrations.AddIndex(
+            model_name='sessionevent',
+            index=models.Index(condition=models.Q(('payload__payload__resultState', 'successWithOutput'), ('payload__payload__toolName', 'dispatch_work'), ('payload__type', 'tool_result'), ('projects_to_agent_run_stream', True), ('session_level', False)), fields=['insertedAt', 'eventId'], name='agent_work_recovery_scan'),
+        ),
+        migrations.AddConstraint(
+            model_name='sessionevent',
+            constraint=models.UniqueConstraint(fields=('session', 'sequence'), name='unique_session_event_session_sequence'),
+        ),
+        migrations.AddConstraint(
+            model_name='sessionevent',
+            constraint=models.UniqueConstraint(fields=('agent_run', 'agent_run_sequence'), name='unique_session_event_agent_run_sequence'),
+        ),
+        migrations.AddConstraint(
+            model_name='sessionevent',
+            constraint=models.CheckConstraint(condition=models.Q(models.Q(('agent_run_sequence__isnull', True), ('projects_to_agent_run_stream', False), ('session_level', True)), models.Q(('agent_run_sequence__gt', 0), ('agent_run_sequence__isnull', False), ('session_level', False)), _connector='OR'), name='session_event_level_shape'),
+        ),
+        migrations.AddConstraint(
+            model_name='sessionevent',
+            constraint=models.CheckConstraint(condition=models.Q(models.Q(('payload__type', 'tool_call_closure'), ('session_level', True)), models.Q(('session_level', False), models.Q(('payload__type', 'tool_call_closure'), _negated=True)), _connector='OR'), name='session_event_session_level_matches_type'),
+        ),
+        migrations.AddConstraint(
+            model_name='sessionassetlink',
+            constraint=models.CheckConstraint(condition=models.Q(models.Q(('artifact__isnull', True), ('sourceObject__isnull', False), ('userLibraryObject__isnull', True)), models.Q(('artifact__isnull', True), ('sourceObject__isnull', True), ('userLibraryObject__isnull', False)), models.Q(('artifact__isnull', False), ('sourceObject__isnull', True), ('userLibraryObject__isnull', True)), _connector='OR'), name='session_asset_link_exactly_one_asset'),
+        ),
+        migrations.AddConstraint(
+            model_name='session',
+            constraint=models.CheckConstraint(condition=models.Q(('status__in', ('active', 'deleted'))), name='session_status_valid'),
+        ),
+        migrations.AddConstraint(
+            model_name='session',
+            constraint=models.CheckConstraint(condition=models.Q(models.Q(('deletedAt__isnull', True), ('purgedAt__isnull', True), ('status', 'active')), models.Q(('deletedAt__isnull', False), ('status', 'deleted'), models.Q(('purgedAt__isnull', True), ('purgedAt__gte', models.F('deletedAt')), _connector='OR')), _connector='OR'), name='session_deletion_consistency'),
+        ),
+        migrations.AddConstraint(
+            model_name='session',
+            constraint=models.CheckConstraint(condition=models.Q(('workspaceGeneration__gte', 0), ('workspaceSnapshotSizeBytes__gte', 0), ('workspaceExpandedSizeBytes__gte', 0), ('workspaceFileCount__gte', 0)), name='session_workspace_nonnegative'),
+        ),
+        migrations.AddConstraint(
+            model_name='session',
+            constraint=models.CheckConstraint(condition=models.Q(models.Q(('workspaceExpandedSizeBytes', 0), ('workspaceFileCount', 0), ('workspaceGeneration', 0), ('workspaceLastAdvancedAgentRun__isnull', True), ('workspaceSnapshotSha256', ''), ('workspaceSnapshotSizeBytes', 0), ('workspaceStorageKey', '')), models.Q(('workspaceGeneration__gt', 0), ('workspaceLastAdvancedAgentRun__isnull', False)), _connector='OR'), name='session_workspace_generation_consistency'),
+        ),
+        migrations.AddConstraint(
+            model_name='session',
+            constraint=models.CheckConstraint(condition=models.Q(models.Q(('workspaceExpandedSizeBytes', 0), ('workspaceFileCount', 0), ('workspaceSnapshotSha256', ''), ('workspaceSnapshotSizeBytes', 0), ('workspaceStorageKey', '')), models.Q(models.Q(('workspaceStorageKey', ''), _negated=True), models.Q(('workspaceSnapshotSha256', ''), _negated=True), ('workspaceSnapshotSizeBytes__gt', 0), models.Q(models.Q(('workspaceExpandedSizeBytes', 0), ('workspaceFileCount', 0)), ('workspaceFileCount__gt', 0), _connector='OR')), _connector='OR'), name='session_workspace_file_count_consistency'),
+        ),
+        migrations.AddConstraint(
+            model_name='hostedoperationreceipt',
+            constraint=models.UniqueConstraint(fields=('user', 'workspace', 'command', 'operationId'), name='hosted_operation_scope_unique'),
+        ),
+        migrations.AddConstraint(
+            model_name='hostedoperationreceipt',
+            constraint=models.CheckConstraint(condition=models.Q(models.Q(('agentRunId__isnull', True), ('command', 'createSession'), ('turnId__isnull', True)), models.Q(('agentRunId__isnull', False), ('command__in', ['submitMessage', 'consumeWorkReturn']), ('turnId__isnull', False)), models.Q(('agentRunId__isnull', True), ('command', 'consumeWorkReturn'), ('turnId__isnull', True)), _connector='OR'), name='hosted_operation_result_valid'),
+        ),
+        migrations.AddIndex(
+            model_name='agentrun',
+            index=models.Index(condition=models.Q(('startedAt__isnull', True), ('status', 'queued')), fields=['workspace', 'createdAt', 'id'], name='agent_run_initial_queue'),
+        ),
+        migrations.AddConstraint(
+            model_name='agentrun',
+            constraint=models.CheckConstraint(condition=models.Q(('membership_ref', ''), _negated=True), name='agent_run_membership_ref_required'),
+        ),
+        migrations.AddConstraint(
+            model_name='agentrun',
+            constraint=models.CheckConstraint(condition=models.Q(models.Q(('acting_app__isnull', True), ('app_delegation__isnull', True)), models.Q(('acting_app__isnull', False), ('app_delegation__isnull', False)), _connector='OR'), name='agent_run_app_origin_valid'),
+        ),
+        migrations.AddConstraint(
+            model_name='agentdefinition',
+            constraint=models.CheckConstraint(condition=models.Q(('status__in', ('active', 'disabled'))), name='agent_definition_status_valid'),
+        ),
+        migrations.AddConstraint(
+            model_name='agentdefinition',
+            constraint=models.CheckConstraint(condition=models.Q(('availability_scope__in', ('none', 'workspace', 'members'))), name='agent_definition_scope_valid'),
+        ),
+        migrations.AddConstraint(
+            model_name='agentdefinition',
+            constraint=models.CheckConstraint(condition=models.Q(('avatar_kind__in', ('centaeris', 'banana'))), name='agent_definition_avatar_valid'),
+        ),
+        migrations.AddConstraint(
+            model_name='agentconnectorcredentialapproval',
+            constraint=models.CheckConstraint(condition=models.Q(('credential_version__gt', 0)), name='connector_approval_version_positive'),
+        ),
+        migrations.AddConstraint(
+            model_name='agentconnectorbinding',
+            constraint=models.UniqueConstraint(fields=('workspace', 'definition', 'plugin_name', 'server_id'), name='agent_connector_binding_unique'),
+        ),
+        migrations.AddConstraint(
+            model_name='agent',
+            constraint=models.CheckConstraint(condition=models.Q(('avatar_kind__in', ('centaeris', 'banana'))), name='agent_avatar_kind_valid'),
+        ),
+        migrations.AddConstraint(
+            model_name='agent',
+            constraint=models.CheckConstraint(condition=models.Q(('status__in', ('active', 'deleted'))), name='agent_status_valid'),
+        ),
+        migrations.AddConstraint(
+            model_name='agent',
+            constraint=models.CheckConstraint(condition=models.Q(models.Q(('deletedAt__isnull', True), ('purgedAt__isnull', True), ('status', 'active')), models.Q(('deletedAt__isnull', False), ('status', 'deleted'), models.Q(('purgedAt__isnull', True), ('purgedAt__gte', models.F('deletedAt')), _connector='OR')), _connector='OR'), name='agent_deletion_consistency'),
+        ),
+        migrations.AddConstraint(
+            model_name='agent',
+            constraint=models.UniqueConstraint(fields=('workspace', 'owner', 'definition'), name='agent_definition_owner_unique'),
+        ),
+        migrations.AddConstraint(
+            model_name='agent',
+            constraint=models.CheckConstraint(condition=models.Q(('model_config__isnull', False), ('thinking_mode', ''), _connector='OR'), name='agent_unconfigured_model_no_effort'),
+        ),
+        migrations.AddConstraint(
+            model_name='sourcegrant',
+            constraint=models.UniqueConstraint(fields=('source', 'workspaceGroup'), name='unique_source_workspace_group_grant'),
+        ),
+        migrations.AddConstraint(
+            model_name='sourcegrant',
+            constraint=models.CheckConstraint(condition=models.Q(('accessLevel__in', ('read', 'write', 'control'))), name='source_grant_access_level_valid'),
+        ),
+        migrations.AddConstraint(
+            model_name='workspaceinvitation',
+            constraint=models.UniqueConstraint(condition=models.Q(('status', 'pending')), fields=('workspace', 'email'), name='unique_pending_workspace_invitation'),
+        ),
+        migrations.AddConstraint(
+            model_name='workspaceinvitation',
+            constraint=models.CheckConstraint(condition=models.Q(('role__in', ('admin', 'member'))), name='workspace_invitation_role_valid'),
+        ),
+        migrations.AddConstraint(
+            model_name='workspaceinvitation',
+            constraint=models.CheckConstraint(condition=models.Q(('status__in', ('pending', 'accepted', 'revoked', 'expired'))), name='workspace_invitation_status_valid'),
+        ),
+        migrations.AddConstraint(
+            model_name='workspacemembership',
+            constraint=models.UniqueConstraint(fields=('workspace', 'user'), name='unique_workspace_membership'),
+        ),
+        migrations.AddConstraint(
+            model_name='workspacemembership',
+            constraint=models.UniqueConstraint(condition=models.Q(('role', 'owner')), fields=('workspace',), name='unique_workspace_owner'),
+        ),
+        migrations.AddConstraint(
+            model_name='workspacemembership',
+            constraint=models.CheckConstraint(condition=models.Q(('role__in', ('owner', 'admin', 'member'))), name='workspace_membership_role_valid'),
+        ),
+        migrations.AddConstraint(
+            model_name='workspacegroup',
+            constraint=models.UniqueConstraint(fields=('workspace', 'name'), name='unique_workspace_group_name'),
+        ),
+        migrations.AddConstraint(
+            model_name='workspacegroup',
+            constraint=models.UniqueConstraint(condition=models.Q(('kind', 'all_members')), fields=('workspace',), name='unique_workspace_all_members_group'),
+        ),
+        migrations.AddConstraint(
+            model_name='workspacegroup',
+            constraint=models.CheckConstraint(condition=models.Q(('kind__in', ('custom', 'all_members'))), name='workspace_group_kind_valid'),
+        ),
+        migrations.AddConstraint(
+            model_name='agentdefinitionmember',
+            constraint=models.UniqueConstraint(fields=('definition', 'membership'), name='agent_definition_member_unique'),
+        ),
+        migrations.AddConstraint(
+            model_name='workspacepluginenablement',
+            constraint=models.UniqueConstraint(fields=('workspace', 'pluginName'), name='unique_workspace_plugin_enablement'),
+        ),
+        migrations.AddConstraint(
+            model_name='agentinputqueue',
+            constraint=models.CheckConstraint(condition=models.Q(('initial_input__isnull', True), ('initial_host__isnull', True), _connector='OR'), name='agent_input_queue_one_initial_owner'),
+        ),
+        migrations.AddConstraint(
+            model_name='agentworksession',
+            constraint=models.UniqueConstraint(fields=('source_run', 'source_turn_id', 'source_call_id'), name='agent_work_source_unique'),
+        ),
+        migrations.AddConstraint(
+            model_name='agentworkreturn',
+            constraint=models.UniqueConstraint(fields=('work', 'child_run', 'fact_kind', 'fact_ref'), name='agent_work_return_fact_unique'),
+        ),
+        migrations.AddConstraint(
+            model_name='transcriptoutputchunk',
+            constraint=models.UniqueConstraint(fields=('capture', 'index'), name='unique_transcript_output_chunk'),
+        ),
+        migrations.RunPython(create_tool_result_lookup_index, drop_tool_result_lookup_index),
+    ]

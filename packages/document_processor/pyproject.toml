@@ -1,0 +1,32 @@
+[project]
+name = "centaeris-document-processor"
+version = "0.1.0"
+license = "AGPL-3.0-only"
+requires-python = "==3.12.10"
+dependencies = [
+  "openpyxl==3.1.5",
+  "paddleocr==3.7.0",
+  "pillow==12.3.0",
+  "pypdfium2==5.12.1",
+]
+
+[project.optional-dependencies]
+cpu = ["paddlepaddle==3.3.1"]
+gpu = [
+  "paddlepaddle-gpu @ https://paddle-whl.bj.bcebos.com/stable/cu126/paddlepaddle-gpu/paddlepaddle_gpu-3.3.1-cp312-cp312-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[tool.uv]
+conflicts = [
+  [
+    { extra = "cpu" },
+    { extra = "gpu" },
+  ],
+]
+
+[tool.setuptools]
+py-modules = ["document_processor"]
+
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"

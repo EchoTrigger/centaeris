@@ -1,0 +1,170 @@
+{
+  "content": [
+    {
+      "byteLength": "3",
+      "content": "中",
+      "endOffset": "3",
+      "hasMore": false,
+      "projectionGeneration": "generation-1",
+      "projectionVersion": "transcript.projection.v1",
+      "refId": "session-event:event-1:modelMarkdown",
+      "revision": "1",
+      "schema": "transcript.content.range.v1",
+      "sessionId": "session-1",
+      "startOffset": "0"
+    }
+  ],
+  "contentRequest": [
+    {
+      "byteLength": "3",
+      "maxBytes": 65536,
+      "offset": "0",
+      "projectionGeneration": "generation-1",
+      "projectionVersion": "transcript.projection.v1",
+      "refId": "session-event:event-1:modelMarkdown",
+      "revision": "1",
+      "schema": "transcript.content.range.read.v1",
+      "sessionId": "session-1"
+    }
+  ],
+  "error": [
+    {
+      "error": "transcript_content_request_invalid"
+    },
+    {
+      "error": "transcript_content_unavailable"
+    },
+    {
+      "error": "transcript_page_request_invalid"
+    },
+    {
+      "error": "transcript_patch_request_invalid"
+    },
+    {
+      "error": "transcript_view_invalidated"
+    }
+  ],
+  "page": [
+    {
+      "blocks": [
+        {
+          "blockId": "block-1",
+          "blockRevision": "1",
+          "body": {
+            "content": {
+              "inlineContent": "中",
+              "sourceRef": null
+            },
+            "kind": "userText"
+          },
+          "orderKey": {
+            "ordinal": 0,
+            "sourceSequence": "1"
+          },
+          "presentation": {
+            "agentRunId": null,
+            "displayTarget": null,
+            "durationMs": null,
+            "observedAtMs": 0,
+            "operation": null,
+            "sourceType": "user_message"
+          }
+        }
+      ],
+      "hasOlder": false,
+      "olderCursor": null,
+      "projectionGeneration": "generation-1",
+      "projectionVersion": "transcript.projection.v1",
+      "resumeCursors": [
+        {
+          "cursor": "1",
+          "streamId": "workspace-transcript.v1"
+        }
+      ],
+      "schema": "transcript.page.v1",
+      "sessionId": "session-1",
+      "sourceHighWater": "1"
+    }
+  ],
+  "pageRequest": [
+    {
+      "olderCursor": null,
+      "projectionGeneration": null,
+      "projectionVersion": "transcript.projection.v1",
+      "schema": "runtime.transcript.page.read.v1",
+      "sessionId": "session-1",
+      "sourceHighWater": "0"
+    }
+  ],
+  "patchRequest": [
+    {
+      "afterSourceHighWater": "0",
+      "projectionGeneration": "generation-1",
+      "projectionVersion": "transcript.projection.v1",
+      "schema": "runtime.transcript.patch.read.v1",
+      "sessionId": "session-1",
+      "throughSourceHighWater": "1"
+    }
+  ],
+  "patches": [
+    {
+      "hasMore": false,
+      "nextSourceHighWater": "1",
+      "patches": [
+        {
+          "appliedCursor": "1",
+          "projectionGeneration": "generation-1",
+          "projectionVersion": "transcript.projection.v1",
+          "removals": [
+            {
+              "blockId": "removed",
+              "blockRevision": "1"
+            }
+          ],
+          "schema": "transcript.patch.v1",
+          "sessionId": "session-1",
+          "sourceHighWater": "1",
+          "streamId": "workspace-transcript.v1",
+          "upserts": [
+            {
+              "blockId": "block-1",
+              "blockRevision": "1",
+              "body": {
+                "content": {
+                  "inlineContent": "中",
+                  "sourceRef": null
+                },
+                "kind": "userText"
+              },
+              "orderKey": {
+                "ordinal": 0,
+                "sourceSequence": "1"
+              },
+              "presentation": {
+                "agentRunId": null,
+                "displayTarget": null,
+                "durationMs": null,
+                "observedAtMs": 0,
+                "operation": null,
+                "sourceType": "user_message"
+              }
+            }
+          ]
+        }
+      ],
+      "projectionGeneration": "generation-1",
+      "projectionVersion": "transcript.projection.v1",
+      "schema": "transcript.patch.page.v1",
+      "sessionId": "session-1",
+      "throughSourceHighWater": "1"
+    }
+  ],
+  "projectionNotReady": [
+    {
+      "error": "transcript_projection_not_ready",
+      "projectedHighWater": "0",
+      "projectionGeneration": "generation-1",
+      "sourceHighWater": "1"
+    }
+  ]
+}

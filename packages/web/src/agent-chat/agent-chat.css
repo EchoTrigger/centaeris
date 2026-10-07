@@ -1,0 +1,157 @@
+/* Agent presentation only. Inherit the host's theme and typography tokens. */
+.shMain.agentChatMain { display: flex; block-size: 100dvh; min-block-size: 0; flex-direction: column; overflow: hidden; }
+.agentChatRouteHeader { display: flex; flex: none; min-block-size: 40px; align-items: center; justify-content: space-between; gap: 16px; padding-inline: 0 8px; }
+.agentChatRouteHeader nav { min-inline-size: 0; font-size: 12px; }
+.shShellPage.isSidebarClosed .agentChatRouteHeader { padding-inline-start: 44px; }
+.agentChatPanelToggle { display: grid; place-items: center; flex: none; inline-size: 32px; block-size: 32px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--process-text); cursor: pointer; }
+.agentChatPanelToggle:hover, .agentChatPanelToggle.isActive { background: var(--surface-variant); color: var(--on-surface); }
+.agentChatPanelToggle svg { inline-size: 18px; block-size: 18px; }
+.agentChatRoutePlane { --agent-chat-preview-width: 360px; --agent-chat-preview-max-height: max(0px, calc(100dvh - 56px - var(--agent-chat-composer-height, 160px))); --agent-chat-bubble-max-width: 760px; --agent-chat-content-inset: 32px; --agent-chat-session-title-width: min(calc(var(--agent-chat-bubble-max-width) / 2), calc((100cqi - var(--agent-chat-content-inset)) / 2)); --agent-chat-preview-gap: 16px; --agent-chat-preview-inset: 16px; position: relative; display: flex; flex: 1; min-inline-size: 0; min-block-size: 0; flex-direction: column; container: agent-chat / inline-size; }
+.agentChatConversationColumn { display: flex; flex: 1; min-inline-size: 0; min-block-size: 0; flex-direction: column; container-type: inline-size; }
+.agentChatRouteReplies { min-inline-size: 0; min-block-size: 0; flex: 1; padding: 20px 16px; overflow: auto; overflow-anchor: none; overscroll-behavior: contain; scrollbar-gutter: stable both-edges; }
+.agentChatContentWidth { box-sizing: border-box; inline-size: min(820px, 100%); margin-inline: auto; }
+.workspaceComposer.agentInputComposer { box-sizing: border-box; inline-size: min(820px, 100%); margin-inline: auto; margin-block: 0; }
+.agentChatContentWidth > button, .agentChatRouteActivity button:where(:not(.workspaceJumpToLatest)) { padding: 7px 12px; border: 1px solid var(--outline-variant); border-radius: 7px; background: var(--surface-color); color: var(--on-surface); font: inherit; cursor: pointer; }
+.agentChatContentWidth > button { margin-block-start: 20px; }
+.agentChatComposerDock { flex: none; padding: 8px 16px max(18px, env(safe-area-inset-bottom)); overflow: hidden; scrollbar-gutter: auto; }
+.agentChatPreviewDock { position: absolute; z-index: 35; inset-block-start: 0; inset-inline-end: var(--agent-chat-preview-inset); display: flex; box-sizing: border-box; inline-size: min(var(--agent-chat-preview-width), calc(100% - 32px)); block-size: auto; max-block-size: var(--agent-chat-preview-max-height); min-inline-size: 0; min-block-size: 0; }
+.agentChatPreviewDock > .agentChatSessionPreview { position: static; flex: none; inline-size: 100%; block-size: auto; max-block-size: var(--agent-chat-preview-max-height); min-block-size: 0; overflow: hidden; box-shadow: none; }
+.agentChatPreviewDock > .agentChatSessionPreview:has(.agentChatOverviewHeader) { background: var(--surface-variant); }
+.agentChatRouteActivity { display: flex; flex: 1; min-block-size: 0; flex-direction: column; }
+.agentChatRouteActivity > .agentPreviewFiles { display: flex; flex: 1; min-block-size: 0; }
+.agentChatRouteActivity .workspaceAgentRunList { flex: 1; min-block-size: 0; block-size: auto; }
+@media (max-width: 760px) {
+  .shShellPage.agentChatShell { display: grid; grid-template-columns: 0 minmax(0, 1fr); overflow: hidden; }
+  .shShellPage.agentChatShell > .shSidebar { display: flex; position: fixed; z-index: 30; inset: 0 auto 0 0; align-items: stretch; flex-direction: column; inline-size: min(var(--workspace-sidebar-width), calc(100vw - 48px)); block-size: 100dvh; min-block-size: 0; padding: 0; }
+  .agentChatShell .shSidebar .shScroll { display: block; flex: 1; min-block-size: 0; overflow: auto; }
+  .agentChatShell .shSidebar .shSidebarNewChat { display: flex; }
+  .agentChatShell .shSidebarCollapse { opacity: 1; }
+  .agentChatRouteHeader { padding-inline: 0 8px; }
+  .agentChatRoutePlane { --agent-chat-content-inset: 24px; }
+  .agentChatRouteReplies { padding: 16px 12px; }
+  .agentChatComposerDock { padding-inline: 9px; padding-block-end: max(12px, env(safe-area-inset-bottom)); }
+  .agentChatPreviewDock { flex: none; min-inline-size: 0; padding: 0; }
+}
+.agentChatMessageList { display: flex; inline-size: 100%; min-inline-size: 0; flex-direction: column; align-items: flex-start; gap: 18px; }
+.agentChatMessageItem { display: flex; inline-size: 100%; min-inline-size: 0; flex-direction: column; gap: 8px; }
+.agentChatTimeSeparator { display: block; align-self: stretch; padding-block: 4px; color: var(--process-text); font-family: var(--font-family); font-size: 12px; line-height: 1.5; text-align: center; overflow-wrap: anywhere; }
+.agentChatMessageGroup { display: flex; box-sizing: border-box; inline-size: fit-content; max-inline-size: min(100%, var(--agent-chat-bubble-max-width, 760px)); min-inline-size: 0; flex-direction: column; gap: 8px; }
+.agentChatMessageGroup--user { max-inline-size: min(620px, 82%); margin-inline-start: auto; }
+.agentChatMessage {
+  box-sizing: border-box;
+  inline-size: 100%;
+  min-inline-size: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--outline-variant);
+  border-radius: 14px;
+  background: var(--surface-color);
+  color: var(--on-surface);
+  font-family: var(--font-content);
+  font-size: var(--chat-body-size);
+  line-height: var(--chat-body-leading);
+  overflow-wrap: anywhere;
+}
+.agentChatMessage--user { align-self: flex-end; inline-size: fit-content; max-inline-size: 100%; background: var(--surface-variant); }
+.agentChatMessageBody { min-inline-size: 0; }
+.agentChatUserText { white-space: pre-wrap; }
+.agentChatMessageFooter { display: flex; align-self: flex-end; align-items: flex-end; justify-content: flex-end; gap: 12px; }
+.agentChatSessionReferences { display: flex; align-self: flex-start; min-inline-size: 0; max-inline-size: 100%; flex-direction: column; align-items: flex-start; gap: 6px; }
+.agentChatSessionReference {
+  display: inline-flex;
+  box-sizing: border-box;
+  align-items: center;
+  gap: 8px;
+  block-size: 32px;
+  inline-size: var(--agent-chat-session-title-width, calc(760px / 2));
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--outline-variant);
+  border-radius: 8px;
+  background: var(--surface-variant);
+  color: var(--on-surface);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: start;
+  cursor: pointer;
+}
+.agentChatSessionReference:hover { background: var(--surface-hover); }
+.agentChatSessionTitle { display: block; inline-size: 100%; min-inline-size: 0; overflow: hidden; white-space: nowrap; text-overflow: clip; mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent); }
+.agentChatMessageTime { flex: none; margin-inline-start: auto; color: var(--process-text); font-size: var(--chat-meta-size); line-height: var(--chat-meta-leading); white-space: nowrap; text-align: end; }
+.agentChatMessage :is(pre, .markdownTable) { max-inline-size: 100%; overflow: auto; }
+
+.agentChatSessionPreview {
+  position: relative;
+  display: flex;
+  box-sizing: border-box;
+  flex: 1;
+  flex-direction: column;
+  min-inline-size: 0;
+  inline-size: 100%;
+  max-block-size: 100%;
+  overflow: hidden;
+  border: 1px solid var(--outline-variant);
+  border-radius: 16px;
+  background: var(--surface-color);
+  color: var(--on-surface);
+  font-family: var(--font-family);
+  font-size: var(--chat-body-size);
+  line-height: var(--chat-body-leading);
+}
+.agentChatPreviewHeader { display: flex; flex: none; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 10px 12px; border-block-end: 1px solid var(--outline-variant); background: var(--surface-variant); }
+.agentChatPreviewClose { display: grid; flex: none; place-items: center; inline-size: 32px; block-size: 32px; border: 0; border-radius: 6px; background: transparent; color: var(--process-text); cursor: pointer; }
+.agentChatPreviewClose:hover { background: var(--surface-hover); color: var(--on-surface); }
+.agentChatPreviewClose svg { inline-size: 16px; block-size: 16px; }
+.agentChatPreviewState button { min-block-size: 34px; padding: 6px 12px; border: 1px solid var(--outline); border-radius: 7px; background: var(--surface-color); color: var(--on-surface); font: inherit; font-size: 12px; cursor: pointer; }
+.agentChatPreviewState button:hover { background: var(--surface-variant); }
+.agentChatPreviewBody { min-inline-size: 0; min-block-size: 0; flex: 0 1 auto; padding: 16px; overflow: auto; overflow-wrap: anywhere; overscroll-behavior: contain; }
+.agentChatPreviewBody:has(.agentChatRouteActivity) { display: flex; flex-direction: column; overflow: hidden; }
+.agentChatPreviewBody .agentChatRouteActivity { flex: 1; }
+.agentChatLibraryPreview { display: flex; block-size: var(--agent-chat-preview-max-height); flex-direction: column; overflow: hidden; }
+.agentChatPreviewBody > :first-child { margin-block-start: 0; }
+.agentChatPreviewBody > :last-child { margin-block-end: 0; }
+.agentChatPreviewState { padding: 16px; color: var(--process-text); }
+.agentChatPreviewState p { margin: 0 0 12px; }
+.agentChatPreviewState--error { color: var(--error); }
+.agentChatSessionPreview [hidden] { display: none; }
+.agentPreviewFiles[aria-hidden="true"] { visibility: hidden; }
+.agentChatPanelToggle:focus-visible, .agentChatContentWidth button:focus-visible, .agentChatSessionReference:focus-visible, .agentChatSessionPreview :is(button, a, [tabindex]):focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+@media (max-width: 760px) {
+  .agentChatMessage { padding: 12px; }
+}
+.agentChatCapabilityNotice { margin: 18px 0; color: var(--on-surface-variant); font-size: 12px; }
+.workspaceComposerFooter.agentInputComposerActions { display: flex; inline-size: 100%; align-items: center; justify-content: flex-end; gap: 12px; }
+.agentInputComposer p { align-self: stretch; margin: 0; font-size: 12px; color: var(--process-text); }
+.agentInputComposerStatus { flex: 1; min-inline-size: 0; line-height: 1.5; }
+.agentInputComposer [role="alert"] { color: var(--error); }
+.agentInputComposer > button { justify-self: start; min-block-size: 34px; padding: 6px 14px; border: 1px solid var(--outline); border-radius: 7px; background: var(--surface-color); color: var(--on-surface); font: inherit; cursor: pointer; }
+.agentChatOverviewHeader { display: flex; flex: none; align-items: flex-start; gap: 12px; padding: 20px 16px 12px; }
+.agentChatOverviewHeader > div { flex: 1; min-inline-size: 0; overflow-wrap: anywhere; }
+.agentChatOverviewHeader strong { display: block; margin-block-end: 6px; font-size: 14px; font-weight: 600; }
+.agentChatOverviewAvatar { inline-size: 40px; block-size: 40px; flex: none; border-radius: 12px; }
+.agentChatOverviewSectionTitle { margin: 0 0 12px; color: var(--process-text); font-size: 12px; font-weight: 500; }
+.agentChatOverviewSession { margin-block-end: 16px; }
+.agentChatOverviewActivity > .agentChatSessionReference { display: flex; inline-size: 100%; margin-block: 4px; }
+.agentChatOverviewSession .agentFileReference { display: block; max-inline-size: 100%; margin: 8px 0 0; text-align: start; overflow-wrap: anywhere; }
+.agentChatShowMore { border: 0; padding: 6px 0; background: transparent; color: var(--process-text); font: inherit; font-size: 12px; cursor: pointer; }
+.agentMessageFiles { margin-block-start: 10px; }
+.agentFileReference { display: inline-flex; box-sizing: border-box; max-inline-size: 100%; min-inline-size: 0; min-block-size: 40px; align-items: center; gap: 8px; margin: 4px; padding: 8px 10px; border: 1px solid var(--outline-variant); border-radius: 8px; background: var(--surface-variant); color: var(--on-surface); font: inherit; font-size: 12px; line-height: 1.5; text-align: start; overflow-wrap: anywhere; cursor: pointer; }
+.agentFileReference > svg { inline-size: 16px; block-size: 16px; flex: none; }
+.agentFileReference > span { min-inline-size: 0; }
+.agentFilePreview { display: flex; min-inline-size: 0; min-block-size: 0; flex: 1; flex-direction: column; gap: 12px; overflow: hidden; }
+.agentFilePreview > p { flex: none; margin: 0; font-size: var(--chat-meta-size); line-height: var(--chat-meta-leading); }
+.agentFilePreview > :last-child { flex: 1; min-block-size: 0; max-inline-size: 100%; }
+.agentFilePreview > :is(img, iframe, .codePreview, .officePreview) { inline-size: 100%; block-size: 100%; }
+.agentFilePreview img { object-fit: contain; }
+.agentFilePreview button { margin-inline-start: 12px; }
+.agentFileReference:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+
+.agentChatPreviewBack { display: grid; flex: none; place-items: center; inline-size: 28px; block-size: 32px; border: 0; border-radius: 6px; background: transparent; color: var(--process-text); cursor: pointer; }
+.agentChatPreviewBack:hover { background: var(--surface-hover); color: var(--on-surface); }
+.agentChatPreviewBack svg { inline-size: 16px; block-size: 16px; }
+.agentChatPreviewTitle { flex: 1; min-inline-size: 0; align-self: center; overflow: hidden; white-space: nowrap; font-size: 12px; font-weight: 600; mask-image: linear-gradient(to right, #000 calc(100% - 20px), transparent); }
+.agentChatConversationPreview { display: flex; flex-direction: column; block-size: var(--agent-chat-preview-max-height); overflow: hidden; }
+.agentChatRouteReplies, .agentChatPreviewBody, .agentChatRouteActivity .workspaceAgentRunList { scrollbar-width: none; scrollbar-gutter: auto; }
+.agentChatRouteReplies::-webkit-scrollbar, .agentChatPreviewBody::-webkit-scrollbar, .agentChatRouteActivity .workspaceAgentRunList::-webkit-scrollbar { display: none; }
+.agentChatOverviewOutputs { margin-block-start: 20px; }

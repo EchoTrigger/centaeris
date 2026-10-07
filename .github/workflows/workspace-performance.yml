@@ -1,0 +1,87 @@
+name: Performance
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/performance.yml
+      - .github/workflows/resolve-core-revision.yml
+      - scripts/resolve-core-revision.mjs
+      - core-revision.txt
+      - scripts/core-revision.test.mjs
+      - scripts/core-source*.mjs
+      - scripts/verify-core-checkout.mjs
+      - scripts/core-pin.py
+      - scripts/rust-toolchain.test.mjs
+      - Cargo.lock
+      - Cargo.toml
+      - rust-toolchain.toml
+      - docs/eval/fixtures/performance-repair-v1.json
+      - packages/runtime_server/Cargo.toml
+      - packages/runtime_server/src/postgres_store.rs
+      - packages/runtime_server/src/postgres_store/**
+      - scripts/performance-eval*.mjs
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/performance.yml
+      - .github/workflows/resolve-core-revision.yml
+      - scripts/resolve-core-revision.mjs
+      - core-revision.txt
+      - scripts/core-revision.test.mjs
+      - scripts/core-source*.mjs
+      - scripts/verify-core-checkout.mjs
+      - scripts/core-pin.py
+      - scripts/rust-toolchain.test.mjs
+      - Cargo.lock
+      - Cargo.toml
+      - rust-toolchain.toml
+      - docs/eval/fixtures/performance-repair-v1.json
+      - packages/runtime_server/Cargo.toml
+      - packages/runtime_server/src/postgres_store.rs
+      - packages/runtime_server/src/postgres_store/**
+      - scripts/performance-eval*.mjs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  resolve-core:
+    uses: ./.github/workflows/resolve-core-revision.yml
+
+  observation-storage:
+    name: Observation storage evaluation
+    needs: resolve-core
+    env:
+      CENTAERIS_CORE_REVISION: ${{ needs.resolve-core.outputs.revision }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: centaeris-workspace
+    steps:
+      - name: Check out Workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: centaeris-workspace
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.21.0
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          rustup show active-toolchain
+          node --test scripts/rust-toolchain.test.mjs
+
+      - name: Run observation storage evaluation
+        shell: bash
+        run: node scripts/performance-eval.mjs
