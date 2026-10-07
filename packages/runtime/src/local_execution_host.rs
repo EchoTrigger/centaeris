@@ -37,7 +37,7 @@ use centaeris_core::execution::{
     ExecutionPolicy, ExecutionPolicySummary, ExecutionProcessOutput,
 };
 
-use centaeris_core::execution::run_policy_scoped_execution_file_system_operation;
+use centaeris_core::execution::run_direct_execution_file_system_operation;
 use centaeris_core::execution::{
     classify_execution_host_failure, ExecutionCancellationProbe, ExecutionFileSystemError,
     ExecutionFileSystemOutput, ExecutionFileSystemRequest, ExecutionHostCommandOutput,
@@ -408,7 +408,7 @@ impl ExecutionHostRunner for LocalExecutionHostRunner {
     ) -> Result<ExecutionFileSystemOutput, ExecutionFileSystemError> {
         validate_local_policy(request.cwd.as_path(), &request.policy)
             .map_err(filesystem_sandbox_error)?;
-        run_policy_scoped_execution_file_system_operation(request)
+        run_direct_execution_file_system_operation(request)
     }
 
     fn run_host_command(
@@ -1198,6 +1198,136 @@ mod tests {
     use super::*;
     use centaeris_core::execution::ExecutionHostFailureKind;
     use std::io::Cursor;
+
+    #[test]
+    fn local_file_operations_accept_parent_and_absolute_paths_with_user_authority() {
+        use centaeris_core::execution::ExecutionFileSystemOperation;
+
+        let root = env::temp_dir().join(format!(
+            "centaeris-local-file-access-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let existing = outside.join("existing.txt");
+        std::fs::write(&existing, b"outside seed").unwrap();
+        let runner = LocalExecutionHostRunner::new(None).unwrap();
+        let request = |path: String, operation| ExecutionFileSystemRequest {
+            operation_id: Some("local-file-access".into()),
+            cwd: workspace.clone(),
+            policy: ExecutionPolicy::workspace_write_public_internet(&workspace),
+            model_path: path,
+            operation,
+        };
+
+        for path in [
+            "../outside/existing.txt".to_string(),
+            existing.to_string_lossy().into_owned(),
+        ] {
+            let ExecutionFileSystemOutput::ReadFile(read) = runner
+                .run_file_system_operation(request(
+                    path,
+                    ExecutionFileSystemOperation::ReadFile { max_bytes: 1024 },
+                ))
+                .expect("local reads use OS access rather than the workspace boundary")
+            else {
+                panic!("expected file read");
+            };
+            assert_eq!(read.bytes, b"outside seed");
+            assert_eq!(
+                Path::new(&read.identity.key),
+                existing.canonicalize().unwrap()
+            );
+        }
+
+        for path in [
+            "../outside/new-relative.txt".to_string(),
+            outside
+                .join("new-absolute.txt")
+                .to_string_lossy()
+                .into_owned(),
+        ] {
+            let ExecutionFileSystemOutput::WriteFile(written) = runner
+                .run_file_system_operation(request(
+                    path,
+                    ExecutionFileSystemOperation::WriteFile {
+                        content: b"new contents".to_vec(),
+                        observed_file_hash: None,
+                        create_only: true,
+                    },
+                ))
+                .expect("local writes use OS access rather than the workspace boundary")
+            else {
+                panic!("expected file write");
+            };
+            assert!(written.created);
+            assert_eq!(
+                std::fs::read(written.identity.key).unwrap(),
+                b"new contents"
+            );
+        }
+        let missing = runner
+            .run_file_system_operation(request(
+                outside.join("missing.txt").to_string_lossy().into_owned(),
+                ExecutionFileSystemOperation::ReadFile { max_bytes: 1024 },
+            ))
+            .expect_err("a missing file remains a real file error");
+        assert_eq!(
+            missing.kind,
+            centaeris_core::execution::ExecutionFileSystemErrorKind::NotFound
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_file_access_does_not_claim_to_enforce_a_filesystem_sandbox() {
+        use centaeris_core::execution::ExecutionFileSystemOperation;
+
+        let root = env::temp_dir().join(format!(
+            "centaeris-local-file-policy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let file = root.join("ordinary-file.txt");
+        std::fs::write(&file, b"original").unwrap();
+        let mut policy = ExecutionPolicy::read_only_no_network(&root);
+        policy.network = centaeris_core::execution::NetworkPolicy::PublicInternet;
+        policy.filesystem.denied_read_paths.push(file.clone());
+        policy.filesystem.denied_write_paths.push(file.clone());
+        let runner = LocalExecutionHostRunner::new(None).unwrap();
+        assert!(!runner.status(&policy).unwrap().policy_enforced);
+        let request = |operation| ExecutionFileSystemRequest {
+            operation_id: None,
+            cwd: root.clone(),
+            policy: policy.clone(),
+            model_path: file.to_string_lossy().into_owned(),
+            operation,
+        };
+        runner
+            .run_file_system_operation(request(ExecutionFileSystemOperation::ReadFile {
+                max_bytes: 1024,
+            }))
+            .expect("local file access has the current user's authority");
+        runner
+            .run_file_system_operation(request(ExecutionFileSystemOperation::WriteFile {
+                content: b"updated".to_vec(),
+                observed_file_hash: None,
+                create_only: false,
+            }))
+            .expect("local execution does not provide a read-only filesystem sandbox");
+        assert_eq!(std::fs::read(&file).unwrap(), b"updated");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn explicit_missing_bash_path_fails_loudly() {

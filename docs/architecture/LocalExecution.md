@@ -6,6 +6,12 @@ run the same Runtime natively with the system Bash. The local Host claims no OS
 sandbox: it launches the requested program with the current user's authority and
 reports `policyEnforced: false`.
 
+Local file tools use the same current-user authority. `cwd` resolves relative
+paths; absolute paths and parent paths can access files outside the working
+directory when the OS permits it. The local Host does not apply a workspace
+allowlist or a private-path denylist to ordinary file access. Resource-specific
+Hosts and authorized-input resolution keep their own access contracts.
+
 ## Windows
 
 Git for Windows is required. The Runtime discovers `bash.exe` under
