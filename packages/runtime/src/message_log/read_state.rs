@@ -1,11 +1,67 @@
-//! Bounded, disposable reducer checkpoints. All semantic validation stays in Core.
+//! Incremental reducer state. Active runs own retention; idle states are disposable.
 use super::*;
 use centaeris_core::session::{reduce_event, SessionProjection};
 use std::sync::Mutex;
 
-const MAX_BYTES: usize = 64 * 1024 * 1024;
-const MAX_SESSIONS: usize = 8;
-static CACHE: OnceLock<Mutex<Vec<(PathBuf, State)>>> = OnceLock::new();
+const MAX_IDLE_SESSIONS: usize = 8;
+static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+
+#[derive(Default)]
+struct Cache {
+    states: Vec<(PathBuf, State)>,
+    active: HashMap<PathBuf, usize>,
+}
+
+impl Cache {
+    fn trim_idle(&mut self) {
+        while self
+            .states
+            .iter()
+            .filter(|(path, _)| !self.active.contains_key(path))
+            .count()
+            > MAX_IDLE_SESSIONS
+        {
+            let index = self
+                .states
+                .iter()
+                .position(|(path, _)| !self.active.contains_key(path))
+                .expect("idle state count implies an idle entry");
+            self.states.remove(index);
+        }
+    }
+}
+
+pub(crate) struct ActiveReadState {
+    path: PathBuf,
+}
+
+pub(super) fn retain_active(path: &Path) -> Result<ActiveReadState, String> {
+    let mut cache = CACHE
+        .get_or_init(|| Mutex::new(Cache::default()))
+        .lock()
+        .map_err(|_| "read-state lock poisoned")?;
+    *cache.active.entry(path.to_path_buf()).or_default() += 1;
+    Ok(ActiveReadState {
+        path: path.to_path_buf(),
+    })
+}
+
+impl Drop for ActiveReadState {
+    fn drop(&mut self) {
+        let Some(cache) = CACHE.get() else {
+            return;
+        };
+        if let Ok(mut cache) = cache.lock() {
+            if let Some(count) = cache.active.get_mut(&self.path) {
+                *count -= 1;
+                if *count == 0 {
+                    cache.active.remove(&self.path);
+                    cache.trim_idle();
+                }
+            }
+        }
+    }
+}
 
 pub(super) struct State {
     identity: SessionLogIdentity,
@@ -27,7 +83,6 @@ pub(super) struct State {
     run_states: HashMap<String, centaeris_core::session::AgentRunSessionState>,
     pub sequence: usize,
     updated: i64,
-    bytes: usize,
 }
 
 fn digest(record: &SessionLogRecord) -> Result<[u8; 32], String> {
@@ -37,11 +92,11 @@ fn digest(record: &SessionLogRecord) -> Result<[u8; 32], String> {
 pub(super) fn take(path: &Path) -> Result<State, String> {
     let identity = session_log_identity(path)?;
     let mut cache = CACHE
-        .get_or_init(|| Mutex::new(vec![]))
+        .get_or_init(|| Mutex::new(Cache::default()))
         .lock()
         .map_err(|_| "read-state lock poisoned")?;
-    if let Some(index) = cache.iter().position(|(p, _)| p == path) {
-        let (_, state) = cache.remove(index);
+    if let Some(index) = cache.states.iter().position(|(p, _)| p == path) {
+        let (_, state) = cache.states.remove(index);
         if state.identity == identity {
             return Ok(state);
         }
@@ -91,19 +146,11 @@ pub(super) fn take(path: &Path) -> Result<State, String> {
         assistant_ids: HashMap::new(),
         sequence: document.records.len(),
         updated: 0,
-        bytes: 0,
     };
     for record in &document.records {
         state.restore_run(record)?;
         state.known.insert(record.event_id.clone(), digest(record)?);
         state.updated = state.updated.max(record.created_at_ms);
-        state.bytes = state.bytes.saturating_add(
-            serde_json::to_vec(record)
-                .map_err(|e| e.to_string())?
-                .len()
-                .saturating_mul(3)
-                + 512,
-        );
     }
     for record in &active {
         state.index_stream(record);
@@ -129,25 +176,10 @@ pub(super) fn take(path: &Path) -> Result<State, String> {
 }
 
 pub(super) fn put(path: &Path, state: State) {
-    if state.bytes > MAX_BYTES {
-        return;
-    }
-    if let Ok(mut cache) = CACHE.get_or_init(|| Mutex::new(vec![])).lock() {
-        cache.retain(|(p, _)| p != path);
-        while cache.len() >= MAX_SESSIONS
-            || cache
-                .iter()
-                .map(|(_, s)| s.bytes)
-                .sum::<usize>()
-                .saturating_add(state.bytes)
-                > MAX_BYTES
-        {
-            if cache.is_empty() {
-                break;
-            }
-            cache.remove(0);
-        }
-        cache.push((path.to_path_buf(), state));
+    if let Ok(mut cache) = CACHE.get_or_init(|| Mutex::new(Cache::default())).lock() {
+        cache.states.retain(|(p, _)| p != path);
+        cache.states.push((path.to_path_buf(), state));
+        cache.trim_idle();
     }
 }
 
@@ -265,13 +297,6 @@ impl State {
             }
             self.known.insert(record.event_id.clone(), digest(&record)?);
             self.updated = self.updated.max(record.created_at_ms);
-            self.bytes = self.bytes.saturating_add(
-                serde_json::to_vec(&record)
-                    .map_err(|e| e.to_string())?
-                    .len()
-                    .saturating_mul(3)
-                    + 512,
-            );
             pending.push(record);
         }
         Ok(pending)
@@ -367,14 +392,14 @@ pub(super) fn stream_indices(
 #[cfg(test)]
 pub(crate) fn evict_all() {
     if let Some(cache) = CACHE.get() {
-        cache.lock().unwrap().clear();
+        cache.lock().unwrap().states.clear();
     }
 }
 
 pub(super) fn invalidate(path: &Path) {
     if let Some(cache) = CACHE.get() {
         if let Ok(mut cache) = cache.lock() {
-            cache.retain(|(p, _)| p != path);
+            cache.states.retain(|(p, _)| p != path);
         }
     }
 }

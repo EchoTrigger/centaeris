@@ -639,6 +639,13 @@ pub(crate) fn agent_run_session_state(
     read_state::run_state(&path, session_id, agent_run_id)
 }
 
+pub(crate) fn retain_active_read_state(
+    session_id: &str,
+) -> Result<read_state::ActiveReadState, String> {
+    let path = existing_session_log_file_path(session_id)?;
+    read_state::retain_active(&path)
+}
+
 pub(crate) fn append_agent_run_records(
     session_id: &str,
     records: Vec<SequencedSessionRecord>,
@@ -2289,6 +2296,165 @@ mod tests {
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].envelope.sequence, 1);
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn active_read_state_owners_survive_idle_churn_and_release_retention() {
+        let _guard = test_env_mutex().lock().unwrap_or_else(|p| p.into_inner());
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-active-read-state-{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        ));
+        let day = root.join("26").join("10").join("07");
+        fs::create_dir_all(&day).unwrap();
+        let create = |id: &str| {
+            let path = day.join(format!("{id}.jsonl"));
+            create_session_document(
+                &path,
+                SessionManifestV1::new(id, 1, centaeris_core::runtime::CORE_PROTOCOL_VERSION)
+                    .unwrap(),
+                SessionMetadataV1 {
+                    record_id: String::new(),
+                    title: id.into(),
+                    cwd: root.to_string_lossy().into(),
+                    session_kind: "main".into(),
+                    parent_session_id: None,
+                    runtime_job_id: None,
+                    sort_order: Some(0),
+                    is_pinned: false,
+                    is_unread: false,
+                },
+            )
+            .map_err(CreateSessionDocumentError::into_string)
+            .unwrap();
+            read_state::context(&path).unwrap();
+            path
+        };
+        let active = create("session-active-retention");
+        let owner = read_state::retain_active(&active).unwrap();
+        let other_owner = read_state::retain_active(&active).unwrap();
+        let churn = |batch: usize| {
+            for index in 0..10 {
+                create(&format!("session-idle-{batch}-{index}"));
+            }
+        };
+        churn(0);
+        TEST_DOCUMENT_READS.with(|reads| reads.borrow_mut().clear());
+        read_state::context(&active).unwrap();
+        assert!(TEST_DOCUMENT_READS.with(|reads| reads.borrow().is_empty()));
+        drop(owner);
+        churn(1);
+        TEST_DOCUMENT_READS.with(|reads| reads.borrow_mut().clear());
+        read_state::context(&active).unwrap();
+        assert!(TEST_DOCUMENT_READS.with(|reads| reads.borrow().is_empty()));
+        drop(other_owner);
+        churn(2);
+        TEST_DOCUMENT_READS.with(|reads| reads.borrow_mut().clear());
+        read_state::context(&active).unwrap();
+        assert_eq!(
+            TEST_DOCUMENT_READS.with(|reads| reads.borrow().clone()),
+            vec![active.clone()]
+        );
+        read_state::invalidate(&active);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn large_repeated_observations_keep_incremental_run_projection_available() {
+        let _guard = test_env_mutex()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-observation-read-state-{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let session_id = "session-large-shared-observations";
+        let run_id = "run-large-shared-observations";
+        let turn_id = "turn-large-shared-observations";
+        let day = root.join("26").join("10").join("07");
+        fs::create_dir_all(&day).unwrap();
+        let path = day.join(format!("{session_id}.jsonl"));
+        create_session_document(
+            &path,
+            SessionManifestV1::new(
+                session_id,
+                1,
+                centaeris_core::runtime::CORE_PROTOCOL_VERSION,
+            )
+            .unwrap(),
+            SessionMetadataV1 {
+                record_id: String::new(),
+                title: "large observations".into(),
+                cwd: root.to_string_lossy().into(),
+                session_kind: "main".into(),
+                parent_session_id: None,
+                runtime_job_id: None,
+                sort_order: Some(0),
+                is_pinned: false,
+                is_unread: false,
+            },
+        )
+        .map_err(CreateSessionDocumentError::into_string)
+        .unwrap();
+        let started = canonical_session_record(
+            "event:large-observations:started",
+            SessionRecordType::AgentRunStarted,
+            session_id,
+            Some(turn_id.into()),
+            Some(run_id.into()),
+            2,
+            json!({"userObjective": "Keep the validated run projection incremental."}),
+        )
+        .unwrap();
+        append_incremental(&path, vec![started]).unwrap();
+        let observation = json!({"kind": "system_prompt", "content": "x".repeat(1024 * 1024)});
+        let mut last = None;
+        for round in 0..24 {
+            let record = canonical_session_record(
+                format!("event:large-observations:{round}"),
+                SessionRecordType::ModelRequestStarted,
+                session_id,
+                Some(turn_id.into()),
+                Some(run_id.into()),
+                3 + round,
+                test_model_request_payload(vec![observation.clone()], &format!("request-{round}")),
+            )
+            .unwrap();
+            append_incremental(&path, vec![record.clone()]).unwrap();
+            last = Some(record);
+        }
+        TEST_DOCUMENT_READS.with(|reads| reads.borrow_mut().clear());
+        let warm = read_state::run_state(&path, session_id, run_id).unwrap();
+        let _ = read_state::catalog_projection(&path, &root, None).unwrap();
+        let reads = TEST_DOCUMENT_READS.with(|reads| reads.borrow().clone());
+        assert!(
+            reads.is_empty(),
+            "warm validated state replayed the full historical observations: {reads:?}"
+        );
+        append_incremental(&path, vec![last.clone().unwrap()]).unwrap();
+        let mut conflict = last.unwrap();
+        conflict.payload["observations"][0]["content"] = json!("different content");
+        assert!(append_incremental(&path, vec![conflict])
+            .unwrap_err()
+            .contains("eventId conflict"));
+        read_state::invalidate(&path);
+        let cold = read_state::run_state(&path, session_id, run_id).unwrap();
+        assert_eq!(warm.next_sequence(), cold.next_sequence());
+        read_state::invalidate(&path);
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn test_model_request_payload(observations: Vec<Value>, request_id: &str) -> Value {

@@ -75,6 +75,7 @@ struct AgentRuntimeStoreActorState {
 struct ActiveAgentRunRegistration {
     event_writer: EventWriter,
     agent_run_lease: AgentRunLease,
+    _read_state: message_log::read_state::ActiveReadState,
 }
 
 impl Drop for ActiveAgentRunRegistration {
@@ -1262,6 +1263,7 @@ fn start_agent_run(mut request: StartAgentRunRequest) -> Result<StartedAgentRun,
             )?;
             Ok(())
         }));
+    let read_state = message_log::retain_active_read_state(request.session_id.as_str())?;
     let agent_run_lease = request.event_writer.start_agent_run(
         request.session_id.as_str(),
         agent_run_id.as_str(),
@@ -1271,6 +1273,7 @@ fn start_agent_run(mut request: StartAgentRunRequest) -> Result<StartedAgentRun,
     let active_agent_run_registration = ActiveAgentRunRegistration {
         event_writer: request.event_writer.clone(),
         agent_run_lease,
+        _read_state: read_state,
     };
     request.event_writer = request.event_writer.for_agent_run(
         active_agent_run_registration
