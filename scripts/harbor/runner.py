@@ -21,9 +21,9 @@ def trial_profile(root: Path, attempt: str) -> Path:
 
 
 def write_json(path: Path, value: dict) -> None:
-    temporary = path.with_suffix(".tmp")
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
-    temporary.replace(path)
+    os.replace(temporary, path)
 
 
 def collect_provider_usage(profile: Path, session_id: str, agent_run_id: str) -> dict:
@@ -66,6 +66,44 @@ def collect_provider_usage(profile: Path, session_id: str, agent_run_id: str) ->
             'mainAgent': session_summary(session_id),
             'subagents': [session_summary(identity) for identity in sorted({path.stem for path in paths} - {session_id})],
             'turns': [{'sessionId': session, 'turnId': turn, **value} for (session, turn), value in turns.items()]}
+
+
+async def export_provider_usage(root, profile_path, identity, *, terminal_observed, status):
+    artifact = {"usageCoverage": {
+        "source": "committedProviderUsage", "terminalObserved": terminal_observed,
+        "inFlightRequestMayBeMissing": not terminal_observed or status != "succeeded"}}
+    try:
+        if profile_path is None:
+            raise ValueError("Runtime profilePath unavailable for committed usage export")
+        artifact["providerUsage"] = await asyncio.wait_for(asyncio.to_thread(
+            collect_provider_usage, Path(profile_path), identity["sessionId"], identity["agentRunId"]), 3)
+    except Exception as error:
+        artifact["usageExportError"] = {"type": type(error).__name__, "message": str(error)}
+        if isinstance(error, TimeoutError):
+            # asyncio cancellation cannot stop a thread blocked in filesystem I/O.
+            artifact["usageExportError"]["workerThreadMayContinue"] = True
+    try:
+        write_json(root / "provider-usage.json", artifact)
+    except Exception as error:
+        artifact["usageExportError"] = {"type": type(error).__name__, "message": str(error)}
+    return artifact
+
+
+async def cancel_and_observe_terminal(rpc, identity, reason):
+    # Cancellation acknowledgement is not the committed terminal fact.
+    await rpc.call("_centaeris/session/agent-runs/cancel", {**identity, "reason": reason}, timeout=6)
+    while True:
+        response = await rpc.call("_centaeris/session/agent-runs", {
+            "sessionId": identity["sessionId"], "includeTerminal": True}, timeout=6)
+        runs = [run for run in response["agentRuns"] if run["agentRunId"] == identity["agentRunId"]]
+        if len(runs) != 1:
+            raise ValueError("Runtime lost or duplicated the admitted AgentRun")
+        status = runs[0]["status"]
+        if status in ("succeeded", "failed", "cancelled"):
+            return status
+        if status not in ("running", "stalled"):
+            raise ValueError(f"unknown AgentRun status: {status}")
+        await asyncio.sleep(0.25)
 
 
 class Rpc:
@@ -191,7 +229,13 @@ class Rpc:
 
 
 async def run_trial(rpc, instruction, cwd, model, provider, effort, timeout,
-                    poll_interval=0.25, state_path=None, api_key=None):
+                    poll_interval=0.25, state_path=None, api_key=None, deadline_at_ms=None):
+    deadline = None
+    if deadline_at_ms is not None:
+        remaining = (deadline_at_ms - time.time() * 1000) / 1000
+        if remaining <= 0:
+            raise TimeoutError("evaluation deadline expired before admission")
+        deadline = time.monotonic() + remaining
     request = {"modelProviderId": provider, "model": model}
     if effort is not None:
         request["modelThinkingMode"] = effort
@@ -208,12 +252,15 @@ async def run_trial(rpc, instruction, cwd, model, provider, effort, timeout,
             raise ValueError(f"Runtime did not apply {field}")
     session = await rpc.call("session/new", {"operationId": str(uuid.uuid4()),
                             "cwd": cwd, "title": "Terminal benchmark attempt"})
+    if deadline_at_ms is not None and time.monotonic() >= deadline:
+        raise TimeoutError("evaluation deadline expired before admission")
     prompt = await rpc.call("session/prompt", {"operationId": str(uuid.uuid4()),
                             "sessionId": session["id"], "message": instruction})
     identity = {"sessionId": session["id"], "agentRunId": prompt["agentRunId"]}
     if state_path:
         write_json(state_path, {**identity, "pid": os.getpid()})
-    deadline = None if timeout is None else time.monotonic() + timeout
+    if deadline_at_ms is None:
+        deadline = None if timeout is None else time.monotonic() + timeout
     try:
         while deadline is None or time.monotonic() < deadline:
             response = await rpc.call("_centaeris/session/agent-runs", {
@@ -277,21 +324,26 @@ async def supervise(args):
     if endpoint_process.returncode:
         raise RuntimeError(stderr.decode())
     endpoint = json.loads(stdout)["endpoint"]
-    write_json(root / "endpoint.json", {"endpoint": endpoint, "pid": os.getpid()})
+    write_json(root / "endpoint.json", {"endpoint": endpoint, "pid": os.getpid(), "profilePath": str(profile)})
     with (root / "runtime.log").open("wb") as runtime_log, (root / "events.jsonl").open("w", encoding="utf-8") as events, (profile / "events.jsonl").open("w+", encoding="utf-8") as event_spool:
         runtime = await asyncio.create_subprocess_exec(args.runtime, "--runtime-server", env=env,
                                                        stdout=runtime_log, stderr=runtime_log)
         rpc = None
+        primary = None
         try:
             rpc = await connect(endpoint, events, event_spool=event_spool)
             result = await run_trial(rpc, Path(args.instruction).read_text(encoding="utf-8"),
                                      args.cwd, args.model, args.provider, args.effort,
                                      args.timeout, state_path=root / "state.json",
-                                     api_key=os.environ[args.credential_env])
+                                     api_key=os.environ[args.credential_env],
+                                     deadline_at_ms=args.deadline_at_ms)
             result["modelBudget"] = {"contextTokens": args.context_tokens,
                                      "maxOutputTokens": args.output_tokens}
             if result.get('sessionId'):
-                result['providerUsage'] = collect_provider_usage(profile, result['sessionId'], result['agentRunId'])
+                result.update(await export_provider_usage(
+                    root, profile, result,
+                    terminal_observed=result["status"] in ("succeeded", "failed", "cancelled"),
+                    status=result["status"]))
             health = rpc.restore_event_log()
             if health["mirrorErrorErrno"] is not None and not health["mirrorRestored"]:
                 health["spoolSnapshotSaved"] = rpc.snapshot_event_spool(profile / "events-terminal.jsonl")
@@ -305,20 +357,36 @@ async def supervise(args):
                     await asyncio.Event().wait()
                 else:
                     await asyncio.sleep(args.linger)
+        except BaseException as error:
+            primary = error
+            raise
         finally:
-            try:
-                if rpc:
-                    try:
-                        await rpc.call("runtime/shutdown", {}, timeout=12)
-                    finally:
-                        await rpc.close()
-            finally:
-                if runtime.returncode is None:
+            cleanup_errors = []
+            if rpc:
+                try:
+                    await rpc.call("runtime/shutdown", {}, timeout=12)
+                except BaseException as error:
+                    cleanup_errors.append(("shutdown", error))
+                try:
+                    await rpc.close()
+                except BaseException as error:
+                    cleanup_errors.append(("connection close", error))
+            if runtime.returncode is None:
+                try:
                     try:
                         await asyncio.wait_for(runtime.wait(), 15)
                     except TimeoutError:
                         runtime.kill()
                         await runtime.wait()
+                except BaseException as error:
+                    cleanup_errors.append(("process reap", error))
+            if cleanup_errors:
+                failure = primary if primary is not None else cleanup_errors[0][1]
+                for stage, error in cleanup_errors:
+                    if error is not failure:
+                        failure.add_note(f"Runtime {stage} also failed: {type(error).__name__}: {error}")
+                if primary is None:
+                    raise failure
 
 
 def wait_result(args):
@@ -339,6 +407,8 @@ async def cancel(args):
     if not endpoint_path.exists():
         return
     endpoint = json.loads(endpoint_path.read_text(encoding="utf-8"))
+    state_path = root / "state.json"
+    identity = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
     with (root / "cancel-events.jsonl").open("w", encoding="utf-8") as events:
         try:
             # Include initialize in the deadline. Debug Runtime initialization
@@ -347,19 +417,33 @@ async def cancel(args):
                 connect(endpoint["endpoint"], events, startup_timeout=2), timeout=15)
         except (TimeoutError, FileNotFoundError, ConnectionRefusedError):
             result_path = root / "result.json"
-            if result_path.exists() and json.loads(result_path.read_text(encoding="utf-8")).get("status") in (
-                    "succeeded", "failed", "cancelled", "timedOut"):
+            result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else {}
+            status = result.get("status")
+            await export_provider_usage(root, endpoint.get("profilePath"), identity or result,
+                                        terminal_observed=status in ("succeeded", "failed", "cancelled"),
+                                        status=status)
+            if status in ("succeeded", "failed", "cancelled", "timedOut"):
                 return
             raise
         try:
-            if (root / "state.json").exists():
-                state = json.loads((root / "state.json").read_text(encoding="utf-8"))
-                await rpc.call("_centaeris/session/agent-runs/cancel", {
-                    "sessionId": state["sessionId"], "agentRunId": state["agentRunId"],
-                    "reason": "harbor_cancelled"}, timeout=6)
+            status = None
+            try:
+                if identity:
+                    status = await asyncio.wait_for(cancel_and_observe_terminal(rpc, {
+                        "sessionId": identity["sessionId"], "agentRunId": identity["agentRunId"]},
+                        "harbor_cancelled"), 6)
+            finally:
+                await export_provider_usage(root, endpoint.get("profilePath"), identity,
+                                            terminal_observed=status is not None, status=status)
             await rpc.call("runtime/shutdown", {}, timeout=6)
-        finally:
-            await rpc.close()
+        except BaseException as primary:
+            try:
+                await asyncio.wait_for(rpc.close(), 1)
+            except BaseException as cleanup:
+                primary.add_note(f"Runtime connection close also failed: {type(cleanup).__name__}: {cleanup}")
+            raise
+        else:
+            await asyncio.wait_for(rpc.close(), 1)
 
 
 def main():
@@ -377,6 +461,8 @@ def main():
     parser.add_argument("--context-tokens", type=int, default=500_000)
     parser.add_argument("--output-tokens", type=int, default=64_000)
     parser.add_argument("--timeout", type=float, default=900)
+    parser.add_argument("--deadline-at-ms", type=int,
+                        help="Absolute evaluation deadline, including setup elapsed before admission")
     parser.add_argument("--no-timeout", action="store_true",
                         help="Let the embedding trial orchestrator own the deadline")
     parser.add_argument("--keep-alive", action="store_true",

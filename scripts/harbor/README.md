@@ -26,8 +26,9 @@ apply to all model selections in that Runtime process.
 
 ## Build and validate
 
-Build against Debian Bookworm (glibc 2.36), since several selected tasks use that
-base. A normal Ubuntu 24.04 build can require a newer glibc than the task supplies.
+Build for the oldest libc required by the selected task images. The Debian
+Bookworm example below targets glibc 2.36 and does not cover older images such as
+Bullseye. A normal Ubuntu 24.04 build can require an even newer glibc.
 From the repository root on Linux or WSL with Docker enabled:
 
 ```bash
@@ -44,6 +45,10 @@ python3 -B -m unittest discover -s scripts/harbor -p 'test_*.py'
 
 Windows Docker Desktop can also build this Linux binary. Use absolute Windows
 bind paths for the two mounts above. The output is still a Linux ELF, not `.exe`.
+After installation, the adapter runs the installed binary's endpoint command
+with an empty environment and a separate temporary profile, before submitting
+model credentials. Dynamic-loader errors fail installation with their original
+diagnostic; the adapter does not upgrade the task's libc.
 The `test_native.py` acceptance requires Linux and the binary environment variable;
 it uses only a mock model and SOCKS5h proxy, and tests remote DNS, actual output
 limits, reasoning selection, and survival of a Runtime-owned background process
@@ -121,6 +126,10 @@ Harbor owns each task's configured agent deadline; the embedded client does not
 impose a separate fixed deadline. Successful Runtime services remain alive until
 external teardown, including for verifiers longer than twenty minutes. Terminal
 failures retain their original error without cancelling an already finished run.
+The adapter discovers the task environment's default working directory before
+launching Runtime; it does not assume `/app`. A failed probe prevents model
+launch. An empty supervisor response retains its exit code and stderr in the
+transport diagnostic and triggers cancellation of the admitted run.
 
 For an explicitly authorized pilot-review-then-full run, use
 `.\scripts\harbor\run.ps1 -FollowWithFull`. After the pilot succeeds, the worker
@@ -186,8 +195,29 @@ When Harbor cancels an attempt, cancellation remains the primary exception even
 if the cleanup command fails. The adapter records `cancellationCleanupError` in
 agent metadata and retains the cleanup diagnostic on the cancellation exception,
 so Harbor can finalize that attempt without cancelling the whole job. Cancellation
-connect/initialize, cancel RPC, and shutdown waits are bounded to fit within the
-adapter's 35-second cleanup command window (15 seconds for connection and
-initialize, six each for cancel and shutdown, plus transport overhead). Docker
-teardown remains Harbor-owned. Deadline-terminated attempts can lack exported
-provider usage; absent token counts are unknown, never zero.
+connect/initialize, cancellation confirmation, usage export, and shutdown waits
+fit within the adapter's 35-second cleanup command window. Docker teardown remains
+Harbor-owned. Terminal and cancellation paths save `provider-usage.json` from
+Core's committed usage records. `usageCoverage` identifies unreported in-flight
+requests; export or transport failures remain explicit and absent counts stay
+unknown. A timed-out export thread may still finish its file I/O, so the outer
+command deadline remains the final bound.
+
+An evaluation controller can supply `deadline_manifest_path` outside the repository:
+
+```json
+{
+  "schemaVersion": "centaeris.harbor.deadlines.v1",
+  "trials": {
+    "trial-name": {"agentTimeoutSec": 7200}
+  }
+}
+```
+
+Register the trial's effective official timeout before environment construction.
+The adapter carries an absolute deadline including 35 seconds for cleanup, while
+Harbor retains the official attempt deadline and scoring. This guard bounds model
+work if the controller disappears. Ordinary runs without this manifest retain
+Harbor-owned deadlines; supervised evaluations should provide it. Runtime client
+disconnect survival is unchanged. Provider selection and credentials remain in
+the external settings and inherited environment.

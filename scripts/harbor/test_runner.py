@@ -8,11 +8,12 @@ import os
 import shutil
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from runner import Rpc, run_trial, trial_profile, collect_provider_usage, cancel
-from unittest.mock import AsyncMock, patch
+from runner import Rpc, run_trial, trial_profile, collect_provider_usage, cancel, supervise, write_json
+from unittest.mock import AsyncMock, Mock, patch
 from types import SimpleNamespace
 
 
@@ -38,8 +39,302 @@ class FakeRpc:
 
 
 class TrialTests(unittest.IsolatedAsyncioTestCase):
+    def test_concurrent_evidence_writers_publish_one_complete_json_without_temporary_conflicts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "provider-usage.json"
+            values = [{"writer": "supervisor", "inputTokens": 100},
+                      {"writer": "cancel", "inputTokens": 200}]
+            barrier = threading.Barrier(2)
+            first_replaced = threading.Event()
+            arrival_lock = threading.Lock()
+            arrived = []
+            original_replace = os.replace
+
+            def replace_after_both_writers_finished(source, destination):
+                self.assertEqual(Path(source).parent, target.parent)
+                with arrival_lock:
+                    arrived.append(Path(source))
+                    first = len(arrived) == 1
+                barrier.wait(timeout=3)
+                if first:
+                    try:
+                        return original_replace(source, destination)
+                    finally:
+                        first_replaced.set()
+                self.assertTrue(first_replaced.wait(timeout=3))
+                return original_replace(source, destination)
+
+            with patch("runner.os.replace", replace_after_both_writers_finished), ThreadPoolExecutor(max_workers=2) as workers:
+                pending = [workers.submit(write_json, target, value) for value in values]
+                for future in pending:
+                    future.result(timeout=5)
+            self.assertIn(json.loads(target.read_text(encoding="utf-8")), values)
+            self.assertEqual(list(target.parent.glob("*.tmp")), [])
+
+    def write_committed_usage(self, profile):
+        sessions = profile / "sessions/day"
+        sessions.mkdir(parents=True)
+        record = {"schemaVersion": "session.event.v1", "type": "provider_usage",
+                  "sessionId": "session-test", "agentRunId": "run-test", "turnId": "turn-test",
+                  "payload": {"inputTokens": 100, "outputTokens": 20,
+                              "promptCacheHitTokens": 80, "promptCacheMissTokens": 20,
+                              "authorization": "fake-do-not-export"}}
+        (sessions / "session-test.jsonl").write_text(json.dumps(record), encoding="utf-8")
+        (profile / "runtime-config.json").write_text('{"modelApiKey":"fake-do-not-read"}', encoding="utf-8")
+
+    async def test_cancel_exports_committed_usage_before_shutdown_without_reading_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "profile"
+            self.write_committed_usage(profile)
+            (root / "endpoint.json").write_text(json.dumps({"endpoint": "/runtime", "profilePath": str(profile)}))
+            (root / "state.json").write_text(json.dumps({"sessionId": "session-test", "agentRunId": "run-test"}))
+            statuses = iter(["running", "cancelled"])
+            methods = []
+
+            async def call(method, request, timeout=30):
+                methods.append(method)
+                if method == "_centaeris/session/agent-runs":
+                    return {"agentRuns": [{"agentRunId": "run-test", "status": next(statuses)}]}
+                if method == "runtime/shutdown":
+                    self.assertTrue((root / "provider-usage.json").exists())
+                return {}
+
+            original_read = Path.read_text
+            def read_only_known_evidence(path, *args, **kwargs):
+                self.assertIn(path, [root / "endpoint.json", root / "state.json",
+                                    profile / "sessions/day/session-test.jsonl"])
+                return original_read(path, *args, **kwargs)
+
+            rpc = SimpleNamespace(call=AsyncMock(side_effect=call), close=AsyncMock())
+            with patch("runner.connect", AsyncMock(return_value=rpc)), patch.object(Path, "read_text", read_only_known_evidence):
+                await cancel(SimpleNamespace(logs=directory))
+            artifact = json.loads((root / "provider-usage.json").read_text(encoding="utf-8"))
+            self.assertEqual(artifact["providerUsage"]["nRequests"], 1)
+            self.assertEqual(artifact["providerUsage"]["totals"]["inputTokens"], 100)
+            self.assertIsNone(artifact["providerUsage"]["totals"]["totalTokens"])
+            self.assertTrue(artifact["usageCoverage"]["terminalObserved"])
+            self.assertTrue(artifact["usageCoverage"]["inFlightRequestMayBeMissing"])
+            self.assertEqual(methods, ["_centaeris/session/agent-runs/cancel",
+                                      "_centaeris/session/agent-runs", "_centaeris/session/agent-runs",
+                                      "runtime/shutdown"])
+            self.assertNotIn("fake-do-not", json.dumps(artifact))
+            rpc.close.assert_awaited_once()
+
+    async def test_cancel_poll_failure_still_exports_committed_usage_and_preserves_rpc_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "profile"
+            self.write_committed_usage(profile)
+            (root / "endpoint.json").write_text(json.dumps({"endpoint": "/runtime", "profilePath": str(profile)}))
+            (root / "state.json").write_text(json.dumps({"sessionId": "session-test", "agentRunId": "run-test"}))
+            failure = ConnectionError("terminal confirmation lost")
+
+            async def call(method, request, timeout=30):
+                if method == "_centaeris/session/agent-runs":
+                    raise failure
+                return {}
+
+            rpc = SimpleNamespace(call=AsyncMock(side_effect=call), close=AsyncMock())
+            with patch("runner.connect", AsyncMock(return_value=rpc)):
+                with self.assertRaises(ConnectionError) as caught:
+                    await cancel(SimpleNamespace(logs=directory))
+            self.assertIs(caught.exception, failure)
+            artifact = json.loads((root / "provider-usage.json").read_text(encoding="utf-8"))
+            self.assertEqual(artifact["providerUsage"]["nRequests"], 1)
+            self.assertFalse(artifact["usageCoverage"]["terminalObserved"])
+            self.assertTrue(artifact["usageCoverage"]["inFlightRequestMayBeMissing"])
+            rpc.close.assert_awaited_once()
+
+    async def test_cancel_usage_export_failure_does_not_fail_an_accepted_cancellation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "endpoint.json").write_text(json.dumps({"endpoint": "/runtime", "profilePath": str(root / "profile")}))
+            (root / "state.json").write_text(json.dumps({"sessionId": "session-test", "agentRunId": "run-test"}))
+            async def call(method, request, timeout=30):
+                if method == "_centaeris/session/agent-runs":
+                    return {"agentRuns": [{"agentRunId": "run-test", "status": "cancelled"}]}
+                return {}
+            rpc = SimpleNamespace(call=AsyncMock(side_effect=call), close=AsyncMock())
+            with patch("runner.connect", AsyncMock(return_value=rpc)), patch("runner.collect_provider_usage", side_effect=ValueError("usage log truncated")):
+                await cancel(SimpleNamespace(logs=directory))
+            artifact = json.loads((root / "provider-usage.json").read_text(encoding="utf-8"))
+            self.assertEqual(artifact["usageExportError"]["type"], "ValueError")
+            self.assertNotIn("providerUsage", artifact)
+            self.assertTrue(artifact["usageCoverage"]["terminalObserved"])
+            self.assertEqual(rpc.call.await_args_list[-1].args[0], "runtime/shutdown")
+
+    async def test_cancel_rpc_failure_is_not_replaced_by_usage_export_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "endpoint.json").write_text(json.dumps({"endpoint": "/runtime", "profilePath": str(root / "profile")}))
+            (root / "state.json").write_text(json.dumps({"sessionId": "session-test", "agentRunId": "run-test"}))
+            failure = ConnectionError("cancel acknowledgement lost")
+            rpc = SimpleNamespace(call=AsyncMock(side_effect=failure), close=AsyncMock())
+            with patch("runner.connect", AsyncMock(return_value=rpc)), patch("runner.collect_provider_usage", side_effect=ValueError("usage log truncated")):
+                with self.assertRaises(ConnectionError) as caught:
+                    await cancel(SimpleNamespace(logs=directory))
+            self.assertIs(caught.exception, failure)
+            artifact = json.loads((root / "provider-usage.json").read_text(encoding="utf-8"))
+            self.assertEqual(artifact["usageExportError"]["type"], "ValueError")
+            self.assertFalse(artifact["usageCoverage"]["terminalObserved"])
+            self.assertTrue(artifact["usageCoverage"]["inFlightRequestMayBeMissing"])
+            rpc.close.assert_awaited_once()
+
+    async def test_cancel_close_failure_keeps_the_primary_rpc_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "endpoint.json").write_text(json.dumps({"endpoint": "/runtime", "profilePath": str(root / "profile")}))
+            (root / "state.json").write_text(json.dumps({"sessionId": "session-test", "agentRunId": "run-test"}))
+            failure = ConnectionError("cancel acknowledgement lost")
+            rpc = SimpleNamespace(call=AsyncMock(side_effect=failure),
+                                  close=AsyncMock(side_effect=TimeoutError("close timed out")))
+            with patch("runner.connect", AsyncMock(return_value=rpc)), patch("runner.collect_provider_usage", return_value={}):
+                with self.assertRaises(ConnectionError) as caught:
+                    await cancel(SimpleNamespace(logs=directory))
+            self.assertIs(caught.exception, failure)
+            self.assertTrue(any("close timed out" in note for note in failure.__notes__))
+            rpc.close.assert_awaited_once()
+
+    async def test_cancel_close_failure_is_reported_after_successful_cancellation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "endpoint.json").write_text(json.dumps({"endpoint": "/runtime", "profilePath": str(root / "profile")}))
+            (root / "state.json").write_text(json.dumps({"sessionId": "session-test", "agentRunId": "run-test"}))
+            async def call(method, request, timeout=30):
+                if method == "_centaeris/session/agent-runs":
+                    return {"agentRuns": [{"agentRunId": "run-test", "status": "cancelled"}]}
+                return {}
+            rpc = SimpleNamespace(call=AsyncMock(side_effect=call),
+                                  close=AsyncMock(side_effect=TimeoutError("close timed out")))
+            with patch("runner.connect", AsyncMock(return_value=rpc)), patch("runner.collect_provider_usage", return_value={}):
+                with self.assertRaisesRegex(TimeoutError, "close timed out"):
+                    await cancel(SimpleNamespace(logs=directory))
+            rpc.close.assert_awaited_once()
+
+    async def test_endpoint_without_profile_reports_unknown_usage_without_configuration_lookup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "endpoint.json").write_text(json.dumps({"endpoint": "/runtime"}))
+            (root / "state.json").write_text(json.dumps({"sessionId": "session-test", "agentRunId": "run-test"}))
+            async def call(method, request, timeout=30):
+                if method == "_centaeris/session/agent-runs":
+                    return {"agentRuns": [{"agentRunId": "run-test", "status": "cancelled"}]}
+                return {}
+            rpc = SimpleNamespace(call=AsyncMock(side_effect=call), close=AsyncMock())
+            with patch("runner.connect", AsyncMock(return_value=rpc)), patch("runner.collect_provider_usage") as collect:
+                await cancel(SimpleNamespace(logs=directory))
+            collect.assert_not_called()
+            artifact = json.loads((root / "provider-usage.json").read_text(encoding="utf-8"))
+            self.assertEqual(artifact["usageExportError"]["type"], "ValueError")
+            self.assertNotIn("providerUsage", artifact)
+            self.assertTrue(artifact["usageCoverage"]["inFlightRequestMayBeMissing"])
+
+    async def test_supervisor_usage_export_failure_preserves_terminal_result_and_profile_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "profile"
+            profile.mkdir()
+            instruction = root / "instruction.txt"
+            instruction.write_text("task", encoding="utf-8")
+            endpoint_process = SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(b'{"endpoint":"/runtime"}', b"")))
+            runtime = SimpleNamespace(returncode=0)
+            rpc = SimpleNamespace(call=AsyncMock(return_value={}), close=AsyncMock(),
+                                  restore_event_log=lambda: {"mirrorErrorErrno": None, "mirrorRestored": False})
+            args = SimpleNamespace(logs=str(root), attempt="attempt", context_tokens=500000,
+                                   output_tokens=64000, runtime="runtime", instruction=str(instruction),
+                                   cwd="/workspace", model="mock", provider="custom.test", effort="max",
+                                   timeout=30, credential_env="TEST_MODEL_KEY", deadline_at_ms=None,
+                                   keep_alive=False, linger=0)
+            result = {"sessionId": "session-test", "agentRunId": "run-test", "status": "succeeded"}
+            with patch("runner.trial_profile", return_value=profile), patch("runner.asyncio.create_subprocess_exec", AsyncMock(side_effect=[endpoint_process, runtime])), patch("runner.connect", AsyncMock(return_value=rpc)), patch("runner.run_trial", AsyncMock(return_value=result)), patch("runner.collect_provider_usage", side_effect=ValueError("usage log truncated")), patch.dict("runner.os.environ", {"TEST_MODEL_KEY": "fake-test-key"}):
+                await supervise(args)
+            endpoint = json.loads((root / "endpoint.json").read_text(encoding="utf-8"))
+            saved = json.loads((root / "result.json").read_text(encoding="utf-8"))
+            artifact = json.loads((root / "provider-usage.json").read_text(encoding="utf-8"))
+            self.assertEqual(endpoint["profilePath"], str(profile))
+            self.assertEqual(saved["status"], "succeeded")
+            self.assertEqual(saved["usageExportError"]["type"], "ValueError")
+            self.assertEqual(saved["usageCoverage"], artifact["usageCoverage"])
+            self.assertFalse(saved["usageCoverage"]["inFlightRequestMayBeMissing"])
+            self.assertNotIn("fake-test-key", json.dumps(saved))
+
+    async def test_supervisor_cleanup_preserves_primary_failure_and_still_kills_the_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "profile"
+            profile.mkdir()
+            instruction = root / "instruction.txt"
+            instruction.write_text("task", encoding="utf-8")
+            endpoint_process = SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(b'{"endpoint":"/runtime"}', b"")))
+            runtime = SimpleNamespace(returncode=None, wait=AsyncMock(side_effect=[TimeoutError("still running"), 0]), kill=Mock())
+            rpc = SimpleNamespace(call=AsyncMock(side_effect=ConnectionError("shutdown connection closed")),
+                                  close=AsyncMock(side_effect=OSError("connection close failed")))
+            args = SimpleNamespace(logs=str(root), attempt="attempt", context_tokens=500000,
+                                   output_tokens=64000, runtime="runtime", instruction=str(instruction),
+                                   cwd="/workspace", model="mock", provider="custom.test", effort="max",
+                                   timeout=30, credential_env="TEST_MODEL_KEY", deadline_at_ms=None,
+                                   keep_alive=False, linger=0)
+            primary = ValueError("trial contract failure")
+            with patch("runner.trial_profile", return_value=profile), patch("runner.asyncio.create_subprocess_exec", AsyncMock(side_effect=[endpoint_process, runtime])), patch("runner.connect", AsyncMock(return_value=rpc)), patch("runner.run_trial", AsyncMock(side_effect=primary)), patch.dict("runner.os.environ", {"TEST_MODEL_KEY": "fake-test-key"}):
+                with self.assertRaises(ValueError) as caught:
+                    await supervise(args)
+            self.assertIs(caught.exception, primary)
+            self.assertTrue(any("shutdown connection closed" in note for note in primary.__notes__))
+            self.assertTrue(any("connection close failed" in note for note in primary.__notes__))
+            rpc.close.assert_awaited_once()
+            runtime.kill.assert_called_once()
+            self.assertEqual(runtime.wait.await_count, 2)
+
+    async def test_supervisor_reports_cleanup_failure_after_a_successful_run_and_reaps_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "profile"
+            profile.mkdir()
+            instruction = root / "instruction.txt"
+            instruction.write_text("task", encoding="utf-8")
+            endpoint_process = SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(b'{"endpoint":"/runtime"}', b"")))
+            runtime = SimpleNamespace(returncode=None, wait=AsyncMock(return_value=0), kill=Mock())
+            cleanup = ConnectionError("shutdown connection closed")
+            rpc = SimpleNamespace(call=AsyncMock(side_effect=cleanup), close=AsyncMock(),
+                                  restore_event_log=lambda: {"mirrorErrorErrno": None, "mirrorRestored": False})
+            args = SimpleNamespace(logs=str(root), attempt="attempt", context_tokens=500000,
+                                   output_tokens=64000, runtime="runtime", instruction=str(instruction),
+                                   cwd="/workspace", model="mock", provider="custom.test", effort="max",
+                                   timeout=30, credential_env="TEST_MODEL_KEY", deadline_at_ms=None,
+                                   keep_alive=False, linger=0)
+            result = {"sessionId": "session-test", "agentRunId": "run-test", "status": "succeeded"}
+            with patch("runner.trial_profile", return_value=profile), patch("runner.asyncio.create_subprocess_exec", AsyncMock(side_effect=[endpoint_process, runtime])), patch("runner.connect", AsyncMock(return_value=rpc)), patch("runner.run_trial", AsyncMock(return_value=result)), patch("runner.collect_provider_usage", return_value={}), patch.dict("runner.os.environ", {"TEST_MODEL_KEY": "fake-test-key"}):
+                with self.assertRaises(ConnectionError) as caught:
+                    await supervise(args)
+            self.assertIs(caught.exception, cleanup)
+            self.assertEqual(json.loads((root / "result.json").read_text(encoding="utf-8"))["status"], "succeeded")
+            rpc.close.assert_awaited_once()
+            runtime.wait.assert_awaited_once()
+            runtime.kill.assert_not_called()
+
+    async def test_expired_evaluation_deadline_does_not_admit_a_model_request(self):
+        rpc = FakeRpc(["running"])
+        with patch("runner.time.time", return_value=1000):
+            with self.assertRaisesRegex(TimeoutError, "deadline expired before admission"):
+                await run_trial(rpc, "task", "/app", "mock", "custom.test", None,
+                                None, deadline_at_ms=999999)
+        self.assertEqual(rpc.calls, [])
+
+    async def test_explicit_task_deadline_overrides_standalone_relative_timeout(self):
+        rpc = FakeRpc(["running", "succeeded"])
+        with patch("runner.time.time", return_value=1000):
+            result = await run_trial(rpc, "task", "/workspace", "mock", "custom.test", None,
+                                     0, poll_interval=0, deadline_at_ms=1000000 + 7200 * 1000)
+        self.assertEqual(result["status"], "succeeded")
+        self.assertFalse(any(method.endswith("/cancel") for method, _ in rpc.calls))
+
     async def test_cancel_rpc_deadlines_fit_the_adapter_cleanup_window(self):
-        rpc = SimpleNamespace(call=AsyncMock(return_value={}), close=AsyncMock())
+        async def call(method, request, timeout=30):
+            if method == "_centaeris/session/agent-runs":
+                return {"agentRuns": [{"agentRunId": "run", "status": "cancelled"}]}
+            return {}
+        rpc = SimpleNamespace(call=AsyncMock(side_effect=call), close=AsyncMock())
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "endpoint.json").write_text(json.dumps({"endpoint": "/runtime"}))
