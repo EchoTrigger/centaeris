@@ -3787,6 +3787,284 @@ fn tool_execution_intent_fixture(
 }
 
 #[tokio::test]
+async fn query_loop_formatted_receipt_replay_preserves_the_original_facts_and_tool_side_effect() {
+    use sha2::{Digest, Sha256};
+
+    let store = AgentRuntimeTestStore::new();
+    let executions = Arc::new(AtomicUsize::new(0));
+    let engine = AgentRuntime::new_for_test_with_tools(
+        store.clone(),
+        stream_execution_boundary_tool_layer(executions.clone()),
+        AgentRuntimeConfig::default(),
+    );
+    let session_id = "formatted-execution-replay";
+    let turn_id = "formatted-execution-turn";
+    let session = SessionStateSnapshot::new(session_id.into(), 1);
+    let original_args = r#" { "value" : "onc\u0065" } "#;
+    let generate = |args_json: &str| GenerateResult {
+        content: String::new(),
+        tool_calls: vec![ToolCallEnvelope {
+            id: "formatted-execution-call".into(),
+            name: "stream_boundary_test_tool".into(),
+            args_json: args_json.into(),
+        }],
+        continuation_reasoning_content: None,
+        reasoning_content: None,
+        input_tokens: None,
+        total_tokens: None,
+        prompt_cache_hit_tokens: None,
+        prompt_cache_miss_tokens: None,
+    };
+    let first = engine
+        .execute_tool_calls_async(session_id, turn_id, &session, generate(original_args), None)
+        .await
+        .expect("first tool execution");
+    assert_eq!(first.tool_results[0].status, "ok");
+    let facts = store.list_events(session_id, 100, 0).unwrap();
+    let intent = facts
+        .iter()
+        .find(|event| event.event_type == "tool_execution.intent.v1")
+        .expect("original intent");
+    let intent: Value = serde_json::from_str(&intent.payload_json).unwrap();
+    assert_eq!(
+        intent["modelArgsDigest"],
+        format!("sha256:{:x}", Sha256::digest(original_args.as_bytes()))
+    );
+    assert_eq!(intent["effectiveArgsJson"], original_args);
+
+    let replay = engine
+        .execute_tool_calls_async(
+            session_id,
+            turn_id,
+            &session,
+            generate(r#"{"value":"once"}"#),
+            None,
+        )
+        .await
+        .expect("equivalent projected JSON must recover the receipt");
+    assert_eq!(
+        serde_json::to_value(&replay.tool_results[0]).unwrap(),
+        serde_json::to_value(&first.tool_results[0]).unwrap()
+    );
+    for conflicting_args in [r#"{"value":"different"}"#, "invalid JSON"] {
+        let error = engine
+            .execute_tool_calls_async(
+                session_id,
+                turn_id,
+                &session,
+                generate(conflicting_args),
+                None,
+            )
+            .await
+            .expect_err("changed or invalid arguments must not recover the receipt");
+        assert!(error.contains("tool execution intent idempotency conflict"));
+    }
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert_eq!(store.list_events(session_id, 100, 0).unwrap(), facts);
+}
+
+#[tokio::test]
+async fn query_loop_hook_rewritten_receipt_requires_the_original_model_arguments() {
+    let store = AgentRuntimeTestStore::new();
+    let executions = Arc::new(AtomicUsize::new(0));
+    let engine = AgentRuntime::new_for_test_with_tools(
+        store.clone(),
+        stream_execution_boundary_tool_layer(executions.clone()),
+        AgentRuntimeConfig::default(),
+    )
+    .with_lifecycle_hooks(lifecycle_hook_runtime_for_events(
+        &[LifecycleHookEventNameV1::PreToolUse],
+        vec![(
+            LifecycleHookEventNameV1::PreToolUse,
+            json!({ "updatedInput": { "value": "rewritten" } }).to_string(),
+        )],
+    ));
+    let session_id = "hook-rewritten-receipt";
+    let turn_id = "hook-rewritten-turn";
+    let session = SessionStateSnapshot::new(session_id.into(), 1);
+    let original_args = r#" { "value" : "onc\u0065" } "#;
+    let generate = |args_json: &str| GenerateResult {
+        content: String::new(),
+        tool_calls: vec![ToolCallEnvelope {
+            id: "hook-rewritten-call".into(),
+            name: "stream_boundary_test_tool".into(),
+            args_json: args_json.into(),
+        }],
+        continuation_reasoning_content: None,
+        reasoning_content: None,
+        input_tokens: None,
+        total_tokens: None,
+        prompt_cache_hit_tokens: None,
+        prompt_cache_miss_tokens: None,
+    };
+    let first = engine
+        .execute_tool_calls_async(session_id, turn_id, &session, generate(original_args), None)
+        .await
+        .expect("hook-rewritten tool execution");
+    assert_eq!(first.tool_results[0].status, "ok");
+    let facts = store.list_events(session_id, 100, 0).unwrap();
+    let intent = facts
+        .iter()
+        .find(|event| event.event_type == "tool_execution.intent.v1")
+        .expect("hook-rewritten intent");
+    let intent: Value = serde_json::from_str(&intent.payload_json).unwrap();
+    assert_ne!(intent["modelArgsDigest"], intent["argsDigest"]);
+    assert_eq!(intent["effectiveArgsJson"], r#"{"value":"rewritten"}"#);
+
+    for unwitnessed_args in [r#"{"value":"once"}"#, r#"{"value":"rewritten"}"#] {
+        let error = engine
+            .execute_tool_calls_async(
+                session_id,
+                turn_id,
+                &session,
+                generate(unwitnessed_args),
+                None,
+            )
+            .await
+            .expect_err("hook output cannot reconstruct the original model argument spelling");
+        assert!(error.contains("tool execution intent idempotency conflict"));
+    }
+    let replay = engine
+        .execute_tool_calls_async(session_id, turn_id, &session, generate(original_args), None)
+        .await
+        .expect("exact original model arguments must still recover a hook-rewritten receipt");
+    assert_eq!(
+        serde_json::to_value(&replay.tool_results[0]).unwrap(),
+        serde_json::to_value(&first.tool_results[0]).unwrap()
+    );
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert_eq!(store.list_events(session_id, 100, 0).unwrap(), facts);
+}
+
+#[test]
+fn query_loop_readmission_recovers_formatted_receipts_without_reexecution_or_digest_rewrite() {
+    use crate::session::AgentRunSessionState;
+    use sha2::{Digest, Sha256};
+    for changed in [false, true] {
+        let store = AgentRuntimeTestStore::new();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let engine = AgentRuntime::new_for_test_with_tools(
+            store.clone(),
+            stream_execution_boundary_tool_layer(executions.clone()),
+            AgentRuntimeConfig::default(),
+        );
+        let session_id = "formatted-receipt";
+        let turn_id = "formatted-turn";
+        let call_id = "formatted-call";
+        let original_args = r#" { "value" : "onc\u0065" } "#;
+        let call = ToolCallEnvelope {
+            id: call_id.into(),
+            name: "stream_boundary_test_tool".into(),
+            args_json: if changed {
+                r#"{"value":"different"}"#.into()
+            } else {
+                original_args.into()
+            },
+        };
+        let mut state = AgentRunSessionState::new(session_id, "original-run").unwrap();
+        let mut records = state.start("original-run", "Probe", vec![], 1).unwrap();
+        let contract = engine.tools_port.tool_contract(&call.name).unwrap();
+        records.extend(
+            state
+                .record_tool_call(
+                    turn_id,
+                    &call,
+                    contract.provider_id.as_deref().unwrap(),
+                    &contract.contract_digest().unwrap(),
+                    "Synthetic probe",
+                    2,
+                )
+                .unwrap(),
+        );
+        records.push(
+            state
+                .record(
+                    crate::session::failed_agent_run_record(
+                        session_id,
+                        turn_id,
+                        "original-run",
+                        "commit_failed",
+                        "Commit failed",
+                        3,
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+        );
+        let result = ToolExecutionResult {
+            tool_call_id: call_id.into(),
+            tool_name: call.name.clone(),
+            status: "ok".into(),
+            content: "kernel\0 literal \\u0000".into(),
+            details: json!({}),
+            facts: vec![],
+            error: None,
+            started_at_ms: 2,
+            completed_at_ms: 3,
+            latency_ms: 1,
+            parallel_group: None,
+            transition_reason: None,
+        };
+        let digest = format!("sha256:{:x}", Sha256::digest(original_args.as_bytes()));
+        let identity = format!("{session_id}\0{turn_id}\0{call_id}");
+        let identity_digest = format!("sha256:{:x}", Sha256::digest(identity.as_bytes()));
+        let intent = tool_execution_intent_fixture(
+            &engine.tools_port,
+            session_id,
+            turn_id,
+            call_id,
+            &call.name,
+            original_args,
+        );
+        let receipt = json!({"schema":"tool_execution.receipt.v1", "sessionId":session_id,
+            "turnId":turn_id,"toolCallId":call_id,"sourceToolName":call.name,"argsDigest":digest,
+            "effectiveArgsJson":original_args,"preHookContexts":[],"runPostHook":false,
+            "resultJson":serde_json::to_string(&result).unwrap()});
+        for (kind, value, time) in [("intent", intent, 2), ("receipt", receipt, 3)] {
+            store
+                .append_event_idempotent(RuntimeEvent {
+                    event_id: format!("tool_execution.{kind}:{identity_digest}"),
+                    session_id: session_id.into(),
+                    task_id: Some(turn_id.into()),
+                    event_type: format!("tool_execution.{kind}.v1"),
+                    at_ms: time,
+                    visibility: EventVisibility::Internal,
+                    payload_json: value.to_string(),
+                })
+                .unwrap();
+        }
+        let before = store.list_events(session_id, 100, 0).unwrap();
+        let source = records
+            .into_iter()
+            .map(|record| record.event)
+            .collect::<Vec<_>>();
+        let plan = engine.plan_new_user_turn_closures(
+            session_id,
+            &source,
+            "next-run",
+            "next-turn",
+            source.len() as u64,
+            4,
+        );
+        if changed {
+            assert!(plan
+                .unwrap_err()
+                .contains("intent does not match open tool call"));
+        } else {
+            let plan =
+                plan.expect("formatted persisted arguments must recover their original receipt");
+            assert_eq!(plan.closures.len(), 1);
+            assert_eq!(plan.closures[0].recovery, "receipt");
+            assert_eq!(plan.closures[0].result.content, result.content);
+            assert_eq!(plan.closures[0].call.args_json, original_args);
+            assert_eq!(plan.evidence_preconditions[0].model_args_digest, digest);
+        }
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        assert_eq!(store.list_events(session_id, 100, 0).unwrap(), before);
+    }
+}
+
+#[tokio::test]
 async fn intent_without_receipt_reports_indeterminate_without_reexecuting_tool() {
     use sha2::{Digest, Sha256};
 
