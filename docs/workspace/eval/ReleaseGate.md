@@ -79,7 +79,7 @@ These tests do not constitute a production-load or fresh-Docker deployment gate.
 
 Fresh-Docker capture acceptance is an additional opt-in check on the owned
 `centaeris-perf` stack: follow the hosted transcript capture instructions in
-[the performance harness](../../perf/README.md). The bounded workload completes
+[the performance harness](../../../perf/README.md). The bounded workload completes
 one real AgentRun, replaces and removes its spill file, reads the archived UTF-8
 text through the authenticated API, replaces only idle API/Runtime services, and
 requires byte-for-byte equality afterwards. Its external manifest and report
@@ -124,7 +124,7 @@ A live owner must not be consumed. Direct test-database cleanup is fixture
 management only and cannot count as lifecycle acceptance. Record zero remaining
 waiters before any manual cleanup, with no replayed tools or fabricated results.
 
-The portable `python scripts/ci.py` gate runs `scripts/runtime_outbox_gate.py` in the API dependency
+The portable `python scripts/workspace/ci.py` gate runs `scripts/workspace/runtime_outbox_gate.py` in the API dependency
 environment. It uses only `TEST_POSTGRES_*`, creates a random disposable database,
 checks non-empty Rust test discovery, runs the PostgreSQL outbox regressions, and
 drops only that database. Coverage includes acknowledged-history stability,
@@ -136,14 +136,14 @@ per tenant for that fixture. The controller's database-isolation and non-empty
 discovery guard tests run before creating the disposable database.
 
 The Python gate uses package-wide `test*.py` discovery, not a hand-maintained
-list of API test labels. `scripts/python_test_gate.py api` runs Django's full
+list of API test labels. `scripts/workspace/python_test_gate.py api` runs Django's full
 discovery against PostgreSQL, including transactional/locking behavior. The
 `worker` and `document_processor` modes discover their respective packages in
 their existing dependency environments. New tests must follow unittest/Django
 discovery conventions (including importable package directories). Each run
 reports discovered/executed counts and fails on an empty suite, duplicate IDs,
 discovery/execution mismatch, import errors, skips, or expected failures.
-`scripts/python_test_gate.py gate` exercises the guard's failure paths.
+`scripts/workspace/python_test_gate.py gate` exercises the guard's failure paths.
 
 For local API tests, start the dedicated test PostgreSQL service; defaults are
 `localhost:55432`, database/user/password `centaeris`. Override only with
@@ -155,14 +155,14 @@ Runtime/Redis calls at a closed loopback port. It does not use deployed database
 settings. CI provisions its own PostgreSQL 18 service. SQLite migration/drift
 checks and the independent Python-to-Rust authorization gate remain in place.
 
-The local gate includes `python scripts/agent-run-authorization-gate.py`. It checks the shared authorization
+The local gate includes `python scripts/workspace/agent-run-authorization-gate.py`. It checks the shared authorization
 fixture and boundary corpus in Python and Rust, then verifies Python-generated
 synthetic signatures in Rust. It requires a non-empty artifact and a Rust
 consumption receipt; consumer failures block the gate. Vector tests use no
 services, real Plugin content, or developer keys. Resource-builder tests isolate
 asset and Plugin lookup while retaining production construction and validation.
 
-The local gate also runs `scripts/deployment-contract.test.py` against rendered
+The local gate also runs `scripts/workspace/deployment-contract.test.py` against rendered
 Compose configuration with synthetic inputs. It covers processor build/material-Worker
 identity, device mapping, Runtime port propagation, volume-path agreement,
 internal addresses, API security options, and Docker socket access restricted to Runtime and the material Worker.
@@ -173,7 +173,7 @@ the built processor and general image IDs respectively and that processor device
 matches. It checks the API's actual capability sets and no-new-privileges, writes
 synthetic upload and Plugin data, replaces the API container, and verifies reads
 and removal. For a bounded local API-only reproduction, run
-`uv run --frozen --package api python scripts/deployment-api-smoke.py`.
+`uv run --frozen --package api python scripts/workspace/deployment-api-smoke.py`.
 This uses a unique Compose project, fresh volumes and synthetic secrets, and
 removes its containers, volumes and temporary API image after testing. Do not run
 the full Docker release script on a host containing an existing deployment; its
@@ -197,8 +197,8 @@ receipts. Browser tests retain the operation identity across uncertain responses
 and reloads, and distinguish receipt recovery from downstream projection or
 material-link failures.
 
-1. `python scripts/ci.py`
-2. `node scripts/performance-eval.mjs`; review the independent phase report in
+1. `python scripts/workspace/ci.py`
+2. `node scripts/workspace/performance-eval.mjs`; review the independent phase report in
    [PerformanceEvaluation.md](PerformanceEvaluation.md). The 4,095-observation
    storage-growth tests are intentionally excluded from the normal test suite;
    this command runs each one exactly once. The checked-in `Performance`
@@ -309,7 +309,7 @@ with a separate build target. The local receipt records 29 passing tests in
 `test-results/assistant-connectors-query-loop.log`; this does not certify a Core
 release or packaged Desktop acceptance.
 
-The final original local `scripts/ci.py` receipt is
+The final original local `scripts/workspace/ci.py` receipt is
 `test-results/assistant-connectors-ci-final.log`: exit 0, 651 API tests discovered
 and executed with no skips or expected failures, the explicit connector
 interoperability receipt, and 120 passing Web tests. The initial LiveServer
@@ -382,20 +382,16 @@ and that timed-out blocking work retains its permit until exit. Long AgentRun
 steps must not inherit the short-request deadline. Material processing runs in its
 dedicated Worker with a bounded processing deadline, outside Runtime HTTP.
 These are acceptance requirements, not a claim that an isolated run was executed.
-Rust dependencies use exact public Git revisions in Cargo.toml and Cargo.lock.
+Rust dependencies use local paths in the shared Cargo workspace and one locked
+resolution. Core source identity is verified by scripts/workspace/core-source.mjs.
+All image provenance is the full actual monorepo checkout SHA. External pins,
+Core checkouts and local Cargo patches are not normal build inputs.
 
-CI and Performance use the shared pinned Core revision from `core-revision.txt`;
-all dependent jobs resolve that full public SHA through Cargo. The run summary records a
-link to it, and Docker image labels retain the same SHA. Source gates verify Cargo metadata and reject local patches; the Docker gate verifies manifest/lock/example pin parity. Core
-`main` advancing does not silently change Workspace builds.
+Historical receipts in this document predate source unification and retain their
+original pin terminology. They are baseline evidence, not a migration gate pass.
+Current validation uses the candidate tree and product gates from the shared root.
 
-The local gate tests strict pin parsing, output recording, and public fetchability
-with `node --test scripts/core-revision.test.mjs`; this requires network access.
-In GitHub Actions, the live smoke test is skipped because the downstream
-checkouts exercise it. To reproduce a CI run, check out the pinned Core SHA
-through Cargo from the tested Workspace SHA.
-
-The checked-in CI workflow runs the source, browser, and Compose gates from a
+The checked-in CI workflow runs the selected source, unit, and Compose gates from a
 clean checkout. Required status checks must be enabled on the public `main`
 branch before external pull requests are accepted.
 
@@ -457,7 +453,7 @@ cargo test --locked -p runtime_server agent_message
 
 The API runtime test explicitly invokes the ignored Rust Django-contract test
 against its migrated disposable database. Ordinary cargo discovery alone does
-not cover it. It runs the pinned Core AgentRuntime, production message provider,
+not cover it. It runs the same-checkout Core AgentRuntime, production message provider,
 production Session record builders and PostgreSQL Session append, then reads
 the actual authenticated API projection. Require two complete committed messages,
 three successful calls and one Final/RunCompleted through
@@ -492,8 +488,8 @@ creating bindings, and concurrent authenticated creation must produce one fresh
 Session and binding. Normal Web unit tests protect existing work Session
 rendering, streaming and Final behavior; this change adds no Agent UI.
 
-Run `python scripts/ci.py` and the pinned Core focused `query_loop` suite as well
-as the focused contract checks. Keep builds serial and record the exact pin and
+Run `python scripts/workspace/ci.py` and the same-checkout Core focused `query_loop` suite as well
+as the focused contract checks. Keep builds serial and record the exact source SHA and
 toolchain. On Windows, use a temporary directory outside any Cargo workspace for
 the exporter's standalone Cargo fixtures, which also declare independent
 workspaces when TEMP is nested; loopback HTTP tests may require
@@ -532,7 +528,7 @@ deferred Workspace foreign keys; do not permit a Session/Workspace lock cycle.
 These controlled races reproduce Runtime's lock/tombstone SQL, not a full Core
 rewrite execution.
 The normal Runtime PostgreSQL gate separately runs
-`postgres_fenced_rewrite_tombstones_completed_dispatch_request`: the pinned Core
+`postgres_fenced_rewrite_tombstones_completed_dispatch_request`: the same-checkout Core
 planner rejects a running tail, accepts a terminal Final without file mutations,
 and the real fenced append waits for the Session lock before tombstoning its
 dispatch call/result. This does not combine the Runtime rewrite and API race
@@ -587,7 +583,7 @@ statistics and the local setting before checking content rejection and membershi
 revocation; `pg_class` row/page estimates are not guaranteed to roll back. This controlled
 index path is not proof of the natural production plan or lookup latency.
 
-Run `python scripts/ci.py` and the unchanged exact public Core `query_loop` suite.
+Run `python scripts/workspace/ci.py` and the unchanged exact public Core `query_loop` suite.
 Keep one build pipeline, D-drive target/temp on Windows, and record the final
 source diff and tree fingerprint before and after validation. These query checks
 do not establish child model completion or recovery.
@@ -861,7 +857,7 @@ metadata and presentation checks.
 
 ## Authorization consolidation acceptance (2026-09-15)
 
-`scripts/ci.ps1 -SkipFrontendTests` passed against a dedicated disposable local
+`scripts/workspace/ci.ps1 -SkipFrontendTests` passed against a dedicated disposable local
 PostgreSQL container: 467 API tests executed with no skips or expected failures,
 Rust workspace checks/tests and PostgreSQL outbox gates, 14 Python-signed Rust
 verification vectors, deployment contracts, migrations, worker/processor tests,
@@ -879,3 +875,5 @@ run remains blocked by two unchanged `main.rs` findings: `too_many_arguments` in
 `terminalize_agent_run_failure`, and `collapsible_match` in the live reasoning
 handler. They were not suppressed or mixed into this authorization change.
 The Rust toolchain and both pinned Rust build images now use 1.95.0 to match Core.
+
+For migration acceptance, also run the deployment identity comparison and actual Docker context exclusion audit. Browser interaction acceptance remains manual and is not added to CI. Disposable test databases and empty-volume gates must never reuse deployed volumes.

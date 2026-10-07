@@ -11,11 +11,11 @@ boundaries, and release verification.
   proposed fixed-content contract and isolated RustFS validation.
 - [Pre-admission cancellation](architecture/PreAdmissionCancellation.md): durable
   cancellation receipts without fabricated Session history.
-- [Generated transcript contract](../packages/api/app_core/generated/README.md):
+- [Generated transcript contract](../../packages/api/app_core/generated/README.md):
   Core-derived wire structure and Python validation.
 - [Platform materials and MCP](architecture/PlatformMaterials.md): material
   access, durable processing, evidence receipts and citation presentation.
-- [Versioning](reference/Versioning.md): product versions, Core revision, and contract identities.
+- [Versioning](reference/Versioning.md): product versions, source revision, and contract identities.
 - [API](reference/API.md): REST, SSE, and internal service contracts.
 - [Web chat presentation](reference/WebChatPresentation.md): typography roles,
   motion inventory, disclosure rules and focused browser checks.
@@ -24,7 +24,7 @@ boundaries, and release verification.
 
 ## Development
 
-- [Core dependency](development/CoreDependency.md): portable checkout, exact Git pins and local co-development.
+- [Core dependency](development/CoreDependency.md): same-checkout source ownership and product gates.
 
 ## Operations
 
@@ -47,11 +47,11 @@ boundaries, and release verification.
 - [Release gate](eval/ReleaseGate.md): required source and deployment checks.
 - [Performance evaluation](eval/PerformanceEvaluation.md): reproducible measurement
   definitions without local run receipts.
-- [Isolated performance harness](../perf/README.md): synthetic test deployment,
+- [Isolated performance harness](../../perf/README.md): synthetic test deployment,
   TLS preflight, worker slot control, and external evidence collection.
-- [Short-window observations](../perf/Observations.md): worker, request-lane and
+- [Short-window observations](../../perf/Observations.md): worker, request-lane and
   Docker timings with read-only evidence collection.
-- [Third-party notices](../THIRD_PARTY_NOTICES.md): bundled font licenses.
+- [Third-party notices](THIRD_PARTY_NOTICES.md): bundled font licenses.
 
-Runtime semantics remain in the external public Runtime Framework and are not
-copied into Workspace documentation.
+Runtime semantics remain owned by packages/core. Hosted documentation describes
+adaptation and product behavior in this same repository.

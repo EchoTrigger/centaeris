@@ -8,7 +8,10 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
-from products import rust_packages
+try:
+    from products import rust_packages
+finally:
+    sys.path.pop(0)
 
 
 def run(label, args, capture=False):

@@ -1,7 +1,7 @@
 # Frontend lint policy
 
 The Web lint gate blocks deterministic defects and regressions against the
-audited zero-warning baseline. `scripts/ci.ps1` runs the repository lint gate
+audited zero-warning baseline. `scripts/workspace/ci.ps1` runs the repository lint gate
 before type-checking and browser tests.
 
 ## Blocking rules

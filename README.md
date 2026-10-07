@@ -10,9 +10,9 @@ Centaeris is a host-agnostic agent runtime framework written in Rust. Desktop,
 terminal, and hosted products use the same runtime contracts for sessions, model
 requests, tools, events, persistence, and durable continuation.
 
-This repository contains the public runtime, local hosts, user interfaces, and
-three built-in System Skills. It does not contain commercial packages, private
-Skills, hosted control-plane code, credentials, or customer data.
+This repository contains the public runtime, local and hosted products, their
+user interfaces, and separate first-party System Skill bundles. Private plugins,
+credentials, customer data and private deployment state remain external.
 
 ## Appearance
 
@@ -39,12 +39,23 @@ packages/
   desktop/          Electron host
   tui/              Terminal host
   ui/               Shared desktop UI
-system-skills/       Public built-in System Skills
+  api/              Hosted control plane
+  runtime_server/   Hosted Runtime adapter
+  hosted_execution/ Hosted execution agent and sandbox tools
+  web/              Hosted Web interface
+  worker/           Hosted lifecycle worker
+  document_processor/ Material processing service
+system-skills/       Local-product built-in System Skills
+skills/system/       Hosted-product built-in System Skills
 ```
+
+See [source and product boundaries](docs/development/SourceUnification.md) and
+[hosted product documentation](docs/workspace/README.md). Root dependency files
+and Compose entries serve independently selectable products.
 
 ## Current release scope
 
-The repository currently builds and verifies Windows x64 artifacts only:
+Local product distributions currently build and verify Windows x64 artifacts:
 
 - a standalone TUI archive named `centaeris-windows-x64.zip`;
 - an unpacked Windows Desktop directory containing `Centaeris Desktop.exe`.

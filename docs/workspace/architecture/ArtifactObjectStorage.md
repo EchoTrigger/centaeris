@@ -60,13 +60,13 @@ does not enlarge the 50 KiB tool-text boundary or put binary data into SSE text.
 
 ## Reproducible isolated experiment
 
-`scripts/artifact_storage_probe.py` is evaluation-only: boto3 1.43.97 with its
+`scripts/workspace/artifact_storage_probe.py` is evaluation-only: boto3 1.43.97 with its
 standalone uv lock (botocore 1.43.104), no production dependency or application
 import. With Docker and uv, choose a new evidence directory outside the repo:
 
 ```powershell
 docker pull --platform linux/amd64 rustfs/rustfs@sha256:ba0a1b53e36f321c0d46f3867104abef169f7bc59c467c664ddac87e7ddc9a8b
-uv run --locked --script scripts/artifact_storage_probe.py --evidence D:/Projects/centaeris-storage-evidence/my-new-run
+uv run --locked --script scripts/workspace/artifact_storage_probe.py --evidence D:/Projects/centaeris-storage-evidence/my-new-run
 ```
 
 The probe creates a fresh Compose project, synthetic credentials, private network

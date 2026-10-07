@@ -52,6 +52,9 @@ def compose_command(root, env_file, args, slots=None):
                'PROGRAMW6432', 'DOCKER_CONFIG', 'DOCKER_HOST',
                'DOCKER_CONTEXT', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH'}
     env = {key: value for key, value in os.environ.items() if key.upper() in allowed}
+    env['CENTAERIS_SOURCE_REVISION'] = subprocess.check_output(
+        ['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True, encoding='utf-8'
+    ).strip()
     if slots is not None:
         if type(slots) is not int or not 1 <= slots <= 16:
             raise ValueError('slots must be between 1 and 16')
@@ -302,9 +305,10 @@ class Stack:
         return parse_stats(run(['docker', 'stats', '--no-stream', '--format', '{{json .}}', *ids]), expected)
 
     def manifest(self):
-        return {'project': PROJECT, 'workspaceSha': run(['git', 'rev-parse', 'HEAD'], cwd=ROOT).strip(),
+        revision = run(['git', 'rev-parse', 'HEAD'], cwd=ROOT).strip()
+        return {'project': PROJECT, 'workspaceSha': revision,
                 'workerSlots': int(self.compose(['exec', '-T', 'worker', 'python', '-c', 'import worker; print(worker.WORKER_SLOT_COUNT)']).strip()),
-                'coreSha': run(['node', str(ROOT / 'scripts/workspace/verify-core-checkout.mjs')], cwd=ROOT).strip(),
+                'coreSha': revision,
                 'dirtyFiles': run(['git', 'status', '--porcelain'], cwd=ROOT).splitlines(),
                 'workspaceDiffSha256': hashlib.sha256(run(['git', 'diff', 'HEAD'], cwd=ROOT).encode()).hexdigest(),
                 'workerSourceSha256': hashlib.sha256((ROOT / 'packages/worker/worker.py').read_bytes()).hexdigest(),

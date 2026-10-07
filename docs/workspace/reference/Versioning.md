@@ -1,17 +1,16 @@
-# Versioning
+# Product versions and source identity
 
-Workspace's product version is `0.1.0`. Rust, Python, and npm component metadata,
-lockfiles, API discovery, and MCP server information advertise the same product
-version. `scripts/test_product_version.py` checks their agreement in the local CI
-gate.
+First-party package versions remain 0.1.0 across the root Rust, npm and Python
+metadata. Public schemas keep their existing explicit version identities.
+Source identity is one full monorepo SHA from the actual tested checkout.
 
-`core-revision.txt` selects one complete Core commit. Local builds require the
-resolved Cargo Git source to match that commit; CI uses the same locked revision.
-Publishing Workspace requires the selected Core commit to be publicly fetchable.
-The example environment uses the same revision for image labels.
+Desktop, TUI and Workspace have independent manual release entries and tag
+namespaces: desktop-v, tui-v and workspace-v. Producing source or candidate
+artifacts does not authorize publication. Publication is opt-in, requires main
+and successful CI for the exact SHA, and retains complete corresponding source.
+TUI installers select a stable release that actually contains their TUI asset,
+skipping Workspace and Desktop releases and checking later API pages.
 
-Product versions do not select wire schemas or processing semantics. The Core
-protocol, authorization schema, transcript schema, and immutable document
-processing specification retain their own identifiers. Processor identity changes
-require coordinated producer and consumer validation and new representation
-digests. Plugin package versions belong to their publishers.
+The original Core and Workspace SHAs and path mappings are historical provenance
+in [the snapshot manifest](../source-snapshot/manifest.json); they are not a live
+cross-repository dependency pin. The old Workspace repository remains unchanged.

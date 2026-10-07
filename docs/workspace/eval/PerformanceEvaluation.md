@@ -9,7 +9,7 @@ Run the current focused gates and write the local aggregate below the ignored
 `test-results` directory:
 
 ```powershell
-node scripts/performance-eval.mjs --output test-results/performance-repair-current.json
+node scripts/workspace/performance-eval.mjs --output test-results/performance-repair-current.json
 ```
 
 The default evaluator executes current Core continuation and context gates,
@@ -23,7 +23,7 @@ Run it only against an authorized disposable database:
 
 ```powershell
 $env:CENTAERIS_ALLOW_POSTGRES_TEST_RESET='1'
-node scripts/performance-eval.mjs --postgres --output test-results/performance-repair-postgres.json
+node scripts/workspace/performance-eval.mjs --postgres --output test-results/performance-repair-postgres.json
 ```
 
 Serialization measurements are not database I/O measurements. The real gate

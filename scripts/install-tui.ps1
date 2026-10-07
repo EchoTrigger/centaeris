@@ -27,11 +27,22 @@ function Write-Step {
 
 function Resolve-Version {
     param([string]$Requested)
-    if ($Requested -eq "latest" -or [string]::IsNullOrWhiteSpace($Requested)) {
-        $meta = Invoke-RestMethod -Uri "https://api.github.com/repos/$repoName/releases/latest" -Headers @{ "User-Agent" = "centaeris-installer" }
-        return $meta.tag_name
+    if ($Requested -ne "latest" -and -not [string]::IsNullOrWhiteSpace($Requested)) {
+        return $Requested
     }
-    return $Requested
+    $page = 1
+    do {
+        $response = Invoke-RestMethod -Uri "https://api.github.com/repos/$repoName/releases?per_page=100&page=$page" -Headers @{ "User-Agent" = "centaeris-installer" }
+        $releases = @($response)
+        foreach ($candidate in $releases) {
+            if (-not $candidate.draft -and -not $candidate.prerelease -and
+                @($candidate.assets | Where-Object { $_.name -eq $assetName }).Count -eq 1) {
+                return $candidate.tag_name
+            }
+        }
+        $page++
+    } while ($releases.Count -eq 100)
+    throw "No stable TUI release provides $assetName"
 }
 
 function Get-Release {
@@ -58,9 +69,9 @@ function Get-Sha256 {
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
 }
 
+$assetName = "centaeris-windows-x64.zip"
 $version = Resolve-Version -Requested $Release
 $release = Get-Release -Version $version
-$assetName = "centaeris-windows-x64.zip"
 $tempZip = Join-Path $env:TEMP "centaeris-$version.zip"
 
 Write-Step "Centaeris TUI installer: version $version"

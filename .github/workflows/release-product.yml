@@ -1,0 +1,155 @@
+name: Product Release Candidate
+
+on:
+  workflow_call:
+    inputs:
+      product:
+        required: true
+        type: string
+      publish:
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: release-${{ inputs.product }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require a supported product
+        env:
+          PRODUCT: ${{ inputs.product }}
+        run: |
+          case "$PRODUCT" in
+            desktop|tui|workspace) ;;
+            *) echo "Unknown product" >&2; exit 64 ;;
+          esac
+  local-product:
+    needs: validate
+    if: ${{ inputs.product == 'desktop' || inputs.product == 'tui' }}
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: '2'
+      PRODUCT: ${{ inputs.product }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: 3.12.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.21.0
+          cache: npm
+      - run: rustup show active-toolchain
+      - run: python scripts/ci.py Rust
+      - name: Build and validate the selected local product
+        shell: pwsh
+        run: |
+          if ($env:PRODUCT -eq 'desktop') {
+            ./scripts/desktop-ui-acceptance.ps1
+          } else {
+            ./scripts/build-tui.ps1
+          }
+      - name: Package the selected product and exact source
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist/release-candidate -Force | Out-Null
+          if ($env:PRODUCT -eq 'desktop') {
+            Compress-Archive -LiteralPath 'packages/desktop/dist/Centaeris Desktop' -DestinationPath dist/release-candidate/centaeris-desktop-windows-x64.zip
+          } else {
+            Copy-Item -LiteralPath packages/tui/dist/centaeris-windows-x64.zip -Destination dist/release-candidate
+          }
+          git archive --format=zip --prefix=centaeris/ --output=dist/release-candidate/centaeris-source.zip HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Source archive failed' }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: centaeris-${{ inputs.product }}-${{ github.sha }}
+          path: dist/release-candidate/*
+          if-no-files-found: error
+          compression-level: 0
+      - name: Publish only after explicit manual selection
+        if: ${{ inputs.publish }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ('${{ github.ref }}' -ne 'refs/heads/main') { throw 'Publication requires main' }
+          $revision = (node scripts/workspace/source-revision.mjs).Trim()
+          $runs = gh run list --workflow ci.yml --commit $revision --json conclusion
+          if (-not (($runs | ConvertFrom-Json) | Where-Object conclusion -eq success)) { throw 'Required CI has not passed for this source SHA' }
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          "Source: https://github.com/EchoTrigger/centaeris/commit/$revision" | Set-Content dist/release-candidate/notes.txt
+          $assets = @(Get-ChildItem dist/release-candidate/*.zip | ForEach-Object FullName)
+          gh release create "$($env:PRODUCT)-v$version" --target $revision --title "$($env:PRODUCT) $version" --notes-file dist/release-candidate/notes.txt @assets
+
+  hosted-product:
+    needs: validate
+    if: ${{ inputs.product == 'workspace' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    services:
+      postgres-test:
+        image: postgres:18-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+        env:
+          POSTGRES_DB: centaeris
+          POSTGRES_USER: centaeris
+          POSTGRES_PASSWORD: centaeris
+        ports: ['55432:5432']
+        options: >-
+          --health-cmd "pg_isready -U centaeris -d centaeris"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: 3.12.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.21.0
+          cache: npm
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: 0.11.6
+          enable-cache: true
+      - run: rustup show active-toolchain
+      - run: python scripts/workspace/ci.py
+      - run: python scripts/workspace/build.py
+      - name: Save candidate images and corresponding source
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CENTAERIS_SOURCE_REVISION="$(node scripts/workspace/source-revision.mjs)"
+          mkdir -p dist/release-candidate
+          mapfile -t images < <(docker compose --env-file .env.example config --images | grep -E '^centaeris' | sort -u)
+          docker save -o dist/release-candidate/centaeris-workspace-images.tar "${images[@]}"
+          git archive --format=zip --prefix=centaeris/ --output=dist/release-candidate/centaeris-source.zip HEAD
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: centaeris-workspace-${{ github.sha }}
+          path: dist/release-candidate/*
+          if-no-files-found: error
+          compression-level: 0
+      - name: Publish only after explicit manual selection
+        if: ${{ inputs.publish }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test '${{ github.ref }}' = refs/heads/main
+          revision="$(node scripts/workspace/source-revision.mjs)"
+          gh run list --workflow ci.yml --commit "$revision" --json conclusion --jq '.[].conclusion' | grep -Fx success
+          version="$(node -p 'require("./package.json").version')"
+          printf 'Source: https://github.com/EchoTrigger/centaeris/commit/%s\n' "$revision" > dist/release-candidate/notes.txt
+          gh release create "workspace-v$version" --target "$revision" --title "Workspace $version" --notes-file dist/release-candidate/notes.txt dist/release-candidate/centaeris-workspace-images.tar dist/release-candidate/centaeris-source.zip

@@ -28,7 +28,7 @@ focused regression that proves the change, followed by the relevant portions of
 the local gate:
 
 ```powershell
-pwsh -File scripts/ci.ps1
+pwsh -File scripts/workspace/ci.ps1
 ```
 
 ## Repository boundary and third-party material

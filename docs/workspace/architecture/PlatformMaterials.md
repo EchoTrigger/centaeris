@@ -186,13 +186,13 @@ citation projection handle citations. Runtime's first-party integration is in
 Run the [release gate](../eval/ReleaseGate.md) for integration validation.
 The audited API suite covers authorization, cancellation, leases, lifecycle
 locks, storage recovery and successful-call binding.
-`scripts/platform-mcp-client-gate.py` exercises real Rust/Python transport and
+`scripts/workspace/platform-mcp-client-gate.py` exercises real Rust/Python transport and
 citation contracts against an isolated database.
 
 The opt-in isolated Docker probes are
-`scripts/platform-material-processing-gate.py`,
-`scripts/platform-material-recovery-gate.py`,
-and `scripts/platform-mcp-live-run.py`. They cover real processing,
+`scripts/workspace/platform-material-processing-gate.py`,
+`scripts/workspace/platform-material-recovery-gate.py`,
+and `scripts/workspace/platform-mcp-live-run.py`. They cover real processing,
 kill/reclaim, model execution, receipts and restart/revocation. Browser preview
 and interaction acceptance is manual.
 Live model credentials are supplied through stdin, never source files or command

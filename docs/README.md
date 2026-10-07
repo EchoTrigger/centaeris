@@ -38,3 +38,8 @@ implementation plans or compatibility aliases.
 Hosted deployment, identity, workspace access control, commercial extension
 content, credentials, customer data, and private operations are outside this
 repository.
+
+## Hosted product and shared source
+
+- [Workspace documentation](workspace/README.md)
+- [Source unification and product gates](development/SourceUnification.md)

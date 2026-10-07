@@ -1,0 +1,20 @@
+name: Workspace Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the verified candidate as a product-specific Release
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  candidate:
+    uses: ./.github/workflows/release-product.yml
+    with:
+      product: workspace
+      publish: ${{ inputs.publish }}

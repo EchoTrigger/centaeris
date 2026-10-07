@@ -4,19 +4,47 @@ on:
   workflow_dispatch:
   pull_request:
   push:
-    branches:
-      - main
+    branches: [main]
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_BUILD_JOBS: '2'
+
 jobs:
-  rust:
-    name: Rust gate (${{ matrix.runner }})
+  scope:
+    name: Affected products and structural checks
+    runs-on: ubuntu-24.04
+    outputs:
+      coreRust: ${{ steps.scope.outputs.coreRust }}
+      localNode: ${{ steps.scope.outputs.localNode }}
+      workspaceRust: ${{ steps.scope.outputs.workspaceRust }}
+      workspacePython: ${{ steps.scope.outputs.workspacePython }}
+      web: ${{ steps.scope.outputs.web }}
+      docker: ${{ steps.scope.outputs.docker }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: 3.12.10
+      - run: python -B scripts/test_ci_scope.py
+      - run: python -B scripts/test_tui_releases.py
+      - run: python -B scripts/test_source_layout.py
+      - run: python -B scripts/test_products.py
+      - id: scope
+        run: python scripts/ci_scope.py
+
+  core-rust:
+    needs: scope
+    if: ${{ needs.scope.outputs.coreRust == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -24,58 +52,192 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-
-      - name: Show locked toolchains
-        run: |
-          rustc --version
-          cargo --version
-
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
         with:
           python-version: 3.12.10
-
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 22.21.0
+          cache: npm
+      - run: rustup show active-toolchain
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-rust-${{ hashFiles('rust-toolchain.toml') }}-core-rust-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-${{ hashFiles('rust-toolchain.toml') }}-core-rust-
+      - run: python scripts/ci.py Rust
 
-      - name: Run Rust gate
-        run: python scripts/ci.py Rust
-
-  node:
-    name: UI and Electron source gate (${{ matrix.runner }})
+  local-node:
+    needs: scope
+    if: ${{ needs.scope.outputs.localNode == 'true' }}
     strategy:
       fail-fast: false
       matrix:
         runner: [windows-2022, ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: 3.12.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 22.21.0
           cache: npm
+      - run: python scripts/ci.py Node
 
-      - name: Show locked toolchain
-        run: |
-          node --version
-          npm --version
-
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+  workspace-rust:
+    needs: scope
+    if: ${{ needs.scope.outputs.workspaceRust == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
         with:
           python-version: 3.12.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.21.0
+          cache: npm
+      - run: rustup show active-toolchain
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-rust-${{ hashFiles('rust-toolchain.toml') }}-workspace-rust-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-${{ hashFiles('rust-toolchain.toml') }}-workspace-rust-
+      - run: python scripts/workspace/ci.py --stage Rust
 
-      - name: Run UI and Electron source gate
-        run: python scripts/ci.py Node
+  workspace-python:
+    needs: scope
+    if: ${{ needs.scope.outputs.workspacePython == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    services:
+      postgres-test:
+        image: postgres:18-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+        env:
+          POSTGRES_DB: centaeris
+          POSTGRES_USER: centaeris
+          POSTGRES_PASSWORD: centaeris
+        ports: ['55432:5432']
+        options: >-
+          --health-cmd "pg_isready -U centaeris -d centaeris"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: 3.12.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.21.0
+          cache: npm
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: 0.11.6
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: rustup show active-toolchain
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-rust-${{ hashFiles('rust-toolchain.toml') }}-workspace-python-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-${{ hashFiles('rust-toolchain.toml') }}-workspace-python-
+      - run: python scripts/workspace/ci.py --stage Python
+
+  web:
+    needs: scope
+    if: ${{ needs.scope.outputs.web == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: 3.12.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.21.0
+          cache: npm
+      - run: python scripts/workspace/ci.py --stage Web
+
+  docker-fresh-start:
+    needs: scope
+    if: ${{ needs.scope.outputs.docker == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: 3.12.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.21.0
+          cache: npm
+      - name: Install and verify pinned runsc on the disposable runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Full release includes the shim and gvisor-bin sidecars required by runsc.
+          # https://gvisor.dev/docs/user_guide/install/
+          archive="${RUNNER_TEMP}/gvisor-x86_64.tar.zstd"
+          curl --fail --silent --show-error --location \
+            https://github.com/google/gvisor/releases/download/release-20260921.0/gvisor-x86_64.tar.zstd \
+            --output "$archive"
+          echo "e3e7776afd36b08431c668a60f4271f9e9787ce0def960be680acb1681af3861  $archive" | sha256sum --check
+          sudo tar --zstd --extract --file "$archive" --directory /usr/local/bin
+          /usr/local/bin/runsc --version
+          sudo /usr/local/bin/runsc install -- --platform=systrap
+          sudo systemctl reload docker
+          docker info --format '{{json .Runtimes}}'
+          docker run --rm --runtime=runsc hello-world@sha256:d1a8d0a4eeb63aff09f5f34d4d80505e0ba81905f36158cc3970d8e07179e59e
+
+      - name: Build and validate empty-volume deployment
+        env:
+          CENTAERIS_CI_DESTRUCTIVE_DOCKER: '1'
+        run: ./scripts/workspace/docker-release-gate.sh
+
+  required:
+    name: Required gates
+    if: ${{ always() }}
+    needs: [scope, core-rust, local-node, workspace-rust, workspace-python, web, docker-fresh-start]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: 3.12.10
+      - name: Validate every selected result
+        env:
+          CI_JOB_RESULTS: ${{ toJSON(needs) }}
+        run: python scripts/ci_scope.py --check-results
