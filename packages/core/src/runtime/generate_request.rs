@@ -1015,7 +1015,7 @@ impl<
                             tool_call_id.as_str(),
                         )
                     }),
-                    model_args_digest,
+                    model_args_digest: evidence.intent.model_args_digest.clone(),
                 },
                 None => crate::runtime::contracts::ClosureEvidencePreconditionV1 {
                     call_id: tool_call_id.clone(),

@@ -152,10 +152,57 @@ pub(super) struct ToolExecutionIntentV1 {
     session_tool_call_event_id: String,
     pub(super) provider_id: String,
     pub(super) tool_contract_digest: String,
-    model_args_digest: String,
+    pub(super) model_args_digest: String,
     args_digest: String,
     effective_args_json: String,
     pub(super) recorded_at_ms: i64,
+}
+
+impl ToolExecutionIntentV1 {
+    fn matches_model_arguments(&self, args_json: &str) -> bool {
+        if self.model_args_digest == sha256_digest(args_json.as_bytes()) {
+            return true;
+        }
+        // Session's normalizedInput preserves JSON values, not the model's
+        // original formatting. Reconstruct that spelling only from a validated
+        // unchanged-arguments intent; hook-rewritten arguments are not a witness.
+        if self.model_args_digest != self.args_digest
+            || self.args_digest != sha256_digest(self.effective_args_json.as_bytes())
+        {
+            return false;
+        }
+        match (
+            serde_json::from_str::<Value>(args_json),
+            serde_json::from_str::<Value>(&self.effective_args_json),
+        ) {
+            (Ok(projected), Ok(original)) => projected == original,
+            _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod model_argument_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn query_loop_argument_reconstruction_rejects_hook_rewrites_and_invalid_json() {
+        let original = r#" { "value" : "original" } "#;
+        let mut intent: ToolExecutionIntentV1 = serde_json::from_value(json!({
+            "schema": TOOL_EXECUTION_INTENT_SCHEMA_V1, "sessionId":"session", "turnId":"turn",
+            "toolCallId":"call", "sourceToolName":"bash", "sessionToolCallEventId":"event",
+            "providerId":"provider", "toolContractDigest":format!("sha256:{}", "a".repeat(64)),
+            "modelArgsDigest":sha256_digest(original.as_bytes()), "argsDigest":sha256_digest(original.as_bytes()),
+            "effectiveArgsJson":original, "recordedAtMs":1
+        })).unwrap();
+        assert!(intent.matches_model_arguments(r#"{"value":"original"}"#));
+        assert!(!intent.matches_model_arguments(r#"{"value":"different"}"#));
+        assert!(!intent.matches_model_arguments("invalid JSON"));
+        intent.effective_args_json = r#"{"value":"rewritten"}"#.into();
+        intent.args_digest = sha256_digest(intent.effective_args_json.as_bytes());
+        assert!(!intent.matches_model_arguments(r#"{"value":"rewritten"}"#));
+        assert!(!intent.matches_model_arguments(r#"{"value":"original"}"#));
+    }
 }
 
 #[expect(
@@ -888,7 +935,7 @@ impl<
         let source_tool_name =
             canonicalize_tool_name(call.tool_name.as_str()).unwrap_or(call.tool_name.as_str());
         if intent.source_tool_name != source_tool_name
-            || intent.model_args_digest != sha256_digest(call.args_json.as_bytes())
+            || !intent.matches_model_arguments(&call.args_json)
         {
             return Err(format!(
                 "tool execution intent does not match open tool call: callId={}",
@@ -1505,7 +1552,7 @@ impl<
                     .as_deref()
                     .ok_or_else(|| "tool contract providerId is required".to_string())?;
                 let tool_contract_digest = contract.contract_digest()?;
-                if intent.model_args_digest != sha256_digest(call.args_json.as_bytes())
+                if !intent.matches_model_arguments(&call.args_json)
                     || intent.tool_call_id != call.id
                     || intent.source_tool_name != call.name
                     || intent.provider_id != provider_id
