@@ -1,0 +1,532 @@
+{
+  "name": "centaeris-workspace",
+  "volumes": {
+    "agent-memory": {
+      "name": "centaeris-workspace_agent-memory"
+    },
+    "plugin-data": {
+      "name": "centaeris-workspace_plugin-data"
+    },
+    "postgres-data": {
+      "name": "centaeris-workspace_postgres-data"
+    },
+    "runtime-data": {
+      "name": "centaeris-workspace_runtime-data"
+    },
+    "storage-data": {
+      "name": "centaeris-workspace_storage-data"
+    }
+  },
+  "services": {
+    "api": {
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "storage-data",
+          "target": "/var/lib/centaeris-storage"
+        },
+        {
+          "type": "volume",
+          "source": "plugin-data",
+          "target": "/opt/centaeris/plugins"
+        }
+      ],
+      "environment": {
+        "AGENT_RUN_AUTHORIZATION_SIGNING_KEY": "",
+        "API_POSTGRES_POOL_MAX_SIZE": "8",
+        "API_WORKERS": "1",
+        "CREDENTIAL_ENCRYPTION_KEY": "",
+        "DJANGO_ALLOWED_HOSTS": "localhost,127.0.0.1,api",
+        "DJANGO_DEBUG": "1",
+        "DJANGO_SECRET_KEY": "",
+        "EXECUTION_GLOBAL_QUEUE_LIMIT": "128",
+        "EXECUTION_QUEUE_WAIT_SECONDS": "300",
+        "EXECUTION_TENANT_QUEUE_LIMIT": "32",
+        "INTERNAL_API_TOKEN": "",
+        "MODEL_PROVIDER_TIMEOUT_SECONDS": "120",
+        "PASSWORD_RESET_ENABLED": "0",
+        "PASSWORD_RESET_MAIL_SENDER": "0",
+        "PASSWORD_RESET_TIMEOUT_SECONDS": "86400",
+        "PLATFORM_MCP_ALLOWED_HOSTS": "localhost,127.0.0.1,api",
+        "PLUGIN_CATALOG_ROOT": "/opt/centaeris/plugins",
+        "POSTGRES_APPLICATION_NAME": "centaeris-api",
+        "POSTGRES_DB": "centaeris",
+        "POSTGRES_HOST": "postgres",
+        "POSTGRES_PASSWORD": "",
+        "POSTGRES_PORT": "5432",
+        "POSTGRES_USER": "centaeris",
+        "REDIS_BROWSER_MAX_CONNECTIONS": "8",
+        "REDIS_URL": "redis://redis:6379/0",
+        "RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS": "5",
+        "RUNTIME_START_TIMEOUT_SECONDS": "30",
+        "RUNTIME_URL": "http://runtime:9000",
+        "SANDBOX_CPU_MILLI": "4000",
+        "SANDBOX_DATA_TMPFS_BYTES": "4294967296",
+        "SANDBOX_MEMORY_BYTES": "8589934592",
+        "SANDBOX_PIDS_LIMIT": "512",
+        "STORAGE_ROOT": "/var/lib/centaeris-storage",
+        "STORAGE_STREAM_CHUNK_BYTES": "65536",
+        "STORAGE_STREAM_LANES": "4",
+        "WEB_EXTRA_ORIGINS": "",
+        "WEB_ORIGIN": "http://localhost:3000"
+      },
+      "entrypoint": null,
+      "command": null,
+      "ports": [
+        {
+          "mode": "ingress",
+          "target": 8000,
+          "published": "8000",
+          "protocol": "tcp"
+        }
+      ],
+      "depends_on": {
+        "api-init": {
+          "condition": "service_completed_successfully",
+          "required": true
+        },
+        "redis": {
+          "condition": "service_healthy",
+          "required": true
+        }
+      },
+      "restart": "unless-stopped"
+    },
+    "api-init": {
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "plugin-data",
+          "target": "/opt/centaeris/plugins"
+        }
+      ],
+      "environment": {
+        "AGENT_RUN_AUTHORIZATION_SIGNING_KEY": "",
+        "API_WORKERS": "1",
+        "BOOTSTRAP_SUPERADMIN_EMAIL": "admin@example.invalid",
+        "BOOTSTRAP_SUPERADMIN_PASSWORD": "",
+        "CREDENTIAL_ENCRYPTION_KEY": "",
+        "DJANGO_ALLOWED_HOSTS": "localhost,127.0.0.1,api",
+        "DJANGO_DEBUG": "1",
+        "DJANGO_SECRET_KEY": "",
+        "EXECUTION_GLOBAL_QUEUE_LIMIT": "128",
+        "EXECUTION_QUEUE_WAIT_SECONDS": "300",
+        "EXECUTION_TENANT_QUEUE_LIMIT": "32",
+        "INTERNAL_API_TOKEN": "",
+        "MODEL_PROVIDER_TIMEOUT_SECONDS": "120",
+        "PASSWORD_RESET_ENABLED": "0",
+        "PASSWORD_RESET_MAIL_SENDER": "0",
+        "PASSWORD_RESET_TIMEOUT_SECONDS": "86400",
+        "PLATFORM_MCP_ALLOWED_HOSTS": "localhost,127.0.0.1,api",
+        "PLUGIN_CATALOG_ROOT": "/opt/centaeris/plugins",
+        "POSTGRES_APPLICATION_NAME": "centaeris-api-init",
+        "POSTGRES_DB": "centaeris",
+        "POSTGRES_HOST": "postgres",
+        "POSTGRES_PASSWORD": "",
+        "POSTGRES_PORT": "5432",
+        "POSTGRES_USER": "centaeris",
+        "REDIS_BROWSER_MAX_CONNECTIONS": "8",
+        "REDIS_URL": "redis://redis:6379/0",
+        "RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS": "5",
+        "RUNTIME_START_TIMEOUT_SECONDS": "30",
+        "RUNTIME_URL": "http://runtime:9000",
+        "SANDBOX_CPU_MILLI": "4000",
+        "SANDBOX_DATA_TMPFS_BYTES": "4294967296",
+        "SANDBOX_MEMORY_BYTES": "8589934592",
+        "SANDBOX_PIDS_LIMIT": "512",
+        "STORAGE_ROOT": "/var/lib/centaeris-storage",
+        "STORAGE_STREAM_CHUNK_BYTES": "65536",
+        "STORAGE_STREAM_LANES": "4",
+        "WEB_EXTRA_ORIGINS": "",
+        "WEB_ORIGIN": "http://localhost:3000"
+      },
+      "entrypoint": [
+        "sh",
+        "/app/packages/api/init-entrypoint.sh"
+      ],
+      "command": null,
+      "depends_on": {
+        "postgres": {
+          "condition": "service_healthy",
+          "required": true
+        }
+      },
+      "restart": "no"
+    },
+    "document-processor": {
+      "entrypoint": null,
+      "command": [
+        "spec"
+      ],
+      "restart": "no"
+    },
+    "gc": {
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "storage-data",
+          "target": "/var/lib/centaeris-storage"
+        }
+      ],
+      "environment": {
+        "AGENT_RUN_AUTHORIZATION_SIGNING_KEY": "",
+        "API_WORKERS": "1",
+        "CREDENTIAL_ENCRYPTION_KEY": "",
+        "DJANGO_ALLOWED_HOSTS": "localhost,127.0.0.1,api",
+        "DJANGO_DEBUG": "1",
+        "DJANGO_SECRET_KEY": "",
+        "EXECUTION_GLOBAL_QUEUE_LIMIT": "128",
+        "EXECUTION_QUEUE_WAIT_SECONDS": "300",
+        "EXECUTION_TENANT_QUEUE_LIMIT": "32",
+        "INTERNAL_API_TOKEN": "",
+        "MODEL_PROVIDER_TIMEOUT_SECONDS": "120",
+        "PASSWORD_RESET_ENABLED": "0",
+        "PASSWORD_RESET_MAIL_SENDER": "0",
+        "PASSWORD_RESET_TIMEOUT_SECONDS": "86400",
+        "PLATFORM_MCP_ALLOWED_HOSTS": "localhost,127.0.0.1,api",
+        "PLUGIN_CATALOG_ROOT": "/opt/centaeris/plugins",
+        "POSTGRES_APPLICATION_NAME": "centaeris-gc",
+        "POSTGRES_DB": "centaeris",
+        "POSTGRES_HOST": "postgres",
+        "POSTGRES_PASSWORD": "",
+        "POSTGRES_PORT": "5432",
+        "POSTGRES_USER": "centaeris",
+        "REDIS_BROWSER_MAX_CONNECTIONS": "8",
+        "REDIS_URL": "redis://redis:6379/0",
+        "RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS": "5",
+        "RUNTIME_START_TIMEOUT_SECONDS": "30",
+        "RUNTIME_URL": "http://runtime:9000",
+        "SANDBOX_CPU_MILLI": "4000",
+        "SANDBOX_DATA_TMPFS_BYTES": "4294967296",
+        "SANDBOX_MEMORY_BYTES": "8589934592",
+        "SANDBOX_PIDS_LIMIT": "512",
+        "STORAGE_ROOT": "/var/lib/centaeris-storage",
+        "STORAGE_STREAM_CHUNK_BYTES": "65536",
+        "STORAGE_STREAM_LANES": "4",
+        "WEB_EXTRA_ORIGINS": "",
+        "WEB_ORIGIN": "http://localhost:3000"
+      },
+      "entrypoint": [
+        "sh",
+        "/app/packages/api/gc-entrypoint.sh"
+      ],
+      "command": null,
+      "depends_on": {
+        "api-init": {
+          "condition": "service_completed_successfully",
+          "required": true
+        }
+      },
+      "restart": "unless-stopped"
+    },
+    "mail-sender": {
+      "environment": {
+        "AGENT_RUN_AUTHORIZATION_SIGNING_KEY": "",
+        "API_WORKERS": "1",
+        "CREDENTIAL_ENCRYPTION_KEY": "",
+        "DEFAULT_FROM_EMAIL": "noreply@example.invalid",
+        "DJANGO_ALLOWED_HOSTS": "localhost,127.0.0.1,api",
+        "DJANGO_DEBUG": "1",
+        "DJANGO_SECRET_KEY": "",
+        "EMAIL_HOST": "localhost",
+        "EMAIL_HOST_PASSWORD": "",
+        "EMAIL_HOST_USER": "",
+        "EMAIL_PORT": "587",
+        "EMAIL_TIMEOUT_SECONDS": "15",
+        "EMAIL_USE_SSL": "0",
+        "EMAIL_USE_TLS": "1",
+        "EXECUTION_GLOBAL_QUEUE_LIMIT": "128",
+        "EXECUTION_QUEUE_WAIT_SECONDS": "300",
+        "EXECUTION_TENANT_QUEUE_LIMIT": "32",
+        "INTERNAL_API_TOKEN": "",
+        "MODEL_PROVIDER_TIMEOUT_SECONDS": "120",
+        "PASSWORD_RESET_ENABLED": "0",
+        "PASSWORD_RESET_MAIL_SENDER": "1",
+        "PASSWORD_RESET_TIMEOUT_SECONDS": "86400",
+        "PLATFORM_MCP_ALLOWED_HOSTS": "localhost,127.0.0.1,api",
+        "PLUGIN_CATALOG_ROOT": "/opt/centaeris/plugins",
+        "POSTGRES_APPLICATION_NAME": "centaeris-mail-sender",
+        "POSTGRES_DB": "centaeris",
+        "POSTGRES_HOST": "postgres",
+        "POSTGRES_PASSWORD": "",
+        "POSTGRES_PORT": "5432",
+        "POSTGRES_USER": "centaeris",
+        "REDIS_BROWSER_MAX_CONNECTIONS": "8",
+        "REDIS_URL": "redis://redis:6379/0",
+        "RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS": "5",
+        "RUNTIME_START_TIMEOUT_SECONDS": "30",
+        "RUNTIME_URL": "http://runtime:9000",
+        "SANDBOX_CPU_MILLI": "4000",
+        "SANDBOX_DATA_TMPFS_BYTES": "4294967296",
+        "SANDBOX_MEMORY_BYTES": "8589934592",
+        "SANDBOX_PIDS_LIMIT": "512",
+        "STORAGE_ROOT": "/var/lib/centaeris-storage",
+        "STORAGE_STREAM_CHUNK_BYTES": "65536",
+        "STORAGE_STREAM_LANES": "4",
+        "WEB_EXTRA_ORIGINS": "",
+        "WEB_ORIGIN": "http://localhost:3000"
+      },
+      "entrypoint": [
+        "python",
+        "manage.py",
+        "send_password_reset_mail"
+      ],
+      "command": null,
+      "depends_on": {
+        "api-init": {
+          "condition": "service_completed_successfully",
+          "required": true
+        }
+      },
+      "restart": "on-failure"
+    },
+    "material-worker": {
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "storage-data",
+          "target": "/var/lib/centaeris-storage"
+        },
+        {
+          "type": "bind",
+          "source": "/var/run/docker.sock",
+          "target": "/var/run/docker.sock",
+          "bind": {}
+        }
+      ],
+      "environment": {
+        "AGENT_RUN_AUTHORIZATION_SIGNING_KEY": "",
+        "API_WORKERS": "1",
+        "CREDENTIAL_ENCRYPTION_KEY": "",
+        "DJANGO_ALLOWED_HOSTS": "localhost,127.0.0.1,api",
+        "DJANGO_DEBUG": "1",
+        "DJANGO_SECRET_KEY": "",
+        "EXECUTION_GLOBAL_QUEUE_LIMIT": "128",
+        "EXECUTION_QUEUE_WAIT_SECONDS": "300",
+        "EXECUTION_TENANT_QUEUE_LIMIT": "32",
+        "INTERNAL_API_TOKEN": "",
+        "MATERIAL_PROCESSOR_DEVICE": "cpu",
+        "MATERIAL_PROCESSOR_IMAGE": "centaeris-document-processor:local",
+        "MATERIAL_PROCESSOR_NAMESPACE": "centaeris-workspace",
+        "MODEL_PROVIDER_TIMEOUT_SECONDS": "120",
+        "OCI_RUNTIME": "runsc",
+        "PASSWORD_RESET_ENABLED": "0",
+        "PASSWORD_RESET_MAIL_SENDER": "0",
+        "PASSWORD_RESET_TIMEOUT_SECONDS": "86400",
+        "PLATFORM_MCP_ALLOWED_HOSTS": "localhost,127.0.0.1,api",
+        "PLUGIN_CATALOG_ROOT": "/opt/centaeris/plugins",
+        "POSTGRES_APPLICATION_NAME": "centaeris-material-worker",
+        "POSTGRES_DB": "centaeris",
+        "POSTGRES_HOST": "postgres",
+        "POSTGRES_PASSWORD": "",
+        "POSTGRES_PORT": "5432",
+        "POSTGRES_USER": "centaeris",
+        "REDIS_BROWSER_MAX_CONNECTIONS": "8",
+        "REDIS_URL": "redis://redis:6379/0",
+        "RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS": "5",
+        "RUNTIME_START_TIMEOUT_SECONDS": "30",
+        "RUNTIME_URL": "http://runtime:9000",
+        "SANDBOX_CPU_MILLI": "4000",
+        "SANDBOX_DATA_TMPFS_BYTES": "4294967296",
+        "SANDBOX_MEMORY_BYTES": "8589934592",
+        "SANDBOX_PIDS_LIMIT": "512",
+        "STORAGE_ROOT": "/var/lib/centaeris-storage",
+        "STORAGE_STREAM_CHUNK_BYTES": "65536",
+        "STORAGE_STREAM_LANES": "4",
+        "WEB_EXTRA_ORIGINS": "",
+        "WEB_ORIGIN": "http://localhost:3000"
+      },
+      "entrypoint": [
+        "python",
+        "manage.py",
+        "process_materials"
+      ],
+      "command": null,
+      "depends_on": {
+        "api-init": {
+          "condition": "service_completed_successfully",
+          "required": true
+        },
+        "document-processor": {
+          "condition": "service_completed_successfully",
+          "required": true
+        }
+      },
+      "restart": "unless-stopped"
+    },
+    "postgres": {
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "postgres-data",
+          "target": "/var/lib/postgresql",
+          "volume": {}
+        }
+      ],
+      "environment": {
+        "POSTGRES_DB": "centaeris",
+        "POSTGRES_PASSWORD": "",
+        "POSTGRES_USER": "centaeris"
+      },
+      "entrypoint": null,
+      "command": null,
+      "restart": "unless-stopped"
+    },
+    "redis": {
+      "entrypoint": null,
+      "command": [
+        "redis-server",
+        "--save",
+        "",
+        "--appendonly",
+        "no",
+        "--maxmemory",
+        "512mb",
+        "--maxmemory-policy",
+        "allkeys-lru"
+      ],
+      "restart": "unless-stopped"
+    },
+    "runtime": {
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "runtime-data",
+          "target": "/var/lib/centaeris-runtime",
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "agent-memory",
+          "target": "/var/lib/centaeris-agent-memory",
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "plugin-data",
+          "target": "/opt/centaeris/plugins",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "/var/run/docker.sock",
+          "target": "/var/run/docker.sock",
+          "bind": {}
+        }
+      ],
+      "environment": {
+        "AGENT_MEMORY_VOLUME_NAME": "centaeris-workspace_agent-memory",
+        "AGENT_RUN_AUTHORIZATION_SIGNING_KEY": "",
+        "API_INTERNAL_URL": "http://api:8000",
+        "DATABASE_URL": "postgresql://centaeris:@postgres:5432/centaeris",
+        "EXECUTION_GLOBAL_LIMIT": "8",
+        "EXECUTION_TENANT_LIMIT": "4",
+        "INTERNAL_API_TOKEN": "",
+        "OCI_RUNTIME": "runsc",
+        "PLUGIN_VOLUME_NAME": "centaeris-workspace_plugin-data",
+        "REDIS_URL": "redis://redis:6379/0",
+        "RUNTIME_BIND_ADDRESS": "0.0.0.0",
+        "RUNTIME_EXECUTION_RECOVERY_MAX_ATTEMPTS": "5",
+        "RUNTIME_HTTP_CONTROL_LIMIT": "4",
+        "RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS": "5",
+        "RUNTIME_HTTP_LISTENER_LIMIT": "8",
+        "RUNTIME_HTTP_REQUEST_LIMIT": "24",
+        "RUNTIME_HTTP_REQUEST_TIMEOUT_SECONDS": "30",
+        "RUNTIME_LIVE_STATE_TTL_SECONDS": "3600",
+        "RUNTIME_PORT": "9000",
+        "RUNTIME_POSTGRES_CHECKOUT_TIMEOUT_MS": "5000",
+        "RUNTIME_POSTGRES_CONNECT_TIMEOUT_MS": "3000",
+        "RUNTIME_POSTGRES_CONTROL_POOL_SIZE": "2",
+        "RUNTIME_POSTGRES_LISTENER_LIMIT": "8",
+        "RUNTIME_POSTGRES_POOL_SIZE": "8",
+        "RUNTIME_STATE_ROOT": "/var/lib/centaeris-runtime/state",
+        "RUNTIME_STREAM_TTL_SECONDS": "3600",
+        "WORKSPACE_GENERAL_IMAGE": "centaeris-workspace-general:local"
+      },
+      "entrypoint": [
+        "runtime_server"
+      ],
+      "command": null,
+      "depends_on": {
+        "api": {
+          "condition": "service_healthy",
+          "required": true
+        },
+        "postgres": {
+          "condition": "service_healthy",
+          "required": true
+        },
+        "redis": {
+          "condition": "service_healthy",
+          "required": true
+        },
+        "workspace-general": {
+          "condition": "service_completed_successfully",
+          "required": true
+        }
+      },
+      "restart": "unless-stopped"
+    },
+    "web": {
+      "environment": {
+        "API_BASE_URL": "http://localhost:8000"
+      },
+      "entrypoint": null,
+      "command": null,
+      "ports": [
+        {
+          "mode": "ingress",
+          "target": 3000,
+          "published": "3000",
+          "protocol": "tcp"
+        }
+      ],
+      "depends_on": {
+        "api": {
+          "condition": "service_healthy",
+          "required": true
+        }
+      }
+    },
+    "worker": {
+      "environment": {
+        "API_INTERNAL_URL": "http://api:8000",
+        "INTERNAL_API_TOKEN": "",
+        "RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS": "5",
+        "RUNTIME_INTERNAL_URL": "http://runtime:9000",
+        "WORKER_LEASE_MS": "120000",
+        "WORKER_SLOT_COUNT": "8"
+      },
+      "entrypoint": null,
+      "command": [
+        "python",
+        "worker.py",
+        "serve"
+      ],
+      "depends_on": {
+        "api": {
+          "condition": "service_healthy",
+          "required": true
+        },
+        "redis": {
+          "condition": "service_healthy",
+          "required": true
+        },
+        "runtime": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "restart": "unless-stopped"
+    },
+    "workspace-general": {
+      "entrypoint": null,
+      "command": [
+        "/bin/sh",
+        "-ec",
+        "test -x /opt/centaeris/bin/execution_agent"
+      ],
+      "restart": "no"
+    }
+  }
+}

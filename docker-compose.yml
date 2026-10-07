@@ -5,11 +5,10 @@ x-api-build: &api-build
   dockerfile: packages/api/Dockerfile
   labels: &release-image-labels
     org.opencontainers.image.licenses: AGPL-3.0-only
-    org.opencontainers.image.source: https://github.com/EchoTrigger/centaeris-workspace
-    org.opencontainers.image.revision: ${CENTAERIS_WORKSPACE_REVISION:-local}
-    io.centaeris.source.revision: ${CENTAERIS_WORKSPACE_REVISION:-local}
+    org.opencontainers.image.source: https://github.com/EchoTrigger/centaeris
+    org.opencontainers.image.revision: ${CENTAERIS_SOURCE_REVISION:?Use scripts/workspace/build.py to set the checkout SHA}
+    io.centaeris.source.revision: ${CENTAERIS_SOURCE_REVISION:?Use scripts/workspace/build.py to set the checkout SHA}
     io.centaeris.core.source: https://github.com/EchoTrigger/centaeris
-    io.centaeris.core.revision: ${CENTAERIS_CORE_REVISION:?CENTAERIS_CORE_REVISION is required}
 
 x-document-processor-image: &document-processor-image centaeris-document-processor:local
 x-processor-device: &processor-device ${KNOWLEDGE_PROCESSOR_DEVICE:?KNOWLEDGE_PROCESSOR_DEVICE is required}

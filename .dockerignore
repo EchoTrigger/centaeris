@@ -46,3 +46,24 @@
 
 packages/ui/vite.config.js
 packages/ui/vite.config.d.ts
+
+# Local instructions, private deployment inputs and product overlays.
+AGENTS.md
+**/AGENTS.md
+.local
+**/.local
+.centaeris
+**/.centaeris
+docker-compose.current.yml
+**/docker-compose.current.yml
+.cargo/config.toml
+.codex-remote-attachments
+plugins
+private-plugins
+credentials
+*.pem
+*.key
+perf/.state
+perf/certs/out
+perf/k6/bin
+perf/results
