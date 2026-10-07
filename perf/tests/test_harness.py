@@ -13,6 +13,22 @@ spec.loader.exec_module(control)
 
 
 class IsolationTests(unittest.TestCase):
+    def test_manifest_records_the_shared_checkout_without_external_core_tools(self):
+        stack = object.__new__(control.Stack)
+        revision = control.run(['git', 'rev-parse', 'HEAD'], cwd=control.ROOT).strip()
+        dirty = control.run(['git', 'status', '--porcelain'], cwd=control.ROOT).splitlines()
+        container = {'Id': 'test-container', 'Image': 'test-image',
+                     'State': {'StartedAt': '2026-10-08T00:00:00Z'}}
+        # Keep Git and source reads real; only the external Docker stack is isolated.
+        with patch.object(stack, 'compose', return_value='2\n'), \
+                patch.object(stack, 'container', return_value=container):
+            manifest = stack.manifest()
+        self.assertEqual(manifest['workspaceSha'], revision)
+        self.assertEqual(manifest['coreSha'], revision)
+        self.assertEqual(manifest['dirtyFiles'], dirty)
+        self.assertEqual(manifest['workerSlots'], 2)
+        self.assertEqual(set(manifest['containers']), set(control.SERVICES))
+
     def test_command_utf8_io_does_not_depend_on_windows_locale(self):
         # Reproduce a non-UTF-8 Windows default even on UTF-8 test hosts.
         with patch.object(control.subprocess, '_text_encoding', return_value='gbk'):
@@ -100,7 +116,7 @@ class IsolationTests(unittest.TestCase):
                 kwargs['stdout'].write('accepted run a session s\n')
                 kwargs['stdout'].flush()
                 return process
-            with patch.object(control.subprocess, 'Popen', side_effect=launch), patch.object(control, 'run', return_value='k6'), patch.object(control.time, 'sleep'), patch.object(control.time, 'monotonic', return_value=0):
+            with patch.object(control.subprocess, 'check_output', return_value='a' * 40), patch.object(control.subprocess, 'Popen', side_effect=launch), patch.object(control, 'run', return_value='k6'), patch.object(control.time, 'sleep'), patch.object(control.time, 'monotonic', return_value=0):
                 with self.assertRaises(RuntimeError):
                     control.load(stack, output, 60, 10)
             errors = json.loads((output / 'failure.json').read_text())['errors']

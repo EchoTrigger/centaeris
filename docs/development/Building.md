@@ -14,7 +14,7 @@ npm ci
 ## Development targets
 
 ```sh
-cargo check --workspace --locked
+cargo check --locked
 npm run typecheck
 npm run dev --workspace centaeris-ui
 npm run dev --workspace @centaeris/electron-host
@@ -46,3 +46,7 @@ the package manifest before creating the Windows archive.
 
 Do not advertise an artifact for a platform that is absent from this build
 matrix and its acceptance tests.
+
+## Hosted components
+
+Hosted Rust, Web and Python gates are separately selected by `python scripts/workspace/ci.py --stage Rust`, `--stage Web` and `--stage Python`. See [shared source boundaries](SourceUnification.md). Local builds use the root Cargo default members; full hosted validation additionally uses a disposable PostgreSQL endpoint.

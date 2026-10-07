@@ -41,6 +41,76 @@ download() {
   exit 1
 }
 
+# Select by the TUI asset, independent of other products' release dates.
+resolve_version() {
+  requested="$1"
+  if [ "$requested" != "latest" ]; then
+    printf '%s\n' "$requested"
+    return
+  fi
+  page=1
+  while :; do
+    release_page="$(fetch "https://api.github.com/repos/$REPO_NAME/releases?per_page=100&page=$page")"
+    selection="$(printf '%s\n' "$release_page" | awk -v asset="$ASSET_NAME" '
+      function assets_array(object, tail, start, i, c, depth, quoted, escaped) {
+        if (!match(object, /"assets"[[:space:]]*:/)) return ""
+        tail=substr(object, RSTART+RLENGTH); start=index(tail, "[")
+        if (!start) return ""
+        for (i=start; i<=length(tail); i++) {
+          c=substr(tail,i,1)
+          if (quoted) {
+            if (escaped) escaped=0
+            else if (c=="\\") escaped=1
+            else if (c=="\"") quoted=0
+          } else if (c=="\"") quoted=1
+          else if (c=="[") depth++
+          else if (c=="]" && --depth==0) return substr(tail,start,i-start+1)
+        }
+        return ""
+      }
+      function release_tag(object, tag, assets, name) {
+        if (object ~ /"draft"[[:space:]]*:[[:space:]]*true/ || object ~ /"prerelease"[[:space:]]*:[[:space:]]*true/) return ""
+        if (!match(object, /"tag_name"[[:space:]]*:[[:space:]]*"[^"\\]*"/)) return ""
+        tag=substr(object,RSTART,RLENGTH)
+        sub(/^"tag_name"[[:space:]]*:[[:space:]]*"/,"",tag); sub(/"$/,"",tag)
+        assets=assets_array(object)
+        while (match(assets, /"name"[[:space:]]*:[[:space:]]*"[^"\\]*"/)) {
+          name=substr(assets,RSTART,RLENGTH)
+          assets=substr(assets,RSTART+RLENGTH)
+          sub(/^"name"[[:space:]]*:[[:space:]]*"/,"",name); sub(/"$/,"",name)
+          if (name==asset) return tag
+        }
+        return ""
+      }
+      {
+        for (i=1;i<=length($0);i++) {
+          c=substr($0,i,1)
+          if (!quoted && c=="{") { if (depth==0) object=""; depth++ }
+          if (depth>0) object=object c
+          if (quoted) {
+            if (escaped) escaped=0
+            else if (c=="\\") escaped=1
+            else if (c=="\"") quoted=0
+          } else if (c=="\"") quoted=1
+          else if (c=="}" && --depth==0) {
+            count++; tag=release_tag(object)
+            if (chosen=="" && tag!="") chosen=tag
+          }
+        }
+      }
+      END { print count+0; print chosen }
+    ')"
+    count="$(printf '%s\n' "$selection" | sed -n '1p')"
+    version="$(printf '%s\n' "$selection" | sed -n '2p')"
+    if [ -n "$version" ]; then printf '%s\n' "$version"; return; fi
+    if [ "$count" -lt 100 ]; then
+      echo "No stable TUI release provides $ASSET_NAME (published platform support is defined by the release assets)." >&2
+      return 1
+    fi
+    page=$((page + 1))
+  done
+}
+
 if [ "$(uname -s)" = "Darwin" ]; then
   ASSET_NAME="centaeris-darwin-arm64.zip"
   EXTRACT="unzip -qo"
@@ -49,10 +119,7 @@ else
   EXTRACT="tar -xzf"
 fi
 
-version="$RELEASE"
-if [ "$RELEASE" = "latest" ]; then
-  version="$(fetch "https://api.github.com/repos/$REPO_NAME/releases/latest" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)"
-fi
+version="$(resolve_version "$RELEASE")"
 if [ -z "$version" ]; then
   echo "Failed to resolve release version." >&2
   exit 1

@@ -42,8 +42,8 @@ for relevant pull requests and `main` changes, and also supports an explicit
 manual run.
 
 The portable source gate runs formatting, workspace checks, Clippy with warnings
-denied, the focused Core query-loop and SQLite integration gates, the full Rust
-workspace tests and UI/Electron source checks. The Windows `ci.ps1 Release`
+denied, the focused Core query-loop and SQLite integration gates, the full local-product Rust
+package tests and UI/Electron source checks. The Windows `ci.ps1 Release`
 entry additionally runs TUI packaging and desktop/UI acceptance. Local Desktop acceptance performs `npm ci`, the UI gate (typecheck, Vite
 build, and Vitest), retained Electron host/security tests and build,
 third-party-license assembly and distribution validation, plus runtime and window
@@ -80,7 +80,7 @@ The repository must also pass these structural checks:
 
 - every workspace member is below `packages/`;
 - no source `#[path]` includes another crate;
-- no hosted control-plane source, commercial package, concrete Skill outside the reviewed built-in `system-skills/` bundle, credential, customer data, private deployment configuration, or third-party research snapshot is tracked;
+- no private plugin, credential, customer data, private deployment configuration, or unrelated third-party research snapshot is tracked; hosted control-plane source stays in its owned packages, and built-in Skills remain in the separate reviewed `system-skills/` and `skills/system/` bundles;
 - the public built-in System Skills are present in the source archive and each Desktop/TUI distribution, with applicable upstream licenses, attribution, and modification notices;
 - root ignore rules exclude test results, browser artifacts, logs, local environment files, and unrelated binary documents before source freeze; the Git index is inspected separately because ignore rules do not remove tracked files;
 - Core treats `ExecutionHost` file identities as opaque and does not classify Host-private namespaces;
@@ -112,3 +112,5 @@ confirmation through actual Agent tool calls, without user CLI/config-file work.
 Local PTY changes additionally run `node scripts/test-terminal-sessions.mjs`
 after building the debug Runtime. This isolated-profile acceptance makes no model
 requests; see [LocalTerminals.md](../reference/LocalTerminals.md).
+
+Hosted components additionally follow [their release gate](../workspace/eval/ReleaseGate.md). The shared CI returns the Required gates result for every run; product jobs are selected by scripts/ci_scope.py. A clean checkout must build local and hosted products independently. See [source unification](../development/SourceUnification.md).

@@ -11,7 +11,7 @@ Run from Workspace with the pinned Core dependency resolved by Cargo:
 ```powershell
 cargo test --locked -p runtime_server memory -- --nocapture
 cargo test --locked -p runtime_server skill_projection -- --nocapture
-python scripts/memory-protocol-acceptance.py --image <local-current-execution-image>
+python scripts/workspace/memory-protocol-acceptance.py --image <local-current-execution-image>
 ```
 
 The script requires an explicitly selected existing local image. It resolves its

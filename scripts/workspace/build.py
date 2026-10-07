@@ -7,7 +7,10 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
-from products import source_revision
+try:
+    from products import source_revision
+finally:
+    sys.path.pop(0)
 
 SERVICES = ("runtime", "workspace-general", "api", "worker", "web", "document-processor")
 

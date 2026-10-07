@@ -57,11 +57,11 @@
     },
     {
       "source": ".github/workflows/ci.yml",
-      "destination": ".github/workflows/workspace-ci.yml",
+      "destination": ".github/workflows/ci.yml",
       "mode": "100644",
       "blob": "fc82bd849f4b9ebd4b8235daa370b5dee6eedc51",
       "sha256": "ea84a20b1feb126ecb3423ecad0e4567828f1f0f34bf7b55ce987c7b888bd79e",
-      "disposition": "imported component or resource"
+      "disposition": "consolidated monorepo product routing; external pin resolver retired"
     },
     {
       "source": ".github/workflows/performance.yml",
@@ -73,11 +73,11 @@
     },
     {
       "source": ".github/workflows/resolve-core-revision.yml",
-      "destination": ".github/workflows/workspace-resolve-core-revision.yml",
+      "destination": ".github/workflows/ci.yml",
       "mode": "100644",
       "blob": "e251bfda7126abe91ad24fe552e4b17ff4a166f3",
       "sha256": "7062330502063955db7c9d85b579676e368cbd6dff91e253a77a5a83d6257684",
-      "disposition": "imported component or resource"
+      "disposition": "consolidated monorepo product routing; external pin resolver retired"
     },
     {
       "source": ".gitignore",

@@ -16,7 +16,7 @@ Execution and document processing are normal runtime dependencies.
 ```powershell
 Copy-Item .env.example .env
 # Fill every blank secret.
-pwsh -File scripts/start-local.ps1
+pwsh -File scripts/workspace/start-local.ps1
 ```
 
 The start script builds required images, runs initialization, and starts the

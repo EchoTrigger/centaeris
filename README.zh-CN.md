@@ -8,7 +8,7 @@
 
 Centaeris 是使用 Rust 编写、不依赖特定宿主的智能体运行时框架。桌面端、终端和托管产品共用会话、模型请求、工具、事件、持久化和持久续执行的运行时契约。
 
-本仓库包含公共运行时、本地宿主、用户界面和三项内置 System Skills。不包含商业扩展包、私有 Skill、托管控制平面代码、凭据或客户数据。
+本仓库统一公共运行时、本地产品和托管产品源码，保留各组件职责及两套内置 Skill。私有插件、凭据、客户数据和本地部署状态不进入仓库。
 
 ## 外观
 
@@ -34,12 +34,21 @@ packages/
   desktop/          Electron 宿主
   tui/              终端宿主
   ui/               共用桌面界面
-system-skills/       公开的内置 System Skills
+  api/              托管控制平面
+  runtime_server/   托管 Runtime 适配器
+  hosted_execution/ 托管执行代理与沙箱工具
+  web/              托管 Web 界面
+  worker/           托管生命周期 Worker
+  document_processor/ 材料处理服务
+system-skills/       本地产品内置 Skill
+skills/system/       托管产品内置 Skill
 ```
+
+目录及产品边界见[源码统一说明](docs/development/SourceUnification.md)，托管产品文档见[Workspace 文档索引](docs/workspace/README.md)。根目录统一依赖与 Compose 入口，各产品分别构建、验证和发行。
 
 ## 当前发布范围
 
-目前仅构建和验证 Windows x64 发布产物：
+本地产品目前仅构建和验证 Windows x64 发布产物：
 
 - 独立 TUI 压缩包 `centaeris-windows-x64.zip`。
 - 包含 `Centaeris Desktop.exe` 的未打包 Windows 桌面程序目录。
