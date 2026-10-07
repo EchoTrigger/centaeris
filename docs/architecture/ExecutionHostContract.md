@@ -72,7 +72,9 @@ approval system.
 
 Policy originates outside model-controlled arguments. The execution binding
 carries it into both command and filesystem operations. Derived scopes preserve
-authorized-input behavior and cannot widen the caller's grant.
+authorized-input behavior. Policy-enforcing Hosts cannot widen the caller's
+grant; the local Host reports `policyEnforced: false` and uses current-user OS
+authority for ordinary commands and file operations.
 
 The command contract carries `program`, `args`, `cwd`, `env`, `timeoutMs`, and
 `policy`, together with the operation identity and cancellation probe. The file
@@ -80,10 +82,13 @@ contract carries `modelPath`, `operation`, `cwd`, `policy`, and the operation
 identity. Program and arguments remain separate values, not a constructed shell
 string.
 
-File operations are policy-scoped in Core and run in-process in the Runtime;
-they are not delegated to a sandbox helper subprocess. Host file identities stay
-opaque. Windows uses the host's own paths; there is no cross-platform path
-rewriting at the binding boundary.
+Core provides direct and policy-scoped filesystem operations. The local Host
+uses the direct implementation in-process: `cwd` is a path-resolution base,
+and absolute or parent paths are not rejected for leaving it. OS errors remain
+typed execution facts. A policy-enforcing Host uses the scoped implementation
+for its declared grants. Host file identities stay opaque. Windows uses the
+host's own paths; there is no cross-platform path rewriting at the binding
+boundary.
 
 ## Results and errors
 
@@ -134,8 +139,9 @@ program with the authority it has, and reports `policyEnforced: false`.
 | Command success/nonzero exit | Exact exit and output facts; no message-based classification |
 | Timeout, cancellation, uncertain launch | Confirmed outcomes distinguished from unknown; no replay of unknown effects |
 | Output under pressure | Bounded retained output, both streams drained, correct raw byte counts |
-| File operations | Policy-scoped in Core; denied paths honored for tool file access |
-| Authorized inputs and shared resources | Existing read-only, revocation, scope, and commit rules preserved |
+| Local file operations | Direct Core filesystem implementation; current-user OS authority and typed OS failures |
+| Policy-enforcing Host file operations | Declared roots and denied paths honored by the scoped implementation |
+| Authorized inputs and shared resources | Manifest resolution, revocation, versions, and resource-specific commit rules preserved; ordinary local OS paths are not isolated by these grants |
 | Contract consumers | Strict camelCase, unknown fields/variants rejected, no old-name aliases |
 
 Implementation changes run the focused `query_loop` gate and the applicable
