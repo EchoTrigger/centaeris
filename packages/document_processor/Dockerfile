@@ -26,7 +26,7 @@ ENV CENTAERIS_PROCESSOR_DEVICE=${PROCESSOR_DEVICE}
 
 WORKDIR /app
 COPY LICENSE /usr/share/licenses/centaeris-workspace/LICENSE
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml uv.lock .python-version ./
 COPY packages/api/pyproject.toml packages/api/pyproject.toml
 COPY packages/hosted_execution/pyproject.toml packages/hosted_execution/pyproject.toml
 COPY packages/worker/pyproject.toml packages/worker/pyproject.toml

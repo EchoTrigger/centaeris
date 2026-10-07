@@ -8,14 +8,11 @@ fi
 
 workspace_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$workspace_root"
-python3 scripts/workspace/core-pin.py
-
-: "${CENTAERIS_WORKSPACE_REVISION:?CENTAERIS_WORKSPACE_REVISION is required}"
-: "${CENTAERIS_CORE_REVISION:?CENTAERIS_CORE_REVISION is required}"
-test "$CENTAERIS_CORE_REVISION" = "$(cat "$workspace_root/core-revision.txt")" || {
-  echo "Core revision does not match Workspace pin" >&2
-  exit 66
-}
+export CENTAERIS_SOURCE_REVISION="$(node scripts/workspace/source-revision.mjs)"
+if ! docker info --format '{{json .Runtimes}}' | grep -q '"runsc"'; then
+  echo "fresh-start gate requires runsc on an explicitly disposable Docker host" >&2
+  exit 69
+fi
 
 if docker ps -aq --filter label=com.docker.compose.project=centaeris-workspace | grep -q .; then
   echo "refusing to reuse an existing centaeris-workspace Compose project" >&2
@@ -27,7 +24,7 @@ if docker volume ls -q | grep -q '^centaeris-workspace_'; then
 fi
 
 env_file="$(mktemp)"
-compose=(docker compose --env-file "$env_file")
+compose=(docker compose --parallel 1 --env-file "$env_file")
 
 cleanup() {
   status=$?
@@ -107,8 +104,8 @@ for service in document-processor workspace-general runtime api worker web; do
   image_id="$("${compose[@]}" images -q "$service" | head -n 1)"
   test -n "$image_id"
   test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.licenses" }}' "$image_id")" = "AGPL-3.0-only"
-  test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image_id")" = "$CENTAERIS_WORKSPACE_REVISION"
-  test "$(docker image inspect --format '{{ index .Config.Labels "io.centaeris.core.revision" }}' "$image_id")" = "$CENTAERIS_CORE_REVISION"
+  test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image_id")" = "$CENTAERIS_SOURCE_REVISION"
+  test "$(docker image inspect --format '{{ index .Config.Labels "io.centaeris.source.revision" }}' "$image_id")" = "$CENTAERIS_SOURCE_REVISION"
   docker run --rm --entrypoint /bin/sh "$image_id" -ec 'test -f /usr/share/licenses/centaeris-workspace/LICENSE'
 done
 

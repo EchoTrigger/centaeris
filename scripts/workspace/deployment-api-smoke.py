@@ -23,7 +23,7 @@ values.update({
     "API_HOST_PORT": "0", "COMPOSE_PROJECT_NAME": project,
 })
 env = {k: v for k, v in os.environ.items() if k not in values}
-env.update(CENTAERIS_WORKSPACE_REVISION="deployment-test", CENTAERIS_CORE_REVISION="deployment-test")
+env["CENTAERIS_SOURCE_REVISION"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
 
 with tempfile.TemporaryDirectory(prefix=project) as temporary:
     root = Path(temporary)
