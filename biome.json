@@ -6,7 +6,9 @@
       "packages/ui/tests/**",
       "packages/ui/scripts/**",
       "packages/desktop/src/**",
-      "packages/desktop/scripts/**"
+      "packages/desktop/scripts/**",
+      "packages/web/src/**",
+      "packages/web/tests/**"
     ]
   },
   "formatter": {
@@ -40,5 +42,31 @@
         "noDuplicateParameters": "error"
       }
     }
-  }
+  },
+  "overrides": [
+    {
+      "includes": [
+        "packages/web/**"
+      ],
+      "linter": {
+        "enabled": true,
+        "rules": {
+          "preset": "none",
+          "correctness": {
+            "noUnreachable": "error",
+            "noUnusedImports": "error",
+            "noUnusedVariables": "error",
+            "useExhaustiveDependencies": "error",
+            "useHookAtTopLevel": "error"
+          },
+          "suspicious": {
+            "noDebugger": "error",
+            "noDuplicateObjectKeys": "error",
+            "noDuplicateParameters": "error",
+            "noExplicitAny": "error"
+          }
+        }
+      }
+    }
+  ]
 }

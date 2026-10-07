@@ -81,7 +81,7 @@ mod tests {
     #[test]
     fn storage_contract_matches_the_shared_rust_python_corpus() {
         let cases: Vec<Value> = serde_json::from_str(include_str!(
-            "../../../../tests/fixtures/session_payload_storage.json"
+            "../../../../tests/workspace/fixtures/session_payload_storage.json"
         ))
         .unwrap();
         assert!(cases.len() >= 3);

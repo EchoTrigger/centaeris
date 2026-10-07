@@ -27,7 +27,7 @@ def verify_persistence(run_id, *, revoke=False):
     """No paid calls; rerun after restarting the isolated services."""
     if os.environ.get("MCP_E2E_ISOLATED") != "1":
         raise RuntimeError("Requires isolated acceptance deployment")
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages/api"))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "packages/api"))
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "api.settings")
     import django
     django.setup()
@@ -71,7 +71,7 @@ def main():
     if os.environ.get("MCP_E2E_ISOLATED") != "1":
         raise RuntimeError("Requires isolated acceptance deployment")
     configuration = json.loads(sys.stdin.readline())
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages/api"))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "packages/api"))
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "api.settings")
     import django
     django.setup()

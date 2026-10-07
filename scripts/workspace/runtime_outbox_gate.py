@@ -25,7 +25,7 @@ def main():
     import psycopg
     from psycopg import sql
 
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[2]
     settings = database_settings()
     database = 'test_outbox_' + uuid.uuid4().hex
     host = settings['host']

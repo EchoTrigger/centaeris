@@ -62,10 +62,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("package", choices=("api", "worker", "document_processor", "gate"))
     args = parser.parse_args()
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[2]
     directory = root / "packages" / args.package
     if args.package == "gate":
-        directory = root / "scripts"
+        directory = root / "scripts" / "workspace"
     sys.path.insert(0, str(directory))
     if args.package != "api":
         suite = unittest.TestLoader().discover(str(directory))

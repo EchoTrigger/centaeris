@@ -25,7 +25,7 @@ Create the private `.env` from `.env.example` and use the root startup path for
 the complete service graph:
 
 ```powershell
-pwsh -File scripts/start-local.ps1
+pwsh -File scripts/workspace/start-local.ps1
 ```
 
 For an API-only development environment with authorized dependencies already

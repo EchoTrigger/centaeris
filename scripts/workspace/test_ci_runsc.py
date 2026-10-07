@@ -2,7 +2,7 @@
 from pathlib import Path
 import unittest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class CiRunscTests(unittest.TestCase):
@@ -15,7 +15,7 @@ class CiRunscTests(unittest.TestCase):
             "sudo /usr/local/bin/runsc install -- --platform=systrap",
             "sudo systemctl reload docker",
             "docker run --rm --runtime=runsc",
-            "run: ./scripts/docker-release-gate.sh",
+            "run: ./scripts/workspace/docker-release-gate.sh",
         ]
         for command in commands:
             self.assertIn(command, job)

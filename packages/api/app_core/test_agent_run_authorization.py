@@ -17,7 +17,7 @@ from .runtime_contract import (
 )
 
 
-FIXTURES = Path(__file__).resolve().parents[3] / "tests/fixtures/agent_run_authorization/v1"
+FIXTURES = Path(__file__).resolve().parents[3] / "tests/workspace/fixtures/agent_run_authorization/v1"
 KEY = "test-key"
 
 

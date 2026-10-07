@@ -70,7 +70,7 @@ def main():
             "for s in ['user-a-agent-a','user-a-agent-b','user-b-agent-a']]"])
         skill_path = "/opt/centaeris/system-skills/memory/SKILL.md"
         installed = read(skill_path)
-        expected = (Path(__file__).resolve().parents[1] / "skills/system/memory/SKILL.md").read_bytes()
+        expected = (Path(__file__).resolve().parents[2] / "skills/system/memory/SKILL.md").read_bytes()
         assert bytes(installed["bytes"]).replace(b"\r\n", b"\n") == expected.replace(b"\r\n", b"\n"), "installed skill differs from source"
         listing = operation(ROOT, {"type": "listDirectory", "recursive": True, "maxEntries": 20})
         assert [entry["path"] for entry in listing["entries"]] == [ROOT + "topics/"], listing

@@ -8,17 +8,21 @@
     "url": "git+https://github.com/EchoTrigger/centaeris.git"
   },
   "scripts": {
-    "lint": "npm run lint:ui && npm run lint:desktop",
+    "lint": "npm run lint:ui && npm run lint:desktop && npm run lint:web",
     "lint:ui": "node ./node_modules/@biomejs/biome/bin/biome lint packages/ui/src packages/ui/tests packages/ui/scripts",
     "lint:ui-source": "node ./node_modules/@biomejs/biome/bin/biome lint packages/ui/src packages/ui/scripts",
     "lint:desktop": "node ./node_modules/@biomejs/biome/bin/biome lint packages/desktop/src packages/desktop/scripts",
     "lint:hooks": "node ./node_modules/@biomejs/biome/bin/biome lint packages/ui/src packages/ui/tests --only=lint/correctness/useExhaustiveDependencies",
     "lint:unused": "node ./node_modules/@biomejs/biome/bin/biome lint packages/ui/src packages/ui/tests packages/ui/scripts packages/desktop/src packages/desktop/scripts --only=lint/correctness/noUnusedImports --only=lint/correctness/noUnusedVariables",
-    "typecheck": "npm run typecheck --workspaces --if-present"
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint:web": "node ./node_modules/@biomejs/biome/bin/biome lint packages/web/src packages/web/tests",
+    "lint:hooks:web": "node ./node_modules/@biomejs/biome/bin/biome lint packages/web/src packages/web/tests --only=lint/correctness/useExhaustiveDependencies",
+    "lint:unused:web": "node ./node_modules/@biomejs/biome/bin/biome lint packages/web/src packages/web/tests --only=lint/correctness/noUnusedImports --only=lint/correctness/noUnusedVariables"
   },
   "workspaces": [
     "packages/ui",
-    "packages/desktop"
+    "packages/desktop",
+    "packages/web"
   ],
   "engines": {
     "node": "22.21.0",
@@ -33,6 +37,11 @@
   "overrides": {
     "nanoid": "3.3.18",
     "typescript": "7.0.2",
-    "vite": "8.1.5"
+    "vite": "8.1.5",
+    "@codemirror/lang-liquid": "6.3.2",
+    "@codemirror/legacy-modes": "6.5.4",
+    "@lezer/markdown": "1.7.2",
+    "@napi-rs/canvas": "1.0.9",
+    "vscode-languageserver-types": "3.18.3"
   }
 }

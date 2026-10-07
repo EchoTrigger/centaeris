@@ -10,7 +10,7 @@ services:
       MCP_E2E_ISOLATED: "1"
       WEB_ORIGIN: http://127.0.0.1:43108
     volumes:
-      - ./scripts/platform-mcp-live-run.py:/app/scripts/platform-mcp-live-run.py:ro
+      - ./scripts/workspace/platform-mcp-live-run.py:/app/scripts/workspace/platform-mcp-live-run.py:ro
   runtime:
     image: centaeris-platform-mcp-e2e-runtime:local
     environment:

@@ -274,7 +274,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore = "scripts/platform-mcp-client-gate.py owns the real API and isolated PostgreSQL fixture"]
+    #[ignore = "scripts/workspace/platform-mcp-client-gate.py owns the real API and isolated PostgreSQL fixture"]
     fn python_http_interoperability() {
         use centaeris_core::model::ToolCallEnvelope;
         use centaeris_core::runtime::{canonical_tool_call_record, canonical_tool_result_record};

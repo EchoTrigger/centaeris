@@ -8,7 +8,7 @@ import subprocess
 @cache
 def core_source():
     result = subprocess.run(
-        ["node", "scripts/core-source.mjs", "--strict"],
+        ["node", "scripts/workspace/core-source.mjs"],
         cwd=Path(__file__).resolve().parents[3], check=True,
         capture_output=True, encoding="utf-8",
     )

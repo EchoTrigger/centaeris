@@ -5,7 +5,7 @@ from pathlib import Path
 import tomllib
 import unittest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 class ProductVersionTests(unittest.TestCase):
     def test_advertised_service_versions_match_product(self):

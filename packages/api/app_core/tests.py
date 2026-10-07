@@ -3850,7 +3850,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
     def test_agent_run_authorization_digest_is_stable(self):
         payload = json.loads(
             (Path(__file__).resolve().parents[3]
-             / "tests/fixtures/agent_run_authorization/v1/valid.json").read_text(encoding="utf-8")
+             / "tests/workspace/fixtures/agent_run_authorization/v1/valid.json").read_text(encoding="utf-8")
         )
         digest = authorization_digest(payload)
         self.assertEqual(
