@@ -6,12 +6,16 @@ import sys
 import unittest
 from unittest.mock import patch
 
+original_search_path = list(sys.path)
 spec = importlib.util.spec_from_file_location("ci", Path(__file__).with_name("ci.py"))
 ci = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ci)
 
 
 class PortableCITests(unittest.TestCase):
+    def test_loading_the_gate_preserves_the_hosted_test_discovery_path(self):
+        self.assertEqual(sys.path, original_search_path)
+
     def test_gate_preserves_backend_checks_and_frontend_skip_scope(self):
         for skip in (False, True):
             calls = []

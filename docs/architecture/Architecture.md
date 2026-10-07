@@ -142,9 +142,10 @@ one resolved activation before the model sees contributed Skills, CLI paths,
 MCP tools, or Hooks. Core owns their composition and execution semantics; the
 package does not receive a second Agent loop.
 
-This repository defines and validates the public package contracts but does not
-contain concrete commercial packages, hosted configuration, credentials, or
-customer data.
+This repository contains local and hosted product components. packages/core
+owns host-agnostic contracts and runtime semantics; packages/api owns hosted
+control-plane facts, and packages/runtime_server adapts those contracts. Private
+plugins, credentials, customer data and local deployment configuration remain external.
 
 ## Desktop Git workbench
 
