@@ -304,7 +304,7 @@ class Stack:
     def manifest(self):
         return {'project': PROJECT, 'workspaceSha': run(['git', 'rev-parse', 'HEAD'], cwd=ROOT).strip(),
                 'workerSlots': int(self.compose(['exec', '-T', 'worker', 'python', '-c', 'import worker; print(worker.WORKER_SLOT_COUNT)']).strip()),
-                'coreSha': run(['node', str(ROOT / 'scripts/verify-core-checkout.mjs')], cwd=ROOT).strip(),
+                'coreSha': run(['node', str(ROOT / 'scripts/workspace/verify-core-checkout.mjs')], cwd=ROOT).strip(),
                 'dirtyFiles': run(['git', 'status', '--porcelain'], cwd=ROOT).splitlines(),
                 'workspaceDiffSha256': hashlib.sha256(run(['git', 'diff', 'HEAD'], cwd=ROOT).encode()).hexdigest(),
                 'workerSourceSha256': hashlib.sha256((ROOT / 'packages/worker/worker.py').read_bytes()).hexdigest(),

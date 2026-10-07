@@ -119,7 +119,7 @@ This check proves retention of a published capture after source mutation and
 service replacement. It does not certify full-text delivery before publication,
 production deployment, throughput, or recovery of uncaptured old results. Validate
 the production Web build separately using the conversation checklist in
-`docs/eval/FrontendManualAcceptance.md`, including deliberate multi-page expansion.
+`docs/workspace/eval/FrontendManualAcceptance.md`, including deliberate multi-page expansion.
 
 ### Bounded API connection-pool validation
 
@@ -191,7 +191,7 @@ restored. Do not run alongside another load or reset database statistics.
 python -m unittest discover -s perf/tests -v
 ```
 
-These regressions also run in `scripts/ci.ps1`. Docker Compose rendering tests use
+These regressions also run in `scripts/workspace/ci.ps1`. Docker Compose rendering tests use
 synthetic configuration; live smoke runs require the isolated deployment.
 
 ## Harness repair (2026-09-20)

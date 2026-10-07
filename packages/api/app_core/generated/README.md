@@ -5,7 +5,7 @@ and its nested Rust types. It describes serialization: camelCase keys, exact
 variants, nullable fields that must still be present, and rejected unknown keys.
 `transcript_block.samples.json` contains values serialized by the same Rust types.
 
-Run `python scripts/transcript-schema.py` to regenerate using the Core dependency
+Run `python scripts/workspace/transcript-schema.py` to regenerate using the Core dependency
 resolved by Cargo. CI runs `--check`; Python contract tests consume the samples.
 Do not edit generated JSON or add a second hand-written field registry.
 

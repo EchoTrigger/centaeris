@@ -66,7 +66,7 @@ fn main() {
 
     def invoke(self, *, check=False):
         def run(command, **kwargs):
-            if command == ["node", "scripts/core-source.mjs"]:
+            if command == ["node", "scripts/workspace/core-source.mjs"]:
                 return subprocess.CompletedProcess(command, 0, stdout=str(self.core))
             return self.run_process(command, **kwargs)
 

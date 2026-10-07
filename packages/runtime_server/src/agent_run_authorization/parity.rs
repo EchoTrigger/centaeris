@@ -17,7 +17,7 @@ struct Case {
 
 fn fixtures() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/agent_run_authorization/v1")
+        .join("../../tests/workspace/fixtures/agent_run_authorization/v1")
 }
 
 fn cases() -> Vec<Case> {

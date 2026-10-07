@@ -6,9 +6,9 @@ if [[ "${CENTAERIS_CI_DESTRUCTIVE_DOCKER:-}" != "1" ]]; then
   exit 64
 fi
 
-workspace_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+workspace_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$workspace_root"
-python3 scripts/core-pin.py
+python3 scripts/workspace/core-pin.py
 
 : "${CENTAERIS_WORKSPACE_REVISION:?CENTAERIS_WORKSPACE_REVISION is required}"
 : "${CENTAERIS_CORE_REVISION:?CENTAERIS_CORE_REVISION is required}"
@@ -88,7 +88,7 @@ for key, value in config["volumes"].items():
 '
 
 "${compose[@]}" build --pull document-processor workspace-general runtime api worker web
-"${compose[@]}" config --format json | python3 scripts/verify-deployment-images.py
+"${compose[@]}" config --format json | python3 scripts/workspace/verify-deployment-images.py
 "${compose[@]}" up -d --wait --wait-timeout 420 postgres redis api runtime worker material-worker web
 
 for service in postgres redis api runtime worker material-worker web; do
@@ -99,9 +99,9 @@ done
 "${compose[@]}" exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"
 "${compose[@]}" exec -T web wget -qO- http://127.0.0.1:3000/ >/dev/null
 
-"${compose[@]}" exec -T api python /app/scripts/verify-api-deployment.py write
+"${compose[@]}" exec -T api python /app/scripts/workspace/verify-api-deployment.py write
 "${compose[@]}" up -d --no-build --no-deps --force-recreate --wait api
-"${compose[@]}" exec -T api python /app/scripts/verify-api-deployment.py read
+"${compose[@]}" exec -T api python /app/scripts/workspace/verify-api-deployment.py read
 
 for service in document-processor workspace-general runtime api worker web; do
   image_id="$("${compose[@]}" images -q "$service" | head -n 1)"

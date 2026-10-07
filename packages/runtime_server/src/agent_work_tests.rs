@@ -15,7 +15,7 @@ type CapturedRequests = Arc<Mutex<Vec<Value>>>;
 
 fn authorization() -> WorkspaceAgentRunAuthorization {
     serde_json::from_str(include_str!(
-        "../../../tests/fixtures/agent_run_authorization/v1/valid.json"
+        "../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
     ))
     .unwrap()
 }
