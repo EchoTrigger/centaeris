@@ -25,11 +25,11 @@ class PortableCITests(unittest.TestCase):
                 ci.main(skip)
             self.assertTrue(any("build" in c and "packages/web" in c for c in calls))
             self.assertEqual(any("test:unit" in c for c in calls), not skip)
-            for script in ("scripts/runtime_outbox_gate.py", "scripts/agent-run-authorization-gate.py",
-                           "scripts/transcript-schema.py", "scripts/test_transcript_schema.py",
-                           "scripts/platform-mcp-client-gate.py"):
+            for script in ("scripts/workspace/runtime_outbox_gate.py", "scripts/workspace/agent-run-authorization-gate.py",
+                           "scripts/workspace/transcript-schema.py", "scripts/workspace/test_transcript_schema.py",
+                           "scripts/workspace/platform-mcp-client-gate.py"):
                 self.assertTrue(any(script in c for c in calls), script)
-            self.assertTrue(any("scripts/python_test_gate.py" in c and "api" == c[-1] for c in calls))
+            self.assertTrue(any("scripts/workspace/python_test_gate.py" in c and "api" == c[-1] for c in calls))
 
     def test_failure_stops_the_gate(self):
         with patch.object(ci, "run", side_effect=RuntimeError("failed")) as run:

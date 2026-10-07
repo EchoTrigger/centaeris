@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = ROOT / "packages/api/app_core/generated/transcript_block.schema.json"
 
 
@@ -25,7 +25,7 @@ def main():
         return subprocess.run(command, cwd=ROOT, check=True, capture_output=True,
                               encoding="utf-8", env={**os.environ,
                               "CARGO_TARGET_DIR": str(output_target)}).stdout
-    core = Path(capture(["node", "scripts/core-source.mjs"]).strip())
+    core = Path(capture(["node", "scripts/workspace/core-source.mjs"]).strip())
     command = [
         "cargo", "run", "--quiet", "--locked", "--manifest-path", str(core / "packages/core/Cargo.toml"),
         "--example", "transcript_schema", "--features", "contract-schema",
@@ -43,7 +43,7 @@ def main():
         generated = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         if args.check:
             if output.read_text(encoding="utf-8") != generated:
-                raise SystemExit(f"{output.name} is stale; run python scripts/transcript-schema.py")
+                raise SystemExit(f"{output.name} is stale; run python scripts/workspace/transcript-schema.py")
         else:
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(generated, encoding="utf-8", newline="\n")

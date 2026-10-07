@@ -4,7 +4,7 @@
 # ///
 """Isolated Artifact object-storage experiment, not an application storage backend.
 
-Run: uv run --script scripts/artifact_storage_probe.py --evidence <outside-repo-dir>
+Run: uv run --script scripts/workspace/artifact_storage_probe.py --evidence <outside-repo-dir>
 Only this program's fresh Compose project can be started, stopped or removed.
 """
 import argparse

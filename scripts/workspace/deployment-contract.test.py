@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from urllib.parse import urlsplit
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 RETIRED = {
     "KNOWLEDGE_PROCESSOR_IMAGE", "RUNTIME_URL", "API_INTERNAL_URL", "REDIS_URL",
     "POSTGRES_HOST", "POSTGRES_PORT", "STORAGE_ROOT", "PLUGIN_CATALOG_ROOT",
@@ -81,7 +81,7 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertFalse(any("*" in value for value in allowed))
 
     def test_docker_release_gate_accepts_current_processor_ownership(self):
-        source = (ROOT / "scripts/docker-release-gate.sh").read_text(encoding="utf-8")
+        source = (ROOT / "scripts/workspace/docker-release-gate.sh").read_text(encoding="utf-8")
         validator = source.split("python3 -c '\n", 1)[1].split("\n'\n", 1)[0]
         config = compose_config()
         env = {**os.environ, "WORKSPACE_ROOT": str(ROOT)}
@@ -94,7 +94,7 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertNotEqual(validate(config).returncode, 0)
 
     def test_docker_release_gate_starts_and_checks_material_worker(self):
-        source = (ROOT / "scripts/docker-release-gate.sh").read_text(encoding="utf-8")
+        source = (ROOT / "scripts/workspace/docker-release-gate.sh").read_text(encoding="utf-8")
         start = next(line for line in source.splitlines() if line.startswith('"${compose[@]}" up -d --wait '))
         checked = next(line for line in source.splitlines() if line.startswith("for service in postgres "))
         self.assertIn("material-worker", start.split())
@@ -203,7 +203,7 @@ class DeploymentContractTests(unittest.TestCase):
             self.assertNotEqual(subprocess.run([*command, device], capture_output=True).returncode, 0)
 
     def test_image_gate_rejects_existing_wrong_image_and_device(self):
-        spec = importlib.util.spec_from_file_location("image_gate", ROOT / "scripts/verify-deployment-images.py")
+        spec = importlib.util.spec_from_file_location("image_gate", ROOT / "scripts/workspace/verify-deployment-images.py")
         gate = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(gate)
         config = compose_config()

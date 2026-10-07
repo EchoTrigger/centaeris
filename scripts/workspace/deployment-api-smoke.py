@@ -7,7 +7,7 @@ import sys
 import tempfile
 import uuid
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 project = "centaeris-deploy-test-" + uuid.uuid4().hex[:12]
 image = project + ":api"
 values = {}
@@ -40,9 +40,9 @@ with tempfile.TemporaryDirectory(prefix=project) as temporary:
     try:
         run("build", "api")
         run("up", "--detach", "--no-build", "--wait", "--wait-timeout", "180", "api")
-        run("exec", "-T", "api", "python", "/app/scripts/verify-api-deployment.py", "write")
+        run("exec", "-T", "api", "python", "/app/scripts/workspace/verify-api-deployment.py", "write")
         run("up", "--detach", "--no-build", "--no-deps", "--force-recreate", "--wait", "api")
-        run("exec", "-T", "api", "python", "/app/scripts/verify-api-deployment.py", "read")
+        run("exec", "-T", "api", "python", "/app/scripts/workspace/verify-api-deployment.py", "read")
     finally:
         original_error = sys.exception()
         cleanup_errors = []

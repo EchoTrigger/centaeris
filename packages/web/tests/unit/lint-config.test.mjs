@@ -50,7 +50,7 @@ test("unused imports and variables block the gate", () => {
 });
 
 test("local CI runs lint, typecheck, and a production Web build", () => {
-  const gate = spawnSync(process.platform === "win32" ? "python" : "python3", ["scripts/test_ci.py"], {
+  const gate = spawnSync(process.platform === "win32" ? "python" : "python3", ["scripts/workspace/test_ci.py"], {
     cwd: repoRoot, encoding: "utf8",
   });
   assert.equal(gate.status, 0, `${gate.stdout}${gate.stderr}`);

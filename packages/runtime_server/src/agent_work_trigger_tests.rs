@@ -7,7 +7,7 @@ use std::time::Duration;
 
 fn start() -> AgentRunStart {
     let authorization: Value = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/agent_run_authorization/v1/valid.json"
+        "../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
     ))
     .unwrap();
     serde_json::from_value(json!({

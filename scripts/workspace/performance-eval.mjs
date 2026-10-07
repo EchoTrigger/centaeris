@@ -7,9 +7,9 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { postgresSources, validateCachePrefixMeasurement, validateCapturedPostgres, validatePostgresMeasurement } from "./performance-eval-artifact.mjs";
 
-const workspace = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const workspace = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const core = resolveCoreSource({ allowLocal: false });
-const reference = JSON.parse(readFileSync(resolve(workspace, "docs/eval/fixtures/performance-repair-v1.json"), "utf8"));
+const reference = JSON.parse(readFileSync(resolve(workspace, "docs/workspace/eval/fixtures/performance-repair-v1.json"), "utf8"));
 assert.equal(reference.schema, "centaeris.performance_repair_eval.v1");
 
 const args = process.argv.slice(2);

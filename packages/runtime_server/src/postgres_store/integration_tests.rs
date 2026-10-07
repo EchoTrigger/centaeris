@@ -2564,7 +2564,7 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
     let session_id = "session_fenced_terminal";
     let mut authorization: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
         serde_json::from_str(include_str!(
-            "../../../../tests/fixtures/agent_run_authorization/v1/valid.json"
+            "../../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
         ))
         .unwrap();
     authorization.agent_run_id = agent_run_id.into();

@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def run(label, args, capture=False):
@@ -29,33 +29,31 @@ def main(skip_frontend_tests=False):
     npm = "npm.cmd" if os.name == "nt" else "npm"
     api = ["uv", "run", "--frozen", "--package", "api", "python"]
     gates = [
-        ("Portable CI behavior", [py, "-B", "scripts/test_ci.py"]),
-        ("Core pin parity", [py, "-B", "scripts/test_core_pin.py"]),
-        ("Product version parity", [py, "-B", "scripts/test_product_version.py"]),
-        ("Pinned public Core revision", ["node", "--test", "scripts/core-revision.test.mjs"]),
-        ("Core source resolution", ["node", "--test", "scripts/core-source.test.mjs"]),
-        ("Pinned Core source", ["node", "scripts/verify-core-checkout.mjs"]),
-        ("Rust toolchain consistency", ["node", "--test", "scripts/rust-toolchain.test.mjs"]),
+        ("Portable CI behavior", [py, "-B", "scripts/workspace/test_ci.py"]),
+        ("Product version parity", [py, "-B", "scripts/workspace/test_product_version.py"]),
+        ("Core source resolution", ["node", "--test", "scripts/workspace/core-source.test.mjs"]),
+        ("Monorepo Core source", ["node", "--test", "scripts/workspace/source-revision.test.mjs"]),
+        ("Rust toolchain consistency", ["node", "--test", "scripts/workspace/rust-toolchain.test.mjs"]),
         ("Rust check", ["cargo", "check", "--workspace", "--locked"]),
         ("Rust tests", ["cargo", "test", "--workspace", "--locked"]),
-        ("Transcript exporter cache isolation", [py, "-B", "scripts/test_transcript_schema.py"]),
-        ("Transcript generated contract", [py, "scripts/transcript-schema.py", "--check"]),
-        ("Outbox gate isolation and discovery guards", [py, "scripts/test_runtime_outbox_gate.py"]),
-        ("Outbox PostgreSQL regressions", [*api, "scripts/runtime_outbox_gate.py"]),
-        ("Authorization gate guards", [py, "scripts/test_authorization_gate.py"]),
-        ("AgentRun authorization parity", [py, "scripts/agent-run-authorization-gate.py"]),
-        ("Deployment identity contracts", [*api, "scripts/deployment-contract.test.py"]),
-        ("Python discovery gate regressions", [py, "scripts/python_test_gate.py", "gate"]),
-        ("Worker tests", [py, "scripts/python_test_gate.py", "worker"]),
+        ("Transcript exporter cache isolation", [py, "-B", "scripts/workspace/test_transcript_schema.py"]),
+        ("Transcript generated contract", [py, "scripts/workspace/transcript-schema.py", "--check"]),
+        ("Outbox gate isolation and discovery guards", [py, "scripts/workspace/test_runtime_outbox_gate.py"]),
+        ("Outbox PostgreSQL regressions", [*api, "scripts/workspace/runtime_outbox_gate.py"]),
+        ("Authorization gate guards", [py, "scripts/workspace/test_authorization_gate.py"]),
+        ("AgentRun authorization parity", [py, "scripts/workspace/agent-run-authorization-gate.py"]),
+        ("Deployment identity contracts", [*api, "scripts/workspace/deployment-contract.test.py"]),
+        ("Python discovery gate regressions", [py, "scripts/workspace/python_test_gate.py", "gate"]),
+        ("Worker tests", [py, "scripts/workspace/python_test_gate.py", "worker"]),
         ("Performance harness isolation", [py, "-m", "unittest", "discover", "-s", "perf/tests", "-v"]),
         ("Performance workload metrics", ["node", "--test", "perf/tests/k6-metrics.test.mjs"]),
-        ("Document processor tests", ["uv", "run", "--frozen", "--package", "centaeris-document-processor", "python", "scripts/python_test_gate.py", "document_processor"]),
+        ("Document processor tests", ["uv", "run", "--frozen", "--package", "centaeris-document-processor", "python", "scripts/workspace/python_test_gate.py", "document_processor"]),
         ("Django fresh migration", [*api, "packages/api/manage.py", "migrate", "--noinput", "--settings=api.migration_test_settings"]),
         ("Django migration drift", [*api, "packages/api/manage.py", "makemigrations", "--check", "--dry-run", "--settings=api.migration_test_settings", "--skip-checks"]),
-        ("Full Django PostgreSQL suite", [*api, "scripts/python_test_gate.py", "api"]),
-        ("First-party MCP Rust/Python client", [*api, "scripts/platform-mcp-client-gate.py"]),
+        ("Full Django PostgreSQL suite", [*api, "scripts/workspace/python_test_gate.py", "api"]),
+        ("First-party MCP Rust/Python client", [*api, "scripts/workspace/platform-mcp-client-gate.py"]),
         ("Node install", [npm, "ci"]),
-        ("Performance artifact validation", ["node", "--test", "scripts/performance-eval-artifact.test.mjs"]),
+        ("Performance artifact validation", ["node", "--test", "scripts/workspace/performance-eval-artifact.test.mjs"]),
         ("Web production validation", [npm, "run", "build", "--workspace", "packages/web"]),
     ]
     if not skip_frontend_tests:

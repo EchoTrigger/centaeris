@@ -9,7 +9,7 @@ import re
 
 if os.environ.get("MCP_E2E_ISOLATED") != "1":
     raise RuntimeError("Requires isolated acceptance deployment")
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages/api"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "packages/api"))
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "api.settings")
 import django
 django.setup()

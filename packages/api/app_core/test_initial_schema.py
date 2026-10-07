@@ -63,7 +63,7 @@ class InitialSchemaTests(TestCase):
                                    "0005_agent_input_attachments.py", "0006_session_event_payload_storage.py"])
 
     def test_release_script_checks_the_current_schema_leaf(self):
-        release_gate = (REPOSITORY_ROOT / "scripts/docker-release-gate.sh").read_text(encoding="utf-8")
+        release_gate = (REPOSITORY_ROOT / "scripts/workspace/docker-release-gate.sh").read_text(encoding="utf-8")
         self.assertIn("0006_session_event_payload_storage$", release_gate)
         self.assertEqual(release_gate.count("showmigrations app_core"), 1)
 

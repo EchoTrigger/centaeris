@@ -1,4 +1,4 @@
-import { coreFile } from '../../../../scripts/core-source.mjs';
+import { coreFile } from '../../../../scripts/workspace/core-source.mjs';
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";

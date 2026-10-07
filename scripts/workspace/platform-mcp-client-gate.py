@@ -17,7 +17,7 @@ import uuid
 
 
 def main():
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(root / "packages/api"))
     with tempfile.TemporaryDirectory(prefix="platform-mcp-client-") as storage:
         os.environ.update(DJANGO_SETTINGS_MODULE="api.test_settings", STORAGE_ROOT=storage,

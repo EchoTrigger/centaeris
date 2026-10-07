@@ -25,7 +25,7 @@ def strings(value):
 
 class SessionPayloadCodecTests(unittest.TestCase):
     def test_storage_contract_matches_the_shared_rust_python_corpus(self):
-        corpus = Path(__file__).resolve().parents[3] / "tests/fixtures/session_payload_storage.json"
+        corpus = Path(__file__).resolve().parents[3] / "tests/workspace/fixtures/session_payload_storage.json"
         cases = json.loads(corpus.read_text(encoding="utf-8"))
         self.assertGreaterEqual(len(cases), 3)
         for case in cases:

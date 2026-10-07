@@ -17,7 +17,7 @@ for container in (API, WORKER):
 
 run("pause", WORKER)
 try:
-    seeded = json.loads(run("exec", API, "python", "/app/scripts/platform-material-processing-gate.py", "--seed-only", "--pdf"))
+    seeded = json.loads(run("exec", API, "python", "/app/scripts/workspace/platform-material-processing-gate.py", "--seed-only", "--pdf"))
 finally:
     run("unpause", WORKER)
 task = seeded["task"]
@@ -49,7 +49,7 @@ while time.monotonic() < deadline:
     time.sleep(1)
 else:
     raise RuntimeError("Recovery timed out")
-verified = json.loads(run("exec", API, "python", "/app/scripts/platform-material-processing-gate.py", "--verify", task))
+verified = json.loads(run("exec", API, "python", "/app/scripts/workspace/platform-material-processing-gate.py", "--verify", task))
 assert verified["attempts"] == 2, verified
 assert verified["pageCount"] == 100, verified
 assert old_container not in run("ps", "-aq", "--filter", "label=workspace.material.task=" + task).split()

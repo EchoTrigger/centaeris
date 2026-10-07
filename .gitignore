@@ -70,3 +70,32 @@ Thumbs.db
 /.claude/
 .centaeris
 tmp/
+
+# Hosted product and local migration inputs.
+/.venv/
+/node_modules/
+/target/
+/test-results/
+/.env
+**/.env
+/.env.*
+**/.env.*
+!/.env.example
+/playwright-report/
+/blob-report/
+/coverage/
+/dist/
+/build/
+/.cache/
+*.pyc
+/perf/.state/
+/perf/certs/out/
+/perf/k6/bin/
+/perf/results/
+# Explicit local Cargo patches are never publication inputs.
+/.cargo/config.toml
+/.local/
+/docker-compose.current.yml
+/.codex-remote-attachments/
+!/perf/env/
+!/perf/env/**
