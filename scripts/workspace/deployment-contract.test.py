@@ -25,6 +25,7 @@ def compose_config(**overrides):
         key, separator, value = line.partition("=")
         if separator and not key.startswith("#"):
             values[key] = value or ("synthetic-test-only" if key in REQUIRED_TEST_SECRETS else "")
+    values["CENTAERIS_SOURCE_REVISION"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     values.update(overrides)
     env = {k: v for k, v in os.environ.items() if k not in values and k not in RETIRED}
     with tempfile.TemporaryDirectory(prefix="centaeris-compose-contract-") as temp:
@@ -54,14 +55,14 @@ class DeploymentContractTests(unittest.TestCase):
                     self.assertEqual(Path(service["build"]["context"]).resolve(), ROOT)
                     self.assertFalse(service["build"].get("additional_contexts"))
 
-    def test_all_image_labels_use_the_pinned_core_revision(self):
-        pin = (ROOT / "core-revision.txt").read_text(encoding="utf-8").strip()
+    def test_all_image_labels_use_the_monorepo_revision(self):
+        pin = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
         services = compose_config()["services"]
         for name, service in services.items():
             build = service.get("build")
             if build is not None:
                 with self.subTest(service=name):
-                    self.assertEqual(build["labels"]["io.centaeris.core.revision"], pin)
+                    self.assertEqual(build["labels"]["io.centaeris.source.revision"], pin)
 
     def test_long_running_foundation_services_restart_after_engine_recovery(self):
         services = compose_config()["services"]

@@ -18,8 +18,9 @@ class PortableGateTests(unittest.TestCase):
                            "scripts/harbor", "-p", "test_runner.py"], calls)
             self.assertIn(["cargo", "test", "--locked", "-p", "centaeris-runtime-sqlite", "--test", "core_runtime"], calls)
             self.assertIn(["cargo", "run", "--locked", "-p", "centaeris-runtime", "--bin", "centaeris-runtime-protocol-docs", "--", "--check"], calls)
-            self.assertEqual(calls[-1], ["cargo", "test", "--workspace", "--locked"])
+            self.assertEqual(calls[-1], ["cargo", "test", "--locked", *ci.package_flags()])
             self.assertFalse(any("pwsh" in c for c in calls))
+            self.assertFalse(any("runtime_server" in c or "hosted_execution" in c for c in calls))
 
     def test_node_source_gate_preserves_build_lint_host_parity_and_licenses(self):
         calls = []

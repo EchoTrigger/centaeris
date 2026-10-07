@@ -1,8 +1,18 @@
 FROM rust:1.95.0-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1 AS build
 
 WORKDIR /src
-COPY . .
-RUN cargo build --release --locked -p hosted_execution --bin execution_agent
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY packages/runtime/Cargo.toml packages/runtime/Cargo.toml
+COPY packages/runtime/src/lib.rs packages/runtime/src/lib.rs
+COPY packages/tui/Cargo.toml packages/tui/Cargo.toml
+COPY packages/core packages/core
+COPY packages/model-catalog packages/model-catalog
+COPY packages/mcp packages/mcp
+COPY packages/runtime_sqlite packages/runtime_sqlite
+COPY packages/hosted_execution packages/hosted_execution
+COPY packages/runtime_server/Cargo.toml packages/runtime_server/Cargo.toml
+COPY packages/runtime_server/examples packages/runtime_server/examples
+RUN --mount=type=cache,target=/usr/local/cargo/registry cargo build --release --locked -p hosted_execution --bin execution_agent
 
 FROM ghcr.io/astral-sh/uv:0.11.6@sha256:b1e699368d24c57cda93c338a57a8c5a119009ba809305cc8e86986d4a006754 AS uv
 FROM node:22.21.0-bookworm-slim@sha256:f9f7f95dcf1f007b007c4dcd44ea8f7773f931b71dc79d57c216e731c87a090b AS node
@@ -17,6 +27,7 @@ COPY pyproject.toml uv.lock .python-version ./
 COPY packages/api/pyproject.toml packages/api/pyproject.toml
 COPY packages/hosted_execution/pyproject.toml packages/hosted_execution/pyproject.toml
 COPY packages/worker/pyproject.toml packages/worker/pyproject.toml
+COPY packages/document_processor/pyproject.toml packages/document_processor/pyproject.toml
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --package centaeris-sandbox-tools --no-install-workspace
 

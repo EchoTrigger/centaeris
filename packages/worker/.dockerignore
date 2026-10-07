@@ -1,2 +1,7 @@
 __pycache__
 *.pyc
+AGENTS.md
+.local
+.env
+.env.*
+docker-compose.current.yml

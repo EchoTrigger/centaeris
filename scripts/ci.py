@@ -6,6 +6,8 @@ import re
 import subprocess
 import sys
 
+from products import package_flags
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -41,8 +43,8 @@ def run_gate(stage, run=run_command, platform=sys.platform, frontend_tests=False
              "scripts/harbor", "-p", "test_runner.py"])
         for args in (
             ["fmt", "--all", "--", "--check"],
-            ["check", "--workspace", "--locked"],
-            ["clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"],
+            ["check", "--locked", *package_flags()],
+            ["clippy", "--all-targets", "--locked", *package_flags(), "--", "-D", "warnings"],
             ["run", "--locked", "-p", "centaeris-runtime", "--bin", "centaeris-runtime-protocol-docs", "--", "--check"],
         ):
             run(["cargo", *args])
@@ -52,7 +54,7 @@ def run_gate(stage, run=run_command, platform=sys.platform, frontend_tests=False
         check_core_boundary()
         run(["cargo", "test", "--locked", "-p", "centaeris-core", "query_loop"])
         run(["cargo", "test", "--locked", "-p", "centaeris-runtime-sqlite", "--test", "core_runtime"])
-        run(["cargo", "test", "--workspace", "--locked"])
+        run(["cargo", "test", "--locked", *package_flags()])
     if stage in ("Node", "Source"):
         run([sys.executable, "-B", "scripts/test_system_skills.py"])
         run(["node", "--test", "packages/desktop/src/systemSkills.test.mjs"])
