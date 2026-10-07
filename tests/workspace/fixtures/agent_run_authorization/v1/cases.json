@@ -1,0 +1,716 @@
+[
+  {
+    "id": "baseline",
+    "changes": [],
+    "signerError": "",
+    "verifierStage": "accept",
+    "verifierError": "",
+    "rationale": "The existing v1 authorization must retain its literal digest and HMAC.",
+    "supportedSignerOutput": true,
+    "digest": "sha256:bd93e8ba466c0d9851e805dd2a8c8a5962b351065c4d982ae961ea0cdb0a6a9f",
+    "signature": "hmac-sha256:86d800a4e2517f1b169894646f9a7bb3297770235a7a3a0cbceffe1897969dd5"
+  },
+  {
+    "id": "input_limit",
+    "changes": [
+      {
+        "path": "/assetRefs/0/sizeBytes",
+        "value": 67108864
+      }
+    ],
+    "signerError": "",
+    "verifierStage": "accept",
+    "verifierError": "",
+    "rationale": "The Core direct-input ceiling is inclusive and Python must accept that same endpoint.",
+    "supportedSignerOutput": true,
+    "digest": "sha256:58e509ca7bae4a3cffa77d0dbfdb77c7f6cbfd3433dfb705aaf8a5fbd41eef0b",
+    "signature": "hmac-sha256:4bf6ee5db64ba617d8dd43df7287ecf04dc8900cccd05b9014ca56b70c2b5aa2"
+  },
+  {
+    "id": "input_over_limit",
+    "changes": [
+      {
+        "path": "/assetRefs/0/sizeBytes",
+        "value": 67108865
+      }
+    ],
+    "signerError": "direct input policy",
+    "verifierStage": "validate",
+    "verifierError": "direct materialization limit",
+    "rationale": "Both boundaries must reject an individual input above the Core direct-materialization ceiling.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "aggregate_at_half",
+    "changes": [
+      {
+        "path": "/assetRefs",
+        "value": [
+          {
+            "schema": "runtime.declared_input.v1",
+            "inputRef": "input_1",
+            "displayName": "notice.pdf",
+            "contentType": "application/pdf",
+            "inputIdentity": {
+              "ownerKind": "sourceObject",
+              "ownerId": "object_1",
+              "generation": 1,
+              "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "sizeBytes": 3
+          },
+          {
+            "schema": "runtime.declared_input.v1",
+            "inputRef": "input_2",
+            "displayName": "notice.pdf",
+            "contentType": "application/pdf",
+            "inputIdentity": {
+              "ownerKind": "sourceObject",
+              "ownerId": "object_1",
+              "generation": 1,
+              "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "sizeBytes": 2
+          }
+        ]
+      },
+      {
+        "path": "/resources/dataTmpfsBytes",
+        "value": 10
+      }
+    ],
+    "signerError": "",
+    "verifierStage": "accept",
+    "verifierError": "",
+    "rationale": "Two independently legal inputs may exactly consume half the configured tmpfs bytes.",
+    "supportedSignerOutput": true,
+    "digest": "sha256:04fd66a67c271d21c98e8552fb2447c1516772ea328403da0bcb272d9999fc8a",
+    "signature": "hmac-sha256:873cba55da25875461f793363ad8f6bcd0da105d7b90d7343210354c57826e0e"
+  },
+  {
+    "id": "aggregate_over_half",
+    "changes": [
+      {
+        "path": "/assetRefs",
+        "value": [
+          {
+            "schema": "runtime.declared_input.v1",
+            "inputRef": "input_1",
+            "displayName": "notice.pdf",
+            "contentType": "application/pdf",
+            "inputIdentity": {
+              "ownerKind": "sourceObject",
+              "ownerId": "object_1",
+              "generation": 1,
+              "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "sizeBytes": 3
+          },
+          {
+            "schema": "runtime.declared_input.v1",
+            "inputRef": "input_2",
+            "displayName": "notice.pdf",
+            "contentType": "application/pdf",
+            "inputIdentity": {
+              "ownerKind": "sourceObject",
+              "ownerId": "object_1",
+              "generation": 1,
+              "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "sizeBytes": 2
+          }
+        ]
+      },
+      {
+        "path": "/resources/dataTmpfsBytes",
+        "value": 9
+      }
+    ],
+    "signerError": "half of dataTmpfsBytes",
+    "verifierStage": "validate",
+    "verifierError": "half of dataTmpfsBytes",
+    "rationale": "The aggregate exceeds the integer half-tmpfs reservation by one byte, with each input independently legal.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "duplicate_inputs",
+    "changes": [
+      {
+        "path": "/assetRefs",
+        "value": [
+          {
+            "schema": "runtime.declared_input.v1",
+            "inputRef": "input_1",
+            "displayName": "notice.pdf",
+            "contentType": "application/pdf",
+            "inputIdentity": {
+              "ownerKind": "sourceObject",
+              "ownerId": "object_1",
+              "generation": 1,
+              "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "sizeBytes": 1
+          },
+          {
+            "schema": "runtime.declared_input.v1",
+            "inputRef": "input_1",
+            "displayName": "notice.pdf",
+            "contentType": "application/pdf",
+            "inputIdentity": {
+              "ownerKind": "sourceObject",
+              "ownerId": "object_1",
+              "generation": 1,
+              "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "sizeBytes": 1
+          }
+        ]
+      }
+    ],
+    "signerError": "sorted by unique inputRef",
+    "verifierStage": "validate",
+    "verifierError": "sorted by unique inputRef",
+    "rationale": "Each signed inputRef must be unique so materialization identity is unambiguous.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "unsorted_inputs",
+    "changes": [
+      {
+        "path": "/assetRefs",
+        "value": [
+          {
+            "schema": "runtime.declared_input.v1",
+            "inputRef": "input_2",
+            "displayName": "notice.pdf",
+            "contentType": "application/pdf",
+            "inputIdentity": {
+              "ownerKind": "sourceObject",
+              "ownerId": "object_1",
+              "generation": 1,
+              "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "sizeBytes": 2
+          },
+          {
+            "schema": "runtime.declared_input.v1",
+            "inputRef": "input_1",
+            "displayName": "notice.pdf",
+            "contentType": "application/pdf",
+            "inputIdentity": {
+              "ownerKind": "sourceObject",
+              "ownerId": "object_1",
+              "generation": 1,
+              "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "sizeBytes": 3
+          }
+        ]
+      }
+    ],
+    "signerError": "sorted by unique inputRef",
+    "verifierStage": "validate",
+    "verifierError": "sorted by unique inputRef",
+    "rationale": "The contract requires deterministic inputRef ordering, even when references are individually valid.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "unauthorized_message",
+    "changes": [
+      {
+        "path": "/messageAssetRefs",
+        "value": [
+          "input_2"
+        ]
+      }
+    ],
+    "signerError": "sorted unique",
+    "verifierStage": "validate",
+    "verifierError": "unauthorized inputRef",
+    "rationale": "A message may select only inputRefs included in the authorization.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "duplicate_messages",
+    "changes": [
+      {
+        "path": "/messageAssetRefs",
+        "value": [
+          "input_1",
+          "input_1"
+        ]
+      }
+    ],
+    "signerError": "sorted unique",
+    "verifierStage": "validate",
+    "verifierError": "sorted unique",
+    "rationale": "Message selections must be sorted unique authorized references.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "cpuMilli_max",
+    "changes": [
+      {
+        "path": "/resources/cpuMilli",
+        "value": 4294967295
+      }
+    ],
+    "signerError": "",
+    "verifierStage": "accept",
+    "verifierError": "",
+    "rationale": "The inclusive Rust resource integer maximum remains signable; no execution capacity guarantee is implied.",
+    "supportedSignerOutput": true,
+    "digest": "sha256:7d7b8e4504da6a5f58c323e7ce7ef22f57089564e02e74d6cb781897718daded",
+    "signature": "hmac-sha256:7b16cdb7238bf3dcd49c493b094cb1265e14e82e030cb6da02cef60983285c0b"
+  },
+  {
+    "id": "cpuMilli_overflow",
+    "changes": [
+      {
+        "path": "/resources/cpuMilli",
+        "value": 4294967296
+      }
+    ],
+    "signerError": "transport range",
+    "verifierStage": "deserialize",
+    "verifierError": "expected u32",
+    "rationale": "API-configured resources must fit the Rust transport type.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "pidsLimit_max",
+    "changes": [
+      {
+        "path": "/resources/pidsLimit",
+        "value": 4294967295
+      }
+    ],
+    "signerError": "",
+    "verifierStage": "accept",
+    "verifierError": "",
+    "rationale": "The inclusive Rust resource integer maximum remains signable; no execution capacity guarantee is implied.",
+    "supportedSignerOutput": true,
+    "digest": "sha256:dea6a5fb9486b8e1cada056d8851480d7d28111b554254d4b538bb8158961ed6",
+    "signature": "hmac-sha256:e630f6598b8d2495b7a3e2af7fb0cc0e749518f05f297a8066cb00318839f596"
+  },
+  {
+    "id": "pidsLimit_overflow",
+    "changes": [
+      {
+        "path": "/resources/pidsLimit",
+        "value": 4294967296
+      }
+    ],
+    "signerError": "transport range",
+    "verifierStage": "deserialize",
+    "verifierError": "expected u32",
+    "rationale": "API-configured resources must fit the Rust transport type.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "memoryBytes_max",
+    "changes": [
+      {
+        "path": "/resources/memoryBytes",
+        "value": 18446744073709551615
+      }
+    ],
+    "signerError": "",
+    "verifierStage": "accept",
+    "verifierError": "",
+    "rationale": "The inclusive Rust resource integer maximum remains signable; no execution capacity guarantee is implied.",
+    "supportedSignerOutput": true,
+    "digest": "sha256:c3d0a64a259ca7ae834abac71a39392a48be3971916de8d8bbcf978af5fcf458",
+    "signature": "hmac-sha256:a06b0a5783c2b1fa2401cd62e134b0fd298f1f91dd444625362db84912c68525"
+  },
+  {
+    "id": "dataTmpfsBytes_max",
+    "changes": [
+      {
+        "path": "/resources/dataTmpfsBytes",
+        "value": 18446744073709551615
+      }
+    ],
+    "signerError": "",
+    "verifierStage": "accept",
+    "verifierError": "",
+    "rationale": "The inclusive Rust resource integer maximum remains signable; no execution capacity guarantee is implied.",
+    "supportedSignerOutput": true,
+    "digest": "sha256:3fe86e13368083fe6d2e7308b4fb1218fcf8d2668425932be29ba57d55942894",
+    "signature": "hmac-sha256:205b9d5b44fb3715a58a78551504fa499e56c43d6ce149804a33c726232003a1"
+  },
+  {
+    "id": "cpu_zero",
+    "changes": [
+      {
+        "path": "/resources/cpuMilli",
+        "value": 0
+      }
+    ],
+    "signerError": "positive integers",
+    "verifierStage": "validate",
+    "verifierError": "positive",
+    "rationale": "Resource counts must be positive integers; bools and floating-point values are not integer transport values.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "cpu_negative",
+    "changes": [
+      {
+        "path": "/resources/cpuMilli",
+        "value": -1
+      }
+    ],
+    "signerError": "positive integers",
+    "verifierStage": "deserialize",
+    "verifierError": "invalid value",
+    "rationale": "Resource counts must be positive integers; bools and floating-point values are not integer transport values.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "cpu_bool",
+    "changes": [
+      {
+        "path": "/resources/cpuMilli",
+        "value": true
+      }
+    ],
+    "signerError": "positive integers",
+    "verifierStage": "deserialize",
+    "verifierError": "invalid type",
+    "rationale": "Resource counts must be positive integers; bools and floating-point values are not integer transport values.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "cpu_float",
+    "changes": [
+      {
+        "path": "/resources/cpuMilli",
+        "value": 1.5
+      }
+    ],
+    "signerError": "positive integers",
+    "verifierStage": "deserialize",
+    "verifierError": "invalid type",
+    "rationale": "Resource counts must be positive integers; bools and floating-point values are not integer transport values.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "unknown_field",
+    "changes": [
+      {
+        "path": "/unexpected",
+        "value": true
+      }
+    ],
+    "signerError": "fields mismatch",
+    "verifierStage": "deserialize",
+    "verifierError": "unknown field",
+    "rationale": "The clean-slate v1 envelope rejects unknown fields rather than silently omitting them from the digest.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "unknown_nested",
+    "changes": [
+      {
+        "path": "/resources/unexpected",
+        "value": true
+      }
+    ],
+    "signerError": "fields mismatch",
+    "verifierStage": "deserialize",
+    "verifierError": "unknown field",
+    "rationale": "Nested resource fields are exact too; unknown policy fields cannot be silently dropped.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "null_required",
+    "changes": [
+      {
+        "path": "/sessionId",
+        "value": null
+      }
+    ],
+    "signerError": "required",
+    "verifierStage": "deserialize",
+    "verifierError": "invalid type",
+    "rationale": "sessionId is a required string; explicit null is not an absent optional value.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "thinking_null",
+    "changes": [
+      {
+        "path": "/thinkingMode",
+        "value": null
+      }
+    ],
+    "signerError": "",
+    "verifierStage": "accept",
+    "verifierError": "",
+    "rationale": "The builder emits explicit null when no thinking override is selected.",
+    "supportedSignerOutput": true,
+    "digest": "sha256:92640d07cdc79750ed2c8d91ad9545d22f7aa25cfffc91c6c75abeea2caa9e59",
+    "signature": "hmac-sha256:139977c8a633f1c5fbd95504f57074d16f41839992afca815f16d112baf541a6"
+  },
+  {
+    "id": "thinking_arbitrary",
+    "changes": [
+      {
+        "path": "/thinkingMode",
+        "value": "banana"
+      }
+    ],
+    "signerError": "",
+    "verifierStage": "accept",
+    "verifierError": "",
+    "rationale": "Thinking mode is an open bounded string, not a hard-coded enumeration.",
+    "supportedSignerOutput": true,
+    "digest": "sha256:8a9a45738d4e59d1c4c021ed1d3b7d752318efd40791db2ffeeb5dc58e19e193",
+    "signature": "hmac-sha256:882a8a33619e23f0f8166345b25196f07277847559412fd6928f693b26cf4022"
+  },
+  {
+    "id": "thinking_max",
+    "changes": [
+      {
+        "path": "/thinkingMode",
+        "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ],
+    "signerError": "",
+    "verifierStage": "accept",
+    "verifierError": "",
+    "rationale": "The common thinking-mode length ceiling includes 64 characters.",
+    "supportedSignerOutput": true,
+    "digest": "sha256:ccc3e4795fb4a7291a15d6afd10e51820aa50af5f97da520123e36e40a19393b",
+    "signature": "hmac-sha256:db664ff0aad5571ddf290b9797d684e6c5670b1a1219a2bdfc22c20a018e3426"
+  },
+  {
+    "id": "thinking_too_long",
+    "changes": [
+      {
+        "path": "/thinkingMode",
+        "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ],
+    "signerError": "thinking mode",
+    "verifierStage": "validate",
+    "verifierError": "thinkingMode",
+    "rationale": "A 65-character thinking override exceeds both existing string contracts.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "thinking_control",
+    "changes": [
+      {
+        "path": "/thinkingMode",
+        "value": "a\u0000b"
+      }
+    ],
+    "signerError": "thinking mode",
+    "verifierStage": "validate",
+    "verifierError": "thinkingMode",
+    "rationale": "Embedded NUL is prohibited by both thinking-mode validators.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "thinking_format_character",
+    "changes": [
+      {
+        "path": "/thinkingMode",
+        "value": "a‍b"
+      }
+    ],
+    "signerError": "thinking mode",
+    "verifierStage": "accept",
+    "verifierError": "",
+    "rationale": "Characterization: Python excludes Unicode Cf; Rust permits it. Outside supported signer outputs; no policy tightening.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "unicode_escapes",
+    "changes": [
+      {
+        "path": "/assetRefs/0/displayName",
+        "value": "中文é \"quote\" \\ slash\nline"
+      }
+    ],
+    "signerError": "",
+    "verifierStage": "accept",
+    "verifierError": "",
+    "rationale": "Accepted display-name Unicode and escaping must produce identical canonical bytes and HMACs.",
+    "supportedSignerOutput": true,
+    "digest": "sha256:e51160fd61ff165ed866dbfedc3ab742fba2647ed143fea85edf6771e1e9fa15",
+    "signature": "hmac-sha256:f840f31009b12bf83369efe78d8f150f84fc8994ea52bbc948b7d00e6c629afa"
+  },
+  {
+    "id": "embedded_nul",
+    "changes": [
+      {
+        "path": "/organizationId",
+        "value": "org\u0000one"
+      }
+    ],
+    "signerError": "",
+    "verifierStage": "accept",
+    "verifierError": "",
+    "rationale": "Characterization of accepted opaque refs; not a safety-policy assertion.",
+    "supportedSignerOutput": false,
+    "digest": "sha256:9e8eafba1e0b8e1b10aba842c5904ad80430eadd9eaba1e6cd809fab4eef09a9",
+    "signature": "hmac-sha256:38a551bd4b808b9dfbb27db8adea074ce8e08441a3d6389b2bacc77c94e8eb86"
+  },
+  {
+    "id": "non_nfc",
+    "changes": [
+      {
+        "path": "/organizationId",
+        "value": "é"
+      }
+    ],
+    "signerError": "NFC",
+    "verifierStage": "validate",
+    "verifierError": "NFC",
+    "rationale": "Opaque references must be NFC; canonical serialization must not silently normalize identities.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "empty_workspace",
+    "changes": [
+      {
+        "path": "/sessionWorkspace",
+        "value": {
+          "generation": 0,
+          "snapshotSha256": "",
+          "snapshotSizeBytes": 0,
+          "expandedSizeBytes": 0,
+          "fileCount": 0
+        }
+      }
+    ],
+    "signerError": "",
+    "verifierStage": "accept",
+    "verifierError": "",
+    "rationale": "Generation zero with all snapshot metadata empty is the initial workspace shape.",
+    "supportedSignerOutput": true,
+    "digest": "sha256:72f113cb6310b71b4afa4360a307638d2d0743b4a298cb63239ea68a3f3fae88",
+    "signature": "hmac-sha256:457cf94007cf5af850ab9a24e35a46e938318c50f00c676c8a3bae93b513eae9"
+  },
+  {
+    "id": "generation_zero_nonempty",
+    "changes": [
+      {
+        "path": "/sessionWorkspace/generation",
+        "value": 0
+      }
+    ],
+    "signerError": "generation zero",
+    "verifierStage": "validate",
+    "verifierError": "generation zero",
+    "rationale": "Generation zero cannot authorize a non-empty snapshot.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "snapshot_missing_size",
+    "changes": [
+      {
+        "path": "/sessionWorkspace/snapshotSizeBytes",
+        "value": 0
+      }
+    ],
+    "signerError": "requires size",
+    "verifierStage": "validate",
+    "verifierError": "requires size",
+    "rationale": "A non-empty snapshot needs positive archive size as well as a file count.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "nonempty_activation",
+    "changes": [
+      {
+        "path": "/pluginActivation",
+        "value": {
+          "schema": "plugin_activation_snapshot_v1",
+          "packages": [
+            {
+              "name": "synthetic-plugin",
+              "version": "1.0.0",
+              "packageDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "skills": [
+                {
+                  "path": "skills/example/SKILL.md",
+                  "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                }
+              ],
+              "cli": [],
+              "mcpServers": [],
+              "hooks": []
+            }
+          ],
+          "digest": "sha256:c6c1742097871447a337c3586ea22570c808ec2c0b63bd9a2419ac92c98ad47d"
+        }
+      }
+    ],
+    "signerError": "",
+    "verifierStage": "accept",
+    "verifierError": "",
+    "rationale": "A synthetic non-empty activation must agree with Core digest and nested resource semantics.",
+    "supportedSignerOutput": true,
+    "digest": "sha256:ce9d4cc04066d5ffed4268f11818a70521f46f6a08c6bba5e4d06e9501ca9e05",
+    "signature": "hmac-sha256:3a71c531ba6b37c0c87e66e5d5e30024e113b42a79a68cb9da4bb0bd4ae4d6b3"
+  },
+  {
+    "id": "activation_tamper",
+    "changes": [
+      {
+        "path": "/pluginActivation/digest",
+        "value": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    ],
+    "signerError": "digest mismatch",
+    "verifierStage": "validate",
+    "verifierError": "digest",
+    "rationale": "The nested activation digest must authenticate the package list before authorization is accepted.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "activation_unknown",
+    "changes": [
+      {
+        "path": "/pluginActivation/unknown",
+        "value": true
+      }
+    ],
+    "signerError": "fields mismatch",
+    "verifierStage": "deserialize",
+    "verifierError": "unknown field",
+    "rationale": "Core activation fields are strict and Python must enforce the same field set.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "schema_mismatch",
+    "changes": [
+      {
+        "path": "/schema",
+        "value": "unknown"
+      }
+    ],
+    "signerError": "schema_mismatch",
+    "verifierStage": "validate",
+    "verifierError": "schema_mismatch",
+    "rationale": "An unsupported authorization identity must fail loudly in v1.",
+    "supportedSignerOutput": false
+  },
+  {
+    "id": "missing_session",
+    "changes": [
+      {
+        "path": "/sessionId"
+      }
+    ],
+    "signerError": "fields mismatch",
+    "verifierStage": "deserialize",
+    "verifierError": "missing field",
+    "rationale": "Required transport field must be present.",
+    "supportedSignerOutput": false
+  }
+]

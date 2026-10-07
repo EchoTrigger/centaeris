@@ -1,0 +1,18 @@
+{
+  "name": "get_work_request",
+  "category": "runtime.coordination",
+  "summary": "Read one dispatch request from this native private Agent's coordination Session by source Run and tool call. The server resolves the unique full run/turn/call identity. notRecorded means no trusted committed success was found; it does not authorize repeating or rebuilding the request. pending means a committed request has no admission yet, including retained rewritten requests. admitted means hosted admission exists, not that work completed. Source projection and child availability/status are separate facts. This query never starts or repairs work.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "source_agent_run_id": {"type": "string", "minLength": 1, "maxLength": 160},
+      "source_tool_call_id": {"type": "string", "minLength": 1, "maxLength": 160}
+    },
+    "required": ["source_agent_run_id", "source_tool_call_id"],
+    "additionalProperties": false
+  },
+  "providerId": "workspace.agent_work",
+  "scopes": [],
+  "concurrencySafe": true,
+  "turnBehavior": "continueTurn"
+}

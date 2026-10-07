@@ -1,0 +1,98 @@
+{
+  "schema": "centaeris.document_processor.model_tier_benchmark.v1",
+  "recordedAt": "2026-08-11",
+  "environment": {
+    "cpuCount": 8,
+    "memoryGiB": 16,
+    "network": "none",
+    "renderDpi": 220,
+    "execution": "serial same-process cold and warm runs"
+  },
+  "comparisonImage": {
+    "image": "centaeris-document-processor:ab-small-cpu8",
+    "imageDigest": "sha256:a7a8fd2ed34882d6d2a2ea749ac41d57405d24d195bc2023991113c452a707f3",
+    "imageSizeBytes": 861966307,
+    "note": "Experimental dual-model image used only for this comparison and deleted after the Small baseline images passed."
+  },
+  "models": {
+    "small": ["PP-OCRv6_small_det", "PP-OCRv6_small_rec"],
+    "medium": ["PP-OCRv6_medium_det", "PP-OCRv6_medium_rec"]
+  },
+  "samples": [
+    {
+      "sha256": "46bc37bd4655552640c13f85dc513586ab1cf5c086d37a06b7c4cef36f481184",
+      "pages": 2,
+      "small": {
+        "coldSeconds": 25.101,
+        "warmSeconds": [24.510, 20.699, 21.039],
+        "warmMedianSeconds": 21.039,
+        "canonicalSha256": "271f80f4323500f168a7c161d11021a17de050a374a85bad64a555d0056ed63a"
+      },
+      "medium": {
+        "coldSeconds": 99.891,
+        "warmSeconds": [108.682, 101.468, 95.105],
+        "warmMedianSeconds": 101.468,
+        "canonicalSha256": "9173ee9e6b6166d49232ba3159b014293f2e1bfc9267782af4ec5e07afff942a"
+      },
+      "smallAfterMedium": {
+        "coldSeconds": 31.926,
+        "warmSeconds": 28.431
+      }
+    },
+    {
+      "sha256": "0b9ccb188dac76e58a44955455dc7f0f2f5fda0a800832501af8129f6f13c7bc",
+      "pages": 9,
+      "small": {
+        "seconds": 100.495,
+        "canonicalSha256": "88cf6cff502f49f23a74438980da618495d887e2643876fe75e8ce18ba50d362"
+      },
+      "medium": {
+        "seconds": 419.202,
+        "canonicalSha256": "0a34464c965cedc29165c0bae4cc67b0c105cf4a4a09d88f178b5e7588575f87"
+      }
+    }
+  ],
+  "observedPeakMemoryGiB": {
+    "small": 1.83,
+    "medium": 3.66
+  },
+  "quality": {
+    "page2HumanReferenceCer": {
+      "referenceCharacters": 1152,
+      "smallEdits": 5,
+      "small": 0.00434,
+      "mediumEdits": 1,
+      "medium": 0.000868
+    },
+    "pages2To9TextProxyEditRate": {
+      "referenceCharacters": 9742,
+      "smallEdits": 318,
+      "small": 0.0326,
+      "mediumEdits": 271,
+      "medium": 0.0278,
+      "mediumBetterPages": 6,
+      "smallBetterPages": 2
+    },
+    "note": "Page 1 was excluded because the reference text was noisy. The pages 2-9 metric is a text proxy, not a human ground-truth CER."
+  },
+  "postSwitchSmoke": {
+    "sampleSha256": "46bc37bd4655552640c13f85dc513586ab1cf5c086d37a06b7c4cef36f481184",
+    "cpu": {
+      "image": "centaeris-document-processor:1.0.0-cpu8",
+      "imageDigest": "sha256:773517e1a4c1f8e69900da3adc40acb5fe4ed304027110a822c8c7a1f442a3e0",
+      "imageSizeBytes": 756948698,
+      "elapsedSeconds": 33.794,
+      "canonicalSha256": "271f80f4323500f168a7c161d11021a17de050a374a85bad64a555d0056ed63a"
+    },
+    "gpu": {
+      "image": "centaeris-document-processor:1.0.0-gpu0-cu126",
+      "imageDigest": "sha256:716bab5b5bb07521282ba6c43b57f5d50b35e8c9c658691c0ec725003b81e0e7",
+      "imageSizeBytes": 4616117156,
+      "elapsedSeconds": 9.327,
+      "canonicalSha256": "eb61d01897bb3f7611c2f3bd26443311c5c2d357a46a8bb81e5ea1ff708a67e0"
+    },
+    "routes": ["ppOcrV6Small", "ppOcrV6Small"],
+    "crossDeviceDifference": "Page 1 differs only by one space in 'Washington, D.C.'; page 2 text SHA-256 is identical. CPU and GPU are separate processor specifications, so cross-device byte identity is not claimed."
+  },
+  "decision": "PP-OCRv6 Small is the sole current baseline at processor version 1.0.0; Medium remains historical evidence only."
+}

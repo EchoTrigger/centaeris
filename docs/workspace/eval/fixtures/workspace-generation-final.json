@@ -1,0 +1,114 @@
+{
+  "schema": "workspace.generation.safety_eval.v1",
+  "recordedAt": "2026-08-31T09:57:22.8120775+08:00",
+  "scope": "Isolated local Docker workspace generation query phase; not end-to-end AgentRun, model latency, or snapshot upload throughput.",
+  "imageId": "sha256:bd6aba96228940b4d32ba5ada74d19633bcb2d11141a036d341618c14c8a7bf3",
+  "executionAgentSourceSha256": "f1de568805986860b70e8d269c8dabd61ed1dd90cc96c2c79a144fc16fe8a690",
+  "sandbox": {
+    "capabilities": [
+      "CHOWN"
+    ],
+    "noNewPrivileges": true,
+    "network": "none",
+    "readOnlyRoot": true,
+    "agentUid": 10001
+  },
+  "finalRpc": {
+    "queries": 42,
+    "dockerExecProcesses": 1,
+    "warmSamples": 41,
+    "coldMs": 158.484,
+    "warmP50Ms": 1.706,
+    "warmP95Ms": 2.035,
+    "totalMs": 238.477,
+    "totalIncludesSpawnAndDrop": true,
+    "includesQuiescenceGuard": true,
+    "rawIndividualDurationsRecorded": false
+  },
+  "earlierOneShotBaseline": {
+    "queries": 42,
+    "dockerExecProcesses": 42,
+    "meanMs": 233.099,
+    "p50Ms": 233.978,
+    "p95Ms": 247.155,
+    "totalMs": 9790.161,
+    "harness": "Same-host PowerShell process timing of the actual one-shot Docker helper, recorded earlier in this repair."
+  },
+  "comparison": {
+    "totalTimeReductionPercent": 97.56411564631063,
+    "speedup": 41.05285205701178
+  },
+  "obsoletePreGuardRpc": {
+    "totalMs": 210.962,
+    "note": "Superseded by the final quiescence-guard measurement; not the final implementation result."
+  },
+  "mmapRegression": {
+    "stimulus": "A uid10001 background ctypes MAP_SHARED writer survives the same timeout/bash foreground wrapper, closes its original file descriptor, writes A->B via memset+msync, and keeps the mapping alive.",
+    "beforeGuard": {
+      "foregroundExitCode": 0,
+      "initialGeneration": 3,
+      "afterMappedWriteGeneration": 3,
+      "actualContent": "B",
+      "writerStillAlive": true,
+      "afterExistingAgentQuiesceGeneration": 4
+    },
+    "final": {
+      "foregroundExitCode": 0,
+      "instanceEpoch": "7462eb68-a846-49c3-97eb-4bd20f2e08dd",
+      "initial": {
+        "generation": 3,
+        "diagnostic": null
+      },
+      "beforeMappedWrite": {
+        "generation": null,
+        "diagnostic": "workspace has active agent processes; collect must quiesce them"
+      },
+      "afterMappedWrite": {
+        "generation": null,
+        "diagnostic": "workspace has active agent processes; collect must quiesce them"
+      },
+      "afterExistingAgentQuiesce": {
+        "generation": 4,
+        "diagnostic": null
+      },
+      "afterReadonlyForegroundBash": {
+        "generation": 4,
+        "diagnostic": null
+      },
+      "actualContent": "B",
+      "assertionsPassed": true
+    },
+    "fallback": "Unknown forces the existing snapshot collect path, which quiesces agent processes as uid10001; an unchanged descriptor can still reuse the previous snapshot without staging. No extra capability or per-query Docker process is added.",
+    "reproduction": "pwsh -NoProfile -File docs/eval/fixtures/workspace-generation-mmap-probe.ps1 -ExecutionImage <locally-built-execution-image>"
+  },
+  "focusedGates": {
+    "coreQueryLoop": {
+      "passed": 26,
+      "failed": 0
+    },
+    "runtimeGeneration": {
+      "passed": 5,
+      "failed": 0,
+      "ignoredDockerBenchmark": 1
+    },
+    "hostedGenerationAfterGuardWindows": {
+      "passed": 3,
+      "failed": 0
+    },
+    "liveDockerFinalMmap": {
+      "passed": 1,
+      "failed": 0
+    },
+    "liveDockerFinalRpcBenchmark": {
+      "passed": 1,
+      "failed": 0
+    }
+  },
+  "rpcReproduction": {
+    "containerSetup": "Start an isolated execution image with workspace-watch, /mnt/data and /run/centaeris tmpfs, and no active uid10001 processes.",
+    "environmentVariable": "CENTAERIS_GENERATION_BENCH_CONTAINER",
+    "command": "cargo test --locked -p runtime_server workspace_generation_rpc_docker_42_query_benchmark -- --ignored --nocapture",
+    "buildJobs": 1
+  },
+  "cleanup": "Both temporary mmap probe and RPC benchmark containers were removed. No existing service or user data was modified."
+}

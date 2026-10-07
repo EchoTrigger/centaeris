@@ -1,0 +1,75 @@
+[
+  {
+    "name": "control-byte-output",
+    "wire": {
+      "type": "tool_result",
+      "payload": {
+        "callId": "call_fixture",
+        "modelContent": "kernel\u0000\nLiteral \\u0000\n中文",
+        "resultState": "successWithOutput",
+        "items": [
+          "\u0000",
+          true,
+          7,
+          null
+        ]
+      }
+    },
+    "stored": {
+      "type": "tool_result",
+      "payload": {
+        "callId": "call_fixture",
+        "modelContent": "kernel␀\nLiteral \\u0000\n中文",
+        "resultState": "successWithOutput",
+        "items": [
+          "␀",
+          true,
+          7,
+          null
+        ]
+      },
+      "__centaerisSessionStorage": {
+        "schema": "workspace.session_event.storage.v1",
+        "canonicalJson": "{\"payload\":{\"callId\":\"call_fixture\",\"items\":[\"\\u0000\",true,7,null],\"modelContent\":\"kernel\\u0000\\nLiteral \\\\u0000\\n中文\",\"resultState\":\"successWithOutput\"},\"type\":\"tool_result\"}"
+      }
+    }
+  },
+  {
+    "name": "literal-escape-only",
+    "wire": {
+      "type": "tool_result",
+      "payload": {
+        "modelContent": "Literal \\u0000",
+        "resultState": "failed"
+      }
+    },
+    "stored": {
+      "type": "tool_result",
+      "payload": {
+        "modelContent": "Literal \\u0000",
+        "resultState": "failed"
+      }
+    }
+  },
+  {
+    "name": "failed-control-byte-output",
+    "wire": {
+      "type": "tool_result",
+      "payload": {
+        "modelContent": "failure\u0000detail",
+        "resultState": "failed"
+      }
+    },
+    "stored": {
+      "type": "tool_result",
+      "payload": {
+        "modelContent": "failure␀detail",
+        "resultState": "failed"
+      },
+      "__centaerisSessionStorage": {
+        "schema": "workspace.session_event.storage.v1",
+        "canonicalJson": "{\"payload\":{\"modelContent\":\"failure\\u0000detail\",\"resultState\":\"failed\"},\"type\":\"tool_result\"}"
+      }
+    }
+  }
+]

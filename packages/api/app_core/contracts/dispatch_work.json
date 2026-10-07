@@ -1,0 +1,19 @@
+{
+  "name": "dispatch_work",
+  "category": "runtime.coordination",
+  "summary": "Record one explicit work request for this private Agent. Include the complete objective and explicitly selected resource refs. This receipt records the request; a separate hosted admission creates the work Session after the successful request is committed.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "objective": {"type": "string", "minLength": 1, "maxLength": 65536},
+      "session_refs": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+      "file_refs": {"type": "array", "items": {"type": "string"}, "maxItems": 8}
+    },
+    "required": ["objective", "session_refs", "file_refs"],
+    "additionalProperties": false
+  },
+  "providerId": "workspace.agent_work",
+  "scopes": [],
+  "concurrencySafe": false,
+  "turnBehavior": "continueTurn"
+}

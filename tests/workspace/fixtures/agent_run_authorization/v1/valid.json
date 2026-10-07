@@ -1,0 +1,51 @@
+{
+  "schema": "workspace.agent_run_authorization.v1",
+  "id": "authorization_1",
+  "organizationId": "org_1",
+  "workspaceId": "ws_1",
+  "userId": "user_1",
+  "agentId": "centaeris",
+  "sessionId": "sess_1",
+  "agentRunId": "agent_run_1",
+  "sessionWorkspace": {
+    "generation": 7,
+    "snapshotSha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "snapshotSizeBytes": 13,
+    "expandedSizeBytes": 7,
+    "fileCount": 1
+  },
+  "modelConfigRef": "model_1",
+  "thinkingMode": "high",
+  "artifactScopeRef": "artifact_scope_1",
+  "assetRefs": [
+    {
+      "schema": "runtime.declared_input.v1",
+      "inputRef": "input_1",
+      "displayName": "notice.pdf",
+      "contentType": "application/pdf",
+      "inputIdentity": {
+        "ownerKind": "sourceObject",
+        "ownerId": "object_1",
+        "generation": 1,
+        "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "sizeBytes": 1
+    }
+  ],
+  "messageAssetRefs": [
+    "input_1"
+  ],
+  "imageCapability": "workspace_general_v1",
+  "imageDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "pluginActivation": {
+    "schema": "plugin_activation_snapshot_v1",
+    "digest": "sha256:3bf31c5d8d4d6523712c9ef2b194d4b0edb3255155a49e76f44bbe7382e54f75",
+    "packages": []
+  },
+  "resources": {
+    "memoryBytes": 2147483648,
+    "cpuMilli": 2000,
+    "pidsLimit": 512,
+    "dataTmpfsBytes": 4294967296
+  }
+}

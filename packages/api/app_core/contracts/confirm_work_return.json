@@ -1,0 +1,18 @@
+{
+  "name": "confirm_work_return",
+  "category": "runtime.coordination",
+  "summary": "Explicitly confirm one accepted work return owned by this Run. Use the exact notice and attempt identities from the native input or get_work_request. Validation alone does not handle the return: only the matching successful Session commit does. Continue working after confirmation.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "notice_id": {"type": "string", "minLength": 1, "maxLength": 160},
+      "attempt_id": {"type": "string", "minLength": 1, "maxLength": 160}
+    },
+    "required": ["notice_id", "attempt_id"],
+    "additionalProperties": false
+  },
+  "providerId": "workspace.agent_work",
+  "scopes": [],
+  "concurrencySafe": false,
+  "turnBehavior": "continueTurn"
+}
