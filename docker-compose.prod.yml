@@ -1,0 +1,15 @@
+# 生产/演示部署 override：收口对外端口，配合外部 HTTPS 反向代理使用。
+# 用法（在仓库根目录）：
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# 规则：
+#   - 移除 api(8000) / postgres-test(55432) / redis-test(6379) 的 host 端口映射；
+#     API 与测试服务只通过 docker internal network 互联。
+#   - Web 只绑定宿主 loopback 6767，外部 HTTPS 反向代理是唯一公网入口。
+#   - postgres-test 与 redis-test 已在基础 compose 中通过 profiles: ["test"] 隔离，本文件不再引入。
+services:
+  api:
+    ports: !reset []
+
+  web:
+    ports: !override
+      - "127.0.0.1:6767:3000"

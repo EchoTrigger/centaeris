@@ -1,0 +1,86 @@
+{
+  "schema": "centaeris.performance_repair_eval.v1",
+  "percentiles": {
+    "method": "nearestRank",
+    "minimumSampleCount": 20
+  },
+  "toolContinuation": {
+    "rounds": 20,
+    "baseline": {
+      "source": "auditedRun",
+      "compliantRounds": 18,
+      "duplicateToolRounds": 2
+    },
+    "current": {
+      "source": "deterministicGate",
+      "compliancePerRound": 1,
+      "duplicateToolsPerRound": 0
+    }
+  },
+  "cachePrefix": {
+    "source": "priorDeterministicGate",
+    "note": "Prior 80-to-81 measurements only; larger message-count boundaries and request-build timings come exclusively from the live Core gate.",
+    "legacy80Cap": {
+      "commonPrefixMessages": 0,
+      "commonPrefixBytes": 0,
+      "commonPrefixTokens": 0,
+      "retainedMessagesAt80": 80,
+      "retainedMessagesAt81": 80
+    },
+    "tokenBudgetOnly": {
+      "commonPrefixMessages": 80,
+      "commonPrefixBytes": 8873,
+      "commonPrefixTokens": 2241,
+      "retainedMessagesAt80": 80,
+      "retainedMessagesAt81": 81
+    },
+    "providerCachedInputTokens": null
+  },
+  "mcpStartup": {
+    "source": "deterministicGate",
+    "servers": 9,
+    "legacyEagerServers": 9,
+    "staticStartupConnects": 0,
+    "staticStartupDiscoveries": 0,
+    "staticStartupCredentialReads": 0,
+    "firstUseConcurrentCalls": 8,
+    "firstUseConnects": 1
+  },
+  "recoverySnapshots": {
+    "source": "deterministicGate",
+    "readOnlyModelRequests": 42,
+    "legacyCollectsPerRequest": 1,
+    "legacyStageCallsPerRequest": 1,
+    "currentCollectsPerRequest": 0,
+    "currentStageCallsPerRequest": 0,
+    "oneRealWriteCollectHelperCalls": 2,
+    "oneRealWriteStageCalls": 1,
+    "writeRevertCollectHelperCalls": 1,
+    "writeRevertStageCalls": 0
+  },
+  "workerScheduling": {
+    "source": "deterministicGate",
+    "slots": 2,
+    "legacyFixedPollMs": 1000,
+    "notificationPickupFixtureMs": 7,
+    "legacyIdleScanCyclesPerMinute": 120,
+    "currentIdleScanCyclesPerMinute": 6,
+    "legacyIdleClaimHttpPerMinute": 360,
+    "currentIdleClaimHttpPerMinute": 18,
+    "currentIdleWaitHttpPerMinute": 6,
+    "legacyIdleTotalHttpPerMinute": 360,
+    "currentIdleTotalHttpPerMinute": 24
+  },
+  "browserRender": {
+    "source": "playwrightBrowserClock",
+    "schema": "workspace.chat_render_telemetry.v1",
+    "stages": [
+      "acceptedAt",
+      "reducerAppliedAt",
+      "domCommitAt",
+      "domPaintBoundaryAt"
+    ],
+    "paintBoundary": "secondAnimationFrameAfterLayoutEffect",
+    "samples": []
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "name": "web",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "baseline:transcript": "node --test tests/unit/transcript-baseline.test.mjs",
+    "build": "npm run lint && npm run typecheck && vite build",
+    "dev": "vite --host 0.0.0.0 --port 3000",
+    "lint": "npm --prefix ../.. run lint",
+    "lint:hooks": "npm --prefix ../.. run lint:hooks",
+    "lint:unused": "npm --prefix ../.. run lint:unused",
+    "test:chat-ui": "node --test tests/browser/chat-presentation.test.mjs tests/browser/transcript-message-actions.test.mjs tests/browser/transcript-recovery-scroll.test.mjs tests/browser/transcript-disclosure-direction.test.mjs tests/browser/transcript-disclosure-stationary.test.mjs",
+    "test:agent-chat-route": "node --test tests/browser/agent-chat-route.test.mjs tests/browser/agent-panel-sizing.test.mjs tests/browser/agent-input-attachments.test.mjs",
+    "test:app-delegations": "node --test tests/browser/app-delegations.test.mjs",
+    "test:transcript-reader": "node --test tests/browser/transcript-reader.test.mjs",
+    "test:unit": "node --test tests/unit/operation-receipts.test.mjs tests/unit/details-dismissal.test.ts tests/unit/message-scroll.test.ts tests/unit/model-preferences.test.mjs tests/unit/transcript-content-reader.test.mjs tests/unit/transcript-content-recovery.test.mjs tests/unit/chat-runtime.test.mjs tests/unit/transcript-page-client.test.mjs tests/unit/transcript-golden.test.mjs tests/unit/transcript-no-full-history-fallback.test.mjs tests/unit/lint-config.test.mjs tests/unit/i18n.test.mjs tests/unit/citation-snapshot.test.mjs tests/unit/transcript-citations.test.mjs tests/unit/office-preview.test.mjs tests/unit/code-preview.test.mjs tests/unit/tool-group-title.test.mjs tests/unit/work-progress.test.mjs tests/unit/agent-chat-time.test.ts tests/unit/agent-output-feed.test.ts tests/unit/agent-chat-navigation.test.ts tests/unit/prepared-agent-input.test.ts tests/unit/composer-model-picker.test.mjs tests/unit/agent-history.test.ts tests/unit/agent-model-settings.test.ts tests/unit/agent-settings-navigation.test.ts tests/unit/agent-chat-route-recovery.test.mjs tests/unit/agent-settings-interactions.test.mjs tests/unit/agent-editor-focus.test.mjs tests/unit/agent-session-navigation.test.mjs tests/unit/agent-input-composer.test.mjs tests/unit/agent-chat-input-read.test.mjs tests/unit/agent-previews.test.mjs tests/unit/agent-preview-data.test.ts tests/unit/agent-preview-content.test.mjs tests/unit/agent-preview-invalidation.test.mjs tests/unit/agent-chat-layout.test.mjs tests/unit/agent-surface-refinement.test.mjs tests/unit/agent-preview-focus.test.mjs tests/unit/model-error-display.test.mjs tests/unit/transcript-work-display.test.mjs tests/unit/agent-preview-lifecycle.test.mjs tests/unit/app-delegation-guide.test.ts tests/unit/transcript-atomic-open.test.mjs tests/unit/session-stream-presentation.test.mjs tests/unit/agent-input-attachments.test.ts tests/unit/agent-work-sessions.test.mjs tests/unit/session-input-origin-route.test.mjs tests/unit/transcript-input-origin.test.mjs",
+    "typecheck": "tsc -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@codemirror/autocomplete": "6.20.3",
+    "@codemirror/commands": "6.10.3",
+    "@codemirror/language": "6.12.3",
+    "@codemirror/language-data": "6.5.2",
+    "@codemirror/lint": "6.9.7",
+    "@codemirror/search": "6.7.2",
+    "@codemirror/state": "6.6.0",
+    "@codemirror/view": "6.42.0",
+    "@tanstack/react-virtual": "3.14.2",
+    "cm6-graphql": "0.2.2",
+    "graphql": "16.11.0",
+    "i18next": "26.4.2",
+    "lucide-react": "1.24.0",
+    "pdfjs-dist": "6.3.289",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "react-i18next": "17.0.13",
+    "react-router": "7.18.2"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.2",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "5.2.0",
+    "typescript": "7.0.2",
+    "vite": "8.1.5"
+  }
+}

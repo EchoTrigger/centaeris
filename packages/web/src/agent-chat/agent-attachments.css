@@ -1,0 +1,11 @@
+.agentInputAttachment { display: flex; align-items: center; gap: 8px; min-inline-size: 0; max-inline-size: 100%; padding: 8px 10px; border: 1px solid var(--outline); border-radius: 8px; font-size: 14px; }
+.agentInputAttachment > span { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agentInputAttachmentPreview { min-inline-size: 0; gap: 8px; font: inherit; }
+.agentInputAttachmentPreview span { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agentInputAttachmentList { justify-content: flex-start; }
+.agentInputAttachmentList .attachmentCard.isImage { inline-size: 96px; block-size: 96px; }
+.agentInputAttachment svg { inline-size: 16px; block-size: 16px; flex: none; }
+.agentInputAttachment button { display: grid; place-items: center; border: 0; background: transparent; color: inherit; cursor: pointer; padding: 4px; }
+.agentInputAttachment .agentInputAttachmentPreview { display: flex; align-items: center; }
+.agentInputComposerActions > .workspaceSendButton { margin-inline-start: auto; }
+.agentInputAttachment button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }

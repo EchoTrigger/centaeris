@@ -1,0 +1,15 @@
+{
+  "schema": "plugin_activation_snapshot_v1",
+  "digest": "sha256:850794170028a5f6099926f851ad7b424b8e8bdfb8159ed7edb31dcde1106116",
+  "packages": [
+    {
+      "name": "banana",
+      "version": "1.0.0",
+      "packageDigest": "sha256:c25b269d0013e73a54d581ce7833fd7e01f43af38b3d969e84ddd5817c4d4c88",
+      "skills": [],
+      "cli": [],
+      "mcpServers": [],
+      "hooks": []
+    }
+  ]
+}

@@ -1,0 +1,83 @@
+# 性能环境专用 compose 覆盖。只做三件事：
+# 1) 注入 mock 模型服务；2) 把 mock CA 挂进 api/runtime 并指到系统证书路径；
+# 3) 不改任何生产镜像构建逻辑。与 docker-compose.yml 通过 -f 叠加使用。
+services:
+  postgres:
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "log_connections=${PERF_POSTGRES_LOG_CONNECTIONS:-off}"]
+
+  postgres-test:
+    ports: !override ["127.0.0.1:55433:5432"]
+
+  redis-test:
+    ports: !override ["127.0.0.1:16379:6379"]
+
+  worker:
+    image: centaeris-perf-worker:local
+    environment:
+      WORKSPACE_PERF_OBSERVATIONS: "1"
+
+  material-worker:
+    image: centaeris-perf-api:local
+    environment:
+      MATERIAL_PROCESSOR_IMAGE: centaeris-perf-processor:local
+
+  document-processor:
+    image: centaeris-perf-processor:local
+
+  api-init:
+    image: centaeris-perf-api:local
+
+  gc:
+    image: centaeris-perf-api:local
+
+  mail-sender:
+    image: centaeris-perf-api:local
+    profiles: ["disabled-mail"]
+
+  workspace-general:
+    image: centaeris-perf-general:local
+
+  web:
+    image: centaeris-perf-web:local
+    ports: !override ["127.0.0.1:13000:3000"]
+
+  mock-model:
+    image: centaeris-perf-mock-model:local
+    build:
+      context: ./perf/mock-model
+    restart: "no"
+    environment:
+      MOCK_TOOL_NAME: ${PERF_MOCK_TOOL_NAME:-bash}
+      MOCK_TOOL_ARGS: ${PERF_MOCK_TOOL_ARGS:-{"command":"echo perf"}}
+    volumes:
+      - ./perf/certs/out/isolated/mock-model-bundle.pem:/opt/mock/tls.pem:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 9999), 2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    image: centaeris-perf-api:local
+    ports: !override ["127.0.0.1:18000:8000"]
+    depends_on:
+      mock-model:
+        condition: service_healthy
+    volumes:
+      - ./perf/certs/out/isolated/mock-ca.crt:/perf-certs/mock-ca.crt:ro
+    environment:
+      SSL_CERT_FILE: /perf-certs/mock-ca.crt
+      REQUESTS_CA_BUNDLE: /perf-certs/mock-ca.crt
+
+  runtime:
+    image: centaeris-perf-runtime:local
+    depends_on:
+      mock-model:
+        condition: service_healthy
+    volumes:
+      - ./perf/certs/out/isolated/mock-ca.crt:/perf-certs/mock-ca.crt:ro
+    environment:
+      WORKSPACE_GENERAL_IMAGE: centaeris-perf-general:local
+      DOCKER_CREATE_CONCURRENCY: ${PERF_DOCKER_CREATE_CONCURRENCY:-2}
+      WORKSPACE_PERF_OBSERVATIONS: "1"
+      SSL_CERT_FILE: /perf-certs/mock-ca.crt

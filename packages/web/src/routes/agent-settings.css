@@ -1,0 +1,37 @@
+.agentSettingsLayout { padding: 38px 44px; color: var(--on-surface); }
+.agentSettingsEditorLayer { position: fixed; z-index: 110; inset: 0; }
+.agentSettingsEditorLayer .shSoulDocumentPage { inset: 0; }
+.agentSettingsLayout > header, .agentSettingsDetail > header { display: flex; align-items: center; gap: 14px; }
+.agentSettingsLayout > header { justify-content: space-between; flex-wrap: wrap; }
+.agentSettingsLayout h1 { margin: 0; font-size: 26px; font-weight: 650; }
+.agentSettingsLayout h2 { margin: 0; font-size: 20px; }
+.agentSettingsLayout h3 { margin: 0 0 12px; font-size: 16px; }
+.agentSettingsLayout p { line-height: 1.5; overflow-wrap: anywhere; }
+.agentSettingsList { display: flex; flex-wrap: wrap; gap: 8px; margin: 22px 0; }
+.agentSettingsList a { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; color: var(--on-surface); text-decoration: none; background: var(--surface-variant); }
+.agentSettingsList a:hover, .agentSettingsList a.isActive { background: color-mix(in srgb, var(--primary-color) 12%, var(--surface-color)); }
+.agentSettingsList .shAgentMark { width: 26px; height: 26px; }
+.agentSettingsDetail > header > .shAgentMark { width: 44px; height: 44px; flex: none; }
+.agentSettingsDetail > header p { margin: 6px 0; color: var(--on-surface-variant); }
+.agentSettingsActions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 18px 0; }
+.agentSettingsActions button { min-height: 34px; padding: 6px 10px; border: 1px solid var(--outline-variant); border-radius: 7px; background: var(--surface-color); color: var(--on-surface); cursor: pointer; }
+.agentSettingsActions button svg { width: 14px; height: 14px; margin-right: 5px; vertical-align: middle; }
+.agentSettingsActions button:disabled { cursor: default; opacity: .5; }
+.agentSettingsActions .isDanger { color: var(--error); }
+.agentSettingsActions .shPrimaryButton { background: var(--solid-surface); color: var(--solid-text); }
+.agentSettingsModel { margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--outline-variant); }
+.agentSettingsStatus { color: var(--on-surface-variant); }
+.agentSettingsModelControls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin: 16px 0; }
+.agentSettingsModelControls > div > span { display: block; margin-bottom: 8px; font-size: 12px; }
+.agentSettingsModelControls summary { justify-content: flex-start; width: fit-content; gap: 8px; padding: 0 8px; }
+.agentSettingsModelControls .workspaceComposerPickerPanel { top: calc(100% + 8px); bottom: auto; left: 0; right: auto; }
+.agentSettingsLayout :is(a, button):focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+@media (max-width: 760px) {
+  .workspaceSettingsDialog.isAgentSettings { flex-direction: column; }
+  .isAgentSettings .workspaceSettingsNav { width: 100%; min-width: 0; max-height: 176px; flex: none; padding: 42px 12px 12px; }
+  .isAgentSettings .workspaceSettingsNav > section + section { margin-top: 10px; }
+  .isAgentSettings .workspaceSettingsNav nav { display: flex; flex-wrap: wrap; }
+  .isAgentSettings .workspaceSettingsContent { min-height: 0; }
+  .agentSettingsLayout { padding: 24px 18px; }
+  .agentSettingsModelControls { grid-template-columns: minmax(0, 1fr); }
+}

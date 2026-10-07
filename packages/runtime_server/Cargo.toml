@@ -1,0 +1,53 @@
+[package]
+name = "runtime_server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "runtime_server"
+path = "src/main.rs"
+
+[dependencies]
+axum = { workspace = true, features = ["http1", "tokio"] }
+bollard.workspace = true
+bytes.workspace = true
+tar.workspace = true
+futures.workspace = true
+centaeris-core.workspace = true
+centaeris-model-catalog.workspace = true
+centaeris-mcp.workspace = true
+hosted_execution = { path = "../hosted_execution" }
+hmac.workspace = true
+hyper = { workspace = true, features = ["http1", "server"] }
+hyper-util = { workspace = true, features = ["service", "tokio"] }
+reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls", "stream"] }
+rmcp.workspace = true
+redis.workspace = true
+postgres.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt-multi-thread", "sync", "time"] }
+unicode-normalization.workspace = true
+
+[dev-dependencies]
+centaeris-runtime-sqlite.workspace = true
+rmcp = { workspace = true, features = ["macros", "server", "transport-streamable-http-server"] }
+rusqlite.workspace = true
+zstd.workspace = true
+
+[features]
+contract-schema = ["dep:schemars", "centaeris-core/contract-schema"]
+
+[dependencies.schemars]
+version = "=1.2.1"
+optional = true
+
+[[example]]
+name = "transcript_schema"
+required-features = ["contract-schema"]

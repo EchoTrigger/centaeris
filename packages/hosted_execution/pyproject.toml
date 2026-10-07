@@ -1,0 +1,14 @@
+[project]
+name = "centaeris-sandbox-tools"
+version = "0.1.0"
+license = "AGPL-3.0-only"
+requires-python = "==3.12.10"
+dependencies = [
+  "openpyxl==3.1.5",
+  "python-docx==1.2.0",
+  "python-pptx==1.0.2",
+  "weasyprint==69.0",
+]
+
+[tool.uv]
+package = false

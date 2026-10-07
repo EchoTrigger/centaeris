@@ -1,0 +1,161 @@
+[
+  {
+    "blockId": "block-0",
+    "blockRevision": "1",
+    "body": {
+      "content": {
+        "inlineContent": "sample",
+        "sourceRef": null
+      },
+      "kind": "userText"
+    },
+    "orderKey": {
+      "ordinal": 0,
+      "sourceSequence": "1"
+    },
+    "presentation": {
+      "agentRunId": "run",
+      "displayTarget": "README.md",
+      "durationMs": 25,
+      "observedAtMs": 1000,
+      "operation": null,
+      "sourceType": "tool_result"
+    }
+  },
+  {
+    "blockId": "block-1",
+    "blockRevision": "1",
+    "body": {
+      "content": {
+        "inlineContent": "sample",
+        "sourceRef": null
+      },
+      "kind": "assistantText",
+      "status": "completed"
+    },
+    "orderKey": {
+      "ordinal": 1,
+      "sourceSequence": "1"
+    },
+    "presentation": {
+      "agentRunId": "run",
+      "displayTarget": "README.md",
+      "durationMs": 25,
+      "observedAtMs": 1000,
+      "operation": null,
+      "sourceType": "tool_result"
+    }
+  },
+  {
+    "blockId": "block-2",
+    "blockRevision": "1",
+    "body": {
+      "content": {
+        "inlineContent": "sample",
+        "sourceRef": null
+      },
+      "kind": "reasoning",
+      "requestId": "request",
+      "status": "running"
+    },
+    "orderKey": {
+      "ordinal": 2,
+      "sourceSequence": "1"
+    },
+    "presentation": {
+      "agentRunId": "run",
+      "displayTarget": "README.md",
+      "durationMs": 25,
+      "observedAtMs": 1000,
+      "operation": null,
+      "sourceType": "tool_result"
+    }
+  },
+  {
+    "blockId": "block-3",
+    "blockRevision": "1",
+    "body": {
+      "callId": "call",
+      "kind": "tool",
+      "outputRef": {
+        "byteLength": "6",
+        "refId": "ref",
+        "revision": "1"
+      },
+      "status": "queued",
+      "summary": "read",
+      "summaryRef": null,
+      "toolName": "read"
+    },
+    "orderKey": {
+      "ordinal": 3,
+      "sourceSequence": "1"
+    },
+    "presentation": {
+      "agentRunId": "run",
+      "displayTarget": "README.md",
+      "durationMs": 25,
+      "observedAtMs": 1000,
+      "operation": null,
+      "sourceType": "tool_result"
+    }
+  },
+  {
+    "blockId": "block-4",
+    "blockRevision": "1",
+    "body": {
+      "callId": "call",
+      "kind": "tool",
+      "outputRef": null,
+      "status": "failed",
+      "summary": null,
+      "summaryRef": {
+        "byteLength": "6",
+        "refId": "ref",
+        "revision": "1"
+      },
+      "toolName": "read"
+    },
+    "orderKey": {
+      "ordinal": 4,
+      "sourceSequence": "1"
+    },
+    "presentation": {
+      "agentRunId": "run",
+      "displayTarget": "README.md",
+      "durationMs": 25,
+      "observedAtMs": 1000,
+      "operation": null,
+      "sourceType": "tool_result"
+    }
+  },
+  {
+    "blockId": "block-5",
+    "blockRevision": "1",
+    "body": {
+      "content": {
+        "inlineContent": null,
+        "sourceRef": {
+          "byteLength": "6",
+          "refId": "ref",
+          "revision": "1"
+        }
+      },
+      "kind": "notice",
+      "noticeType": "info",
+      "status": "interrupted"
+    },
+    "orderKey": {
+      "ordinal": 5,
+      "sourceSequence": "1"
+    },
+    "presentation": {
+      "agentRunId": "run",
+      "displayTarget": "README.md",
+      "durationMs": 25,
+      "observedAtMs": 1000,
+      "operation": null,
+      "sourceType": "tool_result"
+    }
+  }
+]

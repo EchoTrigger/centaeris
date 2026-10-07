@@ -1,0 +1,13 @@
+[project]
+name = "workspace-agent-worker"
+version = "0.1.0"
+license = "AGPL-3.0-only"
+requires-python = "==3.12.10"
+dependencies = []
+
+[tool.setuptools]
+py-modules = ["worker", "observations"]
+
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"

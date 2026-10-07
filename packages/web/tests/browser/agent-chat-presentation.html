@@ -1,0 +1,52 @@
+<!doctype html>
+<html data-theme="light" lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Synthetic Agent presentation scenarios</title>
+  <link rel="stylesheet" href="/src/globals.css">
+  <style>
+    .agentChatFixture { max-width: 1440px; margin: auto; padding: 20px; }
+    .agentChatFixtureNote { margin: 0 0 16px; color: var(--process-text); }
+    .agentChatFixtureWorkbench { block-size: calc(100dvh - 148px); }
+    .agentChatFixtureMessages { display: flex; min-width: 0; flex: 1; flex-direction: column; align-items: flex-start; gap: 18px; padding: 8px; }
+    .agentChatFixtureControls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+    .agentChatFixtureControls select { background: var(--surface-color); color: var(--on-surface); border: 1px solid var(--outline); padding: 6px; }
+    .agentChatFixtureOutput { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
+    .agentChatFixtureStatus { color: var(--process-text); }
+    @media (max-width: 760px) { .agentChatFixture { padding: 12px; } }
+  </style>
+  <script>
+    // Native module loading is allowed. Application requests and navigation fail the fixture.
+    window.agentChatFixtureRequests = [];
+    window.agentChatFixtureNavigations = [];
+    window.fetch = async input => {
+      window.agentChatFixtureRequests.push(String(input));
+      throw new Error("Synthetic presentation fixture must not fetch application data");
+    };
+    XMLHttpRequest.prototype.send = function () {
+      window.agentChatFixtureRequests.push("XMLHttpRequest");
+      throw new Error("Synthetic presentation fixture must not send application requests");
+    };
+    navigator.sendBeacon = function (url) { window.agentChatFixtureRequests.push(String(url)); return false; };
+    for (const method of ["pushState", "replaceState"]) history[method] = function () {
+      window.agentChatFixtureNavigations.push(method);
+      throw new Error("Synthetic presentation fixture must not navigate");
+    };
+    document.addEventListener("click", event => {
+      if (event.target instanceof Element && event.target.closest("a[href]")) {
+        window.agentChatFixtureNavigations.push("anchor");
+        event.preventDefault();
+      }
+    }, true);
+    window.addEventListener("error", event => {
+      document.getElementById("results").textContent = JSON.stringify([{ name: "fixture boot", actual: event.message, expected: "success" }]);
+    });
+  </script>
+</head>
+<body>
+  <div id="fixture" class="agentChatFixture"></div>
+  <pre id="results" hidden></pre>
+  <script type="module" src="/tests/browser/agent-chat-presentation.fixture.tsx"></script>
+</body>
+</html>
