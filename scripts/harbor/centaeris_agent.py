@@ -95,6 +95,11 @@ class CentaerisAgent(BaseInstalledAgent):
             "|| (apt-get update && apt-get install -y python3 bash ca-certificates)"))
         if result.return_code:
             raise RuntimeError("installing the headless client dependencies failed")
+        python_check = "import sys; print(sys.version.split()[0]); sys.exit(0 if sys.version_info >= (3, 9) else 1)"
+        result = await environment.exec(command=shlex.join(["python3", "-c", python_check]))
+        if result.return_code:
+            raise RuntimeError("Centaeris headless client requires Python 3.9 or later: "
+                               + (result.stderr or result.stdout or "interpreter check failed").strip())
         result = await self.exec_as_root(environment, command=(
             f"mkdir -p {shlex.quote(self.remote)} {shlex.quote(self.remote_logs)}"))
         if result.return_code:
@@ -196,6 +201,7 @@ class CentaerisAgent(BaseInstalledAgent):
             context.metadata['providerUsage'] = payload.get('providerUsage')
             context.metadata['usageCoverage'] = payload.get('usageCoverage')
             context.metadata['usageExportError'] = payload.get('usageExportError')
+            context.metadata['cleanupErrors'] = payload.get('cleanupErrors')
             context.metadata['trajectoryPersistence'] = payload.get('trajectoryPersistence')
             health = context.metadata['trajectoryPersistence']
             if health and health.get('spoolSnapshotSaved'):

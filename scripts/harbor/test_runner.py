@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from runner import Rpc, run_trial, trial_profile, collect_provider_usage, cancel, supervise, write_json
+from runner import Rpc, run_trial, trial_profile, collect_provider_usage, cancel, supervise, write_json, main, export_provider_usage
 from unittest.mock import AsyncMock, Mock, patch
 from types import SimpleNamespace
 
@@ -187,13 +187,22 @@ class TrialTests(unittest.IsolatedAsyncioTestCase):
             (root / "endpoint.json").write_text(json.dumps({"endpoint": "/runtime", "profilePath": str(root / "profile")}))
             (root / "state.json").write_text(json.dumps({"sessionId": "session-test", "agentRunId": "run-test"}))
             failure = ConnectionError("cancel acknowledgement lost")
-            rpc = SimpleNamespace(call=AsyncMock(side_effect=failure),
+            async def call(method, request, timeout=30):
+                if method.endswith("/cancel"):
+                    raise failure
+                return {}
+            run_cleanup = {"cleanupErrors": [{"stage": "shutdown", "type": "OSError", "message": "run cleanup failed"}]}
+            write_json(root / "cleanup-errors.json", run_cleanup)
+            rpc = SimpleNamespace(call=AsyncMock(side_effect=call),
                                   close=AsyncMock(side_effect=TimeoutError("close timed out")))
             with patch("runner.connect", AsyncMock(return_value=rpc)), patch("runner.collect_provider_usage", return_value={}):
                 with self.assertRaises(ConnectionError) as caught:
                     await cancel(SimpleNamespace(logs=directory))
             self.assertIs(caught.exception, failure)
-            self.assertTrue(any("close timed out" in note for note in failure.__notes__))
+            self.assertIsInstance(failure.__cause__, TimeoutError)
+            self.assertEqual(json.loads((root / "cancel-cleanup-errors.json").read_text(encoding="utf-8"))["cleanupErrors"],
+                             [{"stage": "close", "type": "TimeoutError", "message": "close timed out"}])
+            self.assertEqual(json.loads((root / "cleanup-errors.json").read_text(encoding="utf-8")), run_cleanup)
             rpc.close.assert_awaited_once()
 
     async def test_cancel_close_failure_is_reported_after_successful_cancellation(self):
@@ -267,7 +276,7 @@ class TrialTests(unittest.IsolatedAsyncioTestCase):
             instruction = root / "instruction.txt"
             instruction.write_text("task", encoding="utf-8")
             endpoint_process = SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(b'{"endpoint":"/runtime"}', b"")))
-            runtime = SimpleNamespace(returncode=None, wait=AsyncMock(side_effect=[TimeoutError("still running"), 0]), kill=Mock())
+            runtime = SimpleNamespace(returncode=None, wait=AsyncMock(side_effect=[asyncio.TimeoutError("still running"), 0]), kill=Mock())
             rpc = SimpleNamespace(call=AsyncMock(side_effect=ConnectionError("shutdown connection closed")),
                                   close=AsyncMock(side_effect=OSError("connection close failed")))
             args = SimpleNamespace(logs=str(root), attempt="attempt", context_tokens=500000,
@@ -280,8 +289,11 @@ class TrialTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(ValueError) as caught:
                     await supervise(args)
             self.assertIs(caught.exception, primary)
-            self.assertTrue(any("shutdown connection closed" in note for note in primary.__notes__))
-            self.assertTrue(any("connection close failed" in note for note in primary.__notes__))
+            self.assertIsInstance(primary.__cause__, ConnectionError)
+            errors = json.loads((root / "cleanup-errors.json").read_text(encoding="utf-8"))["cleanupErrors"]
+            self.assertEqual(errors, [
+                {"stage": "shutdown", "type": "ConnectionError", "message": "shutdown connection closed"},
+                {"stage": "close", "type": "OSError", "message": "connection close failed"}])
             rpc.close.assert_awaited_once()
             runtime.kill.assert_called_once()
             self.assertEqual(runtime.wait.await_count, 2)
@@ -316,7 +328,7 @@ class TrialTests(unittest.IsolatedAsyncioTestCase):
     async def test_expired_evaluation_deadline_does_not_admit_a_model_request(self):
         rpc = FakeRpc(["running"])
         with patch("runner.time.time", return_value=1000):
-            with self.assertRaisesRegex(TimeoutError, "deadline expired before admission"):
+            with self.assertRaisesRegex(asyncio.TimeoutError, "deadline expired before admission"):
                 await run_trial(rpc, "task", "/app", "mock", "custom.test", None,
                                 None, deadline_at_ms=999999)
         self.assertEqual(rpc.calls, [])
@@ -359,15 +371,15 @@ class TrialTests(unittest.IsolatedAsyncioTestCase):
             root = Path(directory)
             (root / "endpoint.json").write_text(json.dumps({"endpoint": "/gone"}))
             (root / "result.json").write_text(json.dumps({"status": "failed"}))
-            with patch("runner.connect", AsyncMock(side_effect=TimeoutError("gone"))):
+            with patch("runner.connect", AsyncMock(side_effect=asyncio.TimeoutError("gone"))):
                 await cancel(SimpleNamespace(logs=directory))
 
     async def test_cancel_does_not_hide_closed_runtime_without_terminal_result(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "endpoint.json").write_text(json.dumps({"endpoint": "/gone"}))
-            with patch("runner.connect", AsyncMock(side_effect=TimeoutError("gone"))):
-                with self.assertRaisesRegex(TimeoutError, "gone"):
+            with patch("runner.connect", AsyncMock(side_effect=asyncio.TimeoutError("gone"))):
+                with self.assertRaisesRegex(asyncio.TimeoutError, "gone"):
                     await cancel(SimpleNamespace(logs=directory))
 
     @unittest.skipUnless(shutil.which('curl'), 'requires curl')
@@ -496,11 +508,147 @@ class TrialTests(unittest.IsolatedAsyncioTestCase):
                 if method.endswith("/cancel"):
                     raise ConnectionError("cancel connection failed")
                 return await super().call(method, request)
-        with self.assertRaises(BaseExceptionGroup) as caught:
+        with self.assertRaises(ValueError) as caught:
             await run_trial(BrokenCancel(["invalid"]), "task", "/app", "mock",
                             "custom.mock", "max", 30, poll_interval=0)
-        self.assertIsInstance(caught.exception.exceptions[0], ValueError)
-        self.assertIsInstance(caught.exception.exceptions[1], ConnectionError)
+        self.assertRegex(str(caught.exception), "unknown.*status")
+        self.assertIsInstance(caught.exception.__cause__, ConnectionError)
+
+    async def test_cancelled_trial_stays_cancelled_when_cancellation_rpc_also_fails(self):
+        primary = asyncio.CancelledError("host cancelled")
+        secondary = ConnectionError("cancel connection failed")
+        class BrokenCancel(FakeRpc):
+            async def call(self, method, request):
+                if method.endswith("/cancel"):
+                    raise secondary
+                if method == "_centaeris/session/agent-runs":
+                    raise primary
+                return await super().call(method, request)
+        with self.assertRaises(asyncio.CancelledError) as caught:
+            await run_trial(BrokenCancel([]), "task", "/app", "mock", "custom.mock", "max", 30)
+        self.assertIs(caught.exception, primary)
+        self.assertIs(caught.exception.__cause__, secondary)
+
+    async def test_cancel_confirmation_failure_still_shuts_down_and_closes_rpc(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_json(root / "endpoint.json", {"endpoint": "/runtime"})
+            write_json(root / "state.json", {"sessionId": "session-test", "agentRunId": "run-test"})
+            primary = ConnectionError("cancel acknowledgement lost")
+            calls = []
+            async def call(method, request, timeout=30):
+                calls.append(method)
+                if method.endswith("/cancel"):
+                    raise primary
+                return {}
+            rpc = SimpleNamespace(call=AsyncMock(side_effect=call), close=AsyncMock())
+            with patch("runner.connect", AsyncMock(return_value=rpc)):
+                with self.assertRaises(ConnectionError) as caught:
+                    await cancel(SimpleNamespace(logs=directory))
+            self.assertIs(caught.exception, primary)
+            self.assertEqual(calls, ["_centaeris/session/agent-runs/cancel", "runtime/shutdown"])
+            rpc.close.assert_awaited_once()
+
+    async def test_cli_preserves_published_terminal_result_when_supervisor_cleanup_fails(self):
+        for status in ("succeeded", "failed", "cancelled", "timedOut"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                committed = {"status": status, "sessionId": "session-test", "agentRunId": "run-test",
+                             "providerUsage": {"nRequests": 3, "totals": {"inputTokens": 100}},
+                             "modelBudget": {"contextTokens": 500000, "maxOutputTokens": 64000}}
+                primary = ConnectionError("shutdown connection closed")
+                async def completed_then_cleanup_failed(args):
+                    write_json(root / "result.json", committed)
+                    raise primary
+                argv = ["runner.py", "run", "--logs", directory, "--runtime", "runtime", "--instruction", "task",
+                        "--model", "mock", "--provider", "custom.test", "--credential-env", "TEST_MODEL_KEY"]
+                with patch("runner.sys.argv", argv), patch("runner.supervise", completed_then_cleanup_failed):
+                    with self.assertRaises(ConnectionError) as caught:
+                        # main owns asyncio.run, so invoke it off this test's event loop.
+                        await asyncio.to_thread(main)
+                self.assertIs(caught.exception, primary)
+                self.assertEqual(json.loads((root / "result.json").read_text(encoding="utf-8")), committed)
+
+    async def test_cli_reports_invalid_existing_result_without_overwriting_it_or_primary(self):
+        for invalid in ("{truncated", '{"status":"running"}', '[]'):
+            with self.subTest(result=invalid), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                result_path = root / "result.json"
+                result_path.write_text(invalid, encoding="utf-8")
+                primary = ConnectionError("supervisor failed")
+                argv = ["runner.py", "run", "--logs", directory, "--runtime", "runtime", "--instruction", "task",
+                        "--model", "mock", "--provider", "custom.test", "--credential-env", "TEST_MODEL_KEY"]
+                with patch("runner.sys.argv", argv), patch("runner.supervise", AsyncMock(side_effect=primary)):
+                    with self.assertRaises(ConnectionError) as caught:
+                        await asyncio.to_thread(main)
+                self.assertIs(caught.exception, primary)
+                self.assertIsInstance(caught.exception.__cause__, ValueError)
+                self.assertEqual(result_path.read_text(encoding="utf-8"), invalid)
+                errors = json.loads((root / "cleanup-errors.json").read_text(encoding="utf-8"))["cleanupErrors"]
+                self.assertEqual(errors[0]["stage"], "resultPersistence")
+                self.assertEqual(errors[0]["type"], type(caught.exception.__cause__).__name__)
+
+    async def test_cancel_secondary_diagnostics_io_failure_cannot_replace_the_primary_error(self):
+        class BrokenStderr(io.StringIO):
+            def write(self, value):
+                raise OSError("stderr is unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_json(root / "endpoint.json", {"endpoint": "/runtime"})
+            write_json(root / "state.json", {"sessionId": "session-test", "agentRunId": "run-test"})
+            primary = asyncio.CancelledError("cancel action interrupted")
+            secondary = ConnectionError("shutdown failed")
+            async def call(method, request, timeout=30):
+                if method.endswith("/cancel"):
+                    raise primary
+                raise secondary
+            rpc = SimpleNamespace(call=AsyncMock(side_effect=call), close=AsyncMock(side_effect=OSError("close failed")))
+            observed = []
+            original_wait_for = asyncio.wait_for
+            async def observe_wait_boundary(awaitable, timeout):
+                try:
+                    return await original_wait_for(awaitable, timeout)
+                except asyncio.CancelledError as error:
+                    observed.append(error)
+                    raise
+            with patch("runner.connect", AsyncMock(return_value=rpc)), patch("runner.asyncio.wait_for", observe_wait_boundary), patch("runner.write_json", side_effect=OSError("disk full")), patch("runner.sys.stderr", BrokenStderr()):
+                with self.assertRaises(asyncio.CancelledError) as caught:
+                    await cancel(SimpleNamespace(logs=directory))
+            # wait_for may reconstruct cancellation across its Task boundary.
+            # Preserve the exception the runner actually receives from that await.
+            self.assertEqual(len(observed), 1)
+            self.assertIs(caught.exception, observed[0])
+            self.assertIs(caught.exception.__cause__, secondary)
+
+    async def test_cli_failure_result_io_failure_keeps_the_original_exception(self):
+        with tempfile.TemporaryDirectory() as directory:
+            primary = ValueError("trial contract failure")
+            argv = ["runner.py", "run", "--logs", directory, "--runtime", "runtime", "--instruction", "task",
+                    "--model", "mock", "--provider", "custom.test", "--credential-env", "TEST_MODEL_KEY"]
+            with patch("runner.sys.argv", argv), patch("runner.supervise", AsyncMock(side_effect=primary)), patch("runner.write_json", side_effect=OSError("disk full")), patch("runner.sys.stderr", io.StringIO()):
+                with self.assertRaises(ValueError) as caught:
+                    await asyncio.to_thread(main)
+            self.assertIs(caught.exception, primary)
+
+    async def test_async_usage_export_timeout_marks_uncancellable_worker_without_losing_coverage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release = threading.Event()
+            def blocked_usage(*args):
+                release.wait(timeout=3)
+                return {}
+            original_wait_for = asyncio.wait_for
+            async def quick_timeout(awaitable, timeout):
+                return await original_wait_for(awaitable, 0.001)
+            try:
+                with patch("runner.collect_provider_usage", blocked_usage), patch("runner.asyncio.wait_for", quick_timeout):
+                    artifact = await export_provider_usage(root, root, {"sessionId": "session-test", "agentRunId": "run-test"},
+                                                           terminal_observed=False, status=None)
+            finally:
+                release.set()
+            self.assertTrue(artifact["usageExportError"]["workerThreadMayContinue"])
+            self.assertTrue(artifact["usageCoverage"]["inFlightRequestMayBeMissing"])
+            self.assertNotIn("providerUsage", artifact)
 
     def test_attempts_have_separate_profiles(self):
         with tempfile.TemporaryDirectory() as root:
@@ -512,6 +660,40 @@ class TrialTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RpcTests(unittest.IsolatedAsyncioTestCase):
+    async def test_writer_close_error_is_not_replaced_by_owned_spool_close_failure(self):
+        primary = ConnectionError("writer close failed")
+        secondary = OSError("spool close failed")
+        writer = SimpleNamespace(close=Mock(), wait_closed=AsyncMock(side_effect=primary))
+        rpc = Rpc(asyncio.StreamReader(), writer, io.StringIO())
+        spool = rpc.event_spool
+        rpc.event_spool = SimpleNamespace(close=Mock(side_effect=secondary))
+        try:
+            with self.assertRaises(ConnectionError) as caught:
+                await rpc.close()
+            self.assertIs(caught.exception, primary)
+            self.assertIs(caught.exception.__cause__, secondary)
+            self.assertTrue(rpc.task.done())
+            rpc.event_spool.close.assert_called_once()
+        finally:
+            rpc.task.cancel()
+            await asyncio.gather(rpc.task, return_exceptions=True)
+            spool.close()
+
+    async def test_close_failure_still_stops_reader_and_closes_owned_spool(self):
+        primary = ConnectionError("writer close failed")
+        writer = SimpleNamespace(close=Mock(), wait_closed=AsyncMock(side_effect=primary))
+        rpc = Rpc(asyncio.StreamReader(), writer, io.StringIO())
+        try:
+            with self.assertRaises(ConnectionError) as caught:
+                await rpc.close()
+            self.assertIs(caught.exception, primary)
+            self.assertTrue(rpc.task.done())
+            self.assertTrue(rpc.event_spool.closed)
+        finally:
+            rpc.task.cancel()
+            await asyncio.gather(rpc.task, return_exceptions=True)
+            rpc.event_spool.close()
+
     async def test_notifications_and_out_of_order_responses(self):
         async def peer(reader, writer):
             frames = [json.loads(await reader.readline()) for _ in range(2)]

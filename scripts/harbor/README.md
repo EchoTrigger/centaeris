@@ -3,6 +3,10 @@
 This adapter requires Harbor 0.21.0, a Linux x86-64 Docker engine, and a prebuilt
 Linux Centaeris Runtime. The adapter submits the task through the existing Runtime
 JSON-RPC interface; Runtime and Core own model requests, tools and compaction.
+Harbor runs in its host Python environment. The container's headless client
+requires Python 3.9 or later; installation checks that minimum before uploading
+the client or admitting model work. Task interpreters are not upgraded by this
+check.
 
 `five-tasks.json` pins Terminal-Bench 2.1 and selects five tasks. Each receives five
 independent attempts with an isolated Runtime profile, with at most two trials
@@ -202,6 +206,17 @@ Core's committed usage records. `usageCoverage` identifies unreported in-flight
 requests; export or transport failures remain explicit and absent counts stay
 unknown. A timed-out export thread may still finish its file I/O, so the outer
 command deadline remains the final bound.
+
+Container-client cleanup uses standard exception chaining across supported Python
+versions. The original execution or cancellation exception remains primary;
+with no original failure, the first cleanup failure is raised. Later cleanup
+steps still run. Diagnostics record `stage`, `type`, and `message` in
+`cleanup-errors.json` for the supervisor and `cancel-cleanup-errors.json` for
+the separate cancellation command. Harbor collects both through its agent-log
+artifact path. Available result `cleanupErrors` are also copied to agent metadata.
+Diagnostic I/O failures do not replace the primary exception. Cleanup failures
+preserve an already-published terminal result, its run identity, and committed
+usage; the client process can still fail separately from that recorded outcome.
 
 An evaluation controller can supply `deadline_manifest_path` outside the repository:
 

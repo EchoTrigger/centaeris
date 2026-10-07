@@ -26,6 +26,20 @@ def write_json(path: Path, value: dict) -> None:
     os.replace(temporary, path)
 
 
+def record_cleanup_errors(path: Path, errors: list) -> list:
+    """Keep the finite cleanup steps observable without replacing their primary error."""
+    values = [{"stage": stage, "type": type(error).__name__, "message": str(error)}
+              for stage, error in errors]
+    try:
+        write_json(path, {"cleanupErrors": values})
+    except Exception as error:
+        try:
+            print(f"Cleanup diagnostics unavailable: {type(error).__name__}: {error}", file=sys.stderr)
+        except Exception:
+            pass
+    return values
+
+
 def collect_provider_usage(profile: Path, session_id: str, agent_run_id: str) -> dict:
     """Export only Core's committed usage records, never configuration or secrets."""
     parent_paths = list((profile / 'sessions').rglob(session_id + '.jsonl'))
@@ -79,7 +93,7 @@ async def export_provider_usage(root, profile_path, identity, *, terminal_observ
             collect_provider_usage, Path(profile_path), identity["sessionId"], identity["agentRunId"]), 3)
     except Exception as error:
         artifact["usageExportError"] = {"type": type(error).__name__, "message": str(error)}
-        if isinstance(error, TimeoutError):
+        if isinstance(error, asyncio.TimeoutError):
             # asyncio cancellation cannot stop a thread blocked in filesystem I/O.
             artifact["usageExportError"]["workerThreadMayContinue"] = True
     try:
@@ -220,21 +234,35 @@ class Rpc:
             self.pending.pop(request_id, None)
 
     async def close(self):
-        self.writer.close()
-        await self.writer.wait_closed()
+        primary = None
+        try:
+            self.writer.close()
+            await self.writer.wait_closed()
+        except BaseException as error:
+            primary = error
         self.task.cancel()
-        await asyncio.gather(self.task, return_exceptions=True)
-        if self.owns_event_spool:
-            self.event_spool.close()
+        try:
+            try:
+                await asyncio.gather(self.task, return_exceptions=True)
+            finally:
+                if self.owns_event_spool:
+                    self.event_spool.close()
+        except BaseException as cleanup:
+            if primary is not None:
+                raise primary from cleanup
+            raise
+        if primary is not None:
+            raise primary
 
 
 async def run_trial(rpc, instruction, cwd, model, provider, effort, timeout,
-                    poll_interval=0.25, state_path=None, api_key=None, deadline_at_ms=None):
+                    poll_interval=0.25, state_path=None, api_key=None, deadline_at_ms=None,
+                    cleanup_errors=None):
     deadline = None
     if deadline_at_ms is not None:
         remaining = (deadline_at_ms - time.time() * 1000) / 1000
         if remaining <= 0:
-            raise TimeoutError("evaluation deadline expired before admission")
+            raise asyncio.TimeoutError("evaluation deadline expired before admission")
         deadline = time.monotonic() + remaining
     request = {"modelProviderId": provider, "model": model}
     if effort is not None:
@@ -253,7 +281,7 @@ async def run_trial(rpc, instruction, cwd, model, provider, effort, timeout,
     session = await rpc.call("session/new", {"operationId": str(uuid.uuid4()),
                             "cwd": cwd, "title": "Terminal benchmark attempt"})
     if deadline_at_ms is not None and time.monotonic() >= deadline:
-        raise TimeoutError("evaluation deadline expired before admission")
+        raise asyncio.TimeoutError("evaluation deadline expired before admission")
     prompt = await rpc.call("session/prompt", {"operationId": str(uuid.uuid4()),
                             "sessionId": session["id"], "message": instruction})
     identity = {"sessionId": session["id"], "agentRunId": prompt["agentRunId"]}
@@ -285,7 +313,9 @@ async def run_trial(rpc, instruction, cwd, model, provider, effort, timeout,
             await asyncio.shield(rpc.call("_centaeris/session/agent-runs/cancel", {
                 **identity, "reason": "benchmark_client_failed"}))
         except BaseException as cleanup:
-            raise BaseExceptionGroup("trial and cancellation failed", [primary, cleanup])
+            if cleanup_errors is not None:
+                cleanup_errors.append(("cancelRun", cleanup))
+            raise primary from cleanup
         raise
 
 
@@ -305,7 +335,7 @@ async def connect(endpoint, events, startup_timeout=30, event_spool=None):
             return rpc
         except (FileNotFoundError, ConnectionRefusedError):
             if time.monotonic() >= deadline:
-                raise TimeoutError("Runtime startup deadline exceeded")
+                raise asyncio.TimeoutError("Runtime startup deadline exceeded")
             await asyncio.sleep(0.1)
 
 
@@ -330,13 +360,16 @@ async def supervise(args):
                                                        stdout=runtime_log, stderr=runtime_log)
         rpc = None
         primary = None
+        cleanup_errors = []
+        published_result = None
         try:
             rpc = await connect(endpoint, events, event_spool=event_spool)
             result = await run_trial(rpc, Path(args.instruction).read_text(encoding="utf-8"),
                                      args.cwd, args.model, args.provider, args.effort,
                                      args.timeout, state_path=root / "state.json",
                                      api_key=os.environ[args.credential_env],
-                                     deadline_at_ms=args.deadline_at_ms)
+                                     deadline_at_ms=args.deadline_at_ms,
+                                     cleanup_errors=cleanup_errors)
             result["modelBudget"] = {"contextTokens": args.context_tokens,
                                      "maxOutputTokens": args.output_tokens}
             if result.get('sessionId'):
@@ -350,6 +383,7 @@ async def supervise(args):
                 health["spoolErrorErrno"] = rpc.event_spool_error.errno if rpc.event_spool_error else None
             result["trajectoryPersistence"] = health
             write_json(root / "result.json", result)
+            published_result = result
             if result["status"] == "succeeded":
                 # Keep the initialized connection and Runtime-owned task services alive
                 # while Harbor verifies. Container teardown ultimately owns cleanup.
@@ -361,30 +395,42 @@ async def supervise(args):
             primary = error
             raise
         finally:
-            cleanup_errors = []
             if rpc:
                 try:
                     await rpc.call("runtime/shutdown", {}, timeout=12)
                 except BaseException as error:
                     cleanup_errors.append(("shutdown", error))
                 try:
-                    await rpc.close()
+                    await asyncio.wait_for(rpc.close(), 1)
                 except BaseException as error:
-                    cleanup_errors.append(("connection close", error))
+                    cleanup_errors.append(("close", error))
             if runtime.returncode is None:
                 try:
+                    await asyncio.wait_for(runtime.wait(), 15)
+                except asyncio.TimeoutError:
                     try:
-                        await asyncio.wait_for(runtime.wait(), 15)
-                    except TimeoutError:
                         runtime.kill()
-                        await runtime.wait()
+                    except BaseException as error:
+                        cleanup_errors.append(("killProcess", error))
+                    try:
+                        await asyncio.wait_for(runtime.wait(), 5)
+                    except BaseException as error:
+                        cleanup_errors.append(("reapProcess", error))
                 except BaseException as error:
-                    cleanup_errors.append(("process reap", error))
+                    cleanup_errors.append(("waitProcess", error))
             if cleanup_errors:
+                values = record_cleanup_errors(root / "cleanup-errors.json", cleanup_errors)
+                if published_result is not None:
+                    published_result["cleanupErrors"] = values
+                    try:
+                        write_json(root / "result.json", published_result)
+                    except Exception as error:
+                        cleanup_errors.append(("resultPersistence", error))
+                        record_cleanup_errors(root / "cleanup-errors.json", cleanup_errors)
                 failure = primary if primary is not None else cleanup_errors[0][1]
-                for stage, error in cleanup_errors:
-                    if error is not failure:
-                        failure.add_note(f"Runtime {stage} also failed: {type(error).__name__}: {error}")
+                secondary = next((error for _, error in cleanup_errors if error is not failure), None)
+                if secondary is not None:
+                    raise failure from secondary
                 if primary is None:
                     raise failure
 
@@ -415,7 +461,7 @@ async def cancel(args):
             # hashes the executable and can take ten seconds on a 1-CPU task.
             rpc = await asyncio.wait_for(
                 connect(endpoint["endpoint"], events, startup_timeout=2), timeout=15)
-        except (TimeoutError, FileNotFoundError, ConnectionRefusedError):
+        except (asyncio.TimeoutError, FileNotFoundError, ConnectionRefusedError):
             result_path = root / "result.json"
             result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else {}
             status = result.get("status")
@@ -425,25 +471,40 @@ async def cancel(args):
             if status in ("succeeded", "failed", "cancelled", "timedOut"):
                 return
             raise
+        primary = None
+        cleanup_errors = []
+        status = None
         try:
-            status = None
-            try:
-                if identity:
-                    status = await asyncio.wait_for(cancel_and_observe_terminal(rpc, {
-                        "sessionId": identity["sessionId"], "agentRunId": identity["agentRunId"]},
-                        "harbor_cancelled"), 6)
-            finally:
-                await export_provider_usage(root, endpoint.get("profilePath"), identity,
-                                            terminal_observed=status is not None, status=status)
+            if identity:
+                status = await asyncio.wait_for(cancel_and_observe_terminal(rpc, {
+                    "sessionId": identity["sessionId"], "agentRunId": identity["agentRunId"]},
+                    "harbor_cancelled"), 6)
+        except BaseException as error:
+            primary = error
+        try:
+            await export_provider_usage(root, endpoint.get("profilePath"), identity,
+                                        terminal_observed=status is not None, status=status)
+        except BaseException as error:
+            cleanup_errors.append(("exportUsage", error))
+        try:
             await rpc.call("runtime/shutdown", {}, timeout=6)
-        except BaseException as primary:
-            try:
-                await asyncio.wait_for(rpc.close(), 1)
-            except BaseException as cleanup:
-                primary.add_note(f"Runtime connection close also failed: {type(cleanup).__name__}: {cleanup}")
-            raise
-        else:
+        except BaseException as error:
+            cleanup_errors.append(("shutdown", error))
+        try:
             await asyncio.wait_for(rpc.close(), 1)
+        except BaseException as error:
+            cleanup_errors.append(("close", error))
+        if cleanup_errors:
+            # run and cancel are separate CLI processes; their diagnostics have
+            # separate destinations so either cleanup pass retains its evidence.
+            record_cleanup_errors(root / "cancel-cleanup-errors.json", cleanup_errors)
+            failure = primary if primary is not None else cleanup_errors[0][1]
+            secondary = next((error for _, error in cleanup_errors if error is not failure), None)
+            if secondary is not None:
+                raise failure from secondary
+            raise failure
+        if primary is not None:
+            raise primary
 
 
 def main():
@@ -480,8 +541,19 @@ def main():
         parser.error("run requires --runtime, --instruction, --model, --provider and --credential-env")
     try:
         asyncio.run(supervise(args))
-    except Exception as error:
-        write_json(Path(args.logs) / "result.json", {"status": "failed", "error": str(error)})
+    except BaseException as error:
+        root = Path(args.logs)
+        result_path = root / "result.json"
+        try:
+            if result_path.exists():
+                result = json.loads(result_path.read_text(encoding="utf-8"))
+                if not isinstance(result, dict) or result.get("status") not in ("succeeded", "failed", "cancelled", "timedOut"):
+                    raise ValueError("existing supervisor result has no supported terminal status")
+            else:
+                write_json(result_path, {"status": "failed", "error": str(error)})
+        except Exception as persistence_error:
+            record_cleanup_errors(root / "cleanup-errors.json", [("resultPersistence", persistence_error)])
+            raise error from persistence_error
         raise
     return 0
 

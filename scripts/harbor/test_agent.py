@@ -1,5 +1,6 @@
 """Harbor adapter contract tests, using fake execs and no model credentials."""
 import asyncio
+import io
 import json
 from pathlib import Path
 import shlex
@@ -43,6 +44,25 @@ class Environment:
                                                           'promptCacheHitTokens': 90}}, "modelBudget": {
                                                           "contextTokens": 500000, "maxOutputTokens": 64000}}))
         return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+
+class PythonVersionEnvironment(Environment):
+    def __init__(self, version):
+        super().__init__()
+        self.version = version
+
+    async def exec(self, command, **kwargs):
+        if "sys.version_info" not in command:
+            return await super().exec(command, **kwargs)
+        self.calls.append((command, kwargs))
+        output = io.StringIO()
+        with patch("sys.version_info", tuple(int(value) for value in self.version.split("."))), \
+                patch("sys.version", self.version), patch("sys.stdout", output):
+            try:
+                exec(shlex.split(command)[2])
+            except SystemExit as error:
+                return SimpleNamespace(return_code=error.code, stdout=output.getvalue(), stderr="")
+        raise AssertionError("interpreter preflight must provide an exit status")
 
 
 @unittest.skipUnless(CentaerisAgent, "requires Harbor 0.21.0")
@@ -176,6 +196,36 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             with patch("time.time", return_value=1000), self.assertRaises(asyncio.CancelledError):
                 await agent.run("task", CancelledEnvironment(), context)
             self.assertEqual(context.metadata["evaluationDeadlineAtMs"], 1_935_000)
+
+    async def test_install_rejects_old_python_before_uploading_or_reading_credentials(self):
+        class CredentialsMustNotBeRead(dict):
+            def get(self, name, *args):
+                if name == "TEST_MODEL_KEY":
+                    raise AssertionError("interpreter preflight must precede credentials")
+                return super().get(name, *args)
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "runtime"
+            binary.write_bytes(b"\x7fELFtest")
+            agent = CentaerisAgent(logs_dir=Path(directory), runtime_binary=str(binary),
+                                   credential_env="TEST_MODEL_KEY")
+            environment = PythonVersionEnvironment("3.8.20")
+            with patch.object(CentaerisAgent, "extra_env", new_callable=PropertyMock,
+                              return_value=CredentialsMustNotBeRead()), \
+                    self.assertRaisesRegex(RuntimeError, "Python 3.9.*3.8.20"):
+                await agent.install(environment)
+            self.assertEqual(environment.uploads, [])
+            self.assertFalse(any(command.startswith("nohup ") for command, _ in environment.calls))
+
+    async def test_install_accepts_supported_task_python_versions(self):
+        for version in ("3.9.2", "3.10.16", "3.12.10", "3.13.7"):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                binary = Path(directory) / "runtime"
+                binary.write_bytes(b"\x7fELFtest")
+                agent = CentaerisAgent(logs_dir=Path(directory), runtime_binary=str(binary))
+                environment = PythonVersionEnvironment(version)
+                await agent.install(environment)
+                check = next(command for command, _ in environment.calls if "sys.version_info" in command)
+                self.assertTrue(environment.uploads)
 
     async def test_install_rejects_an_actual_dynamic_loader_failure_before_model_launch(self):
         class IncompatibleEnvironment(Environment):
@@ -380,12 +430,13 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         coverage = {"source": "committedProviderUsage", "terminalObserved": True,
                     "inFlightRequestMayBeMissing": False}
         error = {"type": "TimeoutError", "workerThreadMayContinue": True}
+        cleanup = [{"stage": "close", "type": "ConnectionError", "message": "connection closed"}]
         class UsageEnvironment(Environment):
             async def exec(self, command, **kwargs):
                 result = await super().exec(command, **kwargs)
                 if " wait " in command:
                     payload = json.loads(result.stdout)
-                    payload.update(usageCoverage=coverage, usageExportError=error)
+                    payload.update(usageCoverage=coverage, usageExportError=error, cleanupErrors=cleanup)
                     result.stdout = json.dumps(payload)
                 return result
         for status in ("succeeded", "failed"):
@@ -401,6 +452,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                     await agent.run("task", environment, context)
                 self.assertEqual(context.metadata["usageCoverage"], coverage)
                 self.assertEqual(context.metadata["usageExportError"], error)
+                self.assertEqual(context.metadata["cleanupErrors"], cleanup)
                 self.assertEqual(context.n_input_tokens, 120)
                 self.assertFalse(any(" cancel " in command for command, _ in environment.calls))
 
