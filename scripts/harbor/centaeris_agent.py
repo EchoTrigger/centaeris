@@ -4,10 +4,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shlex
 import tempfile
+import time
 import uuid
 from urllib.parse import urlsplit, urlunsplit
 
@@ -22,6 +24,7 @@ class CentaerisAgent(BaseInstalledAgent):
 
     def __init__(self, *args, runtime_binary=None, provider_id=None, credential_env=None,
                  reasoning_effort=None, context_tokens=500_000, max_output_tokens=64_000,
+                 deadline_manifest_path=None,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.binary = Path(runtime_binary or os.environ.get("CENTAERIS_RUNTIME_BINARY", ""))
@@ -30,12 +33,31 @@ class CentaerisAgent(BaseInstalledAgent):
         self.effort = reasoning_effort
         self.context_tokens = int(context_tokens)
         self.output_tokens = int(max_output_tokens)
+        self.deadline_manifest = Path(deadline_manifest_path) if deadline_manifest_path is not None else None
         if not 0 < self.output_tokens < self.context_tokens:
             raise ValueError("output budget must be positive and smaller than context budget")
         self.attempt = str(uuid.uuid4())
         self.remote = f"/installed-agent/centaeris-{self.attempt}"
         self.remote_logs = f"/logs/agent/centaeris-{self.attempt}"
         self._version = None
+
+    def evaluation_deadline_at_ms(self):
+        if self.deadline_manifest is None:
+            return None
+        started_at_ms = int(time.time() * 1000)
+        manifest = json.loads(self.deadline_manifest.read_text(encoding="utf-8-sig"))
+        if (not isinstance(manifest, dict) or set(manifest) != {"schemaVersion", "trials"}
+                or manifest["schemaVersion"] != "centaeris.harbor.deadlines.v1"
+                or not isinstance(manifest["trials"], dict)):
+            raise ValueError("invalid evaluation deadline manifest")
+        trial = self.logs_dir.parent.name
+        entry = manifest["trials"].get(trial)
+        if not isinstance(entry, dict) or set(entry) != {"agentTimeoutSec"}:
+            raise ValueError("missing or invalid deadline entry for " + trial)
+        seconds = entry["agentTimeoutSec"]
+        if type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds <= 0:
+            raise ValueError("agentTimeoutSec must be positive finite seconds")
+        return started_at_ms + int(seconds * 1000) + 35_000
 
     def proxy_environment(self):
         sources = (self.extra_env, os.environ)
@@ -98,9 +120,19 @@ class CentaerisAgent(BaseInstalledAgent):
             f"chmod a+x {shlex.quote(self.remote + '/centaeris-runtime')}"))
         if result.return_code:
             raise RuntimeError("setting installed runtime permissions failed")
+        preflight = ["env", "-i", "CENTAERIS_DESKTOP_DATA_DIR=/tmp/centaeris-preflight-" + self.attempt,
+                     self.remote + "/centaeris-runtime", "--runtime-server-endpoint"]
+        result = await environment.exec(command=shlex.join(preflight), cwd="/", timeout_sec=30)
+        if result.return_code:
+            raise RuntimeError(
+                f"Centaeris Runtime preflight failed (exit code {result.return_code}): "
+                + (result.stderr or result.stdout or "no process diagnostic returned").strip())
 
     @with_prompt_template
     async def run(self, instruction, environment, context: AgentContext):
+        deadline_at_ms = self.evaluation_deadline_at_ms()
+        if deadline_at_ms is not None:
+            context.metadata = {**(context.metadata or {}), "evaluationDeadlineAtMs": deadline_at_ms}
         if not self.credential_env:
             raise ValueError("credential_env is required")
         key = self.extra_env.get(self.credential_env) or os.environ.get(self.credential_env)
@@ -110,6 +142,12 @@ class CentaerisAgent(BaseInstalledAgent):
             raise ValueError("a model_name is required")
         if not self.provider:
             raise ValueError("provider_id is required")
+        directory = await environment.exec(command="pwd -P")
+        working_directory = (directory.stdout or "").rstrip("\r\n")
+        if directory.return_code or not working_directory.startswith("/"):
+            raise RuntimeError(
+                f"resolving the task working directory failed (exit code {directory.return_code}): "
+                + (directory.stderr or "no absolute working directory returned").strip())
         with tempfile.TemporaryDirectory() as temporary:
             instruction_file = Path(temporary) / "instruction.txt"
             instruction_file.write_text(instruction, encoding="utf-8")
@@ -121,7 +159,11 @@ class CentaerisAgent(BaseInstalledAgent):
                   "--instruction", self.remote + "/instruction.txt", "--model", self.model_name,
                   "--provider", self.provider, "--credential-env", self.credential_env,
                   "--context-tokens", str(self.context_tokens), "--output-tokens", str(self.output_tokens),
-                  "--cwd", "/app", "--no-timeout", "--keep-alive"]
+                  "--cwd", working_directory, "--keep-alive"]
+        if deadline_at_ms is None:
+            runner.append("--no-timeout")
+        else:
+            runner.extend(["--deadline-at-ms", str(deadline_at_ms)])
         if self.effort is not None:
             runner.extend(["--effort", self.effort])
         # Secrets are passed as an exec environment, never interpolated into a command.
@@ -137,19 +179,23 @@ class CentaerisAgent(BaseInstalledAgent):
             result = await environment.exec(command=shlex.join([
                 "python3", self.remote + "/runner.py", "wait", "--logs", self.remote_logs,
                 "--no-timeout"]))
-            if not result.stdout.strip():
-                raise RuntimeError("headless supervisor returned no result")
+            if not (result.stdout or "").strip():
+                raise RuntimeError(
+                    f"headless supervisor returned no result (exit code {result.return_code}): "
+                    + (result.stderr or "no stderr returned").strip())
             payload = json.loads(result.stdout)
             terminal_result = payload.get("status") in ("succeeded", "failed", "cancelled", "timedOut")
             usage = payload.get('providerUsage', {}).get('totals', {})
             context.n_input_tokens = usage.get('inputTokens')
             context.n_output_tokens = usage.get('outputTokens')
             context.n_cache_tokens = usage.get('promptCacheHitTokens')
-            context.metadata = {"runtimeBuildId": self._version,
+            context.metadata = {**(context.metadata or {}), "runtimeBuildId": self._version,
                                 "modelBudget": payload.get("modelBudget"),
                                 "sessionId": payload.get("sessionId"),
                                 "agentRunId": payload.get("agentRunId")}
             context.metadata['providerUsage'] = payload.get('providerUsage')
+            context.metadata['usageCoverage'] = payload.get('usageCoverage')
+            context.metadata['usageExportError'] = payload.get('usageExportError')
             context.metadata['trajectoryPersistence'] = payload.get('trajectoryPersistence')
             health = context.metadata['trajectoryPersistence']
             if health and health.get('spoolSnapshotSaved'):
@@ -169,9 +215,14 @@ class CentaerisAgent(BaseInstalledAgent):
             if terminal_result:
                 raise
             try:
-                await asyncio.shield(self.exec_as_agent(environment, command=shlex.join([
-                    "python3", self.remote + "/runner.py", "cancel", "--logs", self.remote_logs]),
-                    timeout_sec=35))
+                async def cleanup_run():
+                    try:
+                        await self.exec_as_agent(environment, command=shlex.join([
+                            "python3", self.remote + "/runner.py", "cancel", "--logs", self.remote_logs]),
+                            timeout_sec=35)
+                    finally:
+                        await self.recover_committed_usage(environment, context)
+                await asyncio.shield(cleanup_run())
             except BaseException as cleanup:
                 if isinstance(primary, asyncio.CancelledError):
                     # Harbor must receive cancellation itself to enforce the task
@@ -184,3 +235,26 @@ class CentaerisAgent(BaseInstalledAgent):
                     raise primary from cleanup
                 raise BaseExceptionGroup("agent run and cancellation failed", [primary, cleanup])
             raise
+
+    async def recover_committed_usage(self, environment, context):
+        artifact = self.logs_dir / ("centaeris-" + self.attempt) / "provider-usage.json"
+        try:
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.wait_for(environment.download_file(
+                self.remote_logs + "/provider-usage.json", artifact), 3)
+            value = json.loads(artifact.read_text(encoding="utf-8"))
+            usage = value.get("providerUsage")
+            totals = usage.get("totals", {}) if usage is not None else None
+            metadata = {**(context.metadata or {}),
+                        "usageCoverage": value.get("usageCoverage"),
+                        "usageExportError": value.get("usageExportError")}
+            if usage is not None:
+                tokens = (totals.get("inputTokens"), totals.get("outputTokens"),
+                          totals.get("promptCacheHitTokens"))
+                metadata["providerUsage"] = usage
+        except Exception as error:
+            context.metadata = {**(context.metadata or {}), "usageArtifactRecoveryError": type(error).__name__}
+            return
+        context.metadata = metadata
+        if usage is not None:
+            context.n_input_tokens, context.n_output_tokens, context.n_cache_tokens = tokens
