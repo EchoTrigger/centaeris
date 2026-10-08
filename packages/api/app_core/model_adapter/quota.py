@@ -57,12 +57,26 @@ def _connection_params() -> dict:
 
 
 def _try_lock(conn, key: int, limit: int) -> int:
+    if limit <= 0:
+        return 0
     with conn.cursor() as cursor:
-        for candidate in range(1, limit + 1):
-            cursor.execute("SELECT pg_try_advisory_lock(%s, %s)", (-key, candidate))
-            if cursor.fetchone()[0]:
-                return candidate
-    return 0
+        if limit == 1:
+            cursor.execute("SELECT pg_try_advisory_lock(%s, %s)", (-key, 1))
+            return 1 if cursor.fetchone()[0] else 0
+        # Stop recursion after the first success: LIMIT over volatile lock calls
+        # could acquire additional slots before the planner limits the result.
+        cursor.execute("""
+            WITH RECURSIVE attempts(slot, acquired) AS (
+                SELECT 0, false
+                UNION ALL
+                SELECT slot + 1, pg_try_advisory_lock(%s, slot + 1)
+                FROM attempts
+                WHERE NOT acquired AND slot < %s
+            )
+            SELECT COALESCE(MAX(slot) FILTER (WHERE acquired), 0)
+            FROM attempts
+        """, (-key, limit))
+        return cursor.fetchone()[0]
 
 
 def _unlock(conn, key: int, slot: int) -> None:
