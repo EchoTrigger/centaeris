@@ -24,7 +24,7 @@ def _unique_object(pairs):
     return result
 
 
-def decode_history_cursor(cursor, session_id):
+def decode_history_cursor(cursor, session_id, *, include_reads=False):
     if cursor is None:
         return (-1, 0, 0)
     try:
@@ -39,7 +39,7 @@ def decode_history_cursor(cursor, session_id):
         if (not isinstance(position, list) or len(position) != 3
                 or any(type(part) is not int or part < 0 for part in position)
                 or position[0] > 2_147_483_647 or position[2] > 9_223_372_036_854_775_807
-                or position[1] not in (0, 1)
+                or position[1] not in ((0, 1, 2) if include_reads else (0, 1))
                 or (position[1] == 0 and (position[0] == 0 or position[2] != 0))
                 or (position[1] == 1 and position[2] == 0)
                 or encode_history_cursor(session_id, position) != cursor):
@@ -137,21 +137,36 @@ def _work_snapshot_lateral():
     """.replace("SOURCE_DOCUMENT", source).replace("PRIOR_DOCUMENT", prior).replace("CALL_DOCUMENT", call)
 
 
-def agent_history(user, agent_id, after_cursor=None, limit=50, before_cursor=None):
+def agent_history(user, agent_id, after_cursor=None, limit=50, before_cursor=None, *, from_start=False, include_reads=False):
     from .agent_input_reads import input_read_lateral
     binding = owned_input_binding(user, agent_id)
-    newer = after_cursor is not None
+    newer = after_cursor is not None or from_start
     supplied_cursor = after_cursor if newer else before_cursor
-    position = decode_history_cursor(supplied_cursor, binding.session_id)
+    position = decode_history_cursor(supplied_cursor, binding.session_id, include_reads=include_reads)
     query = _HISTORY_CANDIDATES.replace("{input_read_lateral}", input_read_lateral()).replace(
         "{work_snapshot_lateral}", _work_snapshot_lateral())
+    parameters = [binding.session_id, binding.agent_id, binding.session_id, binding.agent.workspace_id]
+    if include_reads:
+        # Recover updates from the same snapshot and verified uptake projection
+        # as creation. A disconnected reader cannot miss an older input's Read.
+        updates = """
+        UNION ALL
+        SELECT read_event.sequence AS anchor, 2 AS kind_rank, i.sequence AS tie,
+            jsonb_build_object('kind', 'read', 'input_id', i.input_id, 'sequence', i.sequence,
+                'created_at_ms', i.created_at_ms, 'body', i.body, 'attachments', i.attachments,
+                'read', input_read.value) AS document
+        FROM app_core_agentinput i READ_LATERAL
+        JOIN app_core_sessionevent read_event ON read_event."eventId"=input_read.value->>'eventId'
+        WHERE i.session_id=%s AND i.agent_id=%s
+        """.replace("READ_LATERAL", input_read_lateral())
+        query = query.replace(") candidates WHERE", updates + ") candidates WHERE")
+        parameters.extend([binding.session_id, binding.agent_id])
     if not newer:
         query = query.replace(">(%s, %s, %s)", "<(%s, %s, %s)").replace("ORDER BY anchor, kind_rank, tie", "ORDER BY anchor DESC, kind_rank DESC, tie DESC")
         if before_cursor is None:
             position = (2_147_483_648, 0, 0)
     with connection.cursor() as cursor:
-        cursor.execute(query, [binding.session_id, binding.agent_id,
-            binding.session_id, binding.agent.workspace_id, *position, limit + 1])
+        cursor.execute(query, [*parameters, *position, limit + 1])
         candidates = cursor.fetchall()
     items, seen, next_cursor = [], set(), supplied_cursor
     newest_cursor = after_cursor
@@ -161,9 +176,9 @@ def agent_history(user, agent_id, after_cursor=None, limit=50, before_cursor=Non
         next_cursor = encode_history_cursor(binding.session_id, (anchor, rank, tie))
         if isinstance(document, str):
             document = json.loads(document)
-        if document["kind"] == "input":
+        if document["kind"] in {"input", "read"}:
             fact = SimpleNamespace(**{key: document[key] for key in ("input_id", "sequence", "created_at_ms", "body", "attachments", "read")})
-            items.append({"cursor": next_cursor, "kind": "input", "input": serialize_input(fact)})
+            items.append({"cursor": next_cursor, "kind": document["kind"], "input": serialize_input(fact)})
             continue
         call = SimpleNamespace(**document["call"]) if document["call"] is not None else None
         result = SimpleNamespace(eventId=document["eventId"], sequence=document["sequence"],

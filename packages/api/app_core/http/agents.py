@@ -242,6 +242,8 @@ def list_agents(request, workspace_id: str):
         agents = agents.filter(definition_id=request.app_delegation.definition_id)
         if request.app_delegation.agent_id is not None:
             agents = agents.filter(pk=request.business_branch.agent_id)
+        else:
+            agents = agents.filter(is_business_instance=False)
     else:
         agents = agents.filter(business_branch__isnull=True)
     return {"agents": [serialize_agent(agent) for agent in agents]}

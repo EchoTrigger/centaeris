@@ -67,7 +67,7 @@ def authenticate_delegation(token, scope):
 
 
 def require_delegated_agent(grant, agent_id, *, require_active=True, business_branch=None):
-    if grant.agent_id:
+    if grant.agent_id or business_branch is not None or getattr(grant, "business_branch", None) is not None:
         from .business_agent_branches import require_business_branch
         branch = business_branch if business_branch is not None else getattr(grant, "business_branch", None)
         if branch is None:
@@ -77,7 +77,7 @@ def require_delegated_agent(grant, agent_id, *, require_active=True, business_br
             raise DelegationRejected("business_branch_not_found", 404)
         return branch.agent
     query = Agent.objects.filter(id=agent_id, workspace_id=grant.workspace_id, owner_id=grant.user_id,
-                                 definition_id=grant.definition_id)
+                                 definition_id=grant.definition_id, is_business_instance=False)
     if require_active:
         query = query.filter(status="active")
     agent = query.first()
@@ -89,7 +89,7 @@ def require_delegated_agent(grant, agent_id, *, require_active=True, business_br
 def require_delegated_session(grant, session_id, *, require_active=True, business_branch=None):
     query = Session.objects.filter(id=session_id, workspace_id=grant.workspace_id, owner_id=grant.user_id,
         agent__owner_id=grant.user_id, agent__definition_id=grant.definition_id)
-    if grant.agent_id:
+    if grant.agent_id or business_branch is not None or getattr(grant, "business_branch", None) is not None:
         from .business_agent_branches import require_business_branch
         branch = business_branch if business_branch is not None else getattr(grant, "business_branch", None)
         if branch is None:
@@ -97,6 +97,8 @@ def require_delegated_session(grant, session_id, *, require_active=True, busines
         branch = require_business_branch(grant, branch.pk, require_active=require_active)
         query = query.filter(agent_id=branch.agent_id).filter(
             Q(pk=branch.session_id) | Q(work_binding__coordination_session_id=branch.session_id))
+    else:
+        query = query.filter(agent__is_business_instance=False)
     if require_active:
         query = query.filter(status="active", agent__status="active")
     session = query.first()
@@ -114,7 +116,7 @@ def require_request_delegation(request, scope, *, workspace_id=None, agent_id=No
     if type(version) is not int or version <= 0:
         raise DelegationRejected("delegation_invalid", 401)
     grant = require_current_delegation(grant.id, scope, lock=lock, expected_credential_version=version)
-    if grant.agent_id:
+    if grant.agent_id or getattr(request, "business_branch_id", None) is not None:
         from .business_agent_branches import require_business_branch
         branch_id = getattr(request, "business_branch_id", None)
         if branch_id is None:
@@ -184,6 +186,8 @@ def authorize_delegated_request(request, grant):
             continue
         scope = dict(session__workspace_id=grant.workspace_id, session__owner_id=grant.user_id,
                      session__status="active", session__agent__status="active", session__agent__definition_id=grant.definition_id)
+        if not grant.agent_id:
+            scope["session__agent__is_business_instance"] = False
         linked = SessionAssetLink.objects.filter(**scope, **{object_field: values[path_field]})
         cited = SessionCitationProjection.objects.filter(**scope, agent_run__user_id=grant.user_id,
             ownerKind=owner_kind, ownerRef=values[path_field])

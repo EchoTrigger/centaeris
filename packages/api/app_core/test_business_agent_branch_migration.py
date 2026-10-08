@@ -38,7 +38,7 @@ class BusinessAgentBranchMigrationTests(TransactionTestCase):
         workspace = Workspace.objects.create(name="Upgrade", createdBy=user)
         app = BusinessApplication.objects.create(name="Business app", status="active", created_by=user)
         root = Agent.objects.create(workspace=workspace, owner=user, name="Business root")
-        agent = Agent.objects.create(workspace=workspace, owner=user, name="Business branch")
+        agent = Agent.objects.create(workspace=workspace, owner=user, name="Business branch", is_business_instance=True)
         session = Session.objects.create(workspace=workspace, owner=user, agent=agent)
         AgentCoordinationSession.objects.create(agent=agent, session=session)
         branch = BusinessAgentBranch.objects.create(app=app, root_agent=root, business_user_id="ExactUser",

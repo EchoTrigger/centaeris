@@ -160,7 +160,7 @@ try {
   const back = async () => { button("Back to applications").click(); await settle(); };
   check("applications group multiple independent authorizations", [host.querySelectorAll(".appDelegationGroup").length, host.querySelectorAll('[data-delegation-id="grant-native"], [data-delegation-id="grant-native-alt"]').length], [2, 2]);
   await openGrant("Alternative business agent", "api");
-  check("same application second authorization gets its own root guide", [host.querySelector(".appDelegationDetails")?.getAttribute("data-selected-delegation-id"), host.querySelector(".appDelegationEndpoint")?.textContent], ["grant-native-alt", "POST https://fixture.invalid/deployment-prefix/api/agents/agent-alternative/business-branches/resolve"]); await back();
+  check("same application second authorization gets its own root guide", [host.querySelector(".appDelegationDetails")?.getAttribute("data-selected-delegation-id"), host.querySelector(".appDelegationEndpoint")?.textContent], ["grant-native-alt", "POST https://fixture.invalid/deployment-prefix/api/v1/chats"]); await back();
   await openGrant("Daily business agent", "credentials");
   check("active native grant has rotation action", Boolean(host.querySelector(".appDelegationDetailPanel")?.textContent!.includes("Rotate token")), true); await back();
   await openGrant("Expired assistant", "credentials");
@@ -172,7 +172,7 @@ try {
   check("native Agents and published assistants are grouped", field("Agent or published assistant")?.querySelectorAll("optgroup").length, 2);
   check("managed incarnations are excluded from native options", host.textContent!.includes("Managed incarnation"), false);
   change("Agent or published assistant", "agent:agent-research"); await settle();
-  check("native Agent offers use, read, submit and actual artifact delivery scopes", [...host.querySelectorAll('input[type="checkbox"]')].map(item => item.getAttribute("data-scope")), ["assistant:use", "sessions:read", "messages:submit", "artifacts:read"]);
+  check("native Agent offers explicit upload and download permissions", [...host.querySelectorAll('input[type="checkbox"]')].map(item => item.getAttribute("data-scope")), ["assistant:use", "sessions:read", "messages:submit", "attachments:write", "artifacts:read"]);
   (field("assistant:use") as HTMLInputElement).click(); (field("sessions:read") as HTMLInputElement).click(); await settle();
   (field("messages:submit") as HTMLInputElement).click(); (field("artifacts:read") as HTMLInputElement).click(); await settle();
   for (const text of ["Reports", "Research", "Research Agent", "assistant:use", "sessions:read", "messages:submit", "artifacts:read", "Until revoked"]) check(`permanent consent names ${text}`, button("Authorize").textContent!.includes(text.includes(":") ? String(i18n.t(`appDelegations.scope.${text.replace(":", ".")}`)) : text), true);
@@ -180,17 +180,17 @@ try {
   check("native permanent request includes actual artifact delivery and explicit null expiry", calls.find(call => call.path === "/api/account/app-delegations" && call.method === "POST")?.body, { appId: "app-report", workspaceId: "workspace-research", agentId: "agent-research", scopes: ["assistant:use", "sessions:read", "messages:submit", "artifacts:read"], expiresInSeconds: null });
   check("token explanation confines credential to trusted backend", host.textContent!.includes("trusted business backend"), true);
   check("token explanation requires stable authenticated external user identifier", host.textContent!.includes("stable external user identifier"), true);
-  check("token explanation puts conversations, memory and files in each branch", host.textContent!.includes("conversations, memory, files and artifacts"), true);
+  check("token explanation puts chats, memory and files in each branch", host.textContent!.includes("conversations, memory, files and artifacts"), true);
   await openGrant("Daily business agent");
   check("native details expose four focused entries", [...host.querySelectorAll('[role="tab"]')].map(item => item.getAttribute("data-tab")), ["overview", "api", "users", "credentials"]);
   check("detail selects the authorization record rather than consent target", host.querySelector(".appDelegationDetails")?.getAttribute("data-selected-delegation-id"), "grant-native");
   check("detail header identifies the selected target", host.querySelector(".appDelegationDetailHeader")?.textContent!.includes("Daily business agent"), true);
   host.querySelector<HTMLButtonElement>('[data-tab="api"]')!.click(); await settle();
   check("native quick start has four actual contract steps", host.querySelectorAll(".appDelegationGuideSteps > li").length, 4);
-  check("API guide preserves public deployment prefix and selected root", host.querySelector(".appDelegationEndpoint")?.textContent, "POST https://fixture.invalid/deployment-prefix/api/agents/agent-daily/business-branches/resolve");
+  check("API guide preserves public deployment prefix and selected root", host.querySelector(".appDelegationEndpoint")?.textContent, "POST https://fixture.invalid/deployment-prefix/api/v1/chats");
   check("guide excludes unsaved consent target", host.querySelector(".appDelegationGuide")?.textContent!.includes("agent-research"), false);
   check("guide never embeds one-time token", host.querySelector(".appDelegationGuide")?.textContent!.includes("fixture-one-time-token"), false);
-  check("Dify identity and message stream semantics are explicit", ["sys.user_id", "sys.conversation_id", "nextAfterSequence", "sourceSequence", "inputId", "agent_input_source_forbidden"].every(text => host.querySelector(".appDelegationGuide")?.textContent!.includes(text)), true);
+  check("Dify identity and message stream semantics are explicit", ["sys.user_id", "sys.conversation_id", "nextCursor", "Last-Event-ID", "Idempotency-Key", "message.updated"].every(text => host.querySelector(".appDelegationGuide")?.textContent!.includes(text)), true);
   for (const language of ["Python", "JavaScript", "cURL"]) { button(language).click(); await settle(); check(`${language} backend example uses selected root`, host.querySelector(".appDelegationExample")?.textContent!.includes("agent-daily"), true); }
   button("Copy example").click(); await settle(); check("copying example cannot copy actual token", copied.includes("fixture-one-time-token"), false);
   failClipboard = true; button("Example copied").click(); await settle();
@@ -204,8 +204,8 @@ try {
   check("native grant exposes branch maintenance", Boolean(host.querySelector('[data-tab="users"]')), true);
   await back(); await openGrant("Former assistant");
   host.querySelector<HTMLButtonElement>('[data-tab="api"]')!.click(); await settle();
-  check("published assistant displays distinct five-step guide", host.querySelectorAll(".appDelegationGuideSteps > li").length, 5);
-  check("published guide selects a model ID and excludes branch resolution", [host.querySelector(".appDelegationGuide")?.textContent!.includes("modelConfigRef"), host.querySelector(".appDelegationGuide")?.textContent!.includes("business-branches/resolve")], [true, false]);
+  check("published assistant displays the same four-step guide", host.querySelectorAll(".appDelegationGuideSteps > li").length, 4);
+  check("published guide creates a chat for the selected assistant", [host.querySelector(".appDelegationGuide")?.textContent!.includes("def-gone"), host.querySelector(".appDelegationEndpoint")?.textContent], [true, "POST https://fixture.invalid/deployment-prefix/api/v1/chats"]);
   check("published assistant has no branch maintenance action", Boolean(host.querySelector('[data-tab="users"]')), false); await back();
   await openGrant("Former assistant", "credentials");
   check("published credentials do not claim native branch execution semantics", host.querySelector(".appDelegationDetailPanel")?.textContent!.includes("existing branch identities"), false); await back();
