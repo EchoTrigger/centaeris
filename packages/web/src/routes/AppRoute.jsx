@@ -829,8 +829,10 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         setError(t("operations.acceptedReadFailed"));
       } else if (errorValue?.message === "operation_pending_input_changed") {
         setError(t("operations.changedInput"));
+        if (operations.pending()?.receipt) await checkPendingOperation(true);
       } else if (errorValue?.message === "operation_input_acceptance_unconfirmed") {
         setError(t("operations.inputUnconfirmed"));
+        await checkPendingOperation(true);
       } else if (errorValue?.message === "model_not_found") {
         try {
           const response = await apiResponse("/api/models");
@@ -850,7 +852,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     }
   }
 
-  async function checkPendingOperation() {
+  async function checkPendingOperation(preserveChangedDraft = false) {
     const operationId = operations.pending()?.operationId;
     const scope = requestScopeRef.current;
     const isCurrent = () => scope.active && requestScopeRef.current === scope;
@@ -868,7 +870,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
           const resume = await loadAcceptedConversation(session.id, { transport: transcriptTransport, store: transcriptStore, setActive: updateActiveTranscriptRun, isCurrent }, controller.signal);
           if (!isCurrent()) return;
           operations.complete(accepted.operationId);
-          setError("");
+          setError(preserveChangedDraft ? t("operations.inputUnconfirmed") : "");
           if (resume) connectAgentRun(resume.agentRunId, workspace.id, session.id, controller, resume).catch((failure) => handleAgentRunStreamFailure(failure, resume.agentRunId));
         } else {
           setOperationReviewLink({ operationId: accepted.operationId, ...acceptedConversationReviewLink(workspace.id, session) });
@@ -1259,7 +1261,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
             formRef={composerRef}
             fileInputRef={fileInputRef}
             isHome={isHome}
-            onSubmit={sendMessage}
+            onSubmit={(event) => void sendMessage(event, true)}
             pendingAttachments={pendingAttachments}
             pendingUploadFiles={pendingUploadFiles}
             onPreviewAttachment={setAttachmentPreview}
