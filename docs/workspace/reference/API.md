@@ -1227,6 +1227,11 @@ retained Sessions using the branch Agent; it is not a count of child work.
 
 ### Settings and backend integration guide
 
+The current application quickstart is the unified
+[Business Chat API](BusinessAPI.md). Both native and published targets
+use its Chat, Message and File contract. The lower-level transport
+details below describe Workspace transports, not the current application guide.
+
 Settings → Applications groups grants by application. Each detail selects an
 exact `delegationId` and exposes overview, API access, business users (native
 targets only), and credentials. Root configuration remains a separate owner

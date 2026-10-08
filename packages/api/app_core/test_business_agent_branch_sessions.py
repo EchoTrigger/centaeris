@@ -48,7 +48,7 @@ class BusinessAgentBranchSessionTests(BusinessBranchFixture, TestCase):
         root = root or models.Agent.objects.create(workspace=self.workspace, owner=self.member,
             name="Another business root", model_config=self.root.model_config)
         agent = models.Agent.objects.create(workspace=self.workspace, owner=self.member,
-            name="Another branch", model_config=self.root.model_config)
+            name="Another branch", is_business_instance=True, model_config=self.root.model_config)
         session = models.Session.objects.create(workspace=self.workspace, owner=self.member, agent=agent)
         models.AgentCoordinationSession.objects.create(agent=agent, session=session)
         branch = models.BusinessAgentBranch.objects.create(root_agent=root, agent=agent,

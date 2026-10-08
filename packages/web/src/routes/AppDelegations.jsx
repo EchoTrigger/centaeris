@@ -6,7 +6,7 @@ import AppDelegationDetails from "./AppDelegationDetails";
 import "./app-delegations.css";
 
 const SCOPES = ["assistant:use", "sessions:read", "sessions:create", "messages:submit", "attachments:write", "events:read", "artifacts:read", "runs:cancel"];
-const NATIVE_SCOPES = new Set(["assistant:use", "sessions:read", "messages:submit", "artifacts:read"]);
+const NATIVE_SCOPES = new Set(["assistant:use", "sessions:read", "messages:submit", "artifacts:read", "attachments:write"]);
 
 function activeDelegation(delegation) {
   return !delegation.revokedAt && (delegation.expiresAt === null || Date.parse(delegation.expiresAt) > Date.now());

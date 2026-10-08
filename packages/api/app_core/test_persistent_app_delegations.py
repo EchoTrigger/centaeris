@@ -109,7 +109,7 @@ class PersistentDelegationConsentTests(AppDelegationFixture, TestCase):
         for agent_id in (foreign.pk, managed["id"], elsewhere.pk):
             denied = self.issue({**body, "agentId": agent_id})
             self.assertEqual(denied.status_code, 404, denied.content)
-        for scope in ("sessions:create", "attachments:write", "runs:cancel", "events:read"):
+        for scope in ("sessions:create", "runs:cancel", "events:read"):
             denied = self.issue({**body, "scopes": [*NATIVE_SCOPES, scope]})
             self.assertEqual(denied.status_code, 400, denied.content)
         native.status, native.deletedAt = "deleted", timezone.now()

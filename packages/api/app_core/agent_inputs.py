@@ -20,7 +20,7 @@ class AgentInputError(ValueError):
 def require_native_agent_delegation(request, scope, *, agent_id=None, session_id=None, lock=False):
     """Dedicated Agent intake/read routes accept exact native Agent grants only."""
     grant = require_request_delegation(request, scope, agent_id=agent_id, session_id=session_id, lock=lock)
-    if grant is not None and grant.agent_id is None:
+    if grant is not None and grant.agent_id is None and getattr(request, "business_branch_id", None) is None:
         raise DelegationRejected("delegation_scope_forbidden")
     return grant
 

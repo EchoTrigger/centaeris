@@ -3,7 +3,6 @@ import { apiUrl } from "../api";
 import { useTranslation } from "../i18n";
 import { agentSettingsPath } from "../agent-chat/agentSettingsNavigation";
 import { buildDelegationGuide } from "./appDelegationGuide";
-
 export default function AppDelegationDetails({ delegation, tab, onTabChange, onBack, canConfigure, active, busy, onRotate, onRevoke, businessUsers }) {
   const { t, i18n } = useTranslation();
   const [language, setLanguage] = useState("curl");
@@ -50,13 +49,13 @@ export default function AppDelegationDetails({ delegation, tab, onTabChange, onB
           <h3>{t("appDelegations.quickStart")}</h3><p>{t("appDelegations.tokenBackendHint")}</p><p>{t(native ? "appDelegations.nativeGuideHint" : "appDelegations.publishedGuideHint")}</p>
           <ol className="appDelegationGuideSteps">{guide.steps.map(step => <li key={step.key}>
             <h4>{t(`appDelegations.guideStep.${step.key}`, { defaultValue: step.key })}</h4><code className="appDelegationEndpoint" translate="no">{step.method} {step.path}</code>
-            <details><summary>{t("appDelegations.requestDetails")}</summary><p>{t("appDelegations.requiredPermissions")}: <code translate="no">{step.requiredScopes.join(", ")}</code></p>{step.request ? <><h5>{t("appDelegations.requestBody")}</h5><pre translate="no">{step.request}</pre></> : null}<h5>{t("appDelegations.responseBody")}</h5><pre translate="no">{step.response}</pre></details>
+            <details><summary>{t("appDelegations.requestDetails")}</summary><p>{t("appDelegations.requiredPermissions")}: <code translate="no">{step.requiredScopes.join(", ")}</code></p>{step.headers ? <><h5>{t("appDelegations.requestHeaders")}</h5><pre translate="no">{Object.entries(step.headers).map(([key, value]) => `${key}: ${value}`).join("\n")}</pre></> : null}{step.request ? <><h5>{t("appDelegations.requestBody")}</h5><pre translate="no">{step.request}</pre></> : null}<h5>{t("appDelegations.responseBody")}</h5><pre translate="no">{step.response}</pre></details>
           </li>)}</ol>
           <div className="appDelegationExampleHeader"><h4>{t("appDelegations.codeExamples")}</h4><div className="appDelegationActions" aria-label={t("appDelegations.exampleLanguage")}>{["curl", "python", "javascript"].map(key => <button type="button" key={key} aria-pressed={language === key} onClick={() => { setLanguage(key); setCopied(false); setCopyError(""); }}>{key === "curl" ? "cURL" : key === "python" ? "Python" : "JavaScript"}</button>)}</div></div>
           <pre className="appDelegationExample" translate="no">{guide.examples[language]}</pre><button type="button" onClick={() => void copyExample()}>{t(copied ? "appDelegations.exampleCopied" : "appDelegations.copyExample")}</button>{copyError ? <p role="alert" className="accountSecurityError">{copyError}</p> : null}
-          {native ? <><h4>{t("appDelegations.deliveryMeaning")}</h4><p>{t("appDelegations.deliveryHint")}</p><p>{t("appDelegations.cursorHint")}</p><p>{t("appDelegations.readHint")}</p><h4>{t("appDelegations.difyTitle")}</h4><ol><li>{t("appDelegations.difyIdentity")}</li><li>{t("appDelegations.difyResolve")}<pre translate="no">{'request_body = {"businessUserId": stable_id}'}</pre><code translate="no">{'{{#encode.request_body#}}'}</code></li><li>{t("appDelegations.difyConsume")}</li></ol><p>{t("appDelegations.difyBoundary")}</p></> : null}
-          <details className="appDelegationDeveloperDetails"><summary>{t("appDelegations.errorsAndRetry")}</summary><p>{t(native ? "appDelegations.nativeRetryHint" : "appDelegations.publishedRetryHint")}</p><p>{t("appDelegations.errorHint")}</p></details>
-          {!native ? <p>{t("appDelegations.sseHint")}</p> : null}
+          {<><h4>{t("appDelegations.deliveryMeaning")}</h4><p>{t("appDelegations.deliveryHint")}</p><p>{t("appDelegations.cursorHint")}</p><p>{t("appDelegations.readHint")}</p><h4>{t("appDelegations.difyTitle")}</h4><ol><li>{t("appDelegations.difyIdentity")}</li><li>{t("appDelegations.difyResolve")}<pre translate="no">{'request_body = {"agentId": agent_id, "businessUserId": stable_id}'}</pre><code translate="no">{'{{#encode.request_body#}}'}</code></li><li>{t("appDelegations.difyConsume")}</li></ol><p>{t("appDelegations.difyBoundary")}</p></>}
+          <details className="appDelegationDeveloperDetails"><summary>{t("appDelegations.errorsAndRetry")}</summary><p>{t("appDelegations.nativeRetryHint")}</p><p>{t("appDelegations.errorHint")}</p></details>
+
         </div> : null}
         {tab === "users" && native ? businessUsers : null}
         {tab === "credentials" ? <>
