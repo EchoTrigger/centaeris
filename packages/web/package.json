@@ -10,7 +10,7 @@
     "lint": "pnpm -w run lint:web",
     "lint:hooks": "pnpm -w run lint:hooks:web",
     "lint:unused": "pnpm -w run lint:unused:web",
-    "test:chat-ui": "node --test tests/browser/chat-presentation.test.mjs tests/browser/transcript-message-actions.test.mjs tests/browser/transcript-recovery-scroll.test.mjs tests/browser/transcript-disclosure-direction.test.mjs tests/browser/transcript-disclosure-stationary.test.mjs",
+    "test:chat-ui": "node --test tests/browser/model-error-strip.test.mjs tests/browser/chat-presentation.test.mjs tests/browser/transcript-message-actions.test.mjs tests/browser/transcript-recovery-scroll.test.mjs tests/browser/transcript-disclosure-direction.test.mjs tests/browser/transcript-disclosure-stationary.test.mjs",
     "test:agent-chat-route": "node --test tests/browser/agent-chat-route.test.mjs tests/browser/agent-panel-sizing.test.mjs tests/browser/agent-input-attachments.test.mjs",
     "test:app-delegations": "node --test tests/browser/app-delegations.test.mjs",
     "test:transcript-reader": "node --test tests/browser/transcript-reader.test.mjs",
