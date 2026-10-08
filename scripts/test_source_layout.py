@@ -38,6 +38,16 @@ class SourceLayoutTests(unittest.TestCase):
         self.assertTrue(pins)
         self.assertEqual(set(pins), {version})
 
+    def test_ci_caches_pnpm_only_for_jobs_that_install_frontend_dependencies(self):
+        import re
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        jobs = dict(re.findall(r"^  ([a-z][a-z-]+):\n(.*?)(?=^  [a-z][a-z-]+:|\Z)", workflow, re.M | re.S))
+        cached = {name for name, body in jobs.items() if "cache: pnpm" in body}
+        self.assertEqual(cached, {"local-node", "web"})
+        release = (ROOT / ".github/workflows/release-product.yml").read_text()
+        local_product = release.split("  local-product:", 1)[1].split("  hosted-product:", 1)[0]
+        self.assertIn("cache: ${{ inputs.product == 'desktop' && 'pnpm' || '' }}", local_product)
+
     def test_relocated_python_tools_find_the_product_root(self):
         for name in ("ci.py", "test_product_version.py", "transcript-schema.py", "agent-run-authorization-gate.py"):
             with self.subTest(tool=name):
