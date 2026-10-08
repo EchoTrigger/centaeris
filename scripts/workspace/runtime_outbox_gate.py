@@ -47,6 +47,7 @@ def main():
                 ['cargo', 'test', '--locked', '-p', 'runtime_server', 'postgres_wait_handoff', '--'],
                 ['cargo', 'test', '--locked', '-p', 'runtime_server', 'postgres_current_schema', '--']]
     exact_tests = [
+        'snapshot_cas_tests::postgres_snapshot_cas_rejects_stale_writers_and_preserves_concurrent_results',
         'postgres_transcript_concurrent_duplicate_commit_is_idempotent',
         'postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_state',
         'postgres_runtime_store_persists_core_state_and_claims_jobs_once',

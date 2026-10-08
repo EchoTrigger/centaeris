@@ -11,6 +11,209 @@ const MAX_SUBAGENT_RESULT_ITEMS: usize = 64;
 const MAX_SUBAGENT_TITLE_CHARS: usize = 180;
 const MAX_SUBAGENT_DESCRIPTION_CHARS: usize = 800;
 const MAX_SUBAGENT_SUMMARY_CHARS: usize = 1_200;
+const SNAPSHOT_CAS_ATTEMPTS: usize = 16;
+
+pub fn validate_wait_recovery_replay<S: RuntimeJobStorePort>(
+    store: &S,
+    sealed: &SessionStateSnapshot,
+    current: &SessionStateSnapshot,
+) -> Result<(), String> {
+    validate_projection(store, sealed)?;
+    validate_projection(store, current)?;
+    let mut semantic_sealed = sealed.clone();
+    let mut semantic_current = current.clone();
+    // Only Core's verified, derived terminal-child projection may evolve while
+    // the same wait is sealed. All other state, including private wait metadata,
+    // remains part of the exact replay contract.
+    semantic_sealed
+        .metadata
+        .remove(SUBAGENT_RESULT_PROJECTION_META_KEY);
+    semantic_current
+        .metadata
+        .remove(SUBAGENT_RESULT_PROJECTION_META_KEY);
+    if serde_json::to_value(semantic_sealed).map_err(|e| e.to_string())?
+        != serde_json::to_value(semantic_current).map_err(|e| e.to_string())?
+    {
+        return Err("wait recovery changed Core state".into());
+    }
+    Ok(())
+}
+
+pub fn reconstruct_wait_recovery_snapshot<S: RuntimeJobStorePort>(
+    store: &S,
+    sealed: &SessionStateSnapshot,
+) -> Result<SessionStateSnapshot, String> {
+    validate_projection(store, sealed)?;
+    let mut restored = sealed.clone();
+    let retained = read_subagent_result_projection(sealed)?;
+    let mut items = Vec::new();
+    let mut offset = 0;
+    const PAGE_SIZE: usize = 256;
+    loop {
+        let jobs =
+            store.list_runtime_jobs(crate::session::reliability::ListRuntimeJobsRequest {
+                statuses: vec![
+                    RuntimeJobStatus::Succeeded,
+                    RuntimeJobStatus::Failed,
+                    RuntimeJobStatus::DeadLettered,
+                    RuntimeJobStatus::Cancelled,
+                ],
+                job_kind: Some(super::subagent::SUBAGENT_RUN_JOB_KIND.into()),
+                session_id: Some(sealed.session_id.clone()),
+                branch_id: None,
+                limit: PAGE_SIZE,
+                offset,
+            })?;
+        let count = jobs.len();
+        for job in jobs {
+            let item = authoritative_projection_item(&sealed.session_id, &job)?;
+            items.push(
+                retained
+                    .items
+                    .iter()
+                    .find(|old| old.subagent_run_ref == item.subagent_run_ref)
+                    .cloned()
+                    .unwrap_or(item),
+            );
+            items.sort_by(|left, right| {
+                right
+                    .finished_at_ms
+                    .unwrap_or_default()
+                    .cmp(&left.finished_at_ms.unwrap_or_default())
+                    .then_with(|| right.subagent_run_ref.cmp(&left.subagent_run_ref))
+            });
+            items.truncate(MAX_SUBAGENT_RESULT_ITEMS);
+        }
+        if count < PAGE_SIZE {
+            break;
+        }
+        offset += count;
+    }
+    if !items.is_empty() {
+        merge_subagent_result_projection_items(&mut restored, items)?;
+    }
+    Ok(restored)
+}
+
+pub fn restore_wait_recovery_snapshot<S: RuntimeJobStorePort + AgentRuntimeSnapshotStorePort>(
+    store: &S,
+    sealed: &SessionStateSnapshot,
+) -> Result<SessionStateSnapshot, String> {
+    let mut first_observed = None;
+    for _ in 0..SNAPSHOT_CAS_ATTEMPTS {
+        let raw = store.load_agent_runtime_snapshot(&sealed.session_id)?;
+        let mut basis = sealed.clone();
+        if let Some(raw) = &raw {
+            let current: SessionStateSnapshot =
+                serde_json::from_str(raw).map_err(|e| e.to_string())?;
+            if current.session_id != sealed.session_id {
+                return Err("wait recovery snapshot session mismatch".into());
+            }
+            validate_projection(store, &current)?;
+            if let Some(first) = &first_observed {
+                validate_wait_recovery_replay(store, first, &current)?;
+            } else {
+                // The caller has authorized rollback to an immutable recovery
+                // checkpoint. Retain that first observation to detect unrelated
+                // advancement during a CAS retry, rather than overwriting it.
+                first_observed = Some(current.clone());
+            }
+            let retained = read_subagent_result_projection(&current)?;
+            if !retained.items.is_empty() {
+                merge_subagent_result_projection_items(&mut basis, retained.items)?;
+            }
+        }
+        if first_observed.is_none() {
+            first_observed = Some(sealed.clone());
+        }
+        let snapshot = reconstruct_wait_recovery_snapshot(store, &basis)?;
+        if store.compare_and_save_agent_runtime_snapshot(
+            &sealed.session_id,
+            raw.as_deref(),
+            &serde_json::to_string(&snapshot).map_err(|e| e.to_string())?,
+            now_ms(),
+        )? {
+            return Ok(snapshot);
+        }
+    }
+    Err("wait recovery snapshot concurrent update".into())
+}
+
+fn authoritative_projection_item(
+    parent: &str,
+    job: &RuntimeJobRecord,
+) -> Result<SubagentResultProjectionItemV1, String> {
+    if job.job_kind != super::subagent::SUBAGENT_RUN_JOB_KIND
+        || job.session_id.as_deref() != Some(parent)
+        || !job.status.is_terminal()
+    {
+        return Err("subagent projection ownership or terminal mismatch".into());
+    }
+    let kind = match job.status {
+        RuntimeJobStatus::Succeeded => SubagentSchedulerEventKind::Succeeded,
+        RuntimeJobStatus::Failed | RuntimeJobStatus::DeadLettered => {
+            SubagentSchedulerEventKind::Failed
+        }
+        RuntimeJobStatus::Cancelled => SubagentSchedulerEventKind::Cancelled,
+        _ => return Err("subagent projection job is not terminal".into()),
+    };
+    let summary = subagent_projection_default_title(&kind);
+    let event = super::subagent::scheduler_event_from_job(
+        job,
+        kind,
+        SubagentLifecycleStatus::from(job.status.clone()),
+        None,
+        summary,
+        job.updated_at_ms,
+    )?;
+    build_projection_item(parent, &event)
+        .ok_or_else(|| "subagent projection terminal item missing".into())
+}
+
+fn validate_projection<S: RuntimeJobStorePort>(
+    store: &S,
+    snapshot: &SessionStateSnapshot,
+) -> Result<(), String> {
+    let projection = read_subagent_result_projection(snapshot)?;
+    if projection.items.len() > MAX_SUBAGENT_RESULT_ITEMS {
+        return Err("subagent result projection exceeds item limit".into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for item in &projection.items {
+        // The producer appends three dots after its retained character budget.
+        if item.title.chars().count() > MAX_SUBAGENT_TITLE_CHARS + 3
+            || item
+                .description
+                .as_ref()
+                .is_some_and(|value| value.chars().count() > MAX_SUBAGENT_DESCRIPTION_CHARS + 3)
+            || item.bounded_summary.chars().count() > MAX_SUBAGENT_SUMMARY_CHARS + 3
+        {
+            return Err("subagent projection display bounds exceeded".into());
+        }
+        let id = item
+            .subagent_run_ref
+            .strip_prefix("runtime_job:")
+            .ok_or("subagent projection runtime job ref invalid")?;
+        if !seen.insert(id) {
+            return Err("subagent projection duplicate job".into());
+        }
+        let job = store
+            .get_runtime_job(id)?
+            .ok_or("subagent projection job missing")?;
+        let expected = authoritative_projection_item(&snapshot.session_id, &job)?;
+        if item.subagent_id != expected.subagent_id
+            || item.child_session_ref != expected.child_session_ref
+            || item.parent_turn_id != expected.parent_turn_id
+            || item.work_packet_ref != expected.work_packet_ref
+            || item.status != expected.status
+            || item.result_ref != expected.result_ref
+            || item.output_refs != expected.output_refs
+        {
+            return Err("subagent projection ownership or terminal mismatch".into());
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -98,13 +301,28 @@ where
         return Ok(0);
     }
 
-    let session_manager = crate::session::manager::SessionManager::new(store.clone());
-    let mut session = session_manager.load_or_create_session(parent_session_id)?;
-    let written = merge_subagent_result_projection_items(&mut session, terminal_items)?;
-    if written > 0 {
-        session_manager.save_session(&session)?;
+    for _ in 0..SNAPSHOT_CAS_ATTEMPTS {
+        let raw = store.load_agent_runtime_snapshot(parent_session_id)?;
+        let mut session = match &raw {
+            Some(raw) => {
+                serde_json::from_str::<SessionStateSnapshot>(raw).map_err(|e| e.to_string())?
+            }
+            None => SessionStateSnapshot::new(parent_session_id.into(), now_ms()),
+        };
+        let written = merge_subagent_result_projection_items(&mut session, terminal_items.clone())?;
+        if written == 0 {
+            return Ok(0);
+        }
+        if store.compare_and_save_agent_runtime_snapshot(
+            parent_session_id,
+            raw.as_deref(),
+            &serde_json::to_string(&session).map_err(|e| e.to_string())?,
+            now_ms(),
+        )? {
+            return Ok(written);
+        }
     }
-    Ok(written)
+    Err("subagent projection snapshot concurrent update".into())
 }
 
 fn build_projection_item(

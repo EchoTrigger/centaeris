@@ -69,7 +69,10 @@ pub use self::lifecycle_hooks_runtime::{
 pub use self::loop_runtime::persist_answer_now_requested_fact;
 use self::prompt_compaction_metadata::*;
 use self::provider_polling::*;
-pub use self::subagent_projection::persist_subagent_result_projection_from_scheduler_events;
+pub use self::subagent_projection::{
+    persist_subagent_result_projection_from_scheduler_events, reconstruct_wait_recovery_snapshot,
+    restore_wait_recovery_snapshot, validate_wait_recovery_replay,
+};
 pub use self::subagent_runner::{
     build_subagent_scheduler_runtime_event, AgentRuntimeSubagentRunnerConfig,
     ModelClientSubagentRunner, QueryLifecycleSubagentObserver, ToolSafePointCommitPort,

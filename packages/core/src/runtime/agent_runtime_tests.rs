@@ -40,6 +40,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod active_input_tests;
 mod completion_delivery_tests;
 mod host_event_tests;
+mod wait_recovery_tests;
 
 #[derive(Clone, Debug, Default)]
 struct AgentRuntimeTestState {
@@ -47,6 +48,7 @@ struct AgentRuntimeTestState {
     events: Vec<RuntimeEvent>,
     snapshots: HashMap<String, String>,
     fail_after_input_snapshot: Option<String>,
+    snapshot_cas_conflict: Option<(String, String, RuntimeJobRecord)>,
     external_objects: HashMap<String, ExternalContextObject>,
     external_links: Vec<ExternalContextObjectLink>,
     jobs: HashMap<String, RuntimeJobRecord>,
@@ -315,6 +317,27 @@ impl RuntimeStore for AgentRuntimeTestStore {
 }
 
 impl AgentRuntimeSnapshotStorePort for AgentRuntimeTestStore {
+    fn compare_and_save_agent_runtime_snapshot(
+        &self,
+        session_id: &str,
+        expected_snapshot: Option<&str>,
+        snapshot_json: &str,
+        _updated_at_ms: i64,
+    ) -> Result<bool, String> {
+        let mut state = self.state()?;
+        if let Some((session, snapshot, job)) = state.snapshot_cas_conflict.take() {
+            state.snapshots.insert(session, snapshot);
+            state.jobs.insert(job.job_id.clone(), job);
+        }
+        if state.snapshots.get(session_id).map(String::as_str) != expected_snapshot {
+            return Ok(false);
+        }
+        state
+            .snapshots
+            .insert(session_id.into(), snapshot_json.into());
+        Ok(true)
+    }
+
     fn load_agent_runtime_snapshot(&self, session_id: &str) -> Result<Option<String>, String> {
         Ok(self.state()?.snapshots.get(session_id).cloned())
     }

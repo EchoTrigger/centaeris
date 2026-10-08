@@ -640,6 +640,28 @@ impl SessionDataStorePort for PostgresRuntimeStore {
 }
 
 impl AgentRuntimeSnapshotStorePort for PostgresRuntimeStore {
+    fn compare_and_save_agent_runtime_snapshot(
+        &self,
+        session_id: &str,
+        expected_snapshot: Option<&str>,
+        snapshot_json: &str,
+        updated_at_ms: i64,
+    ) -> Result<bool, String> {
+        self.with_client(|client| {
+            let written = match expected_snapshot {
+                Some(expected) => client.execute(
+                    "UPDATE session_runtime_snapshots SET snapshot_json=$3,updated_at_ms=$4 WHERE session_id=$1 AND snapshot_json=$2",
+                    &[&session_id, &expected, &snapshot_json, &updated_at_ms],
+                ),
+                None => client.execute(
+                    "INSERT INTO session_runtime_snapshots(session_id,snapshot_json,updated_at_ms) VALUES($1,$2,$3) ON CONFLICT(session_id) DO NOTHING",
+                    &[&session_id, &snapshot_json, &updated_at_ms],
+                ),
+            }.map_err(|error| format!("compare and save Postgres session snapshot failed: {error}"))?;
+            Ok(written == 1)
+        })
+    }
+
     fn load_agent_runtime_snapshot(&self, session_id: &str) -> Result<Option<String>, String> {
         self.with_client(|client| {
             client
