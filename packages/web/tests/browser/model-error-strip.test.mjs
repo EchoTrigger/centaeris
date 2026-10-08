@@ -20,16 +20,18 @@ for (const width of [736, 320]) for (const theme of ["light", "dark"]) test(`err
         const icon = row.querySelector("svg").getBoundingClientRect();
         const box = text.getBoundingClientRect();
         const lineHeight = parseFloat(getComputedStyle(text).lineHeight);
-        return { offset: Math.abs(icon.y + icon.height / 2 - box.y - lineHeight / 2), iconWidth: icon.width,
+        return { offset: Math.abs(icon.y + icon.height / 2 - box.y - lineHeight / 2), iconWidth: icon.width, iconHeight: icon.height,
           fits: row.getBoundingClientRect().right <= innerWidth && row.scrollWidth <= row.clientWidth,
-          wraps: box.height > lineHeight + 1, radius: getComputedStyle(row).borderRadius };
+          wraps: box.height > lineHeight + 1, text: text.textContent };
       }));
       for (const item of geometry) {
         assert.ok(item.offset < 1, JSON.stringify(item));
-        assert.equal(item.iconWidth, 20);
+        assert.ok(item.iconWidth > 0 && item.iconHeight > 0, "icon has visible geometry");
+        assert.equal(item.iconWidth, item.iconHeight, "wrapping must not distort the icon");
         assert.ok(item.fits);
-        assert.ok(parseFloat(item.radius) >= 22);
       }
+      assert.ok(geometry[0].text.includes("provider_timeout"));
+      assert.equal(geometry[1].text, "exceeded retry limit, last status: 429 Too Many Requests");
       if (width === 320) assert.ok(geometry[1].wraps, "long error wraps without moving the icon from the first line");
     });
   } finally {

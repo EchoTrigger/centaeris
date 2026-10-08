@@ -4,9 +4,12 @@ import { PluginsDialog } from "../src/components/PluginsDialog";
 import { useState } from "react";
 import { useAppNavigation, type AppLocation } from "../src/components/app/useAppNavigation";
 import { SkillsDialog } from "../src/components/SkillsDialog";
+import { getPluginDetail, setPluginEnabled, reloadPlugins } from "../src/lib/chatBridge";
 vi.mock("../src/lib/chatBridge", () => ({
  listPlugins: vi.fn(async () => [{ id:"p",name:"Example",description:"Plugin description",source:"managed",enabled:true,errors:[],tools:[],path:"/p" }]),
  getPluginDetail: vi.fn(async () => ({descriptor:{id:"p"},capabilities:{skills:[],cli:[],apps:[],hooks:[],mcpServers:[],capabilities:[]}})),
+ setPluginEnabled: vi.fn(async () => ({})),
+ reloadPlugins: vi.fn(async () => ({})),
  listSkillSources: vi.fn(async () => ({sources:[],skillPolicies:[]})),
  getSkillCatalog: vi.fn(async () => ({skills:[{skillId:"s",sourceId:"src",scope:"user",name:"Design",description:"Design guidance",enabled:true,errors:[],capabilityMetadata:{allowedTools:[]}}, ...(["workspace", "system", "plugin"] as const).map(scope => ({skillId:scope,sourceId:scope,scope,name:scope,description:"",enabled:true,errors:[],capabilityMetadata:{allowedTools:[]}}))],diagnostics:[]})),
  getSkillDetail: vi.fn(async () => ({skill:{skillId:"s",scope:"user",name:"Design",description:"Design guidance",enabled:true,errors:[],capabilityMetadata:{allowedTools:[]}},content:"Instructions"})),
@@ -22,6 +25,31 @@ test("plugin selection navigates to detail while list search survives return", a
  await act(async () => view.root.findByProps({"aria-label":"Back to plugins"}).props.onClick());
  expect(view.root.findByProps({"aria-label":"Search plugins"}).props.value).toBe("Example");
  await act(async () => view.unmount());
+});
+
+test("plugin detail discarded after returning to the list cannot surface a late error", async () => {
+ let reject!:(error:Error)=>void;
+ vi.mocked(getPluginDetail).mockImplementationOnce(()=>new Promise((_resolve,fail)=>{reject=fail;}));
+ let view!:ReactTestRenderer;
+ await act(async()=>{view=create(<PluginsDialog/>);});
+ await act(async()=>view.root.findByProps({"aria-label":"Open Example"}).props.onClick());
+ await act(async()=>view.root.findByProps({"aria-label":"Back to plugins"}).props.onClick());
+ await act(async()=>reject(new Error("obsolete detail error")));
+ expect(JSON.stringify(view.toJSON())).not.toContain("obsolete detail error");
+ expect(view.root.findByProps({"aria-label":"Search plugins"})).toBeTruthy();
+ await act(async()=>view.unmount());
+});
+
+test("plugin reload and enablement controls invoke the selected plugin operations", async () => {
+ vi.mocked(reloadPlugins).mockClear(); vi.mocked(setPluginEnabled).mockClear();
+ let view!:ReactTestRenderer;
+ await act(async()=>{view=create(<PluginsDialog/>);});
+ await act(async()=>view.root.findByProps({"aria-label":"Reload plugins"}).props.onClick());
+ expect(reloadPlugins).toHaveBeenCalledExactlyOnceWith();
+ await act(async()=>view.root.findByProps({"aria-label":"Open Example"}).props.onClick());
+ await act(async()=>view.root.findByProps({"aria-label":"Disable plugin"}).props.onClick());
+ expect(setPluginEnabled).toHaveBeenCalledExactlyOnceWith({id:"p",enabled:false});
+ await act(async()=>view.unmount());
 });
 test("skill opens in a dismissible dialog and preserves list query", async () => {
  let view!:ReactTestRenderer;

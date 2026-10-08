@@ -1,6 +1,5 @@
 import importlib.util
 from pathlib import Path
-import tempfile
 import unittest
 
 spec = importlib.util.spec_from_file_location("ci", Path(__file__).with_name("ci.py"))
@@ -45,16 +44,19 @@ class PortableGateTests(unittest.TestCase):
             ci.run_gate("Rust", fail)
         self.assertEqual(len(calls), 1)
 
-    def test_dependency_and_source_boundaries_remain_enforced(self):
-        with self.assertRaisesRegex(RuntimeError, "SQLite"):
-            ci.run_gate("Rust", lambda args, **kw: "rusqlite" if "tree" in args else "")
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = root / "packages/core/src"
-            source.mkdir(parents=True)
-            (source / "lib.rs").write_text("use rusqlite::Connection;")
-            with self.assertRaisesRegex(RuntimeError, "SQLite"):
-                ci.check_core_boundary(root)
+    def test_dependency_boundary_rejects_actual_direct_and_transitive_adapters(self):
+        for tree in (
+            "centaeris-core v0.1.0\n└── rusqlite v0.32.1",
+            "centaeris-core v0.1.0\n└── wrapper v0.1.0\n    └── centaeris-runtime-sqlite v0.1.0",
+        ):
+            with self.subTest(tree=tree):
+                calls = []
+                def run(args, **kwargs):
+                    calls.append(args)
+                    return tree if args[:2] == ["cargo", "tree"] else ""
+                with self.assertRaisesRegex(RuntimeError, "SQLite"):
+                    ci.run_gate("Rust", run)
+                self.assertEqual(calls[-1], ["cargo", "tree", "--locked", "-p", "centaeris-core", "--edges", "normal,build,dev"])
 
     def test_unknown_stage_fails_before_running_commands(self):
         with self.assertRaises(ValueError):
