@@ -48,7 +48,7 @@ class PortableCITests(unittest.TestCase):
                 return json.dumps(config)
             with patch.object(ci, "run", record):
                 ci.main(skip)
-            self.assertTrue(any("build" in c and "packages/web" in c for c in calls))
+            self.assertTrue(any("build" in c and "web" in c for c in calls))
             self.assertEqual(any("test:unit" in c for c in calls), not skip)
             for script in ("scripts/workspace/runtime_outbox_gate.py", "scripts/workspace/agent-run-authorization-gate.py",
                            "scripts/workspace/transcript-schema.py", "scripts/workspace/test_transcript_schema.py",

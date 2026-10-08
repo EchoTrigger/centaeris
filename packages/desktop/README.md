@@ -31,10 +31,10 @@ Desktop requires Node/npm and Rust/Cargo. It does not call Python, read a root
 virtual environment, or bundle hosted-product services.
 
 ```powershell
-npm ci
+pnpm install --frozen-lockfile
 node packages/desktop/scripts/ensure-runtime.mjs --profile debug
-npm run dev --workspace centaeris-ui
-npm run dev --workspace @centaeris/electron-host
+pnpm --filter centaeris-ui run dev
+pnpm --filter @centaeris/electron-host run dev
 ```
 
 The default development Runtime is `target/debug/centaeris-runtime.exe` on Windows.
@@ -52,10 +52,10 @@ Build the complete Desktop directory from the repository root:
 Focused checks:
 
 ```powershell
-npm run check --workspace @centaeris/electron-host
-npm run check:host-parity --workspace @centaeris/electron-host
-npm run smoke:runtime --workspace @centaeris/electron-host
-npm run smoke:window --workspace @centaeris/electron-host
+pnpm --filter @centaeris/electron-host run check
+pnpm --filter @centaeris/electron-host run check:host-parity
+pnpm --filter @centaeris/electron-host run smoke:runtime
+pnpm --filter @centaeris/electron-host run smoke:window
 cargo test --locked -p centaeris-runtime
 ```
 

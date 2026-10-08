@@ -5,7 +5,7 @@ from ci_scope import select_products, aggregate_result, PRODUCTS, JOBS
 
 class ScopeTests(unittest.TestCase):
     def test_shared_core_locks_and_unknown_inputs_expand_to_all_products(self):
-        for path in ("packages/core/src/lib.rs", "Cargo.lock", "package-lock.json", "uv.lock", "new-build-input"):
+        for path in ("packages/core/src/lib.rs", "Cargo.lock", "pnpm-lock.yaml", "pnpm-workspace.yaml", "uv.lock", "new-build-input"):
             self.assertTrue(all(select_products([path]).values()), path)
 
     def test_web_only_changes_keep_local_and_core_gates_out_of_scope(self):

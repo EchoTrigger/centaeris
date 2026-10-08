@@ -44,7 +44,7 @@ manual run.
 The portable source gate runs formatting, workspace checks, Clippy with warnings
 denied, the focused Core query-loop and SQLite integration gates, the full local-product Rust
 package tests and UI/Electron source checks. The Windows `ci.ps1 Release`
-entry additionally runs TUI packaging and desktop/UI acceptance. Local Desktop acceptance performs `npm ci`, the UI gate (typecheck, Vite
+entry additionally runs TUI packaging and desktop/UI acceptance. Local Desktop acceptance performs `pnpm install --frozen-lockfile`, the UI gate (typecheck, Vite
 build, and Vitest), retained Electron host/security tests and build,
 third-party-license assembly and distribution validation, plus runtime and window
 smoke tests, plus Desktop/TUI coexistence, persistence and sidecar
@@ -95,7 +95,7 @@ The repository must also pass these structural checks:
 - the public repository contains a checked-in CI workflow that runs the documented gates on the supported runner and makes no release-platform claim beyond its tested build matrix;
 - installers request only artifacts produced by that matrix; the current Unix installer must not advertise absent macOS or Linux assets;
 - release artifacts are produced and tested by an explicit build matrix for every advertised platform; the current repository only produces Windows x64 TUI and desktop artifacts;
-- `Cargo.lock` and `package-lock.json` resolve only this repository's workspaces.
+- `Cargo.lock` and `pnpm-lock.yaml` resolve only this repository's workspaces.
 
 The gate's Core/storage boundary checks protect dependency direction rather than preserving a migration blacklist: Core owns contracts and private semantics, while `runtime_sqlite` owns its implementation and the public Core-plus-SQLite integration coverage.
 

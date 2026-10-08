@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { packageDirectory as resolvePackageDirectory } from "./package-directory.mjs";
 
 const licenseName = /^(?:license|licence|copying|copyright|notice)(?:[._-]|$)/i;
 
@@ -125,8 +126,8 @@ const licenseFiles = async (directory) =>
 
 const npmPackages = async (repoRoot) => {
   const paths = run(
-    process.platform === "win32" ? "npm.cmd" : "npm",
-    ["ls", "--omit=dev", "--all", "--workspace", "centaeris-ui", "--parseable"],
+    process.platform === "win32" ? "pnpm.cmd" : "pnpm",
+    ["--filter", "centaeris-ui", "list", "--prod", "--depth", "Infinity", "--parseable"],
     repoRoot,
     process.platform === "win32",
   )
@@ -217,7 +218,9 @@ export const fallbackFiles = async (item, repoRoot, hostRoot) => {
   let sourcePath;
   let source;
   if (item.ecosystem === "npm") {
-    const sourceRoot = path.join(repoRoot, "node_modules", ...fallback.sourcePackage.split("/"));
+    const uiRoot = path.join(repoRoot, "packages", "ui");
+    const owner = fallback.sourcePackage === "rolldown" ? resolvePackageDirectory("vite", uiRoot) : uiRoot;
+    const sourceRoot = resolvePackageDirectory(fallback.sourcePackage, owner);
     const manifest = await readJson(path.join(sourceRoot, "package.json"));
     if (manifest.version !== fallback.sourceVersion) {
       throw new Error(`third-party fallback version mismatch: ${key}`);

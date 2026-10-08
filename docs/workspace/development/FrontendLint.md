@@ -10,7 +10,7 @@ Unreachable code, unused imports and variables, missing Hook dependencies,
 Hooks called outside the top level, debugger statements, duplicate object keys,
 duplicate parameters, and explicit `any` annotations are errors.
 
-Use `npm run lint:hooks` and `npm run lint:unused` when investigating one
+Use `pnpm run lint:hooks` and `pnpm run lint:unused` when investigating one
 category. The Web package scripts delegate to the repository root so every
 invocation uses the shared root configuration.
 
@@ -24,7 +24,7 @@ explanation and behavior coverage before the diagnostic is suppressed.
 
 ### Zero-warning baseline
 
-`npm run lint`, `npm run lint:hooks`, and `npm run lint:unused` report no
+`pnpm run lint`, `pnpm run lint:hooks`, and `pnpm run lint:unused` report no
 findings. The global CI lint step now owns that invariant; tests do not pin
 diagnostics to individual source line numbers.
 
@@ -34,7 +34,7 @@ diagnostics to individual source line numbers.
 - Removed the unused `selectedItem` binding from `LibraryRoute.jsx`.
 - Removed the unused `Trash2` import from `ModelSettings.jsx`.
 
-`npm run lint:unused` reports no remaining findings in this repository.
+`pnpm run lint:unused` reports no remaining findings in this repository.
 
 ### Core chat type-checking
 
@@ -67,6 +67,6 @@ and route-scope failures were corrected. Intentional reset and refresh triggers
 remain explicit at their owning effects with inline explanations.
 
 The result is enforced globally: a new unsuppressed exhaustive-dependency
-diagnostic fails both `npm run lint` and local CI. Similar-looking effects remain
+diagnostic fails both `pnpm run lint` and local CI. Similar-looking effects remain
 separate when they have different owners, lifecycles, cleanup, or failure
 handling.

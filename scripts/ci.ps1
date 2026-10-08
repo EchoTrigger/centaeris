@@ -15,7 +15,7 @@ try {
         python -B scripts/test_system_skills.py
         & (Join-Path $PSScriptRoot "desktop-ui-acceptance.ps1")
         & (Join-Path $PSScriptRoot "build-tui.ps1")
-        npm --prefix packages/desktop run smoke:runtime
+        pnpm --filter @centaeris/electron-host run smoke:runtime
     } else {
         python scripts/ci.py $Stage
     }

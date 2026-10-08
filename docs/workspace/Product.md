@@ -28,7 +28,7 @@ Changing the interface language preserves drafts and does not translate user con
 model responses, commands, or protocol identifiers.
 
 Translation resources live in `packages/web/src/locales/`. Run
-`npm run test:unit --workspace packages/web` for resource parity and plural checks.
+`pnpm --filter web run test:unit` for resource parity and plural checks.
 The main browser regression suite explicitly selects English; dedicated language
 tests cover the Chinese default, switching, and persistence.
 
@@ -38,7 +38,7 @@ tests cover the Chinese default, switching, and persistence.
 cp .env.example .env
 # Fill every blank secret.
 uv sync --locked
-npm ci
+pnpm install --frozen-lockfile
 cargo check --workspace --locked
 docker compose config --quiet
 ```

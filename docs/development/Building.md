@@ -2,22 +2,23 @@
 
 ## Locked toolchains
 
-Use the Rust version in `rust-toolchain.toml`, Python 3.12, Node.js `22.21.0`, and npm `10.9.4`. Commit and use
-`Cargo.lock` and `package-lock.json`; do not replace locked installs with
+Use the Rust version in `rust-toolchain.toml`, Python 3.12, Node.js `22.21.0`, and pnpm `12.10.1`. Commit and use
+`Cargo.lock` and `pnpm-lock.yaml`; do not replace locked installs with
 floating dependency resolution in release builds.
 
 ```sh
 cargo fetch --locked
-npm ci
+npm install --global pnpm@12.10.1
+pnpm install --frozen-lockfile
 ```
 
 ## Development targets
 
 ```sh
 cargo check --locked
-npm run typecheck
-npm run dev --workspace centaeris-ui
-npm run dev --workspace @centaeris/electron-host
+pnpm run typecheck
+pnpm --filter centaeris-ui run dev
+pnpm --filter @centaeris/electron-host run dev
 ```
 
 ## Portable source checks

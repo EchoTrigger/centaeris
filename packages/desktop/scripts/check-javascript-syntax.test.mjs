@@ -16,7 +16,7 @@ test("desktop check rejects a newly added nested JavaScript file with invalid sy
     packageManifest.scripts["check:syntax"],
     "node ./scripts/check-javascript-syntax.mjs",
   );
-  assert.match(packageManifest.scripts.check, /^npm run check:syntax &&/);
+  assert.match(packageManifest.scripts.check, /^pnpm run check:syntax &&/);
 
   fs.mkdirSync(probeDirectory, { recursive: true });
   fs.writeFileSync(probePath, "export const broken = ;\n", "utf8");

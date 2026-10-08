@@ -25,8 +25,8 @@ stale closure, missed refresh, duplicate subscription, reload loop, or rendering
 regression. Intentional trigger dependencies stay in place unless a test proves
 they are unnecessary.
 
-Run the complete policy with `npm run lint`. Use `npm run lint:hooks` or
-`npm run lint:unused` to isolate an audit category. Package-level scripts
+Run the complete policy with `pnpm run lint`. Use `pnpm run lint:hooks` or
+`pnpm run lint:unused` to isolate an audit category. Package-level scripts
 delegate to these root-owned commands so every invocation uses the shared root
 configuration.
 
@@ -39,7 +39,7 @@ configuration.
 - Removed the unused `repoRoot` binding from
   `packages/desktop/scripts/smoke-window.mjs`.
 
-`npm run lint:unused` reports no remaining findings in this repository.
+`pnpm run lint:unused` reports no remaining findings in this repository.
 
 ### Hook dependency investigation
 

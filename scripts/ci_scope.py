@@ -13,7 +13,7 @@ JOBS = {"coreRust": "core-rust", "localNode": "local-node", "workspaceRust": "wo
 
 def select_products(paths):
     selected = set()
-    shared = {"Cargo.toml", "Cargo.lock", "package.json", "package-lock.json", "pyproject.toml", "uv.lock",
+    shared = {"Cargo.toml", "Cargo.lock", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "pyproject.toml", "uv.lock",
               "rust-toolchain.toml", ".node-version", ".python-version", ".gitignore", ".dockerignore", "biome.json"}
     rules = [
         (("packages/core/", "packages/model-catalog/", "packages/mcp/", "packages/runtime_sqlite/"), PRODUCTS),

@@ -16,7 +16,7 @@ Runtime Framework 是固定到精确公共 Git 提交的 Rust 依赖。Cargo 和
 
 Workspace 使用 `react-i18next` 支持英文和简体中文，默认简体中文。在**设置 → 通用 → 语言**中切换，选择会保存在当前浏览器中。登录页面也提供语言选择。切换界面语言会保留草稿，不会翻译用户内容、模型回复、命令或协议标识。
 
-翻译资源位于 `packages/web/src/locales/`。运行 `npm run test:unit --workspace packages/web` 检查资源键、插值参数和单复数。主要浏览器回归测试明确选择英文；专门的语言测试覆盖默认中文、切换和持久化。
+翻译资源位于 `packages/web/src/locales/`。运行 `pnpm --filter web run test:unit` 检查资源键、插值参数和单复数。主要浏览器回归测试明确选择英文；专门的语言测试覆盖默认中文、切换和持久化。
 
 ## 开发
 
@@ -24,7 +24,7 @@ Workspace 使用 `react-i18next` 支持英文和简体中文，默认简体中�
 cp .env.example .env
 # 填写所有留空的密钥。
 uv sync --locked
-npm ci
+pnpm install --frozen-lockfile
 cargo check --workspace --locked
 docker compose config --quiet
 ```
