@@ -50,7 +50,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 22.21.0
-          cache: pnpm
+          cache: ${{ inputs.product == 'desktop' && 'pnpm' || '' }}
       - run: rustup show active-toolchain
       - run: python scripts/ci.py Rust
       - name: Build and validate the selected local product
