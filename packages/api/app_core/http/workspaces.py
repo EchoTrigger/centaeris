@@ -503,7 +503,7 @@ def list_workspace_sessions(request, workspace_id: str):
         sessions_query = sessions_query.filter(coordination_binding__isnull=True)
         if grant is not None:
             sessions_query = sessions_query.filter(agent__definition_id=grant.definition_id)
-    sessions = list(sessions_query.order_by("-isPinned", "-updatedAt"))
+    sessions = list(sessions_query.select_related("work_binding__operation").order_by("-isPinned", "-updatedAt"))
     running_session_ids = set(
         AgentRun.objects.filter(
             session__in=sessions, status__in=["queued", "running"]
