@@ -4,6 +4,7 @@ packages:
   - packages/web
 
 enablePrePostScripts: true
+storeDir: .cache/pnpm
 
 allowBuilds:
   electron: true
