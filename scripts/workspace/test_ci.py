@@ -13,6 +13,27 @@ spec.loader.exec_module(ci)
 
 
 class PortableCITests(unittest.TestCase):
+    def test_web_prepares_rust_and_core_before_parallel_tests(self):
+        for stage in ("Web", "All"):
+            with self.subTest(stage=stage):
+                calls = []
+                def record(label, args, **kwargs):
+                    calls.append(args)
+                    return json.dumps({"services": {"document-processor": {}, "workspace-general": {},
+                        "runtime": {"depends_on": {"workspace-general": {"condition": "service_completed_successfully"}}},
+                        "material-worker": {"depends_on": {"document-processor": {"condition": "service_completed_successfully"}}}}})
+                with patch.object(ci, "run", record):
+                    ci.main(stage=stage)
+                toolchain = calls.index(["rustup", "show", "active-toolchain"])
+                source = calls.index(["node", "scripts/workspace/core-source.mjs"])
+                tests = next(i for i, command in enumerate(calls) if "test:unit" in command)
+                self.assertLess(toolchain, source)
+                self.assertLess(source, tests)
+        with patch.object(ci, "run", side_effect=RuntimeError("preparation failed")) as run:
+            with self.assertRaises(RuntimeError):
+                ci.main(stage="Web")
+        self.assertFalse(any("test:unit" in call.args[1] for call in run.call_args_list))
+
     def test_loading_the_gate_preserves_the_hosted_test_discovery_path(self):
         self.assertEqual(sys.path, original_search_path)
 

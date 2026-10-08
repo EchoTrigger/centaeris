@@ -66,6 +66,10 @@ def main(skip_frontend_tests=False, stage="All"):
         ("Web production validation", [npm, "run", "build", "--workspace", "packages/web"]),
     ]
     if not skip_frontend_tests:
+        # Node runs fixture readers in separate processes. Prepare the shared
+        # Rust toolchain and registry before those readers invoke Cargo together.
+        gates.append(("Web fixture toolchain", ["rustup", "show", "active-toolchain"]))
+        gates.append(("Web fixture source", ["node", "scripts/workspace/core-source.mjs"]))
         gates.append(("Web unit tests", [npm, "run", "test:unit", "--workspace", "packages/web"]))
     rust_gates = []
     for name in rust_packages(hosted=True):
@@ -73,7 +77,7 @@ def main(skip_frontend_tests=False, stage="All"):
                            (f"Rust tests {name}", ["cargo", "test", "--locked", "-p", name])])
     rust_labels = {"Core source resolution", "Monorepo Core source", "Rust toolchain consistency",
                    "Transcript exporter cache isolation", "Transcript generated contract"}
-    web_labels = {"Node install", "Web production validation", "Web unit tests"}
+    web_labels = {"Node install", "Web production validation", "Web fixture toolchain", "Web fixture source", "Web unit tests"}
     if stage == "Rust":
         gates = [gate for gate in gates if gate[0] in rust_labels] + rust_gates
     elif stage == "Web":
