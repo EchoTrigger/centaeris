@@ -23,7 +23,13 @@ def verified_work(binding, *, source_event=...):
 
 
 def initial_input_origin(session):
-    binding = AgentWorkSession.objects.select_related("operation").filter(session=session).first()
+    if session._meta.get_field("work_binding").is_cached(session):
+        try:
+            binding = session.work_binding
+        except ObjectDoesNotExist:
+            return None
+    else:
+        binding = AgentWorkSession.objects.select_related("operation").filter(session=session).first()
     if binding is None:
         return None
     child = verified_work(binding)
