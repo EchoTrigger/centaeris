@@ -17,6 +17,7 @@ axum = { workspace = true, features = ["http1", "tokio"] }
 bollard.workspace = true
 bytes.workspace = true
 tar.workspace = true
+tempfile = "=3.27.0"
 futures.workspace = true
 centaeris-core.workspace = true
 centaeris-model-catalog.workspace = true

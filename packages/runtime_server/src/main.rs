@@ -25,6 +25,7 @@ mod native_consumption_tests;
 mod observations;
 mod platform_materials;
 mod postgres_store;
+mod recovery_upload;
 mod request_capacity;
 mod session_delivery;
 mod skill_projection;
@@ -2007,6 +2008,19 @@ fn requires_session_workspace_restore(has_started_fact: bool, completing_recover
     !has_started_fact && !completing_recovery
 }
 
+fn retry_completed_workspace_commit(
+    resolution: SessionWorkspaceResolution,
+    validate: impl FnOnce() -> Result<(), String>,
+    commit: impl FnOnce() -> Result<SessionWorkspaceCommitOutcome, String>,
+) -> Result<SessionWorkspaceCommitOutcome, String> {
+    validate()?;
+    if resolution == SessionWorkspaceResolution::Advanced {
+        Ok(SessionWorkspaceCommitOutcome::Accepted)
+    } else {
+        commit()
+    }
+}
+
 fn execution_recovery_waiting(retry_at_ms: i64) -> AgentRunStepOutcome {
     AgentRunStepOutcome {
         disposition: "waiting",
@@ -2828,14 +2842,58 @@ fn execute_agent_run(
     };
     let workspace_restore_ms = workspace_restore_started.elapsed().as_millis();
     match completed_projection {
-        Some(projection) if workspace_resolution == SessionWorkspaceResolution::Advanced => {
+        Some(projection) => {
             let mut completed_sequence = sequence_guard(&session_record_sequence)?.clone();
-            validate_completed_projection_session_log(
-                job_store.as_ref(),
-                &agent_run_start,
-                &projection,
-                &completed_sequence,
-            )?;
+            let workspace_commit = retry_completed_workspace_commit(
+                workspace_resolution,
+                || {
+                    validate_completed_projection_session_log(
+                        job_store.as_ref(),
+                        &agent_run_start,
+                        &projection,
+                        &completed_sequence,
+                    )
+                },
+                || {
+                    docker_execution.collect_and_commit_session_workspace(
+                        &workspace_lease,
+                        &agent_run_start.authorization.session_workspace,
+                        workspace_input_upper_bound_bytes,
+                    )
+                },
+            );
+            match workspace_commit {
+                Ok(
+                    SessionWorkspaceCommitOutcome::Accepted
+                    | SessionWorkspaceCommitOutcome::Unchanged,
+                ) => {}
+                Ok(SessionWorkspaceCommitOutcome::Pending) => {
+                    return Ok(AgentRunStepOutcome {
+                        retry_at_ms: None,
+                        disposition: "waiting",
+                        terminal_state: None,
+                        transition_reason: "session_workspace_commit_unavailable".to_string(),
+                    });
+                }
+                Ok(SessionWorkspaceCommitOutcome::Rejected(error)) | Err(error) => {
+                    let outcome = commit_failed_agent_run(
+                        runtime.as_ref(),
+                        &session_log,
+                        &agent_run_start,
+                        &mut *sequence_guard(&session_record_sequence)?,
+                        &mut *session_stream_guard(&session_stream)?,
+                        error.as_str(),
+                        "session_workspace_commit_failed",
+                        &*assistant_text_guard(&assistant_text)?,
+                        &terminal_lease_fence,
+                    )?;
+                    agent_runtime.acknowledge_completed_turn_projection(
+                        agent_run_start.authorization.session_id.as_str(),
+                        &agent_run_identity,
+                    )?;
+                    return Ok(outcome);
+                }
+            }
             let mut events = Vec::new();
             if let Some(event) = end_active_execution(
                 &mut completed_sequence,
@@ -2875,24 +2933,6 @@ fn execute_agent_run(
                 terminal_state: Some("completed"),
                 transition_reason: "runtime_completed_projection_recovered".to_string(),
             });
-        }
-        Some(_) => {
-            let outcome = commit_failed_agent_run(
-                runtime.as_ref(),
-                &session_log,
-                &agent_run_start,
-                &mut *sequence_guard(&session_record_sequence)?,
-                &mut *session_stream_guard(&session_stream)?,
-                "workspace commit was interrupted before acceptance",
-                "session_workspace_commit_interrupted",
-                &*assistant_text_guard(&assistant_text)?,
-                &terminal_lease_fence,
-            )?;
-            agent_runtime.acknowledge_completed_turn_projection(
-                agent_run_start.authorization.session_id.as_str(),
-                &agent_run_identity,
-            )?;
-            return Ok(outcome);
         }
         None if workspace_resolution == SessionWorkspaceResolution::Advanced => {
             return Err("workspace_advanced_without_completed_projection".to_string());
@@ -3170,6 +3210,7 @@ fn execute_agent_run(
     let mut previous_checkpoint_sequence = workspace_checkpoint
         .as_ref()
         .map_or(0, |checkpoint| checkpoint.session_sequence);
+    let pending_recovery_upload = Mutex::new(None::<PendingRecoveryCheckpoint>);
     let work_trigger = if agent_run_start.native_coordination_session_id.is_some() {
         match agent_work_trigger::WorkCommitTrigger::new(runtime.handle().clone(), &api_url, &token)
         {
@@ -3183,13 +3224,17 @@ fn execute_agent_run(
         None
     };
     let mut commit_tool_safe_point = |safe_point: ToolSafePoint| {
+        let safe_point_started = Instant::now();
         let stage = match &safe_point {
             ToolSafePoint::ModelRequestStarted(_) => "model_request_safe_point",
             ToolSafePoint::DurableToolCall { .. } => "tool_call_safe_point",
             ToolSafePoint::DurableReceipt { .. } => "tool_receipt_safe_point",
             _ => "other_safe_point",
         };
-        failure_diagnostics::observe(&agent_run_start.agent_run_id, stage, || {
+        let result = failure_diagnostics::observe(&agent_run_start.agent_run_id, stage, || {
+            let mut pending_recovery_upload = pending_recovery_upload
+                .lock()
+                .map_err(|_| "pending recovery upload lock poisoned")?;
             if !safe_point_live_degraded.load(Ordering::Relaxed) {
                 match flush_live_stream(&safe_point_stream) {
                     Ok(()) => {}
@@ -3212,6 +3257,68 @@ fn execute_agent_run(
                 .lock()
                 .map_err(|_| "session record sequence lock poisoned".to_string())?
                 .clone();
+            let wait_for_upload = matches!(
+                &safe_point,
+                ToolSafePoint::DurableToolCall { .. }
+                    | ToolSafePoint::CompletedTurn(_)
+                    | ToolSafePoint::ModelRequestStarted(_)
+            );
+            let completed_upload = if wait_for_upload {
+                observations::timed("recoveryUploadFence", || {
+                    Ok(pending_recovery_upload
+                        .as_mut()
+                        .and_then(|pending| pending.upload.take(true)))
+                })?
+            } else {
+                pending_recovery_upload
+                    .as_mut()
+                    .and_then(|pending| pending.upload.take(false))
+            };
+            if let Some(upload_result) = completed_upload {
+                let pending = pending_recovery_upload
+                    .take()
+                    .expect("completed upload binding");
+                let snapshot = upload_result?;
+                let current_generation = observed_workspace_generation(docker_execution.as_ref());
+                let generation_stable = pending.generation.token().is_none()
+                    || workspace_generations_match(&pending.generation, &current_generation);
+                if generation_stable
+                    && docker_execution.accept_captured_recovery_workspace(pending.evidence)?
+                {
+                    let (checkpoint, checkpoint_sequence) = uploaded_recovery_checkpoint(
+                        &pending,
+                        &snapshot,
+                        &agent_run_start,
+                        &execution_id,
+                        &committed_sequence,
+                        now,
+                    )?;
+                    // Publish before the tool call record: a reference after the call
+                    // would claim a workspace frontier that the frozen bytes do not cover.
+                    let event = committed_sequence.checkpoint_ref(&checkpoint)?;
+                    let receipt = commit_agent_tool_records(
+                        &session_log,
+                        &agent_run_start,
+                        &[event],
+                        Some(&checkpoint),
+                        &terminal_lease_fence,
+                        work_trigger.as_ref(),
+                    )?;
+                    accept_session_commit(
+                        &mut committed_sequence,
+                        &mut *session_stream_guard(&safe_point_stream)?,
+                        &receipt,
+                    )?;
+                    *safe_point_sequence
+                        .lock()
+                        .map_err(|_| "session record sequence lock poisoned")? =
+                        committed_sequence.clone();
+                    recovery_workspace_snapshot = snapshot;
+                    recovery_workspace_generation = pending.generation;
+                    previous_checkpoint_sequence = checkpoint_sequence;
+                    recovery_suffix = execution_recovery_policy::RecoverySuffix::default();
+                }
+            }
             let mut recovery_checkpoint = None;
             let mut ending_lost_execution = false;
             let events = match safe_point {
@@ -3323,7 +3430,7 @@ fn execute_agent_run(
                                 &current_generation,
                             ));
                     let workspace_snapshot = if should_collect {
-                        let Some(snapshot) = docker_execution.stage_recovery_workspace(
+                        let Some(prepared) = docker_execution.prepare_recovery_workspace(
                             &workspace_lease,
                             checkpoint_id.as_str(),
                             &recovery_workspace_snapshot,
@@ -3334,7 +3441,29 @@ fn execute_agent_run(
                             // checkpoint nor reset the tool suffix used by recovery policy.
                             break 'checkpoint events;
                         };
-                        snapshot
+                        let after_collect =
+                            observed_workspace_generation(docker_execution.as_ref());
+                        let generation =
+                            stable_workspace_generation(&current_generation, after_collect);
+                        let evidence = prepared.evidence();
+                        let upload_host = docker_execution.clone();
+                        let upload_context = serde_json::to_vec(&serde_json::json!({
+                            "jobId": workspace_lease.job_id,
+                            "agentRunStart": {"agentRunId": agent_run_start.agent_run_id},
+                        }))
+                        .map_err(|error| error.to_string())?;
+                        *pending_recovery_upload = Some(PendingRecoveryCheckpoint {
+                            checkpoint_id,
+                            model_request_id: model_request_id.to_string(),
+                            turn_id: turn_id.to_string(),
+                            generation,
+                            evidence,
+                            upload: recovery_upload::PendingRecoveryUpload::start(move || {
+                                let _context = observations::Context::enter(&upload_context);
+                                upload_host.upload_recovery_workspace(prepared)
+                            }),
+                        });
+                        break 'checkpoint events;
                     } else {
                         recovery_workspace_snapshot.clone()
                     };
@@ -3533,7 +3662,13 @@ fn execute_agent_run(
                 return Err(format!("fatal_execution_outcome:{reason}"));
             }
             Ok(())
-        })
+        });
+        observations::timing(
+            stage,
+            safe_point_started,
+            if result.is_ok() { "ok" } else { "error" },
+        );
+        result
     };
     let agent_run_result = runtime.block_on(async {
         agent_runtime
@@ -3763,6 +3898,21 @@ fn execute_agent_run(
             )
             .await
     });
+    // Failed/cancelled model requests may never reach CompletedTurn. Drain their
+    // immutable upload before any final workspace save or execution teardown.
+    if let Some(mut pending) = pending_recovery_upload
+        .lock()
+        .map_err(|_| "pending recovery upload lock poisoned")?
+        .take()
+    {
+        if let Some(Err(error)) = pending.upload.take(true) {
+            failure_diagnostics::report(
+                &agent_run_start.agent_run_id,
+                "recovery_snapshot_upload",
+                &error,
+            );
+        }
+    }
     let cancellation_reason = cancellation_probe.as_ref()()?;
     if cancellation_reason.as_deref() == Some("agent_run_lifecycle_lease_lost") {
         return Err("agent_run_lifecycle_lease_lost".to_string());
@@ -4022,6 +4172,31 @@ fn execute_agent_run(
                         | SessionWorkspaceCommitOutcome::Unchanged,
                     ) => {}
                     Ok(SessionWorkspaceCommitOutcome::Pending) => {
+                        let mut pending_sequence =
+                            sequence_guard(&session_record_sequence)?.clone();
+                        let prefix = pending_completion_session_records(
+                            &agent_run_start,
+                            Some(resolved_inputs.as_ref()),
+                            &*assistant_text_guard(&assistant_text)?,
+                            &response,
+                            &mut pending_sequence,
+                            now_ms()?,
+                        )?;
+                        if !prefix.is_empty() {
+                            let receipt = append_agent_run_session_records(
+                                &runtime,
+                                &session_log,
+                                &agent_run_start,
+                                &prefix,
+                                &terminal_lease_fence,
+                            )?;
+                            accept_session_commit(
+                                &mut pending_sequence,
+                                &mut *session_stream_guard(&session_stream)?,
+                                &receipt,
+                            )?;
+                            *sequence_guard(&session_record_sequence)? = pending_sequence;
+                        }
                         return Ok(AgentRunStepOutcome {
                             retry_at_ms: None,
                             disposition: "waiting",
@@ -5009,6 +5184,31 @@ fn message_attachments(agent_run_start: &AgentRunStart) -> Result<Vec<serde_json
         .collect()
 }
 
+fn pending_completion_session_records(
+    agent_run_start: &AgentRunStart,
+    resolved_inputs: Option<&ResolvedInputState>,
+    assistant_text: &AssistantTextProjection,
+    response: &AgentRunResult,
+    sequence: &mut AgentRunSessionState,
+    created_at_ms: i64,
+) -> Result<Vec<SequencedSessionRecord>, String> {
+    let mut records = tool_session_records(
+        agent_run_start,
+        resolved_inputs,
+        response,
+        sequence,
+        created_at_ms,
+    )?;
+    records.extend(assistant_session_records(
+        agent_run_start,
+        assistant_text,
+        Some("done"),
+        sequence,
+        created_at_ms,
+    )?);
+    Ok(records)
+}
+
 fn completed_session_records(
     agent_run_start: &AgentRunStart,
     resolved_inputs: Option<&ResolvedInputState>,
@@ -5850,6 +6050,59 @@ fn replacement_execution_id(
     )
 }
 
+struct PendingRecoveryCheckpoint {
+    checkpoint_id: String,
+    model_request_id: String,
+    turn_id: String,
+    generation: ExecutionWorkspaceGeneration,
+    evidence: execution_recovery_policy::WorkspaceReuseEvidence,
+    upload: recovery_upload::PendingRecoveryUpload<RecoveryWorkspaceSnapshotV1>,
+}
+
+fn uploaded_recovery_checkpoint(
+    pending: &PendingRecoveryCheckpoint,
+    snapshot: &RecoveryWorkspaceSnapshotV1,
+    start: &AgentRunStart,
+    execution_id: &str,
+    sequence: &AgentRunSessionState,
+    now: i64,
+) -> Result<(CheckpointRecord, u64), String> {
+    if !sequence.open_tool_call_ids().is_empty() {
+        return Err("recovery upload publication requires an empty in-flight tool set".into());
+    }
+    let session_sequence = sequence
+        .committed_session_sequence()
+        .checked_add(1)
+        .ok_or("recovery checkpoint Session sequence overflow")?;
+    let payload = RuntimeRecoveryCheckpointV1 {
+        schema: RUNTIME_RECOVERY_CHECKPOINT_SCHEMA_V1.to_string(),
+        checkpoint_id: pending.checkpoint_id.clone(),
+        session_id: start.authorization.session_id.clone(),
+        agent_run_id: start.agent_run_id.clone(),
+        execution_id: execution_id.to_string(),
+        authorization_digest: start.authorization_digest.clone(),
+        session_sequence,
+        model_request_id: pending.model_request_id.clone(),
+        workspace_snapshot: snapshot.clone(),
+        workspace_generation: pending.generation.clone(),
+        created_at_ms: now,
+    };
+    payload.validate()?;
+    Ok((
+        CheckpointRecord {
+            checkpoint_id: pending.checkpoint_id.clone(),
+            kind: CheckpointKindV1::Recovery,
+            session_id: start.authorization.session_id.clone(),
+            turn_id: pending.turn_id.clone(),
+            status: "committed".into(),
+            done_reason: None,
+            updated_at_ms: now,
+            payload_json: serde_json::to_string(&payload).map_err(|error| error.to_string())?,
+        },
+        session_sequence,
+    ))
+}
+
 fn recovery_checkpoint_id(execution_id: &str, model_request_id: &str) -> String {
     format!(
         "checkpoint:{:x}",
@@ -6266,6 +6519,104 @@ mod tests {
     }
 
     #[test]
+    fn prepared_completion_retries_busy_workspace_commit_without_model_work() {
+        let validations = std::cell::Cell::new(0);
+        let commits = std::cell::Cell::new(0);
+        for result in [
+            SessionWorkspaceCommitOutcome::Pending,
+            SessionWorkspaceCommitOutcome::Pending,
+            SessionWorkspaceCommitOutcome::Accepted,
+        ] {
+            let expected = result.clone();
+            let outcome = retry_completed_workspace_commit(
+                SessionWorkspaceResolution::Download,
+                || {
+                    validations.set(validations.get() + 1);
+                    Ok(())
+                },
+                || {
+                    commits.set(commits.get() + 1);
+                    Ok(result)
+                },
+            )
+            .unwrap();
+            assert_eq!(outcome, expected);
+        }
+        assert_eq!(validations.get(), 3);
+        assert_eq!(commits.get(), 3);
+    }
+
+    #[test]
+    fn prepared_completion_requires_receipts_before_retrying_workspace_commit() {
+        let result = retry_completed_workspace_commit(
+            SessionWorkspaceResolution::Download,
+            || Err("completed_turn_projection_tool_receipts_mismatch".into()),
+            || panic!("unverified completion must not commit a workspace"),
+        );
+        assert_eq!(
+            result,
+            Err("completed_turn_projection_tool_receipts_mismatch".into())
+        );
+        assert_eq!(
+            retry_completed_workspace_commit(
+                SessionWorkspaceResolution::Advanced,
+                || Ok(()),
+                || panic!("accepted workspace commit must not be submitted again"),
+            )
+            .unwrap(),
+            SessionWorkspaceCommitOutcome::Accepted,
+        );
+        assert_eq!(
+            retry_completed_workspace_commit(
+                SessionWorkspaceResolution::Empty,
+                || Ok(()),
+                || Ok(SessionWorkspaceCommitOutcome::Unchanged),
+            )
+            .unwrap(),
+            SessionWorkspaceCommitOutcome::Unchanged,
+        );
+    }
+
+    #[test]
+    fn prepared_completion_pending_records_keep_done_reply_without_terminalizing_run() {
+        let start = agent_run_start();
+        let assistant = assistant_projection(&start.turn_id, "Completed synthetic reply");
+        let response = AgentRunResult {
+            turn_responses: vec![],
+            stop: AgentRunStop::Finalized,
+        };
+        let mut sequence = agent_run_session_state(&start);
+        let records = pending_completion_session_records(
+            &start,
+            None,
+            &assistant,
+            &response,
+            &mut sequence,
+            100,
+        )
+        .unwrap();
+        assert_eq!(
+            records.len(),
+            1,
+            "only the final assistant receipt is emitted"
+        );
+        assert!(sequence.assistant_is_final(&assistant_message_id(&start.turn_id)));
+        assert!(
+            pending_completion_session_records(
+                &start,
+                None,
+                &assistant,
+                &response,
+                &mut sequence,
+                101,
+            )
+            .unwrap()
+            .is_empty(),
+            "the pending prefix is idempotent"
+        );
+    }
+
+    #[test]
     fn session_workspace_restore_only_precedes_durable_start() {
         assert!(requires_session_workspace_restore(false, false));
         assert!(!requires_session_workspace_restore(true, false));
@@ -6357,6 +6708,135 @@ mod tests {
             agent_run_start.agent_run_id.clone(),
         )
         .expect("AgentRun Session state")
+    }
+
+    #[test]
+    fn uploaded_checkpoint_reference_before_tool_preserves_replayed_frontier() {
+        let start = agent_run_start();
+        let mut state = agent_run_session_state(&start);
+        let mut records = state
+            .start("turn_1", "inspect workspace", Vec::new(), 1)
+            .unwrap();
+        let digest = format!("sha256:{}", "a".repeat(64));
+        records.push(
+            state
+                .start_execution("turn_1", "execution_1", &digest, None, 2)
+                .unwrap(),
+        );
+        let request = centaeris_core::session::SessionLogRecord {
+            schema_version: centaeris_core::session::SESSION_EVENT_SCHEMA_VERSION.to_string(),
+            event_version: centaeris_core::session::SESSION_EVENT_VERSION,
+            event_type: SessionRecordType::ModelRequestStarted,
+            event_id: "request_1".into(),
+            session_id: start.authorization.session_id.clone(),
+            turn_id: Some("turn_1".into()),
+            agent_run_id: Some(start.agent_run_id.clone()),
+            created_at_ms: 3,
+            payload: json!({"requestId":"request_1", "purpose":"main",
+                "agentComposition":{"compositionDigest":digest}}),
+        };
+        records.push(state.record(request).unwrap());
+        let snapshot =
+            recovery_snapshot_from_session_workspace(&start.authorization.session_workspace)
+                .unwrap();
+        let uploaded_snapshot = snapshot.clone();
+        let (release, wait) = std::sync::mpsc::channel();
+        let mut upload = recovery_upload::PendingRecoveryUpload::start(move || {
+            wait.recv().unwrap();
+            Ok(uploaded_snapshot)
+        });
+        assert!(upload.take(false).is_none());
+        // Model reasoning is durable while its workspace upload remains pending.
+        records.push(
+            state
+                .record_reasoning_block(
+                    "turn_1",
+                    "request_1",
+                    "I will inspect the workspace",
+                    "done",
+                    4,
+                )
+                .unwrap()
+                .unwrap(),
+        );
+        release.send(()).unwrap();
+        assert_eq!(upload.take(true).unwrap().unwrap(), snapshot);
+        let activity = execution_recovery_policy::ExecutionActivityWitness::for_execution(
+            1,
+            "upload-replay-test",
+        )
+        .unwrap();
+        let evidence = activity
+            .complete_quiesced_snapshot(activity.begin_snapshot_capture(), true, false)
+            .unwrap();
+        let pending = PendingRecoveryCheckpoint {
+            checkpoint_id: recovery_checkpoint_id("execution_1", "request_1"),
+            model_request_id: "request_1".into(),
+            turn_id: "turn_1".into(),
+            generation: ExecutionWorkspaceGeneration::Unknown {
+                reason: "watcher unavailable".into(),
+            },
+            evidence,
+            upload,
+        };
+        let mut committed = agent_run_session_state(&start);
+        for record in records.clone() {
+            committed.restore(record).unwrap();
+        }
+        committed.set_committed_session_sequence(records.last().unwrap().sequence);
+        state = committed;
+        let (checkpoint, checkpoint_sequence) =
+            uploaded_recovery_checkpoint(&pending, &snapshot, &start, "execution_1", &state, 5)
+                .unwrap();
+        records.push(state.checkpoint_ref(&checkpoint).unwrap());
+        let reference_sequence = records.last().unwrap().sequence;
+        assert_eq!(checkpoint_sequence, reference_sequence);
+        let payload: RuntimeRecoveryCheckpointV1 =
+            serde_json::from_str(&checkpoint.payload_json).unwrap();
+        assert_eq!(payload.session_sequence, reference_sequence);
+        assert_eq!(payload.model_request_id, "request_1");
+        let replay_boundary = records.clone();
+        let call = ToolCallEnvelope {
+            id: "call_1".into(),
+            name: "bash".into(),
+            args_json: json!({"command":"touch result"}).to_string(),
+        };
+        records.extend(
+            tool_call_session_records(
+                &start,
+                None,
+                "turn_1",
+                &call,
+                &mut state,
+                ToolCallRecordContext {
+                    provider_id: "centaeris.builtin",
+                    tool_contract_digest: &digest,
+                    created_at_ms: 6,
+                },
+            )
+            .unwrap(),
+        );
+        assert!(records.last().unwrap().sequence > reference_sequence);
+        assert!(!state.tool_ledger_is_checkpointed());
+        assert!(
+            uploaded_recovery_checkpoint(&pending, &snapshot, &start, "execution_1", &state, 7)
+                .is_err(),
+            "publishing after a tool call cannot claim the frozen workspace frontier"
+        );
+        let mut replay = agent_run_session_state(&start);
+        for record in replay_boundary {
+            replay.restore(record).unwrap();
+        }
+        assert_eq!(
+            replay.latest_recovery_checkpoint_id(),
+            Some(checkpoint.checkpoint_id.as_str())
+        );
+        assert!(replay.tool_ledger_is_checkpointed());
+        assert!(replay.open_tool_call_ids().is_empty());
+        assert!(
+            !replay.has_tool_call("call_1"),
+            "recovery must never replay a later tool"
+        );
     }
 
     fn assistant_projection(turn_id: &str, text: &str) -> AssistantTextProjection {

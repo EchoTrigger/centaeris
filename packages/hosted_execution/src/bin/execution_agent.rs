@@ -1,6 +1,7 @@
 fn main() {
     let result = match std::env::args().nth(1).as_deref() {
         Some("filesystem-once") => hosted_execution::agent::run_filesystem_once(),
+        Some("agent-process-state") => hosted_execution::agent::run_agent_process_state_once(),
         Some("input-inventory") => hosted_execution::agent::run_input_inventory_once(),
         Some("materialize-input") => hosted_execution::agent::run_materialize_input_once(),
         Some("revoke-input") => hosted_execution::agent::run_revoke_input_once(),
@@ -17,7 +18,7 @@ fn main() {
         Some("quiesce-agent-processes") => {
             hosted_execution::agent::run_quiesce_agent_processes_once()
         }
-        _ => Err("usage: execution_agent <filesystem-once|input-inventory|materialize-input|revoke-input|read-artifact|snapshot-collect|snapshot-restore|workspace-watch|workspace-generation|workspace-generation-rpc|quiesce-agent-processes>".to_string()),
+        _ => Err("usage: execution_agent <filesystem-once|agent-process-state|input-inventory|materialize-input|revoke-input|read-artifact|snapshot-collect|snapshot-restore|workspace-watch|workspace-generation|workspace-generation-rpc|quiesce-agent-processes>".to_string()),
     };
     if let Err(error) = result {
         eprintln!("execution_agent failed: {error}");
