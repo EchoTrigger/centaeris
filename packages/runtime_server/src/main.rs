@@ -28,6 +28,7 @@ mod postgres_store;
 mod request_capacity;
 mod session_delivery;
 mod skill_projection;
+mod terminal_subagents;
 mod transcript_capture;
 mod transcript_protocol;
 mod transient_stream;
@@ -1693,6 +1694,23 @@ fn handle_request(
         }) {
             eprintln!("turn supplement terminal cleanup failed: {error}");
             return json_error_response(500, "agent_run_supplement_cleanup_failed");
+        }
+        if let Err(error) =
+            runtime.block_on(terminal_subagents::settle_terminal_parent_subagent_jobs(
+                store.as_ref(),
+                &teardown.agent_run_start.authorization.session_id,
+                &teardown.agent_run_start.agent_run_id,
+                now_ms()?,
+            ))
+        {
+            failure_diagnostics::report(
+                &teardown.agent_run_start.agent_run_id,
+                "terminal_subagent_cleanup",
+                &error,
+            );
+            // The parent terminal fact remains committed. A retry repeats only
+            // teardown and retains the context until child cancellation commits.
+            return json_error_response(503, "terminal_subagent_cleanup_unavailable");
         }
         if let Err(error) =
             DockerExecutionHostRunner::teardown(teardown.agent_run_start.agent_run_id.as_str())
