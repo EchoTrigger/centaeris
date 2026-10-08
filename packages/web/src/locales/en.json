@@ -960,6 +960,7 @@
   "modelErrors.unreachable": "Unable to connect to the model. Check the connection and retry.",
   "modelErrors.interrupted": "The model response was interrupted. Retry the request.",
   "modelErrors.failed": "The request could not be completed. Retry the request.",
+  "modelErrors.failureLabel": "Model request failed",
   "transcriptTool.resultsUnconfirmed": "Execution ended; {{count}} tool results unconfirmed",
   "modelErrors.replyNotDelivered": "The Agent could not submit its reply. Retry the request.",
   "modelErrors.replyContextLimit": "The context limit prevented the Agent from submitting its reply. Reduce the task and retry.",
