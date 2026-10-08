@@ -5596,7 +5596,7 @@ class ModelProtocolAdapterTests(TestCase):
             self.assertEqual(result["reasoningContent"], "inspect request")
 
         with self.assertRaisesRegex(
-            RuntimeError, "both reasoning and reasoning_content"
+            ModelProviderError, "provider_response_invalid"
         ):
             parse_open_ai_completions_response(
                 {
@@ -5625,7 +5625,7 @@ class ModelProtocolAdapterTests(TestCase):
         with patch(
             "app_core.model_adapter.openai_completions.async_open_ai_completions_client",
             new=AsyncMock(return_value=client),
-        ), self.assertRaisesRegex(RuntimeError, "changed reasoning field names"):
+        ), self.assertRaisesRegex(ModelProviderError, "provider_response_invalid"):
             async_iterator_bytes(
                 stream_open_ai_completions(
                     model,

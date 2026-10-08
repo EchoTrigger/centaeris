@@ -16,6 +16,27 @@ async def events(values):
 
 
 class ModelReasoningTests(SimpleTestCase):
+    async def test_invalid_provider_reasoning_after_partial_output_has_a_recoverable_reason(self):
+        model = Mock(modelName="glm-5.3-flash", provider=Mock(template_id="openai"))
+        frames = [
+            {"choices": [{"delta": {"reasoning_content": "preparing final answer"}}]},
+            {"choices": [{"delta": {"reasoning_content": ["invalid"]}}]},
+        ]
+        client = Mock()
+        client.chat.completions.create = AsyncMock(return_value=events(frames))
+        client.close = AsyncMock()
+        emitted = []
+        with (
+            patch.object(openai_completions, "async_open_ai_completions_client", new=AsyncMock(return_value=client)),
+            patch.object(openai_completions, "build_open_ai_completions_request", return_value={}),
+        ):
+            with self.assertRaises(model_adapter.ModelProviderError) as failure:
+                async for event in openai_completions.stream_open_ai_completions(model, {}, {}, lambda kind, payload: (kind, payload)):
+                    emitted.append(event)
+        self.assertEqual(failure.exception.reasonType, "provider_response_invalid")
+        self.assertEqual(emitted, [("reasoning", {"text": "preparing final answer"})])
+        client.close.assert_awaited_once()
+
     def test_gemini_tool_signature_survives_hosted_request_continuation(self):
         model = Mock(modelName="gemini-3.8-flash", provider=Mock(template_id="google"))
         response = {

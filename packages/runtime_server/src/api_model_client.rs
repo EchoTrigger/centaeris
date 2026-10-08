@@ -207,6 +207,7 @@ impl ApiModelClient {
                 Err(mut error) => {
                     error.provider_attempts = retry.saturating_add(1);
                     if !error.retryable || retry == max_retries {
+                        finish_hosted_failure(&mut error, retry == max_retries);
                         if retry == max_retries {
                             error.retryable = false;
                         }
@@ -442,6 +443,7 @@ impl ApiModelClient {
                 Err(mut error) => {
                     error.provider_attempts = retry.saturating_add(1);
                     if !error.retryable || retry == max_retries {
+                        finish_hosted_failure(&mut error, retry == max_retries);
                         if retry == max_retries {
                             error.retryable = false;
                         }
@@ -529,9 +531,101 @@ fn canonical_failure_reason(reason: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
-pub(super) fn hosted_model_failure_reason(error: &str) -> Option<&str> {
-    let (_, reason) = error.rsplit_once("hosted_model_error: ")?;
-    canonical_failure_reason(reason).then_some(reason)
+// Host-owned diagnostic data crosses the existing Core string-error boundary.
+// Only this versioned, sanitized envelope may become a public failure message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct HostedModelFailure {
+    schema: String,
+    pub reason_type: String,
+    #[serde(deserialize_with = "required_optional_http_status")]
+    http_status: Option<u16>,
+    provider_attempts: u32,
+    retry_exhausted: bool,
+}
+
+fn required_optional_http_status<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u16>, D::Error> {
+    Option::<u16>::deserialize(deserializer)
+}
+
+impl HostedModelFailure {
+    fn encoded(&self) -> String {
+        format!(
+            "hosted_model_error: {}",
+            serde_json::to_string(self).expect("failure contains only scalar fields")
+        )
+    }
+
+    pub fn public_message(&self) -> String {
+        let mut message = if self.retry_exhausted {
+            format!(
+                "exceeded retry limit after {} attempts",
+                self.provider_attempts
+            )
+        } else if self.http_status.is_some() {
+            "model request failed".to_string()
+        } else {
+            return self.reason_type.clone();
+        };
+        if let Some(status) = self.http_status {
+            let title = reqwest::StatusCode::from_u16(status)
+                .ok()
+                .and_then(|status| status.canonical_reason())
+                .unwrap_or("HTTP Error");
+            message.push_str(&format!(
+                ", {}status: {status} {title}",
+                if self.retry_exhausted { "last " } else { "" }
+            ));
+        }
+        message.push_str(&format!(" · {}", self.reason_type));
+        message
+    }
+}
+
+pub(super) fn hosted_model_failure(error: &str) -> Option<HostedModelFailure> {
+    let json = error.strip_prefix("hosted_model_error: ").or_else(|| {
+        error
+            .strip_prefix("model_client_error(")?
+            .split_once("): hosted_model_error: ")
+            .map(|(_, json)| json)
+    })?;
+    let failure: HostedModelFailure = serde_json::from_str(json).ok()?;
+    (failure.schema == "hosted.model.failure.v1"
+        && canonical_failure_reason(&failure.reason_type)
+        && failure.provider_attempts > 0
+        && failure
+            .http_status
+            .is_none_or(|status| (400..=599).contains(&status)))
+    .then_some(failure)
+}
+
+fn finish_hosted_failure(error: &mut ModelClientError, reached_limit: bool) {
+    let failure = hosted_model_failure(&error.message).or_else(|| {
+        if error.provider_code.is_some() {
+            return None;
+        }
+        let reason = match error.kind {
+            ModelClientErrorKind::Timeout => "provider_timeout",
+            ModelClientErrorKind::Network => "provider_unreachable",
+            ModelClientErrorKind::ProviderResponseInterrupted => "provider_stream_interrupted",
+            _ => return None,
+        };
+        Some(HostedModelFailure {
+            schema: "hosted.model.failure.v1".to_string(),
+            reason_type: reason.to_string(),
+            http_status: None,
+            provider_attempts: error.provider_attempts,
+            retry_exhausted: false,
+        })
+    });
+    if let Some(mut failure) = failure {
+        failure.provider_attempts = error.provider_attempts;
+        failure.retry_exhausted = reached_limit && error.retryable;
+        error.provider_code = Some(failure.reason_type.clone());
+        error.message = failure.encoded();
+    }
 }
 
 fn hosted_model_error(failure: ModelStreamFailure) -> Result<ModelClientError, ModelClientError> {
@@ -549,7 +643,9 @@ fn hosted_model_error(failure: ModelStreamFailure) -> Result<ModelClientError, M
         ));
     }
     let (kind, retryable) = match failure.reason_type.as_str() {
-        "provider_stream_interrupted" => (ModelClientErrorKind::ProviderResponseInterrupted, true),
+        "provider_stream_interrupted" | "provider_response_invalid" => {
+            (ModelClientErrorKind::ProviderResponseInterrupted, true)
+        }
         "provider_timeout" => (ModelClientErrorKind::Timeout, true),
         "provider_request_rejected" if failure.http_status == Some(408) => {
             (ModelClientErrorKind::Timeout, true)
@@ -576,7 +672,14 @@ fn hosted_model_error(failure: ModelStreamFailure) -> Result<ModelClientError, M
     };
     let mut error = ModelClientError::new(
         kind,
-        format!("hosted_model_error: {}", failure.reason_type),
+        HostedModelFailure {
+            schema: "hosted.model.failure.v1".to_string(),
+            reason_type: failure.reason_type.clone(),
+            http_status: failure.http_status,
+            provider_attempts: 1,
+            retry_exhausted: false,
+        }
+        .encoded(),
         retryable,
     );
     error.provider_code = Some(failure.reason_type);
@@ -966,6 +1069,11 @@ mod tests {
         assert_eq!(error.provider_attempts, 1);
         assert!(!error.retryable);
         assert!(events.is_empty());
+        let detail: serde_json::Value =
+            serde_json::from_str(error.message.strip_prefix("hosted_model_error: ").unwrap())
+                .expect("structured terminal model failure");
+        assert_eq!(detail["providerAttempts"], 1);
+        assert_eq!(detail["retryExhausted"], false);
     }
 
     #[test]
@@ -1013,6 +1121,12 @@ mod tests {
                 ModelClientErrorKind::ProviderResponseInterrupted,
                 true,
             ),
+            (
+                "provider_response_invalid",
+                None,
+                ModelClientErrorKind::ProviderResponseInterrupted,
+                true,
+            ),
         ] {
             let failure = serde_json::from_value(serde_json::json!({
                 "schema": "api.model.stream.v1", "type": "error", "reasonType": reason, "httpStatus": status,
@@ -1020,7 +1134,10 @@ mod tests {
             let error = hosted_model_error(failure).unwrap();
             assert_eq!(error.kind, kind);
             assert_eq!(error.retryable, retryable);
-            assert_eq!(hosted_model_failure_reason(&error.message), Some(reason));
+            assert_eq!(
+                hosted_model_failure(&error.message).map(|failure| failure.reason_type),
+                Some(reason.to_string())
+            );
         }
         for (field, value) in [
             ("reason_type", serde_json::json!("wrong")),
@@ -1030,10 +1147,113 @@ mod tests {
             failure[field] = value;
             assert!(serde_json::from_value::<ModelStreamFailure>(failure).is_err());
         }
+        assert!(hosted_model_failure("hosted_model_error: secret response with spaces").is_none());
+    }
+
+    #[test]
+    fn exhausted_transport_failure_retains_terminal_identity_without_private_text() {
+        let mut error = ModelClientError::new(
+            ModelClientErrorKind::ProviderResponseInterrupted,
+            "private provider body",
+            true,
+        )
+        .with_provider_attempts(2);
+        finish_hosted_failure(&mut error, true);
+        let detail = hosted_model_failure(&error.message)
+            .expect("transport failure must retain attempts and its terminal classification");
+        assert_eq!(detail.reason_type, "provider_stream_interrupted");
+        assert_eq!(detail.provider_attempts, 2);
+        assert!(detail.retry_exhausted);
+        assert_eq!(detail.http_status, None);
+        assert!(!error.message.contains("private provider body"));
+    }
+
+    #[test]
+    fn terminal_failure_details_cross_core_conversion_and_reject_corruption() {
+        let mut error = hosted_model_error(serde_json::from_value(serde_json::json!({
+            "schema":"api.model.stream.v1", "type":"error", "reasonType":"provider_rate_limited", "httpStatus":429,
+        })).unwrap()).unwrap();
+        error.provider_attempts = 3;
+        finish_hosted_failure(&mut error, true);
+        error.retryable = false;
+        let wrapped: String =
+            centaeris_core::runtime::GenerateDriverError::from_model_client(error, String::new())
+                .into();
+        let failure = hosted_model_failure(&wrapped).expect("Core must preserve the host envelope");
+        assert_eq!(failure.http_status, Some(429));
+        assert_eq!(failure.provider_attempts, 3);
+        assert!(failure.retry_exhausted);
+        for (key, value) in [
+            ("schema", serde_json::json!("unknown")),
+            ("httpStatus", serde_json::json!(200)),
+            ("providerAttempts", serde_json::json!(0)),
+            ("retryExhausted", serde_json::json!("true")),
+            ("unknown", serde_json::json!(true)),
+        ] {
+            let mut malformed = serde_json::to_value(&failure).unwrap();
+            malformed[key] = value;
+            assert!(hosted_model_failure(&format!("hosted_model_error: {malformed}")).is_none());
+        }
+        let mut missing = serde_json::to_value(&failure).unwrap();
+        missing.as_object_mut().unwrap().remove("httpStatus");
+        assert!(hosted_model_failure(&format!("hosted_model_error: {missing}")).is_none());
+        assert!(hosted_model_failure(&format!("{} trailing data", failure.encoded())).is_none());
         assert!(
-            hosted_model_failure_reason("hosted_model_error: secret response with spaces")
+            hosted_model_failure(&format!("private provider body: {}", failure.encoded()))
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn api_model_rate_limit_records_actual_attempts_and_exhaustion() {
+        for (reason, status, expected_attempts) in [
+            ("provider_rate_limited", 429, 2),
+            ("provider_authentication_failed", 401, 1),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                for _ in 0..expected_attempts {
+                    let (mut stream, _) =
+                        tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    read_http_request(&mut stream).await;
+                    let frame = serde_json::json!({"schema":"api.model.stream.v1","type":"error","reasonType":reason,"httpStatus":status});
+                    let body = format!("data: {frame}\n\n");
+                    stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                }
+            });
+            let client = model_client(format!("http://{address}"), None, 1_024);
+            let mut request = model_request();
+            request.session_config.max_retries = 1;
+            request.session_config.retry_backoff_ms = 0;
+            let mut events = Vec::new();
+            let error = client
+                .generate_stream(&request, &mut |event| events.push(event))
+                .await
+                .unwrap_err();
+            let failure = hosted_model_failure(&error.message).unwrap();
+            assert_eq!(failure.http_status, Some(status));
+            assert_eq!(failure.provider_attempts, expected_attempts);
+            assert_eq!(failure.retry_exhausted, status == 429);
+            assert!(!error.retryable);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        ModelClientStreamEvent::Status {
+                            process_state: RuntimeProcessState::Retrying,
+                            ..
+                        }
+                    ))
+                    .count(),
+                (expected_attempts - 1) as usize
+            );
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -1121,5 +1341,70 @@ mod tests {
             matches!(&events[3], ModelClientStreamEvent::Token { content } if content == "recovered")
         );
         assert!(matches!(&events[4], ModelClientStreamEvent::Done { .. }));
+    }
+    #[tokio::test]
+    async fn api_model_stream_recovers_typed_failure_after_reasoning_and_bounds_retries() {
+        for recover in [true, false] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                for attempt in 0..2 {
+                    let (mut stream, _) =
+                        tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+                            .await
+                            .expect("expected model attempt")
+                            .unwrap();
+                    read_http_request(&mut stream).await;
+                    let body = if recover && attempt == 1 {
+                        "data: {\"schema\":\"api.model.stream.v1\",\"type\":\"delta\",\"delta\":\"final answer\"}\n\ndata: {\"schema\":\"api.model.stream.v1\",\"type\":\"result\",\"text\":\"final answer\",\"toolCalls\":[],\"usage\":null}\n\n"
+                    } else {
+                        "data: {\"schema\":\"api.model.stream.v1\",\"type\":\"reasoning\",\"text\":\"preparing final answer\"}\n\ndata: {\"schema\":\"api.model.stream.v1\",\"type\":\"error\",\"reasonType\":\"provider_response_invalid\",\"httpStatus\":null}\n\n"
+                    };
+                    stream.write_all(format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body
+                    ).as_bytes()).await.unwrap();
+                }
+            });
+            let client = model_client(format!("http://{address}"), None, 1_024);
+            let mut request = model_request();
+            request.session_config.max_retries = 1;
+            request.session_config.retry_backoff_ms = 0;
+            let mut events = Vec::new();
+            let result = client
+                .generate_stream(&request, &mut |event| events.push(event))
+                .await;
+            if recover {
+                let response = result.expect("typed provider failure should recover");
+                assert_eq!(response.generate_result.content, "final answer");
+                assert_eq!(response.provider_attempts, 2);
+                assert!(response.generate_result.tool_calls.is_empty());
+            } else {
+                let error =
+                    result.expect_err("persistent invalid responses must stop at the limit");
+                assert_eq!(error.provider_attempts, 2);
+                assert!(!error.retryable);
+                assert_eq!(
+                    error.provider_code.as_deref(),
+                    Some("provider_response_invalid")
+                );
+            }
+            assert!(events.iter().any(
+                |e| matches!(e, ModelClientStreamEvent::Reasoning { text } if text.is_empty())
+            ));
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| matches!(
+                        e,
+                        ModelClientStreamEvent::Status {
+                            process_state: RuntimeProcessState::Retrying,
+                            ..
+                        }
+                    ))
+                    .count(),
+                1
+            );
+            server.await.unwrap();
+        }
     }
 }
