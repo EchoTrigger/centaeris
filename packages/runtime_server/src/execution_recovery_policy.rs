@@ -2,9 +2,80 @@
 //!
 //! This module deliberately consumes typed host evidence. Display text and tool summaries are
 //! never recovery evidence. Snapshot reuse requires a stable host activity epoch across the
-//! existing quiesce-and-collect operation and through the final recovery decision.
+//! verified process quiescence and exclusive collection, and through the final recovery decision.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
+use std::time::Instant;
+
+#[derive(Debug, Default)]
+struct DispatchState {
+    active: usize,
+    waiting: usize,
+    capturing: bool,
+    persistent_dispatch: bool,
+}
+
+#[derive(Debug, Default)]
+struct ActivityGate {
+    state: Mutex<DispatchState>,
+    changed: Condvar,
+    epoch: AtomicU64,
+}
+
+pub(crate) struct DispatchActivityGuard(Arc<ActivityGate>);
+pub(crate) struct SnapshotActivityGuard {
+    gate: Arc<ActivityGate>,
+    acquired: Instant,
+    observation_phase: &'static str,
+}
+
+impl SnapshotActivityGuard {
+    pub(crate) fn observe_as(mut self, phase: &'static str) -> Self {
+        self.observation_phase = phase;
+        self
+    }
+}
+
+impl DispatchActivityGuard {
+    pub(crate) fn register_persistent_dispatch(&self) -> Result<(), &'static str> {
+        self.0
+            .state
+            .lock()
+            .map_err(|_| "execution activity lock poisoned")?
+            .persistent_dispatch = true;
+        Ok(())
+    }
+}
+
+impl Drop for DispatchActivityGuard {
+    fn drop(&mut self) {
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.active -= 1;
+        self.0.changed.notify_all();
+    }
+}
+
+impl Drop for SnapshotActivityGuard {
+    fn drop(&mut self) {
+        let mut state = self
+            .gate
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.capturing = false;
+        self.gate.changed.notify_all();
+        drop(state);
+        crate::observations::timing(self.observation_phase, self.acquired, "released");
+    }
+}
+
+static EXECUTION_GATES: OnceLock<Mutex<HashMap<String, Weak<ActivityGate>>>> = OnceLock::new();
 
 /// Tracks only newly committed tool records after an in-process checkpoint.
 /// Reconstructed state deliberately starts without a snapshot witness.
@@ -65,9 +136,9 @@ pub(crate) enum HostFailureEvidence {
 pub(crate) struct WorkspaceReuseEvidence {
     pub(crate) prior_checkpoint_snapshot_valid: bool,
     pub(crate) generation_known: bool,
-    /// True only when the host completed its existing process-quiescence operation before the
-    /// snapshot (or when a newly-created Execution had no dispatch opportunity before its
-    /// initial snapshot). A generation-only reuse does not establish this fact.
+    /// True only when exclusive admission and a non-destructive process observation proved
+    /// the host quiescent before collection (or a new Execution had no dispatch opportunity).
+    /// A generation-only reuse does not establish this fact.
     pub(crate) snapshot_was_quiesced: bool,
     /// Monotonic host activity epoch captured after quiescence and snapshot completion.
     pub(crate) snapshot_activity_epoch: u64,
@@ -83,7 +154,7 @@ pub(crate) struct WorkspaceReuseEvidence {
 #[derive(Debug)]
 pub(crate) struct ExecutionActivityWitness {
     host_instance: u64,
-    epoch: AtomicU64,
+    gate: Arc<ActivityGate>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,15 +170,123 @@ pub(crate) enum SnapshotCaptureError {
 }
 
 impl ExecutionActivityWitness {
+    pub(crate) fn for_execution(host_instance: u64, execution: &str) -> Result<Self, &'static str> {
+        let mut registry = EXECUTION_GATES
+            .get_or_init(Default::default)
+            .lock()
+            .map_err(|_| "execution activity registry lock poisoned")?;
+        registry.retain(|_, gate| gate.strong_count() > 0);
+        let gate = registry
+            .get(execution)
+            .and_then(Weak::upgrade)
+            .unwrap_or_else(|| {
+                let gate = Arc::new(ActivityGate::default());
+                registry.insert(execution.into(), Arc::downgrade(&gate));
+                gate
+            });
+        Ok(Self {
+            host_instance,
+            gate,
+        })
+    }
+
+    pub(crate) fn begin_dispatch_activity(&self) -> Result<DispatchActivityGuard, &'static str> {
+        let started = Instant::now();
+        let mut state = self
+            .gate
+            .state
+            .lock()
+            .map_err(|_| "execution activity lock poisoned")?;
+        state.waiting += 1;
+        let queued = state.capturing;
+        while state.capturing {
+            state = self
+                .gate
+                .changed
+                .wait(state)
+                .map_err(|_| "execution activity lock poisoned")?;
+        }
+        state.waiting -= 1;
+        state.active += 1;
+        drop(state);
+        let activity = DispatchActivityGuard(self.gate.clone());
+        crate::observations::timing(
+            "workspaceDispatchWait",
+            started,
+            if queued { "queued" } else { "ready" },
+        );
+        Ok(activity)
+    }
+
+    pub(crate) fn try_snapshot_activity(
+        &self,
+    ) -> Result<Option<SnapshotActivityGuard>, &'static str> {
+        self.try_snapshot_admission(false)
+    }
+
+    pub(crate) fn try_final_snapshot_activity(
+        &self,
+    ) -> Result<Option<SnapshotActivityGuard>, &'static str> {
+        self.try_snapshot_admission(true)
+    }
+
+    fn try_snapshot_admission(
+        &self,
+        finalizing: bool,
+    ) -> Result<Option<SnapshotActivityGuard>, &'static str> {
+        let mut state = self
+            .gate
+            .state
+            .lock()
+            .map_err(|_| "execution activity lock poisoned")?;
+        if state.active != 0
+            || state.waiting != 0
+            || state.capturing
+            || (!finalizing && state.persistent_dispatch)
+        {
+            return Ok(None);
+        }
+        state.capturing = true;
+        Ok(Some(SnapshotActivityGuard {
+            gate: self.gate.clone(),
+            acquired: Instant::now(),
+            observation_phase: "workspaceSnapshotHold",
+        }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_snapshot_activity(&self) -> Result<SnapshotActivityGuard, &'static str> {
+        let mut state = self
+            .gate
+            .state
+            .lock()
+            .map_err(|_| "execution activity lock poisoned")?;
+        while state.active != 0 || state.capturing || state.waiting != 0 {
+            state = self
+                .gate
+                .changed
+                .wait(state)
+                .map_err(|_| "execution activity lock poisoned")?;
+        }
+        state.capturing = true;
+        Ok(SnapshotActivityGuard {
+            gate: self.gate.clone(),
+            acquired: Instant::now(),
+            observation_phase: "workspaceSnapshotHold",
+        })
+    }
+
+    #[cfg(test)]
     pub(crate) fn new(host_instance: u64) -> Self {
         Self {
             host_instance,
-            epoch: AtomicU64::new(0),
+            gate: Arc::new(ActivityGate::default()),
         }
     }
 
     pub(crate) fn invalidate_before_dispatch(&self) -> Result<u64, &'static str> {
-        self.epoch
+        self.gate
+            .epoch
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |epoch| {
                 epoch.checked_add(1)
             })
@@ -118,11 +297,11 @@ impl ExecutionActivityWitness {
     pub(crate) fn begin_snapshot_capture(&self) -> SnapshotCaptureToken {
         SnapshotCaptureToken {
             host_instance: self.host_instance,
-            activity_epoch: self.epoch.load(Ordering::SeqCst),
+            activity_epoch: self.gate.epoch.load(Ordering::SeqCst),
         }
     }
 
-    /// Complete only after the existing host quiescence and snapshot collection both succeed.
+    /// Complete only after verified host quiescence and snapshot collection both succeed.
     pub(crate) fn complete_quiesced_snapshot(
         &self,
         token: SnapshotCaptureToken,
@@ -132,7 +311,7 @@ impl ExecutionActivityWitness {
         if token.host_instance != self.host_instance {
             return Err(SnapshotCaptureError::HostChanged);
         }
-        if token.activity_epoch != self.epoch.load(Ordering::SeqCst) {
+        if token.activity_epoch != self.gate.epoch.load(Ordering::SeqCst) {
             return Err(SnapshotCaptureError::ActivityChanged);
         }
         // Bind the evidence to the epoch actually checked above. Reading a new
@@ -164,7 +343,7 @@ impl ExecutionActivityWitness {
         generation_known: bool,
         snapshot_was_quiesced: bool,
     ) -> WorkspaceReuseEvidence {
-        let epoch = self.epoch.load(Ordering::SeqCst);
+        let epoch = self.gate.epoch.load(Ordering::SeqCst);
         WorkspaceReuseEvidence {
             prior_checkpoint_snapshot_valid: snapshot_valid,
             generation_known,
@@ -181,7 +360,7 @@ impl ExecutionActivityWitness {
         snapshot: &WorkspaceReuseEvidence,
     ) -> WorkspaceReuseEvidence {
         WorkspaceReuseEvidence {
-            current_activity_epoch: self.epoch.load(Ordering::SeqCst),
+            current_activity_epoch: self.gate.epoch.load(Ordering::SeqCst),
             current_host_instance: self.host_instance,
             ..*snapshot
         }

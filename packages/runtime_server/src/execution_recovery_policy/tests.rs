@@ -201,3 +201,33 @@ fn capture_rejects_foreign_host_even_at_the_same_epoch() {
         Err(SnapshotCaptureError::HostChanged)
     );
 }
+
+#[test]
+fn persistent_extension_dispatch_defers_capture_across_rebuilt_witnesses() {
+    let key = format!("persistent-{}", std::process::id());
+    let first = ExecutionActivityWitness::for_execution(81, &key).unwrap();
+    let second = ExecutionActivityWitness::for_execution(82, &key).unwrap();
+    let dispatch = first.begin_dispatch_activity().unwrap();
+    dispatch.register_persistent_dispatch().unwrap();
+    drop(dispatch);
+    assert!(first.try_snapshot_activity().unwrap().is_none());
+    assert!(second.try_snapshot_activity().unwrap().is_none());
+    // The authoritative finalization path may quiesce the persistent extension,
+    // while ordinary recovery captures must continue to defer.
+    assert!(second.try_final_snapshot_activity().unwrap().is_some());
+}
+
+#[test]
+fn completed_read_activity_releases_capture_without_changing_mutation_epoch() {
+    let witness = ExecutionActivityWitness::new(91);
+    let before = witness.begin_snapshot_capture();
+    let read = witness.begin_dispatch_activity().unwrap();
+    assert!(witness.try_snapshot_activity().unwrap().is_none());
+    drop(read);
+    let capture = witness.try_snapshot_activity().unwrap().unwrap();
+    assert!(witness
+        .complete_quiesced_snapshot(before, true, true)
+        .is_ok());
+    drop(capture);
+    assert!(witness.try_snapshot_activity().unwrap().is_some());
+}
