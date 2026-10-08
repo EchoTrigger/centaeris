@@ -1,6 +1,4 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import path from "node:path";
 import { test } from "vitest";
 import {
   buildTranscriptProcessViewModel,
@@ -222,7 +220,7 @@ test("preserves completed read-only groups around assistant stages", () => {
   );
 });
 
-test("uses exact structured operations and leaves no legacy summary chain", () => {
+test("formats structured tool operations and rejects unsupported tool names", () => {
   const command = makeTask({
     id: "command",
     turnId: "turn-combined",
@@ -338,59 +336,4 @@ test("uses exact structured operations and leaves no legacy summary chain", () =
   }).processItems[0];
   assert.equal(firstGroup.id, expandedGroup.id);
 
-});
-
-test("keeps command titles bounded inside the process text rail", async () => {
-  const rootDir = path.resolve(import.meta.dirname, "..");
-  const chatStyles = await readFile(
-    path.join(rootDir, "src", "styles", "chat.css"),
-    "utf8",
-  );
-
-  assert.match(
-    chatStyles,
-    /\.agent-tool-node\s*\{[^}]*width:\s*100%;[^}]*min-width:\s*0;[^}]*max-width:\s*100%;/,
-  );
-  assert.match(
-    chatStyles,
-    /\.agent-tool-node-summary\s*\{[^}]*display:\s*flex;[^}]*width:\s*100%;[^}]*min-width:\s*0;[^}]*max-width:\s*100%;[^}]*overflow:\s*hidden;/,
-  );
-  assert.match(
-    chatStyles,
-    /\.agentProcessFeed\s*\{[^}]*width:\s*var\(--agent-text-rail\);[^}]*margin-left:\s*auto;[^}]*margin-right:\s*auto;/,
-  );
-  assert.doesNotMatch(
-    chatStyles,
-    /\.agentProcessFeed\s*\{[^}]*padding-left:\s*14px;/,
-  );
-  assert.match(
-    chatStyles,
-    /\.agent-tool-node-summary\s*\{[^}]*padding:\s*8px 12px;/,
-  );
-  assert.match(
-    chatStyles,
-    /\.agent-tool-node-list\s*\{[^}]*border:\s*1px solid[^}]*border-radius:\s*10px;/,
-  );
-  assert.match(
-    chatStyles,
-    /\.agent-tool-node-action\.is-inline-summary\s*\{[^}]*flex:\s*0 1 auto;[^}]*min-width:\s*0;[^}]*max-width:\s*100%;[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/,
-  );
-  assert.doesNotMatch(
-    chatStyles,
-    /execution-board|tool-drawer-|tool-timeline-card|agent-activity-section/,
-  );
-  assert.match(
-    chatStyles,
-    /\.agent-tool-bash-status\s*\{[^}]*justify-self:\s*end;/,
-  );
-  assert.match(
-    chatStyles,
-    /\.agent-tool-bash-scroll\s*\{[^}]*contain:\s*layout paint;/,
-  );
-  assert.doesNotMatch(chatStyles, /\.agent-tool-bash-scroll\s*\{[^}]*mask-image:/);
-  const shimmerStyles = await readFile(new URL("../src/styles/status-shimmer.css", import.meta.url), "utf8");
-  assert.match(shimmerStyles, /animation:\s*statusShimmerSweep 4s ease-in-out 1;/);
-  assert.match(shimmerStyles, /prefers-reduced-motion: reduce/);
-  assert.match(shimmerStyles, /forced-colors: active/);
-  assert.doesNotMatch(chatStyles, /agentProcessSummary|AgentProcessHeaderText/);
 });

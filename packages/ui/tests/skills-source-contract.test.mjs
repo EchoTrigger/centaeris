@@ -1,22 +1,27 @@
-import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { test } from "vitest";
-
-const dialogUrl = new URL("../src/components/SkillsDialog.tsx", import.meta.url);
-const bridgeUrl = new URL("../src/lib/chatBridge.ts", import.meta.url);
-
-test("Skills uses explicit typed sources and keeps Plugin on its own surface", async () => {
-  const [dialogSource, bridgeSource] = await Promise.all([
-    readFile(dialogUrl, "utf8"),
-    readFile(bridgeUrl, "utf8"),
+import { beforeEach, expect, test, vi } from "vitest";
+const host = vi.hoisted(() => ({ invokeHost: vi.fn(), isNativeHostRuntime: vi.fn(() => true) }));
+vi.mock("../src/host/hostBridge", () => ({ ...host, listenHost: vi.fn() }));
+import { addSkillSource, getSkillCatalog, getSkillDetail } from "../src/lib/chatBridge";
+beforeEach(() => { host.invokeHost.mockReset(); host.isNativeHostRuntime.mockReturnValue(true); });
+test.each(["catalogDirectory", "skillFile"])("registers an explicit %s workspace location", async kind => {
+  const request = { scope: "workspace", kind, path: "/skills", workspaceRoot: "/project" };
+  const response = { sources: [], skillPolicies: [] };
+  host.invokeHost.mockResolvedValue(response);
+  expect(await addSkillSource(request)).toBe(response);
+  expect(host.invokeHost).toHaveBeenCalledExactlyOnceWith("skill/source/add", {request});
+});
+test("personal sources and catalog/detail requests normalize omitted workspace context", async () => {
+  await addSkillSource({scope:"user",kind:"skillFile",path:"/SKILL.md"});
+  await getSkillCatalog();
+  await getSkillDetail({skillId:"design"});
+  expect(host.invokeHost.mock.calls).toEqual([
+    ["skill/source/add", {request:{scope:"user",kind:"skillFile",path:"/SKILL.md",workspaceRoot:null}}],
+    ["skill/catalog", {request:{cwd:null}}],
+    ["skill/detail", {request:{cwd:null,skillId:"design"}}],
   ]);
-
-  assert.match(dialogSource, /Add skill location/);
-  assert.match(dialogSource, /Catalog directory/);
-  assert.match(dialogSource, /SKILL\.md/);
-  assert.match(dialogSource, /source\.scope === "workspace" \|\| source\.scope === "user"/);
-  assert.doesNotMatch(dialogSource, /skills\.sh|marketplace|install skill/i);
-  assert.match(bridgeSource, /"skill\/source\/add"/);
-  assert.match(bridgeSource, /"skill\/catalog"/);
-  assert.match(bridgeSource, /"skill\/detail"/);
+});
+test("skill access outside the native host fails before invocation", async () => {
+  host.isNativeHostRuntime.mockReturnValue(false);
+  for (const call of [() => addSkillSource({scope:"user",kind:"skillFile",path:"/SKILL.md"}), getSkillCatalog, () => getSkillDetail({skillId:"design"})]) await expect(call()).rejects.toThrow("desktop-only");
+  expect(host.invokeHost).not.toHaveBeenCalled();
 });

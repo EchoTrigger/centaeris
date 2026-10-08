@@ -1,5 +1,4 @@
 import { expect, test } from "vitest";
-import { readFile } from "node:fs/promises";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { buildCustomProvidersInput } from "../src/components/ModelsDialog.tsx";
@@ -11,18 +10,6 @@ test("provider catalog is not the Models landing page", () => {
   expect(markup).toContain("Model services");
   expect(markup).toContain("Add service");
   expect(markup).not.toContain("OAUTH SUBSCRIPTIONS");
-});
-
-test("fixed catalog providers stay API-only in settings", async () => {
-  const source = await readFile(new URL("../src/components/ModelsDialog.tsx", import.meta.url), "utf8");
-  const fixedProviderTree = source.slice(
-    source.indexOf("{visibleBuiltIns.map"),
-    source.indexOf("{customProviders.map"),
-  );
-
-  expect(fixedProviderTree).not.toContain("modelsProviderModels");
-  expect(source).not.toContain("modelsBuiltInModel");
-  expect(source).not.toContain("First-party HTTPS endpoint");
 });
 
 test("model settings preserve incomplete provider and model drafts", () => {

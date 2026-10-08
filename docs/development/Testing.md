@@ -1,5 +1,41 @@
 # Testing
 
+## Test quality
+
+Tests protect observable behavior and documented contracts, not the spelling of
+the current implementation. A refactor that preserves behavior should not need
+test changes merely because an internal function, type, variable, CSS class, or
+file was renamed, moved, or split.
+
+Removing an implementation is not a reason to add its names to a source
+blacklist. For example, replacing a history reader should be protected by the
+actual request sequence, pagination, reconnect, and failure behavior, rather
+than by searching source files for the former reader's name. Likewise, removing
+a UI component should be verified through the resulting interactions and
+visible output, not by requiring its old file to remain absent forever.
+
+Negative assertions remain appropriate for real contracts: unauthorized requests
+must fail, credentials must not appear in output, unsupported protocol fields
+must be rejected, and Core must not depend on a storage adapter. State the
+contract being protected. Prefer dependency graphs, parsed structure, generated
+registries, and public protocol results over source text matching. A comment
+mentioning a prohibited dependency must not be mistaken for an actual import.
+Static checks supplement behavioral coverage; they do not establish that a
+feature works merely because certain source text is absent.
+
+Choose UI scenarios from observable risks such as wrapping, clipping, keyboard
+navigation, zoom, localization, and layout transitions. Viewport dimensions are
+test inputs, not correctness criteria. Assert useful relationships such as
+visibility, alignment, and containment rather than incidental class names or
+exact pixel values unless those values are an explicit product contract.
+
+Before replacing a brittle test, identify equivalent existing coverage or add
+the smallest missing behavioral test. Verify that a representative broken
+behavior fails the replacement, and that a harmless implementation change does
+not. Retain security and public-contract checks when consolidating tests. Do not
+implement this policy as another blacklist of source patterns in tests; enforce
+it through review and evidence.
+
 ## Focused Core gate
 
 Every Rust change runs at least:
