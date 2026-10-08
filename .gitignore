@@ -94,7 +94,8 @@ tmp/
 /perf/results/
 # Explicit local Cargo patches are never publication inputs.
 /.cargo/config.toml
-/.local/
+# Machine-specific deployment configuration and private diagnostics.
+/deployment/local/
 /docker-compose.current.yml
 /.codex-remote-attachments/
 !/perf/env/
