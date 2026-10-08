@@ -26,13 +26,6 @@ def run_command(args, capture=False):
     return result.stdout or ""
 
 
-def check_core_boundary(root=ROOT):
-    forbidden = re.compile(r"centaeris_runtime_sqlite|rusqlite::|use\s+rusqlite|#\[path\s*=.*sqlite")
-    for path in (root / "packages/core/src").rglob("*"):
-        if path.is_file() and forbidden.search(path.read_text(encoding="utf-8")):
-            raise RuntimeError(f"Core contains a SQLite adapter or source include: {path}")
-
-
 def run_gate(stage, run=run_command, platform=sys.platform, frontend_tests=False):
     if stage not in ("Rust", "Node", "Source"):
         raise ValueError(f"Unknown source gate: {stage}")
@@ -51,7 +44,6 @@ def run_gate(stage, run=run_command, platform=sys.platform, frontend_tests=False
         tree = run(["cargo", "tree", "--locked", "-p", "centaeris-core", "--edges", "normal,build,dev"], capture=True)
         if re.search(r"centaeris-runtime-sqlite|rusqlite", tree):
             raise RuntimeError("Core depends on the SQLite adapter")
-        check_core_boundary()
         run(["cargo", "test", "--locked", "-p", "centaeris-core", "query_loop"])
         run(["cargo", "test", "--locked", "-p", "centaeris-runtime-sqlite", "--test", "core_runtime"])
         run(["cargo", "test", "--locked", *package_flags()])

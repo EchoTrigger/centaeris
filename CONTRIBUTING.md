@@ -32,6 +32,11 @@ Use the locked toolchains and dependencies described in
 that proves a behavior or contract boundary. Do not add tests that only mirror
 the implementation.
 
+Follow the [test-quality policy](docs/development/Testing.md#test-quality).
+Do not turn removed implementation names or source spellings into permanent
+blacklists. Preserve behavior and contract coverage when replacing brittle
+tests; static architecture checks require a documented invariant.
+
 Every Rust change runs:
 
 ```powershell

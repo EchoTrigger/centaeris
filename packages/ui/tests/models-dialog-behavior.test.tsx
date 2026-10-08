@@ -140,3 +140,18 @@ test("testing a model from the service list targets its provider and model", asy
  expect(view.root.findAllByType("dialog")).toHaveLength(0);
  await act(async()=>view.unmount());
 });
+
+test("built-in services expose API credentials without custom connection fields", async () => {
+ runtime.getAgentRuntimeConfig.mockResolvedValue({...config, customModelProviders:[], modelProviders:[{
+  ...config.modelProviders[0], providerId:"builtin.test", name:"Built-in service", builtIn:true, accessKind:"api_key",
+ }]});
+ let view!:ReactTestRenderer;
+ await act(async()=>{view=create(<ModelsDialog onClose={()=>{}} confirmAction={async()=>true}/>);});
+ await act(async()=>view.root.findByProps({"aria-label":"Open Built-in service"}).props.onClick());
+ await act(async()=>button(view,"Edit connection").props.onClick());
+ expect(view.root.findByProps({"aria-label":"API key"}).props.type).toBe("password");
+ expect(view.root.findAllByProps({"aria-label":"Provider name"})).toHaveLength(0);
+ expect(view.root.findAllByType("select")).toHaveLength(0);
+ expect(view.root.findAllByType("button").filter(b=>text(b.props.children)==="Add model")).toHaveLength(0);
+ await act(async()=>view.unmount());
+});
