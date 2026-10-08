@@ -36,7 +36,7 @@ def check_core_boundary(root=ROOT):
 def run_gate(stage, run=run_command, platform=sys.platform, frontend_tests=False):
     if stage not in ("Rust", "Node", "Source"):
         raise ValueError(f"Unknown source gate: {stage}")
-    npm = "npm.cmd" if platform == "win32" else "npm"
+    pnpm = "pnpm.cmd" if platform == "win32" else "pnpm"
     run([sys.executable, "-B", "scripts/test_product_version.py"])
     if stage in ("Rust", "Source"):
         run([sys.executable, "-B", "-m", "unittest", "discover", "-s",
@@ -58,16 +58,16 @@ def run_gate(stage, run=run_command, platform=sys.platform, frontend_tests=False
     if stage in ("Node", "Source"):
         run([sys.executable, "-B", "scripts/test_system_skills.py"])
         run(["node", "--test", "packages/desktop/src/systemSkills.test.mjs"])
-        run([npm, "ci"])
+        run([pnpm, "install", "--frozen-lockfile"])
         if frontend_tests:
-            run([npm, "run", "gate", "--workspace", "centaeris-ui"])
-            run([npm, "run", "check", "--workspace", "@centaeris/electron-host"])
+            run([pnpm, "--filter", "centaeris-ui", "run", "gate"])
+            run([pnpm, "--filter", "@centaeris/electron-host", "run", "check"])
         else:
             for script in ("build", "lint:source"):
-                run([npm, "run", script, "--workspace", "centaeris-ui"])
+                run([pnpm, "--filter", "centaeris-ui", "run", script])
             for script in ("check:syntax", "check:host-parity"):
-                run([npm, "run", script, "--workspace", "@centaeris/electron-host"])
-        run([npm, "run", "test:third-party-licenses", "--workspace", "@centaeris/electron-host"])
+                run([pnpm, "--filter", "@centaeris/electron-host", "run", script])
+        run([pnpm, "--filter", "@centaeris/electron-host", "run", "test:third-party-licenses"])
 
 
 if __name__ == "__main__":

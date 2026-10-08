@@ -39,12 +39,8 @@ class ProductVersionTests(unittest.TestCase):
         for package in uv["package"]:
             if package["name"] in python_names:
                 self.assertEqual(package["version"], version, package["name"])
-        npm = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
-        lock = json.loads((ROOT / "package-lock.json").read_text(encoding="utf-8"))
-        self.assertEqual(lock["version"], version)
-        for member in ["", *npm["workspaces"]]:
-            self.assertEqual(json.loads((ROOT / member / "package.json").read_text(encoding="utf-8"))["version"], version)
-            self.assertEqual(lock["packages"][member]["version"], version)
+        for manifest in [ROOT / "package.json", *(ROOT / "packages").glob("*/package.json")]:
+            self.assertEqual(json.loads(manifest.read_text(encoding="utf-8"))["version"], version, str(manifest))
 
 if __name__ == "__main__":
     unittest.main()

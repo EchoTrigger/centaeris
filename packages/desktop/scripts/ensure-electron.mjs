@@ -1,9 +1,10 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { packageDirectory } from "./package-directory.mjs";
 
 const hostRoot = path.resolve(import.meta.dirname, "..");
-const electronRoot = path.join(hostRoot, "node_modules", "electron");
+const electronRoot = packageDirectory("electron", hostRoot);
 const executable = path.join(electronRoot, "dist", "electron.exe");
 if (!fs.existsSync(executable)) {
   const env = { ...process.env };

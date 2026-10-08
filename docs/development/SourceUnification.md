@@ -23,8 +23,8 @@ source baselines. Existing Core versions stay selected where constraints allow;
 incompatible major versions required by hosted packages remain side by side.
 The added hosted crates and their dependency graph account for the lock growth.
 
-npm retains ui, desktop and web workspaces, existing direct versions and root
-Node/npm/TypeScript/Vite/Biome versions. Five explicit transitive overrides retain
+pnpm retains ui, desktop and web workspaces, existing direct versions and root
+Node/TypeScript/Vite/Biome versions. pnpm 12.10.1 replaces npm after the source migration. Five explicit transitive overrides retain
 Workspace baseline versions for lang-liquid, legacy-modes, lezer/markdown,
 napi-rs/canvas and vscode-languageserver-types instead of refreshing their caret
 ranges. lucide-react retains the distinct versions requested by ui and web.

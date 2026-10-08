@@ -22,14 +22,10 @@ class ProductVersionTests(unittest.TestCase):
         lock = tomllib.loads((ROOT / "Cargo.lock").read_text(encoding="utf-8"))
         locked = {p["name"]: p["version"] for p in lock["package"] if p["name"] in first_party}
         self.assertEqual(locked, dict.fromkeys(first_party, version))
-        npm = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
-        npm_lock = json.loads((ROOT / "package-lock.json").read_text(encoding="utf-8"))
-        self.assertEqual(npm_lock["version"], version)
-        for directory in ["", *npm["workspaces"], "packages/tui"]:
-            package = json.loads((ROOT / directory / "package.json").read_text(encoding="utf-8"))
-            self.assertEqual(package["version"], version, directory)
-            if directory in npm_lock["packages"]:
-                self.assertEqual(npm_lock["packages"][directory]["version"], version, directory)
+        for manifest in [ROOT / "package.json", *(ROOT / "packages").glob("*/package.json")]:
+            package = json.loads(manifest.read_text(encoding="utf-8"))
+            self.assertEqual(package["version"], version, str(manifest))
+
 
 
 if __name__ == "__main__":

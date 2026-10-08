@@ -2,7 +2,7 @@
 
 All products live in one checkout. The four Core dependencies are local paths
 in the root Cargo workspace; no Core Git pin, sibling checkout or development
-patch is used. Cargo.lock, package-lock.json and uv.lock belong to the root.
+patch is used. Cargo.lock, pnpm-lock.yaml and uv.lock belong to the root.
 
 Run commands from the repository root, regardless of the scripts/workspace
 location. Its Python tools deliberately resolve the monorepo root two levels

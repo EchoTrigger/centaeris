@@ -35,7 +35,7 @@ def main(skip_frontend_tests=False, stage="All"):
     if stage not in ("All", "Rust", "Python", "Web"):
         raise ValueError(f"Unknown hosted gate stage: {stage}")
     py = sys.executable
-    npm = "npm.cmd" if os.name == "nt" else "npm"
+    pnpm = "pnpm.cmd" if os.name == "nt" else "pnpm"
     api = ["uv", "run", "--frozen", "--package", "api", "python"]
     gates = [
         ("Portable CI behavior", [py, "-B", "scripts/workspace/test_ci.py"]),
@@ -61,16 +61,16 @@ def main(skip_frontend_tests=False, stage="All"):
         ("Django migration drift", [*api, "packages/api/manage.py", "makemigrations", "--check", "--dry-run", "--settings=api.migration_test_settings", "--skip-checks"]),
         ("Full Django PostgreSQL suite", [*api, "scripts/workspace/python_test_gate.py", "api"]),
         ("First-party MCP Rust/Python client", [*api, "scripts/workspace/platform-mcp-client-gate.py"]),
-        ("Node install", [npm, "ci"]),
+        ("Node install", [pnpm, "install", "--frozen-lockfile"]),
         ("Performance artifact validation", ["node", "--test", "scripts/workspace/performance-eval-artifact.test.mjs"]),
-        ("Web production validation", [npm, "run", "build", "--workspace", "packages/web"]),
+        ("Web production validation", [pnpm, "--filter", "web", "run", "build"]),
     ]
     if not skip_frontend_tests:
         # Node runs fixture readers in separate processes. Prepare the shared
         # Rust toolchain and registry before those readers invoke Cargo together.
         gates.append(("Web fixture toolchain", ["rustup", "show", "active-toolchain"]))
         gates.append(("Web fixture source", ["node", "scripts/workspace/core-source.mjs"]))
-        gates.append(("Web unit tests", [npm, "run", "test:unit", "--workspace", "packages/web"]))
+        gates.append(("Web unit tests", [pnpm, "--filter", "web", "run", "test:unit"]))
     rust_gates = []
     for name in rust_packages(hosted=True):
         rust_gates.extend([(f"Rust check {name}", ["cargo", "check", "--locked", "-p", name]),

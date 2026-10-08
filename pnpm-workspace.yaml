@@ -1,0 +1,20 @@
+packages:
+  - packages/ui
+  - packages/desktop
+  - packages/web
+
+enablePrePostScripts: true
+
+allowBuilds:
+  electron: true
+  fsevents: true
+
+overrides:
+  "nanoid": "3.3.18"
+  "typescript": "7.0.2"
+  "vite": "8.1.5"
+  "@codemirror/lang-liquid": "6.3.2"
+  "@codemirror/legacy-modes": "6.5.4"
+  "@lezer/markdown": "1.7.2"
+  "@napi-rs/canvas": "1.0.9"
+  "vscode-languageserver-types": "3.18.3"
