@@ -638,8 +638,35 @@ checkpoints retain their existing behavior; migration cannot infer a missing wai
 boundary for an already lost execution.
 
 An active Execution does not select a recovery checkpoint. Checkpoint collection
-occurs at runtime safe points, not on a timer; concurrent workspace activity defers
-collection. Terminal hosted teardown cancels remaining native children bound to
+occurs at runtime safe points, not on a timer. A process-local gate shared by
+runners for the same container tracks helpers, commands and hooks for their full
+dispatch lifetime. Recovery collection skips a busy gate; new dispatch waits
+while collection owns it. An idle gate alone is insufficient: a non-destructive
+process inventory also defers recovery collection while agent-owned background
+processes remain. Normal recovery collection does not terminate those processes.
+This gate does not establish exclusion between separate Runtime replicas; the
+existing execution ownership and lease fences remain necessary.
+
+Final workspace publication returns Pending when foreground host activity is
+still active, preserving the prepared completion for a later attempt. Final
+publication and explicit restoration retain their own cleanup semantics; a
+normal recovery snapshot must not be treated as terminal cleanup. Collection
+validates one complete frame while spooling its exact bytes to a private anonymous
+temporary file, bounded by the sandbox workspace capacity plus manifest overhead.
+Recovery upload reads this immutable artifact after releasing the activity gate
+and overlaps the next model request. Before the next tool call, completion, or
+model request, Runtime joins any outstanding upload and publishes a separate
+checkpoint reference only when the captured host/activity evidence remains valid.
+The reference uses its actual committed Session sequence and precedes the next
+tool call; an uploaded object alone never advances the recovery frontier.
+Final workspace publication still retains exclusion through its synchronous
+commit. Each execution retains at most one pending recovery artifact; temporary
+files close on success, failure and teardown. There is no aggregate spool byte
+budget or hard maximum pause yet. Slow uploads may still delay the next tool at
+the publication fence. Opt-in observations distinguish capture, upload, gate hold,
+dispatch wait and the recovery upload fence.
+
+Terminal hosted teardown cancels remaining native children bound to
 that exact parent AgentRun across its turns before removing its context and
 sandbox. Cleanup failure leaves the parent terminal fact intact and returns a
 retryable dependency failure so the worker retries teardown without rerunning the

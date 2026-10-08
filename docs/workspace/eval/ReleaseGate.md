@@ -106,6 +106,32 @@ errors still fail and foreign host evidence stays rejected. Verify that the pare
 can reach durable waiting before injecting sandbox loss.
 Compilation alone does not satisfy these checks.
 
+Snapshot activity acceptance must cover both orders of the race: a running file
+helper prevents collection from starting, and an admitted collector delays new
+dispatch until its guard is released. Repeat across two runners sharing one
+container, including read-only helpers, failure and unwind paths. An agent-owned
+background process must remain alive when normal recovery collection is deferred;
+exercise the Linux process observer against a real UID 10001 child. Busy final
+publication returns Pending rather than blocking indefinitely. Helper failure
+diagnostics retain the exit status even when stderr is empty.
+
+Immutable snapshot upload acceptance must verify that one collected frame is
+validated and uploaded unchanged even after the live workspace changes. Corrupt
+frames and spool capacity overflow must be rejected. A blocked recovery upload
+must not hold the workspace dispatch gate or delay the model request; the next
+tool's publication fence still waits for upload completion. Verify checkpoint
+publication after intervening model reasoning uses the actual reference sequence
+and precedes the tool call, with replay excluding that unexecuted tool. Upload
+failure, stale activity evidence and foreign hosts cannot publish a new recovery
+frontier. Pending workers and anonymous artifacts must be drained on terminal
+paths, including model failure without a completion safe point. Final workspace
+commit retains its existing exclusion and Pending retry behavior.
+
+Real-model capacity evidence must validate native child results as well as parent
+terminal status. Measure snapshot hold and dispatch-wait observations separately
+from model and queue latency. Include changed-file size and file-count variants;
+a few samples establish functional coverage, not a stable p99 or a maximum pause.
+
 Waiter-index acceptance must cover both PostgreSQL and SQLite: atomic index
 creation and rollback, cascading removal on checkpoint consumption, targeted
 source lookup, and more than 256 relationships inside one checkpoint. Worker

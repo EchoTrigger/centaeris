@@ -45,6 +45,26 @@ const AGENT_UID: u32 = 10_001;
 #[cfg(target_os = "linux")]
 const AGENT_GID: u32 = 10_001;
 
+#[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentProcessState {
+    active_process_count: usize,
+}
+
+pub fn run_agent_process_state_once() -> Result<(), String> {
+    let state = observe_agent_process_state(agent_process_ids)?;
+    serde_json::to_writer(std::io::stdout(), &state)
+        .map_err(|error| format!("write agent process state failed: {error}"))
+}
+
+fn observe_agent_process_state(
+    inspect: impl FnOnce() -> Result<Vec<i32>, String>,
+) -> Result<AgentProcessState, String> {
+    Ok(AgentProcessState {
+        active_process_count: inspect()?.len(),
+    })
+}
+
 pub fn run_filesystem_once() -> Result<(), String> {
     let request: SandboxFileSystemRequest = read_json(MAX_JSON_BYTES)?;
     let result = run_file_system_request(request);
@@ -1293,7 +1313,12 @@ fn agent_process_ids() -> Result<Vec<i32>, String> {
     Ok(result)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "linux"))]
+fn agent_process_ids() -> Result<Vec<i32>, String> {
+    Err("agent process state requires Linux".to_string())
+}
+
+#[cfg(any(target_os = "linux", test))]
 fn is_other_agent_process(pid: i32, current_pid: i32, status: &str) -> bool {
     pid != current_pid && is_agent_process_status(status)
 }
@@ -1909,6 +1934,105 @@ mod tests {
 
         assert!(manifest.files.is_empty());
         assert!(canonical_snapshot_manifest_bytes(&manifest).is_err());
+    }
+
+    #[test]
+    fn agent_process_observer_reports_live_count_without_altering_processes() {
+        let processes = vec![41, 42];
+        let calls = std::cell::Cell::new(0);
+        let state = observe_agent_process_state(|| {
+            calls.set(calls.get() + 1);
+            Ok(processes.clone())
+        })
+        .unwrap();
+        assert_eq!(state.active_process_count, 2);
+        assert_eq!(processes, [41, 42]);
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn agent_process_observer_propagates_unknown_state_instead_of_claiming_idle() {
+        assert_eq!(
+            observe_agent_process_state(|| Err("process inventory unavailable".into())),
+            Err("process inventory unavailable".into())
+        );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn agent_process_state_rejects_unsupported_platform_without_claiming_idle() {
+        assert_eq!(
+            run_agent_process_state_once(),
+            Err("agent process state requires Linux".into())
+        );
+    }
+
+    #[test]
+    fn agent_process_state_has_exact_camel_case_nonnegative_count_contract() {
+        let state = AgentProcessState {
+            active_process_count: 2,
+        };
+        assert_eq!(
+            serde_json::to_value(&state).unwrap(),
+            serde_json::json!({"activeProcessCount": 2})
+        );
+        for invalid in [
+            serde_json::json!({"active_process_count": 2}),
+            serde_json::json!({"activeProcessCount": 2, "other": 1}),
+            serde_json::json!({"activeProcessCount": -1}),
+        ] {
+            assert!(serde_json::from_value::<AgentProcessState>(invalid).is_err());
+        }
+        assert_eq!(
+            serde_json::from_value::<AgentProcessState>(serde_json::json!({
+                "activeProcessCount": 0
+            }))
+            .unwrap()
+            .active_process_count,
+            0
+        );
+    }
+
+    #[test]
+    fn agent_process_observer_excludes_itself_other_users_and_zombies() {
+        let live = "Name:\thelper\nState:\tS (sleeping)\nUid:\t10001\t10001\t10001\t10001\n";
+        let root = "Name:\twatcher\nState:\tS (sleeping)\nUid:\t0\t0\t0\t0\n";
+        let zombie = "Name:\thelper\nState:\tZ (zombie)\nUid:\t10001\t10001\t10001\t10001\n";
+        assert!(!is_other_agent_process(41, 41, live));
+        assert!(is_other_agent_process(42, 41, live));
+        assert!(!is_other_agent_process(42, 41, root));
+        assert!(!is_other_agent_process(42, 41, zombie));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn agent_process_observer_keeps_a_real_agent_uid_child_alive() {
+        use std::os::unix::process::CommandExt;
+        if !matches!(unsafe { libc::geteuid() }, 0 | AGENT_UID) {
+            eprintln!("real agent UID fixture requires root or agent UID");
+            return;
+        }
+        struct OwnedChild(std::process::Child);
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = OwnedChild(
+            std::process::Command::new("/bin/sleep")
+                .arg("30")
+                .gid(AGENT_GID)
+                .uid(AGENT_UID)
+                .spawn()
+                .expect("start owned agent UID process"),
+        );
+        let state = observe_agent_process_state(agent_process_ids).unwrap();
+        assert!(state.active_process_count >= 1);
+        assert!(agent_process_ids()
+            .unwrap()
+            .contains(&(child.0.id() as i32)));
+        assert!(child.0.try_wait().unwrap().is_none());
     }
 
     #[test]
