@@ -956,6 +956,7 @@ class AgentDefinitionMember(models.Model):
 
 
 class Agent(models.Model):
+    is_business_instance = models.BooleanField(default=False)
     objects = ResourceQuerySet.as_manager()
     id = models.CharField(primary_key=True, max_length=64, default=new_agent_id)
     workspace = models.ForeignKey(
@@ -992,7 +993,8 @@ class Agent(models.Model):
 
     class Meta:
         constraints = [
-            models.UniqueConstraint(fields=["workspace", "owner", "definition"], name="agent_definition_owner_unique"),
+            models.UniqueConstraint(fields=["workspace", "owner", "definition"],
+                condition=models.Q(is_business_instance=False), name="agent_definition_owner_unique"),
             models.CheckConstraint(condition=models.Q(model_config__isnull=False) | models.Q(thinking_mode=""),
                 name="agent_unconfigured_model_no_effort"),
             models.CheckConstraint(
@@ -1043,8 +1045,9 @@ class Agent(models.Model):
                 "workspace_id",
                 "owner_id",
                 "definition_id",
+                "is_business_instance",
             ).get(pk=self.pk)
-            if stored_scope != (self.workspace_id, self.owner_id, self.definition_id):
+            if stored_scope != (self.workspace_id, self.owner_id, self.definition_id, self.is_business_instance):
                 raise ValueError("Agent ownership is immutable")
             if self.definition_id:
                 stored_config = type(self).objects.values_list("name", "description", "instructions", "avatar_kind").get(pk=self.pk)
@@ -1454,8 +1457,8 @@ class BusinessAgentBranch(models.Model):
         validate_business_user_id(self.business_user_id)
         if not self._state.adding:
             raise ValueError("business_agent_branch_is_immutable")
-        if (self.root_agent_id == self.agent_id or self.root_agent.definition_id is not None
-                or self.agent.definition_id is not None or self.root_agent.status != "active"
+        if (self.root_agent_id == self.agent_id or self.root_agent.definition_id != self.agent.definition_id
+                or self.root_agent.is_business_instance or not self.agent.is_business_instance or self.root_agent.status != "active"
                 or self.agent.status != "active" or self.app.status != "active"
                 or self.root_agent.owner_id != self.agent.owner_id
                 or self.root_agent.workspace_id != self.agent.workspace_id
@@ -1514,11 +1517,13 @@ class AgentInput(models.Model):
         else:
             grant = self.app_delegation
             if (self.credential_version <= 0 or self.credential_version != grant.credential_version
-                    or grant.definition_id is not None
                     or grant.app_id != self.acting_app_id or grant.user_id != self.agent.owner_id
                     or grant.workspace_id != self.agent.workspace_id or grant.membership_ref != self.membership_ref
-                    or not BusinessAgentBranch.objects.filter(app_id=grant.app_id, root_agent_id=grant.agent_id,
-                        agent_id=self.agent_id, session_id=self.session_id).exists()):
+                    or not BusinessAgentBranch.objects.filter(app_id=grant.app_id,
+                        agent_id=self.agent_id, session_id=self.session_id).filter(
+                            models.Q(root_agent_id=grant.agent_id) if grant.agent_id else
+                            models.Q(root_agent__definition_id=grant.definition_id,
+                                root_agent__owner_id=grant.user_id, root_agent__workspace_id=grant.workspace_id)).exists()):
                 raise ValueError("agent_input_application_origin_binding_rejected")
         kwargs["force_insert"] = True
         return super().save(*args, **kwargs)

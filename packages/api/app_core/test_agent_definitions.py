@@ -194,7 +194,10 @@ class AgentDefinitionTests(DefinitionFixture, TestCase):
         self.assertEqual(self.publish(definition)["version"], 2)
 
 
-class AgentDefinitionRunTests(DefinitionFixture, TestCase):
+class AgentDefinitionRunTests(DefinitionFixture, TransactionTestCase):
+    # Streaming routes return their database leases before network waits. These
+    # real request boundaries must not live inside TestCase's outer transaction.
+    serialized_rollback = True
     def setUp(self):
         super().setUp()
         self.definition, self.version = self.ready_definition()

@@ -12,7 +12,7 @@ def branch_for_agent(agent_id):
 
 
 def _require_root_configuration(agent, root):
-    if (root.status != "active" or root.definition_id is not None
+    if (root.status != "active" or root.definition_id != agent.definition_id
             or root.owner_id != agent.owner_id or root.workspace_id != agent.workspace_id):
         raise BusinessAgentConfigurationUnavailable("agent_business_root_unavailable")
     return root

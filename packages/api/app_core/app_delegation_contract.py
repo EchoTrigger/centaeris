@@ -6,7 +6,7 @@ SCOPES = frozenset({"assistant:use", "sessions:read", "sessions:create", "messag
                     "attachments:write", "events:read", "artifacts:read", "runs:cancel"})
 
 # Native Agents accept inputs into the existing coordinator executed by its owner.
-NATIVE_SCOPES = frozenset({"assistant:use", "messages:submit", "sessions:read", "artifacts:read"})
+NATIVE_SCOPES = frozenset({"assistant:use", "messages:submit", "sessions:read", "artifacts:read", "attachments:write"})
 
 
 def validate_scopes(value):

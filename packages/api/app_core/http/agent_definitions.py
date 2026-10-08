@@ -214,7 +214,7 @@ def use_agent_definition(request, workspace_id: str, definition_id: str, payload
             return Status(404, {"error": "agent_definition_not_available"})
         version = definition.published_version
         agent, created = Agent.objects.get_or_create(
-            workspace=membership.workspace, owner=request.user, definition=definition,
+            workspace=membership.workspace, owner=request.user, definition=definition, is_business_instance=False,
             defaults={"name": version.name, "description": version.description,
                       "instructions": version.instructions, "avatar_kind": version.avatar_kind},
         )

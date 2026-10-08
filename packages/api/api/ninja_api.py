@@ -8,6 +8,7 @@ from app_core.http.business_agent_branches import router as business_agent_branc
 from app_core.http.agents import router as agents_router
 from app_core.http.agent_messages import router as agent_messages_router, internal_router as internal_agent_messages_router
 from app_core.http.agent_inputs import router as agent_inputs_router
+from app_core.http.chats import router as chats_router
 from app_core.http.agent_previews import router as agent_previews_router
 from app_core.http.agent_work_validation import router as internal_agent_work_validation_router
 from app_core.http.agent_definitions import router as agent_definitions_router
@@ -49,6 +50,7 @@ api.add_router("/api", business_agent_branches_router)
 api.add_router("/api", agents_router)
 api.add_router("/api", agent_messages_router)
 api.add_router("/api", agent_inputs_router)
+api.add_router("/api/v1", chats_router)
 api.add_router("/api", agent_previews_router)
 api.add_router("/internal", internal_agent_messages_router)
 api.add_router("/api", agent_definitions_router)

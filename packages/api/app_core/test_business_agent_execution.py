@@ -50,7 +50,7 @@ class BusinessAgentExecutionTests(TransactionTestCase):
         self.addCleanup(guard.stop)
 
     def new_branch(self, subject):
-        agent = models.Agent.objects.create(workspace=self.workspace, owner=self.user,
+        agent = models.Agent.objects.create(is_business_instance=True, workspace=self.workspace, owner=self.user,
             name=self.root.name, instructions=self.root.instructions, model_config=self.model)
         session = models.Session.objects.create(workspace=self.workspace, owner=self.user,
             agent=agent, origin="automation")

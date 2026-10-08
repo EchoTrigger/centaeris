@@ -19,18 +19,21 @@ def validate_business_user_id(value):
 
 
 def require_business_branch(grant, branch_id, *, lock=False, require_active=True):
-    if grant.agent_id is None:
-        raise DelegationRejected("delegation_scope_forbidden")
     query = BusinessAgentBranch.objects.select_related("agent", "session", "root_agent")
     if lock:
         query = query.select_for_update(of=("self",))
-    branch = query.filter(pk=branch_id, app_id=grant.app_id, root_agent_id=grant.agent_id).first()
-    if (branch is None or branch.agent.definition_id is not None
+    query = query.filter(pk=branch_id, app_id=grant.app_id)
+    query = query.filter(root_agent_id=grant.agent_id) if grant.agent_id else query.filter(
+        root_agent__definition_id=grant.definition_id, root_agent__owner_id=grant.user_id,
+        root_agent__workspace_id=grant.workspace_id)
+    branch = query.first()
+    if (branch is None or branch.agent.definition_id != branch.root_agent.definition_id
             or branch.agent.owner_id != grant.user_id or branch.agent.workspace_id != grant.workspace_id
             or branch.session.agent_id != branch.agent_id or branch.session.owner_id != grant.user_id
             or branch.session.workspace_id != grant.workspace_id
             or not AgentCoordinationSession.objects.filter(agent_id=branch.agent_id, session_id=branch.session_id).exists()
-            or (require_active and (branch.agent.status != "active" or branch.session.status != "active"))):
+            or (require_active and (branch.root_agent.status != "active"
+                or branch.agent.status != "active" or branch.session.status != "active"))):
         raise DelegationRejected("business_branch_not_found", 404)
     return branch
 
@@ -58,19 +61,31 @@ def bind_request_business_branch(request, grant):
 
 
 @transaction.atomic
-def resolve_business_branch(request, root_agent_id, business_user_id):
+def resolve_business_branch(request, root_agent_id, business_user_id, *, published=False):
     validate_business_user_id(business_user_id)
     grant = request.app_delegation
-    if grant is None or grant.agent_id is None:
+    if grant is None or (grant.agent_id is None and not published):
         raise DelegationRejected("delegation_scope_forbidden")
     membership = locked_workspace_membership_for(request.user, grant.workspace_id)
     if membership is None:
         raise DelegationRejected("delegation_not_available")
     grant = require_current_delegation(grant.pk, "assistant:use", lock=True,
         expected_credential_version=request.app_delegation_credential_version)
-    if root_agent_id != grant.agent_id:
+    if published and grant.definition_id:
+        from .agent_definitions import available_agent_definitions
+        if root_agent_id != grant.definition_id:
+            raise DelegationRejected("business_branch_not_found", 404)
+        definition = available_agent_definitions(membership).get(pk=grant.definition_id)
+        version = definition.published_version
+        root, _ = Agent.objects.get_or_create(workspace_id=grant.workspace_id, owner_id=grant.user_id,
+            definition=definition, is_business_instance=False, defaults={"name": version.name,
+                "description": version.description, "instructions": version.instructions, "avatar_kind": version.avatar_kind})
+        root_agent_id = root.pk
+    elif root_agent_id != grant.agent_id:
         raise DelegationRejected("business_branch_not_found", 404)
     root = Agent.objects.select_for_update().get(pk=root_agent_id)
+    if root.status != "active":
+        raise DelegationRejected("business_branch_deleted", 410)
     existing = BusinessAgentBranch.objects.filter(app_id=grant.app_id, root_agent=root,
         business_user_id=business_user_id).first()
     if existing is not None:
@@ -78,8 +93,10 @@ def resolve_business_branch(request, root_agent_id, business_user_id):
         if branch.agent.status != "active" or branch.session.status != "active":
             raise DelegationRejected("business_branch_deleted", 410)
         return branch, False
-    agent = Agent.objects.create(workspace=root.workspace, owner=root.owner, name=root.name,
-        description=root.description, instructions=root.instructions, avatar_kind=root.avatar_kind,
+    version = root.definition.published_version if root.definition_id else root
+    agent = Agent.objects.create(workspace=root.workspace, owner=root.owner, name=version.name,
+        definition_id=root.definition_id, is_business_instance=True,
+        description=version.description, instructions=version.instructions, avatar_kind=version.avatar_kind,
         model_config=root.model_config, thinking_mode=root.thinking_mode)
     session = Session.objects.create(workspace=root.workspace, owner=root.owner, agent=agent,
         origin="automation", title="Agent coordination")
