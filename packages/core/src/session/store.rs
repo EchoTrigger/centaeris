@@ -204,6 +204,16 @@ pub trait RuntimeStore {
 }
 
 pub trait AgentRuntimeSnapshotStorePort {
+    /// Atomically write only if the retained raw snapshot matches `expected_snapshot`.
+    /// `None` requires an absent row. A conflict returns false without any write.
+    fn compare_and_save_agent_runtime_snapshot(
+        &self,
+        session_id: &str,
+        expected_snapshot: Option<&str>,
+        snapshot_json: &str,
+        updated_at_ms: i64,
+    ) -> Result<bool, String>;
+
     fn load_agent_runtime_snapshot(&self, session_id: &str) -> Result<Option<String>, String>;
 
     fn save_agent_runtime_snapshot(

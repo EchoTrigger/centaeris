@@ -78,9 +78,7 @@ impl WaitHandoffPublisher<'_> {
             let committed_payload: RuntimeRecoveryCheckpointV1 =
                 serde_json::from_str(&committed.payload_json).map_err(|e| e.to_string())?;
             sealed.validate(&committed_payload)?;
-            if sealed.wait_checkpoint != *wait || sealed.snapshot_json != handoff.snapshot_json {
-                return Err("wait handoff replay changed Core state".into());
-            }
+            sealed.validate_replay(self.store, wait, &turn.session_snapshot)?;
             if sequence.has_checkpoint(&committed.checkpoint_id) {
                 if sequence.latest_recovery_checkpoint_id()
                     != Some(committed.checkpoint_id.as_str())
@@ -162,6 +160,20 @@ fn digest(value: &impl Serialize) -> Result<String, String> {
 }
 
 impl WaitHandoff {
+    fn validate_replay<S: centaeris_core::session::reliability::RuntimeJobStorePort>(
+        &self,
+        store: &S,
+        wait: &CheckpointRecord,
+        snapshot: &SessionStateSnapshot,
+    ) -> Result<(), String> {
+        if self.wait_checkpoint != *wait {
+            return Err("wait handoff replay changed wait checkpoint".into());
+        }
+        let sealed =
+            serde_json::from_str(&self.snapshot_json).map_err(|error| error.to_string())?;
+        centaeris_core::runtime::validate_wait_recovery_replay(store, &sealed, snapshot)
+    }
+
     pub fn key(
         payload: &RuntimeRecoveryCheckpointV1,
         wait: &CheckpointRecord,
@@ -261,3 +273,6 @@ impl WaitHandoff {
         Ok(snapshot)
     }
 }
+
+#[cfg(test)]
+mod tests;

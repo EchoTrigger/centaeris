@@ -5576,7 +5576,8 @@ fn restore_runtime_state_from_recovery_checkpoint(
             .load_wait_handoff(&checkpoint.checkpoint_id)?
             .ok_or("wait recovery attachment missing")?
             .validate(checkpoint)?;
-        return SessionManager::new(store.clone()).save_session(&snapshot);
+        return centaeris_core::runtime::restore_wait_recovery_snapshot(store, &snapshot)
+            .map(|_| ());
     }
     let session_sequence = i32::try_from(checkpoint.session_sequence)
         .map_err(|_| "recovery checkpoint Session sequence overflow".to_string())?;
