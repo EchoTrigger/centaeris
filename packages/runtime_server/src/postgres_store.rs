@@ -6,7 +6,7 @@ use std::fmt;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-const DEFAULT_POSTGRES_POOL_SIZE: usize = 8;
+const DEFAULT_POSTGRES_POOL_SIZE: usize = 10;
 const DEFAULT_POSTGRES_CONTROL_POOL_SIZE: usize = 2;
 const DEFAULT_POSTGRES_LISTENER_LIMIT: usize = 8;
 const DEFAULT_POSTGRES_CHECKOUT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -600,6 +600,17 @@ mod tests {
             moved,
             "current-thread Runtime needs the plain-thread bridge"
         );
+    }
+
+    #[test]
+    fn postgres_connection_defaults_reserve_ten_ordinary_two_control_and_eight_listeners() {
+        let limits = super::PostgresConnectionLimits::default();
+        assert_eq!(
+            (limits.ordinary, limits.execution_control, limits.listeners),
+            (10, 2, 8)
+        );
+        assert_eq!(limits.checkout_timeout, Duration::from_secs(5));
+        assert_eq!(limits.connect_timeout, Duration::from_secs(3));
     }
 
     #[test]

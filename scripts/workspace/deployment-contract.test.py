@@ -145,15 +145,22 @@ class DeploymentContractTests(unittest.TestCase):
 
     def test_runtime_postgres_connection_budgets_reach_runtime(self):
         environment = compose_config()["services"]["runtime"]["environment"]
-        self.assertEqual(environment["RUNTIME_POSTGRES_POOL_SIZE"], "8")
+        self.assertEqual(environment["RUNTIME_POSTGRES_POOL_SIZE"], "10")
         self.assertEqual(environment["RUNTIME_POSTGRES_CONTROL_POOL_SIZE"], "2")
         self.assertEqual(environment["RUNTIME_POSTGRES_LISTENER_LIMIT"], "8")
         self.assertEqual(environment["RUNTIME_POSTGRES_CHECKOUT_TIMEOUT_MS"], "5000")
         self.assertEqual(environment["RUNTIME_POSTGRES_CONNECT_TIMEOUT_MS"], "3000")
 
+    def test_runtime_ordinary_pool_default_and_overrides_render_in_compose(self):
+        for value, expected in ((None, "10"), ("6", "6"), ("10", "10")):
+            with self.subTest(configured=value):
+                environment = compose_config(RUNTIME_POSTGRES_POOL_SIZE=value)["services"]["runtime"]["environment"]
+                self.assertEqual(environment["RUNTIME_POSTGRES_POOL_SIZE"], expected)
+                self.assertEqual(environment["RUNTIME_POSTGRES_CONTROL_POOL_SIZE"], "2")
+
     def test_django_pool_budget_only_reaches_asgi_api(self):
         services = compose_config()["services"]
-        self.assertEqual(services["api"]["environment"]["API_POSTGRES_POOL_MAX_SIZE"], "8")
+        self.assertEqual(services["api"]["environment"]["API_POSTGRES_POOL_MAX_SIZE"], "10")
         self.assertEqual(services["api"]["environment"]["POSTGRES_APPLICATION_NAME"], "centaeris-api")
         self.assertEqual(
             compose_config(API_POSTGRES_POOL_MAX_SIZE="0")["services"]["api"]["environment"]["API_POSTGRES_POOL_MAX_SIZE"],
@@ -166,6 +173,12 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertNotIn("POSTGRES_HOST", services["worker"]["environment"])
         self.assertNotIn("DATABASE_URL", services["worker"]["environment"])
 
+    def test_api_pool_default_and_explicit_overrides_render_in_compose(self):
+        for value, expected in ((None, "10"), ("", "10"), ("0", "0"), ("6", "6"), ("10", "10")):
+            with self.subTest(configured=value):
+                rendered = compose_config(API_POSTGRES_POOL_MAX_SIZE=value)
+                self.assertEqual(rendered["services"]["api"]["environment"]["API_POSTGRES_POOL_MAX_SIZE"], expected)
+
     def test_django_pool_settings_follow_the_api_deployment_budget(self):
         probe = (
             "import os; from api.settings import DATABASES; "
@@ -175,7 +188,7 @@ class DeploymentContractTests(unittest.TestCase):
             "assert (db['OPTIONS'].get('pool') == "
             "({'min_size': 0, 'max_size': size, 'timeout': 5} if size else None))"
         )
-        for service, override in (("api", None), ("api", "0"), ("api-init", None)):
+        for service, override in (("api", None), ("api", "0"), ("api", "6"), ("api-init", None)):
             with self.subTest(service=service, pool_size=override):
                 environment = {
                     **os.environ,
