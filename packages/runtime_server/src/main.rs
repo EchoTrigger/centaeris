@@ -703,9 +703,47 @@ async fn run_next_hosted_subagent_batch(
             offset: 0,
         })
         .await?;
-    let Some((session_id, context)) = next_hosted_subagent_context(&jobs, &contexts)? else {
-        return Ok(());
-    };
+    let batches = hosted_subagent_batches(&jobs, &contexts, now)?;
+    run_hosted_subagent_batches(batches, |batch| {
+        run_hosted_subagent_batch(store, job_store.clone(), batch, now)
+    })
+    .await
+}
+
+struct HostedSubagentBatch {
+    session_id: String,
+    context: HostedRuntimeContext,
+    limit: usize,
+}
+
+async fn run_hosted_subagent_batches<T, Run, Execution>(
+    batches: Vec<T>,
+    run: Run,
+) -> Result<(), String>
+where
+    Run: Fn(T) -> Execution,
+    Execution: Future<Output = Result<(), String>>,
+{
+    // Keep every scoped pool alive through completion, including after a sibling
+    // fails. This is a bounded cross-Session batch, not rolling job admission.
+    let results = futures::future::join_all(batches.into_iter().map(run)).await;
+    for result in results {
+        result?;
+    }
+    Ok(())
+}
+
+async fn run_hosted_subagent_batch(
+    store: &RuntimeStoreActor,
+    job_store: Arc<PostgresRuntimeStore>,
+    batch: HostedSubagentBatch,
+    now: i64,
+) -> Result<(), String> {
+    let HostedSubagentBatch {
+        session_id,
+        context,
+        limit,
+    } = batch;
     let worker_id = format!("hosted-subagent-worker-{}", std::process::id());
     let runner = HostedSubagentRunner {
         store: store.clone(),
@@ -727,13 +765,13 @@ async fn run_next_hosted_subagent_batch(
             now_ms: now,
             worker_id,
             session_id: Some(session_id.clone()),
-            limit: HOSTED_SUBAGENT_MAX_PARALLELISM,
+            limit,
             lease_ms: HOSTED_SUBAGENT_LEASE_MS,
             started_at_ms: now,
             finished_at_ms: now_ms()?,
         },
         SubagentWorkerPoolPolicy {
-            max_parallelism: HOSTED_SUBAGENT_MAX_PARALLELISM,
+            max_parallelism: limit,
         },
     )
     .await?;
@@ -745,13 +783,16 @@ async fn run_next_hosted_subagent_batch(
     Ok(())
 }
 
-fn next_hosted_subagent_context(
+fn hosted_subagent_batches(
     jobs: &[RuntimeJobRecord],
     contexts: &ToolLayerRegistry,
-) -> Result<Option<(String, HostedRuntimeContext)>, String> {
+    now: i64,
+) -> Result<Vec<HostedSubagentBatch>, String> {
     let contexts = contexts
         .lock()
         .map_err(|_| "hosted subagent context registry lock poisoned".to_string())?;
+    let mut batches: Vec<HostedSubagentBatch> = Vec::new();
+    let mut queued_counts = Vec::new();
     for job in jobs {
         if job.job_kind != SUBAGENT_RUN_JOB_KIND || job.status != RuntimeJobStatus::Queued {
             return Err(format!(
@@ -765,11 +806,46 @@ fn next_hosted_subagent_context(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| format!("hosted subagent job session missing: {}", job.job_id))?;
+        if job.run_at_ms > now {
+            continue;
+        }
         if let Some(context) = contexts.get(session_id) {
-            return Ok(Some((session_id.to_string(), context.clone())));
+            if let Some(index) = batches
+                .iter()
+                .position(|batch| batch.session_id == session_id)
+            {
+                queued_counts[index] += 1;
+            } else if batches.len() < HOSTED_SUBAGENT_MAX_PARALLELISM {
+                batches.push(HostedSubagentBatch {
+                    session_id: session_id.to_string(),
+                    context: context.clone(),
+                    limit: 1,
+                });
+                queued_counts.push(1);
+            }
         }
     }
-    Ok(None)
+    // Give each selected Session one slot before expanding a scoped pool. The
+    // sum of claim limits bounds this process, while Core owns actual leases
+    // and same-Session resource conflicts.
+    let mut remaining = HOSTED_SUBAGENT_MAX_PARALLELISM - batches.len();
+    while remaining > 0 {
+        let mut assigned = false;
+        for (batch, queued) in batches.iter_mut().zip(&queued_counts) {
+            if batch.limit < *queued {
+                batch.limit += 1;
+                remaining -= 1;
+                assigned = true;
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+        if !assigned {
+            break;
+        }
+    }
+    Ok(batches)
 }
 
 struct HostedSubagentRunner {
@@ -6533,18 +6609,185 @@ mod tests {
     }
 
     #[test]
+    fn hosted_subagent_sessions_progress_while_other_session_is_blocked() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let first_context = hosted_context();
+                let mut second_context = hosted_context();
+                second_context.agent_run_id = "agent_run_2".to_string();
+                second_context.agent_run_identity.agent_run_id = "agent_run_2".to_string();
+                let contexts = Arc::new(Mutex::new(HashMap::from([
+                    ("sess_1".to_string(), first_context),
+                    ("sess_2".to_string(), second_context),
+                ])));
+                let first_job = queued_job(SUBAGENT_RUN_JOB_KIND);
+                let mut second_job = queued_job(SUBAGENT_RUN_JOB_KIND);
+                second_job.job_id = "subagent_2".to_string();
+                second_job.session_id = Some("sess_2".to_string());
+                let batches = hosted_subagent_batches(&[first_job, second_job], &contexts, 1)
+                    .expect("plan both ready Sessions");
+                let release_first = Arc::new(tokio::sync::Semaphore::new(0));
+                let release = release_first.clone();
+                let (started, mut observed) = tokio::sync::mpsc::unbounded_channel();
+                let execution = tokio::spawn(run_hosted_subagent_batches(batches, move |batch| {
+                    let started = started.clone();
+                    let release = release.clone();
+                    async move {
+                        started
+                            .send((batch.session_id.clone(), batch.context.agent_run_id))
+                            .expect("observe dispatched context");
+                        if batch.session_id == "sess_1" {
+                            let _permit = release.acquire().await.expect("release slow session");
+                        }
+                        Ok(())
+                    }
+                }));
+                assert_eq!(
+                    observed.recv().await,
+                    Some(("sess_1".to_string(), "agent_run_1".to_string()))
+                );
+                let second_before_release =
+                    tokio::time::timeout(Duration::from_millis(100), observed.recv()).await;
+                release_first.add_permits(1);
+                execution
+                    .await
+                    .expect("scheduler task")
+                    .expect("both batches");
+                assert_eq!(
+                    second_before_release.ok().flatten(),
+                    Some(("sess_2".to_string(), "agent_run_2".to_string())),
+                    "a ready second Session must progress before the slow Session completes"
+                );
+            });
+    }
+
+    #[test]
+    fn hosted_subagent_claim_budgets_preserve_one_pool_per_session_and_total_three() {
+        let contexts = Arc::new(Mutex::new(HashMap::from_iter(
+            (1..=4).map(|index| (format!("sess_{index}"), hosted_context())),
+        )));
+        for (sessions, expected) in [
+            (vec![1, 1, 1], vec![("sess_1", 3)]),
+            (vec![1, 1, 1, 2], vec![("sess_1", 2), ("sess_2", 1)]),
+            (
+                vec![1, 2, 3, 4],
+                vec![("sess_1", 1), ("sess_2", 1), ("sess_3", 1)],
+            ),
+            (vec![5, 1, 1], vec![("sess_1", 2)]),
+        ] {
+            let jobs: Vec<_> = sessions
+                .iter()
+                .enumerate()
+                .map(|(index, session)| {
+                    let mut job = queued_job(SUBAGENT_RUN_JOB_KIND);
+                    job.job_id = format!("subagent_{index}");
+                    job.session_id = Some(format!("sess_{session}"));
+                    job
+                })
+                .collect();
+            let batches = hosted_subagent_batches(&jobs, &contexts, 1).expect("bounded claims");
+            let actual: Vec<_> = batches
+                .iter()
+                .map(|batch| (batch.session_id.as_str(), batch.limit))
+                .collect();
+            assert_eq!(actual, expected, "queued Sessions: {sessions:?}");
+            assert!(batches.iter().map(|batch| batch.limit).sum::<usize>() <= 3);
+            let sessions: HashSet<_> = batches.iter().map(|batch| &batch.session_id).collect();
+            assert_eq!(sessions.len(), batches.len());
+        }
+    }
+
+    #[test]
+    fn hosted_subagent_future_retry_does_not_take_a_due_sessions_claim_budget() {
+        let contexts = Arc::new(Mutex::new(HashMap::from([
+            ("sess_1".to_string(), hosted_context()),
+            ("sess_2".to_string(), hosted_context()),
+        ])));
+        let mut jobs: Vec<_> = (0..3)
+            .map(|index| {
+                let mut job = queued_job(SUBAGENT_RUN_JOB_KIND);
+                job.job_id = format!("due_{index}");
+                job
+            })
+            .collect();
+        let mut future = queued_job(SUBAGENT_RUN_JOB_KIND);
+        future.job_id = "future_retry".to_string();
+        future.session_id = Some("sess_2".to_string());
+        future.run_at_ms = i64::MAX;
+        jobs.push(future);
+        let batches = hosted_subagent_batches(&jobs, &contexts, 1).expect("plan due jobs");
+        assert_eq!(
+            batches.len(),
+            1,
+            "future retry cannot reserve a scoped pool"
+        );
+        assert_eq!(batches[0].session_id, "sess_1");
+        assert_eq!(batches[0].limit, 3);
+    }
+
+    #[test]
+    fn hosted_subagent_fast_failure_keeps_slow_sibling_alive_until_completion() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let release_slow = Arc::new(tokio::sync::Semaphore::new(0));
+                let release = release_slow.clone();
+                let (started, mut observed) = tokio::sync::mpsc::unbounded_channel();
+                let finished_slow = Arc::new(AtomicBool::new(false));
+                let finished = finished_slow.clone();
+                let execution = tokio::spawn(run_hosted_subagent_batches(
+                    vec!["fast-error", "slow-success"],
+                    move |session| {
+                        let release = release.clone();
+                        let started = started.clone();
+                        let finished = finished.clone();
+                        async move {
+                            if session == "fast-error" {
+                                return Err("scoped batch failure".to_string());
+                            }
+                            started.send(()).expect("observe slow sibling");
+                            let _permit = release.acquire().await.expect("release slow sibling");
+                            finished.store(true, Ordering::SeqCst);
+                            Ok(())
+                        }
+                    },
+                ));
+                let slow_started =
+                    tokio::time::timeout(Duration::from_millis(100), observed.recv())
+                        .await
+                        .expect("a failed sibling must not suppress another scoped pool");
+                assert_eq!(slow_started, Some(()));
+                assert!(
+                    !execution.is_finished(),
+                    "the current batch still awaits its slow pool"
+                );
+                release_slow.add_permits(1);
+                assert_eq!(
+                    execution.await.expect("scheduler task"),
+                    Err("scoped batch failure".to_string())
+                );
+                assert!(finished_slow.load(Ordering::SeqCst));
+            });
+    }
+
+    #[test]
     fn hosted_worker_selects_only_exact_subagent_jobs_with_active_context() {
         let contexts = Arc::new(Mutex::new(HashMap::from([(
             "sess_1".to_string(),
             hosted_context(),
         )])));
-        let selected =
-            next_hosted_subagent_context(&[queued_job(SUBAGENT_RUN_JOB_KIND)], &contexts)
-                .expect("select hosted subagent")
-                .expect("active hosted subagent context");
-        assert_eq!(selected.0, "sess_1");
-        assert_eq!(selected.1.agent_run_id, "agent_run_1");
-        match next_hosted_subagent_context(&[queued_job("provider.poll")], &contexts) {
+        let selected = hosted_subagent_batches(&[queued_job(SUBAGENT_RUN_JOB_KIND)], &contexts, 1)
+            .expect("select hosted subagent");
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].session_id, "sess_1");
+        assert_eq!(selected[0].context.agent_run_id, "agent_run_1");
+        assert_eq!(selected[0].limit, 1);
+        match hosted_subagent_batches(&[queued_job("provider.poll")], &contexts, 1) {
             Err(error) => assert!(error.contains("unsupported job")),
             Ok(_) => panic!("provider jobs belong to the Core provider scheduler"),
         }
