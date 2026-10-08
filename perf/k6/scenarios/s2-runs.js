@@ -25,7 +25,7 @@ export const options = {
     },
   },
   thresholds: {
-    's2_create_errors{scenario:runs}': ['rate<0.01'],
+    's2_create_errors': ['rate<0.01'],
     'http_req_duration{type:post_message}': ['p(95)<5000'],
   },
   systemTags: ['status', 'type'],
