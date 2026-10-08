@@ -8,7 +8,7 @@ import {
   Image as ImageIcon, Layers, LoaderCircle, MessageSquarePlus, Minus,
   Search, Trash2, Upload, X,
 } from "lucide-react";
-import { apiJson as api, apiUrl, jsonOptions } from "../api";
+import { ApiError, apiJson as api, apiUrl, jsonOptions } from "../api";
 import { OperationClient } from "../chat/operationReceipts";
 import { MarkdownContent } from "../chat/MarkdownContent";
 import { useModalDialog } from "../components/useModalDialog";
@@ -385,11 +385,26 @@ function LibraryPageContent() {
     setWorking(true);
     const scope = operationScopeRef.current;
     const isCurrent = () => scope.active && operationScopeRef.current === scope;
+    const operationId = operations.pending()?.operationId;
+    let targetUnavailable = false;
     try {
-      const accepted = await operations.submit(`/api/workspaces/${workspace.id}/sessions`, { agentId }, [], selectedItems.map((item) => item.id).sort());
+      let accepted;
+      try {
+        accepted = await operations.submit(`/api/workspaces/${workspace.id}/sessions`, { agentId }, [], selectedItems.map((item) => item.id).sort());
+      } catch (requestError) {
+        targetUnavailable = requestError instanceof ApiError
+          && requestError.status === 410
+          && requestError.message === "operation_resource_unavailable";
+        if (isCurrent() && targetUnavailable && operationId) operations.complete(operationId);
+        throw requestError;
+      }
       await finishCreatedChat(accepted, isCurrent);
     } catch (requestError) {
       if (!isCurrent()) return;
+      if (targetUnavailable) {
+        setError(t("operations.unavailable"));
+        return;
+      }
       setError(requestError?.message === "operation_pending_input_changed" ? t("operations.changedInput") : t("libraryRoute.unableToStartChatValue", { value1: requestError.message }));
     } finally {
       if (isCurrent()) setWorking(false);
@@ -414,12 +429,25 @@ function LibraryPageContent() {
   async function openPendingChat(linkAssets = true) {
     const scope = operationScopeRef.current;
     const isCurrent = () => scope.active && operationScopeRef.current === scope;
+    const operationId = operations.pending()?.operationId;
+    let targetUnavailable = false;
     setWorking(true);
     setError("");
     try {
-      const accepted = await operations.recover();
+      let accepted;
+      try {
+        accepted = await operations.recover();
+      } catch (requestError) {
+        targetUnavailable = requestError instanceof ApiError
+          && requestError.status === 410
+          && requestError.message === "operation_resource_unavailable";
+        if (isCurrent() && targetUnavailable && operationId) operations.complete(operationId);
+        throw requestError;
+      }
       if (accepted) await finishCreatedChat(accepted, isCurrent, linkAssets);
-    } catch { if (isCurrent()) setError(t("operations.acceptedReadFailed")); }
+    } catch {
+      if (isCurrent()) setError(t(targetUnavailable ? "operations.unavailable" : "operations.acceptedReadFailed"));
+    }
     finally { if (isCurrent()) setWorking(false); }
   }
 
