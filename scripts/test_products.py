@@ -29,7 +29,7 @@ class ProductEntryTests(unittest.TestCase):
 
     def test_web_build_selects_web_only(self):
         commands = self.plan("web")
-        self.assertTrue(any("packages/web" in command for command in commands))
+        self.assertTrue(any("web" in command for command in commands))
         self.assertFalse(any("packages/desktop" in command for command in commands))
 
     def test_unknown_product_fails_without_running_a_build(self):

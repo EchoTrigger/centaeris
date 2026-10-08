@@ -12,7 +12,7 @@ $packagedRuntime = Join-Path $desktopDist "resources/bin/centaeris-runtime.exe"
 $centaerisExe = Join-Path $desktopDist "Centaeris Desktop.exe"
 $uiIndex = Join-Path $repoRoot "packages/ui/dist/index.html"
 
-# Some terminals can have COMSPEC changed; npm run may fail if it is not cmd.exe.
+# Some terminals can have COMSPEC changed; pnpm run may fail if it is not cmd.exe.
 $env:ComSpec = "C:\Windows\System32\cmd.exe"
 
 function Assert-CommandAvailable {
@@ -83,13 +83,13 @@ function Assert-RuntimeFreshForRustSources {
     Invoke-Checked "runtime freshness gate" "node.exe" @((Join-Path $electronDir "scripts/ensure-runtime.mjs"), "--check") $repoRoot
 }
 
-Assert-CommandAvailable "npm.cmd"
+Assert-CommandAvailable "pnpm.cmd"
 Assert-CommandAvailable "node.exe"
 Assert-CommandAvailable "cargo.exe"
 Assert-DistNotRunning
 
-Invoke-Checked "ui production build" "npm.cmd" @("run", "build") $uiDir
-Invoke-Checked "electron release runtime and desktop dist build" "npm.cmd" @("run", "build") $electronDir
+Invoke-Checked "ui production build" "pnpm.cmd" @("run", "build") $uiDir
+Invoke-Checked "electron release runtime and desktop dist build" "pnpm.cmd" @("run", "build") $electronDir
 
 Assert-PathExists $uiIndex "UI dist index"
 Assert-PathExists $releaseRuntime "Rust release runtime"

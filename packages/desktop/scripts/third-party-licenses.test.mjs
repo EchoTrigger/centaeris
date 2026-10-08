@@ -5,23 +5,25 @@ import path from "node:path";
 import test from "node:test";
 
 import { fallbackFiles, writeThirdPartyLicenses } from "./third-party-licenses.mjs";
+import { packageDirectory } from "./package-directory.mjs";
 
 const hostRoot = path.resolve(import.meta.dirname, "..");
 const repoRoot = path.resolve(hostRoot, "..", "..");
 
-const lock = JSON.parse(await fs.readFile(path.join(repoRoot, "package-lock.json"), "utf8"));
-const rolldown = lock.packages["node_modules/rolldown"];
+const rolldownRoot = packageDirectory("rolldown", packageDirectory("vite", path.join(repoRoot, "packages/ui")));
+const rolldown = JSON.parse(await fs.readFile(path.join(rolldownRoot, "package.json"), "utf8"));
+const lock = await fs.readFile(path.join(repoRoot, "pnpm-lock.yaml"), "utf8");
 assert.equal(rolldown.version, "1.1.5");
 assert.ok(Object.keys(rolldown.optionalDependencies).length > 0);
 
 for (const [name, version] of Object.entries(rolldown.optionalDependencies)) {
   test(`audited Rolldown license fallback covers ${name}`, async () => {
-    assert.equal(lock.packages[`node_modules/${name}`].version, version);
+    assert.ok(lock.includes(`'${name}@${version}':`));
     const item = { ecosystem: "npm", name, version };
     const files = await fallbackFiles(item, repoRoot, hostRoot);
     assert.equal(files.length, 1);
     assert.equal(files[0].source, "rolldown@1.1.5/LICENSE");
-    assert.deepEqual(files[0].content, await fs.readFile(path.join(repoRoot, "node_modules/rolldown/LICENSE")));
+    assert.deepEqual(files[0].content, await fs.readFile(path.join(rolldownRoot, "LICENSE")));
     await assert.rejects(
       fallbackFiles({ ...item, version: "1.1.6" }, repoRoot, hostRoot),
       /third-party license files missing/,

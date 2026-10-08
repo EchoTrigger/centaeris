@@ -8,7 +8,7 @@ runner packages native Windows artifacts.
 
 - Rust `1.95.0` (pinned by `rust-toolchain.toml`)
 - Node.js `22.21.0`
-- npm `10.9.4`
+- pnpm `12.10.1`
 - Git for source development
 - Git for Windows (provides the verified `bash.exe` used for host execution); see
   [local execution](../architecture/LocalExecution.md)
@@ -16,7 +16,8 @@ runner packages native Windows artifacts.
 Clone the repository and install locked dependencies:
 
 ```powershell
-npm ci
+npm install --global pnpm@12.10.1
+pnpm install --frozen-lockfile
 cargo fetch --locked
 ```
 
@@ -40,8 +41,8 @@ before rebuilding it.
 For development:
 
 ```powershell
-npm run dev --workspace centaeris-ui
-npm run dev --workspace @centaeris/electron-host
+pnpm --filter centaeris-ui run dev
+pnpm --filter @centaeris/electron-host run dev
 ```
 
 ## TUI

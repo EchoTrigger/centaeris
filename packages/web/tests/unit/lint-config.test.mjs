@@ -55,7 +55,7 @@ test("local CI runs lint, typecheck, and a production Web build", () => {
   });
   assert.equal(gate.status, 0, `${gate.stdout}${gate.stderr}`);
   const webPackage = JSON.parse(readFileSync(webPackagePath, "utf8"));
-  assert.equal(webPackage.scripts.build, "npm run lint && npm run typecheck && vite build");
+  assert.equal(webPackage.scripts.build, "pnpm run lint && pnpm run typecheck && vite build");
 });
 
 test("conditional React hooks block the gate", () => {

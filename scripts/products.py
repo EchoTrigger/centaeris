@@ -32,7 +32,7 @@ def source_revision(clean=True):
 
 
 def build_commands(product, release=False):
-    npm = "npm.cmd" if os.name == "nt" else "npm"
+    pnpm = "pnpm.cmd" if os.name == "nt" else "pnpm"
     rust = {"core": "centaeris-core", "runtime": "centaeris-runtime", "tui": "centaeris-tui",
             "runtime-server": "runtime_server", "hosted-execution": "hosted_execution"}
     if product in rust:
@@ -41,8 +41,8 @@ def build_commands(product, release=False):
     if product == "desktop":
         return [["pwsh", "-NoProfile", "-File", "scripts/build-desktop.ps1"]]
     if product == "web":
-        return [[npm, "ci", "--workspace", "web", "--include-workspace-root"],
-                [npm, "run", "build", "--workspace", "packages/web"]]
+        return [[pnpm, "--filter", "web", "--filter", "centaeris", "install", "--frozen-lockfile"],
+                [pnpm, "--filter", "web", "run", "build"]]
     python = {"api": "api", "worker": "workspace-agent-worker", "document-processor": "centaeris-document-processor"}
     if product in python:
         return [["uv", "sync", "--frozen", "--package", python[product]]]

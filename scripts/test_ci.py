@@ -29,6 +29,13 @@ class PortableGateTests(unittest.TestCase):
             self.assertTrue(any(script in c for c in calls), script)
         self.assertFalse(any("smoke:window" in c for c in calls))
 
+    def test_node_gate_uses_a_frozen_pnpm_install_on_every_platform(self):
+        for platform, command in (("win32", "pnpm.cmd"), ("linux", "pnpm"), ("darwin", "pnpm")):
+            calls = []
+            ci.run_gate("Node", lambda args, **kw: calls.append(args) or "", platform=platform)
+            self.assertIn([command, "install", "--frozen-lockfile"], calls)
+            self.assertFalse(any(c[0] in ("npm", "npm.cmd") for c in calls))
+
     def test_failure_stops_before_later_commands(self):
         calls = []
         def fail(args, **kwargs):

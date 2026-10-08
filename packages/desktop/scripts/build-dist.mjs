@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { packageDirectory } from "./package-directory.mjs";
 import { spawnSync } from "node:child_process";
 import * as ResEdit from "resedit";
 import { writeThirdPartyLicenses } from "./third-party-licenses.mjs";
@@ -8,7 +9,7 @@ import { runtimeArtifactPath, DESKTOP_RUNTIME_TARGET } from "../src/runtimeArtif
 
 const hostRoot = path.resolve(import.meta.dirname, "..");
 const repoRoot = path.resolve(hostRoot, "..", "..");
-const electronDist = path.join(hostRoot, "node_modules", "electron", "dist");
+const electronDist = path.join(packageDirectory("electron", hostRoot), "dist");
 const uiDist = path.join(repoRoot, "packages", "ui", "dist");
 const runtimeExecutable = runtimeArtifactPath(repoRoot, "release");
 const trayIconIco = path.join(hostRoot, "assets", "icon.ico");

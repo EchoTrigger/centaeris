@@ -29,7 +29,7 @@ node packages/desktop/scripts/ensure-runtime.mjs --profile debug
 node packages/desktop/scripts/smoke-runtime.mjs
 ```
 
-`npm run smoke:runtime --workspace @centaeris/electron-host` builds and tests the
+`pnpm --filter @centaeris/electron-host run smoke:runtime` builds and tests the
 default release Runtime. `scripts/build-desktop.ps1` bundles the native
 `centaeris-runtime.exe` with the Windows Electron application; packaged window
 acceptance runs the same native Runtime.
