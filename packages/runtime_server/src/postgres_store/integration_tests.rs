@@ -35,6 +35,7 @@ use centaeris_runtime_sqlite::SqliteRuntimeStore;
 
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+mod snapshot_cas_tests;
 mod tool_result_storage_tests;
 mod wait_handoff_tests;
 

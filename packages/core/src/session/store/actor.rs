@@ -1107,6 +1107,24 @@ impl RuntimeStoreActor {
 }
 
 impl AgentRuntimeSnapshotStorePort for RuntimeStoreActor {
+    fn compare_and_save_agent_runtime_snapshot(
+        &self,
+        session_id: &str,
+        expected_snapshot: Option<&str>,
+        snapshot_json: &str,
+        updated_at_ms: i64,
+    ) -> Result<bool, String> {
+        self.send_blocking(
+            |reply| RuntimeStoreActorCommand::CompareAndSaveAgentRuntimeSnapshot {
+                session_id: session_id.to_string(),
+                expected_snapshot: expected_snapshot.map(str::to_string),
+                snapshot_json: snapshot_json.to_string(),
+                updated_at_ms,
+                reply,
+            },
+        )
+    }
+
     fn load_agent_runtime_snapshot(&self, session_id: &str) -> Result<Option<String>, String> {
         let session_id = session_id.to_string();
         self.send_blocking(|reply| RuntimeStoreActorCommand::LoadAgentRuntimeSnapshot {
@@ -1657,6 +1675,13 @@ enum RuntimeStoreActorCommand {
         session_id: String,
         reply: RuntimeStoreActorReply<Option<String>>,
     },
+    CompareAndSaveAgentRuntimeSnapshot {
+        session_id: String,
+        expected_snapshot: Option<String>,
+        snapshot_json: String,
+        updated_at_ms: i64,
+        reply: RuntimeStoreActorReply<bool>,
+    },
     SaveAgentRuntimeSnapshot {
         session_id: String,
         snapshot_json: String,
@@ -1762,6 +1787,9 @@ impl RuntimeStoreActorCommand {
             }
             Self::CreateDeadLetterAndFailJob { .. } => "create_dead_letter_and_fail_job",
             Self::LoadAgentRuntimeSnapshot { .. } => "load_agent_runtime_snapshot",
+            Self::CompareAndSaveAgentRuntimeSnapshot { .. } => {
+                "compare_and_save_agent_runtime_snapshot"
+            }
             Self::SaveAgentRuntimeSnapshot { .. } => "save_agent_runtime_snapshot",
             Self::DeleteSessionData { .. } => "delete_session_data",
             Self::CommitTranscriptProjection { .. } => "commit_transcript_projection",
@@ -2149,6 +2177,25 @@ async fn run_runtime_store_actor<S>(
                 reply.send(
                     run_store_operation(store.clone(), move |store| {
                         store.load_agent_runtime_snapshot(session_id.as_str())
+                    })
+                    .await,
+                );
+            }
+            RuntimeStoreActorCommand::CompareAndSaveAgentRuntimeSnapshot {
+                session_id,
+                expected_snapshot,
+                snapshot_json,
+                updated_at_ms,
+                reply,
+            } => {
+                reply.send(
+                    run_store_operation(store.clone(), move |store| {
+                        store.compare_and_save_agent_runtime_snapshot(
+                            &session_id,
+                            expected_snapshot.as_deref(),
+                            &snapshot_json,
+                            updated_at_ms,
+                        )
                     })
                     .await,
                 );

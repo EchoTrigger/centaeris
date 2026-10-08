@@ -334,6 +334,39 @@ impl AgentRuntimeSnapshotStorePort for SqliteRuntimeStore {
             Ok(())
         })
     }
+
+    fn compare_and_save_agent_runtime_snapshot(
+        &self,
+        session_id: &str,
+        expected_snapshot: Option<&str>,
+        snapshot_json: &str,
+        updated_at_ms: i64,
+    ) -> Result<bool, String> {
+        #[cfg(test)]
+        if self
+            .fail_next_session_snapshot_save
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err("injected one-shot session runtime snapshot save failure".to_string());
+        }
+        self.with_conn(|conn| {
+            let changed = match expected_snapshot {
+                Some(expected) => conn.execute(
+                    "UPDATE session_runtime_snapshots
+                     SET snapshot_json = ?2, updated_at_ms = ?3
+                     WHERE session_id = ?1 AND snapshot_json = ?4",
+                    params![session_id, snapshot_json, updated_at_ms, expected],
+                ),
+                None => conn.execute(
+                    "INSERT INTO session_runtime_snapshots(session_id, snapshot_json, updated_at_ms)
+                     VALUES(?1, ?2, ?3) ON CONFLICT(session_id) DO NOTHING",
+                    params![session_id, snapshot_json, updated_at_ms],
+                ),
+            }
+            .map_err(|error| format!("compare and save session runtime snapshot failed: {error}"))?;
+            Ok(changed == 1)
+        })
+    }
 }
 
 pub(super) fn save_checkpoint_conn(
