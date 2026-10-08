@@ -167,7 +167,7 @@ async def stream_open_ai_completions(
             chunk_reasoning_field, chunk_reasoning = _openai_reasoning(delta)
             if chunk_reasoning_field is not None:
                 if reasoning_field is not None and reasoning_field != chunk_reasoning_field:
-                    raise RuntimeError("provider stream changed reasoning field names")
+                    raise ModelProviderError("provider_response_invalid")
                 reasoning_field = chunk_reasoning_field
                 reasoning_parts.append(chunk_reasoning)
                 if chunk_reasoning:
@@ -175,15 +175,15 @@ async def stream_open_ai_completions(
             content = delta.get("content")
             if content:
                 if not isinstance(content, str):
-                    raise RuntimeError("provider delta content must be a string")
+                    raise ModelProviderError("provider_response_invalid")
                 text_parts.append(content)
                 yield encode_event("delta", {"delta": content})
             elif content is not None and not isinstance(content, str):
-                raise RuntimeError("provider delta content must be a string")
+                raise ModelProviderError("provider_response_invalid")
             for call in delta.get("tool_calls") or []:
                 index = call.get("index")
                 if not isinstance(index, int):
-                    raise RuntimeError("provider tool call delta index is required")
+                    raise ModelProviderError("provider_response_invalid")
                 aggregate = tool_calls.setdefault(index, {"id": "", "name": "", "argsJson": ""})
                 if call.get("id"):
                     aggregate["id"] = call["id"]
@@ -210,8 +210,11 @@ async def stream_open_ai_completions(
     for index in sorted(tool_calls):
         call = tool_calls[index]
         if not call["id"] or not call["name"]:
-            raise RuntimeError("provider tool call stream is incomplete")
-        json.loads(call["argsJson"])
+            raise ModelProviderError("provider_response_invalid")
+        try:
+            json.loads(call["argsJson"])
+        except (TypeError, ValueError) as error:
+            raise ModelProviderError("provider_response_invalid") from error
         raw_calls.append(call)
         parsed_calls.append({key: call[key] for key in ("id", "name", "argsJson")})
     gemini_continuation = _gemini_tool_continuation(raw_calls) if gemini and raw_calls else None
@@ -229,7 +232,7 @@ def parse_open_ai_completions_response(payload: dict, *, gemini: bool = False) -
     message = choice.get("message") or {}
     text = message.get("content") or ""
     if not isinstance(text, str):
-        raise RuntimeError("model provider response message content must be a string")
+        raise ModelProviderError("provider_response_invalid")
     _, reasoning_content = _openai_reasoning(message)
     raw_calls = message.get("tool_calls") or []
     gemini_continuation = _gemini_tool_continuation(raw_calls) if gemini and raw_calls else None
@@ -249,10 +252,10 @@ def _openai_reasoning(payload: dict) -> tuple[str | None, str | None]:
         if field in payload and payload[field] is not None
     ]
     if len(values) > 1:
-        raise RuntimeError("provider response contains both reasoning and reasoning_content")
+        raise ModelProviderError("provider_response_invalid")
     if not values:
         return None, None
     field, value = values[0]
     if not isinstance(value, str):
-        raise RuntimeError(f"provider response field {field} must be a string or null")
+        raise ModelProviderError("provider_response_invalid")
     return field, value

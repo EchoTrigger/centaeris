@@ -5016,10 +5016,11 @@ fn execution_environment_was_lost(error: &str) -> bool {
 
 fn provider_response_was_interrupted(error: &str) -> bool {
     error.contains("kind=provider_response_interrupted")
+        && api_model_client::hosted_model_failure(error).is_none()
 }
 
 fn public_agent_failure_reason<'a>(internal_error: &'a str, transition_reason: &'a str) -> &'a str {
-    if api_model_client::hosted_model_failure_reason(internal_error).is_some()
+    if api_model_client::hosted_model_failure(internal_error).is_some()
         || matches!(
             internal_error,
             "completion_tool_delivery_required" | "completion_delivery_repair_prompt_too_large"
@@ -5044,8 +5045,14 @@ fn failed_session_records(
         // messages; it stays in the durable AgentRun control plane.
         return Ok(Vec::new());
     }
-    let model_failure = api_model_client::hosted_model_failure_reason(failure_kind);
-    let failure_kind = model_failure.unwrap_or(failure_kind);
+    let model_failure = api_model_client::hosted_model_failure(failure_kind);
+    let failure_kind = model_failure
+        .as_ref()
+        .map(|failure| failure.reason_type.as_str())
+        .unwrap_or(failure_kind);
+    let failure_message = model_failure
+        .as_ref()
+        .map(|failure| failure.public_message());
     let mut events = Vec::new();
     if assistant_text
         .responses
@@ -5070,12 +5077,16 @@ fn failed_session_records(
     )? {
         events.push(event);
     }
-    events.push(sequence.fail(
-        agent_run_start.agent_run_id.as_str(),
-        failure_kind,
-        model_failure.unwrap_or("AgentRun did not complete. Retry the request."),
-        created_at_ms,
-    )?);
+    events.push(
+        sequence.fail(
+            agent_run_start.agent_run_id.as_str(),
+            failure_kind,
+            failure_message
+                .as_deref()
+                .unwrap_or("AgentRun did not complete. Retry the request."),
+            created_at_ms,
+        )?,
+    );
     Ok(events)
 }
 
@@ -7444,12 +7455,67 @@ mod tests {
         started_session_records(&agent_run_start, &mut sequence, 1).unwrap();
         let failure = failed_session_records(
             &agent_run_start,
-            "model_client_error(kind=invalid_request,retryable=false,providerCode=model_quota_domain_required,providerAttempts=1): hosted_model_error: model_quota_domain_required",
+            r#"model_client_error(kind=invalid_request,retryable=false,providerCode=model_quota_domain_required,providerAttempts=1): hosted_model_error: {"schema":"hosted.model.failure.v1","reasonType":"model_quota_domain_required","httpStatus":null,"providerAttempts":1,"retryExhausted":false}"#,
             &AssistantTextProjection::default(), &mut sequence, 2,
         ).unwrap();
         let payload = &failure.last().unwrap().event.payload;
         assert_eq!(payload["reasonType"], "model_quota_domain_required");
         assert_eq!(payload["message"], "model_quota_domain_required");
+    }
+
+    #[test]
+    fn hosted_model_terminal_detail_survives_into_failure_history() {
+        let start = agent_run_start();
+        let mut state = agent_run_session_state(&start);
+        started_session_records(&start, &mut state, 1).unwrap();
+        let detail = r#"hosted_model_error: {"schema":"hosted.model.failure.v1","reasonType":"provider_rate_limited","httpStatus":429,"providerAttempts":3,"retryExhausted":true}"#;
+        let events = failed_session_records(
+            &start,
+            public_agent_failure_reason(detail, "core_run_failed"),
+            &AssistantTextProjection::default(),
+            &mut state,
+            2,
+        )
+        .unwrap();
+        let payload = &events.last().unwrap().event.payload;
+        assert_eq!(payload["reasonType"], "provider_rate_limited");
+        assert_eq!(payload["message"], "exceeded retry limit after 3 attempts, last status: 429 Too Many Requests · provider_rate_limited");
+        assert!(!provider_response_was_interrupted(&format!(
+            "model_client_error(kind=provider_response_interrupted,retryable=false): {detail}"
+        )));
+    }
+
+    #[test]
+    fn exhausted_stream_failure_stays_terminal_after_core_error_conversion() {
+        let start = agent_run_start();
+        let mut state = agent_run_session_state(&start);
+        started_session_records(&start, &mut state, 1).unwrap();
+        let error = centaeris_core::model::ModelClientError::new(
+            centaeris_core::model::ModelClientErrorKind::ProviderResponseInterrupted,
+            r#"hosted_model_error: {"schema":"hosted.model.failure.v1","reasonType":"provider_stream_interrupted","httpStatus":null,"providerAttempts":2,"retryExhausted":true}"#,
+            false,
+        ).with_provider_attempts(2);
+        let error: String =
+            centaeris_core::runtime::GenerateDriverError::from_model_client(error, String::new())
+                .into();
+        assert!(!provider_response_was_interrupted(&error));
+        let records = failed_session_records(
+            &start,
+            public_agent_failure_reason(&error, "core_run_failed"),
+            &AssistantTextProjection::default(),
+            &mut state,
+            2,
+        )
+        .unwrap();
+        let failed = &records.last().unwrap().event;
+        assert_eq!(failed.payload["reasonType"], "provider_stream_interrupted");
+        assert_eq!(
+            failed.payload["message"],
+            "exceeded retry limit after 2 attempts · provider_stream_interrupted"
+        );
+        assert!(records
+            .iter()
+            .all(|record| record.event.payload.get("retryable") != Some(&serde_json::json!(true))));
     }
 
     #[test]

@@ -2,9 +2,14 @@ import asyncio
 import json
 import logging
 import re
+import httpx
 from .images import project_images
 
 from asgiref.sync import sync_to_async
+from anthropic import (
+    APIConnectionError as AnthropicAPIConnectionError,
+    APITimeoutError as AnthropicAPITimeoutError,
+)
 from openai import (
     APIConnectionError,
     APIStatusError,
@@ -53,6 +58,14 @@ def model_payload(value) -> dict:
 
 
 def provider_error(error: Exception) -> ModelProviderError | None:
+    if isinstance(error, ModelProviderError):
+        return None
+    if isinstance(error, httpx.TimeoutException):
+        return ModelProviderError("provider_timeout")
+    if isinstance(error, httpx.NetworkError):
+        return ModelProviderError("provider_unreachable")
+    if isinstance(error, httpx.RemoteProtocolError):
+        return ModelProviderError("provider_stream_interrupted")
     response = getattr(error, "response", None)
     headers = getattr(response, "headers", None)
     retry_after = headers.get("retry-after") if headers is not None else None
@@ -60,11 +73,15 @@ def provider_error(error: Exception) -> ModelProviderError | None:
         return ModelProviderError("provider_authentication_failed", getattr(error, "status_code", 401))
     if isinstance(error, RateLimitError):
         return ModelProviderError("provider_rate_limited", getattr(error, "status_code", 429), retry_after)
-    if isinstance(error, APITimeoutError):
+    if isinstance(error, (APITimeoutError, AnthropicAPITimeoutError)):
         return ModelProviderError("provider_timeout")
-    if isinstance(error, APIConnectionError):
+    if isinstance(error, (APIConnectionError, AnthropicAPIConnectionError)):
         return ModelProviderError("provider_unreachable")
     status_code = getattr(error, "status_code", None)
+    if status_code in {401, 403}:
+        return ModelProviderError("provider_authentication_failed", status_code)
+    if status_code == 429:
+        return ModelProviderError("provider_rate_limited", status_code, retry_after)
     if status_code == 408:
         return ModelProviderError("provider_timeout", status_code, retry_after)
     if isinstance(error, APIStatusError):
@@ -73,10 +90,6 @@ def provider_error(error: Exception) -> ModelProviderError | None:
             error.status_code,
             retry_after,
         )
-    if status_code in {401, 403}:
-        return ModelProviderError("provider_authentication_failed", status_code)
-    if status_code == 429:
-        return ModelProviderError("provider_rate_limited", status_code, retry_after)
     if isinstance(status_code, int):
         return ModelProviderError(
             "provider_unavailable" if status_code >= 500 else "provider_request_rejected",
