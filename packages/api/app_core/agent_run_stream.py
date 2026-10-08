@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable
 
 import redis
 import redis.asyncio as async_redis
-from asgiref.sync import sync_to_async
+from .http.stream_response import stream_database_call
 from django.conf import settings
 
 from .models import AgentRun, SessionEvent
@@ -238,7 +238,7 @@ def _decode_signal(agent_run: AgentRun, fields: dict) -> dict:
     return signal
 
 
-@sync_to_async(thread_sensitive=True)
+@stream_database_call
 def _load_postgres_page(
     agent_run: AgentRun, after_sequence: int
 ) -> tuple[list[dict], int]:
@@ -258,7 +258,7 @@ def _load_postgres_page(
     return records, high_water
 
 
-@sync_to_async(thread_sensitive=True)
+@stream_database_call
 def _load_terminal_sequence(agent_run_id: str) -> int | None:
     sequence = (
         SessionEvent.objects.filter(
@@ -292,7 +292,7 @@ def live_overlay_is_superseded(live_state: dict, barriers: dict[str, int]) -> bo
     return live_state["afterSequence"] < barriers.get(live_state["turnId"], 0)
 
 
-@sync_to_async(thread_sensitive=True)
+@stream_database_call
 def _load_committed_overlay_projection(
     agent_run: AgentRun, turn_id: str, message_id: str
 ) -> tuple[int, bool]:

@@ -1,4 +1,3 @@
-from asgiref.sync import sync_to_async
 from django.http import JsonResponse
 from ninja import Router
 
@@ -14,7 +13,7 @@ from app_core.workspace_access import (
     workspace_membership_for,
 )
 from .security import usage_auth
-from .stream_response import OwnedAsyncStreamingHttpResponse
+from .stream_response import OwnedAsyncStreamingHttpResponse, stream_database_call
 
 
 router = Router(tags=["streaming"], by_alias=True)
@@ -42,7 +41,7 @@ async def agent_run_events(request, session_id: str, agent_run_id: str):
     business_branch_id = request.business_branch_id if delegation is not None else None
 
     async def authority_check():
-        return await sync_to_async(session_authority_is_current, thread_sensitive=True)(
+        return await stream_database_call(session_authority_is_current)(
             user_id, session_id, delegation_id=delegation_id, scope="events:read",
             credential_version=credential_version,
             business_branch_id=business_branch_id,
@@ -57,7 +56,7 @@ async def agent_run_events(request, session_id: str, agent_run_id: str):
     return response
 
 
-@sync_to_async(thread_sensitive=True)
+@stream_database_call
 def _prepare_agent_run_stream(
     *,
     user_id: int,

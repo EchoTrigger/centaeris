@@ -1,10 +1,27 @@
 import asyncio
 import logging
+from functools import wraps
 
+from asgiref.sync import sync_to_async
+from django.db import connection
 from django.http import StreamingHttpResponse
 
 
 logger = logging.getLogger(__name__)
+
+
+def stream_database_call(operation):
+    """Return a stream's database lease before its next network wait."""
+    @wraps(operation)
+    def call(*args, **kwargs):
+        try:
+            return operation(*args, **kwargs)
+        finally:
+            # Django normally closes at request end, which can be far away for
+            # SSE. Close on the ORM thread to return this request's pool lease.
+            connection.close()
+
+    return sync_to_async(call, thread_sensitive=True)
 
 
 class OwnedAsyncStreamingHttpResponse(StreamingHttpResponse):
