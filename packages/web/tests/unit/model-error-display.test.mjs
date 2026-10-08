@@ -29,6 +29,35 @@ function render(kind, sourceType, reason = "model_quota_domain_required") {
 test("quota configuration failure is translated in trusted failed run notices", () => {
   assert.ok(render("notice", "agent_run_failed").includes("modelErrors.quotaRequired"));
 });
+
+test("failed and interrupted runs render a plain error strip with the original code", () => {
+  for (const source of ["agent_run_failed", "agent_run_interrupted"]) {
+    const html = render("notice", source, "provider_rate_limited");
+    assert.match(html, /workspaceRunError/);
+    assert.match(html, /role="status"/);
+    assert.match(html, /aria-hidden="true"/);
+    assert.match(html, /modelErrors.rateLimited · provider_rate_limited/);
+    assert.doesNotMatch(html, /workspaceStageSummary|workspaceTerminalAnswer|<details|<button/);
+  }
+});
+
+test("unclassified failures retain their code instead of the generic retry instruction", () => {
+  for (const reason of ["model_adapter_failed", "provider_response_invalid", "prepared_prompt_new_validation_failure"]) {
+    const html = render("notice", "agent_run_failed", reason);
+    assert.match(html, /modelErrors.failureLabel/);
+    assert.ok(html.includes(reason));
+    assert.ok(!html.includes("modelErrors.failed"));
+  }
+  const raw = render("notice", "agent_run_failed", "exceeded retry limit, last status: 429 Too Many Requests");
+  assert.ok(raw.includes("exceeded retry limit, last status: 429 Too Many Requests"));
+});
+
+test("ordinary content never acquires system error strip semantics", () => {
+  for (const kind of ["userText", "assistantText"]) {
+    assert.doesNotMatch(render(kind, "agent_run_failed", "provider_rate_limited"), /workspaceRunError/);
+  }
+  assert.doesNotMatch(render("notice", null), /workspaceRunError/);
+});
 test("failed delivery explains whether the Agent omitted its reply or exhausted context", () => {
   const t = key => key;
   for (const [reason, key] of [

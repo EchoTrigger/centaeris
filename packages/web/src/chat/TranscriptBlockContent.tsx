@@ -12,6 +12,7 @@ import {
   Bot,
   Brain,
   ChevronDown,
+  CircleAlert,
   FileOutput,
   Globe,
   ListChecks,
@@ -21,7 +22,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useTranslation } from "../i18n";
-import { localizedModelError } from "../modelErrors";
+import { modelFailureDetail } from "../modelErrors";
 import { MarkdownContent } from "./MarkdownContent";
 import { reasoningPreview } from "./reasoningPreview";
 import { useStickToBottom } from "./useStickToBottom";
@@ -413,8 +414,17 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
   const { text, reference } = textSource(body);
   const failedRun = block.presentation?.sourceType === "agent_run_failed"
     || block.presentation?.sourceType === "agent_run_interrupted";
-  const displayText = kind === "notice" && body.noticeType === "run_boundary" && failedRun && text !== null
-    ? localizedModelError(text, t) ?? text : text;
+  if (kind === "notice" && body.noticeType === "run_boundary" && failedRun) {
+    return (
+      <div className="workspaceTranscriptBlock workspaceRunError" data-block-id={block.blockId} role="status">
+        <span className="workspaceRunErrorIcon" aria-hidden="true"><CircleAlert /></span>
+        <div className="workspaceRunErrorText">
+          {text !== null ? modelFailureDetail(text, t)
+            : reference ? <ReferencedContent store={store} reference={reference} mode="plain" /> : null}
+        </div>
+      </div>
+    );
+  }
   if (kind === "userText") {
     return (
       <div className="workspaceTranscriptBlock workspaceTranscriptUser" data-block-id={block.blockId}>
@@ -456,10 +466,10 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
   }
   return (
     <div className="workspaceTranscriptBlock workspaceStageSummary" data-block-id={block.blockId}>
-      {displayText === null
+      {text === null
         ? (reference ? <ReferencedContent store={store} reference={reference} mode="markdown" /> : null)
-        : <MarkdownContent text={displayText} />}
-      {kind === "notice" && body.noticeType !== "run_boundary" ? <TranscriptMessageMeta key={`${viewEpoch}:${block.blockRevision}`} text={displayText} reference={reference}
+        : <MarkdownContent text={text} />}
+      {kind === "notice" && body.noticeType !== "run_boundary" ? <TranscriptMessageMeta key={`${viewEpoch}:${block.blockRevision}`} text={text} reference={reference}
         sessionId={identity.sessionId} projectionGeneration={identity.projectionGeneration} observedAtMs={block.presentation?.observedAtMs} /> : null}
     </div>
   );

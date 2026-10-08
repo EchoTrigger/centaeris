@@ -960,6 +960,7 @@
   "modelErrors.unreachable": "无法连接模型，请检查连接后重试。",
   "modelErrors.interrupted": "模型响应中断，请重试。",
   "modelErrors.failed": "请求未能完成，请重试。",
+  "modelErrors.failureLabel": "模型请求失败",
   "transcriptTool.resultsUnconfirmed": "执行已结束，{{count}} 个工具结果未确认",
   "modelErrors.replyNotDelivered": "Agent 未能提交回复，请重试。",
   "modelErrors.replyContextLimit": "上下文已达到限制，Agent 未能提交回复。请缩小任务后重试。",

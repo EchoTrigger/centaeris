@@ -27,6 +27,15 @@ export function localizedModelError(reason: string, t: Translate): string | null
   return key ? t(key) : /^(?:model|provider|prepared_prompt)_[a-z0-9_]+$/.test(reason) ? t("modelErrors.failed") : null;
 }
 
+export function modelFailureDetail(reason: string, t: Translate): string {
+  if (/^(?:model|provider|prepared_prompt|completion)_[a-z0-9_]+$/.test(reason)) {
+    const key = Object.hasOwn(MODEL_ERROR_KEYS, reason) ? MODEL_ERROR_KEYS[reason] : null;
+    const label = key && key !== "modelErrors.failed" ? t(key) : t("modelErrors.failureLabel");
+    return `${label} · ${reason}`;
+  }
+  return localizedModelError(reason, t) ?? reason;
+}
+
 export function modelErrorText(error: unknown, t: Translate): string {
   const payload = typeof error === "object" && error !== null && "payload" in error ? error.payload : null;
   const reason = typeof payload === "object" && payload !== null && "reasonType" in payload

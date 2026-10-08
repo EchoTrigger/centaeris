@@ -427,6 +427,11 @@ button.attachmentCardContent:hover { border-color: var(--outline-variant); backg
 .workspaceAnswer { position: relative; display: grid; min-width: 0; gap: 12px; }
 .workspaceProcessSection { display: grid; min-width: 0; gap: 7px; }
 .workspaceStageSummary, .workspaceStageSummary .markdownContent { color: var(--process-text); font-size: var(--font-size-stage); }
+.workspaceRunError { display: flex; align-items: flex-start; gap: 16px; padding: 20px 24px; border: 1px solid var(--border); border-radius: 26px; background: var(--surface); color: var(--text); font-size: var(--font-size-stage); line-height: 1.5; }
+.workspaceRunErrorIcon { display: flex; align-items: center; justify-content: center; flex: 0 0 20px; height: 1.5em; }
+.workspaceRunErrorIcon svg { display: block; width: 20px; height: 20px; }
+.workspaceRunErrorText { min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+@media (max-width: 480px) { .workspaceRunError { padding: 18px; gap: 12px; border-radius: 22px; } }
 .workspaceAnswerText { font-size: 14px; line-height: 1.68; white-space: pre-wrap; }
 .workspaceAnswerText.isStreaming { overflow-wrap: anywhere; }
 .markdownContent { min-width: 0; color: var(--text); font-size: var(--font-size-chat); line-height: var(--line-height-chat); overflow-wrap: anywhere; }
