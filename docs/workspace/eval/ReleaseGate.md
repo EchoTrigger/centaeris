@@ -708,6 +708,17 @@ Failures within that supported boundary remain release blockers. This acceptance
 does not certify automatic worker wake, retries or full child model execution.
 
 Current runtime Job wait handoffs have the following acceptance.
+Core and host regressions must allow one completed native child's verified
+projection while its sibling remains queued, preserving the original sealed
+handoff. Cover result arrival before restoration and during compare-and-save,
+cold reconstruction from durable Jobs, rejection of foreign references and
+concurrent non-projection state advancement, and exactly-once consumption after
+both waited Jobs complete. SQLite and PostgreSQL must reject stale snapshot
+writes and preserve both results after a losing writer reloads and merges.
+Terminal teardown must settle only the exact parent AgentRun's remaining children
+across turns, preserve completed children and newer Runs, and be idempotent.
+Worker teardown retries must preserve the original terminal outcome and avoid a
+second model execution.
 The normal PostgreSQL outbox gate runs `postgres_wait_handoff`: inject failure
 before the Session reference commit, lose the successful response, expire or
 reclaim the original lease, and replay recovery. Require atomic publication,

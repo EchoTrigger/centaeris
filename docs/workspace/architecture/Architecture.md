@@ -618,14 +618,32 @@ issuing another model request. Attachment, recovery checkpoint and Session
 reference commit together under the original lifecycle lease and Session lock.
 The transaction checks the source position, current Core wait state and accepted
 call/result and source Job bindings. A replay returns the same committed boundary.
+Core permits its derived terminal-child result projection to evolve after sealing,
+after checking the referenced durable Jobs' ownership, kind, terminal status and
+result references. All other Session state and the wait checkpoint remain exact
+replay invariants. Hosts do not interpret Core's private metadata.
 
 After owned execution loss, the existing recovery reservation and checkpoint-used
 guards still apply. Restoration loads the bound immutable Core snapshot, including
 its opaque pending batch, and Core's existing wait resolver consumes the completed
-source evidence. It does not reconstruct that batch from tool receipts or load a
-later mutable snapshot. A missing or altered attachment fails closed. Old recovery
+source evidence. Core reconstructs the derived child-result projection from durable
+Jobs and retains verified cached summaries. Recovery and projection writers use
+atomic compare-and-save; a concurrent projection write is merged, while unrelated
+state advancement during recovery retry is rejected. Ordinary turn snapshot writes
+still use their existing store operation; the projection remains a rebuildable
+cache, and wait completion reads durable Jobs and scoped result objects.
+Restoration does not reconstruct the pending batch from tool receipts or substitute
+a later mutable snapshot for it. A missing or altered attachment fails closed. Old recovery
 checkpoints retain their existing behavior; migration cannot infer a missing wait
 boundary for an already lost execution.
+
+An active Execution does not select a recovery checkpoint. Checkpoint collection
+occurs at runtime safe points, not on a timer; concurrent workspace activity defers
+collection. Terminal hosted teardown cancels remaining native children bound to
+that exact parent AgentRun across its turns before removing its context and
+sandbox. Cleanup failure leaves the parent terminal fact intact and returns a
+retryable dependency failure so the worker retries teardown without rerunning the
+model. Already-completed historical teardown Jobs need separate reconciliation.
 
 ## Safe replacement of a lost execution
 
