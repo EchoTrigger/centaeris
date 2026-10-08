@@ -84,7 +84,9 @@ for key, value in config["volumes"].items():
     assert value["name"] == f"centaeris-workspace_{key}"
 '
 
-"${compose[@]}" build --pull document-processor workspace-general runtime api worker web
+for service in document-processor workspace-general runtime api worker web; do
+  "${compose[@]}" build --pull "$service"
+done
 "${compose[@]}" config --format json | python3 scripts/workspace/verify-deployment-images.py
 "${compose[@]}" up -d --wait --wait-timeout 420 postgres redis api runtime worker material-worker web
 
