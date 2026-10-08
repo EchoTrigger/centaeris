@@ -35,6 +35,7 @@ from .openai_completions import (
 )
 from .openai_responses import call_open_ai_responses, stream_open_ai_responses
 from .quota import async_model_attempt, model_attempt
+from .diagnostics import report_model_failure
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,7 @@ def run_model(agent_run_id: str, model_config_ref: str, request_body: dict, canc
             "usage": usage,
         }
     except Exception as error:
+        report_model_failure(agent_run_id, model_config_ref, "generate", error)
         ModelRunLog.objects.create(
             agentRunId=agent_run_id,
             modelConfig=model,
@@ -154,6 +156,7 @@ async def stream_model_async(agent_run_id: str, model_config_ref: str, request_b
     except Exception as error:
         if terminal_delivered:
             raise
+        report_model_failure(agent_run_id, model_config_ref, "stream", error)
         try:
             await record_model_run(
                 agent_run_id=agent_run_id,

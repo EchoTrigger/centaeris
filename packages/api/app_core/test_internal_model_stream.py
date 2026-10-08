@@ -15,6 +15,45 @@ from . import model_adapter
 
 
 class InternalModelStreamTests(SimpleTestCase):
+    def test_transport_failures_keep_recoverable_categories(self):
+        for error, reason in (
+            (httpx.ReadTimeout("private endpoint"), "provider_timeout"),
+            (httpx.ReadError("private endpoint"), "provider_unreachable"),
+            (httpx.RemoteProtocolError("private response"), "provider_stream_interrupted"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                mapped = provider_error(error)
+                self.assertIsInstance(mapped, ModelProviderError)
+                self.assertEqual(mapped.reasonType, reason)
+        self.assertIsNone(provider_error(httpx.LocalProtocolError("invalid client request")))
+        self.assertIsNone(provider_error(KeyError("programming defect")))
+
+    async def test_unknown_failure_records_safe_diagnostics_without_replacing_its_cause(self):
+        @asynccontextmanager
+        async def attempt(model):
+            yield
+
+        async def provider_stream(*args):
+            yield encode_model_stream_event("reasoning", {"text": "preparing final answer"})
+            raise ValueError("private-provider-body-and-credential")
+
+        with (
+            patch.object(model_adapter.ModelConfig.objects, "get", return_value=Mock(provider_id="provider")),
+            patch.object(model_adapter, "async_model_attempt", attempt),
+            patch.object(model_adapter, "resolve_model_route", return_value=("openai-completions", "https://provider.example")),
+            patch.object(model_adapter, "stream_open_ai_completions", provider_stream),
+            patch.object(model_adapter, "record_model_run", new=AsyncMock()),
+            self.assertLogs("app_core.model_adapter", level="ERROR") as logs,
+        ):
+            chunks = [part async for part in internal_model._model_stream_response(model_adapter.stream_model_async("run-1", "model-1", {}))]
+        diagnostic = json.loads(logs.records[0].getMessage())
+        self.assertEqual(diagnostic["agentRunId"], "run-1")
+        self.assertEqual(diagnostic["reasonType"], "model_adapter_failed")
+        self.assertEqual(diagnostic["exceptions"][0]["type"], "ValueError")
+        self.assertTrue(diagnostic["exceptions"][0]["frames"])
+        self.assertNotIn("private-provider-body-and-credential", "".join(logs.output))
+        self.assertIn(b'"reasonType":"model_adapter_failed"', chunks[-1])
+
     async def test_provider_http_408_keeps_timeout_reason_and_status(self):
         response = httpx.Response(408, request=httpx.Request("POST", "https://provider.example/v1/chat/completions"))
         sdk_error = APIStatusError("secret provider response", response=response, body={"error": "secret provider response"})
