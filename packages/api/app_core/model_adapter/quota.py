@@ -84,6 +84,28 @@ def _unlock(conn, key: int, slot: int) -> None:
         cursor.execute("SELECT pg_advisory_unlock(%s, %s)", (-key, slot))
 
 
+def _slot_may_be_available(key: int, limit: int) -> bool:
+    if limit <= 0:
+        return False
+    # This snapshot only avoids opening a dedicated connection when all slots
+    # appear occupied. A fresh advisory-lock attempt still owns admission.
+    with connection.cursor() as cursor:
+        cursor.execute("""
+            SELECT COUNT(DISTINCT objid) < %s
+            FROM pg_locks
+            WHERE locktype = 'advisory'
+              AND database = (
+                  SELECT oid FROM pg_database WHERE datname = current_database()
+              )
+              AND classid::bigint = %s
+              AND objsubid = 2
+              AND granted
+              AND mode = 'ExclusiveLock'
+              AND objid::bigint BETWEEN 1 AND %s
+        """, (limit, (-key) & 0xffffffff, limit))
+        return cursor.fetchone()[0]
+
+
 async def _in_thread(operation, *args, **kwargs):
     # Finish the database operation before cancellation closes its connection.
     task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
@@ -156,14 +178,21 @@ def model_attempt(model: ModelConfig, cancel_event=None):
     key = _quota_domain_key(model)
     if cancel_event is not None and cancel_event.is_set():
         raise ModelProviderError("model_run_cancelled")
-    conn = psycopg.connect(**_connection_params(), autocommit=True)
+    params = _connection_params()
+    conn = None
     try:
         slot = 0
         while True:
             if cancel_event is not None and cancel_event.is_set():
                 raise ModelProviderError("model_run_cancelled")
             limit, cooldown_until = _domain_state(key)
-            if _database_now_ms() / 1000 >= cooldown_until:
+            if (
+                _database_now_ms() / 1000 >= cooldown_until
+                and _slot_may_be_available(key, limit)
+            ):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise ModelProviderError("model_run_cancelled")
+                conn = psycopg.connect(**params, autocommit=True)
                 slot = _try_lock(conn, key, limit)
             if slot:
                 _, cooldown_until = _domain_state(key)
@@ -171,8 +200,10 @@ def model_attempt(model: ModelConfig, cancel_event=None):
                     cancel_event is None or not cancel_event.is_set()
                 ):
                     break
-                _unlock(conn, key, slot)
                 slot = 0
+            if conn is not None:
+                conn.close()
+                conn = None
             time.sleep(POLL_SECONDS)
         try:
             yield
@@ -180,28 +211,35 @@ def model_attempt(model: ModelConfig, cancel_event=None):
             _observe_error(key, error)
             raise
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 @asynccontextmanager
 async def async_model_attempt(model: ModelConfig):
     key = await sync_to_async(_quota_domain_key, thread_sensitive=True)(model)
     params = await sync_to_async(_connection_params, thread_sensitive=True)()
-    conn = await _open_connection(params)
+    conn = None
     try:
         slot = 0
         while True:
             limit, cooldown_until = await sync_to_async(_domain_state, thread_sensitive=True)(key)
             current_ms = await sync_to_async(_database_now_ms, thread_sensitive=True)()
-            if current_ms / 1000 >= cooldown_until:
+            if (
+                current_ms / 1000 >= cooldown_until
+                and await sync_to_async(_slot_may_be_available, thread_sensitive=True)(key, limit)
+            ):
+                conn = await _open_connection(params)
                 slot = await _in_thread(_try_lock, conn, key, limit)
             if slot:
                 _, cooldown_until = await sync_to_async(_domain_state, thread_sensitive=True)(key)
                 current_ms = await sync_to_async(_database_now_ms, thread_sensitive=True)()
                 if current_ms / 1000 >= cooldown_until:
                     break
-                await _in_thread(_unlock, conn, key, slot)
                 slot = 0
+            if conn is not None:
+                await _in_thread(conn.close)
+                conn = None
             await asyncio.sleep(POLL_SECONDS)
         try:
             yield
@@ -209,4 +247,5 @@ async def async_model_attempt(model: ModelConfig):
             await sync_to_async(_observe_error, thread_sensitive=True)(key, error)
             raise
     finally:
-        await _in_thread(conn.close)
+        if conn is not None:
+            await _in_thread(conn.close)
