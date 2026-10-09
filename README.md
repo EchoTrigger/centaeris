@@ -98,8 +98,7 @@ code, patches, documentation drafts, and other works for incorporation into
 the project are temporarily not accepted. Pull requests are limited to
 collaborators for maintainer development.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the temporary policy and plans for
-future contributions and commercial licensing.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution policy and license.
 
 ## License
 

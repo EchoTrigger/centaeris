@@ -45,7 +45,7 @@ docker compose build && docker compose up -d
 
 欢迎通过 Issue 提交错误报告、自然语言复现步骤、脱敏日志、功能请求和高层设计建议。目前暂不接收用于合入项目的外部代码、补丁、文档草稿或其他作品。Pull Request 仅供协作者进行维护者开发。
 
-临时贡献政策，以及未来贡献和商业许可计划，见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+贡献政策及许可证说明见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 许可证
 

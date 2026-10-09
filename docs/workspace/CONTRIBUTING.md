@@ -1,46 +1,18 @@
 # Contributing
 
-## Temporary contribution policy
+## Contribution policy
 
-Centaeris Workspace is currently maintained by the GitHub account EchoTrigger.
-Until an operating company is established and a formal contributor license agreement
-(CLA) is published, external code and other works intended for incorporation
-into the project are not accepted.
+Centaeris is maintained by the GitHub account EchoTrigger. External code and
+other works intended for incorporation into the project are currently not
+accepted. Issues are welcome for problem reports, natural-language reproduction
+steps, necessary redacted logs, feature requests, and high-level suggestions.
+Pull requests are limited to collaborators for maintainer development.
 
-Issues are welcome for bug reports, reproduction steps described in natural
-language, necessary redacted logs, feature requests, and high-level design
-suggestions. Remove credentials, personal information, and confidential data
-before posting.
+## License
 
-Please do not submit patches, source code, tests or reproduction programs,
-documentation drafts, artwork, or other works intended for incorporation into
-the project through pull requests, issues, comments, or other channels.
-Maintainers will not substantively review or incorporate such unsolicited
-submissions and may close them. Maintainers will independently investigate,
-design, and implement solutions based on problem descriptions.
-
-Pull request creation is restricted to collaborators for maintainer development.
-Collaborator access does not exempt external works from this policy.
-
-## Future contributions and commercial licensing
-
-Centaeris plans to support ongoing maintenance through commercial products,
-services, and licensing. External works are planned to be accepted after an
-operating company is established and a formal CLA is published.
-
-The intended arrangement is for contributors to retain copyright and grant the
-operating company non-exclusive rights to reproduce, modify, prepare derivative
-works, display, distribute, and sublicense their contributions, together with
-necessary patent rights. Sublicensing may include commercial or proprietary
-licenses. The intended arrangement also includes continued availability of
-accepted contributions in Centaeris Workspace's public AGPL source version. The
-precise scope of these rights and the public-source availability commitment will be
-published before contributions reopen and will require contributors' explicit
-agreement. Current submissions do not constitute acceptance of a future CLA.
-
-This policy governs contribution intake only. It does not change Centaeris
-Workspace's existing `AGPL-3.0-only` license or restrict anyone's rights to use,
-modify, or distribute the software under that license.
+Except where a file or notice says otherwise, the original source code and
+documentation are licensed under `AGPL-3.0-only`. Third-party materials remain
+under their stated licenses. The software license grants no trademark rights.
 
 ## Maintainer development
 

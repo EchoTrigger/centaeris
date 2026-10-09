@@ -12,7 +12,6 @@ Centaeris currently accepts problem reports and high-level suggestions only.
 Do not submit patches, source code, tests or reproduction programs,
 documentation drafts, artwork, or other works for incorporation into the project.
 Remove credentials, personal information, and confidential data from logs.
-Submitting an issue does not mean accepting a future CLA.
 -->
 
 ## Problem or suggestion
