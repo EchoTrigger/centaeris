@@ -9,6 +9,9 @@ from .model_adapter import quota
 
 
 class QuotaAvailabilityTests(TransactionTestCase):
+    # Match the suite snapshot so post_migrate cannot duplicate restored content types.
+    serialized_rollback = True
+
     def test_other_domains_bigint_locks_and_out_of_range_slots_do_not_block(self):
         key = 314160
         with psycopg.connect(**connection.get_connection_params(), autocommit=True) as holder:

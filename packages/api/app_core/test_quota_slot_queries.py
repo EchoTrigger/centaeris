@@ -37,6 +37,9 @@ class CountingConnection:
 
 
 class QuotaSlotQueryTests(TransactionTestCase):
+    # Match the suite snapshot so post_migrate cannot duplicate restored content types.
+    serialized_rollback = True
+
     key = 314159
 
     def open_connections(self, stack):
@@ -96,4 +99,3 @@ class QuotaSlotQueryTests(TransactionTestCase):
                     self.assertEqual(_try_lock(counted, self.key, limit), 0)
                     self.assertEqual(self.held_slots(observer, applicant), [])
                     self.assertEqual(counted.statements, 0)
-
