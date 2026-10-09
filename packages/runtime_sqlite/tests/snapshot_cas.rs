@@ -14,10 +14,22 @@ impl SnapshotDatabase {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        Self(std::env::temp_dir().join(format!(
-            "centaeris-snapshot-cas-{}-{nonce}.sqlite3",
-            std::process::id()
-        )))
+        Self::with_nonce(nonce)
+    }
+
+    fn with_nonce(nonce: u128) -> Self {
+        for attempt in 0.. {
+            let directory = std::env::temp_dir().join(format!(
+                "centaeris-snapshot-cas-{}-{nonce}-{attempt}",
+                std::process::id()
+            ));
+            match std::fs::create_dir(&directory) {
+                Ok(()) => return Self(directory.join("snapshot.sqlite3")),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("create isolated snapshot database directory: {error}"),
+            }
+        }
+        unreachable!("unbounded directory allocation attempts")
     }
 
     fn store(&self) -> SqliteRuntimeStore {
@@ -28,6 +40,7 @@ impl SnapshotDatabase {
 impl Drop for SnapshotDatabase {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
+        let _ = std::fs::remove_dir(self.0.parent().expect("owned database directory"));
     }
 }
 
@@ -228,5 +241,35 @@ fn snapshot_cas_compares_exact_bytes_and_changes_only_the_named_session() {
     assert_eq!(
         store.load_agent_runtime_snapshot("other").unwrap(),
         Some("other-session-snapshot".to_string())
+    );
+}
+
+#[test]
+fn snapshot_databases_with_the_same_clock_value_remain_isolated_after_cleanup() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let first = SnapshotDatabase::with_nonce(nonce);
+    let second = SnapshotDatabase::with_nonce(nonce);
+    first
+        .store()
+        .save_agent_runtime_snapshot("parent", "first", 1)
+        .unwrap();
+    let second_store = second.store();
+    assert!(second_store
+        .load_agent_runtime_snapshot("parent")
+        .unwrap()
+        .is_none());
+    second_store
+        .save_agent_runtime_snapshot("parent", "second", 2)
+        .unwrap();
+    drop(first);
+    assert_eq!(
+        second
+            .store()
+            .load_agent_runtime_snapshot("parent")
+            .unwrap(),
+        Some("second".to_string())
     );
 }
