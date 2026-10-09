@@ -1,29 +1,29 @@
 ---
-name: Problem report or suggestion
-about: Report a problem or share a feature request or high-level design suggestion.
+name: Bug report
+about: Report a reproducible problem in Centaeris.
 title: ''
-labels: ''
+labels: bug
 assignees: ''
 ---
 
-<!--
-Please read CONTRIBUTING.md before posting.
-Centaeris currently accepts problem reports and high-level suggestions only.
-Do not submit patches, source code, tests or reproduction programs,
-documentation drafts, artwork, or other works for incorporation into the project.
-Remove credentials, personal information, and confidential data from logs.
--->
+<!-- Search existing issues first. Read CONTRIBUTING.md. Remove credentials,
+personal information, and confidential data from logs and reproductions. -->
 
-## Problem or suggestion
+## Problem
 
-Describe the problem, intended outcome, or high-level suggestion in your own words.
+Describe the observed behavior and what you expected instead.
 
-## Reproduction steps (for bugs)
+## Reproduction
 
-Describe the steps in natural language. Do not attach source code or a reproduction program.
+Provide steps and, where useful, a minimal example or failing test that you have
+the right to share.
 
-## Expected and actual behavior (for bugs)
+## Environment
 
-## Environment and necessary redacted logs (if applicable)
+Include the Centaeris revision/version, product, operating system, and relevant
+configuration. Attach only necessary redacted logs.
 
-Include the Centaeris version and operating system. Keep logs relevant and remove sensitive data.
+## Proposed fix (optional)
+
+Describe the likely cause or intended approach. If you plan to work on this,
+say so here and check whether someone is already working on it.

@@ -423,11 +423,11 @@ branch before external pull requests are accepted.
 
 The root license, first-party Rust/npm/Python package metadata, README, and
 contribution policy must consistently identify `AGPL-3.0-only`. Third-party and
-brand-asset exceptions remain explicit. The README, contribution guide, and issue
-template must consistently describe the temporary restriction on external works.
-Pull request creation is limited to collaborators. Any future reopening of
-external contributions requires the published contributor agreement and explicit
-contributor acceptance described in the contribution guide.
+brand-asset exceptions remain explicit. The README, contribution guide, and
+issue/PR templates must match the repository-wide contribution workflow and DCO
+provenance certification. External PR creation is open. The public `main`
+requires PRs, `Required gates`, resolved review discussions, and linear history;
+force pushes and deletion are blocked.
 Every distributed image or application must identify the AGPL license and the
 complete corresponding source for its exact released revision. A modified
 network-interactive deployment must offer that corresponding source to users

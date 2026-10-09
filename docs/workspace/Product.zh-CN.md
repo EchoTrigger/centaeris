@@ -43,7 +43,7 @@ docker compose build && docker compose up -d
 
 ## 参与贡献
 
-欢迎通过 Issue 提交错误报告、自然语言复现步骤、脱敏日志、功能请求和高层设计建议。目前暂不接收用于合入项目的外部代码、补丁、文档草稿或其他作品。Pull Request 仅供协作者进行维护者开发。
+欢迎贡献。小范围文档修正可直接提交 PR；Bug 修复请关联有复现步骤的 Issue。新功能、较大 UI 调整和架构变更应先通过 Issue 与维护者确认方向，再开始实现。贡献提交使用 DCO sign-off，PR 通过 CI 和审查后合入。
 
 贡献政策及许可证说明见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
