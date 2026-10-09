@@ -29,25 +29,25 @@ Use the sun/moon button immediately to the right of the left-sidebar toggle to s
 
 ## Repository layout
 
-```text
-packages/
-  core/             Runtime semantics and contracts
-  runtime/          Shared local runtime host
-  runtime_sqlite/   SQLite RuntimeStore adapter
-  mcp/              MCP adapter
-  model-catalog/    Rust model catalog
-  desktop/          Electron host
-  tui/              Terminal host
-  ui/               Shared desktop UI
-  api/              Hosted control plane
-  runtime_server/   Hosted Runtime adapter
-  hosted_execution/ Hosted execution agent and sandbox tools
-  web/              Hosted Web interface
-  worker/           Hosted lifecycle worker
-  document_processor/ Material processing service
-system-skills/       Local-product built-in System Skills
-skills/system/       Hosted-product built-in System Skills
-```
+| Package | Responsibility |
+| --- | --- |
+| [`packages/core`](packages/core/README.md) | Runtime semantics and contracts |
+| [`packages/runtime`](packages/runtime/README.md) | Shared local Runtime host |
+| [`packages/runtime_sqlite`](packages/runtime_sqlite/README.md) | SQLite RuntimeStore adapter |
+| [`packages/mcp`](packages/mcp/README.md) | MCP adapter |
+| [`packages/model-catalog`](packages/model-catalog/README.md) | Rust model catalog |
+| [`packages/desktop`](packages/desktop/README.md) | Electron host |
+| [`packages/tui`](packages/tui/README.md) | Terminal host |
+| [`packages/ui`](packages/ui/README.md) | Shared desktop UI |
+| [`packages/api`](packages/api/README.md) | Hosted control plane |
+| [`packages/runtime_server`](packages/runtime_server/README.md) | Hosted Runtime adapter |
+| [`packages/hosted_execution`](packages/hosted_execution/README.md) | Hosted execution agent and sandbox tools |
+| [`packages/web`](packages/web/README.md) | Hosted Web interface |
+| [`packages/worker`](packages/worker/README.md) | Hosted lifecycle worker |
+| [`packages/document_processor`](packages/document_processor/README.md) | Material processing service |
+
+`system-skills/` holds local-product built-in System Skills; `skills/system/`
+holds hosted-product built-in System Skills. Neither is a workspace package.
 
 See [source and product boundaries](docs/development/SourceUnification.md) and
 [hosted product documentation](docs/workspace/README.md). Root dependency files

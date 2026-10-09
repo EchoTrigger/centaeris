@@ -7,7 +7,7 @@ without redefining Core semantics.
 
 See [Workspace architecture](../../docs/architecture/Architecture.md),
 [Workspace API](../../docs/reference/API.md), and the
-[security model](../../docs/security/Model.md) for the complete boundary.
+[security model](../../docs/workspace/security/Model.md) for the complete boundary.
 
 ## Execution boundary
 

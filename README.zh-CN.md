@@ -24,25 +24,24 @@ Centaeris 是使用 Rust 编写、不依赖特定宿主的智能体运行时框�
 
 ## 仓库结构
 
-```text
-packages/
-  core/             运行时语义与契约
-  runtime/          共用的本地运行时宿主
-  runtime_sqlite/   SQLite RuntimeStore 适配器
-  mcp/              MCP 适配器
-  model-catalog/    Rust 模型目录
-  desktop/          Electron 宿主
-  tui/              终端宿主
-  ui/               共用桌面界面
-  api/              托管控制平面
-  runtime_server/   托管 Runtime 适配器
-  hosted_execution/ 托管执行代理与沙箱工具
-  web/              托管 Web 界面
-  worker/           托管生命周期 Worker
-  document_processor/ 材料处理服务
-system-skills/       本地产品内置 Skill
-skills/system/       托管产品内置 Skill
-```
+| 包 | 职责 |
+| --- | --- |
+| [`packages/core`](packages/core/README.md) | 运行时语义与契约 |
+| [`packages/runtime`](packages/runtime/README.md) | 共用的本地运行时宿主 |
+| [`packages/runtime_sqlite`](packages/runtime_sqlite/README.md) | SQLite RuntimeStore 适配器 |
+| [`packages/mcp`](packages/mcp/README.md) | MCP 适配器 |
+| [`packages/model-catalog`](packages/model-catalog/README.md) | Rust 模型目录 |
+| [`packages/desktop`](packages/desktop/README.md) | Electron 宿主 |
+| [`packages/tui`](packages/tui/README.md) | 终端宿主 |
+| [`packages/ui`](packages/ui/README.md) | 共用桌面界面 |
+| [`packages/api`](packages/api/README.md) | 托管控制平面 |
+| [`packages/runtime_server`](packages/runtime_server/README.md) | 托管 Runtime 适配器 |
+| [`packages/hosted_execution`](packages/hosted_execution/README.md) | 托管执行代理与沙箱工具 |
+| [`packages/web`](packages/web/README.md) | 托管 Web 界面 |
+| [`packages/worker`](packages/worker/README.md) | 托管生命周期 Worker |
+| [`packages/document_processor`](packages/document_processor/README.md) | 材料处理服务 |
+
+`system-skills/` 为本地产品内置 Skill，`skills/system/` 为托管产品内置 Skill，两者均不属于 workspace 包。各包 README 目前仅提供英文版本。
 
 目录及产品边界见[源码统一说明](docs/development/SourceUnification.md)，托管产品文档见[Workspace 文档索引](docs/workspace/README.md)。根目录统一依赖与 Compose 入口，各产品分别构建、验证和发行。
 
