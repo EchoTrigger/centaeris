@@ -50,7 +50,7 @@ class InitialSchemaTests(TestCase):
 
     def test_current_migration_chain_matches_all_current_models(self):
         loader = MigrationLoader(None)
-        self.assertEqual(loader.graph.leaf_nodes("app_core"), [("app_core", "0006_session_event_payload_storage")])
+        self.assertEqual(loader.graph.leaf_nodes("app_core"), [("app_core", "0007_business_definition_instances")])
         self.assertEqual(
             MigrationAutodetector(loader.project_state(), ProjectState.from_apps(apps)).changes(
                 graph=loader.graph, trim_to_apps={"app_core"}),
@@ -60,11 +60,13 @@ class InitialSchemaTests(TestCase):
         numbered = sorted(path.name for path in Path(__file__).with_name("migrations").glob("[0-9]*.py"))
         self.assertEqual(numbered, ["0001_initial.py", "0002_persistent_app_delegations.py",
                                    "0003_persistent_browser_login.py", "0004_business_agent_branches.py",
-                                   "0005_agent_input_attachments.py", "0006_session_event_payload_storage.py"])
+                                   "0005_agent_input_attachments.py", "0006_session_event_payload_storage.py",
+                                   "0007_business_definition_instances.py"])
 
     def test_release_script_checks_the_current_schema_leaf(self):
         release_gate = (REPOSITORY_ROOT / "scripts/workspace/docker-release-gate.sh").read_text(encoding="utf-8")
-        self.assertIn("0006_session_event_payload_storage$", release_gate)
+        leaf, = MigrationLoader(None).graph.leaf_nodes("app_core")
+        self.assertIn(leaf[1] + "$", release_gate)
         self.assertEqual(release_gate.count("showmigrations app_core"), 1)
 
 
