@@ -14,6 +14,25 @@ Except where a file or notice says otherwise, the original source code and
 documentation are licensed under `AGPL-3.0-only`. Third-party materials remain
 under their stated licenses. The software license grants no trademark rights.
 
+## Contribution provenance
+
+Contributors certify the [Developer Certificate of Origin 1.1](../../DCO)
+by adding a `Signed-off-by` trailer to each new contribution commit:
+
+```text
+Signed-off-by: Your Name <your.email@example.com>
+```
+
+Use `git commit --signoff` after reviewing the DCO and confirming that you can
+make its certification. The sign-off records your certification of the
+contribution's origin and your right to submit it under the applicable project
+license. It does not transfer copyright or grant separate relicensing rights;
+the project's original source code and documentation remain `AGPL-3.0-only`.
+
+The DCO also records that contributions and sign-off information are public,
+maintained indefinitely, and may be redistributed under the applicable license.
+Sign-off does not change the contribution intake policy above.
+
 ## Maintainer development
 
 The following guidance is for maintainer development; it does not reopen
