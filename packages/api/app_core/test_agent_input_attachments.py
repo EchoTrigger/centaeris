@@ -172,15 +172,24 @@ class AgentInputAttachmentTests(TransactionTestCase):
         from django.db.migrations.executor import MigrationExecutor
         with patch("app_core.agent_input_delivery.dispatch_agent_inputs"):
             self.assertEqual(self.submit("legacy", "  retained text\n", []).status_code, 201)
-        executor = MigrationExecutor(connection)
-        executor.migrate([("app_core", "0004_business_agent_branches")])
-        executor = MigrationExecutor(connection)
-        executor.migrate([("app_core", "0005_agent_input_attachments")])
-        legacy = models.AgentInput.objects.get(input_id="legacy")
-        self.assertEqual((legacy.body, legacy.sequence, legacy.membership_ref, legacy.attachments),
-            ("  retained text\n", 1, self.membership.pk, []))
-        attached = self.upload()
-        with patch("app_core.agent_input_delivery.dispatch_agent_inputs"):
-            self.assertEqual(self.submit("captured", "", [attached]).status_code, 201)
-        with self.assertRaisesMessage(ValueError, "agent_input_attachment_migration_cannot_discard_captures"):
-            MigrationExecutor(connection).migrate([("app_core", "0004_business_agent_branches")])
+        try:
+            executor = MigrationExecutor(connection)
+            executor.migrate([("app_core", "0004_business_agent_branches")])
+            executor = MigrationExecutor(connection)
+            target = [("app_core", "0005_agent_input_attachments")]
+            executor.migrate(target)
+            historical = executor.loader.project_state(target).apps
+            legacy = historical.get_model("app_core", "AgentInput").objects.get(input_id="legacy")
+            self.assertEqual((legacy.body, legacy.sequence, legacy.membership_ref, legacy.attachments),
+                ("  retained text\n", 1, self.membership.pk, []))
+            # Current HTTP/model code must only run against the current schema.
+            latest = MigrationExecutor(connection)
+            latest.migrate(latest.loader.graph.leaf_nodes("app_core"))
+            attached = self.upload()
+            with patch("app_core.agent_input_delivery.dispatch_agent_inputs"):
+                self.assertEqual(self.submit("captured", "", [attached]).status_code, 201)
+            with self.assertRaisesMessage(ValueError, "agent_input_attachment_migration_cannot_discard_captures"):
+                MigrationExecutor(connection).migrate([("app_core", "0004_business_agent_branches")])
+        finally:
+            latest = MigrationExecutor(connection)
+            latest.migrate(latest.loader.graph.leaf_nodes("app_core"))
