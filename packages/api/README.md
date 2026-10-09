@@ -14,9 +14,9 @@ Repository-level boundaries are documented in:
 
 - [Architecture](../../docs/architecture/Architecture.md)
 - [Workspace API](../../docs/reference/API.md)
-- [Configuration](../../docs/reference/Configuration.md)
-- [Plugin lifecycle](../../docs/operations/Plugins.md)
-- [Data and recovery](../../docs/operations/Data.md)
+- [Configuration](../../docs/workspace/reference/Configuration.md)
+- [Plugin lifecycle](../../docs/workspace/operations/Plugins.md)
+- [Data and recovery](../../docs/workspace/operations/Data.md)
 - [Release gate](../../docs/eval/ReleaseGate.md)
 
 ## Local development
@@ -38,7 +38,7 @@ uv run --frozen --package api python packages/api/manage.py bootstrap_superadmin
 ```
 
 The required configuration and bootstrap constraints are defined once in
-[Configuration](../../docs/reference/Configuration.md). Do not put usable
+[Configuration](../../docs/workspace/reference/Configuration.md). Do not put usable
 secrets in commands, documentation, images, or test results.
 
 Compose runs the one-shot `api-init` job before API replicas. It validates the
