@@ -94,7 +94,7 @@ for service in postgres redis api runtime worker material-worker web; do
   "${compose[@]}" ps --status running --services | grep -Fx "$service" >/dev/null
 done
 
-"${compose[@]}" exec -T api python manage.py showmigrations app_core | grep -Eq '^[[:space:]]*\[X\][[:space:]]+0006_session_event_payload_storage$'
+"${compose[@]}" exec -T api python manage.py showmigrations app_core | grep -Eq '^[[:space:]]*\[X\][[:space:]]+0007_business_definition_instances$'
 "${compose[@]}" exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"
 "${compose[@]}" exec -T web wget -qO- http://127.0.0.1:3000/ >/dev/null
 
