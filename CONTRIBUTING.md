@@ -1,12 +1,48 @@
 # Contributing
 
-## Contribution policy
+## Contribution workflow
 
-Centaeris is maintained by the GitHub account EchoTrigger. External code and
-other works intended for incorporation into the project are currently not
-accepted. Issues are welcome for problem reports, natural-language reproduction
-steps, necessary redacted logs, feature requests, and high-level suggestions.
-Pull requests are limited to collaborators for maintainer development.
+Contributions are welcome. Search existing issues and pull requests before
+starting, and keep each pull request focused on one problem.
+
+| Change | Before implementation |
+| --- | --- |
+| Typo, broken link, or small documentation correction | Open a pull request directly; a separate issue is optional. |
+| Bug fix | Link an existing issue or open one with a reproduction. Add a focused regression test that fails before the fix and passes afterward. |
+| New feature or substantial UI change | Open an issue describing the user need, proposed behavior, and scope. Wait for maintainer agreement. |
+| Runtime semantics, public protocols, persisted schemas, or architecture boundaries | Discuss the contract, compatibility or migration needs, and validation before implementation. |
+| Large refactor, dependency replacement, or performance work | Present the concrete problem or measurements and agree on scope before implementation. |
+
+A maintainer's `accepted` label means the direction and scope are ready for
+implementation. `good first issue` identifies suitable introductory tasks;
+use it together with `accepted`. Comment on the issue before starting to avoid
+duplicating work. Agreement on direction is not a promise to merge a particular
+implementation.
+
+Issue reports may include a minimal reproduction or test. Remove credentials,
+personal information, and confidential data from examples and logs, and submit
+only material you have the right to share.
+
+## Pull requests and review
+
+1. Create a focused branch in your fork and link the relevant issue in the PR.
+2. Describe the problem, resulting behavior, and validation performed. Use a
+   draft PR when the implementation is still in progress.
+3. Follow the test policy below and sign off each contribution commit under
+   the DCO. Documentation-only corrections need appropriate document checks,
+   not unrelated runtime test suites.
+4. Address review feedback and resolve discussions. Maintainers review the
+   behavior, scope, tests, and contribution provenance before merging.
+5. Rebase onto the current `main` when needed; do not merge `main` into the
+   contribution branch. Coordinate any rewrite of shared work with its authors.
+
+Merges require the `Required gates` CI check and resolved review discussions.
+Maintainers use squash or rebase to keep `main` linear. They preserve contributor
+attribution and applicable `Signed-off-by` trailers when squashing, and ask the
+contributor to correct a missing certification rather than signing for them.
+Sign-off is checked during review; no separate automated DCO gate is required.
+Maintainer-authored changes also go through pull requests and CI. While there is
+one maintainer, an additional approving review is not a required merge condition.
 
 ## License
 
@@ -31,12 +67,8 @@ the project's original source code and documentation remain `AGPL-3.0-only`.
 
 The DCO also records that contributions and sign-off information are public,
 maintained indefinitely, and may be redistributed under the applicable license.
-Sign-off does not change the contribution intake policy above.
 
-## Maintainer development
-
-The following guidance is for maintainer development; it does not reopen
-external contribution intake.
+## Development and validation
 
 Discuss changes to a public protocol, persisted schema, extension contract, or
 architecture boundary before implementation.
