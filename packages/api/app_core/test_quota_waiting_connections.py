@@ -18,6 +18,9 @@ from .models import ModelQuotaDomain
 
 
 class QuotaWaitingConnectionTests(TransactionTestCase):
+    # Match the suite snapshot so post_migrate cannot duplicate restored content types.
+    serialized_rollback = True
+
     setUp = existing_tests.ModelQuotaAdmissionTests.setUp
 
     def _count(self):

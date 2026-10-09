@@ -13,6 +13,9 @@ from .http.stream_response import stream_database_call
 
 
 class StreamDatabaseLeaseTests(TransactionTestCase):
+    # Match the suite snapshot so post_migrate cannot duplicate restored content types.
+    serialized_rollback = True
+
     def setUp(self):
         connections.close_all()
         previous = DatabaseWrapper._connection_pools.pop("default", None)
