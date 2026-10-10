@@ -57,10 +57,6 @@ class DependencyUnavailable(RuntimeError):
         self.http_status = http_status
 
 
-class UploadCapacityRefused(DependencyUnavailable):
-    """The API rejected ingress before the requested business operation began."""
-
-
 class RuntimeStepFailed(RuntimeError):
     def __init__(self, reason, retryable, agent_run_id, http_status=None):
         super().__init__(reason)
@@ -111,22 +107,14 @@ def runtime_teardown_request(body):
 
 
 def api_request(path, body, default_reason, *, timeout=10):
-    try:
-        return json_request(
-            f"{API_INTERNAL_URL}{path}",
-            body,
-            "X-Internal-Token",
-            INTERNAL_API_TOKEN,
-            default_reason,
-            timeout=timeout,
-        )
-    except RuntimeError as error:
-        origin = urllib.parse.urlsplit(API_INTERNAL_URL)
-        if (getattr(error, "http_status", None) == 429
-                and getattr(error, "http_error_code", None) == "upload_capacity_exhausted"
-                and getattr(error, "http_origin", None) == (origin.scheme.lower(), origin.netloc.lower())):
-            raise UploadCapacityRefused("upload_capacity_exhausted", http_status=429) from error
-        raise
+    return json_request(
+        f"{API_INTERNAL_URL}{path}",
+        body,
+        "X-Internal-Token",
+        INTERNAL_API_TOKEN,
+        default_reason,
+        timeout=timeout,
+    )
 
 
 def json_request(url, body, token_header, token, default_reason, timeout=10):
@@ -186,10 +174,6 @@ def _json_request(url, body, token_header, token, default_reason, timeout=10):
             raise DependencyUnavailable(reason, http_status=status) from error
         failure = RuntimeError(reason)
         failure.http_status = status
-        failure.http_error_code = (payload["error"] if isinstance(payload, dict)
-            and set(payload) == {"error"} and isinstance(payload["error"], str) else None)
-        origin = urllib.parse.urlsplit(error.geturl())
-        failure.http_origin = (origin.scheme.lower(), origin.netloc.lower())
         raise failure from error
     except (
         urllib.error.URLError,
@@ -644,9 +628,6 @@ def _execute_claimed_job(job, lease_owner):
             f"worker job stopped: jobId={job['jobId']}; transitionReason={error}",
             flush=True,
         )
-    except UploadCapacityRefused:
-        yield_job(job["jobId"], lease_owner,
-            now_ms() + AGENT_RUN_LIFECYCLE_RECHECK_MS, "upload_capacity_wait")
     except DependencyUnavailable:
         fail_claimed_job(job, lease_owner, "dependency_unavailable", True)
     except RuntimeStepFailed as error:

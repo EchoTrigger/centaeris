@@ -12,6 +12,7 @@ import tempfile
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.conf import settings
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -28,10 +29,11 @@ def ingress(application):
     return StorageIngressApplication(application)
 
 
-async def request(application, body=b"x", *, content_type=b"multipart/form-data", chunks=None, length=True):
+async def request(application, body=b"x", *, content_type=b"multipart/form-data", chunks=None,
+                  length=True, path="/api/library", extra_headers=()):
     sent = []
     messages = iter(chunks or [{"type": "http.request", "body": body, "more_body": False}])
-    headers = [(b"content-type", content_type)]
+    headers = [(b"content-type", content_type), *extra_headers]
     if length:
         headers.append((b"content-length", str(len(body)).encode()))
 
@@ -41,7 +43,7 @@ async def request(application, body=b"x", *, content_type=b"multipart/form-data"
     async def send(message):
         sent.append(message)
 
-    await application({"type": "http", "path": "/api/library", "headers": headers}, receive, send)
+    await application({"type": "http", "path": path, "headers": headers}, receive, send)
     return sent
 
 
@@ -86,6 +88,49 @@ class UploadTemporaryBoundaryTests(TransactionTestCase):
             UPLOAD_BODY_MAX_BYTES=8, UPLOAD_TEMP_MAX_BYTES=128, UPLOAD_MAX_CONCURRENT=1)
         isolated.enable()
         self.addCleanup(isolated.disable)
+
+    def test_full_upload_capacity_preserves_control_json_without_upload_database_or_filesystem_calls(self):
+        from . import upload_ingress
+        from .models import UploadCapacity, UploadLease
+        from .upload_capacity import reserve_ingress
+        occupied = reserve_ingress(64)
+        before = UploadCapacity.objects.values_list("reservedBytes", "activeUploads").get(pk=1)
+        seen = []
+        async def app(scope, receive, send):
+            seen.append((scope["path"], (await receive())["body"]))
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+        with (patch.object(upload_ingress, "database_call", wraps=upload_ingress.database_call) as database,
+              patch.object(upload_ingress, "initialize_upload_temp_root", wraps=upload_ingress.initialize_upload_temp_root) as filesystem):
+            response = asyncio.run(request(ingress(app), b"{}", content_type=b"application/json",
+                path="/internal/agent-run-lifecycle/resolve"))
+            self.assertEqual(response[0]["status"], 200)
+            database.assert_not_called()
+            filesystem.assert_not_called()
+        self.assertEqual(seen, [("/internal/agent-run-lifecycle/resolve", b"{}")])
+        self.assertEqual(UploadCapacity.objects.values_list("reservedBytes", "activeUploads").get(pk=1), before)
+        self.assertEqual(list(UploadLease.objects.values_list("pk", flat=True)), [occupied.pk])
+
+    def test_full_upload_capacity_preserves_authenticated_snapshot_transport_without_changing_upload_counters(self):
+        from .models import UploadCapacity, UploadLease
+        from .upload_capacity import reserve_ingress
+        occupied = reserve_ingress(64)
+        before = UploadCapacity.objects.values_list("reservedBytes", "activeUploads").get(pk=1)
+        seen = []
+        async def app(scope, receive, send):
+            self.assertEqual(dict(scope["headers"])[b"x-internal-token"], settings.INTERNAL_API_TOKEN.encode())
+            seen.append((scope["path"], (await receive())["body"]))
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"accepted by original application"})
+        for path in ("/internal/agent-runs/session-workspace/commit", "/internal/agent-runs/execution-workspace/stage"):
+            with self.subTest(path=path):
+                response = asyncio.run(request(ingress(app), b"signed snapshot", content_type=b"application/octet-stream",
+                    path=path, extra_headers=[(b"x-internal-token", settings.INTERNAL_API_TOKEN.encode())]))
+                self.assertEqual(response[0]["status"], 200)
+        self.assertEqual(seen, [(path, b"signed snapshot") for path in
+            ("/internal/agent-runs/session-workspace/commit", "/internal/agent-runs/execution-workspace/stage")])
+        self.assertEqual(UploadCapacity.objects.values_list("reservedBytes", "activeUploads").get(pk=1), before)
+        self.assertEqual(list(UploadLease.objects.values_list("pk", flat=True)), [occupied.pk])
 
     def test_unknown_length_and_false_length_are_checked_before_downstream_spooling(self):
         for length, chunks in ((False, [
@@ -261,7 +306,7 @@ class UploadTemporaryBoundaryTests(TransactionTestCase):
             await send({"type": "http.response.body", "body": b"ok"})
         application = ingress(app)
         for _ in range(2):
-            self.assertEqual(asyncio.run(request(application, b"{}", content_type=b"application/json"))[0]["status"], 200)
+            self.assertEqual(asyncio.run(request(application, b"part", content_type=b"multipart/form-data"))[0]["status"], 200)
         self.assertFalse(UploadLease.objects.exists(), "Completed requests must not accumulate historical liabilities")
         active = reserve_ingress(4)
         for identity in identities:

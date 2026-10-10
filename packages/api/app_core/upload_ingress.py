@@ -2,7 +2,6 @@
 from contextvars import ContextVar
 import io
 import json
-import secrets
 
 from asgiref.sync import sync_to_async
 from django.conf import settings
@@ -39,6 +38,8 @@ async def reject(send, status, error):
 class ManagedUploadASGIHandler(ASGIHandler):
     async def read_body(self, receive):
         tracker = CURRENT_TRACKER.get()
+        if tracker is None:
+            return await super().read_body(receive)
         body = None
         try:
             while True:
@@ -48,7 +49,7 @@ class ManagedUploadASGIHandler(ASGIHandler):
                 chunk = message.get("body", b"")
                 if chunk:
                     if body is None:
-                        body = tracker.open_file(body=True) if tracker is not None else io.BytesIO()
+                        body = tracker.open_file(body=True)
                     body.write(chunk)
                 if not message.get("more_body", False):
                     break
@@ -70,28 +71,22 @@ class StorageIngressApplication:
         if scope["type"] != "http":
             return await self.application(scope, receive, send)
         headers = dict(scope.get("headers", []))
-        snapshot = scope.get("path") in SNAPSHOT_PATHS
-        if snapshot and not secrets.compare_digest(headers.get(b"x-internal-token", b""), settings.INTERNAL_API_TOKEN.encode()):
-            return await reject(send, 401, "unauthorized")
-        # Internal snapshot validation still uses its issued signed authorization.
-        # The temporary pool bounds transport space, without substituting today's
-        # sandbox profile or applying the public attachment envelope to old Runs.
-        maximum = settings.UPLOAD_TEMP_MAX_BYTES // 2 if snapshot else settings.UPLOAD_BODY_MAX_BYTES
+        content_type = headers.get(b"content-type", b"").split(b";", 1)[0].strip().lower()
+        if scope.get("path") in SNAPSHOT_PATHS or content_type != b"multipart/form-data":
+            return await self.application(scope, receive, send)
+        maximum = settings.UPLOAD_BODY_MAX_BYTES
         declared = headers.get(b"content-length")
         if declared is not None:
             if not declared.isdigit() or len(declared) > 19:
                 return await reject(send, 400, "upload_length_invalid")
             length = int(declared)
             if length > maximum:
-                return await reject(send, 429 if snapshot else 413,
-                    "upload_capacity_exhausted" if snapshot else "upload_body_too_large")
+                return await reject(send, 413, "upload_body_too_large")
             maximum = length
-        content_type = headers.get(b"content-type", b"").split(b";", 1)[0].strip().lower()
-        upload_slot = snapshot or content_type == b"multipart/form-data"
         lease = tracker = None
         if maximum:
             try:
-                lease = await database_call(reserve_ingress, maximum, upload_slot=upload_slot)
+                lease = await database_call(reserve_ingress, maximum, upload_slot=True)
                 root, pool_ref = initialize_upload_temp_root()
                 tracker = UploadTempTracker(root, pool_ref, lease.pk)
             except (UploadCapacityError, OSError, ValueError):
@@ -195,7 +190,7 @@ class UploadLimitMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
-        if request.content_type == "multipart/form-data":
+        if request.content_type == "multipart/form-data" and request.path_info not in SNAPSHOT_PATHS:
             handlers = [ActualBytesUploadHandler(request)]
             tracker = getattr(request, "scope", {}).get("upload_temp_tracker")
             if tracker is not None:
