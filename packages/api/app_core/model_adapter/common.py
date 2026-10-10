@@ -2,10 +2,12 @@ import asyncio
 import json
 import logging
 import re
+from functools import wraps
 import httpx
 from .images import project_images
 
 from asgiref.sync import sync_to_async
+from django.db import connection
 from anthropic import (
     APIConnectionError as AnthropicAPIConnectionError,
     APITimeoutError as AnthropicAPITimeoutError,
@@ -35,6 +37,29 @@ from ..models import (
 MODEL_STREAM_SCHEMA = "api.model.stream.v1"
 PREPARED_PROMPT_FIELDS = {"schema", "systemPrompt", "messages", "toolDefinitions", "toolChoice", "maxOutputTokens", "inputImages"}
 logger = logging.getLogger(__name__)
+
+
+def model_database_operation(operation):
+    """Finish one ordinary ORM fragment before the model's next external wait."""
+    @wraps(operation)
+    def call(*args, **kwargs):
+        try:
+            return operation(*args, **kwargs)
+        finally:
+            # A caller-owned transaction cannot surrender its connection here.
+            # Inspect an open connection first: get_autocommit() can connect.
+            if (
+                connection.connection is not None
+                and not connection.in_atomic_block
+                and connection.get_autocommit()
+            ):
+                connection.close()
+
+    return call
+
+
+def model_database_call(operation):
+    return sync_to_async(model_database_operation(operation), thread_sensitive=True)
 
 
 class ModelProviderError(RuntimeError):
@@ -415,6 +440,7 @@ def parse_tool_calls(raw_tool_calls) -> list[dict]:
     return calls
 
 
+@model_database_operation
 def fake_model_response(model: ModelConfig, request_body: dict) -> dict:
     prepared_prompt = validate_prepared_prompt(model, request_body)
     messages = prepared_prompt["messages"]
@@ -455,7 +481,7 @@ def fake_tool_call(call_id: str, name: str, arguments: dict) -> dict:
     return {"text": "", "toolCalls": [{"id": call_id, "name": name, "argsJson": json.dumps(arguments)}], "usage": zero_usage()}
 
 
-@sync_to_async(thread_sensitive=True)
+@model_database_call
 def record_model_run(
     *,
     agent_run_id: str,

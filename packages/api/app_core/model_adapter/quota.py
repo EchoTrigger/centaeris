@@ -16,7 +16,7 @@ from django.db import connection
 from django.db.models.functions import Greatest
 
 from ..models import ModelConfig, ModelQuotaDomain, ProviderCredential
-from .common import ModelProviderError
+from .common import ModelProviderError, model_database_operation
 
 
 POLL_SECONDS = 0.05
@@ -160,6 +160,7 @@ def _retry_after_delay(value: str | None) -> float | None:
     return seconds
 
 
+@model_database_operation
 def _observe_error(key: int, error: ModelProviderError) -> None:
     if error.httpStatus not in {408, 429} and (
         error.httpStatus is None or error.httpStatus < 500
@@ -173,30 +174,47 @@ def _observe_error(key: int, error: ModelProviderError) -> None:
     )
 
 
-@contextmanager
-def model_attempt(model: ModelConfig, cancel_event=None):
+@model_database_operation
+def _attempt_configuration(model, cancel_event=None):
     key = _quota_domain_key(model)
     if cancel_event is not None and cancel_event.is_set():
         raise ModelProviderError("model_run_cancelled")
-    params = _connection_params()
+    return key, _connection_params()
+
+
+@model_database_operation
+def _poll_admission(key):
+    limit, cooldown_until = _domain_state(key)
+    available = (
+        _database_now_ms() / 1000 >= cooldown_until
+        and _slot_may_be_available(key, limit)
+    )
+    return limit, available
+
+
+@model_database_operation
+def _cooldown_has_ended(key):
+    _, cooldown_until = _domain_state(key)
+    return _database_now_ms() / 1000 >= cooldown_until
+
+
+@contextmanager
+def model_attempt(model: ModelConfig, cancel_event=None):
+    key, params = _attempt_configuration(model, cancel_event)
     conn = None
     try:
         slot = 0
         while True:
             if cancel_event is not None and cancel_event.is_set():
                 raise ModelProviderError("model_run_cancelled")
-            limit, cooldown_until = _domain_state(key)
-            if (
-                _database_now_ms() / 1000 >= cooldown_until
-                and _slot_may_be_available(key, limit)
-            ):
+            limit, available = _poll_admission(key)
+            if available:
                 if cancel_event is not None and cancel_event.is_set():
                     raise ModelProviderError("model_run_cancelled")
                 conn = psycopg.connect(**params, autocommit=True)
                 slot = _try_lock(conn, key, limit)
             if slot:
-                _, cooldown_until = _domain_state(key)
-                if _database_now_ms() / 1000 >= cooldown_until and (
+                if _cooldown_has_ended(key) and (
                     cancel_event is None or not cancel_event.is_set()
                 ):
                     break
@@ -217,24 +235,17 @@ def model_attempt(model: ModelConfig, cancel_event=None):
 
 @asynccontextmanager
 async def async_model_attempt(model: ModelConfig):
-    key = await sync_to_async(_quota_domain_key, thread_sensitive=True)(model)
-    params = await sync_to_async(_connection_params, thread_sensitive=True)()
+    key, params = await sync_to_async(_attempt_configuration, thread_sensitive=True)(model)
     conn = None
     try:
         slot = 0
         while True:
-            limit, cooldown_until = await sync_to_async(_domain_state, thread_sensitive=True)(key)
-            current_ms = await sync_to_async(_database_now_ms, thread_sensitive=True)()
-            if (
-                current_ms / 1000 >= cooldown_until
-                and await sync_to_async(_slot_may_be_available, thread_sensitive=True)(key, limit)
-            ):
+            limit, available = await sync_to_async(_poll_admission, thread_sensitive=True)(key)
+            if available:
                 conn = await _open_connection(params)
                 slot = await _in_thread(_try_lock, conn, key, limit)
             if slot:
-                _, cooldown_until = await sync_to_async(_domain_state, thread_sensitive=True)(key)
-                current_ms = await sync_to_async(_database_now_ms, thread_sensitive=True)()
-                if current_ms / 1000 >= cooldown_until:
+                if await sync_to_async(_cooldown_has_ended, thread_sensitive=True)(key):
                     break
                 slot = 0
             if conn is not None:
