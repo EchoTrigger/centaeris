@@ -182,13 +182,18 @@ fn hosted_typed_input_store() {
             client
                 .execute(
                     "UPDATE runtime_jobs SET lease_expires_at_ms=$1 WHERE job_id=$2",
-                    &[&(now - 1), &job],
+                    &[&(now - 60_001), &job],
                 )
                 .unwrap();
             Ok(())
         })
         .unwrap();
-    assert_eq!(backend.reclaim_expired_runtime_job_leases(now).unwrap(), 1);
+    assert_eq!(
+        backend
+            .reclaim_expired_runtime_job_leases(now - 60_000)
+            .unwrap(),
+        1
+    );
     let recovery_owner = lease("typed-input-recovery-writer");
     claim.lease_owner = recovery_owner.clone();
     claim.claim_token = "claim-recovery".into();
@@ -1036,13 +1041,18 @@ fn run_hosted_input_recovery(inject_failed_commit: bool, replace_execution: bool
                     client
                         .execute(
                             "UPDATE runtime_jobs SET lease_expires_at_ms=$1 WHERE job_id=$2",
-                            &[&(now - 1), &job],
+                            &[&(now - 60_001), &job],
                         )
                         .unwrap();
                     Ok(())
                 })
                 .unwrap();
-            assert_eq!(backend.reclaim_expired_runtime_job_leases(now).unwrap(), 1);
+            assert_eq!(
+                backend
+                    .reclaim_expired_runtime_job_leases(now - 60_000)
+                    .unwrap(),
+                1
+            );
         }
         let owner = backend
             .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {

@@ -598,14 +598,16 @@ fn postgres_completion_delivery_upgrade_preserves_records_and_accepts_core_obser
     let mut f = fixture();
     append(&mut f).unwrap();
     f.store.with_client(|db| db.batch_execute(
-        "DELETE FROM runtime.schema_migrations WHERE version=5;
+        "DELETE FROM runtime.schema_migrations WHERE version>=5;
+         ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_count;
+         ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_not_before_ms;
          ALTER TABLE runtime.model_observation_contents DROP CONSTRAINT model_observation_contents_kind_check;
          ALTER TABLE runtime.model_observation_contents ADD CONSTRAINT model_observation_contents_kind_check CHECK(kind IN('system_prompt','message','input_image','tool_catalog','compaction_prompt','input_uptake'));"
     ).map_err(|error| error.to_string())).unwrap();
-    let before = retained_rows(&f);
+    let before = legacy_retained_rows(&f);
     let upgraded = PostgresRuntimeStore::new(&test_url()).unwrap();
-    assert_eq!(observation_versions(&f), [1, 2, 3, 4, 5]);
-    assert_eq!(retained_rows(&f), before);
+    assert_eq!(observation_versions(&f), [1, 2, 3, 4, 5, 6]);
+    assert_eq!(legacy_retained_rows(&f), before);
     upgraded.with_client(|db| db.execute(
         "INSERT INTO runtime.model_observation_contents VALUES($1,$2,'required_completion_delivery','{}',2,1)",
         &[&SESSION, &format!("sha256:{}", "a".repeat(64))]
@@ -621,7 +623,9 @@ fn postgres_completion_delivery_upgrade_rejects_unknown_legacy_constraint_withou
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let f = fixture();
     f.store.with_client(|db| db.batch_execute(
-        "DELETE FROM runtime.schema_migrations WHERE version=5;
+        "DELETE FROM runtime.schema_migrations WHERE version>=5;
+         ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_count;
+         ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_not_before_ms;
          ALTER TABLE runtime.model_observation_contents DROP CONSTRAINT model_observation_contents_kind_check;
          ALTER TABLE runtime.model_observation_contents ADD CONSTRAINT model_observation_contents_kind_check CHECK(kind<>'unknown');"
     ).map_err(|error| error.to_string())).unwrap();
@@ -639,7 +643,7 @@ fn postgres_current_schema_reopen_retains_sealed_wait_handoff() {
     append(&mut f).unwrap();
     let before = retained_rows(&f);
     let reopened = PostgresRuntimeStore::new(&test_url()).unwrap();
-    assert_eq!(observation_versions(&f), [1, 2, 3, 4, 5]);
+    assert_eq!(observation_versions(&f), [1, 2, 3, 4, 5, 6]);
     assert_eq!(retained_rows(&f), before);
     assert_eq!(
         reopened
@@ -661,6 +665,23 @@ fn retained_rows(f: &Fixture) -> std::collections::BTreeMap<String, String> {
             Ok((table, rows))
         }).collect()
     }).unwrap()
+}
+
+fn legacy_retained_rows(f: &Fixture) -> std::collections::BTreeMap<String, String> {
+    let mut rows = retained_rows(f);
+    let jobs = rows.get_mut("runtime.runtime_jobs").unwrap();
+    let mut values: Vec<serde_json::Value> = serde_json::from_str(jobs).unwrap();
+    for value in &mut values {
+        let value = value.as_object_mut().unwrap();
+        if let Some(count) = value.remove("lease_reclaim_count") {
+            assert_eq!(count, 0);
+        }
+        if let Some(deadline) = value.remove("lease_reclaim_not_before_ms") {
+            assert!(deadline.is_null());
+        }
+    }
+    *jobs = serde_json::to_string(&values).unwrap();
+    rows
 }
 
 fn hydrated_events(f: &Fixture) -> Vec<serde_json::Value> {
@@ -732,11 +753,12 @@ fn postgres_current_schema_reopens_observations_and_checkpoint_owners() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let f = fixture();
     seed_retained_observations(&f);
+    let supported_versions = observation_versions(&f);
     let before = retained_rows(&f);
     let hydrated_before = hydrated_events(&f);
     for _ in 0..3 {
         PostgresRuntimeStore::new(&test_url()).unwrap();
-        assert_eq!(observation_versions(&f), [1, 2, 3, 4, 5]);
+        assert_eq!(observation_versions(&f), supported_versions);
         assert_eq!(retained_rows(&f), before);
         assert_eq!(hydrated_events(&f), hydrated_before);
     }
@@ -782,7 +804,7 @@ fn postgres_current_schema_rejects_unsupported_versions_and_drift_without_writes
         ("DELETE FROM runtime.schema_migrations WHERE version>1", "schema version mismatch"),
         ("DELETE FROM runtime.schema_migrations WHERE version>2", "schema version mismatch"),
         ("DELETE FROM runtime.schema_migrations WHERE version>3", "schema version mismatch"),
-        ("INSERT INTO runtime.schema_migrations VALUES(6,0)", "schema version mismatch"),
+        ("unsupported_next_version", "schema version mismatch"),
         ("DELETE FROM runtime.schema_migrations WHERE version=2", "schema version mismatch"),
         ("ALTER TABLE runtime.model_observation_contents DROP CONSTRAINT model_observation_contents_kind_check; ALTER TABLE runtime.model_observation_contents ADD CONSTRAINT model_observation_contents_kind_check CHECK(kind<>'unknown')", "model observation kind constraint mismatch"),
         ("ALTER TABLE runtime.model_observation_contents DROP CONSTRAINT model_observation_contents_kind_check", "model observation kind constraint mismatch"),
@@ -792,7 +814,11 @@ fn postgres_current_schema_rejects_unsupported_versions_and_drift_without_writes
     ] {
         let mut f = fixture();
         append(&mut f).unwrap();
-        f.store.with_client(|db| db.batch_execute(ddl).map_err(|error| error.to_string())).unwrap();
+        let ddl = if ddl == "unsupported_next_version" {
+            format!("INSERT INTO runtime.schema_migrations VALUES({},0)",
+                observation_versions(&f).last().copied().unwrap() + 1)
+        } else { ddl.to_string() };
+        f.store.with_client(|db| db.batch_execute(&ddl).map_err(|error| error.to_string())).unwrap();
         let versions = observation_versions(&f);
         let before = retained_rows(&f);
         let shape = f.store.with_client(|db| db.query("SELECT table_name,column_name,data_type,is_nullable FROM information_schema.columns WHERE table_schema='runtime' ORDER BY table_name,ordinal_position", &[])

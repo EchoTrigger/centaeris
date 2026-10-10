@@ -2,7 +2,9 @@ use std::collections::BTreeSet;
 
 use postgres::{Client, GenericClient};
 
-const STORE_SCHEMA_VERSION: i64 = 5;
+const STORE_SCHEMA_VERSION: i64 = 6;
+const LEASE_RECLAIM_COLUMNS: &str =
+    ",lease_reclaim_count:bigint:NO,lease_reclaim_not_before_ms:bigint:YES";
 const PREVIOUS_OBSERVATION_KINDS: &str = "'system_prompt'::text, 'message'::text, 'input_image'::text, 'tool_catalog'::text, 'compaction_prompt'::text, 'input_uptake'::text";
 const CURRENT_OBSERVATION_KINDS: &str = "'system_prompt'::text, 'message'::text, 'input_image'::text, 'tool_catalog'::text, 'compaction_prompt'::text, 'input_uptake'::text, 'required_completion_delivery'::text";
 
@@ -82,7 +84,7 @@ const TABLE_SHAPES: &[(&str, &str)] = &[
     ),
     (
         "runtime_jobs",
-        "job_id:text:NO,job_kind:text:NO,status:text:NO,run_at_ms:bigint:NO,lease_owner:text:YES,lease_expires_at_ms:bigint:YES,retry_count:bigint:NO,max_retries:bigint:NO,backoff_policy_json:text:NO,idempotency_key:text:NO,session_id:text:YES,branch_id:text:YES,checkpoint_id:text:YES,payload_ref:text:YES,output_refs_json:text:NO,last_error:text:YES,created_at_ms:bigint:NO,updated_at_ms:bigint:NO,heartbeat_at_ms:bigint:YES",
+        "job_id:text:NO,job_kind:text:NO,status:text:NO,run_at_ms:bigint:NO,lease_owner:text:YES,lease_expires_at_ms:bigint:YES,retry_count:bigint:NO,max_retries:bigint:NO,backoff_policy_json:text:NO,idempotency_key:text:NO,session_id:text:YES,branch_id:text:YES,checkpoint_id:text:YES,payload_ref:text:YES,output_refs_json:text:NO,last_error:text:YES,created_at_ms:bigint:NO,updated_at_ms:bigint:NO,heartbeat_at_ms:bigint:YES,lease_reclaim_count:bigint:NO,lease_reclaim_not_before_ms:bigint:YES",
     ),
     (
         "runtime_job_outbox",
@@ -245,6 +247,7 @@ pub(super) fn ensure_schema(client: &mut Client) -> Result<(), String> {
         create_schema(client)?;
     } else {
         upgrade_completion_delivery_observations(client)?;
+        upgrade_lease_reclaim_budget(client)?;
     }
     validate_schema_version(client)?;
     validate_schema(client, CURRENT_OBSERVATION_KINDS)
@@ -264,7 +267,7 @@ fn upgrade_completion_delivery_observations(client: &mut Client) -> Result<(), S
     if schema_versions(&mut tx)? != [1, 2, 3, 4] {
         return Ok(());
     }
-    validate_schema(&mut tx, PREVIOUS_OBSERVATION_KINDS)?;
+    validate_schema_with_reclaim_budget(&mut tx, PREVIOUS_OBSERVATION_KINDS, false)?;
     tx.batch_execute(
         "ALTER TABLE runtime.model_observation_contents DROP CONSTRAINT model_observation_contents_kind_check;
          ALTER TABLE runtime.model_observation_contents ADD CONSTRAINT model_observation_contents_kind_check CHECK(kind IN('system_prompt','message','input_image','tool_catalog','compaction_prompt','input_uptake','required_completion_delivery'));"
@@ -274,9 +277,36 @@ fn upgrade_completion_delivery_observations(client: &mut Client) -> Result<(), S
         &[&now_ms()?],
     )
     .map_err(|error| format!("record completion observation upgrade failed: {error}"))?;
-    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    validate_schema_with_reclaim_budget(&mut tx, CURRENT_OBSERVATION_KINDS, false)?;
     tx.commit()
         .map_err(|error| format!("commit completion observation upgrade failed: {error}"))
+}
+
+fn upgrade_lease_reclaim_budget(client: &mut Client) -> Result<(), String> {
+    if schema_versions(client)? != [1, 2, 3, 4, 5] {
+        return Ok(());
+    }
+    let mut tx = client
+        .transaction()
+        .map_err(|error| format!("begin lease reclaim schema upgrade failed: {error}"))?;
+    tx.batch_execute("LOCK TABLE runtime.schema_migrations IN ACCESS EXCLUSIVE MODE")
+        .map_err(|error| format!("lock lease reclaim schema upgrade failed: {error}"))?;
+    if schema_versions(&mut tx)? != [1, 2, 3, 4, 5] {
+        return Ok(());
+    }
+    validate_schema_with_reclaim_budget(&mut tx, CURRENT_OBSERVATION_KINDS, false)?;
+    tx.batch_execute(
+        "ALTER TABLE runtime.runtime_jobs ADD COLUMN lease_reclaim_count bigint NOT NULL DEFAULT 0 CHECK(lease_reclaim_count>=0);
+         ALTER TABLE runtime.runtime_jobs ADD COLUMN lease_reclaim_not_before_ms bigint;"
+    ).map_err(|error| format!("add lease reclaim budget columns failed: {error}"))?;
+    tx.execute(
+        "INSERT INTO runtime.schema_migrations(version,applied_at_ms) VALUES(6,$1)",
+        &[&now_ms()?],
+    )
+    .map_err(|error| format!("record lease reclaim schema upgrade failed: {error}"))?;
+    validate_schema_with_reclaim_budget(&mut tx, CURRENT_OBSERVATION_KINDS, true)?;
+    tx.commit()
+        .map_err(|error| format!("commit lease reclaim schema upgrade failed: {error}"))
 }
 
 fn schema_versions(client: &mut impl GenericClient) -> Result<Vec<i64>, String> {
@@ -328,20 +358,49 @@ fn create_schema(client: &mut Client) -> Result<(), String> {
 }
 
 fn validate_schema(client: &mut impl GenericClient, kinds: &str) -> Result<(), String> {
+    validate_schema_with_reclaim_budget(client, kinds, true)
+}
+
+fn validate_schema_with_reclaim_budget(
+    client: &mut impl GenericClient,
+    kinds: &str,
+    reclaim_budget: bool,
+) -> Result<(), String> {
     let tables = object_names(client, "BASE TABLE")?;
     let expected_tables = RUNTIME_TABLES.iter().copied().map(str::to_string).collect();
     if tables != expected_tables {
         return Err(format!("Postgres runtime table set mismatch: {tables:?}"));
     }
     for (table, expected) in TABLE_SHAPES {
+        let expected = if *table == "runtime_jobs" && !reclaim_budget {
+            expected
+                .strip_suffix(LEASE_RECLAIM_COLUMNS)
+                .ok_or("previous runtime job shape missing")?
+        } else {
+            expected
+        };
         let actual = client.query(
             "SELECT column_name,data_type,is_nullable FROM information_schema.columns WHERE table_schema='runtime' AND table_name=$1 ORDER BY ordinal_position",
             &[table],
         ).map_err(|error| format!("query Postgres runtime columns failed: {error}"))?.into_iter().map(|row| format!("{}:{}:{}",row.get::<_,String>(0),row.get::<_,String>(1),row.get::<_,String>(2))).collect::<Vec<_>>().join(",");
-        if actual != *expected {
+        if actual != expected {
             return Err(format!(
                 "Postgres runtime table definition mismatch: {table}"
             ));
+        }
+    }
+    if reclaim_budget {
+        let constraint = client.query_opt(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='runtime.runtime_jobs'::regclass AND conname='runtime_jobs_lease_reclaim_count_check' AND contype='c'", &[])
+            .map_err(|error| format!("query lease reclaim budget constraint failed: {error}"))?
+            .map(|row| row.get::<_, String>(0));
+        if constraint.as_deref() != Some("CHECK ((lease_reclaim_count >= 0))") {
+            return Err("Postgres lease reclaim budget constraint mismatch".into());
+        }
+        let default = client.query_one("SELECT column_default FROM information_schema.columns WHERE table_schema='runtime' AND table_name='runtime_jobs' AND column_name='lease_reclaim_count'", &[])
+            .map_err(|error| format!("query lease reclaim budget default failed: {error}"))?.get::<_, Option<String>>(0);
+        if default.as_deref() != Some("0") {
+            return Err("Postgres lease reclaim budget default mismatch".into());
         }
     }
     let observation_kind_check = client.query_opt(
@@ -480,7 +539,7 @@ CREATE INDEX idx_runtime_job_waiters_source ON runtime.runtime_job_waiters(sourc
 CREATE INDEX idx_runtime_job_waiters_owner ON runtime.runtime_job_waiters(agent_run_id,session_id,checkpoint_id);
 CREATE TABLE runtime.session_runtime_snapshots(session_id text PRIMARY KEY, snapshot_json text NOT NULL, updated_at_ms bigint NOT NULL);
 CREATE TABLE runtime.runtime_events(event_id text PRIMARY KEY, session_id text NOT NULL, task_id text, event_type text NOT NULL, at_ms bigint NOT NULL, visibility text NOT NULL, payload_json text NOT NULL);
-CREATE TABLE runtime.runtime_jobs(job_id text PRIMARY KEY, job_kind text NOT NULL, status text NOT NULL, run_at_ms bigint NOT NULL, lease_owner text, lease_expires_at_ms bigint, retry_count bigint NOT NULL DEFAULT 0, max_retries bigint NOT NULL DEFAULT 0, backoff_policy_json text NOT NULL, idempotency_key text NOT NULL, session_id text, branch_id text, checkpoint_id text, payload_ref text, output_refs_json text NOT NULL DEFAULT '[]', last_error text, created_at_ms bigint NOT NULL, updated_at_ms bigint NOT NULL, heartbeat_at_ms bigint, UNIQUE(job_kind, idempotency_key));
+CREATE TABLE runtime.runtime_jobs(job_id text PRIMARY KEY, job_kind text NOT NULL, status text NOT NULL, run_at_ms bigint NOT NULL, lease_owner text, lease_expires_at_ms bigint, retry_count bigint NOT NULL DEFAULT 0, max_retries bigint NOT NULL DEFAULT 0, backoff_policy_json text NOT NULL, idempotency_key text NOT NULL, session_id text, branch_id text, checkpoint_id text, payload_ref text, output_refs_json text NOT NULL DEFAULT '[]', last_error text, created_at_ms bigint NOT NULL, updated_at_ms bigint NOT NULL, heartbeat_at_ms bigint, lease_reclaim_count bigint NOT NULL DEFAULT 0 CHECK(lease_reclaim_count>=0), lease_reclaim_not_before_ms bigint, UNIQUE(job_kind, idempotency_key));
 CREATE TABLE runtime.execution_job_tenants(job_id text PRIMARY KEY REFERENCES runtime.runtime_jobs(job_id) ON DELETE CASCADE,workspace_id text NOT NULL);
 CREATE TABLE runtime.runtime_job_outbox(job_id text NOT NULL REFERENCES runtime.runtime_jobs(job_id) ON DELETE CASCADE,event_type text NOT NULL,published_at_ms bigint,generation bigint NOT NULL DEFAULT 0,PRIMARY KEY(job_id,event_type));
 CREATE TABLE runtime.runtime_turn_supplement_queues(agent_run_id text PRIMARY KEY,lifecycle_job_id text NOT NULL UNIQUE REFERENCES runtime.runtime_jobs(job_id) ON DELETE CASCADE,session_id text NOT NULL,authorization_digest text NOT NULL,revision bigint NOT NULL,next_sequence bigint NOT NULL,accepting bigint NOT NULL CHECK(accepting IN(0,1)),entries_json text NOT NULL,dedupe_json text NOT NULL,closed_reason text,updated_at_ms bigint NOT NULL);
@@ -586,7 +645,7 @@ mod tests {
 
     #[test]
     fn transcript_read_model_and_wait_handoff_have_explicit_store_schema() {
-        assert_eq!(STORE_SCHEMA_VERSION, 5);
+        assert_eq!(STORE_SCHEMA_VERSION, 6);
         for table in [
             "transcript_projection_heads",
             "transcript_projection_current_generations",
