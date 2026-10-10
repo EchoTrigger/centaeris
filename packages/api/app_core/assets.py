@@ -6,6 +6,7 @@ import unicodedata
 import uuid
 
 from django.core.files.base import ContentFile
+from django.conf import settings
 from django.core.files.storage import default_storage
 from django.utils import timezone
 
@@ -117,6 +118,8 @@ def store_upload(upload, area: str) -> dict:
     for chunk in upload.chunks():
         digest.update(chunk)
         size_bytes += len(chunk)
+        if size_bytes > settings.UPLOAD_FILE_MAX_BYTES:
+            raise ValueError("upload_file_too_large")
     upload.seek(0)
     requested_storage_key = f"{area}/{uuid.uuid4().hex}/{filename}"
     try:
@@ -138,6 +141,8 @@ def store_upload(upload, area: str) -> dict:
 
 
 def store_bytes(content: bytes, area: str, filename: str, content_type: str) -> dict:
+    if len(content) > settings.UPLOAD_FILE_MAX_BYTES:
+        raise ValueError("upload_file_too_large")
     display_name = unicodedata.normalize("NFC", filename)
     safe = safe_filename(display_name)
     storage_key = default_storage.save(

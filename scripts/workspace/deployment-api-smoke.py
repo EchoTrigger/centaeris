@@ -21,6 +21,8 @@ values.update({
     "CREDENTIAL_ENCRYPTION_KEY": "z5wA0vTzQGNG2LkVbNqnd3CPnGds4M8Xqy9lXgkqfZI=",
     "POSTGRES_PASSWORD": "synthetic-test-password", "BOOTSTRAP_SUPERADMIN_PASSWORD": "synthetic-test-password",
     "API_HOST_PORT": "0", "COMPOSE_PROJECT_NAME": project,
+    # Synthetic fixture capacity; production still requires explicit inputs.
+    "UPLOAD_BODY_MAX_BYTES": "1048576", "UPLOAD_TEMP_MAX_BYTES": "4194304", "UPLOAD_MAX_CONCURRENT": "2",
 })
 env = {k: v for k, v in os.environ.items() if k not in values}
 env["CENTAERIS_SOURCE_REVISION"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()

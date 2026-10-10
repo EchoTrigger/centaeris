@@ -1,13 +1,15 @@
 import os
-
-from django.core.asgi import get_asgi_application
+import django
 
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "api.settings")
 
-django_application = get_asgi_application()
+django.setup(set_prefix=False)
 
 from app_core.platform_mcp import create_mcp_app
+from app_core.upload_ingress import ManagedUploadASGIHandler, StorageIngressApplication
+
+django_application = ManagedUploadASGIHandler()
 
 
 class WorkspaceApplication:
@@ -20,4 +22,4 @@ class WorkspaceApplication:
         return await django_application(scope, receive, send)
 
 
-application = WorkspaceApplication()
+application = StorageIngressApplication(WorkspaceApplication())

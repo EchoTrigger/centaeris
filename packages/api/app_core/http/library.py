@@ -2,6 +2,7 @@ import os
 import unicodedata
 
 from django.contrib.auth import get_user_model
+from django.conf import settings
 from django.core.files.storage import default_storage
 from django.db import transaction
 from django.utils import timezone
@@ -687,6 +688,17 @@ def _require_uploads(request, allowed_form_fields: set[str]):
 
 
 def _store_upload_batch(uploads, area: str) -> list[dict]:
+    total = 0
+    for upload in uploads:
+        size = 0
+        for chunk in upload.chunks():
+            size += len(chunk)
+            total += len(chunk)
+            if size > settings.UPLOAD_FILE_MAX_BYTES:
+                raise ValueError("upload_file_too_large")
+            if total > settings.UPLOAD_BODY_MAX_BYTES:
+                raise ValueError("upload_body_too_large")
+        upload.seek(0)
     stored = []
     try:
         for upload in uploads:
