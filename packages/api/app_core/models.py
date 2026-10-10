@@ -1617,6 +1617,9 @@ class AgentRun(models.Model):
             models.Index(fields=["workspace", "createdAt", "id"],
                          condition=models.Q(status="queued", startedAt__isnull=True),
                          name="agent_run_initial_queue"),
+            models.Index(fields=["workspace", "id"],
+                         condition=models.Q(status__in=["queued", "running"]),
+                         name="agent_run_active_admission"),
         ]
         constraints = [
             models.CheckConstraint(
