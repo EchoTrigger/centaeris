@@ -110,6 +110,7 @@ Invalid or unsafe budgets fail instead of falling back to an unbounded value.
 | `RUNTIME_HTTP_CONTROL_LIMIT` | 4 | Cancellation, heartbeat, and job-status handlers per Runtime process |
 | `RUNTIME_HTTP_REQUEST_TIMEOUT_SECONDS` | 30 | Absolute handler response deadline for short ordinary RPCs |
 | `RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS` | 5 | Absolute control handler response deadline; also used by API/worker control clients |
+| `WORK_RETURN_AUDIT_INTERVAL_SECONDS` | required | Deployment-selected delay between shared work-return repair pages; a whole pass spans all retained source pages |
 
 All replicas sharing one database must use the same execution/admission limits.
 Run admission retains its slot while Runtime capacity is unavailable or a Run

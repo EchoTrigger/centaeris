@@ -26,7 +26,7 @@ def get_runtime_job(job_id: str) -> dict | None:
     return body["job"]
 
 
-def schedule_runtime_job(payload: dict) -> dict:
+def schedule_runtime_job(payload: dict, *, timeout=None) -> dict:
     request = urllib.request.Request(
         f"{settings.RUNTIME_URL.rstrip('/')}/internal/jobs/schedule",
         data=json.dumps(payload, separators=(",", ":")).encode(),
@@ -34,7 +34,7 @@ def schedule_runtime_job(payload: dict) -> dict:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=settings.RUNTIME_START_TIMEOUT_SECONDS) as response:
+        with urllib.request.urlopen(request, timeout=settings.RUNTIME_START_TIMEOUT_SECONDS if timeout is None else timeout) as response:
             body = json.loads(response.read())
     except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError) as error:
         if isinstance(error, urllib.error.HTTPError):

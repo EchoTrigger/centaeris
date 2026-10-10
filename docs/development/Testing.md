@@ -73,3 +73,5 @@ is not a source artifact and should not be committed.
 Before release, run the same gate from a clean clone of the exact candidate
 revision. A passing dirty working tree does not prove that ignored files,
 adjacent repositories, or previously built binaries are unnecessary.
+
+Work-return publication changes protect three behavior boundaries: history-independent normal job traffic; shared audit leasing, restart cursors and stale-owner rejection; and omitted/unknown schedule repair without losing source records. The immutable previous publisher characterization and history-count RED establish the replaced behavior; worker/API tests cover deadlines, partial progress, cancellation and transport outcomes. No source-name absence checks enforce this change.

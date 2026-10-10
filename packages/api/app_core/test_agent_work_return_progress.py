@@ -1,4 +1,4 @@
-"""Real worker/API/slow Runtime HTTP; source progress survives a page budget."""
+"""Real worker/API/slow Runtime HTTP; per-job failure leaves later terminal work runnable."""
 import json
 import os
 from pathlib import Path
@@ -27,7 +27,7 @@ class WorkReturnProgressTests(LiveServerTestCase):
     commit_facts = runtime_fixture.WorkReturnRuntimeTests.commit_facts
 
     @override_settings(EXECUTION_TENANT_QUEUE_LIMIT=200, EXECUTION_GLOBAL_QUEUE_LIMIT=200)
-    def test_slow_first_page_preserves_attempted_progress_and_reaches_later_terminal(self):
+    def test_slow_return_jobs_retry_and_reach_later_terminal(self):
         self.dependencies()
         children = []
         for index in range(101):
@@ -95,18 +95,22 @@ class WorkReturnProgressTests(LiveServerTestCase):
         request_finished.connect(finished, weak=False)
 
         script = """import json, time, worker
-scan = worker.WorkReturnPublisher()
-rounds = []
-for index in range(6):
-    start = time.monotonic()
-    error = None
-    try:
-        scan()
-    except worker.DependencyUnavailable as failure:
-        error = type(failure).__name__
-    rounds.append({'after': scan.after, 'through': scan.through, 'error': error, 'elapsed': time.monotonic()-start})
-print('work-return-http-progress: ' + json.dumps(rounds))
-"""
+from contextlib import contextmanager
+from unittest.mock import patch
+@contextmanager
+def lease(*args):
+    yield lambda: None
+rounds=[]
+def failed(job, *args):
+    rounds.append({'run':job['jobId'].removeprefix('agent_work.return:'), 'outcome':'retry'})
+def complete(job, *args):
+    rounds.append({'run':job.removeprefix('agent_work.return:'), 'outcome':'completed'})
+with patch.object(worker, 'start_job'), patch.object(worker, 'lease_heartbeats', lease), patch.object(worker, 'complete_job', side_effect=complete), patch.object(worker, 'yield_job'), patch.object(worker, 'fail_claimed_job', side_effect=failed):
+    for run in RUN_IDS:
+        worker.execute_claimed_job({'jobId':'agent_work.return:'+run,'jobKind':'agent_work.return','sessionId':'session_fixture','payloadRef':'record:agent_work:'+run,'idempotencyKey':'agent_work.return:'+run,'retryCount':0,'maxRetries':10}, 'synthetic-fenced-owner')
+print('work-return-http-progress: '+json.dumps(rounds))
+""".replace("RUN_IDS", repr([child.pk for child in slow] + [terminal.pk]))
+
         try:
             with override_settings(RUNTIME_URL=f"http://127.0.0.1:{runtime.server_port}", RUNTIME_CONTROL_TIMEOUT_SECONDS=5):
                 try:
@@ -124,10 +128,10 @@ print('work-return-http-progress: ' + json.dumps(rounds))
                 snapshot = {"rounds": rounds, "slowRequests": dict(requested),
                     "terminalDelivered": AgentWorkReturn.objects.filter(child_run=terminal).exists()}
                 print("work-return-http-progress-evidence: " + json.dumps(snapshot))
-                self.assertEqual([rounds[0]["after"], rounds[1]["after"]], [slow[0].session_id, slow[1].session_id], snapshot)
-                self.assertEqual(rounds[0]["through"], terminal.session_id)
+                self.assertEqual([entry["run"] for entry in rounds], [child.pk for child in slow] + [terminal.pk], snapshot)
+                self.assertEqual([entry["outcome"] for entry in rounds], ["retry", "retry", "completed"], snapshot)
                 self.assertTrue(snapshot["terminalDelivered"], snapshot)
-                self.assertTrue(all(requested["agent_run.lifecycle:" + child.id] >= 2 for child in slow), snapshot)
+                self.assertTrue(all(requested["agent_run.lifecycle:" + child.id] >= 1 for child in slow), snapshot)
                 self.assertEqual(AgentRun.objects.count(), 102)
                 print("work-return-slow-http-later-terminal-progress-ok")
         finally:

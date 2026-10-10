@@ -22,7 +22,8 @@ use serde_json::{json, Value};
 
 const TERMINAL_EVENT_TYPE: &str = "runtime_job.terminal";
 const SESSION_ID_PREFIX: &str = "session_";
-const PYTHON_WORKER_JOB_KINDS: [&str; 2] = ["agent_run.lifecycle", "worker.noop"];
+const PYTHON_WORKER_JOB_KINDS: [&str; 3] =
+    ["agent_run.lifecycle", "worker.noop", "agent_work.return"];
 
 fn python_worker_job_kind(value: &str) -> bool {
     PYTHON_WORKER_JOB_KINDS.contains(&value)
@@ -358,8 +359,10 @@ fn complete(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
         .map_err(|_| (500, "job_store_failed"))?
         .ok_or((404, "job_not_found"))?;
     if job.job_kind == "provider.poll"
-        || (matches!(job.job_kind.as_str(), "agent_run.lifecycle" | "worker.noop")
-            && !request.output_refs.is_empty())
+        || (matches!(
+            job.job_kind.as_str(),
+            "agent_run.lifecycle" | "worker.noop" | "agent_work.return"
+        ) && !request.output_refs.is_empty())
     {
         return Err((409, "job_complete_output_contract_mismatch"));
     }
@@ -971,5 +974,17 @@ mod tests {
             "banana":true,
         }))
         .is_err());
+    }
+
+    #[test]
+    fn work_return_job_uses_the_python_worker_claim_and_wait_contract() {
+        assert!(python_worker_job_kind("agent_work.return"));
+        let request = serde_json::from_value::<WaitRequest>(json!({
+            "schema": "runtime.job.wait.v1",
+            "jobKinds": ["agent_work.return"],
+            "waitMs": 20_000,
+        }))
+        .expect("decode work return wait request");
+        assert!(valid_wait_request(&request));
     }
 }
