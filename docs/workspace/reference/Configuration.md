@@ -95,8 +95,8 @@ Invalid or unsafe budgets fail instead of falling back to an unbounded value.
 | --- | ---: | --- |
 | `EXECUTION_GLOBAL_LIMIT` | 8 | Leased/running hosted AgentRun lifecycle steps across worker and Runtime replicas |
 | `EXECUTION_TENANT_LIMIT` | 4 | The same execution leases within one Workspace |
-| `EXECUTION_GLOBAL_QUEUE_LIMIT` | 128 | Initially queued AgentRuns across API replicas |
-| `EXECUTION_TENANT_QUEUE_LIMIT` | 32 | Initially queued AgentRuns within one Workspace |
+| `EXECUTION_GLOBAL_QUEUE_LIMIT` | 128 | Queued and running AgentRuns across API replicas |
+| `EXECUTION_TENANT_QUEUE_LIMIT` | 32 | The same nonterminal obligations within one Workspace |
 | `EXECUTION_QUEUE_WAIT_SECONDS` | 300 | Maximum age before first execution; expiry requests semantic cancellation |
 | `RUNTIME_HTTP_REQUEST_LIMIT` | 24 | Ordinary handlers per Runtime process, including long executions |
 | `RUNTIME_HTTP_LISTENER_LIMIT` | 8 | Job wait handlers per Runtime process |
@@ -105,6 +105,14 @@ Invalid or unsafe budgets fail instead of falling back to an unbounded value.
 | `RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS` | 5 | Absolute control handler response deadline; also used by API/worker control clients |
 
 All replicas sharing one database must use the same execution/admission limits.
+Run admission retains its slot while Runtime capacity is unavailable or a Run
+waits for input. Moving from queued to running, replay, restart and retry do not
+release the obligation; a terminal state does. At capacity, new Run identities
+are refused while an accepted operation can still replay.
+All API replicas must use this revision for the expanded admission count to
+apply consistently. These limits do not bound unbound Agent inputs or the
+independent material-processing backlog.
+
 The runtime job lease is the execution permit: yield and terminal transitions
 release it; expired leases remain counted until lifecycle reconciliation.
 `WORKER_SLOT_COUNT` remains a local worker-thread limit. The execution limits do
