@@ -51,6 +51,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "app_core.upload_ingress.UploadLimitMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -194,6 +195,15 @@ GC_RETRY_BASE_SECONDS = finite_resource_limit("GC_RETRY_BASE_SECONDS", 86400, 31
 GC_RETRY_MAX_SECONDS = finite_resource_limit("GC_RETRY_MAX_SECONDS", 7 * 86400, 31 * 86400)
 if GC_RETRY_MAX_SECONDS < GC_RETRY_BASE_SECONDS:
     raise RuntimeError("GC_RETRY_MAX_SECONDS must be at least GC_RETRY_BASE_SECONDS")
+
+
+UPLOAD_FILE_MAX_BYTES = finite_resource_limit("UPLOAD_FILE_MAX_BYTES", 64 * 1024**2, (2**63 - 1) // 2)
+UPLOAD_BODY_MAX_BYTES = finite_resource_limit("UPLOAD_BODY_MAX_BYTES", required_env("UPLOAD_BODY_MAX_BYTES"), (2**63 - 1) // 2)
+UPLOAD_TEMP_MAX_BYTES = finite_resource_limit("UPLOAD_TEMP_MAX_BYTES", required_env("UPLOAD_TEMP_MAX_BYTES"))
+UPLOAD_MAX_CONCURRENT = finite_resource_limit("UPLOAD_MAX_CONCURRENT", required_env("UPLOAD_MAX_CONCURRENT"), 2**31 - 1)
+if UPLOAD_TEMP_MAX_BYTES < 2 * UPLOAD_BODY_MAX_BYTES:
+    raise RuntimeError("UPLOAD_TEMP_MAX_BYTES must fit two copies of UPLOAD_BODY_MAX_BYTES")
+FILE_UPLOAD_TEMP_DIR = required_env("UPLOAD_TEMP_ROOT")
 
 
 STORAGE_STREAM_LANES = required_bounded_positive_int(

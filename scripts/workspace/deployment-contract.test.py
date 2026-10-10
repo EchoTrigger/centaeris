@@ -2,6 +2,8 @@
 import json
 import importlib.util
 import os
+import shlex
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -17,6 +19,11 @@ REQUIRED_TEST_SECRETS = {
     "DJANGO_SECRET_KEY", "INTERNAL_API_TOKEN", "AGENT_RUN_AUTHORIZATION_SIGNING_KEY",
     "CREDENTIAL_ENCRYPTION_KEY", "POSTGRES_PASSWORD", "BOOTSTRAP_SUPERADMIN_PASSWORD",
 }
+REQUIRED_TEST_UPLOAD_LIMITS = {
+    # Synthetic gate inputs, never production defaults.
+    "UPLOAD_BODY_MAX_BYTES": "1048576", "UPLOAD_TEMP_MAX_BYTES": "4194304",
+    "UPLOAD_MAX_CONCURRENT": "2",
+}
 
 
 def compose_config(**overrides):
@@ -24,7 +31,7 @@ def compose_config(**overrides):
     for line in (ROOT / ".env.example").read_text().splitlines():
         key, separator, value = line.partition("=")
         if separator and not key.startswith("#"):
-            values[key] = value or ("synthetic-test-only" if key in REQUIRED_TEST_SECRETS else "")
+            values[key] = value or REQUIRED_TEST_UPLOAD_LIMITS.get(key, "synthetic-test-only" if key in REQUIRED_TEST_SECRETS else "")
     values["CENTAERIS_SOURCE_REVISION"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     values.update(overrides)
     env = {k: v for k, v in os.environ.items() if k not in values and k not in RETIRED}
@@ -40,6 +47,94 @@ def compose_config(**overrides):
 
 
 class DeploymentContractTests(unittest.TestCase):
+    def test_explicit_upload_limits_reach_api_and_gateway_and_missing_inputs_fail(self):
+        values = {"UPLOAD_BODY_MAX_BYTES": "2097152", "UPLOAD_TEMP_MAX_BYTES": "8388608",
+                  "UPLOAD_MAX_CONCURRENT": "3", "UPLOAD_FILE_MAX_BYTES": "1048576"}
+        services = compose_config(**values)["services"]
+        for service in ("api", "api-init", "gc"):
+            environment = services[service]["environment"]
+            for name, value in values.items():
+                self.assertEqual(environment[name], value)
+            self.assertEqual(environment["UPLOAD_TEMP_ROOT"], "/var/lib/centaeris-upload-temp")
+            self.assertTrue(any(mount.get("source") == "upload-temp" and
+                                mount.get("target") == environment["UPLOAD_TEMP_ROOT"]
+                                for mount in services[service]["volumes"]))
+        self.assertEqual(services["web"]["environment"]["UPLOAD_BODY_MAX_BYTES"], "2097152")
+        for name in REQUIRED_TEST_UPLOAD_LIMITS:
+            with self.subTest(missing=name), self.assertRaises(subprocess.CalledProcessError):
+                compose_config(**{name: None})
+
+    def test_upload_settings_parse_explicit_inputs_and_reject_invalid_combinations(self):
+        environment = {**os.environ, **compose_config()["services"]["api"]["environment"]}
+        environment["PYTHONPATH"] = str(ROOT / "packages/api")
+        probe = (
+            "import os,json; from cryptography.fernet import Fernet; "
+            "os.environ['CREDENTIAL_ENCRYPTION_KEY']=Fernet.generate_key().decode(); "
+            "from api import settings; print(json.dumps([settings.UPLOAD_FILE_MAX_BYTES, "
+            "settings.UPLOAD_BODY_MAX_BYTES,settings.UPLOAD_TEMP_MAX_BYTES,settings.UPLOAD_MAX_CONCURRENT]))"
+        )
+        accepted = subprocess.run([os.sys.executable, "-c", probe], cwd=ROOT,
+            env=environment, capture_output=True, text=True)
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        self.assertEqual(json.loads(accepted.stdout), [67108864, 1048576, 4194304, 2])
+        for name, value in (("UPLOAD_BODY_MAX_BYTES", ""), ("UPLOAD_TEMP_MAX_BYTES", "0"),
+                            ("UPLOAD_MAX_CONCURRENT", "-1"), ("UPLOAD_BODY_MAX_BYTES", "invalid"),
+                            ("UPLOAD_TEMP_MAX_BYTES", "1048576")):
+            with self.subTest(name=name, value=value):
+                result = subprocess.run([os.sys.executable, "-c", probe], cwd=ROOT,
+                    env={**environment, name: value}, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(name, result.stderr)
+
+    def test_web_entrypoint_renders_finite_body_cap_and_preserves_nginx_variables(self):
+        shell = shutil.which("sh")
+        if shell is None and Path("C:/Program Files/Git/bin/bash.exe").is_file():
+            shell = "C:/Program Files/Git/bin/bash.exe"
+        self.assertIsNotNone(shell, "A POSIX shell is required for the web entrypoint gate")
+        with tempfile.TemporaryDirectory(prefix="upload-nginx-gate-") as directory:
+            root = Path(directory)
+            tools = root / "bin"
+            tools.mkdir()
+            (tools / "nginx").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            # Execute the real entrypoint with deterministic external programs.
+            # The envsubst stub implements its selected-variable contract.
+            substitute = r"""import os,re,sys
+pattern = r'\$(?:\{([A-Za-z_][A-Za-z_0-9]*)\}|([A-Za-z_][A-Za-z_0-9]*))'
+names = {a or b for a,b in re.findall(pattern,sys.argv[1])}
+text = sys.stdin.read()
+def replace(match):
+    name = match[1] or match[2]
+    return os.environ.get(name,'') if name in names else match[0]
+sys.stdout.write(re.sub(pattern,replace,text))
+"""
+            (tools / "envsubst").write_text("#!/bin/sh\nexec " + shlex.quote(os.sys.executable.replace("\\", "/"))
+                + " -c " + shlex.quote(substitute) + ' "$@"\n', encoding="utf-8")
+            for tool in tools.iterdir():
+                tool.chmod(0o755)
+            template = root / "nginx.template"
+            template.write_text((ROOT / "packages/web/nginx.conf").read_text(encoding="utf-8"), encoding="utf-8")
+            output, config = root / "nginx.conf", root / "config.json"
+            source = (ROOT / "packages/web/entrypoint.sh").read_text(encoding="utf-8")
+            source = source.replace("/usr/share/nginx/html/config.json", shlex.quote(config.as_posix()))
+            source = source.replace("/etc/nginx/upload-boundary.conf.template", shlex.quote(template.as_posix()))
+            source = source.replace("/etc/nginx/conf.d/default.conf", shlex.quote(output.as_posix()))
+            tool_path = tools.as_posix()
+            if len(tool_path) > 1 and tool_path[1] == ":":
+                tool_path = "/" + tool_path[0].lower() + tool_path[2:]
+            for value in ("4096", "8192", "0", "", "invalid"):
+                with self.subTest(value=value):
+                    result = subprocess.run([shell, "-c", source], cwd=ROOT,
+                        env={**os.environ, "API_BASE_URL": "/", "UPLOAD_BODY_MAX_BYTES": value,
+                             "PATH": tool_path + ":" + os.environ.get("PATH", "")}, capture_output=True, text=True)
+                    if value in {"4096", "8192"}:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        rendered = output.read_text(encoding="utf-8")
+                        self.assertRegex(rendered, r"client_max_body_size\s+" + value + r";")
+                        self.assertIn("$scheme", rendered)
+                        self.assertIn("$uri", rendered)
+                    else:
+                        self.assertNotEqual(result.returncode, 0)
+
     def gc_settings(self, environment, **overrides):
         environment = {**os.environ, **environment}
         for name, value in overrides.items():

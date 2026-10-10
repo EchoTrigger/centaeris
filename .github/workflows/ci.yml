@@ -15,6 +15,10 @@ concurrency:
 
 env:
   CARGO_BUILD_JOBS: '2'
+  # Synthetic validation inputs; these are not deployment defaults.
+  UPLOAD_BODY_MAX_BYTES: '1048576'
+  UPLOAD_TEMP_MAX_BYTES: '4194304'
+  UPLOAD_MAX_CONCURRENT: '2'
 
 jobs:
   scope:

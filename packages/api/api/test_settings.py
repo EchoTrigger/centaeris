@@ -26,6 +26,10 @@ os.environ["SANDBOX_CPU_MILLI"] = "2000"
 os.environ["SANDBOX_PIDS_LIMIT"] = "512"
 os.environ["SANDBOX_DATA_TMPFS_BYTES"] = str(4 * 1024 * 1024 * 1024)
 os.environ.setdefault("STORAGE_ROOT", tempfile.mkdtemp(prefix="centaeris-workspace-agent-test-"))
+os.environ["UPLOAD_BODY_MAX_BYTES"] = "1048576"
+os.environ["UPLOAD_TEMP_MAX_BYTES"] = "4194304"
+os.environ["UPLOAD_MAX_CONCURRENT"] = "2"
+os.environ["UPLOAD_TEMP_ROOT"] = tempfile.mkdtemp(prefix="centaeris-upload-test-")
 os.environ["TEST_POSTGRES_DB"] = os.environ.get("TEST_POSTGRES_DB", "centaeris")
 os.environ["TEST_POSTGRES_USER"] = os.environ.get("TEST_POSTGRES_USER", "centaeris")
 os.environ["TEST_POSTGRES_PASSWORD"] = os.environ.get("TEST_POSTGRES_PASSWORD", "centaeris")

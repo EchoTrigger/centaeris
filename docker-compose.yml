@@ -13,6 +13,10 @@ x-api-build: &api-build
 x-document-processor-image: &document-processor-image centaeris-document-processor:local
 x-processor-device: &processor-device ${KNOWLEDGE_PROCESSOR_DEVICE:?KNOWLEDGE_PROCESSOR_DEVICE is required}
 x-storage-root: &storage-root /var/lib/centaeris-storage
+x-upload-temp-mount: &upload-temp-mount
+  type: volume
+  source: upload-temp
+  target: &upload-temp-root /var/lib/centaeris-upload-temp
 x-plugin-root: &plugin-root /opt/centaeris/plugins
 x-api-internal-url: &api-internal-url http://api:8000
 x-redis-url: &redis-url redis://redis:6379/0
@@ -212,6 +216,11 @@ services:
         POSTGRES_PORT: "5432"
         POSTGRES_APPLICATION_NAME: centaeris-api
         STORAGE_ROOT: *storage-root
+        UPLOAD_TEMP_ROOT: *upload-temp-root
+        UPLOAD_FILE_MAX_BYTES: ${UPLOAD_FILE_MAX_BYTES-67108864}
+        UPLOAD_BODY_MAX_BYTES: ${UPLOAD_BODY_MAX_BYTES:?UPLOAD_BODY_MAX_BYTES is required}
+        UPLOAD_TEMP_MAX_BYTES: ${UPLOAD_TEMP_MAX_BYTES:?UPLOAD_TEMP_MAX_BYTES is required}
+        UPLOAD_MAX_CONCURRENT: ${UPLOAD_MAX_CONCURRENT:?UPLOAD_MAX_CONCURRENT is required}
         STORAGE_STREAM_LANES: ${STORAGE_STREAM_LANES}
         STORAGE_STREAM_CHUNK_BYTES: ${STORAGE_STREAM_CHUNK_BYTES}
         GC_MAX_CLEANUP_ATTEMPTS: ${GC_MAX_CLEANUP_ATTEMPTS-5}
@@ -246,6 +255,7 @@ services:
       postgres:
         condition: service_healthy
     volumes:
+      - *upload-temp-mount
       - type: volume
         source: plugin-data
         target: *plugin-root
@@ -264,6 +274,7 @@ services:
     ports:
       - "${API_HOST_PORT:-8000}:8000"
     volumes:
+      - *upload-temp-mount
       - type: volume
         source: storage-data
         target: *storage-root
@@ -297,6 +308,8 @@ services:
       EMAIL_USE_SSL: ${EMAIL_USE_SSL:-0}
       EMAIL_TIMEOUT_SECONDS: ${EMAIL_TIMEOUT_SECONDS:-15}
       DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL:-}
+    volumes:
+      - *upload-temp-mount
     depends_on:
       api-init:
         condition: service_completed_successfully
@@ -318,6 +331,7 @@ services:
       MATERIAL_PROCESSOR_DEVICE: *processor-device
       OCI_RUNTIME: ${OCI_RUNTIME-runsc}
     volumes:
+      - *upload-temp-mount
       - type: volume
         source: storage-data
         target: *storage-root
@@ -341,6 +355,7 @@ services:
       <<: *api-environment
       POSTGRES_APPLICATION_NAME: centaeris-gc
     volumes:
+      - *upload-temp-mount
       - type: volume
         source: storage-data
         target: *storage-root
@@ -360,6 +375,7 @@ services:
       labels: *release-image-labels
     environment:
       API_BASE_URL: ${API_BASE_URL}
+      UPLOAD_BODY_MAX_BYTES: ${UPLOAD_BODY_MAX_BYTES:?UPLOAD_BODY_MAX_BYTES is required}
     ports:
       - "${WEB_HOST_PORT:-3000}:3000"
     depends_on:
@@ -373,3 +389,4 @@ volumes:
   storage-data:
   plugin-data:
   agent-memory:
+  upload-temp:
