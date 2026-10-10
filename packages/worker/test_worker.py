@@ -493,8 +493,8 @@ class WorkerContractTests(unittest.TestCase):
         new_total_http = new_wait_requests + new_claim_http
 
         self.assertEqual((old_scan_cycles, new_wait_requests), (120, 6))
-        self.assertEqual(worker.WORKER_JOB_KINDS, ("agent_run.lifecycle", "worker.noop"))
-        self.assertEqual((old_claim_http, new_claim_http, new_total_http), (240, 12, 18))
+        self.assertEqual(worker.WORKER_JOB_KINDS, ("agent_run.lifecycle", "worker.noop", "agent_work.return"))
+        self.assertEqual((old_claim_http, new_claim_http, new_total_http), (360, 18, 24))
         print(
             "worker_idle_per_min "
             f"scan_cycles={old_scan_cycles}->{new_wait_requests} "

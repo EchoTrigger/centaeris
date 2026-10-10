@@ -23,6 +23,7 @@ REQUIRED_TEST_UPLOAD_LIMITS = {
     # Synthetic gate inputs, never production defaults.
     "UPLOAD_BODY_MAX_BYTES": "1048576", "UPLOAD_TEMP_MAX_BYTES": "4194304",
     "UPLOAD_MAX_CONCURRENT": "2",
+    "WORK_RETURN_AUDIT_INTERVAL_SECONDS": "3600",
 }
 
 

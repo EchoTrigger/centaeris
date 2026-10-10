@@ -39,6 +39,8 @@ os.environ["PLUGIN_CATALOG_ROOT"] = str(
     Path(__file__).resolve().parents[1] / "app_core" / "testdata" / "plugins"
 )
 
+os.environ["WORK_RETURN_AUDIT_INTERVAL_SECONDS"] = "3600"
+
 from .settings import *  # noqa: F403
 
 

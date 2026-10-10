@@ -211,4 +211,9 @@ def materialize_work_request(event_id):
     except Exception:
         logger.exception("Agent work admission awaits existing lifecycle reconciliation")
         AgentRun.objects.filter(pk=child.pk, status="queued").update(transitionReason="agent_run_lifecycle_schedule_pending")
+    try:
+        from .agent_work_return_jobs import schedule_work_return_job
+        schedule_work_return_job(child)
+    except Exception:
+        logger.exception("Agent work return scheduling awaits the shared audit")
     return response, True

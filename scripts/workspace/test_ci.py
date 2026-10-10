@@ -15,7 +15,7 @@ spec.loader.exec_module(ci)
 
 class PortableCITests(unittest.TestCase):
     def test_compose_structure_chooses_isolated_capacity_inputs_without_changing_host_environment(self):
-        host_environment = {key: value for key, value in os.environ.items() if not key.startswith("UPLOAD_")}
+        host_environment = {key: value for key, value in os.environ.items() if not key.startswith("UPLOAD_") and key != "WORK_RETURN_AUDIT_INTERVAL_SECONDS"}
         with patch.dict(os.environ, host_environment, clear=True), \
                 patch.object(ci.subprocess, "check_output", return_value="f" * 40), \
                 patch.object(ci.subprocess, "run") as command:
@@ -24,6 +24,7 @@ class PortableCITests(unittest.TestCase):
             self.assertEqual(environment["UPLOAD_BODY_MAX_BYTES"], "1048576")
             self.assertEqual(environment["UPLOAD_TEMP_MAX_BYTES"], "4194304")
             self.assertEqual(environment["UPLOAD_MAX_CONCURRENT"], "2")
+            self.assertEqual(environment["WORK_RETURN_AUDIT_INTERVAL_SECONDS"], "3600")
             self.assertNotIn("UPLOAD_BODY_MAX_BYTES", os.environ)
 
     def test_web_prepares_rust_and_core_before_parallel_tests(self):
