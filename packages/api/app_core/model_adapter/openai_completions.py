@@ -12,6 +12,7 @@ from .common import (
     build_tool_choice,
     build_tools,
     model_payload,
+    model_database_operation,
     parse_tool_calls,
     provider_error,
     provider_client_options,
@@ -72,21 +73,25 @@ def _project_gemini_messages(messages: list[dict]) -> None:
                 call["extra_content"] = {"google": {"thought_signature": signature}}
 
 
-def open_ai_completions_client(model: ModelConfig, request_body: dict | None = None) -> OpenAI:
+@model_database_operation
+def _client_arguments(model, request_body):
     _, api_base = resolve_model_route(model)
+    return resolve_model_secret(model), api_base, provider_client_options(model, request_body)
+
+
+def open_ai_completions_client(model: ModelConfig, request_body: dict | None = None) -> OpenAI:
+    api_key, api_base, options = _client_arguments(model, request_body)
     return OpenAI(
-        api_key=resolve_model_secret(model),
+        api_key=api_key,
         base_url=api_base,
         timeout=settings.MODEL_PROVIDER_TIMEOUT_SECONDS,
         max_retries=0,
-        **provider_client_options(model, request_body),
+        **options,
     )
 
 
 async def async_open_ai_completions_client(model: ModelConfig, request_body: dict | None = None) -> AsyncOpenAI:
-    _, api_base = await sync_to_async(resolve_model_route, thread_sensitive=True)(model)
-    api_key = await sync_to_async(resolve_model_secret, thread_sensitive=True)(model)
-    options = await sync_to_async(provider_client_options, thread_sensitive=True)(model, request_body)
+    api_key, api_base, options = await sync_to_async(_client_arguments, thread_sensitive=True)(model, request_body)
     return AsyncOpenAI(
         api_key=api_key,
         base_url=api_base,
@@ -116,16 +121,21 @@ def build_open_ai_completions_request(model: ModelConfig, request_body: dict) ->
     return payload
 
 
+@model_database_operation
+def _completion_request(model, request_body):
+    payload = build_open_ai_completions_request(model, request_body)
+    return payload, _is_gemini(model)
+
+
 def call_open_ai_completions(model: ModelConfig, request_body: dict) -> dict:
     client = open_ai_completions_client(model, request_body)
     try:
+        request, gemini = _completion_request(model, request_body)
         return parse_open_ai_completions_response(
             model_payload(
-                client.chat.completions.create(
-                    **build_open_ai_completions_request(model, request_body)
-                )
+                client.chat.completions.create(**request)
             ),
-            gemini=_is_gemini(model),
+            gemini=gemini,
         )
     except Exception as error:
         mapped = provider_error(error)
@@ -148,10 +158,10 @@ async def stream_open_ai_completions(
     tool_calls = {}
     usage = {}
     saw_finish = False
-    gemini = await sync_to_async(_is_gemini, thread_sensitive=True)(model)
     client = await async_open_ai_completions_client(model, request_body)
     try:
-        request = build_open_ai_completions_request(model, request_body) | {"stream": True}
+        request, gemini = await sync_to_async(_completion_request, thread_sensitive=True)(model, request_body)
+        request = request | {"stream": True}
         request["stream_options"] = {"include_usage": True}
         stream = await client.chat.completions.create(**request)
         async for raw_chunk in stream:

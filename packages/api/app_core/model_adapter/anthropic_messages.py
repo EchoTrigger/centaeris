@@ -12,6 +12,7 @@ from .common import (
     build_tool_choice,
     build_tools,
     model_payload,
+    model_database_operation,
     provider_error,
     provider_client_options,
     request_thinking_mode,
@@ -22,21 +23,25 @@ from .common import (
 )
 
 
-def anthropic_messages_client(model: ModelConfig, request_body: dict | None = None) -> Anthropic:
+@model_database_operation
+def _client_arguments(model, request_body):
     _, api_base = resolve_model_route(model)
+    return resolve_model_secret(model), api_base, provider_client_options(model, request_body)
+
+
+def anthropic_messages_client(model: ModelConfig, request_body: dict | None = None) -> Anthropic:
+    api_key, api_base, options = _client_arguments(model, request_body)
     return Anthropic(
-        api_key=resolve_model_secret(model),
+        api_key=api_key,
         base_url=api_base,
         timeout=settings.MODEL_PROVIDER_TIMEOUT_SECONDS,
         max_retries=0,
-        **provider_client_options(model, request_body),
+        **options,
     )
 
 
 async def async_anthropic_messages_client(model: ModelConfig, request_body: dict | None = None) -> AsyncAnthropic:
-    _, api_base = await sync_to_async(resolve_model_route, thread_sensitive=True)(model)
-    api_key = await sync_to_async(resolve_model_secret, thread_sensitive=True)(model)
-    options = await sync_to_async(provider_client_options, thread_sensitive=True)(model, request_body)
+    api_key, api_base, options = await sync_to_async(_client_arguments, thread_sensitive=True)(model, request_body)
     return AsyncAnthropic(
         api_key=api_key,
         base_url=api_base,

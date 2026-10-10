@@ -16,6 +16,7 @@ from app_core.model_adapter import (
 )
 from app_core.models import ModelConfig, AgentRunAuthorization
 from app_core.model_adapter.common import PREPARED_PROMPT_FIELDS
+from app_core.model_adapter.common import model_database_call
 from app_core.runtime_contract import (
     MODEL_RUN_SCHEMA,
     agent_run_binding_matches,
@@ -106,7 +107,7 @@ async def model_runs(request):
     return JsonResponse(result)
 
 
-@sync_to_async(thread_sensitive=True)
+@model_database_call
 def _validate_model_run(body):
     if not isinstance(body, dict):
         return JsonResponse({"error": "invalid_json"}, status=400)
