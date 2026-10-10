@@ -109,6 +109,7 @@ impl PostgresRuntimeStore {
             let candidates = tx.query("SELECT j.job_id,t.workspace_id FROM runtime_jobs j
                 JOIN execution_job_tenants t ON t.job_id=j.job_id
                 WHERE j.status='queued' AND j.job_kind='agent_run.lifecycle' AND j.run_at_ms<=$1
+                AND COALESCE(j.lease_reclaim_not_before_ms,j.run_at_ms)<=$1
                 AND ($2::text IS NULL OR j.job_id=$2) AND ($3::text IS NULL OR j.session_id=$3)
                 AND NOT(t.workspace_id=ANY($4))
                 ORDER BY j.run_at_ms,j.created_at_ms,j.job_id FOR UPDATE OF j SKIP LOCKED LIMIT $5",

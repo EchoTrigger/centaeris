@@ -8,11 +8,12 @@ use centaeris_core::session::reliability::{
     MarkDeadLetterReplayedRequest, MarkDeadLetterReplayingRequest, ReleaseResourceClaimRequest,
     RenewRuntimeJobLeaseRequest, ReplayDeadLetterRequest, ReplayDeadLetterResult,
     ResourceClaimRecord, ResourceClaimStorePort, RuntimeBackoffPolicy,
-    RuntimeJobFailureDisposition, RuntimeJobOutboxPort, RuntimeJobOutboxPublishDisposition,
-    RuntimeJobOutboxRecord, RuntimeJobRecord, RuntimeJobStatus, RuntimeJobStorePort,
-    ScheduleRuntimeJobDisposition, ScheduleRuntimeJobRequest, ScheduleRuntimeJobResult,
-    StartRuntimeJobRequest, WakeRuntimeJobDisposition, WakeRuntimeJobRequest,
-    YieldRuntimeJobRequest, RUNTIME_JOB_TERMINAL_EVENT,
+    RuntimeJobFailureDisposition, RuntimeJobLeaseReclaimPolicy, RuntimeJobOutboxPort,
+    RuntimeJobOutboxPublishDisposition, RuntimeJobOutboxRecord, RuntimeJobRecord, RuntimeJobStatus,
+    RuntimeJobStorePort, ScheduleRuntimeJobDisposition, ScheduleRuntimeJobRequest,
+    ScheduleRuntimeJobResult, StartRuntimeJobRequest, WakeRuntimeJobDisposition,
+    WakeRuntimeJobRequest, YieldRuntimeJobRequest, RUNTIME_JOB_LEASE_RECLAIM_BATCH_LIMIT,
+    RUNTIME_JOB_TERMINAL_EVENT,
 };
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, OptionalExtension};
@@ -85,8 +86,9 @@ impl RuntimeJobStorePort for SqliteRuntimeStore {
                 let mut conditions = vec![
                     "status = 'queued'".to_string(),
                     "run_at_ms <= ?".to_string(),
+                    "COALESCE(lease_reclaim_not_before_ms, run_at_ms) <= ?".to_string(),
                 ];
-                let mut params_vec = vec![SqlValue::from(req.now_ms)];
+                let mut params_vec = vec![SqlValue::from(req.now_ms), SqlValue::from(req.now_ms)];
                 if let Some(job_id) = req
                     .job_id
                     .as_deref()
@@ -370,15 +372,16 @@ impl RuntimeJobStorePort for SqliteRuntimeStore {
             let tx = conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(|error| format!("begin wake_runtime_job failed: {error}"))?;
-            let (status, run_at_ms, session_id) = tx
+            let (status, run_at_ms, session_id, reclaim_not_before_ms) = tx
                 .query_row(
-                    "SELECT status,run_at_ms,session_id FROM runtime_jobs WHERE job_id=?1",
+                    "SELECT status,run_at_ms,session_id,lease_reclaim_not_before_ms FROM runtime_jobs WHERE job_id=?1",
                     params![req.job_id],
                     |row| {
                         Ok((
                             row.get::<_, String>(0)?,
                             row.get::<_, i64>(1)?,
                             row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
                         ))
                     },
                 )
@@ -420,10 +423,11 @@ impl RuntimeJobStorePort for SqliteRuntimeStore {
             }
             let disposition = match status.as_str() {
                 "queued" => {
-                    if run_at_ms > req.woken_at_ms {
+                    let wake_at_ms = req.woken_at_ms.max(reclaim_not_before_ms.unwrap_or(req.woken_at_ms));
+                    if run_at_ms > wake_at_ms {
                         tx.execute(
-                            "UPDATE runtime_jobs SET run_at_ms=?1,updated_at_ms=?1 WHERE job_id=?2 AND status='queued' AND run_at_ms>?1",
-                            params![req.woken_at_ms, req.job_id],
+                            "UPDATE runtime_jobs SET run_at_ms=?1,updated_at_ms=?3 WHERE job_id=?2 AND status='queued' AND run_at_ms>?1",
+                            params![wake_at_ms, req.job_id, req.woken_at_ms],
                         )
                         .map_err(|error| format!("wake runtime job failed: {error}"))?;
                         WakeRuntimeJobDisposition::Woken
@@ -601,30 +605,52 @@ impl RuntimeJobStorePort for SqliteRuntimeStore {
         now_ms: centaeris_core::runtime::contracts::TimestampMs,
     ) -> Result<usize, String> {
         self.with_conn(|conn| {
-            let updated = conn
-                .execute(
-                    "
-                    UPDATE runtime_jobs
-                    SET status = 'queued',
-                        run_at_ms = ?1,
-                        updated_at_ms = ?1,
-                        lease_owner = NULL,
-                        lease_expires_at_ms = NULL,
-                        last_error = CASE
-                            WHEN COALESCE(last_error, '') = '' AND status = 'running' THEN 'worker_crashed_reclaimed'
-                            WHEN COALESCE(last_error, '') = '' THEN 'lease_expired_reclaimed'
-                            ELSE last_error
-                        END
-                    WHERE status IN ('leased', 'running')
-                      AND lease_expires_at_ms IS NOT NULL
-                      AND lease_expires_at_ms <= ?1
-                    ",
-                    params![now_ms],
-                )
-                .map_err(|err| format!("reclaim_expired_runtime_job_leases failed: {err}"))?;
-            Ok(updated)
+            require_durable_lease_reclaim(conn)?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|error| format!("begin expired lease reclaim failed: {error}"))?;
+            let expired = {
+                let mut stmt = tx.prepare("SELECT job_id,session_id,lease_owner,lease_reclaim_count,status,last_error FROM runtime_jobs WHERE status IN ('leased','running') AND lease_expires_at_ms<=?1 ORDER BY lease_expires_at_ms,job_id LIMIT ?2")
+                    .map_err(|error| format!("select expired leases failed: {error}"))?;
+                let rows = stmt.query_map(params![now_ms, to_i64(RUNTIME_JOB_LEASE_RECLAIM_BATCH_LIMIT)?], |row| Ok((
+                    row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?, row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?, row.get::<_, Option<String>>(5)?,
+                ))).map_err(|error| format!("query expired leases failed: {error}"))?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(|error| format!("decode expired leases failed: {error}"))?
+            };
+            let policy = RuntimeJobLeaseReclaimPolicy::default();
+            for (job_id, session_id, lease_owner, previous_count, status, prior_error) in &expired {
+                let prior_status = runtime_job_status_from_db(status).map_err(|error| error.to_string())?;
+                let decision = policy.decide(job_id, u32::try_from(*previous_count).map_err(|error| error.to_string())?, &prior_status, now_ms)?;
+                tx.execute("UPDATE runtime_jobs SET status=?1,run_at_ms=?2,updated_at_ms=?3,lease_owner=NULL,lease_expires_at_ms=NULL,lease_reclaim_count=?4,lease_reclaim_not_before_ms=?2,last_error=?5 WHERE job_id=?6",
+                    params![runtime_job_status_to_db(&decision.status), decision.not_before_ms, now_ms, i64::from(decision.reclaim_count), decision.reason, job_id])
+                    .map_err(|error| format!("update expired lease failed: {error}"))?;
+                let payload = serde_json::json!({
+                    "schema": "runtime.job.lease_reclaimed.v1", "jobId": job_id,
+                    "leaseOwner": lease_owner, "reclaimCount": decision.reclaim_count,
+                    "maxReclaims": policy.max_reclaims, "notBeforeMs": decision.not_before_ms,
+                    "transitionReason": decision.reason,
+                    "previousError": prior_error,
+                }).to_string();
+                tx.execute("INSERT INTO runtime_events(event_id,session_id,task_id,event_type,at_ms,visibility,payload_json) VALUES(?1,?2,?3,'runtime_job_lease_reclaimed',?4,'internal',?5)",
+                    params![format!("runtime_job_lease_reclaimed:{job_id}:{}", decision.reclaim_count), session_id.clone().unwrap_or_else(|| format!("runtime_job:{job_id}")), job_id, now_ms, payload])
+                    .map_err(|error| format!("append expired lease diagnostic failed: {error}"))?;
+                if decision.status.is_terminal() {
+                    upsert_runtime_job_outbox_event(&tx, job_id, RUNTIME_JOB_TERMINAL_EVENT)?;
+                }
+            }
+            tx.commit().map_err(|error| format!("commit expired lease reclaim failed: {error}"))?;
+            Ok(expired.len())
         })
     }
+}
+
+fn require_durable_lease_reclaim(connection: &rusqlite::Connection) -> Result<(), String> {
+    // This operation owns a fresh connection. Raise only its critical commit
+    // policy; ordinary runtime writes retain the configured WAL NORMAL policy.
+    connection
+        .pragma_update(None, "synchronous", "FULL")
+        .map_err(|error| format!("require durable lease reclaim failed: {error}"))
 }
 
 impl ResourceClaimStorePort for SqliteRuntimeStore {
@@ -1591,8 +1617,34 @@ fn row_to_dead_letter(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeadLetterRec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use centaeris_core::session::store::RuntimeStore;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn critical_lease_reclaim_requires_full_sqlite_sync_only_on_its_connection() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .pragma_update(None, "synchronous", "NORMAL")
+            .unwrap();
+        require_durable_lease_reclaim(&connection).unwrap();
+        let synchronous: i64 = connection
+            .pragma_query_value(None, "synchronous", |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            synchronous, 2,
+            "acknowledged crash counts must not inherit WAL NORMAL power-loss policy"
+        );
+        let ordinary = rusqlite::Connection::open_in_memory().unwrap();
+        crate::configure_conn(&ordinary).unwrap();
+        assert_eq!(
+            ordinary
+                .pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1,
+            "critical reclaim must not change ordinary adapter connections"
+        );
+    }
 
     fn temp_db_path(suffix: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -1618,6 +1670,376 @@ mod tests {
             ttl_ms: 30_000,
             metadata_json: "{}".to_string(),
         }
+    }
+
+    fn crash_budget_job(id: &str) -> RuntimeJobRecord {
+        RuntimeJobRecord {
+            job_id: id.into(),
+            job_kind: "worker.noop".into(),
+            status: RuntimeJobStatus::Queued,
+            run_at_ms: 1,
+            lease_owner: None,
+            lease_expires_at_ms: None,
+            heartbeat_at_ms: None,
+            retry_count: 0,
+            max_retries: 10,
+            backoff_policy: RuntimeBackoffPolicy::default(),
+            idempotency_key: id.into(),
+            session_id: None,
+            branch_id: None,
+            checkpoint_id: None,
+            payload_ref: None,
+            output_refs: vec![],
+            last_error: None,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        }
+    }
+
+    fn claim_crash_budget_job(
+        store: &SqliteRuntimeStore,
+        id: &str,
+        now: i64,
+    ) -> Vec<RuntimeJobRecord> {
+        store
+            .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
+                now_ms: now,
+                worker_id: "crash-budget-worker".into(),
+                job_id: Some(id.into()),
+                job_kind: None,
+                session_id: None,
+                limit: 1,
+                lease_ms: 10,
+            })
+            .expect("claim isolated crash-budget job")
+    }
+
+    #[test]
+    fn sqlite_expired_lease_reclaim_pages_in_expiry_order_without_recounting() {
+        let db_path = temp_db_path("lease_reclaim_pages");
+        let store = SqliteRuntimeStore::new(&db_path).unwrap();
+        let session_id = "reclaim-pages-session";
+        let now = 200;
+        let mut expired = Vec::new();
+        // Reverse insertion and interleaved expirations distinguish both sort keys
+        // from insertion order, while 103 jobs cross the maintenance batch boundary.
+        for index in (0..103).rev() {
+            let id = format!("reclaim-page-{index:03}");
+            let mut job = crash_budget_job(&id);
+            job.status = if index % 2 == 0 {
+                RuntimeJobStatus::Leased
+            } else {
+                RuntimeJobStatus::Running
+            };
+            job.lease_owner = Some(format!("old-owner-{index}"));
+            job.lease_expires_at_ms = Some(110 + index % 3);
+            job.session_id = Some(session_id.into());
+            expired.push(job.clone());
+            store
+                .schedule_runtime_job(ScheduleRuntimeJobRequest { job })
+                .unwrap();
+        }
+        expired.sort_by_key(|job| (job.lease_expires_at_ms, job.job_id.clone()));
+        let terminal_ids = ["reclaim-page-000", "reclaim-page-101"];
+        // The public record omits the persisted crash counter. Seed its prior
+        // history so both pages exercise the terminal transition and outbox.
+        store
+            .with_conn(|conn| {
+                for id in terminal_ids {
+                    conn.execute(
+                        "UPDATE runtime_jobs SET lease_reclaim_count=3 WHERE job_id=?1",
+                        params![id],
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        store
+            .schedule_runtime_job(ScheduleRuntimeJobRequest {
+                job: crash_budget_job("ordinary-queued"),
+            })
+            .unwrap();
+        store
+            .schedule_runtime_job(ScheduleRuntimeJobRequest {
+                job: crash_budget_job("lawful-page-wait"),
+            })
+            .unwrap();
+        let waiting_claim = claim_crash_budget_job(&store, "lawful-page-wait", 100);
+        store
+            .yield_runtime_job(YieldRuntimeJobRequest {
+                job_id: "lawful-page-wait".into(),
+                lease_owner: waiting_claim[0].lease_owner.clone().unwrap(),
+                yielded_at_ms: 101,
+                run_at_ms: 10_000,
+                transition_reason: "runtime_job_wait".into(),
+            })
+            .unwrap();
+        let mut live = crash_budget_job("unexpired-page-lease");
+        live.status = RuntimeJobStatus::Leased;
+        live.lease_owner = Some("live-owner".into());
+        live.lease_expires_at_ms = Some(now + 1);
+        store
+            .schedule_runtime_job(ScheduleRuntimeJobRequest { job: live })
+            .unwrap();
+        let mut finished = crash_budget_job("finished-page-job");
+        finished.status = RuntimeJobStatus::Succeeded;
+        finished.lease_owner = Some("finished-owner".into());
+        finished.lease_expires_at_ms = Some(100);
+        store
+            .schedule_runtime_job(ScheduleRuntimeJobRequest { job: finished })
+            .unwrap();
+        let control_ids = [
+            "ordinary-queued",
+            "lawful-page-wait",
+            "unexpired-page-lease",
+            "finished-page-job",
+        ];
+        let controls: Vec<_> = control_ids
+            .iter()
+            .map(|id| store.get_runtime_job(id).unwrap().unwrap())
+            .collect();
+
+        for (expected_reclaimed, total_processed) in [(100, 100), (3, 103), (0, 103)] {
+            assert_eq!(
+                store.reclaim_expired_runtime_job_leases(now).unwrap(),
+                expected_reclaimed,
+                "one maintenance call must process at most 100 expired leases"
+            );
+            for (position, original) in expired.iter().enumerate() {
+                let current = store.get_runtime_job(&original.job_id).unwrap().unwrap();
+                if position >= total_processed {
+                    assert_eq!(current, *original, "later leases remain untouched");
+                    continue;
+                }
+                let terminal = terminal_ids.contains(&original.job_id.as_str());
+                assert_eq!(
+                    current.status,
+                    if terminal {
+                        RuntimeJobStatus::DeadLettered
+                    } else {
+                        RuntimeJobStatus::Queued
+                    }
+                );
+                assert!(current.lease_owner.is_none());
+                assert!(current.lease_expires_at_ms.is_none());
+                assert_eq!(current.retry_count, 0);
+                if !terminal {
+                    assert!(current.run_at_ms >= now + 2_000);
+                }
+            }
+            let events = store.list_events(session_id, 200, 0).unwrap();
+            assert_eq!(events.len(), total_processed);
+            for original in expired.iter().take(total_processed) {
+                let matching: Vec<_> = events
+                    .iter()
+                    .filter(|event| event.task_id.as_deref() == Some(original.job_id.as_str()))
+                    .collect();
+                assert_eq!(
+                    matching.len(),
+                    1,
+                    "already processed leases are not recounted"
+                );
+                assert_eq!(matching[0].event_type, "runtime_job_lease_reclaimed");
+                let payload: serde_json::Value =
+                    serde_json::from_str(&matching[0].payload_json).unwrap();
+                assert_eq!(
+                    payload["reclaimCount"],
+                    if terminal_ids.contains(&original.job_id.as_str()) {
+                        4
+                    } else {
+                        1
+                    }
+                );
+            }
+            let mut outbox_ids: Vec<_> = store
+                .list_pending_runtime_job_outbox(200)
+                .unwrap()
+                .into_iter()
+                .map(|event| event.job_id)
+                .collect();
+            outbox_ids.sort();
+            let mut expected_terminal: Vec<_> = expired
+                .iter()
+                .take(total_processed)
+                .filter(|job| terminal_ids.contains(&job.job_id.as_str()))
+                .map(|job| job.job_id.clone())
+                .collect();
+            expected_terminal.sort();
+            assert_eq!(outbox_ids, expected_terminal);
+            for control in &controls {
+                assert_eq!(
+                    store.get_runtime_job(&control.job_id).unwrap().as_ref(),
+                    Some(control)
+                );
+            }
+        }
+        assert_eq!(
+            claim_crash_budget_job(&store, "ordinary-queued", now).len(),
+            1
+        );
+        assert!(claim_crash_budget_job(&store, "lawful-page-wait", now).is_empty());
+        assert_eq!(
+            claim_crash_budget_job(&store, "lawful-page-wait", 10_000).len(),
+            1
+        );
+        drop(store);
+        std::fs::remove_file(db_path).unwrap();
+    }
+
+    #[test]
+    fn sqlite_expired_lease_reclaim_backs_off_before_reassignment() {
+        let db_path = temp_db_path("lease_reclaim_backoff");
+        let store = SqliteRuntimeStore::new(&db_path).unwrap();
+        store
+            .schedule_runtime_job(ScheduleRuntimeJobRequest {
+                job: crash_budget_job("reclaim-backoff"),
+            })
+            .unwrap();
+        let claimed = claim_crash_budget_job(&store, "reclaim-backoff", 100);
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(store.reclaim_expired_runtime_job_leases(110).unwrap(), 1);
+        assert!(
+            claim_crash_budget_job(&store, "reclaim-backoff", 110).is_empty(),
+            "an expired worker must not be reassigned immediately after reclaim"
+        );
+        let pending = store.get_runtime_job("reclaim-backoff").unwrap().unwrap();
+        assert!(pending.run_at_ms >= 2_110);
+        assert_eq!(
+            pending.retry_count, 0,
+            "crash budget is independent of normal failure retries"
+        );
+        assert!(store
+            .complete_runtime_job(CompleteRuntimeJobRequest {
+                job_id: pending.job_id,
+                lease_owner: claimed[0].lease_owner.clone().unwrap(),
+                output_refs: vec![],
+                completed_at_ms: 111,
+            })
+            .is_err());
+        drop(store);
+        std::fs::remove_file(db_path).unwrap();
+    }
+
+    #[test]
+    fn sqlite_expired_lease_reclaim_budget_survives_restart_and_isolates_crash_loop() {
+        let db_path = temp_db_path("lease_reclaim_budget");
+        let store = SqliteRuntimeStore::new(&db_path).unwrap();
+        store
+            .schedule_runtime_job(ScheduleRuntimeJobRequest {
+                job: crash_budget_job("crash-loop"),
+            })
+            .unwrap();
+        drop(store);
+        let mut now = 100;
+        for attempt in 0..4 {
+            let store = SqliteRuntimeStore::new(&db_path).unwrap();
+            let claimed = claim_crash_budget_job(&store, "crash-loop", now);
+            assert_eq!(claimed.len(), 1, "allowed attempt {attempt}");
+            if attempt % 2 == 1 {
+                store
+                    .start_runtime_job(StartRuntimeJobRequest {
+                        job_id: "crash-loop".into(),
+                        lease_owner: claimed[0].lease_owner.clone().unwrap(),
+                        started_at_ms: now + 1,
+                    })
+                    .unwrap();
+            }
+            assert_eq!(
+                store.reclaim_expired_runtime_job_leases(now + 10).unwrap(),
+                1
+            );
+            now = store
+                .get_runtime_job("crash-loop")
+                .unwrap()
+                .unwrap()
+                .run_at_ms;
+        }
+        let store = SqliteRuntimeStore::new(&db_path).unwrap();
+        let isolated = store.get_runtime_job("crash-loop").unwrap().unwrap();
+        assert_eq!(
+            isolated.status,
+            RuntimeJobStatus::DeadLettered,
+            "repeated worker loss must stop automatic reassignment"
+        );
+        assert_eq!(
+            isolated.last_error.as_deref(),
+            Some("lease_reclaim_budget_exhausted")
+        );
+        assert_eq!(isolated.retry_count, 0);
+        assert!(claim_crash_budget_job(&store, "crash-loop", now + 1_000_000).is_empty());
+        assert_eq!(store.list_pending_runtime_job_outbox(10).unwrap().len(), 1);
+        drop(store);
+        std::fs::remove_file(db_path).unwrap();
+    }
+
+    #[test]
+    fn sqlite_runtime_job_wake_preserves_expired_lease_backoff() {
+        let db_path = temp_db_path("lease_reclaim_wake");
+        let store = SqliteRuntimeStore::new(&db_path).unwrap();
+        store
+            .schedule_runtime_job(ScheduleRuntimeJobRequest {
+                job: crash_budget_job("reclaim-wake"),
+            })
+            .unwrap();
+        assert_eq!(claim_crash_budget_job(&store, "reclaim-wake", 100).len(), 1);
+        store.reclaim_expired_runtime_job_leases(110).unwrap();
+        store
+            .wake_runtime_job(WakeRuntimeJobRequest {
+                job_id: "reclaim-wake".into(),
+                source_job_id: "finished-child".into(),
+                woken_at_ms: 111,
+                transition_reason: "runtime_job_wait_ready".into(),
+            })
+            .unwrap();
+        assert!(
+            claim_crash_budget_job(&store, "reclaim-wake", 111).is_empty(),
+            "a child completion wake must not erase persisted crash backoff"
+        );
+        drop(store);
+        std::fs::remove_file(db_path).unwrap();
+    }
+
+    #[test]
+    fn sqlite_lawful_wait_yield_is_not_an_expired_lease() {
+        let db_path = temp_db_path("lawful_wait");
+        let store = SqliteRuntimeStore::new(&db_path).unwrap();
+        store
+            .schedule_runtime_job(ScheduleRuntimeJobRequest {
+                job: crash_budget_job("lawful-wait"),
+            })
+            .unwrap();
+        let mut now = 100;
+        for reason in [
+            "question_wait",
+            "runtime_job_wait",
+            "question_wait",
+            "runtime_job_wait",
+            "question_wait",
+        ] {
+            let claimed = claim_crash_budget_job(&store, "lawful-wait", now);
+            assert_eq!(claimed.len(), 1);
+            store
+                .yield_runtime_job(YieldRuntimeJobRequest {
+                    job_id: "lawful-wait".into(),
+                    lease_owner: claimed[0].lease_owner.clone().unwrap(),
+                    yielded_at_ms: now + 1,
+                    run_at_ms: now + 100,
+                    transition_reason: reason.into(),
+                })
+                .unwrap();
+            assert_eq!(
+                store.reclaim_expired_runtime_job_leases(now + 11).unwrap(),
+                0
+            );
+            now += 100;
+        }
+        let waiting = store.get_runtime_job("lawful-wait").unwrap().unwrap();
+        assert_eq!(waiting.status, RuntimeJobStatus::Queued);
+        assert_eq!(waiting.retry_count, 0);
+        drop(store);
+        std::fs::remove_file(db_path).unwrap();
     }
 
     #[test]
