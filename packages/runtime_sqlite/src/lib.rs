@@ -28,7 +28,7 @@ mod sqlite_transcript;
 #[path = "sqlite_store/sqlite_turn_supplement.rs"]
 mod sqlite_turn_supplement;
 
-pub const STORE_SCHEMA_VERSION: i64 = 4;
+pub const STORE_SCHEMA_VERSION: i64 = 5;
 
 #[derive(Debug, Clone)]
 pub struct SqliteRuntimeStore {
@@ -1084,7 +1084,13 @@ mod tests {
         let store = SqliteRuntimeStore::new(&path).unwrap();
         assert_eq!(store.get_runtime_job("fenced-job").unwrap().unwrap(), old);
         store.reclaim_expired_runtime_job_leases(200).unwrap();
-        let current = store.claim_due_runtime_jobs(claim(200)).unwrap().remove(0);
+        let due = store
+            .get_runtime_job("fenced-job")
+            .unwrap()
+            .unwrap()
+            .run_at_ms;
+        assert!(store.claim_due_runtime_jobs(claim(200)).unwrap().is_empty());
+        let current = store.claim_due_runtime_jobs(claim(due)).unwrap().remove(0);
         let old_owner = old.lease_owner.clone().unwrap();
         assert!(store
             .start_runtime_job(
@@ -1153,7 +1159,7 @@ mod tests {
                 job_id: "fenced-job".into(),
                 lease_owner: current.lease_owner.unwrap(),
                 output_refs: vec!["current-result".into()],
-                completed_at_ms: 202,
+                completed_at_ms: due + 2,
             })
             .unwrap();
         assert_eq!(

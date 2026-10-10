@@ -1554,7 +1554,7 @@ fn reclaim_expired_runtime_job_leases_recovers_running_subagent_job() {
         .expect("get reclaimed job")
         .expect("reclaimed job exists");
     assert_eq!(job.status, RuntimeJobStatus::Queued);
-    assert_eq!(job.run_at_ms, 1_200);
+    assert!(job.run_at_ms >= 3_200);
     assert_eq!(job.last_error.as_deref(), Some("worker_crashed_reclaimed"));
 
     drop(store);
@@ -1733,9 +1733,10 @@ async fn run_due_subagent_jobs_worker_pool_async_fails_when_resource_claim_packe
 
 #[tokio::test]
 async fn late_cancelled_worker_cannot_cancel_reclaimed_job() {
-    use centaeris_core::session::reliability::ClaimDueRuntimeJobsRequest;
+    use centaeris_core::session::reliability::{ClaimDueRuntimeJobsRequest, RuntimeJobRecord};
     struct ReclaimedRunner {
         actor: RuntimeStoreActor,
+        replacement: Arc<Mutex<Option<RuntimeJobRecord>>>,
     }
     impl AsyncSubagentWorkerRunner for ReclaimedRunner {
         fn run_async<'a>(
@@ -1747,10 +1748,17 @@ async fn late_cancelled_worker_cannot_cancel_reclaimed_job() {
                     .reclaim_expired_runtime_job_leases(6001)
                     .await
                     .unwrap();
+                let due = self
+                    .actor
+                    .get_runtime_job(&request.job.job_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .run_at_ms;
                 let newer = self
                     .actor
                     .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
-                        now_ms: 6001,
+                        now_ms: due,
                         worker_id: "same-worker".into(),
                         job_id: Some(request.job.job_id),
                         job_kind: None,
@@ -1761,6 +1769,7 @@ async fn late_cancelled_worker_cannot_cancel_reclaimed_job() {
                     .await
                     .unwrap();
                 assert_eq!(newer.len(), 1);
+                *self.replacement.lock().unwrap() = newer.into_iter().next();
                 SubagentWorkerRunOutcome::Cancelled {
                     reason: "old execution stopped".into(),
                 }
@@ -1786,11 +1795,13 @@ async fn late_cancelled_worker_cannot_cancel_reclaimed_job() {
         fail_on_start: false,
         fail_on_stop: false,
     };
+    let replacement = Arc::new(Mutex::new(None));
     run_claimed_subagent_job_async(
         &actor,
         claimed,
         &ReclaimedRunner {
             actor: actor.clone(),
+            replacement: replacement.clone(),
         },
         &observer,
         RunClaimedSubagentJobRequest {
@@ -1803,7 +1814,11 @@ async fn late_cancelled_worker_cannot_cancel_reclaimed_job() {
     .expect_err("old cancellation must not affect a newly claimed execution");
     let current = store.get_runtime_job(&job_id).unwrap().unwrap();
     assert_eq!(current.status, RuntimeJobStatus::Leased);
-    assert_eq!(current.lease_expires_at_ms, Some(11001));
+    assert_eq!(
+        Some(current),
+        *replacement.lock().unwrap(),
+        "late cancellation must preserve the complete replacement lease"
+    );
     assert_eq!(
         observer_events.lock().unwrap().len(),
         1,

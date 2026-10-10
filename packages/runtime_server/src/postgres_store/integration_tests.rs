@@ -891,6 +891,337 @@ fn job(id: &str, key: &str) -> RuntimeJobRecord {
 
 #[test]
 #[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_expired_lease_reclaim_pages_in_expiry_and_job_order_without_replay() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    let mut db = Client::connect(&url, NoTls).unwrap();
+    let now = 1_000;
+    let mut expected = Vec::new();
+    // Reverse insertion and shared expiry timestamps make both ordering keys observable.
+    for index in (0..103).rev() {
+        let id = format!("pg-reclaim-page-{index:03}");
+        let expires = 100 + (index % 3) as i64;
+        let exhausted = index % 10 == 0;
+        let mut active = job(&id, &id);
+        active.status = if index % 2 == 0 {
+            RuntimeJobStatus::Leased
+        } else {
+            RuntimeJobStatus::Running
+        };
+        active.lease_owner = Some(format!("worker-{index}"));
+        active.lease_expires_at_ms = Some(expires);
+        store
+            .schedule_runtime_job(ScheduleRuntimeJobRequest { job: active })
+            .unwrap();
+        if exhausted {
+            db.execute(
+                "UPDATE runtime.runtime_jobs SET lease_reclaim_count=3 WHERE job_id=$1",
+                &[&id],
+            )
+            .unwrap();
+        }
+        expected.push((expires, id, exhausted));
+    }
+    expected.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
+
+    for (expected_batch, completed) in [(100, 100), (3, 103), (0, 103)] {
+        assert_eq!(
+            store.reclaim_expired_runtime_job_leases(now).unwrap(),
+            expected_batch,
+            "each call must reclaim at most 100 jobs and continue the remaining page"
+        );
+        for (position, (_, id, exhausted)) in expected.iter().enumerate() {
+            let reclaimed = position < completed;
+            let active = store.get_runtime_job(id).unwrap().unwrap();
+            let original_index: usize = id.rsplit('-').next().unwrap().parse().unwrap();
+            let expected_status = if reclaimed {
+                if *exhausted {
+                    RuntimeJobStatus::DeadLettered
+                } else {
+                    RuntimeJobStatus::Queued
+                }
+            } else if original_index.is_multiple_of(2) {
+                RuntimeJobStatus::Leased
+            } else {
+                RuntimeJobStatus::Running
+            };
+            assert_eq!(active.status, expected_status, "reclaim order for {id}");
+            assert_eq!(active.lease_owner.is_none(), reclaimed, "lease for {id}");
+            assert_eq!(active.lease_expires_at_ms.is_none(), reclaimed);
+            assert_eq!(active.retry_count, 0);
+            let prior_count = if *exhausted { 3 } else { 0 };
+            let count = db
+                .query_one(
+                    "SELECT lease_reclaim_count FROM runtime.runtime_jobs WHERE job_id=$1",
+                    &[id],
+                )
+                .unwrap()
+                .get::<_, i64>(0);
+            assert_eq!(count, prior_count + i64::from(reclaimed), "count for {id}");
+        }
+        let diagnostics = db
+            .query(
+                "SELECT task_id,payload_json FROM runtime.runtime_events WHERE event_type='runtime_job_lease_reclaimed' ORDER BY task_id",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(diagnostics.len(), completed);
+        let mut expected_ids = expected[..completed]
+            .iter()
+            .map(|(_, id, _)| id.clone())
+            .collect::<Vec<_>>();
+        expected_ids.sort();
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|row| row.get::<_, String>(0))
+                .collect::<Vec<_>>(),
+            expected_ids
+        );
+        for row in diagnostics {
+            let id = row.get::<_, String>(0);
+            let payload: serde_json::Value =
+                serde_json::from_str(&row.get::<_, String>(1)).unwrap();
+            let exhausted = expected
+                .iter()
+                .find(|(_, job_id, _)| job_id == &id)
+                .unwrap()
+                .2;
+            assert_eq!(payload["jobId"], id);
+            assert_eq!(payload["reclaimCount"], if exhausted { 4 } else { 1 });
+        }
+        let mut terminal_ids = expected[..completed]
+            .iter()
+            .filter(|(_, _, exhausted)| *exhausted)
+            .map(|(_, id, _)| id.clone())
+            .collect::<Vec<_>>();
+        terminal_ids.sort();
+        assert_eq!(
+            store
+                .list_pending_runtime_job_outbox(200)
+                .unwrap()
+                .into_iter()
+                .map(|record| record.job_id)
+                .collect::<Vec<_>>(),
+            terminal_ids,
+            "only newly isolated jobs produce terminal outbox records, without duplicates"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_expired_lease_reclaim_skips_another_workers_locked_job() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let url = test_url();
+    reset_store(&url);
+    let first_store = PostgresRuntimeStore::new(&url).unwrap();
+    let second_store = PostgresRuntimeStore::new(&url).unwrap();
+    for index in 0..3 {
+        let id = format!("pg-reclaim-locked-{index}");
+        let mut active = job(&id, &id);
+        active.status = RuntimeJobStatus::Running;
+        active.lease_owner = Some(format!("worker-{index}"));
+        active.lease_expires_at_ms = Some(100 + index);
+        first_store
+            .schedule_runtime_job(ScheduleRuntimeJobRequest { job: active })
+            .unwrap();
+    }
+    let mut db = Client::connect(&url, NoTls).unwrap();
+    let mut locked = db.transaction().unwrap();
+    locked
+        .query_one(
+            "SELECT job_id FROM runtime.runtime_jobs WHERE job_id='pg-reclaim-locked-0' FOR UPDATE",
+            &[],
+        )
+        .unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        sender
+            .send(second_store.reclaim_expired_runtime_job_leases(200))
+            .unwrap();
+    });
+    let result = receiver.recv_timeout(Duration::from_secs(5));
+    // Always release the row lock before joining, including the failure path.
+    locked.rollback().unwrap();
+    worker.join().unwrap();
+    assert_eq!(
+        result
+            .expect("another worker must progress while the oldest lease is locked")
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        first_store
+            .get_runtime_job("pg-reclaim-locked-0")
+            .unwrap()
+            .unwrap()
+            .status,
+        RuntimeJobStatus::Running
+    );
+    assert_eq!(
+        first_store.reclaim_expired_runtime_job_leases(200).unwrap(),
+        1
+    );
+    assert_eq!(
+        first_store.reclaim_expired_runtime_job_leases(200).unwrap(),
+        0
+    );
+    let counts = db.query_one("SELECT count(*),sum(lease_reclaim_count)::bigint FROM runtime.runtime_jobs WHERE status='queued'", &[]).unwrap();
+    assert_eq!(counts.get::<_, i64>(0), 3);
+    assert_eq!(counts.get::<_, i64>(1), 3);
+    assert_eq!(db.query_one("SELECT count(*) FROM runtime.runtime_events WHERE event_type='runtime_job_lease_reclaimed'", &[]).unwrap().get::<_, i64>(0), 3);
+    assert!(first_store
+        .list_pending_runtime_job_outbox(10)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_expired_lease_budget_persists_backoff_fencing_and_isolation() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    store
+        .schedule_runtime_job(ScheduleRuntimeJobRequest {
+            job: job("pg-crash-budget", "pg-crash-budget"),
+        })
+        .unwrap();
+    let claim = |store: &PostgresRuntimeStore, now_ms| {
+        store
+            .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
+                now_ms,
+                worker_id: "crashing-worker".into(),
+                job_id: Some("pg-crash-budget".into()),
+                job_kind: None,
+                session_id: None,
+                limit: 1,
+                lease_ms: 10,
+            })
+            .unwrap()
+    };
+    drop(store);
+    let mut now = 100;
+    for attempt in 0..4 {
+        let store = PostgresRuntimeStore::new(&url).unwrap();
+        let active = claim(&store, now).remove(0);
+        if attempt % 2 == 1 {
+            store
+                .start_runtime_job(StartRuntimeJobRequest {
+                    job_id: active.job_id.clone(),
+                    lease_owner: active.lease_owner.clone().unwrap(),
+                    started_at_ms: now + 1,
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            store.reclaim_expired_runtime_job_leases(now + 10).unwrap(),
+            1
+        );
+        assert!(claim(&store, now + 10).is_empty());
+        assert!(store
+            .complete_runtime_job(CompleteRuntimeJobRequest {
+                job_id: active.job_id,
+                lease_owner: active.lease_owner.unwrap(),
+                output_refs: vec![],
+                completed_at_ms: now + 11,
+            })
+            .is_err());
+        store
+            .wake_runtime_job(
+                centaeris_core::session::reliability::WakeRuntimeJobRequest {
+                    job_id: "pg-crash-budget".into(),
+                    source_job_id: format!("child-{attempt}"),
+                    woken_at_ms: now + 11,
+                    transition_reason: "runtime_job_wait_ready".into(),
+                },
+            )
+            .unwrap();
+        assert!(claim(&store, now + 11).is_empty());
+        now = store
+            .get_runtime_job("pg-crash-budget")
+            .unwrap()
+            .unwrap()
+            .run_at_ms;
+    }
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    let isolated = store.get_runtime_job("pg-crash-budget").unwrap().unwrap();
+    assert_eq!(isolated.status, RuntimeJobStatus::DeadLettered);
+    assert_eq!(
+        isolated.last_error.as_deref(),
+        Some("lease_reclaim_budget_exhausted")
+    );
+    assert_eq!(isolated.retry_count, 0);
+    assert!(claim(&store, now + 1_000_000).is_empty());
+    assert_eq!(store.list_pending_runtime_job_outbox(10).unwrap().len(), 1);
+    let mut db = Client::connect(&url, NoTls).unwrap();
+    assert_eq!(
+        db.query_one(
+            "SELECT lease_reclaim_count FROM runtime.runtime_jobs WHERE job_id='pg-crash-budget'",
+            &[]
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        4
+    );
+    let diagnostic = db.query_one("SELECT payload_json FROM runtime.runtime_events WHERE event_id='runtime_job_lease_reclaimed:pg-crash-budget:4'", &[]).unwrap().get::<_, String>(0);
+    let diagnostic: serde_json::Value = serde_json::from_str(&diagnostic).unwrap();
+    assert_eq!(diagnostic["reclaimCount"], 4);
+    assert_eq!(diagnostic["maxReclaims"], 3);
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_lease_budget_forward_migration_preserves_published_job_facts() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    let mut prior = job("pg-previous-job", "pg-previous-job");
+    prior.status = RuntimeJobStatus::Running;
+    prior.retry_count = 1;
+    prior.lease_owner = Some("prior-worker".into());
+    prior.lease_expires_at_ms = Some(200);
+    store
+        .schedule_runtime_job(ScheduleRuntimeJobRequest { job: prior.clone() })
+        .unwrap();
+    drop(store);
+    let mut db = Client::connect(&url, NoTls).unwrap();
+    db.batch_execute("DELETE FROM runtime.schema_migrations WHERE version>=6; ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_count; ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_not_before_ms;").unwrap();
+    let history = db
+        .query(
+            "SELECT version,applied_at_ms FROM runtime.schema_migrations ORDER BY version",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|row| (row.get::<_, i64>(0), row.get::<_, i64>(1)))
+        .collect::<Vec<_>>();
+    let upgraded = PostgresRuntimeStore::new(&url).unwrap();
+    assert_eq!(
+        upgraded.get_runtime_job("pg-previous-job").unwrap(),
+        Some(prior)
+    );
+    let retained_history = db.query("SELECT version,applied_at_ms FROM runtime.schema_migrations WHERE version<=5 ORDER BY version", &[]).unwrap().iter()
+        .map(|row| (row.get::<_, i64>(0), row.get::<_, i64>(1))).collect::<Vec<_>>();
+    assert_eq!(retained_history, history);
+    assert_eq!(db.query_one("SELECT lease_reclaim_count,lease_reclaim_not_before_ms FROM runtime.runtime_jobs WHERE job_id='pg-previous-job'", &[]).unwrap().get::<_, i64>(0), 0);
+    assert!(db
+        .execute(
+            "UPDATE runtime.runtime_jobs SET lease_reclaim_count=-1",
+            &[]
+        )
+        .is_err());
+    drop(upgraded);
+    PostgresRuntimeStore::new(&url).unwrap();
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
 fn postgres_same_worker_reclaim_fences_old_writes_and_result_transaction() {
     let _guard = TEST_LOCK.lock().unwrap();
     let url = test_url();
@@ -937,7 +1268,12 @@ fn postgres_same_worker_reclaim_fences_old_writes_and_result_transaction() {
         Some(old.as_str())
     );
     assert_eq!(store.reclaim_expired_runtime_job_leases(110).unwrap(), 1);
-    let current = claim(&store, 110);
+    let due = store
+        .get_runtime_job("job_pg_reclaim")
+        .unwrap()
+        .unwrap()
+        .run_at_ms;
+    let current = claim(&store, due);
     assert_ne!(
         old, current,
         "each claim needs a new identity even for the same worker"
@@ -1051,7 +1387,7 @@ fn postgres_same_worker_reclaim_fences_old_writes_and_result_transaction() {
         .start_runtime_job(StartRuntimeJobRequest {
             job_id: "job_pg_reclaim".into(),
             lease_owner: current.clone(),
-            started_at_ms: 111,
+            started_at_ms: due + 1,
         })
         .unwrap();
     store
@@ -1059,7 +1395,7 @@ fn postgres_same_worker_reclaim_fences_old_writes_and_result_transaction() {
             job_id: "job_pg_reclaim".into(),
             lease_owner: current,
             output_refs: vec![],
-            completed_at_ms: 112,
+            completed_at_ms: due + 2,
         })
         .unwrap();
     assert_eq!(
@@ -1168,9 +1504,14 @@ fn postgres_worker_cancel_checks_claim_but_user_cancel_targets_job() {
         Some("released_worker_identity")
     );
     assert_eq!(store.reclaim_expired_runtime_job_leases(200).unwrap(), 1);
+    let due = store
+        .get_runtime_job("job_pg_published_transition")
+        .unwrap()
+        .unwrap()
+        .run_at_ms;
     let claim = store
         .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
-            now_ms: 200,
+            now_ms: due,
             worker_id: "released_worker_identity".into(),
             job_id: Some("job_pg_published_transition".into()),
             job_kind: None,
@@ -1189,7 +1530,7 @@ fn postgres_worker_cancel_checks_claim_but_user_cancel_targets_job() {
             job_id: claim.job_id,
             lease_owner: claim.lease_owner.unwrap(),
             output_refs: vec![],
-            completed_at_ms: 201,
+            completed_at_ms: due + 1,
         })
         .unwrap();
 }
@@ -1240,7 +1581,12 @@ fn postgres_hosted_worker_reclaim_changes_claim_identity() {
         )
         .unwrap()
         .get(0);
-    assert_eq!(store.reclaim_expired_runtime_job_leases(now).unwrap(), 1);
+    assert_eq!(
+        store
+            .reclaim_expired_runtime_job_leases(now - 60_000)
+            .unwrap(),
+        1
+    );
     let current = claim(&store);
     assert_ne!(old, current);
     assert!(store
@@ -2264,7 +2610,7 @@ fn postgres_runtime_store_persists_core_state_and_claims_jobs_once() {
     );
     let current_owner = store
         .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
-            now_ms: 120,
+            now_ms: store.get_runtime_job("job_pg").unwrap().unwrap().run_at_ms,
             worker_id: "worker_b".to_string(),
             job_id: Some("job_pg".to_string()),
             job_kind: None,
@@ -2666,7 +3012,11 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
         .expect("reclaim old lease");
     let new_owner = store
         .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
-            now_ms: now_ms + 11,
+            now_ms: store
+                .get_runtime_job("agent_run.lifecycle:agent_run_fenced_terminal")
+                .unwrap()
+                .unwrap()
+                .run_at_ms,
             worker_id: "new_owner".to_string(),
             job_id: Some("agent_run.lifecycle:agent_run_fenced_terminal".to_string()),
             job_kind: None,

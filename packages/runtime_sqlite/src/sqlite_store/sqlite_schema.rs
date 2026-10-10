@@ -29,8 +29,32 @@ pub(super) fn ensure_schema(conn: &Connection) -> Result<(), String> {
         return Ok(());
     }
 
+    upgrade_lease_reclaim_budget(conn)?;
     validate_schema_history(conn)?;
     validate_schema_shape(conn)
+}
+
+fn upgrade_lease_reclaim_budget(conn: &Connection) -> Result<(), String> {
+    if object_sql(conn, "table", "schema_migrations")?.is_none()
+        || schema_versions(conn)? != [1, 2, 3, 4]
+    {
+        return Ok(());
+    }
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|error| format!("begin lease reclaim schema upgrade failed: {error}"))?;
+    if schema_versions(&tx)? != [1, 2, 3, 4] {
+        return Ok(());
+    }
+    validate_schema_shape_with_reclaim_budget(&tx, false)?;
+    tx.execute_batch(
+        "ALTER TABLE runtime_jobs ADD COLUMN lease_reclaim_count INTEGER NOT NULL DEFAULT 0 CHECK (lease_reclaim_count >= 0);
+         ALTER TABLE runtime_jobs ADD COLUMN lease_reclaim_not_before_ms INTEGER;"
+    ).map_err(|error| format!("add lease reclaim budget columns failed: {error}"))?;
+    tx.execute("INSERT INTO schema_migrations(version,applied_at_ms) VALUES(5,CAST(strftime('%s','now') AS INTEGER)*1000)", [])
+        .map_err(|error| format!("record lease reclaim schema upgrade failed: {error}"))?;
+    validate_schema_shape_with_reclaim_budget(&tx, true)?;
+    tx.commit()
+        .map_err(|error| format!("commit lease reclaim schema upgrade failed: {error}"))
 }
 
 fn validate_schema_history(conn: &Connection) -> Result<i64, String> {
@@ -182,6 +206,8 @@ const REQUIRED_TABLES: &[RequiredObject] = &[
             created_at_ms INTEGER NOT NULL,
             updated_at_ms INTEGER NOT NULL,
             heartbeat_at_ms INTEGER,
+            lease_reclaim_count INTEGER NOT NULL DEFAULT 0 CHECK (lease_reclaim_count >= 0),
+            lease_reclaim_not_before_ms INTEGER,
             UNIQUE(job_kind, idempotency_key)
         )
         ",
@@ -542,6 +568,13 @@ pub(super) fn runtime_schema_user_table_count(conn: &Connection) -> Result<i64, 
 }
 
 pub(super) fn validate_schema_shape(conn: &Connection) -> Result<(), String> {
+    validate_schema_shape_with_reclaim_budget(conn, true)
+}
+
+fn validate_schema_shape_with_reclaim_budget(
+    conn: &Connection,
+    reclaim_budget: bool,
+) -> Result<(), String> {
     for table_name in user_tables(conn)? {
         if REQUIRED_TABLES
             .iter()
@@ -561,12 +594,22 @@ pub(super) fn validate_schema_shape(conn: &Connection) -> Result<(), String> {
         }
     }
     for table in REQUIRED_TABLES.iter().chain(TRANSCRIPT_TABLES) {
-        validate_object_sql(conn, "table", table.name, table.sql)?;
+        let expected_sql = if table.name == "runtime_jobs" && !reclaim_budget {
+            previous_runtime_jobs_sql(table.sql)
+        } else {
+            table.sql.to_string()
+        };
+        validate_object_sql(conn, "table", table.name, &expected_sql)?;
     }
     for index in REQUIRED_INDEXES.iter().chain(TRANSCRIPT_INDEXES) {
         validate_object_sql(conn, "index", index.name, index.sql)?;
     }
     Ok(())
+}
+
+fn previous_runtime_jobs_sql(sql: &str) -> String {
+    sql.replace("            lease_reclaim_count INTEGER NOT NULL DEFAULT 0 CHECK (lease_reclaim_count >= 0),\n", "")
+        .replace("            lease_reclaim_not_before_ms INTEGER,\n", "")
 }
 
 fn validate_object_sql(
@@ -577,8 +620,18 @@ fn validate_object_sql(
 ) -> Result<(), String> {
     let actual_sql = object_sql(conn, object_type, name)?
         .ok_or_else(|| format!("runtime sqlite required {object_type} missing: {name}"))?;
-    let actual = normalize_sql(actual_sql.as_str());
-    let expected = normalize_sql(expected_sql);
+    // SQLite ALTER ADD COLUMN places new fields before table constraints and
+    // preserves the old whitespace. Compare the same strict definition without
+    // requiring the formatting of a newly-created table.
+    let normalize = |sql: &str| {
+        if name == "runtime_jobs" {
+            sql.split_whitespace().collect::<String>()
+        } else {
+            normalize_sql(sql)
+        }
+    };
+    let actual = normalize(actual_sql.as_str());
+    let expected = normalize(expected_sql);
     if actual != expected {
         return Err(format!(
             "runtime sqlite {object_type} definition mismatch: {name}"
@@ -669,9 +722,79 @@ fn user_indexes(conn: &Connection) -> Result<Vec<String>, String> {
 mod tests {
     use super::*;
 
+    fn previous_schema(conn: &Connection) {
+        for table in REQUIRED_TABLES.iter().chain(TRANSCRIPT_TABLES) {
+            let sql = if table.name == "runtime_jobs" {
+                previous_runtime_jobs_sql(table.sql)
+            } else {
+                table.sql.to_string()
+            };
+            conn.execute_batch(&sql).unwrap();
+        }
+        for index in REQUIRED_INDEXES.iter().chain(TRANSCRIPT_INDEXES) {
+            conn.execute_batch(index.sql).unwrap();
+        }
+        for version in 1..=4 {
+            conn.execute("INSERT INTO schema_migrations VALUES(?1,1234)", [version])
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn lease_reclaim_forward_migration_preserves_jobs_outbox_and_history() {
+        let conn = Connection::open_in_memory().unwrap();
+        previous_schema(&conn);
+        conn.execute_batch("INSERT INTO runtime_jobs(job_id,job_kind,status,run_at_ms,retry_count,max_retries,backoff_policy_json,idempotency_key,created_at_ms,updated_at_ms,lease_owner,lease_expires_at_ms) VALUES('old-job','worker.noop','running',1,2,8,'{}','old-key',5,10,'old-lease',20); INSERT INTO runtime_job_outbox VALUES('old-job','runtime_job.terminal',NULL,2);").unwrap();
+        ensure_schema(&conn).unwrap();
+        let state = conn.query_row("SELECT status,retry_count,lease_owner,lease_expires_at_ms,lease_reclaim_count,lease_reclaim_not_before_ms FROM runtime_jobs", [], |row| Ok((
+            row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?, row.get::<_, i64>(4)?, row.get::<_, Option<i64>>(5)?
+        ))).unwrap();
+        assert_eq!(
+            state,
+            ("running".into(), 2, "old-lease".into(), 20, 0, None)
+        );
+        assert_eq!(
+            conn.query_row("SELECT generation FROM runtime_job_outbox", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version<=4 AND applied_at_ms=1234",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            4
+        );
+        assert_eq!(schema_versions(&conn).unwrap(), [1, 2, 3, 4, 5]);
+        ensure_schema(&conn).unwrap();
+        assert!(conn
+            .execute("UPDATE runtime_jobs SET lease_reclaim_count=-1", [])
+            .is_err());
+    }
+
+    #[test]
+    fn lease_reclaim_migration_rejects_unknown_previous_shape_without_mutation() {
+        let conn = Connection::open_in_memory().unwrap();
+        previous_schema(&conn);
+        conn.execute_batch("ALTER TABLE runtime_jobs ADD COLUMN unknown_field TEXT")
+            .unwrap();
+        let before = object_sql(&conn, "table", "runtime_jobs").unwrap();
+        assert!(ensure_schema(&conn)
+            .unwrap_err()
+            .contains("definition mismatch"));
+        assert_eq!(object_sql(&conn, "table", "runtime_jobs").unwrap(), before);
+        assert_eq!(schema_versions(&conn).unwrap(), [1, 2, 3, 4]);
+    }
+
     #[test]
     fn unsupported_schema_is_rejected_without_changing_stored_facts() {
-        for version in (1..STORE_SCHEMA_VERSION).rev() {
+        for version in (1..4).rev() {
             let conn = Connection::open_in_memory().unwrap();
             create_schema(&conn).unwrap();
             conn.execute(

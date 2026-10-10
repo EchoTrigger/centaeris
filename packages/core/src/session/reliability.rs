@@ -108,6 +108,79 @@ pub fn runtime_job_retry_delay_ms(
     i64::try_from(capped.saturating_add(jitter)).unwrap_or(i64::MAX)
 }
 
+/// Bound one maintenance transaction while callers continue polling the backlog.
+pub const RUNTIME_JOB_LEASE_RECLAIM_BATCH_LIMIT: usize = 100;
+
+/// Expired leases consume a separate lifetime budget from reported failures.
+/// Lawful waits yield their lease and therefore never enter this policy.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeJobLeaseReclaimPolicy {
+    pub max_reclaims: u32,
+    pub backoff: RuntimeBackoffPolicy,
+}
+
+impl Default for RuntimeJobLeaseReclaimPolicy {
+    fn default() -> Self {
+        Self {
+            max_reclaims: 3,
+            backoff: RuntimeBackoffPolicy::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeJobLeaseReclaimDecision {
+    pub reclaim_count: u32,
+    pub status: RuntimeJobStatus,
+    pub not_before_ms: TimestampMs,
+    pub reason: &'static str,
+}
+
+impl RuntimeJobLeaseReclaimPolicy {
+    pub fn decide(
+        &self,
+        job_id: &str,
+        previous_reclaim_count: u32,
+        prior_status: &RuntimeJobStatus,
+        now_ms: TimestampMs,
+    ) -> Result<RuntimeJobLeaseReclaimDecision, String> {
+        if !matches!(
+            prior_status,
+            RuntimeJobStatus::Leased | RuntimeJobStatus::Running
+        ) {
+            return Err("only leased or running jobs can consume the lease reclaim budget".into());
+        }
+        let reclaim_count = previous_reclaim_count
+            .checked_add(1)
+            .ok_or("lease reclaim count overflow")?;
+        let exhausted = reclaim_count > self.max_reclaims;
+        let delay_ms = if exhausted {
+            0
+        } else {
+            runtime_job_retry_delay_ms(&self.backoff, reclaim_count, job_id, now_ms)
+        };
+        let not_before_ms = now_ms
+            .checked_add(delay_ms)
+            .ok_or("lease reclaim deadline overflow")?;
+        Ok(RuntimeJobLeaseReclaimDecision {
+            reclaim_count,
+            status: if exhausted {
+                RuntimeJobStatus::DeadLettered
+            } else {
+                RuntimeJobStatus::Queued
+            },
+            not_before_ms,
+            reason: if exhausted {
+                "lease_reclaim_budget_exhausted"
+            } else if *prior_status == RuntimeJobStatus::Running {
+                "worker_crashed_reclaimed"
+            } else {
+                "lease_expired_reclaimed"
+            },
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeJobRecord {
@@ -295,6 +368,8 @@ pub trait RuntimeJobStorePort {
     fn complete_runtime_job(&self, req: CompleteRuntimeJobRequest) -> Result<(), String>;
     fn fail_runtime_job(&self, req: FailRuntimeJobRequest) -> Result<(), String>;
     fn cancel_runtime_job(&self, req: CancelRuntimeJobRequest) -> Result<(), String>;
+    /// Reclaim a bounded batch, returning the number of transitioned jobs.
+    /// Remaining expired leases are handled by subsequent maintenance calls.
     fn reclaim_expired_runtime_job_leases(&self, now_ms: TimestampMs) -> Result<usize, String>;
 }
 
@@ -556,7 +631,37 @@ pub trait DeadLetterStorePort {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeadLetterStatus, RuntimeJobStatus};
+    use super::{DeadLetterStatus, RuntimeJobLeaseReclaimPolicy, RuntimeJobStatus};
+
+    #[test]
+    fn expired_lease_policy_has_finite_independent_budget_and_backoff() {
+        let policy = RuntimeJobLeaseReclaimPolicy::default();
+        let first = policy
+            .decide("crashed-job", 0, &RuntimeJobStatus::Leased, 100)
+            .unwrap();
+        assert_eq!(first.reclaim_count, 1);
+        assert_eq!(first.status, RuntimeJobStatus::Queued);
+        assert!(first.not_before_ms >= 2_100);
+        let last = policy
+            .decide("crashed-job", 2, &RuntimeJobStatus::Running, 100)
+            .unwrap();
+        assert_eq!(last.status, RuntimeJobStatus::Queued);
+        assert!(last.not_before_ms > first.not_before_ms);
+        let exhausted = policy
+            .decide("crashed-job", 3, &RuntimeJobStatus::Running, 100)
+            .unwrap();
+        assert_eq!(exhausted.status, RuntimeJobStatus::DeadLettered);
+        assert_eq!(exhausted.reason, "lease_reclaim_budget_exhausted");
+        assert!(policy
+            .decide("crashed-job", u32::MAX, &RuntimeJobStatus::Leased, 100)
+            .is_err());
+        assert!(policy
+            .decide("crashed-job", 0, &RuntimeJobStatus::Leased, i64::MAX)
+            .is_err());
+        assert!(policy
+            .decide("waiting-job", 0, &RuntimeJobStatus::Queued, 100)
+            .is_err());
+    }
 
     #[test]
     fn runtime_job_status_transitions_are_stable() {
