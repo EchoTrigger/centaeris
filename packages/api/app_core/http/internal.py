@@ -1283,6 +1283,127 @@ def discover_agent_work_consumption(request):
         return JsonResponse({"error": "agent_work_consume_discover_invalid"}, status=400)
 
 
+@_internal_post("/agent-work/returns/schedule")
+def schedule_agent_work_return(request):
+    from app_core.agent_work_return_jobs import schedule_work_return_job
+    from app_core.agent_work_returns import WorkReturnError
+    try:
+        body = decode_json_object(request)
+        if set(body) != {"schema", "workAgentRunId"} or body["schema"] != "workspace.agent_work.return_schedule.v1":
+            raise ValueError
+        require_opaque_ref("workAgentRunId", body["workAgentRunId"])
+        disposition = schedule_work_return_job(AgentRun.objects.get(pk=body["workAgentRunId"]))
+        return JsonResponse({"schema": "workspace.agent_work.return_scheduled.v1", "disposition": disposition})
+    except WorkReturnError as error:
+        return JsonResponse({"error": error.code}, status=error.status)
+    except AgentRun.DoesNotExist:
+        return JsonResponse({"error": "agent_work_return_source_not_found"}, status=404)
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "agent_work_return_schedule_invalid"}, status=400)
+    except RuntimeError:
+        return JsonResponse({"error": "agent_work_return_schedule_unavailable"}, status=503)
+
+
+@_internal_post("/agent-work/returns/audit/claim")
+def claim_agent_work_return_audit(request):
+    from app_core.agent_work_return_jobs import claim_work_return_audit
+    try:
+        body = decode_json_object(request)
+        if (set(body) != {"schema", "limit"} or body["schema"] != "workspace.agent_work.return_audit.claim.v1"
+                or type(body["limit"]) is not int or not 1 <= body["limit"] <= 100):
+            raise ValueError
+        return JsonResponse(claim_work_return_audit(body["limit"]))
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "agent_work_return_audit_invalid"}, status=400)
+
+
+@_internal_post("/agent-work/returns/audit/finish")
+def finish_agent_work_return_audit(request):
+    from app_core.agent_work_return_jobs import finish_work_return_audit
+    from app_core.agent_work_returns import WorkReturnError
+    try:
+        body = decode_json_object(request)
+        if (set(body) != {"schema", "leaseOwner", "after", "complete"}
+                or body["schema"] != "workspace.agent_work.return_audit.finish.v1"
+                or type(body["complete"]) is not bool):
+            raise ValueError
+        require_opaque_ref("leaseOwner", body["leaseOwner"])
+        if body["after"] is not None:
+            require_opaque_ref("after", body["after"])
+        finish_work_return_audit(body["leaseOwner"], body["after"], body["complete"])
+        return JsonResponse({"schema": "workspace.agent_work.return_audit.finished.v1", "disposition": "recorded"})
+    except WorkReturnError as error:
+        return JsonResponse({"error": error.code}, status=error.status)
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "agent_work_return_audit_invalid"}, status=400)
+
+
+@_internal_post("/agent-work/returns/query")
+def query_agent_work_return(request):
+    from app_core.agent_work_returns import query_work_return, WorkReturnError
+    try:
+        body = decode_json_object(request)
+        fields = {"schema", "agentRunId", "authorizationDigest", "coordinationSessionId", "toolCallId", "noticeId"}
+        if set(body) != fields or body["schema"] != "workspace.agent_work.return_query.v1":
+            raise ValueError
+        require_sha256("authorizationDigest", body["authorizationDigest"])
+        for name in fields - {"schema", "authorizationDigest"}:
+            require_opaque_ref(name, body[name])
+        return JsonResponse(query_work_return(body))
+    except WorkReturnError as error:
+        return JsonResponse({"error": error.code}, status=error.status)
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "agent_work_return_invalid"}, status=400)
+
+
+@_internal_post("/agent-work/returns/consume")
+def consume_agent_work_return(request):
+    from django.db import IntegrityError
+    from app_core.agent_work_consumption import consume_work_return
+    from app_core.agent_work_returns import WorkReturnError
+    from app_core.hosted_operations import HostedOperationError, OPERATION_ID_PATTERN
+    import re
+    try:
+        body = decode_json_object(request)
+        if set(body) != {"schema", "noticeId", "operationId"} or body["schema"] != "workspace.agent_work.consume.v1":
+            raise ValueError
+        require_opaque_ref("noticeId", body["noticeId"])
+        if not isinstance(body["operationId"], str) or re.fullmatch(OPERATION_ID_PATTERN, body["operationId"]) is None:
+            raise ValueError
+        response, status = consume_work_return(body["noticeId"], body["operationId"])
+        return JsonResponse(response, status=status)
+    except (WorkReturnError, HostedOperationError) as error:
+        return JsonResponse({"error": error.code}, status=error.status)
+    except (ValueError, TypeError, KeyError):
+        return JsonResponse({"error": "agent_work_consume_invalid"}, status=400)
+    except IntegrityError:
+        return JsonResponse({"error": "agent_work_consume_conflict"}, status=409)
+    except RuntimeError:
+        return JsonResponse({"error": "agent_work_consume_dependency_unavailable"}, status=503)
+
+
+@_internal_post("/agent-work/returns/consume/discover")
+def discover_agent_work_consumption(request):
+    from app_core.agent_work_consumption import discover_pending_work_returns
+    try:
+        body = decode_json_object(request)
+        if set(body) != {"schema", "limit", "after", "through"} or body["schema"] != "workspace.agent_work.consume_discover.v1":
+            raise ValueError
+        limit = body["limit"]
+        if type(limit) is not int or not 1 <= limit <= AGENT_RUN_LIFECYCLE_RECONCILE_LIMIT:
+            raise ValueError
+        for name in ("after", "through"):
+            if body[name] is not None:
+                require_opaque_ref(name, body[name])
+                if len(body[name]) > 96:
+                    raise ValueError
+        if body["after"] is not None and (body["through"] is None or body["after"] > body["through"]):
+            raise ValueError
+        return JsonResponse(discover_pending_work_returns(body["after"], body["through"], limit))
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "agent_work_consume_discover_invalid"}, status=400)
+
+
 @_internal_post("/agent-work/returns/discover")
 def discover_agent_work_returns(request):
     from app_core.agent_work_returns import discover_work_returns
@@ -1650,8 +1771,8 @@ def transition_agent_run(request):
         # The terminal is already durable. Delivery failure must not undo it or
         # block lifecycle teardown; the independent ledger pass repairs this gap.
         try:
-            from app_core.agent_work_returns import materialize_work_return
-            materialize_work_return(agent_run.id)
+            from app_core.agent_work_return_jobs import schedule_work_return_job
+            schedule_work_return_job(agent_run)
         except Exception as error:
             logger.warning("Work return delivery remains pending: %s", type(error).__name__)
     return JsonResponse({"agentRunId": agent_run.id, "state": agent_run.status})

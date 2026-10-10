@@ -84,8 +84,19 @@ class WorkReturnRuntimeTests(LiveServerTestCase):
                 row = cursor.fetchone()
             return dict(zip(("jobId", "jobKind", "status", "sessionId", "payloadRef", "idempotencyKey", "updatedAtMs"), row)) if row else None
 
-        def run_publisher():
-            process = subprocess.run([sys.executable, "-B", "-c", "import worker; worker.WorkReturnPublisher()(); print('work-return-live-worker-ok')"],
+        def run_return_jobs():
+            script = """import json, worker
+from contextlib import contextmanager
+from unittest.mock import patch
+@contextmanager
+def lease(*args):
+    yield lambda: None
+with patch.object(worker, 'start_job'), patch.object(worker, 'lease_heartbeats', lease), patch.object(worker, 'complete_job'), patch.object(worker, 'yield_job'), patch.object(worker, 'fail_claimed_job'):
+    for run in RUN_IDS:
+        worker.execute_claimed_job({'jobId':'agent_work.return:'+run,'jobKind':'agent_work.return','sessionId':'session_fixture','payloadRef':'record:agent_work:'+run,'idempotencyKey':'agent_work.return:'+run,'retryCount':0,'maxRetries':10}, 'synthetic-fenced-owner')
+print('work-return-live-worker-ok')
+""".replace("RUN_IDS", repr([child.pk for child in children.values()]))
+            process = subprocess.run([sys.executable, "-B", "-c", script],
                 cwd=Path(__file__).resolve().parents[2] / "worker",
                 env={**os.environ, "API_INTERNAL_URL": self.live_server_url, "RUNTIME_INTERNAL_URL": "http://127.0.0.1:1",
                     "INTERNAL_API_TOKEN": settings.INTERNAL_API_TOKEN, "NO_PROXY": "127.0.0.1,localhost"},
@@ -95,10 +106,10 @@ class WorkReturnRuntimeTests(LiveServerTestCase):
 
         with patch("app_core.agent_work_returns.get_runtime_job", side_effect=persisted_runtime_job), \
              patch("app_core.agent_work.schedule_agent_run_lifecycle", side_effect=AssertionError("no new scheduling")):
-            run_publisher()
+            run_return_jobs()
             notices = list(AgentWorkReturn.objects.order_by("id").values())
             self.assertEqual(len(notices), 5)
-            run_publisher()  # A new process restarts from the head after outbox publication.
+            run_return_jobs()  # A new process safely replays the same stable jobs after outbox publication.
             self.assertEqual(list(AgentWorkReturn.objects.order_by("id").values()), notices)
         for notice in AgentWorkReturn.objects.all():
             self.assertEqual(self.query(notice.id).status_code, 200)

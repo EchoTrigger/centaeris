@@ -124,12 +124,55 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
     def load_worker(self, runtime_url):
         path = Path(__file__).resolve().parents[2] / "worker"
         with patch.dict(os.environ, {"RUNTIME_INTERNAL_URL": runtime_url,
-                "API_INTERNAL_URL": self.live_server_url, "INTERNAL_API_TOKEN": settings.INTERNAL_API_TOKEN}), \
+                "API_INTERNAL_URL": self.live_server_url, "INTERNAL_API_TOKEN": settings.INTERNAL_API_TOKEN,
+                # A legal positive recheck retains real Core due-time waiting
+                # while keeping this isolated HTTP fixture within five seconds.
+                "AGENT_RUN_LIFECYCLE_RECHECK_MS": "1000"}), \
              patch.object(sys, "path", [str(path), *sys.path]):
             spec = importlib.util.spec_from_file_location("native_consume_worker", path / "worker.py")
             worker = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(worker)
         return worker
+
+    def lifecycle_diagnostic(self, run, result):
+        run.refresh_from_db()
+        return json.dumps({"result": result, "agentRunId": run.pk, "state": run.status,
+            "transitionReason": run.transitionReason, "runtimeLog": self.runtime_lines,
+            "terminalFacts": list(run.events.filter(payload__type__in=[
+                "agent_run_completed", "agent_run_failed", "agent_run_interrupted"]).values_list("payload", flat=True))})
+
+    def execute_return_job(self, worker, child):
+        """Publish through an exact real Core lease after the child commits."""
+        job_id = "agent_work.return:" + child.pk
+        deadline = time.monotonic() + 5
+        def poll_request(path, body=None):
+            remaining = deadline - time.monotonic()
+            self.assertGreater(remaining, 0, "stable return claim deadline exceeded")
+            return worker.json_request(f"{worker.RUNTIME_INTERNAL_URL}{path}", body,
+                "X-Internal-Token", worker.INTERNAL_API_TOKEN, "native_return_claim_unavailable",
+                timeout=remaining)
+        while True:
+            jobs = poll_request("/internal/jobs/claim", {
+                "schema": "runtime.job.claim.v1", "workerId": "worker:native-return-test",
+                "jobId": job_id, "jobKind": "agent_work.return", "nowMs": worker.now_ms(),
+                "leaseMs": 300000, "limit": 1})["jobs"]
+            if jobs:
+                break
+            current = poll_request("/internal/jobs/" + job_id)["job"]
+            remaining = deadline - time.monotonic()
+            self.assertGreater(remaining, 0, f"stable return job did not become due: {current}")
+            self.assertEqual(current["status"], "queued", current)
+            due_seconds = max(0.01, (current["runAtMs"] - worker.now_ms()) / 1000)
+            time.sleep(min(due_seconds, remaining))
+        self.assertEqual(len(jobs), 1)
+        job = jobs[0]
+        self.assertEqual((job["status"], job["sessionId"], job["payloadRef"], job["idempotencyKey"]),
+            ("leased", child.session_id, "record:agent_work:" + child.pk, job_id))
+        current = poll_request("/internal/jobs/" + job_id)["job"]
+        self.assertEqual((current["status"], current["leaseOwner"]), ("leased", job["leaseOwner"]))
+        worker.execute_claimed_job(job, job["leaseOwner"])
+        self.assertEqual(worker.runtime_request("/internal/jobs/" + job_id)["job"]["status"], "succeeded")
+        self.assertEqual(AgentWorkReturn.objects.filter(child_run=child).count(), 1)
 
     def model_response(self, model, request):
         self.assertEqual(model.pk, self.model.pk)
@@ -174,7 +217,7 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
             self.steps.append(deepcopy(body))
             self.assertEqual(body["agentRunStart"], build_agent_run_start(run))
             result = original_step(body)
-            self.assertEqual(result["terminalState"], "completed", "".join(self.runtime_lines))
+            self.assertEqual(result["terminalState"], "completed", self.lifecycle_diagnostic(run, result))
             if replay:
                 before = list(run.events.order_by("agent_run_sequence").values_list("eventId", "payload"))
                 request_count = len(self.requests)
@@ -216,6 +259,7 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
             work = AgentWorkSession.objects.get()
             child = AgentRun.objects.get(pk=work.operation.agentRunId)
             self.execute_lifecycle(worker, child)
+            self.execute_return_job(worker, child)
             returned = AgentWorkReturn.objects.get(child_run=child)
             notice = deepcopy(returned.payload)
             terminal = child.events.get(payload__type="agent_run_completed")
@@ -366,10 +410,17 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
             self.assertEqual(body["agentRunStart"], build_agent_run_start(run))
             self.steps.append(deepcopy(body))
             result = original_step(body)
-            self.assertEqual(result["terminalState"], "completed", "".join(self.runtime_lines))
+            self.assertEqual(result["terminalState"], "completed", self.lifecycle_diagnostic(run, result))
             return result
 
         def execute(job, owner):
+            if job["jobKind"] != "agent_run.lifecycle":
+                # Return jobs may legitimately precede this slot's lifecycle
+                # claim. Execute/yield them through the real worker and Core;
+                # they do not complete the child-only observation boundary.
+                self.assertEqual(job["jobKind"], "agent_work.return")
+                original_execute(job, owner)
+                return
             run_id, digest = worker.agent_run_lifecycle_binding(job)
             self.assertIn(run_id, children)
             run = children[run_id]
@@ -498,6 +549,8 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
                 "childLeases": {run_id: hashlib.sha256(owner.encode()).hexdigest() for run_id, owner in self.child_leases.items()},
                 "executionIds": execution_ids, "modelOverlapNs": min(item[2] for item in self.child_model_intervals)
                     - max(item[1] for item in self.child_model_intervals)}))
+            for child in children:
+                self.execute_return_job(worker, child)
             self.assertEqual(AgentWorkReturn.objects.count(), 2)
             # Admission folds the committed terminal before it accepts returns.
             # Both notices must share one coordinator and retain their identities.

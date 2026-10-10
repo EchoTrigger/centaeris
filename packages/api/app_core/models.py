@@ -2722,3 +2722,12 @@ class UploadLease(models.Model):
     def save(self, *args, **kwargs):
         require_enum("UploadLease.state", self.state, {"reserved", "unknown"})
         return super().save(*args, **kwargs)
+
+
+class WorkReturnAuditCursor(models.Model):
+    id = models.CharField(primary_key=True, max_length=32)
+    after = models.CharField(max_length=64, null=True)
+    through = models.CharField(max_length=64, null=True)
+    nextPageAtMs = models.BigIntegerField(default=0)
+    leaseOwner = models.CharField(max_length=64, blank=True, default="")
+    leaseExpiresAtMs = models.BigIntegerField(default=0)
