@@ -58,7 +58,7 @@ fixture = json.load(sys.stdin)
 settings.configure(
     DATABASES={"default": fixture["database"]}, INSTALLED_APPS=fixture["apps"],
     AUTH_USER_MODEL=fixture["userModel"], DEFAULT_AUTO_FIELD="django.db.models.BigAutoField",
-    USE_TZ=True, MEDIA_ROOT=fixture["mediaRoot"],
+    USE_TZ=True, MEDIA_ROOT=fixture["mediaRoot"], FILE_UPLOAD_TEMP_DIR=fixture["uploadTempRoot"],
     GC_MAX_CLEANUP_ATTEMPTS=2, GC_RETRY_BASE_SECONDS=60, GC_RETRY_MAX_SECONDS=120,
 )
 import django
@@ -94,6 +94,7 @@ connections.close_all()
                     fixture = {
                         "database": config, "apps": settings.INSTALLED_APPS,
                         "userModel": settings.AUTH_USER_MODEL, "mediaRoot": directory, "key": key,
+                        "uploadTempRoot": settings.FILE_UPLOAD_TEMP_DIR,
                     }
 
                     def run_process(instants):

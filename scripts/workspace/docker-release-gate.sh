@@ -52,6 +52,10 @@ values = {
     "CREDENTIAL_ENCRYPTION_KEY": "z5wA0vTzQGNG2LkVbNqnd3CPnGds4M8Xqy9lXgkqfZI=",
     "POSTGRES_PASSWORD": "ci-only-postgres-password",
     "BOOTSTRAP_SUPERADMIN_PASSWORD": "ci-only-bootstrap-password",
+    # Synthetic empty-volume acceptance inputs, never deployment defaults.
+    "UPLOAD_BODY_MAX_BYTES": "1048576",
+    "UPLOAD_TEMP_MAX_BYTES": "4194304",
+    "UPLOAD_MAX_CONCURRENT": "2",
 }
 rendered = []
 for line in source:
@@ -78,7 +82,7 @@ for name in required_builds:
     assert pathlib.Path(config["services"][name]["build"]["context"]).resolve() == workspace
 for name in ("runtime", "workspace-general"):
     assert not config["services"][name]["build"].get("additional_contexts")
-expected_volumes = {"agent-memory", "plugin-data", "postgres-data", "runtime-data", "storage-data"}
+expected_volumes = {"agent-memory", "plugin-data", "postgres-data", "runtime-data", "storage-data", "upload-temp"}
 assert set(config["volumes"]) == expected_volumes
 for key, value in config["volumes"].items():
     assert value["name"] == f"centaeris-workspace_{key}"

@@ -2700,3 +2700,25 @@ class StorageCleanupRetry(models.Model):
         require_enum("StorageCleanupRetry.collector", self.collector, {"workspaceSnapshot", "orphanedLibrary"})
         require_enum("StorageCleanupRetry.state", self.state, {"pending", "cleaning", "failed", "cleaned", "quarantined"})
         return super().save(*args, **kwargs)
+
+
+class UploadCapacity(models.Model):
+    """One database-wide counter for temporary bytes and active upload slots."""
+
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1)
+    reservedBytes = models.PositiveBigIntegerField(default=0)
+    activeUploads = models.PositiveIntegerField(default=0)
+
+
+class UploadLease(models.Model):
+    """A request liability, retained until its exact namespace is proven absent."""
+
+    id = models.CharField(primary_key=True, max_length=32)
+    poolRef = models.CharField(max_length=32)
+    byteHold = models.PositiveBigIntegerField()
+    uploadSlot = models.BooleanField()
+    state = models.CharField(max_length=16, default="reserved")
+
+    def save(self, *args, **kwargs):
+        require_enum("UploadLease.state", self.state, {"reserved", "unknown"})
+        return super().save(*args, **kwargs)

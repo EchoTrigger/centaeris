@@ -18,6 +18,12 @@ concurrency:
   group: release-${{ inputs.product }}-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  # Synthetic validation/build inputs; deployments must choose their own budgets.
+  UPLOAD_BODY_MAX_BYTES: '1048576'
+  UPLOAD_TEMP_MAX_BYTES: '4194304'
+  UPLOAD_MAX_CONCURRENT: '2'
+
 jobs:
   validate:
     runs-on: ubuntu-24.04

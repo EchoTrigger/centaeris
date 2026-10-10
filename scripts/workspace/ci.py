@@ -19,6 +19,10 @@ def run(label, args, capture=False):
     env = {**os.environ, "CARGO_BUILD_JOBS": os.environ.get("CARGO_BUILD_JOBS", "2")}
     if args[:2] == ["docker", "compose"]:
         env["CENTAERIS_SOURCE_REVISION"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        # Synthetic source-gate inputs only; deployments still choose each budget.
+        env.setdefault("UPLOAD_BODY_MAX_BYTES", "1048576")
+        env.setdefault("UPLOAD_TEMP_MAX_BYTES", "4194304")
+        env.setdefault("UPLOAD_MAX_CONCURRENT", "2")
     if os.name == "nt":
         bash = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe"
         if not bash.is_file():

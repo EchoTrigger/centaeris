@@ -3,6 +3,11 @@
 Copy `.env.example` to `.env` for local development. Empty required secrets
 fail at startup; the example file intentionally contains no usable secret.
 
+Public upload envelopes, shared temporary spool bytes and concurrent upload slots
+also require explicit deployment values; `.env.example` leaves them blank.
+See [Upload and temporary-space limits](../operations/Uploads.md) for the four
+inputs, physical volume requirements and verified offline recovery procedure.
+
 ## Required secrets
 
 | Variable | Purpose |
