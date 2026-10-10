@@ -50,6 +50,10 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::agent_run_authorization::SandboxResources;
 use crate::agent_run_authorization::SessionWorkspace;
+use crate::postgres_store::PostgresRuntimeStore;
+use crate::resident_capacity::{
+    declared_usage, ObservedResidentSandbox, ResidentCapacity, ResidentSandboxRequest,
+};
 
 const VALIDATE_INPUTS_SCHEMA: &str = "runtime.projected_input.validate.v1";
 const AGENT_BINARY: &str = "/opt/centaeris/bin/execution_agent";
@@ -291,6 +295,8 @@ pub struct DockerExecutionHostRunner {
     input_lock: Mutex<()>,
     materialized_inputs: Mutex<BTreeMap<String, SandboxMaterializedInput>>,
     workspace_generation_rpc: Mutex<Option<WorkspaceGenerationRpc>>,
+    resident_store: Option<Arc<PostgresRuntimeStore>>,
+    resident_lease: Option<centaeris_core::session::RuntimeJobLeaseFence>,
 }
 
 struct WorkspaceGenerationRpc {
@@ -469,6 +475,10 @@ fn query_workspace_generation_rpc(
 }
 
 pub struct DockerExecutionHostRequest<'a> {
+    pub workspace_id: String,
+    pub lifecycle_job_id: String,
+    pub lifecycle_lease_owner: String,
+    pub resident_store: Arc<PostgresRuntimeStore>,
     pub agent_run_id: String,
     pub execution_id: String,
     pub user_id: String,
@@ -533,7 +543,10 @@ impl DockerExecutionHostRunner {
         }
     }
 
-    pub fn new(request: DockerExecutionHostRequest<'_>) -> Result<Self, String> {
+    pub fn new_with_admitted(
+        request: DockerExecutionHostRequest<'_>,
+        before_create: &mut (dyn FnMut(&mut postgres::Client) -> Result<(), String> + Send),
+    ) -> Result<Self, String> {
         #[cfg(test)]
         if crate::native_consumption_tests::owns_identity(&request.user_id, &request.agent_id) {
             assert!(
@@ -557,6 +570,10 @@ impl DockerExecutionHostRunner {
             return Ok(runner);
         }
         let DockerExecutionHostRequest {
+            workspace_id,
+            lifecycle_job_id,
+            lifecycle_lease_owner,
+            resident_store,
             agent_run_id,
             execution_id,
             user_id,
@@ -591,20 +608,39 @@ impl DockerExecutionHostRunner {
         let command_path = plugin_command_path(plugin_activation)?;
         let oci_runtime = OciRuntime::from_environment()?;
         let container_name = container_name(execution_id.as_str());
-        ensure_container(
-            &ContainerExpectation {
-                name: container_name.as_str(),
-                agent_run_id: agent_run_id.as_str(),
-                execution_id: execution_id.as_str(),
-                authorization_digest: authorization_digest.as_str(),
-                image_digest: image_digest.as_str(),
-                oci_runtime,
-                resources,
-                plugin_volume_name: plugin_volume_name.as_str(),
-                plugin_mounts: plugin_mounts.as_slice(),
-                memory_mount: &memory_mount,
+        let expected = ContainerExpectation {
+            name: container_name.as_str(),
+            agent_run_id: agent_run_id.as_str(),
+            execution_id: execution_id.as_str(),
+            authorization_digest: authorization_digest.as_str(),
+            image_digest: image_digest.as_str(),
+            oci_runtime,
+            resources,
+            plugin_volume_name: plugin_volume_name.as_str(),
+            plugin_mounts: plugin_mounts.as_slice(),
+            memory_mount: &memory_mount,
+        };
+        let (resident_host_id, resident_limits) = resident_host_context()?;
+        resident_store.prepare_resident_sandbox_with_client(
+            &resident_host_id,
+            &ResidentSandboxRequest {
+                execution_id: &execution_id,
+                agent_run_id: &agent_run_id,
+                workspace_id: &workspace_id,
+                lifecycle_job_id: &lifecycle_job_id,
+                lifecycle_lease_owner: &lifecycle_lease_owner,
+                must_exist: has_execution_fact,
+                resources: declared_usage(resources),
             },
-            has_execution_fact,
+            resident_limits,
+            observed_resident_sandboxes,
+            |client| {
+                before_create(client)?;
+                ensure_container(&expected, has_execution_fact)?;
+                Ok(inspect_container(&container_name)?
+                    .ok_or("prepared resident sandbox disappeared")?
+                    .id)
+            },
         )?;
         let runner = Self {
             transcript_capture: Mutex::new(Default::default()),
@@ -636,6 +672,12 @@ impl DockerExecutionHostRunner {
             input_lock: Mutex::new(()),
             materialized_inputs: Mutex::new(BTreeMap::new()),
             workspace_generation_rpc: Mutex::new(None),
+            resident_store: Some(resident_store),
+            resident_lease: Some(centaeris_core::session::RuntimeJobLeaseFence {
+                job_id: lifecycle_job_id,
+                job_kind: centaeris_core::session::reliability::AGENT_RUN_LIFECYCLE_JOB_KIND.into(),
+                lease_owner: lifecycle_lease_owner,
+            }),
         };
         if has_execution_fact {
             runner.quiesce_existing_execution()?;
@@ -806,7 +848,7 @@ impl DockerExecutionHostRunner {
                 Ok(Some(status)) => break (status.code(), false),
                 Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
                 Ok(None) => {
-                    let teardown = Self::teardown(self.agent_run_id.as_str());
+                    let teardown = self.teardown_owned();
                     child.disconnect();
                     let _ = child.wait();
                     return Err(teardown.err().unwrap_or_else(|| {
@@ -838,12 +880,45 @@ impl DockerExecutionHostRunner {
         })
     }
 
-    pub fn teardown(agent_run_id: &str) -> Result<(), String> {
+    pub fn teardown(
+        agent_run_id: &str,
+        resident_store: &PostgresRuntimeStore,
+        fence: &centaeris_core::session::RuntimeJobLeaseFence,
+    ) -> Result<(), String> {
         #[cfg(test)]
         if crate::native_consumption_tests::owns_run(agent_run_id) {
             return Ok(());
         }
-        crate::observations::timed("sandboxTeardown", || Self::teardown_inner(agent_run_id))
+        crate::observations::timed("sandboxTeardown", || {
+            resident_store.remove_resident_sandboxes(
+                &resident_host_id()?,
+                agent_run_id,
+                fence,
+                || Self::teardown_inner(agent_run_id),
+                || observed_resident_sandboxes_for_run(agent_run_id),
+            )
+        })
+    }
+
+    fn teardown_owned(&self) -> Result<(), String> {
+        if let Some(store) = self.resident_store.as_ref() {
+            return Self::teardown(
+                &self.agent_run_id,
+                store,
+                self.resident_lease
+                    .as_ref()
+                    .ok_or("resident removal owner binding missing")?,
+            );
+        }
+        #[cfg(test)]
+        return Self::teardown_inner(&self.agent_run_id);
+        #[cfg(not(test))]
+        Err("resident sandbox accounting binding missing".into())
+    }
+
+    pub(crate) fn reconcile_residency(resident_store: &PostgresRuntimeStore) -> Result<(), String> {
+        let (host_id, _) = resident_host_context()?;
+        resident_store.reconcile_resident_sandboxes(&host_id, observed_resident_sandboxes)
     }
 
     fn teardown_inner(agent_run_id: &str) -> Result<(), String> {
@@ -2224,7 +2299,7 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
                     })?
                     .is_some()
                 {
-                    match Self::teardown(self.agent_run_id.as_str()) {
+                    match self.teardown_owned() {
                         Ok(()) => {
                             child.disconnect();
                             break (None, false, true);
@@ -2244,7 +2319,7 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
                 Ok(Some(status)) => break (status.code(), false, false),
                 Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
                 Ok(None) => {
-                    let teardown = Self::teardown(self.agent_run_id.as_str());
+                    let teardown = self.teardown_owned();
                     child.disconnect();
                     let _ = child.wait();
                     return Err(ExecutionError::CancellationIndeterminate {
@@ -2589,6 +2664,110 @@ fn workspace_execution_sentinel_matches(
 
 fn container_ids_for_agent_run(agent_run_id: &str) -> Result<Vec<String>, String> {
     crate::docker_engine::list_owned(agent_run_id)
+}
+
+fn resident_host_id() -> Result<String, String> {
+    crate::docker_engine::info()?["ID"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "Docker daemon identity missing; resident admission blocked".into())
+}
+
+fn resident_host_context() -> Result<(String, ResidentCapacity), String> {
+    let info = crate::docker_engine::info()?;
+    let id = info["ID"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("Docker daemon identity missing; resident admission blocked")?
+        .to_string();
+    let memory = info["MemTotal"]
+        .as_u64()
+        .filter(|value| *value > 0)
+        .ok_or("Docker daemon memory capacity missing")?;
+    let cpus = info["NCPU"]
+        .as_u64()
+        .filter(|value| *value > 0)
+        .ok_or("Docker daemon CPU capacity missing")?;
+    let memory_headroom = crate::positive_u64_env(
+        "RESIDENT_HOST_MEMORY_HEADROOM_BYTES",
+        (memory / 5).max(512 * 1024 * 1024),
+    )?;
+    let cpu_headroom = crate::positive_u64_env(
+        "RESIDENT_HOST_CPU_HEADROOM_MILLI",
+        cpus.checked_mul(100)
+            .ok_or("resident CPU headroom overflow")?,
+    )?;
+    Ok((
+        id,
+        ResidentCapacity::from_env()?.bound_to_host(memory, cpus, memory_headroom, cpu_headroom)?,
+    ))
+}
+
+fn observed_resident_sandboxes() -> Result<Vec<ObservedResidentSandbox>, String> {
+    observe_resident_container_ids(crate::docker_engine::list_managed(None)?)
+}
+
+fn observed_resident_sandboxes_for_run(
+    agent_run_id: &str,
+) -> Result<Vec<ObservedResidentSandbox>, String> {
+    observe_resident_container_ids(crate::docker_engine::list_owned(agent_run_id)?)
+}
+
+fn observe_resident_container_ids(
+    ids: Vec<String>,
+) -> Result<Vec<ObservedResidentSandbox>, String> {
+    ids.into_iter()
+        .filter_map(|id| match inspect_container(&id) {
+            Ok(None) => None,
+            Ok(Some(facts)) => Some(observed_resident_sandbox(&facts)),
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
+}
+
+fn observed_resident_sandbox(facts: &ContainerFacts) -> Result<ObservedResidentSandbox, String> {
+    let label = |name: &str| {
+        facts
+            .labels
+            .get(name)
+            .filter(|value| !value.trim().is_empty())
+            .cloned()
+            .ok_or_else(|| format!("managed sandbox {name} missing; resident admission blocked"))
+    };
+    if facts.labels.get("centaeris.managed").map(String::as_str) != Some("true")
+        || facts.memory == 0
+        || facts.cpu_period != 100_000
+        || facts.cpu_quota <= 0
+        || facts.cpu_quota % 100 != 0
+        || facts.pids_limit.is_none_or(|value| value <= 0)
+    {
+        return Err(
+            "managed sandbox has unbounded or unknown resources; resident admission blocked".into(),
+        );
+    }
+    let tmpfs = facts.raw["HostConfig"]["Tmpfs"][WORKSPACE_DATA_ROOT]
+        .as_str()
+        .and_then(|options| {
+            options
+                .split(',')
+                .find_map(|option| option.strip_prefix("size="))
+        })
+        .and_then(|size| size.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .ok_or("managed sandbox workspace resource limit unknown; resident admission blocked")?;
+    Ok(ObservedResidentSandbox {
+        execution_id: label("centaeris.execution_id")?,
+        agent_run_id: label("centaeris.agent_run_id")?,
+        container_id: facts.id.clone(),
+        resources: centaeris_core::execution::ResidentResourceUsage {
+            sandbox_count: 1,
+            memory_bytes: facts.memory,
+            cpu_milli: (facts.cpu_quota as u64) / 100,
+            pids: facts.pids_limit.unwrap_or_default() as u64,
+            workspace_bytes: tmpfs,
+        },
+    })
 }
 
 #[derive(Deserialize)]
@@ -4313,6 +4492,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn resident_inventory_counts_declared_limits_and_rejects_unknown_managed_resources() {
+        let runner = test_docker_execution_host_runner();
+        let body = container_create_body(&runner.container_expectation()).unwrap();
+        let host = &body["HostConfig"];
+        let mut facts = ContainerFacts {
+            id: "a".repeat(64),
+            raw: serde_json::json!({"HostConfig": host}),
+            running: false,
+            image: runner.image_digest.clone(),
+            runtime: "runc".into(),
+            labels: serde_json::from_value(body["Labels"].clone()).unwrap(),
+            memory: host["Memory"].as_u64().unwrap(),
+            cpu_period: host["CpuPeriod"].as_i64().unwrap(),
+            cpu_quota: host["CpuQuota"].as_i64().unwrap(),
+            pids_limit: host["PidsLimit"].as_i64(),
+            readonly_rootfs: true,
+            network_mode: "none".into(),
+            mounts: Vec::new(),
+        };
+        let observed = observed_resident_sandbox(&facts).unwrap();
+        assert_eq!(observed.resources, declared_usage(runner.resources));
+        assert_eq!(observed.agent_run_id, runner.agent_run_id);
+        assert_eq!(observed.execution_id, runner.execution_id);
+        facts.labels.remove("centaeris.execution_id");
+        assert!(observed_resident_sandbox(&facts).is_err());
+        facts
+            .labels
+            .insert("centaeris.execution_id".into(), runner.execution_id.clone());
+        facts.memory = 0;
+        assert!(observed_resident_sandbox(&facts).is_err());
+        facts.memory = runner.resources.memory_bytes;
+        facts.raw["HostConfig"]["Tmpfs"][WORKSPACE_DATA_ROOT] = serde_json::Value::Null;
+        assert!(observed_resident_sandbox(&facts).is_err());
+    }
+
     fn empty_recovery_snapshot() -> RecoveryWorkspaceSnapshotV1 {
         RecoveryWorkspaceSnapshotV1 {
             object_ref: None,
@@ -4738,6 +4953,8 @@ mod tests {
             input_lock: Mutex::new(()),
             materialized_inputs: Mutex::new(BTreeMap::new()),
             workspace_generation_rpc: Mutex::new(None),
+            resident_store: None,
+            resident_lease: None,
         }
     }
 

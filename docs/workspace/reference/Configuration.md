@@ -136,6 +136,50 @@ verification must initialize the current schema, not reuse an incompatible one.
 
 ## Execution and processing
 
+### Resident sandbox capacity
+
+Resident limits count containers while executing, paused, or waiting for work.
+They bound retained resources independently of execution leases and worker slots;
+yielding an execution lease does not free its resident sandbox capacity.
+
+| Variable | Default | Scope |
+| --- | ---: | --- |
+| `RESIDENT_GLOBAL_COUNT` | 16 | Resident sandbox count across Runtime hosts sharing the database |
+| `RESIDENT_GLOBAL_MEMORY_BYTES` | 34359738368 | Global declared memory ceiling (32 GiB) |
+| `RESIDENT_GLOBAL_CPU_MILLI` | 16000 | Global declared CPU ceiling (16 cores) |
+| `RESIDENT_GLOBAL_PIDS` | 8192 | Global declared process ceiling |
+| `RESIDENT_GLOBAL_WORKSPACE_BYTES` | 34359738368 | Global workspace tmpfs ceiling (32 GiB) |
+| `RESIDENT_TENANT_COUNT` | 4 | Resident sandbox count within one Workspace |
+| `RESIDENT_TENANT_MEMORY_BYTES` | 8589934592 | Workspace declared memory ceiling (8 GiB) |
+| `RESIDENT_TENANT_CPU_MILLI` | 4000 | Workspace declared CPU ceiling (4 cores) |
+| `RESIDENT_TENANT_PIDS` | 2048 | Workspace declared process ceiling |
+| `RESIDENT_TENANT_WORKSPACE_BYTES` | 8589934592 | Workspace tmpfs ceiling (8 GiB) |
+| `RESIDENT_HOST_MEMORY_HEADROOM_BYTES` | Greater of 20% of Docker host RAM or 512 MiB | Memory reserved for host services |
+| `RESIDENT_HOST_CPU_HEADROOM_MILLI` | 100 per Docker host CPU core | CPU reserved for host services |
+
+Runtime derives host capacity from the Docker daemon's reported resources, then
+caps the host's memory, CPU, and workspace ceilings by both the global limits and
+the resources left after host headroom. Workspace tmpfs is capped by available
+RAM separately; it is not added to declared cgroup memory a second time. Headroom
+that leaves no capacity fails rather than allowing overbooking.
+
+Compose supplies the ten finite global and Workspace defaults and passes explicit
+overrides to Runtime. All Runtime replicas sharing one database must use the same
+global and Workspace limits. Leave host headroom variables unset to use the
+Docker host-derived defaults; Compose renders unresolved pass-through entries as
+null and omits them from the container environment. Every explicit resident limit
+or headroom override must be a positive integer. Empty values, zero, negative
+values, and non-integers reach Runtime and
+fail validation instead of silently selecting a default.
+
+Capacity planning must account for retained containers, not only active execution
+steps. The default Workspace memory and CPU ceilings fit one default authorized
+sandbox profile; independent AgentRuns sharing that Workspace may therefore wait
+for capacity even when the resident count limit has not been reached. Capacity
+waiting defers execution until resources become available.
+
+### Sandbox execution profile
+
 `SANDBOX_MEMORY_BYTES`, `SANDBOX_CPU_MILLI`, `SANDBOX_PIDS_LIMIT`, and
 `SANDBOX_DATA_TMPFS_BYTES` define the authorized AgentRun profile.
 Compose and the material Worker default `OCI_RUNTIME` to `runsc`. Install and

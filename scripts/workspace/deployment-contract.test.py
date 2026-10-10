@@ -17,6 +17,21 @@ REQUIRED_TEST_SECRETS = {
     "DJANGO_SECRET_KEY", "INTERNAL_API_TOKEN", "AGENT_RUN_AUTHORIZATION_SIGNING_KEY",
     "CREDENTIAL_ENCRYPTION_KEY", "POSTGRES_PASSWORD", "BOOTSTRAP_SUPERADMIN_PASSWORD",
 }
+RESIDENT_LIMIT_DEFAULTS = {
+    "RESIDENT_GLOBAL_COUNT": "16",
+    "RESIDENT_GLOBAL_MEMORY_BYTES": "34359738368",
+    "RESIDENT_GLOBAL_CPU_MILLI": "16000",
+    "RESIDENT_GLOBAL_PIDS": "8192",
+    "RESIDENT_GLOBAL_WORKSPACE_BYTES": "34359738368",
+    "RESIDENT_TENANT_COUNT": "4",
+    "RESIDENT_TENANT_MEMORY_BYTES": "8589934592",
+    "RESIDENT_TENANT_CPU_MILLI": "4000",
+    "RESIDENT_TENANT_PIDS": "2048",
+    "RESIDENT_TENANT_WORKSPACE_BYTES": "8589934592",
+}
+RESIDENT_HEADROOM_VARIABLES = (
+    "RESIDENT_HOST_MEMORY_HEADROOM_BYTES", "RESIDENT_HOST_CPU_HEADROOM_MILLI",
+)
 
 
 def compose_config(**overrides):
@@ -27,7 +42,8 @@ def compose_config(**overrides):
             values[key] = value or ("synthetic-test-only" if key in REQUIRED_TEST_SECRETS else "")
     values["CENTAERIS_SOURCE_REVISION"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     values.update(overrides)
-    env = {k: v for k, v in os.environ.items() if k not in values and k not in RETIRED}
+    env = {k: v for k, v in os.environ.items()
+           if k not in values and k not in RETIRED and k not in RESIDENT_HEADROOM_VARIABLES}
     with tempfile.TemporaryDirectory(prefix="centaeris-compose-contract-") as temp:
         path = Path(temp) / "synthetic.env"
         path.write_text("\n".join(f"{k}={v}" for k, v in values.items() if v is not None), encoding="utf-8")
@@ -150,6 +166,47 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertEqual(environment["RUNTIME_POSTGRES_LISTENER_LIMIT"], "8")
         self.assertEqual(environment["RUNTIME_POSTGRES_CHECKOUT_TIMEOUT_MS"], "5000")
         self.assertEqual(environment["RUNTIME_POSTGRES_CONNECT_TIMEOUT_MS"], "3000")
+
+    def test_resident_limits_keep_finite_defaults_with_example_or_unset_inputs(self):
+        for overrides in ({}, dict.fromkeys(RESIDENT_LIMIT_DEFAULTS)):
+            environment = compose_config(**overrides)["services"]["runtime"]["environment"]
+            for name, expected in RESIDENT_LIMIT_DEFAULTS.items():
+                with self.subTest(unset=bool(overrides), variable=name):
+                    self.assertEqual(environment.get(name), expected)
+
+    def test_explicit_resident_limits_reach_runtime(self):
+        configured = {name: str(101 + index) for index, name in enumerate(RESIDENT_LIMIT_DEFAULTS)}
+        environment = compose_config(**configured)["services"]["runtime"]["environment"]
+        for name, expected in configured.items():
+            with self.subTest(variable=name):
+                self.assertEqual(environment.get(name), expected)
+
+    def test_resident_host_headroom_overrides_reach_runtime(self):
+        configured = {
+            "RESIDENT_HOST_MEMORY_HEADROOM_BYTES": "1073741824",
+            "RESIDENT_HOST_CPU_HEADROOM_MILLI": "250",
+        }
+        environment = compose_config(**configured)["services"]["runtime"]["environment"]
+        for name, expected in configured.items():
+            with self.subTest(variable=name):
+                self.assertEqual(environment.get(name), expected)
+
+    def test_unset_resident_headroom_preserves_runtime_dynamic_defaults(self):
+        environment = compose_config(**dict.fromkeys(RESIDENT_HEADROOM_VARIABLES))["services"]["runtime"]["environment"]
+        for name in RESIDENT_HEADROOM_VARIABLES:
+            with self.subTest(variable=name):
+                # Compose renders unresolved pass-through values as null; this
+                # leaves the variable unset in the container, unlike "".
+                self.assertIsNone(environment.get(name))
+
+    def test_invalid_resident_values_reach_runtime_without_compose_fallback(self):
+        variables = (*RESIDENT_LIMIT_DEFAULTS, *RESIDENT_HEADROOM_VARIABLES)
+        for value in ("", "0", "-1", "not-an-integer"):
+            environment = compose_config(**dict.fromkeys(variables, value))["services"]["runtime"]["environment"]
+            for name in variables:
+                with self.subTest(variable=name, value=value):
+                    self.assertIn(name, environment)
+                    self.assertEqual(environment[name], value)
 
     def test_runtime_ordinary_pool_default_and_overrides_render_in_compose(self):
         for value, expected in ((None, "10"), ("6", "6"), ("10", "10")):
