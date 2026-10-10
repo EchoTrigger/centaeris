@@ -7,7 +7,7 @@ from django.conf import settings
 from django.db import close_old_connections, connection
 from django.test import Client, TransactionTestCase, override_settings
 from django.utils import timezone
-from . import models, test_hosted_operations
+from . import models, test_agent_work_consumption, test_hosted_operations
 
 
 @override_settings(EXECUTION_GLOBAL_QUEUE_LIMIT=1, EXECUTION_TENANT_QUEUE_LIMIT=4)
@@ -107,3 +107,44 @@ class ApiRunQueueCapacityTests(test_hosted_operations.OperationFixture, Transact
                          [{"error": "execution_queue_full"}], results)
         self.assertEqual(models.AgentRun.objects.count(), 2)
         self.assertEqual(models.HostedOperationReceipt.objects.filter(command="submitMessage").count(), 2)
+
+
+class ApiWorkReturnQueueCapacityTests(TransactionTestCase):
+    serialized_rollback = True
+    setUp = test_agent_work_consumption.AgentWorkConsumptionTests.setUp
+    request_fact = test_agent_work_consumption.AgentWorkConsumptionTests.request_fact
+    dependencies = test_agent_work_consumption.AgentWorkConsumptionTests.dependencies
+    post = test_agent_work_consumption.AgentWorkConsumptionTests.post
+    child = test_agent_work_consumption.AgentWorkConsumptionTests.child
+    terminal = test_agent_work_consumption.AgentWorkConsumptionTests.terminal
+    publish = test_agent_work_consumption.AgentWorkConsumptionTests.publish
+    notice = test_agent_work_consumption.AgentWorkConsumptionTests.notice
+    consume = test_agent_work_consumption.AgentWorkConsumptionTests.consume
+    runtime = test_agent_work_consumption.AgentWorkConsumptionTests.runtime
+
+    def test_full_run_queue_retains_work_return_receipt_then_binds_same_attempt(self):
+        notice = self.notice()
+        filler = models.AgentRun.objects.create(workspace=self.workspace, user=self.user,
+            session=models.Session.objects.create(workspace=self.workspace, owner=self.user, agent=self.agent),
+            modelConfig=self.model, prompt="one existing resource obligation")
+        before = models.AgentRun.objects.count()
+        with override_settings(EXECUTION_GLOBAL_QUEUE_LIMIT=1, EXECUTION_TENANT_QUEUE_LIMIT=4), self.runtime() as (inputs, schedules):
+            first = self.consume(notice)
+            self.assertEqual(first.status_code, 201, first.content)
+            attempt = models.AgentWorkConsumeAttempt.objects.get()
+            receipt_id, attempt_id = attempt.operation_id, attempt.pk
+            self.assertIsNone(attempt.coordinator_run_id)
+            self.assertIsNone(first.json()["operation"]["agentRunId"])
+            self.assertEqual(models.AgentRun.objects.count(), before)
+            replay = self.consume(notice)
+            self.assertEqual(replay.status_code, 200, replay.content)
+            self.assertEqual(replay.json(), first.json())
+            models.AgentRun.objects.filter(pk=filler.pk).update(status="cancelled", completedAt=timezone.now())
+            bound = self.consume(notice)
+            self.assertEqual(bound.status_code, 200, bound.content)
+        attempt.refresh_from_db()
+        self.assertEqual((attempt.pk, attempt.operation_id), (attempt_id, receipt_id))
+        self.assertIsNotNone(attempt.coordinator_run_id)
+        self.assertEqual(models.AgentWorkConsumeAttempt.objects.count(), 1)
+        self.assertEqual(models.AgentRun.objects.count(), before + 1)
+        self.assertEqual((len(inputs), len(schedules)), (1, 1))
