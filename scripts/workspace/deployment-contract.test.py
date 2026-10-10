@@ -40,6 +40,66 @@ def compose_config(**overrides):
 
 
 class DeploymentContractTests(unittest.TestCase):
+    def gc_settings(self, environment, **overrides):
+        environment = {**os.environ, **environment}
+        for name, value in overrides.items():
+            if value is None:
+                environment.pop(name, None)
+            else:
+                environment[name] = value
+        environment["PYTHONPATH"] = str(ROOT / "packages" / "api")
+        probe = (
+            "import json, os; from cryptography.fernet import Fernet; "
+            "os.environ['CREDENTIAL_ENCRYPTION_KEY'] = Fernet.generate_key().decode(); "
+            "from api import settings; "
+            "print(json.dumps({name: getattr(settings, name) for name in "
+            "('GC_MAX_CLEANUP_ATTEMPTS', 'GC_RETRY_BASE_SECONDS', 'GC_RETRY_MAX_SECONDS')}))"
+        )
+        return subprocess.run([os.sys.executable, "-c", probe], cwd=ROOT,
+                              env=environment, capture_output=True, text=True)
+
+    def test_gc_defaults_and_overrides_reach_collectors_and_settings(self):
+        defaults = {"GC_MAX_CLEANUP_ATTEMPTS": 5, "GC_RETRY_BASE_SECONDS": 86400,
+                    "GC_RETRY_MAX_SECONDS": 604800}
+        explicit = {"GC_MAX_CLEANUP_ATTEMPTS": 3, "GC_RETRY_BASE_SECONDS": 60,
+                    "GC_RETRY_MAX_SECONDS": 120}
+        for values, expected in ((dict.fromkeys(defaults), defaults),
+                                 ({name: str(value) for name, value in explicit.items()}, explicit)):
+            services = compose_config(**values)["services"]
+            for service in ("api", "api-init", "gc"):
+                with self.subTest(service=service, expected=expected):
+                    environment = services[service]["environment"]
+                    for name, value in expected.items():
+                        self.assertEqual(environment.get(name), str(value))
+                    result = self.gc_settings(environment)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(json.loads(result.stdout), expected)
+        result = self.gc_settings(services["gc"]["environment"], **dict.fromkeys(defaults))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), defaults)
+
+    def test_gc_settings_reject_invalid_or_excessive_positive_limits(self):
+        environment = compose_config()["services"]["gc"]["environment"]
+        maxima = {"GC_MAX_CLEANUP_ATTEMPTS": 100, "GC_RETRY_BASE_SECONDS": 2678400,
+                  "GC_RETRY_MAX_SECONDS": 2678400}
+        result = self.gc_settings(environment, **{name: str(value) for name, value in maxima.items()})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), maxima)
+        for name, maximum in maxima.items():
+            for value in ("0", "-1", "", "invalid", str(maximum + 1)):
+                with self.subTest(name=name, value=value):
+                    rendered = compose_config(**{name: value})["services"]["gc"]["environment"]
+                    self.assertEqual(rendered.get(name), value)
+                    result = self.gc_settings(environment, **{name: value})
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(name, result.stderr)
+
+    def test_gc_settings_reject_retry_maximum_below_base(self):
+        environment = compose_config(GC_RETRY_BASE_SECONDS="120", GC_RETRY_MAX_SECONDS="60")["services"]["gc"]["environment"]
+        result = self.gc_settings(environment)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("GC_RETRY_MAX_SECONDS", result.stderr)
+
     def test_optional_web_origins_preserve_empty_default_and_explicit_override(self):
         for origins in (None, "http://localhost:3100,https://workspace.example.invalid"):
             overrides = {} if origins is None else {"WEB_EXTRA_ORIGINS": origins}

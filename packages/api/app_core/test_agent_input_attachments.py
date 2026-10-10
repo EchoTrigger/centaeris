@@ -168,28 +168,44 @@ class AgentInputAttachmentTests(TransactionTestCase):
         self.assertEqual(self.client.get(self.input_url).json()["inputs"][0]["attachments"][0]["displayName"], "evidence.txt")
 
     def test_explicit_forward_migration_preserves_existing_input_and_refuses_lossy_reversal(self):
-        from django.db import connection
         from django.db.migrations.executor import MigrationExecutor
+        from .migration_testing import isolated_migration_database
+
         with patch("app_core.agent_input_delivery.dispatch_agent_inputs"):
             self.assertEqual(self.submit("legacy", "  retained text\n", []).status_code, 201)
-        try:
-            executor = MigrationExecutor(connection)
-            executor.migrate([("app_core", "0004_business_agent_branches")])
-            executor = MigrationExecutor(connection)
+            attached = self.upload()
+            self.assertEqual(self.submit("captured", "", [attached]).status_code, 201)
+        previous = models.AgentInput.objects.values().get(input_id="legacy")
+        captured = models.AgentInput.objects.values().get(input_id="captured")
+        before = [("app_core", "0004_business_agent_branches")]
+        with isolated_migration_database(before) as isolated:
+            alias = isolated.alias
+            old = MigrationExecutor(isolated).loader.project_state(before).apps
+            user = old.get_model("auth", "User").objects.using(alias).create(
+                pk=self.user.pk, username=self.user.username)
+            workspace = old.get_model("app_core", "Workspace").objects.using(alias).create(
+                pk=self.workspace.pk, name=self.workspace.name, createdBy=user)
+            old.get_model("app_core", "WorkspaceMembership").objects.using(alias).create(
+                pk=self.membership.pk, workspace=workspace, user=user, role=self.membership.role)
+            agent = old.get_model("app_core", "Agent").objects.using(alias).create(
+                pk=self.agent.pk, workspace=workspace, owner=user, name=self.agent.name,
+                instructions=self.agent.instructions)
+            old.get_model("app_core", "Session").objects.using(alias).create(
+                pk=self.session.pk, workspace=workspace, owner=user, agent=agent)
+            old_input = old.get_model("app_core", "AgentInput")
+            retained = {field.attname: previous[field.attname] for field in old_input._meta.concrete_fields}
+            old_input.objects.using(alias).create(**retained)
+
+            executor = MigrationExecutor(isolated)
             target = [("app_core", "0005_agent_input_attachments")]
             executor.migrate(target)
             historical = executor.loader.project_state(target).apps
-            legacy = historical.get_model("app_core", "AgentInput").objects.get(input_id="legacy")
+            inputs = historical.get_model("app_core", "AgentInput").objects.using(alias)
+            legacy = inputs.get(input_id="legacy")
             self.assertEqual((legacy.body, legacy.sequence, legacy.membership_ref, legacy.attachments),
                 ("  retained text\n", 1, self.membership.pk, []))
-            # Current HTTP/model code must only run against the current schema.
-            latest = MigrationExecutor(connection)
-            latest.migrate(latest.loader.graph.leaf_nodes("app_core"))
-            attached = self.upload()
-            with patch("app_core.agent_input_delivery.dispatch_agent_inputs"):
-                self.assertEqual(self.submit("captured", "", [attached]).status_code, 201)
+            self.assertEqual({key: getattr(legacy, key) for key in retained}, retained)
+            inputs.create(**captured)
             with self.assertRaisesMessage(ValueError, "agent_input_attachment_migration_cannot_discard_captures"):
-                MigrationExecutor(connection).migrate([("app_core", "0004_business_agent_branches")])
-        finally:
-            latest = MigrationExecutor(connection)
-            latest.migrate(latest.loader.graph.leaf_nodes("app_core"))
+                MigrationExecutor(isolated).migrate(before)
+            self.assertEqual(inputs.values().get(input_id="captured"), captured)
