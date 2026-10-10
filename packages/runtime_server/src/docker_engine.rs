@@ -164,16 +164,21 @@ fn decode_inspect(
 }
 
 pub(crate) fn list_owned(agent_run_id: &str) -> Result<Vec<String>, String> {
+    list_managed(Some(agent_run_id))
+}
+
+pub(crate) fn list_managed(agent_run_id: Option<&str>) -> Result<Vec<String>, String> {
     let engine = shared()?;
     engine.run(QUERY_TIMEOUT, async {
+        let mut labels = vec!["centaeris.managed=true".to_string()];
+        if let Some(agent_run_id) = agent_run_id {
+            labels.push(format!("centaeris.agent_run_id={agent_run_id}"));
+        }
         let options = ListContainersOptions {
             all: true,
             filters: Some(std::collections::HashMap::from([(
                 "label".to_string(),
-                vec![
-                    "centaeris.managed=true".to_string(),
-                    format!("centaeris.agent_run_id={agent_run_id}"),
-                ],
+                labels,
             )])),
             ..Default::default()
         };

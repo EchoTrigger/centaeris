@@ -1769,18 +1769,87 @@ impl PostgresSessionLog {
         checkpoint: Option<&CheckpointRecord>,
         handoff: Option<&crate::wait_recovery::WaitHandoff>,
     ) -> Result<SessionCommitReceipt, String> {
+        let result = self.connections.with_client(|client| {
+            self.append_transaction_on_client(
+                client,
+                agent_run_id,
+                events,
+                fence,
+                rewrite,
+                checkpoint,
+                handoff,
+            )
+        });
+        if result.is_err() {
+            self.agent_run_state
+                .lock()
+                .map_err(|_| "session record AgentRun state lock poisoned".to_string())?
+                .remove(agent_run_id);
+        }
+        let receipt = result?;
+        self.catch_up_transcript_projection_after_append(&receipt);
+        Ok(receipt)
+    }
+
+    /// Append while a host admission already holds the ordinary connection.
+    /// The caller catches up projection after returning that connection.
+    pub(crate) fn append_session_records_with_runtime_job_lease_on_client(
+        &self,
+        client: &mut postgres::Client,
+        agent_run_id: &str,
+        events: &[SequencedSessionRecord],
+        fence: &RuntimeJobLeaseFence,
+    ) -> Result<SessionCommitReceipt, String> {
+        self.append_transaction_on_client(
+            client,
+            agent_run_id,
+            events,
+            Some(fence),
+            None,
+            None,
+            None,
+        )
+    }
+
+    // Keep the existing append variants on the same fenced transaction boundary.
+    #[allow(clippy::too_many_arguments)]
+    fn append_transaction_on_client(
+        &self,
+        client: &mut postgres::Client,
+        agent_run_id: &str,
+        events: &[SequencedSessionRecord],
+        fence: Option<&RuntimeJobLeaseFence>,
+        rewrite: Option<&RewriteLastUserTailRequest>,
+        checkpoint: Option<&CheckpointRecord>,
+        handoff: Option<&crate::wait_recovery::WaitHandoff>,
+    ) -> Result<SessionCommitReceipt, String> {
         validate_sequenced_session_records(events)?;
         let _append_guard = self
             .append_lock
             .lock()
             .map_err(|_| "session record append lock poisoned".to_string())?;
-        let result = self.connections.with_client(|client| {
-            let mut tx = client
-                .transaction()
-                .map_err(|error| crate::session_delivery::postgres_error("begin session log append failed", error))?;
-            if events.iter().any(|item| is_successful_work_confirmation(&item.event)) {
-                if fence.is_none() { return Err("work_confirmation_lease_required".into()); }
-                let start = self.accepted_start.as_ref().ok_or("work_confirmation_admission_missing")?;
+        let result = (|| {
+            let mut tx = client.transaction().map_err(|error| {
+                crate::session_delivery::postgres_error("begin session log append failed", error)
+            })?;
+            if handoff.is_some()
+                || events.iter().any(|item| {
+                    item.event.event_type == SessionRecordType::AgentRunRecoveryAttempted
+                })
+            {
+                super::resource_commit::require_durable_resource_commit(&mut tx)?;
+            }
+            if events
+                .iter()
+                .any(|item| is_successful_work_confirmation(&item.event))
+            {
+                if fence.is_none() {
+                    return Err("work_confirmation_lease_required".into());
+                }
+                let start = self
+                    .accepted_start
+                    .as_ref()
+                    .ok_or("work_confirmation_admission_missing")?;
                 lock_work_confirmation_scope(&mut tx, start, events)?;
             }
             let session = tx
@@ -1788,7 +1857,9 @@ impl PostgresSessionLog {
                     "SELECT workspace_id FROM app_core_session WHERE id=$1 FOR UPDATE",
                     &[&self.session_id],
                 )
-                .map_err(|error| crate::session_delivery::postgres_error("lock chat session failed", error))?
+                .map_err(|error| {
+                    crate::session_delivery::postgres_error("lock chat session failed", error)
+                })?
                 .ok_or_else(|| "chat session not found".to_string())?;
             if session.get::<_, String>(0) != self.workspace_id {
                 return Err("chat session workspace binding mismatch".to_string());
@@ -1818,27 +1889,46 @@ impl PostgresSessionLog {
             }
             if let Some(handoff) = handoff {
                 let checkpoint = checkpoint.ok_or("wait handoff requires recovery checkpoint")?;
-                let payload = serde_json::from_str::<centaeris_core::runtime::contracts::RuntimeRecoveryCheckpointV1>(&checkpoint.payload_json).map_err(|e|e.to_string())?;
+                let payload = serde_json::from_str::<
+                    centaeris_core::runtime::contracts::RuntimeRecoveryCheckpointV1,
+                >(&checkpoint.payload_json)
+                .map_err(|e| e.to_string())?;
                 handoff.validate(&payload)?;
                 if events.len() == 1 {
-                    crate::wait_recovery::WaitHandoff::validate_reference(checkpoint, &events[0].event)?;
+                    crate::wait_recovery::WaitHandoff::validate_reference(
+                        checkpoint,
+                        &events[0].event,
+                    )?;
                 }
-                if payload.agent_run_id != agent_run_id || checkpoint.turn_id != handoff.wait_checkpoint.turn_id
-                    || events.len()!=1 || events[0].event.event_type!=SessionRecordType::CheckpointRef
-                    || events[0].event.payload["checkpointId"].as_str()!=Some(checkpoint.checkpoint_id.as_str())
-                { return Err("wait handoff Session binding mismatch".into()); }
-                let serialized = serde_json::to_string(handoff).map_err(|e|e.to_string())?;
+                if payload.agent_run_id != agent_run_id
+                    || checkpoint.turn_id != handoff.wait_checkpoint.turn_id
+                    || events.len() != 1
+                    || events[0].event.event_type != SessionRecordType::CheckpointRef
+                    || events[0].event.payload["checkpointId"].as_str()
+                        != Some(checkpoint.checkpoint_id.as_str())
+                {
+                    return Err("wait handoff Session binding mismatch".into());
+                }
+                let serialized = serde_json::to_string(handoff).map_err(|e| e.to_string())?;
                 let stored: Option<String> = tx.query_one("SELECT wait_handoff_json FROM runtime.checkpoints WHERE checkpoint_id=$1 FOR UPDATE", &[&checkpoint.checkpoint_id]).map_err(|e|e.to_string())?.get(0);
                 match stored {
-                    Some(value) if value!=serialized => return Err("wait handoff idempotency conflict".into()),
-                    Some(_) => {},
-                    None => { tx.execute("UPDATE runtime.checkpoints SET wait_handoff_json=$2 WHERE checkpoint_id=$1", &[&checkpoint.checkpoint_id,&serialized]).map_err(|e|e.to_string())?; }
+                    Some(value) if value != serialized => {
+                        return Err("wait handoff idempotency conflict".into())
+                    }
+                    Some(_) => {}
+                    None => {
+                        tx.execute("UPDATE runtime.checkpoints SET wait_handoff_json=$2 WHERE checkpoint_id=$1", &[&checkpoint.checkpoint_id,&serialized]).map_err(|e|e.to_string())?;
+                    }
                 }
             }
             if let Some(receipt) = self.load_idempotent_batch(&mut tx, agent_run_id, events)? {
                 consume_waits_for_terminal_batch(&mut tx, &self.session_id, agent_run_id, events)?;
-                tx.commit()
-                    .map_err(|error| crate::session_delivery::postgres_error("commit idempotent session append failed", error))?;
+                tx.commit().map_err(|error| {
+                    crate::session_delivery::postgres_error(
+                        "commit idempotent session append failed",
+                        error,
+                    )
+                })?;
                 return Ok(receipt);
             }
             if let Some(handoff) = handoff {
@@ -1905,13 +1995,13 @@ impl PostgresSessionLog {
                 .map_err(|error| crate::session_delivery::postgres_error("load session sequence failed", error))?
                 .get::<_, i32>(0);
             let observation_state = if records_to_append
-                    .iter()
-                    .any(|item| item.event.event_type == SessionRecordType::ModelRequestStarted)
-                {
-                    load_latest_model_observation_state(&mut tx, self.session_id.as_str())?
-                } else {
-                    (None, Vec::new())
-                };
+                .iter()
+                .any(|item| item.event.event_type == SessionRecordType::ModelRequestStarted)
+            {
+                load_latest_model_observation_state(&mut tx, self.session_id.as_str())?
+            } else {
+                (None, Vec::new())
+            };
             let prepared = self.prepare_session_append(
                 &mut tx,
                 agent_run_id,
@@ -1929,17 +2019,26 @@ impl PostgresSessionLog {
                 )
                 .map_err(|error| crate::session_delivery::postgres_error("update tombstoned session projection failed", error))?;
             }
-            tx.commit()
-                .map_err(|error| crate::session_delivery::postgres_error("commit session log append failed", error))?;
+            tx.commit().map_err(|error| {
+                crate::session_delivery::postgres_error("commit session log append failed", error)
+            })?;
             Ok(SessionCommitReceipt { records })
-        });
+        })();
         if result.is_err() {
             self.agent_run_state
                 .lock()
                 .map_err(|_| "session record AgentRun state lock poisoned".to_string())?
                 .remove(agent_run_id);
         }
-        let receipt = result?;
+        result
+    }
+
+    /// Best-effort projection follows a committed source receipt, after the
+    /// caller has returned any ordinary connection held for host admission.
+    pub(crate) fn catch_up_transcript_projection_after_append(
+        &self,
+        receipt: &SessionCommitReceipt,
+    ) {
         if let (Some(store), Some(source_high_water)) = (
             self.projection_store.as_ref(),
             receipt.records.iter().map(|record| record.sequence).max(),
@@ -1982,7 +2081,6 @@ impl PostgresSessionLog {
                 }
             }
         }
-        Ok(receipt)
     }
 
     fn load_idempotent_batch(

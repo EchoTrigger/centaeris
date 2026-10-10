@@ -45,12 +45,20 @@ def main():
                  '--', '--exact'],
                 ['cargo', 'test', '--locked', '-p', 'runtime_server', 'postgres_outbox', '--'],
                 ['cargo', 'test', '--locked', '-p', 'runtime_server', 'postgres_wait_handoff', '--'],
-                ['cargo', 'test', '--locked', '-p', 'runtime_server', 'postgres_current_schema', '--']]
+                ['cargo', 'test', '--locked', '-p', 'runtime_server', 'postgres_current_schema', '--'],
+                ['cargo', 'test', '--locked', '-p', 'runtime_server', 'postgres_completion_delivery_upgrade', '--'],
+                ['cargo', 'test', '--locked', '-p', 'runtime_server',
+                 'postgres_store::resource_commit::tests::critical_resource_transaction_overrides_asynchronous_session_without_changing_default',
+                 '--', '--exact'],
+                ['cargo', 'test', '--locked', '-p', 'runtime_server',
+                 'postgres_store::integration_tests::residency_tests', '--']]
     exact_tests = [
         'snapshot_cas_tests::postgres_snapshot_cas_rejects_stale_writers_and_preserves_concurrent_results',
         'postgres_transcript_concurrent_duplicate_commit_is_idempotent',
         'postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_state',
         'postgres_runtime_store_persists_core_state_and_claims_jobs_once',
+        'postgres_expired_lease_budget_persists_backoff_fencing_and_isolation',
+        'postgres_lease_budget_forward_migration_preserves_published_job_facts',
         'postgres_same_worker_reclaim_fences_old_writes_and_result_transaction',
         'postgres_worker_cancel_checks_claim_but_user_cancel_targets_job',
         'postgres_hosted_worker_reclaim_changes_claim_identity',
@@ -81,7 +89,8 @@ def main():
     ])
     names = []
     for command in commands:
-        discovered = subprocess.run([*command, '--ignored', '--list'], cwd=root, env=env,
+        discovered = subprocess.run([*command, '--ignored', '--list'], cwd=root,
+                                    env=env,
                                     capture_output=True, text=True, check=True)
         names.extend(discovered_tests(discovered.stdout))
     if len(names) != len(set(names)):
@@ -90,7 +99,8 @@ def main():
         admin.execute(sql.SQL('CREATE DATABASE {}').format(sql.Identifier(database)))
         try:
             for command in commands:
-                subprocess.run([*command, '--ignored', '--test-threads=1'], cwd=root, env=env, check=True)
+                subprocess.run([*command, '--ignored', '--test-threads=1'], cwd=root,
+                               env=env, check=True)
             print(f'Runtime PostgreSQL gate: {len(names)} discovered tests passed')
         finally:
             admin.execute(sql.SQL('DROP DATABASE {} WITH (FORCE)').format(sql.Identifier(database)))

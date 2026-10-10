@@ -35,6 +35,7 @@ use centaeris_runtime_sqlite::SqliteRuntimeStore;
 
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+mod residency_tests;
 mod snapshot_cas_tests;
 mod tool_result_storage_tests;
 mod wait_handoff_tests;
@@ -1191,7 +1192,7 @@ fn postgres_lease_budget_forward_migration_preserves_published_job_facts() {
         .unwrap();
     drop(store);
     let mut db = Client::connect(&url, NoTls).unwrap();
-    db.batch_execute("DELETE FROM runtime.schema_migrations WHERE version>=6; ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_count; ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_not_before_ms;").unwrap();
+    db.batch_execute("DELETE FROM runtime.schema_migrations WHERE version>=6; DROP TABLE runtime.resident_sandboxes; ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_count; ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_not_before_ms;").unwrap();
     let history = db
         .query(
             "SELECT version,applied_at_ms FROM runtime.schema_migrations ORDER BY version",

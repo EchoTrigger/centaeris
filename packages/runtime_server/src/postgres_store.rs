@@ -80,6 +80,7 @@ impl Default for PostgresConnectionLimits {
 mod execution_capacity;
 mod external_context;
 mod reliability;
+mod residency;
 mod resource_commit;
 mod runtime;
 pub(crate) use runtime::validate_hosted_native_input;
