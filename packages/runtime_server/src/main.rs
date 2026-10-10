@@ -27,6 +27,7 @@ mod platform_materials;
 mod postgres_store;
 mod recovery_upload;
 mod request_capacity;
+mod resident_capacity;
 mod session_delivery;
 mod skill_projection;
 mod terminal_subagents;
@@ -145,6 +146,7 @@ const HTTP_HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 const HTTP_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const AGENT_RUN_WAITING_TRANSITION_REASONS: &[&str] = &[
+    "execution_resident_capacity_wait",
     "execution_recovery_checkpoint_committed",
     "question_wait",
     "runtime_job_wait",
@@ -413,6 +415,7 @@ fn main() -> Result<(), String> {
     };
     let store = Arc::new(store);
     let job_store = Arc::new(job_store);
+    DockerExecutionHostRunner::reconcile_residency(job_store.as_ref())?;
     let tool_layers = Arc::new(Mutex::new(HashMap::<String, HostedRuntimeContext>::new()));
     let resolver_layers = tool_layers.clone();
     let resolver_jobs = job_store.clone();
@@ -1713,9 +1716,15 @@ fn handle_request(
             // teardown and retains the context until child cancellation commits.
             return json_error_response(503, "terminal_subagent_cleanup_unavailable");
         }
-        if let Err(error) =
-            DockerExecutionHostRunner::teardown(teardown.agent_run_start.agent_run_id.as_str())
-        {
+        if let Err(error) = DockerExecutionHostRunner::teardown(
+            teardown.agent_run_start.agent_run_id.as_str(),
+            job_store.as_ref(),
+            &RuntimeJobLeaseFence {
+                job_id: teardown.job_id.clone(),
+                job_kind: AGENT_RUN_LIFECYCLE_JOB_KIND.into(),
+                lease_owner: teardown.lease_owner.clone(),
+            },
+        ) {
             eprintln!("sandbox teardown failed: {error}");
             return json_error_response(500, "sandbox_teardown_failed");
         }
@@ -2028,6 +2037,35 @@ fn execution_recovery_waiting(retry_at_ms: i64) -> AgentRunStepOutcome {
         transition_reason: "execution_recovery_checkpoint_committed".to_string(),
         retry_at_ms: Some(retry_at_ms),
     }
+}
+
+fn prepare_execution_host_with_recovery<T>(
+    mut reserve_recovery: impl FnMut(Option<&mut postgres::Client>) -> Result<(), String> + Send,
+    prepare: impl FnOnce(
+        &mut (dyn FnMut(Option<&mut postgres::Client>) -> Result<(), String> + Send),
+    ) -> Result<T, String>,
+) -> Result<T, String> {
+    prepare(&mut reserve_recovery)
+}
+
+fn commit_execution_recovery_attempt(
+    state: &mut AgentRunSessionState,
+    turn_id: &str,
+    checkpoint_id: &str,
+    maximum_attempts: u64,
+    created_at_ms: i64,
+    mut persist: impl FnMut(&mut AgentRunSessionState, &SequencedSessionRecord) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut reserved_state = state.clone();
+    let reserved = reserved_state.reserve_execution_recovery(
+        turn_id,
+        checkpoint_id,
+        maximum_attempts,
+        created_at_ms,
+    )?;
+    persist(&mut reserved_state, &reserved)?;
+    *state = reserved_state;
+    Ok(())
 }
 
 fn session_delivery_waiting() -> AgentRunStepOutcome {
@@ -2357,30 +2395,11 @@ fn execute_agent_run(
         if now_ms()? < retry_at_ms {
             return Ok(execution_recovery_waiting(retry_at_ms));
         }
-        let reserved = sequence.reserve_execution_recovery(
-            agent_run_start.turn_id.as_str(),
-            checkpoint.checkpoint_id.as_str(),
-            recovery_schedule.maximum_attempts,
-            now_ms()?,
-        )?;
-        let receipt = append_agent_run_session_records(
-            runtime.as_ref(),
-            &session_log,
-            &agent_run_start,
-            &[reserved],
-            &terminal_lease_fence,
-        )?;
-        accept_session_commit(
-            &mut sequence,
-            &mut *session_stream_guard(&session_stream)?,
-            &receipt,
-        )?;
         execution_id = replacement_execution_id(
             &agent_run_start,
             checkpoint.checkpoint_id.as_str(),
             attempts + 1,
         );
-        *sequence_guard(&session_record_sequence)? = sequence;
     }
     let workspace_skill_catalog_config =
         workspace_skill_catalog_config(&agent_run_start.authorization.plugin_activation)?;
@@ -2412,21 +2431,100 @@ fn execute_agent_run(
     )));
     let runtime_prelude_ms = startup_started.elapsed().as_millis();
     let sandbox_started = Instant::now();
-    let docker_execution = DockerExecutionHostRunner::new(DockerExecutionHostRequest {
-        agent_run_id: agent_run_start.agent_run_id.clone(),
-        execution_id: execution_id.clone(),
-        user_id: agent_run_start.authorization.user_id.clone(),
-        agent_id: agent_run_start.authorization.agent_id.clone(),
-        authorization_digest: agent_run_start.authorization_digest.clone(),
-        image_digest: agent_run_start.authorization.image_digest.clone(),
-        resources: agent_run_start.authorization.resources,
-        has_execution_fact,
-        api_url: api_url.clone(),
-        api_token: token.clone(),
-        plugin_activation: &agent_run_start.authorization.plugin_activation,
-    });
+    let mut recovery_reservation_error = None;
+    let mut recovery_projection_receipt = None;
+    let docker_execution = prepare_execution_host_with_recovery(
+        |mut admitted_client| {
+            let result = (|| {
+                let Some((_, checkpoint)) = recovery_checkpoint.as_ref() else {
+                    return Ok(());
+                };
+                commit_execution_recovery_attempt(
+                    &mut *sequence_guard(&session_record_sequence)?,
+                    agent_run_start.turn_id.as_str(),
+                    checkpoint.checkpoint_id.as_str(),
+                    recovery_schedule.maximum_attempts,
+                    now_ms()?,
+                    |sequence, reserved| {
+                        let receipt = match admitted_client.as_deref_mut() {
+                            Some(client) => {
+                                let receipt = session_log
+                                    .append_session_records_with_runtime_job_lease_on_client(
+                                        client,
+                                        agent_run_start.agent_run_id.as_str(),
+                                        std::slice::from_ref(reserved),
+                                        &terminal_lease_fence,
+                                    )
+                                    .map_err(|error| {
+                                        if error == RUNTIME_JOB_LEASE_FENCE_REJECTED {
+                                            "agent_run_lifecycle_lease_lost".to_string()
+                                        } else {
+                                            error
+                                        }
+                                    })?;
+                                recovery_projection_receipt = Some(receipt.clone());
+                                receipt
+                            }
+                            None => append_agent_run_session_records(
+                                runtime.as_ref(),
+                                &session_log,
+                                &agent_run_start,
+                                std::slice::from_ref(reserved),
+                                &terminal_lease_fence,
+                            )?,
+                        };
+                        accept_session_commit(
+                            sequence,
+                            &mut *session_stream_guard(&session_stream)?,
+                            &receipt,
+                        )
+                    },
+                )
+            })();
+            if let Err(error) = &result {
+                recovery_reservation_error = Some(error.clone());
+            }
+            result
+        },
+        |admitted| {
+            DockerExecutionHostRunner::new_with_admitted(
+                DockerExecutionHostRequest {
+                    workspace_id: agent_run_start.authorization.workspace_id.clone(),
+                    lifecycle_job_id: lifecycle_job_id.clone(),
+                    lifecycle_lease_owner: lifecycle_lease_owner.clone(),
+                    resident_store: job_store.clone(),
+                    agent_run_id: agent_run_start.agent_run_id.clone(),
+                    execution_id: execution_id.clone(),
+                    user_id: agent_run_start.authorization.user_id.clone(),
+                    agent_id: agent_run_start.authorization.agent_id.clone(),
+                    authorization_digest: agent_run_start.authorization_digest.clone(),
+                    image_digest: agent_run_start.authorization.image_digest.clone(),
+                    resources: agent_run_start.authorization.resources,
+                    has_execution_fact,
+                    api_url: api_url.clone(),
+                    api_token: token.clone(),
+                    plugin_activation: &agent_run_start.authorization.plugin_activation,
+                },
+                &mut |client| admitted(Some(client)),
+            )
+        },
+    );
+    if let Some(receipt) = recovery_projection_receipt {
+        session_log.catch_up_transcript_projection_after_append(&receipt);
+    }
+    if let Some(error) = recovery_reservation_error {
+        return Err(error);
+    }
     let docker_execution = match docker_execution {
         Ok(runner) => runner,
+        Err(error) if error == resident_capacity::RESIDENT_CAPACITY_WAIT => {
+            return Ok(AgentRunStepOutcome {
+                disposition: "waiting",
+                terminal_state: None,
+                transition_reason: resident_capacity::RESIDENT_CAPACITY_WAIT.into(),
+                retry_at_ms: None,
+            });
+        }
         Err(error) if has_execution_fact && error.starts_with("execution_environment_lost:") => {
             let checkpoint = latest_recovery_checkpoint(
                 job_store.as_ref(),
@@ -3042,7 +3140,11 @@ fn execute_agent_run(
             std::thread::sleep,
         );
         let receipt = session_delivery::admission(admission_result, || {
-            DockerExecutionHostRunner::teardown(agent_run_start.agent_run_id.as_str())
+            DockerExecutionHostRunner::teardown(
+                agent_run_start.agent_run_id.as_str(),
+                job_store.as_ref(),
+                &terminal_lease_fence,
+            )
         })?;
         accept_session_commit(
             &mut committed_sequence,
@@ -6228,6 +6330,210 @@ fn agent_run_step_failure_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn recovery_preparation_state() -> (AgentRunSessionState, Vec<SequencedSessionRecord>) {
+        let start = agent_run_start();
+        let mut state = agent_run_session_state(&start);
+        let mut records = state.start("turn_1", "recover", Vec::new(), 1).unwrap();
+        records.push(
+            state
+                .start_execution(
+                    "turn_1",
+                    "execution_1",
+                    &start.authorization_digest,
+                    None,
+                    2,
+                )
+                .unwrap(),
+        );
+        records.push(
+            state
+                .checkpoint_ref(&CheckpointRecord {
+                    checkpoint_id: "checkpoint_1".into(),
+                    kind: CheckpointKindV1::Recovery,
+                    session_id: start.authorization.session_id.clone(),
+                    turn_id: "turn_1".into(),
+                    status: "committed".into(),
+                    done_reason: None,
+                    updated_at_ms: 3,
+                    payload_json: "{}".into(),
+                })
+                .unwrap(),
+        );
+        records.push(
+            state
+                .end_execution(
+                    "turn_1",
+                    "execution_1",
+                    "lost",
+                    "execution_environment_lost",
+                    true,
+                    Some("checkpoint_1"),
+                    Vec::new(),
+                    4,
+                )
+                .unwrap(),
+        );
+        (state, records)
+    }
+
+    #[test]
+    fn recovery_preparation_persists_before_create_and_restore_and_counts_failed_create() {
+        let (mut state, mut records) = recovery_preparation_state();
+        let events = Mutex::new(Vec::new());
+        let result = prepare_execution_host_with_recovery(
+            |_client| {
+                commit_execution_recovery_attempt(
+                    &mut state,
+                    "turn_1",
+                    "checkpoint_1",
+                    5,
+                    5,
+                    |_, record| {
+                        assert_eq!(
+                            record.event.event_type,
+                            SessionRecordType::AgentRunRecoveryAttempted
+                        );
+                        events.lock().unwrap().push("persist");
+                        records.push(record.clone());
+                        Ok(())
+                    },
+                )
+            },
+            |admitted| {
+                events.lock().unwrap().push("admit");
+                admitted(None)?;
+                events.lock().unwrap().push("create");
+                Err::<(), _>("unknown Docker create result".into())
+            },
+        );
+        assert_eq!(result.unwrap_err(), "unknown Docker create result");
+        assert_eq!(state.recovery_attempt().unwrap().number, 1);
+        let start = agent_run_start();
+        let mut replay = agent_run_session_state(&start);
+        for record in records {
+            replay.restore(record).unwrap();
+        }
+        events.lock().unwrap().push("restore");
+        assert_eq!(replay.recovery_attempt().unwrap().number, 1);
+        assert_eq!(replay.active_execution_id(), None);
+        let events = events.into_inner().unwrap();
+        let position = |name| events.iter().position(|event| *event == name).unwrap();
+        assert!(position("persist") < position("create"));
+        assert!(position("admit") < position("create"));
+        assert!(position("create") < position("restore"));
+    }
+
+    #[test]
+    fn recovery_preparation_commit_failure_prevents_create_and_preserves_replayed_attempts() {
+        let (mut state, records) = recovery_preparation_state();
+        let created = std::sync::atomic::AtomicBool::new(false);
+        let result = prepare_execution_host_with_recovery(
+            |_client| {
+                commit_execution_recovery_attempt(
+                    &mut state,
+                    "turn_1",
+                    "checkpoint_1",
+                    5,
+                    5,
+                    |_, _| Err("commit unavailable".into()),
+                )
+            },
+            |admitted| {
+                admitted(None)?;
+                created.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        assert_eq!(result.unwrap_err(), "commit unavailable");
+        assert!(!created.load(Ordering::SeqCst));
+        assert!(state.recovery_attempt().is_none());
+        let mut replay = agent_run_session_state(&agent_run_start());
+        for record in records {
+            replay.restore(record).unwrap();
+        }
+        assert!(replay.recovery_attempt().is_none());
+    }
+
+    #[test]
+    fn recovery_capacity_wait_does_not_consume_attempts_and_release_recovers_once() {
+        let maximum_attempts = 5;
+        let (mut state, mut records) = recovery_preparation_state();
+        for tick in 0..maximum_attempts + 3 {
+            let result = prepare_execution_host_with_recovery(
+                |_client| {
+                    commit_execution_recovery_attempt(
+                        &mut state,
+                        "turn_1",
+                        "checkpoint_1",
+                        maximum_attempts,
+                        5 + tick as i64,
+                        |_, record| {
+                            records.push(record.clone());
+                            Ok(())
+                        },
+                    )
+                },
+                |_admitted| Err::<(), _>(resident_capacity::RESIDENT_CAPACITY_WAIT.into()),
+            );
+            assert_eq!(
+                result.unwrap_err(),
+                resident_capacity::RESIDENT_CAPACITY_WAIT
+            );
+            assert!(
+                state.recovery_attempt().is_none(),
+                "capacity wait must not reserve a recovery attempt"
+            );
+        }
+        let events = Mutex::new(Vec::new());
+        prepare_execution_host_with_recovery(
+            |_client| {
+                commit_execution_recovery_attempt(
+                    &mut state,
+                    "turn_1",
+                    "checkpoint_1",
+                    maximum_attempts,
+                    20,
+                    |_, record| {
+                        events.lock().unwrap().push("persist");
+                        records.push(record.clone());
+                        Ok(())
+                    },
+                )
+            },
+            |admitted| {
+                events.lock().unwrap().push("admit");
+                admitted(None)?;
+                events.lock().unwrap().push("create");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            events.into_inner().unwrap(),
+            vec!["admit", "persist", "create"]
+        );
+        assert_eq!(state.recovery_attempt().unwrap().number, 1);
+        records.push(
+            state
+                .start_execution(
+                    "turn_1",
+                    "execution_2",
+                    &agent_run_start().authorization_digest,
+                    Some("checkpoint_1"),
+                    21,
+                )
+                .unwrap(),
+        );
+        let mut replay = agent_run_session_state(&agent_run_start());
+        for record in records {
+            replay.restore(record).unwrap();
+        }
+        assert_eq!(replay.recovery_attempt().unwrap().number, 1);
+        assert_eq!(replay.recovery_execution_count(), 1);
+        assert_eq!(replay.active_execution_id(), Some("execution_2"));
+    }
+
     #[test]
     fn pending_result_delivery_is_recoverable_without_claiming_tool_or_run_failure() {
         let outcome = session_delivery_waiting();

@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 mod filesystem;
 mod policy;
 mod process;
+mod residency;
+
+pub use residency::{admit_resident_resources, ResidentResourceUsage};
 
 pub use policy::{ExecutionPolicy, FileSystemPolicy, NetworkPolicy};
 pub use process::{

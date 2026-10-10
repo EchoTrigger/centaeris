@@ -38,6 +38,7 @@ except ValueError:
 if not 1 <= WORKER_SLOT_COUNT <= 16:
     raise ValueError("WORKER_SLOT_COUNT must be an integer between 1 and 16")
 AGENT_RUN_WAITING_TRANSITION_REASONS = {
+    "execution_resident_capacity_wait",
     "execution_recovery_checkpoint_committed",
     "question_wait",
     "runtime_job_wait",
