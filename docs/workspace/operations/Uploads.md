@@ -1,6 +1,6 @@
 # Upload and temporary-space limits
 
-The API checks actual request bytes before Django's initial body spool. Multipart
+The API checks ordinary multipart upload bytes before Django's initial body spool. Multipart
 parsing checks each file before a view can publish any part, including a late
 oversized part following valid files. Content-Length and uploaded size metadata
 do not substitute for counting received bytes. The existing library batch count
@@ -13,7 +13,7 @@ of 50 files remains unchanged.
 | `UPLOAD_FILE_MAX_BYTES` | Defaults to 67108864 (64 MiB). This is a new general single-file policy using the existing Artifact protocol ceiling as its reference; it is not evidence that library/source uploads previously had that limit. |
 | `UPLOAD_BODY_MAX_BYTES` | Required positive public HTTP envelope size in bytes. No production default. Includes multipart framing, form fields and all files together. |
 | `UPLOAD_TEMP_MAX_BYTES` | Required positive shared spool-byte reservation budget. No production default. Must fit two copies of the public envelope. |
-| `UPLOAD_MAX_CONCURRENT` | Required positive count of simultaneous multipart or authenticated snapshot upload requests across API replicas. No production default. |
+| `UPLOAD_MAX_CONCURRENT` | Required positive count of simultaneous ordinary multipart upload requests across API replicas. No production default. |
 
 Choose the envelope for supported payloads and their actual framing. There is no
 independent 128 MiB batch ceiling or invented fixed framing allowance. The gateway
@@ -28,19 +28,22 @@ the retained storage root and free of aliases, symlinks and reparse points.
 
 ## What the budget bounds
 
-Each admitted request durably holds twice its declared body length, or twice its
+Each admitted ordinary multipart request durably holds twice its declared body length, or twice its
 maximum when length is unknown. This covers the overlapping initial body spool
 and multipart file copies. False lengths and actual overflow are rejected before
-the overflowing chunk reaches the spool. Ordinary JSON/control traffic consumes
-byte capacity but does not consume an upload slot. An empty received body releases
+the overflowing chunk reaches the spool. Non-multipart traffic, including ordinary
+JSON/control requests, bypasses this upload pool and creates no upload lease or
+counter/database/filesystem work in the ingress adapter. An empty multipart body releases
 its temporary hold before a potentially long response.
 
-An authenticated internal snapshot request uses its declared length or the
-temporary pool's finite transport envelope. Existing snapshot metadata and issued
-signed authorization validation remain authoritative; today's sandbox profile
-does not reduce an older Run's authorized blob size. Snapshot staging remains on
-the retained storage filesystem. This temporary-volume policy does not bound its
-persistent bytes or promise final-save capacity.
+The exact internal workspace commit and execution stage paths are excluded,
+including when presented with a multipart content type. Their original Django
+body spool, view authentication and issued signed authorization validation remain
+unchanged. Upload-pool saturation cannot reject a final snapshot or a lifecycle
+control request. Snapshot staging remains on the retained storage filesystem;
+its transport and persistent capacity policies are deferred, and this temporary
+volume does not promise final-save capacity. Other non-multipart body spools also
+remain governed by the original Django transport.
 
 These counters bound spool payload envelopes, not every physical disk byte.
 Request markers, directory entries, inodes, filesystem allocation overhead,
@@ -59,11 +62,12 @@ error with that same confirmed cleanup can release capacity too. Uncertain
 cleanup retains its byte/slot hold across restart; elapsed time never refunds it.
 Confirmed request liabilities are removed in the same transaction that reduces
 the counters. Duplicate releases cannot refund a different active request;
-completed ordinary JSON requests do not accumulate historical lease records.
+completed multipart requests do not accumulate historical lease records.
 
 Oversized content receives 413. Exhausted temporary byte capacity or upload slots
-receive 429 with `upload_capacity_exhausted`. Slots being full alone does not
-block control JSON, but a full byte budget can.
+receive 429 with `upload_capacity_exhausted`. These rejections apply only to
+ordinary multipart uploads; even a full upload byte/slot budget leaves control
+JSON and internal snapshot requests on their original transport path.
 
 After stopping every API writer sharing the pool, run:
 
