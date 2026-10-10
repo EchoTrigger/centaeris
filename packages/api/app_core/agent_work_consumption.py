@@ -284,15 +284,15 @@ def consume_work_return(notice_id, operation_id):
         active = _active(session)
         run = active
         initial = False
-        if active is None and profile is not None:
+        # Retain the completed work's pending carrier and acceptance when no
+        # new Run fits. A later binding reuses this same receipt and attempt.
+        if (active is None and profile is not None
+                and queued_admission_error(source.workspace_id) is None):
             # User carriers win idle admission too, using the existing binder.
             from .models import AgentInput
             pending_users = list(AgentInput.objects.filter(agent=agent, session=session,
                 membership_ref=source.membership_ref, delivery__isnull=True).order_by("sequence")[:256])
             model, mode = _coordinator_model(agent)
-            admission = queued_admission_error(source.workspace_id)
-            if admission is not None:
-                raise WorkReturnError(*admission)
             run = AgentRun.objects.create(workspace_id=source.workspace_id, user=source.user, session=session,
                 modelConfig=model, thinkingMode=mode, prompt=pending_users[0].body if pending_users else _initial_objective(session, source),
                 agent_instructions=agent_configuration(agent).instructions)

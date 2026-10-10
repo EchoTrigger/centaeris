@@ -108,7 +108,9 @@ All replicas sharing one database must use the same execution/admission limits.
 Run admission retains its slot while Runtime capacity is unavailable or a Run
 waits for input. Moving from queued to running, replay, restart and retry do not
 release the obligation; a terminal state does. At capacity, new Run identities
-are refused while an accepted operation can still replay.
+are refused while an accepted operation can still replay. Completed work returns
+retain their acceptance and pending carrier and bind a coordinator Run once
+capacity becomes available, without creating another receipt or attempt.
 All API replicas must use this revision for the expanded admission count to
 apply consistently. These limits do not bound unbound Agent inputs or the
 independent material-processing backlog.
