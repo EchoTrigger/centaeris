@@ -9,10 +9,7 @@ from app_core.deleted_resource_gc import (
     expire_trash,
 )
 from app_core.trash_retention import trash_cutoff
-from app_core.workspace_snapshot_gc import (
-    WorkspaceSnapshotGcError,
-    collect_workspace_snapshot_gc,
-)
+from app_core.workspace_snapshot_gc import collect_workspace_snapshot_gc
 
 
 class Command(BaseCommand):
@@ -33,12 +30,35 @@ class Command(BaseCommand):
             raise CommandError("--older-than-seconds must be non-negative")
         dry_run = options["dry_run"]
         cutoff = timezone.now() - timedelta(seconds=older_than_seconds)
+        collectors = [
+            ("Trash expiration", lambda: self.expire(dry_run)),
+            ("Deleted resource GC", lambda: self.deleted(cutoff, dry_run)),
+            ("Workspace snapshot GC", lambda: self.snapshots(cutoff, dry_run)),
+        ]
+        if options["orphaned_library"]:
+            collectors.append(("Orphaned library GC", lambda: self.orphans(cutoff, dry_run)))
+        failures = []
+        for label, collect in collectors:
+            try:
+                count = collect()
+            except Exception as error:
+                failures.append(f"{label}: {error}")
+            else:
+                if count:
+                    failures.append(f"{label} failed for {count} resources")
+        if failures:
+            raise CommandError("; ".join(failures))
+
+    def expire(self, dry_run):
         expired = expire_trash(trash_cutoff(), dry_run)
         action = "Would expire" if dry_run else "Expired"
         self.stdout.write(
             f"{action} {expired.agents} agents, {expired.sessions} sessions, "
             f"{expired.sources} sources, {expired.library_objects} library objects"
         )
+        return 0
+
+    def deleted(self, cutoff, dry_run):
         report = collect_deleted_resource_gc(cutoff, dry_run)
         for resource in report.planned + report.cleaned:
             action = "Would clean" if dry_run else "Cleaned"
@@ -56,12 +76,10 @@ class Command(BaseCommand):
             f"{action} {len(report.planned) if dry_run else len(report.cleaned)} deleted resources; "
             f"blocked {len(report.blocked)}; failed {len(report.failures)}"
         )
-        if report.failures:
-            raise CommandError(f"GC failed for {len(report.failures)} deleted resources")
-        try:
-            snapshot_report = collect_workspace_snapshot_gc(cutoff, dry_run)
-        except WorkspaceSnapshotGcError as error:
-            raise CommandError(str(error)) from error
+        return len(report.failures)
+
+    def snapshots(self, cutoff, dry_run):
+        snapshot_report = collect_workspace_snapshot_gc(cutoff, dry_run)
         action = "Would clean" if dry_run else "Cleaned"
         for key in snapshot_report.planned + snapshot_report.cleaned:
             self.stdout.write(f"{action} workspace snapshot key {key}")
@@ -74,20 +92,17 @@ class Command(BaseCommand):
             f"workspace snapshot keys; blocked {len(snapshot_report.blocked)}; "
             f"failed {len(snapshot_report.failures)}"
         )
-        if snapshot_report.failures:
-            raise CommandError(f"Workspace snapshot GC failed for {len(snapshot_report.failures)} keys")
-        if options["orphaned_library"]:
-            orphan_report = collect_orphaned_library_gc(cutoff, dry_run)
-            action = "Would clean" if dry_run else "Cleaned"
-            for key in orphan_report.planned + orphan_report.cleaned:
-                self.stdout.write(f"{action} orphaned library key {key}")
-            for failure in orphan_report.failures:
-                self.stdout.write(f"Failed orphaned library key {failure}")
-            self.stdout.write(
-                f"{action} {len(orphan_report.planned) if dry_run else len(orphan_report.cleaned)} "
-                f"orphaned library keys; failed {len(orphan_report.failures)}"
-            )
-            if orphan_report.failures:
-                raise CommandError(
-                    f"Orphaned library GC failed for {len(orphan_report.failures)} keys"
-                )
+        return len(snapshot_report.failures)
+
+    def orphans(self, cutoff, dry_run):
+        orphan_report = collect_orphaned_library_gc(cutoff, dry_run)
+        action = "Would clean" if dry_run else "Cleaned"
+        for key in orphan_report.planned + orphan_report.cleaned:
+            self.stdout.write(f"{action} orphaned library key {key}")
+        for failure in orphan_report.failures:
+            self.stdout.write(f"Failed orphaned library key {failure}")
+        self.stdout.write(
+            f"{action} {len(orphan_report.planned) if dry_run else len(orphan_report.cleaned)} "
+            f"orphaned library keys; failed {len(orphan_report.failures)}"
+        )
+        return len(orphan_report.failures)

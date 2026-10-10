@@ -1,14 +1,17 @@
 import uuid
+import logging
 from dataclasses import dataclass
 from datetime import timedelta
 
 from django.core.files.storage import default_storage
-from django.db import models, transaction
+from django.db import connection, models, transaction
 from django.utils import timezone
 
 from .assets import delete_stored_object_for_gc
 from .assets import tombstone_stored_object
 from .transcript_output import purge_session_outputs
+from .storage_gc_retry import clean_storage_key, cleanup_attempt_limit, next_cleanup_time
+from .resource_commit import require_durable_commit
 from .models import (
     Agent,
     Artifact,
@@ -19,6 +22,9 @@ from .models import (
     SourceObject,
     UserLibraryObject,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -121,8 +127,11 @@ def collect_orphaned_library_gc(cutoff, dry_run: bool) -> OrphanedLibraryGcRepor
             planned.append(key)
             continue
         try:
-            delete_stored_object_for_gc(key)
-            cleaned.append(key)
+            result = clean_storage_key(key, "orphanedLibrary", delete_stored_object_for_gc)
+            if result.state == "cleaned":
+                cleaned.append(key)
+            elif result.state == "failed":
+                failures.append(f"{key}: {result.failure}")
         except Exception as error:
             failures.append(f"{key}: {error}")
     return OrphanedLibraryGcReport(planned, cleaned, failures)
@@ -210,6 +219,7 @@ def _has_uncleaned_derived_resources(resource: DerivedResource) -> bool:
 def _claim_resource(resource_id: str, lease_owner: str) -> DerivedResource | None:
     now = timezone.now()
     with transaction.atomic():
+        require_durable_commit(connection, RuntimeError("storage_cleanup_durability_required"))
         resource = DerivedResource.objects.select_for_update().get(id=resource_id)
         if resource.state == "cleaned":
             return None
@@ -217,13 +227,24 @@ def _claim_resource(resource_id: str, lease_owner: str) -> DerivedResource | Non
             return None
         if resource.state not in {"pending", "failed", "cleaning"}:
             return None
+        if resource.nextCleanupAt and resource.nextCleanupAt > now:
+            return None
+        if resource.cleanupAttempts >= cleanup_attempt_limit():
+            resource.state = "quarantined"
+            resource.quarantinedAt = now
+            resource.leaseOwner = ""
+            resource.leaseExpiresAt = None
+            resource.save(update_fields=["state", "quarantinedAt", "leaseOwner", "leaseExpiresAt", "updatedAt"])
+            logger.error("Derived resource cleanup quarantined: resourceId=%s attempts=%s", resource.pk, resource.cleanupAttempts)
+            return None
         resource.state = "cleaning"
         resource.leaseOwner = lease_owner
         resource.leaseExpiresAt = now + timedelta(minutes=5)
         resource.cleanupAttempts += 1
         resource.lastFailure = ""
+        resource.nextCleanupAt = None
         resource.save(update_fields=[
-            "state", "leaseOwner", "leaseExpiresAt", "cleanupAttempts", "lastFailure", "updatedAt",
+            "state", "leaseOwner", "leaseExpiresAt", "cleanupAttempts", "lastFailure", "nextCleanupAt", "updatedAt",
         ])
         return resource
 
@@ -275,6 +296,7 @@ def _mark_cleaned(resource_id: str, lease_owner: str) -> None:
         leaseOwner="",
         leaseExpiresAt=None,
         cleanedAt=now,
+        nextCleanupAt=None,
         updatedAt=now,
     )
     if updated != 1:
@@ -283,19 +305,24 @@ def _mark_cleaned(resource_id: str, lease_owner: str) -> None:
 
 def _mark_failed(resource_id: str, lease_owner: str, reason: str) -> None:
     now = timezone.now()
-    updated = DerivedResource.objects.filter(
-        id=resource_id,
-        state="cleaning",
-        leaseOwner=lease_owner,
-    ).update(
-        state="failed",
-        leaseOwner="",
-        leaseExpiresAt=None,
-        lastFailure=reason[:4000],
-        updatedAt=now,
-    )
-    if updated != 1:
-        raise RuntimeError("derived resource GC lease was lost before failure recording")
+    with transaction.atomic():
+        resource = DerivedResource.objects.select_for_update().filter(
+            id=resource_id, state="cleaning", leaseOwner=lease_owner,
+        ).first()
+        if resource is None:
+            raise RuntimeError("derived resource GC lease was lost before failure recording")
+        exhausted = resource.cleanupAttempts >= cleanup_attempt_limit()
+        resource.state = "quarantined" if exhausted else "failed"
+        resource.leaseOwner = ""
+        resource.leaseExpiresAt = None
+        resource.lastFailure = reason[:4000]
+        resource.nextCleanupAt = None if exhausted else next_cleanup_time(resource.cleanupAttempts, now)
+        resource.quarantinedAt = now if exhausted else None
+        resource.save(update_fields=[
+            "state", "leaseOwner", "leaseExpiresAt", "lastFailure", "nextCleanupAt", "quarantinedAt", "updatedAt",
+        ])
+        if exhausted:
+            logger.error("Derived resource cleanup quarantined: resourceId=%s attempts=%s", resource.pk, resource.cleanupAttempts)
 
 
 def _delete_stale_representation_if_fully_cleaned(resource: DerivedResource) -> None:

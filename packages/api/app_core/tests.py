@@ -7917,6 +7917,11 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         self.assertIn("storage failed", resource.lastFailure)
 
         call_command("gc_deleted_resources", older_than_seconds=0, stdout=io.StringIO())
+        resource.refresh_from_db()
+        self.assertEqual(resource.cleanupAttempts, 1)
+        self.assertEqual(resource.state, "failed")
+        with patch("django.utils.timezone.now", return_value=resource.nextCleanupAt):
+            call_command("gc_deleted_resources", older_than_seconds=0, stdout=io.StringIO())
 
         resource.refresh_from_db()
         self.assertEqual(resource.state, "cleaned")

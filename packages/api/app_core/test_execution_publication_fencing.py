@@ -24,13 +24,11 @@ from django.utils import timezone
 
 from .agent_run_authorization_factory import create_agent_run_authorization
 from .http import internal, workspaces
-from .models import Agent, AgentRun, ModelConfig, Workspace
+from .models import Agent, AgentRun, ModelConfig, StorageCleanupRetry, Workspace
 from .testing import create_session
 
 
-class ExecutionPublicationFencingTests(TransactionTestCase):
-    serialized_rollback = True
-
+class ExecutionPublicationFixture:
     def setUp(self):
         super().setUp()
         storage = tempfile.TemporaryDirectory(prefix="execution-publication-")
@@ -111,6 +109,23 @@ class ExecutionPublicationFencingTests(TransactionTestCase):
             HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN,
         )
 
+    def _assert_snapshot(self, expected):
+        self.session.refresh_from_db()
+        self.assertEqual(self.session.workspaceGeneration, 1)
+        self.assertEqual(self.session.workspaceLastAdvancedAgentRun_id, self.run.id)
+        self.assertTrue(default_storage.exists(self.session.workspaceStorageKey))
+        with default_storage.open(self.session.workspaceStorageKey, "rb") as stored:
+            self.assertEqual(stored.read(), expected)
+
+
+class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionTestCase):
+    serialized_rollback = True
+
+
+
+
+
+
     def _thread_post(self, body):
         try:
             with connection.cursor() as cursor:
@@ -147,13 +162,6 @@ class ExecutionPublicationFencingTests(TransactionTestCase):
         self.assertEqual(response.status_code, 409, response.content)
         self.assertEqual(response.json(), {"error": error})
 
-    def _assert_snapshot(self, expected):
-        self.session.refresh_from_db()
-        self.assertEqual(self.session.workspaceGeneration, 1)
-        self.assertEqual(self.session.workspaceLastAdvancedAgentRun_id, self.run.id)
-        self.assertTrue(default_storage.exists(self.session.workspaceStorageKey))
-        with default_storage.open(self.session.workspaceStorageKey, "rb") as stored:
-            self.assertEqual(stored.read(), expected)
 
     def _assert_no_upload_temporaries(self):
         self.assertEqual(list(self.storage_root.rglob(".centaeris-immutable-*.tmp")), [])
@@ -616,7 +624,14 @@ class ExecutionPublicationFencingTests(TransactionTestCase):
                 response.close()
         if parent:
             AgentRun.objects.filter(id=self.run.id).update(status="completed")
-        call_command("gc_deleted_resources", older_than_seconds=0, stdout=io.StringIO())
+        retry = StorageCleanupRetry.objects.filter(storageKey=key, state="failed").first()
+        if retry is not None:
+            self.assertIsNotNone(retry.nextCleanupAt)
+            self.assertGreater(retry.nextCleanupAt, timezone.now())
+            with patch("django.utils.timezone.now", return_value=retry.nextCleanupAt):
+                call_command("gc_deleted_resources", older_than_seconds=0, stdout=io.StringIO())
+        else:
+            call_command("gc_deleted_resources", older_than_seconds=0, stdout=io.StringIO())
         self.assertFalse(default_storage.exists(key))
         self._assert_error(
             self._thread_download(body, checkpoint=checkpoint), "session_workspace_session_unavailable",

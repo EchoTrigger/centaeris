@@ -20,6 +20,7 @@ from django.db.models import Q
 
 from .assets import delete_stored_object_for_gc
 from .models import Agent, AgentRun, Session
+from .storage_gc_retry import claim_storage_key, clean_storage_key
 
 
 _GENERATION = re.compile(r"[1-9][0-9]*\Z")
@@ -67,6 +68,26 @@ def collect_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSnapshotGcR
             continue
         for key in _snapshot_keys(root, prefix, session.id, report):
             try:
+                # Persist the attempt before the deletion transaction. A crash
+                # while unlinking must leave a reclaimable lease, not reset it.
+                claim = None
+                if not dry_run:
+                    path = _checked_path(root, key, directory=False)
+                    if path.stat().st_mtime > cutoff.timestamp():
+                        report.blocked.append(key)
+                        continue
+                    # A parent's purge cannot reclaim a child that is still
+                    # running. Do not spend attempts on this legitimate wait.
+                    with transaction.atomic():
+                        agent = Agent.objects.select_for_update().get(pk=session.agent_id)
+                        owner = Session.objects.select_for_update().get(pk=session.id)
+                        if not _owner_reclaimable(agent, owner, session, cutoff):
+                            report.blocked.append(key)
+                            continue
+                    claim = claim_storage_key(key, "workspaceSnapshot")
+                    if claim is None:
+                        report.blocked.append(key)
+                        continue
                 # Match public deletion and snapshot I/O: parent before child.
                 # Do not enumerate or copy payloads while holding these locks.
                 with transaction.atomic():
@@ -76,28 +97,7 @@ def collect_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSnapshotGcR
                     owner = Session.objects.select_for_update().only(
                         "status", "purgedAt", "workspace_id", "agent_id",
                     ).get(pk=session.id)
-                    session_purged = (
-                        owner.status == "deleted"
-                        and owner.purgedAt is not None
-                        and owner.purgedAt <= cutoff
-                    )
-                    agent_purged = (
-                        agent.status == "deleted"
-                        and agent.purgedAt is not None
-                        and agent.purgedAt <= cutoff
-                    )
-                    if (
-                        owner.workspace_id != session.workspace_id
-                        or owner.agent_id != agent.id
-                        or agent.workspace_id != owner.workspace_id
-                        or not (
-                            session_purged
-                            or (
-                                agent_purged
-                                and not owner.agent_runs.filter(status__in={"queued", "running"}).exists()
-                            )
-                        )
-                    ):
+                    if not _owner_reclaimable(agent, owner, session, cutoff):
                         report.blocked.append(key)
                         continue
                     try:
@@ -112,8 +112,13 @@ def collect_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSnapshotGcR
                     if dry_run:
                         report.planned.append(key)
                     else:
-                        delete_stored_object_for_gc(key)
-                        report.cleaned.append(key)
+                        result = clean_storage_key(key, "workspaceSnapshot", delete_stored_object_for_gc, claim=claim)
+                        if result.state == "cleaned":
+                            report.cleaned.append(key)
+                        elif result.state == "blocked":
+                            report.blocked.append(key)
+                        else:
+                            report.failures.append(f"{key}: {result.failure}")
             except FileNotFoundError:
                 # Uploader cleanup does not need the owner lock: after the
                 # checked lstat it may independently unlink its temporary name.
@@ -121,6 +126,17 @@ def collect_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSnapshotGcR
             except Exception as error:
                 report.failures.append(f"{key}: {error}")
     return report
+
+
+def _owner_reclaimable(agent, owner, session, cutoff):
+    session_purged = owner.status == "deleted" and owner.purgedAt is not None and owner.purgedAt <= cutoff
+    agent_purged = agent.status == "deleted" and agent.purgedAt is not None and agent.purgedAt <= cutoff
+    return (
+        owner.workspace_id == session.workspace_id
+        and owner.agent_id == agent.id
+        and agent.workspace_id == owner.workspace_id
+        and (session_purged or (agent_purged and not owner.agent_runs.filter(status__in={"queued", "running"}).exists()))
+    )
 
 
 def _session_prefix(session: Session) -> str:
