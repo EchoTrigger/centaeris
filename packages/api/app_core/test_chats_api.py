@@ -205,10 +205,12 @@ class ChatApiTests(BusinessBranchFixture, TransactionTestCase):
         self.assertEqual([item["id"] for item in listing], [branch.root_agent_id])
         # Generic definition transports cannot bypass a chat's binding.
         self.assertEqual(self.api("get", f"/api/sessions/{branch.session_id}", token=token).status_code, 404)
+        from importlib import import_module
+        from django.apps import apps
         from django.db import connection
-        from django.db.migrations.executor import MigrationExecutor
+        migration = import_module("app_core.migrations.0007_business_definition_instances")
         with self.assertRaisesRegex(RuntimeError, "published conversations"):
-            MigrationExecutor(connection).migrate([("app_core", "0006_session_event_payload_storage")])
+            migration.refuse_managed_conversation_loss(apps, connection.schema_editor())
         self.assertEqual(create("published-A").json()["data"]["id"], a)
         self.availability(definition, "none")
         self.assertEqual(self.api("get", f"/api/v1/chats/{a}/messages", token=token).status_code, 403)

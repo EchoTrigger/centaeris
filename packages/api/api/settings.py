@@ -179,6 +179,23 @@ def required_bounded_positive_int(name: str, *, maximum: int) -> int:
     return value
 
 
+def finite_resource_limit(name, default, maximum=2**63 - 1):
+    raw = os.environ.get(name, str(default))
+    if not raw.isascii() or not raw.isdecimal() or len(raw) > 19:
+        raise RuntimeError(f"{name} must be a positive bounded integer")
+    value = int(raw)
+    if not 0 < value <= maximum:
+        raise RuntimeError(f"{name} must be between 1 and {maximum}")
+    return value
+
+
+GC_MAX_CLEANUP_ATTEMPTS = finite_resource_limit("GC_MAX_CLEANUP_ATTEMPTS", 5, 100)
+GC_RETRY_BASE_SECONDS = finite_resource_limit("GC_RETRY_BASE_SECONDS", 86400, 31 * 86400)
+GC_RETRY_MAX_SECONDS = finite_resource_limit("GC_RETRY_MAX_SECONDS", 7 * 86400, 31 * 86400)
+if GC_RETRY_MAX_SECONDS < GC_RETRY_BASE_SECONDS:
+    raise RuntimeError("GC_RETRY_MAX_SECONDS must be at least GC_RETRY_BASE_SECONDS")
+
+
 STORAGE_STREAM_LANES = required_bounded_positive_int(
     "STORAGE_STREAM_LANES",
     maximum=256,

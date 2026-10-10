@@ -223,6 +223,13 @@ document processor specification active and run the material worker with access
 to the same object storage as the API. See
 [Office preview operations](../operations/OfficePreview.md).
 
+## Garbage collection
+
+Cleanup failures use finite attempt limits and persistent retry delays. Set
+`GC_MAX_CLEANUP_ATTEMPTS`, `GC_RETRY_BASE_SECONDS`, and `GC_RETRY_MAX_SECONDS`
+through the deployment environment. Defaults, quarantine handling and migration
+recovery are documented in [Garbage collection](../operations/GarbageCollection.md).
+
 ## Production review
 
 Runtime's `DOCKER_CREATE_CONCURRENCY` limits simultaneous Docker container-create

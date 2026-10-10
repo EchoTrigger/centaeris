@@ -2346,6 +2346,8 @@ class DerivedResource(models.Model):
     leaseOwner = models.CharField(max_length=96, blank=True, default="")
     leaseExpiresAt = models.DateTimeField(null=True, blank=True)
     cleanupAttempts = models.PositiveIntegerField(default=0)
+    nextCleanupAt = models.DateTimeField(null=True, blank=True)
+    quarantinedAt = models.DateTimeField(null=True, blank=True)
     lastFailure = models.TextField(blank=True, default="")
     cleanedAt = models.DateTimeField(null=True, blank=True)
     createdAt = models.DateTimeField(auto_now_add=True)
@@ -2386,7 +2388,7 @@ class DerivedResource(models.Model):
         require_enum(
             "DerivedResource.state",
             self.state,
-            {"active", "pending", "cleaning", "cleaned", "failed"},
+            {"active", "pending", "cleaning", "cleaned", "failed", "quarantined"},
         )
         if self.state == "active" and self.tombstonedAt is not None:
             raise ValueError("active DerivedResource cannot be tombstoned")
@@ -2394,6 +2396,8 @@ class DerivedResource(models.Model):
             raise ValueError("tombstoned DerivedResource requires tombstonedAt")
         if self.state == "cleaned" and self.cleanedAt is None:
             raise ValueError("cleaned DerivedResource requires cleanedAt")
+        if self.state == "quarantined" and self.quarantinedAt is None:
+            raise ValueError("quarantined DerivedResource requires quarantinedAt")
         return super().save(*args, **kwargs)
 
 
@@ -2670,3 +2674,26 @@ class BrowserLoginSession(AbstractBaseSession):
     def get_session_store_class(cls):
         from .persistent_sessions import SessionStore
         return SessionStore
+
+
+class StorageCleanupRetry(models.Model):
+    """Retry ownership for exact storage keys without a DerivedResource owner."""
+
+    keyDigest = models.CharField(primary_key=True, max_length=64)
+    storageKey = models.CharField(max_length=1000)
+    collector = models.CharField(max_length=32)
+    state = models.CharField(max_length=32, default="pending")
+    cleanupAttempts = models.PositiveIntegerField(default=0)
+    nextCleanupAt = models.DateTimeField(null=True, blank=True)
+    quarantinedAt = models.DateTimeField(null=True, blank=True)
+    leaseOwner = models.CharField(max_length=96, blank=True, default="")
+    leaseExpiresAt = models.DateTimeField(null=True, blank=True)
+    lastFailure = models.TextField(blank=True, default="")
+    cleanedAt = models.DateTimeField(null=True, blank=True)
+    createdAt = models.DateTimeField(auto_now_add=True)
+    updatedAt = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        require_enum("StorageCleanupRetry.collector", self.collector, {"workspaceSnapshot", "orphanedLibrary"})
+        require_enum("StorageCleanupRetry.state", self.state, {"pending", "cleaning", "failed", "cleaned", "quarantined"})
+        return super().save(*args, **kwargs)

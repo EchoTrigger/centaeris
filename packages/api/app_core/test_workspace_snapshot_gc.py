@@ -24,6 +24,7 @@ from .models import (
     ModelConfig,
     Session,
     SessionEvent,
+    StorageCleanupRetry,
     TranscriptOutputCapture,
     TranscriptOutputChunk,
     UserLibraryObject,
@@ -513,7 +514,10 @@ class WorkspaceSnapshotGcTests(TestCase):
         self.assertFalse(default_storage.exists(other_key))
 
         self.collect()
-
+        self.assertTrue(default_storage.exists(failed_key))
+        retry = StorageCleanupRetry.objects.get(storageKey=failed_key)
+        with patch("django.utils.timezone.now", return_value=retry.nextCleanupAt):
+            self.collect()
         self.assertFalse(default_storage.exists(failed_key))
         self.assertIn("Cleaned 0 workspace snapshot keys", self.collect())
 
@@ -536,6 +540,10 @@ class WorkspaceSnapshotGcTests(TestCase):
         self.assertEqual(sum(default_storage.exists(key) for key in keys), 1)
 
         self.collect()
+        self.assertEqual(sum(default_storage.exists(key) for key in keys), 1)
+        retry = StorageCleanupRetry.objects.get(storageKey=keys[1])
+        with patch("django.utils.timezone.now", return_value=retry.leaseExpiresAt):
+            self.collect()
 
         self.assertTrue(all(not default_storage.exists(key) for key in keys))
 
