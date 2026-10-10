@@ -18,6 +18,7 @@ from .common import (
     credential_for_provider,
     fake_model_response,
     model_payload,
+    model_database_operation,
     record_model_run,
     record_model_run_cancellation_safe,
     resolve_model_route,
@@ -39,6 +40,17 @@ from .diagnostics import report_model_failure
 
 logger = logging.getLogger(__name__)
 
+
+@model_database_operation
+def _load_model_config(model_config_ref):
+    return ModelConfig.objects.get(id=model_config_ref)
+
+
+@model_database_operation
+def _record_model_log(**fields):
+    return ModelRunLog.objects.create(**fields)
+
+
 def encode_model_stream_event(event_type: str, payload: dict) -> bytes:
     event = {"schema": MODEL_STREAM_SCHEMA, "type": event_type} | payload
     body = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
@@ -49,7 +61,7 @@ def call_model(model: ModelConfig, request_body: dict, cancel_event=None) -> dic
     if model.provider_id is None:
         return fake_model_response(model, request_body)
     with model_attempt(model, cancel_event):
-        api, _ = resolve_model_route(model)
+        api, _ = model_database_operation(resolve_model_route)(model)
         if api == "openai-completions":
             return call_open_ai_completions(model, request_body)
         if api == "openai-responses":
@@ -60,11 +72,11 @@ def call_model(model: ModelConfig, request_body: dict, cancel_event=None) -> dic
 
 
 def run_model(agent_run_id: str, model_config_ref: str, request_body: dict, cancel_event=None) -> dict:
-    model = ModelConfig.objects.get(id=model_config_ref)
+    model = _load_model_config(model_config_ref)
     try:
         result = call_model(model, request_body, cancel_event)
         usage = validated_usage(result.get("usage"))
-        ModelRunLog.objects.create(
+        _record_model_log(
             agentRunId=agent_run_id,
             modelConfig=model,
             status="success",
@@ -83,7 +95,7 @@ def run_model(agent_run_id: str, model_config_ref: str, request_body: dict, canc
         }
     except Exception as error:
         report_model_failure(agent_run_id, model_config_ref, "generate", error)
-        ModelRunLog.objects.create(
+        _record_model_log(
             agentRunId=agent_run_id,
             modelConfig=model,
             status="error",
@@ -93,7 +105,7 @@ def run_model(agent_run_id: str, model_config_ref: str, request_body: dict, canc
 
 
 async def stream_model_async(agent_run_id: str, model_config_ref: str, request_body: dict):
-    model = await sync_to_async(ModelConfig.objects.get, thread_sensitive=True)(id=model_config_ref)
+    model = await sync_to_async(_load_model_config, thread_sensitive=True)(model_config_ref)
     terminal_delivered = False
     provider_stream = None
     try:
@@ -105,7 +117,9 @@ async def stream_model_async(agent_run_id: str, model_config_ref: str, request_b
                 yield encode_model_stream_event("delta", {"delta": text[index : index + 4]})
         else:
             async with async_model_attempt(model):
-                api, _ = await sync_to_async(resolve_model_route, thread_sensitive=True)(model)
+                api, _ = await sync_to_async(
+                    model_database_operation(resolve_model_route), thread_sensitive=True,
+                )(model)
                 result_holder = {}
                 if api == "openai-completions":
                     provider_stream = stream_open_ai_completions(model, request_body, result_holder, encode_model_stream_event)
