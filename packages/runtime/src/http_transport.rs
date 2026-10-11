@@ -13,10 +13,16 @@ use std::time::Duration;
 // process-wide domain across all providers and models, rather than guessing a
 // quota identity from provider names or credentials. No cross-process guarantee.
 const MODEL_ATTEMPT_LIMIT: usize = 4;
+// Wire-buffer safety ceilings, independently bounded per response/line/event.
+const MODEL_BODY_MAX_BYTES: usize = 16 * 1024 * 1024;
+const SSE_LINE_MAX_BYTES: usize = 16 * 1024 * 1024;
+const SSE_EVENT_MAX_BYTES: usize = 16 * 1024 * 1024;
 fn admit_runtime_transport<T>(inner: T, run_id: String) -> AdmittedJsonHttpTransport<T> {
     static DOMAIN: OnceLock<ModelAdmission> = OnceLock::new();
     let admission = DOMAIN.get_or_init(|| {
-        ModelAdmission::new(NonZeroUsize::new(MODEL_ATTEMPT_LIMIT).expect("positive attempt limit"))
+        ModelAdmission::new(
+            NonZeroUsize::new(MODEL_ATTEMPT_LIMIT).expect("positive attempt limit"),
+        )
     });
     AdmittedJsonHttpTransport::new(inner, admission.clone(), run_id)
 }
@@ -44,6 +50,7 @@ impl ReqwestJsonHttpTransport {
         }
         let client = reqwest::Client::builder()
             .default_headers(headers)
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("centaeris/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|error| format!("build reqwest client failed: {error}"))?;
@@ -103,19 +110,26 @@ async fn execute_sse_async(
     let response = send_sse_headers(client, request).await?;
     let status_code = response.status().as_u16();
     let headers = response_headers(&response);
-    if status_code >= 400 {
-        let body_json =
-            tokio::time::timeout(Duration::from_millis(sse_idle_timeout_ms), response.text())
-                .await
-                .map_err(|_| {
-                    format!("read SSE error body idle timeout after {sse_idle_timeout_ms}ms")
-                })?
-                .map_err(|error| format_reqwest_error("read SSE error body failed", error))?;
+    if !response.status().is_success() {
+        let body_json = tokio::time::timeout(
+            Duration::from_millis(sse_idle_timeout_ms),
+            read_bounded_body(response, "SSE error"),
+        )
+        .await
+        .map_err(|_| format!("read SSE error body idle timeout after {sse_idle_timeout_ms}ms"))??;
         return Ok(JsonHttpResponse {
             status_code,
             headers,
             body_json,
         });
+    }
+    let media_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next());
+    if !media_type.is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream")) {
+        return Err("successful model SSE response requires Content-Type text/event-stream".into());
     }
     read_sse_chunks(
         futures::stream::try_unfold(response, |mut response| async move {
@@ -206,10 +220,7 @@ async fn send_sse_headers(
 async fn response_to_json(response: reqwest::Response) -> Result<JsonHttpResponse, String> {
     let status_code = response.status().as_u16();
     let headers = response_headers(&response);
-    let body_json = response
-        .text()
-        .await
-        .map_err(|error| format_reqwest_error("read http body failed", error))?;
+    let body_json = read_bounded_body(response, "http").await?;
     Ok(JsonHttpResponse {
         status_code,
         headers,
@@ -217,6 +228,31 @@ async fn response_to_json(response: reqwest::Response) -> Result<JsonHttpRespons
     })
 }
 
+async fn read_bounded_body(
+    mut response: reqwest::Response,
+    context: &str,
+) -> Result<String, String> {
+    let too_large = || format!("{context} body exceeds {MODEL_BODY_MAX_BYTES} bytes");
+    if response
+        .content_length()
+        .is_some_and(|length| length > MODEL_BODY_MAX_BYTES as u64)
+    {
+        return Err(too_large());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format_reqwest_error(&format!("read {context} body failed"), error))?
+    {
+        if chunk.len() > MODEL_BODY_MAX_BYTES - body.len() {
+            return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    // reqwest's charset feature is disabled; preserve its text() UTF-8-lossy policy.
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
 fn response_headers(response: &reqwest::Response) -> HashMap<String, String> {
     response
         .headers()
@@ -233,7 +269,10 @@ fn response_headers(response: &reqwest::Response) -> HashMap<String, String> {
 #[derive(Default)]
 struct SseDecoder {
     pending: Vec<u8>,
-    data_lines: Vec<String>,
+    scan_from: usize,
+    data: String,
+    has_data: bool,
+    read_first_line: bool,
 }
 
 impl SseDecoder {
@@ -242,13 +281,22 @@ impl SseDecoder {
         bytes: &[u8],
         on_data: &mut (dyn FnMut(String) + Send),
     ) -> Result<(), String> {
-        self.pending.extend_from_slice(bytes);
-        self.drain(false, on_data)
+        // Drain incrementally: a large network chunk must not create an unbounded
+        // pending buffer before the line limit is checked.
+        for chunk in bytes.chunks(8192) {
+            self.pending.extend_from_slice(chunk);
+            self.drain(false, on_data)?;
+            let trailing_cr = usize::from(self.pending.last() == Some(&b'\r'));
+            if self.pending.len() > SSE_LINE_MAX_BYTES + trailing_cr {
+                return Err(format!("SSE line exceeds {SSE_LINE_MAX_BYTES} bytes"));
+            }
+        }
+        Ok(())
     }
 
     fn finish(&mut self, on_data: &mut (dyn FnMut(String) + Send)) -> Result<(), String> {
         self.drain(true, on_data)?;
-        if self.pending.is_empty() && self.data_lines.is_empty() {
+        if self.pending.is_empty() && !self.has_data {
             Ok(())
         } else {
             Err("SSE stream ended with an incomplete event".to_string())
@@ -263,12 +311,17 @@ impl SseDecoder {
         loop {
             let Some(index) = self
                 .pending
+                .get(self.scan_from..)
+                .expect("scan stays within pending line")
                 .iter()
                 .position(|byte| matches!(byte, b'\r' | b'\n'))
+                .map(|offset| self.scan_from + offset)
             else {
+                self.scan_from = self.pending.len();
                 return Ok(());
             };
             if self.pending[index] == b'\r' && index + 1 == self.pending.len() && !end_of_stream {
+                self.scan_from = index;
                 return Ok(());
             }
             let delimiter_bytes =
@@ -277,8 +330,12 @@ impl SseDecoder {
                 } else {
                     1
                 };
+            if index > SSE_LINE_MAX_BYTES {
+                return Err(format!("SSE line exceeds {SSE_LINE_MAX_BYTES} bytes"));
+            }
             let line = self.pending[..index].to_vec();
             self.pending.drain(..index + delimiter_bytes);
+            self.scan_from = 0;
             self.process_line(line.as_slice(), on_data)?;
         }
     }
@@ -288,12 +345,18 @@ impl SseDecoder {
         line: &[u8],
         on_data: &mut (dyn FnMut(String) + Send),
     ) -> Result<(), String> {
+        let line = if !self.read_first_line {
+            self.read_first_line = true;
+            line.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(line)
+        } else {
+            line
+        };
         let line = std::str::from_utf8(line)
             .map_err(|error| format!("SSE event contains invalid UTF-8: {error}"))?;
         if line.is_empty() {
-            if !self.data_lines.is_empty() {
-                let data = self.data_lines.join("\n");
-                self.data_lines.clear();
+            if self.has_data {
+                let data = std::mem::take(&mut self.data);
+                self.has_data = false;
                 if !data.is_empty() && data != "[DONE]" {
                     on_data(data);
                 }
@@ -306,8 +369,16 @@ impl SseDecoder {
         }
         let (field, value) = line.split_once(':').unwrap_or((line, ""));
         if field == "data" {
-            self.data_lines
-                .push(value.strip_prefix(' ').unwrap_or(value).to_string());
+            let value = value.strip_prefix(' ').unwrap_or(value);
+            let separator = usize::from(self.has_data);
+            if value.len() + separator > SSE_EVENT_MAX_BYTES - self.data.len() {
+                return Err(format!("SSE event exceeds {SSE_EVENT_MAX_BYTES} bytes"));
+            }
+            if self.has_data {
+                self.data.push('\n');
+            }
+            self.data.push_str(value);
+            self.has_data = true;
         }
         Ok(())
     }
@@ -486,7 +557,10 @@ mod tests {
         assert_eq!(started.load(Ordering::SeqCst), MODEL_ATTEMPT_LIMIT);
         drop(attempts.remove(0));
         assert!(poll!(attempts.last_mut().unwrap()).is_pending());
-        assert_eq!(started.load(Ordering::SeqCst), MODEL_ATTEMPT_LIMIT + 1);
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            MODEL_ATTEMPT_LIMIT + 1
+        );
         drop(attempts);
         // No capacity lost after dropping both active and previously queued calls.
         let mut again: Vec<_> = clients
@@ -497,7 +571,10 @@ mod tests {
         for attempt in &mut again {
             assert!(poll!(attempt).is_pending());
         }
-        assert_eq!(started.load(Ordering::SeqCst), MODEL_ATTEMPT_LIMIT * 2 + 1);
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            MODEL_ATTEMPT_LIMIT * 2 + 1
+        );
     }
 
     #[tokio::test]
@@ -689,3 +766,7 @@ mod tests {
         assert!(events.iter().any(|event| event.contains("finish_reason")));
     }
 }
+
+
+#[cfg(test)]
+mod boundary_tests;
