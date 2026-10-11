@@ -1,15 +1,17 @@
 //! JSON-RPC framing shared by every Runtime Server local connection.
 
 use crate::errors::RuntimeHostError;
-use crate::runtime_rpc::{encode_jsonl_value, RuntimeRpcNotification, RuntimeRpcResponse};
+use crate::runtime_rpc::{RuntimeRpcNotification, RuntimeRpcResponse};
 use crate::runtime_server::{
     ActiveAgentRun, AgentRunLease, AgentRunRegistry, RuntimeClientKind, StartAgentRunError,
 };
 use centaeris_core::runtime::TurnControl;
 use std::collections::HashMap;
+use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RuntimeClientRegistration {
@@ -17,13 +19,85 @@ pub(crate) struct RuntimeClientRegistration {
     pub(crate) viewer_id: String,
 }
 
+pub(crate) const RPC_INPUT_FRAME_MAX_BYTES: usize = 16 * 1024 * 1024;
+const RPC_OUTPUT_FRAME_MAX_BYTES: usize = 160 * 1024 * 1024;
+const RPC_OUTBOUND_MESSAGES: usize = 128;
+const RPC_CLIENT_OUTBOUND_BYTES: usize = 256 * 1024 * 1024;
+const RPC_GLOBAL_OUTBOUND_BYTES: usize = 512 * 1024 * 1024;
+const RPC_MAX_CONNECTIONS: usize = 32;
+const RPC_CLIENT_REQUESTS: usize = 8;
+const RPC_GLOBAL_REQUESTS: usize = 32;
+const RPC_CLIENT_CONTROL_REQUESTS: usize = 4;
+const RPC_GLOBAL_CONTROL_REQUESTS: usize = 8;
+
+// Byte permits remain owned until the complete frame has been written or dropped.
+pub(crate) struct OutboundFrame {
+    text: String,
+    _client_bytes: OwnedSemaphorePermit,
+    _global_bytes: OwnedSemaphorePermit,
+}
+impl std::ops::Deref for OutboundFrame {
+    type Target = String;
+    fn deref(&self) -> &String {
+        &self.text
+    }
+}
+
+#[derive(Clone)]
+struct OutboundSender {
+    sender: mpsc::Sender<OutboundFrame>,
+    bytes: Arc<Semaphore>,
+    global_bytes: Arc<Semaphore>,
+    disconnected: CancellationToken,
+}
+impl OutboundSender {
+    fn send(&self, text: String) -> Result<(), RuntimeHostError> {
+        let enqueue = || {
+            if self.disconnected.is_cancelled() || text.len() > RPC_OUTPUT_FRAME_MAX_BYTES {
+                return Err(());
+            }
+            let bytes = text.len() as u32;
+            let client = self
+                .bytes
+                .clone()
+                .try_acquire_many_owned(bytes)
+                .map_err(|_| ())?;
+            let global = self
+                .global_bytes
+                .clone()
+                .try_acquire_many_owned(bytes)
+                .map_err(|_| ())?;
+            self.sender
+                .try_send(OutboundFrame {
+                    text,
+                    _client_bytes: client,
+                    _global_bytes: global,
+                })
+                .map_err(|_| ())
+        };
+        if enqueue().is_err() {
+            self.disconnected.cancel();
+            return Err(RuntimeHostError::transport(
+                "runtime client outbound capacity exhausted or closed; reconnect and reconcile",
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct RequestPermit {
+    _client: OwnedSemaphorePermit,
+    _global: OwnedSemaphorePermit,
+}
+
 struct ConnectedClient {
-    outbound: mpsc::UnboundedSender<String>,
+    outbound: OutboundSender,
+    requests: Arc<Semaphore>,
+    controls: Arc<Semaphore>,
     registration: Option<RuntimeClientRegistration>,
     exiting: bool,
 }
 
-#[derive(Default)]
 pub(crate) struct RuntimeServerClientHub {
     clients: Mutex<HashMap<u64, ConnectedClient>>,
     next_client_id: AtomicU64,
@@ -32,14 +106,40 @@ pub(crate) struct RuntimeServerClientHub {
     agent_runs: AgentRunRegistry,
     draining: AtomicBool,
     service_shutdown: Notify,
+    outbound_bytes: Arc<Semaphore>,
+    requests: Arc<Semaphore>,
+    controls: Arc<Semaphore>,
+}
+
+impl Default for RuntimeServerClientHub {
+    fn default() -> Self {
+        Self {
+            clients: Mutex::new(HashMap::new()),
+            next_client_id: AtomicU64::new(0),
+            activity_generation: AtomicU64::new(0),
+            active_actions: AtomicU64::new(0),
+            agent_runs: AgentRunRegistry::default(),
+            draining: AtomicBool::new(false),
+            service_shutdown: Notify::new(),
+            outbound_bytes: Arc::new(Semaphore::new(RPC_GLOBAL_OUTBOUND_BYTES)),
+            requests: Arc::new(Semaphore::new(RPC_GLOBAL_REQUESTS)),
+            controls: Arc::new(Semaphore::new(RPC_GLOBAL_CONTROL_REQUESTS)),
+        }
+    }
 }
 
 impl RuntimeServerClientHub {
     pub(crate) fn connect(
         self: &Arc<Self>,
-    ) -> Result<Option<(EventWriter, mpsc::UnboundedReceiver<String>)>, RuntimeHostError> {
+    ) -> Result<Option<(EventWriter, mpsc::Receiver<OutboundFrame>)>, RuntimeHostError> {
         let client_id = self.next_client_id.fetch_add(1, Ordering::Relaxed) + 1;
-        let (outbound, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::channel(RPC_OUTBOUND_MESSAGES);
+        let outbound = OutboundSender {
+            sender,
+            bytes: Arc::new(Semaphore::new(RPC_CLIENT_OUTBOUND_BYTES)),
+            global_bytes: self.outbound_bytes.clone(),
+            disconnected: CancellationToken::new(),
+        };
         let mut clients = self
             .clients
             .lock()
@@ -47,10 +147,17 @@ impl RuntimeServerClientHub {
         if self.draining.load(Ordering::Acquire) {
             return Ok(None);
         }
+        if clients.len() >= RPC_MAX_CONNECTIONS {
+            return Err(RuntimeHostError::transport(
+                "runtime client connection capacity exhausted",
+            ));
+        }
         clients.insert(
             client_id,
             ConnectedClient {
                 outbound,
+                requests: Arc::new(Semaphore::new(RPC_CLIENT_REQUESTS)),
+                controls: Arc::new(Semaphore::new(RPC_CLIENT_CONTROL_REQUESTS)),
                 registration: None,
                 exiting: false,
             },
@@ -60,6 +167,47 @@ impl RuntimeServerClientHub {
             EventWriter::new(Arc::clone(self), client_id),
             receiver,
         )))
+    }
+
+    fn request_permit(
+        &self,
+        client_id: u64,
+        control: bool,
+    ) -> Result<RequestPermit, RuntimeHostError> {
+        let clients = self
+            .clients
+            .lock()
+            .map_err(|_| RuntimeHostError::transport("runtime server client hub lock poisoned"))?;
+        let client = clients
+            .get(&client_id)
+            .filter(|client| !client.exiting && !client.outbound.disconnected.is_cancelled())
+            .ok_or_else(|| {
+                RuntimeHostError::transport("runtime client disconnected before dispatch")
+            })?;
+        let (local, global) = if control {
+            (&client.controls, &self.controls)
+        } else {
+            (&client.requests, &self.requests)
+        };
+        let local = local.clone().try_acquire_owned().map_err(|_| {
+            RuntimeHostError::transport("runtime client request capacity exhausted")
+        })?;
+        let global = global.clone().try_acquire_owned().map_err(|_| {
+            RuntimeHostError::transport("runtime global request capacity exhausted")
+        })?;
+        Ok(RequestPermit {
+            _client: local,
+            _global: global,
+        })
+    }
+
+    fn disconnect_token(&self, client_id: u64) -> Result<CancellationToken, RuntimeHostError> {
+        self.clients
+            .lock()
+            .map_err(|_| RuntimeHostError::transport("runtime server client hub lock poisoned"))?
+            .get(&client_id)
+            .map(|client| client.outbound.disconnected.clone())
+            .ok_or_else(|| RuntimeHostError::transport("runtime client disconnected"))
     }
 
     pub(crate) fn broadcaster(self: &Arc<Self>) -> EventWriter {
@@ -92,6 +240,7 @@ impl RuntimeServerClientHub {
             return Ok(());
         };
         client.exiting = true;
+        client.outbound.disconnected.cancel();
         if let Some(registration) = &client.registration {
             detach(registration.viewer_id.as_str())?;
         }
@@ -145,7 +294,7 @@ impl RuntimeServerClientHub {
     }
 
     fn broadcast<TValue: serde::Serialize>(&self, value: &TValue) -> Result<(), RuntimeHostError> {
-        let encoded = encode(value)?;
+        let encoded = encode(value).map_err(RpcEncodeError::into_host_error)?;
         let mut clients = self
             .clients
             .lock()
@@ -163,12 +312,20 @@ impl RuntimeServerClientHub {
         Ok(())
     }
 
-    fn send<TValue: serde::Serialize>(
-        &self,
-        client_id: u64,
-        value: &TValue,
-    ) -> Result<(), RuntimeHostError> {
-        let encoded = encode(value)?;
+    fn send(&self, client_id: u64, response: &RuntimeRpcResponse) -> Result<(), RuntimeHostError> {
+        let encoded = match encode(response) {
+            Ok(encoded) => encoded,
+            Err(RpcEncodeError::TooLarge) => {
+                // A typed failure preserves the request ID without truncation or disconnect.
+                let error = RpcEncodeError::TooLarge.into_host_error();
+                encode(&RuntimeRpcResponse::failure(
+                    response.id.clone(),
+                    error.to_runtime_rpc_error(),
+                ))
+                .map_err(RpcEncodeError::into_host_error)?
+            }
+            Err(error) => return Err(error.into_host_error()),
+        };
         let sender = self
             .clients
             .lock()
@@ -548,6 +705,13 @@ impl EventWriter {
         self.hub.is_draining()
     }
 
+    pub(crate) fn request_permit(&self, control: bool) -> Result<RequestPermit, RuntimeHostError> {
+        self.hub.request_permit(self.client_id, control)
+    }
+    pub(crate) fn disconnect_token(&self) -> Result<CancellationToken, RuntimeHostError> {
+        self.hub.disconnect_token(self.client_id)
+    }
+
     pub(crate) fn start_action(&self) -> Result<RuntimeActionPermit, RuntimeHostError> {
         self.hub.start_action(self.client_id)
     }
@@ -603,10 +767,81 @@ fn detach_viewer(viewer_id: &str) -> Result<(), RuntimeHostError> {
     .map_err(|error| RuntimeHostError::new("agent_task_failed", error))
 }
 
-fn encode<TValue: serde::Serialize>(value: &TValue) -> Result<String, RuntimeHostError> {
-    encode_jsonl_value(value).map_err(|error| {
-        RuntimeHostError::transport(format!("runtime response encode failed: {error}"))
-    })
+#[derive(Debug)]
+enum RpcEncodeError {
+    TooLarge,
+    Serialize(serde_json::Error),
+}
+impl RpcEncodeError {
+    fn into_host_error(self) -> RuntimeHostError {
+        match self {
+            Self::TooLarge => RuntimeHostError::new(
+                "runtime_rpc_response_too_large",
+                format!("Runtime response exceeds {RPC_OUTPUT_FRAME_MAX_BYTES} encoded bytes; use bounded transcript reads for history"),
+            ),
+            Self::Serialize(error) => RuntimeHostError::transport(format!("runtime response encode failed: {error}")),
+        }
+    }
+}
+
+struct RpcFrameBuffer {
+    bytes: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+impl Write for RpcFrameBuffer {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let required = self.bytes.len().checked_add(bytes.len());
+        let Some(required) = required.filter(|required| *required <= self.limit) else {
+            self.exceeded = true;
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "RPC output frame limit exceeded",
+            ));
+        };
+        if required > self.bytes.capacity() {
+            // Grow geometrically for many tiny escapes, but never beyond the cap.
+            let capacity = self
+                .bytes
+                .capacity()
+                .max(1024)
+                .saturating_mul(2)
+                .min(self.limit)
+                .max(required);
+            self.bytes.reserve_exact(capacity - self.bytes.len());
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn encode<TValue: serde::Serialize>(value: &TValue) -> Result<String, RpcEncodeError> {
+    encode_with_limit(value, RPC_OUTPUT_FRAME_MAX_BYTES)
+}
+
+fn encode_with_limit<TValue: serde::Serialize>(
+    value: &TValue,
+    limit: usize,
+) -> Result<String, RpcEncodeError> {
+    let mut buffer = RpcFrameBuffer {
+        bytes: Vec::new(),
+        limit,
+        exceeded: false,
+    };
+    if let Err(error) = serde_json::to_writer(&mut buffer, value) {
+        return Err(if buffer.exceeded {
+            RpcEncodeError::TooLarge
+        } else {
+            RpcEncodeError::Serialize(error)
+        });
+    }
+    buffer
+        .write_all(b"\n")
+        .map_err(|_| RpcEncodeError::TooLarge)?;
+    Ok(String::from_utf8(buffer.bytes).expect("JSON serializer writes valid UTF-8"))
 }
 
 fn format_start_agent_run_error(error: StartAgentRunError) -> String {
@@ -627,9 +862,73 @@ mod tests {
     use crate::runtime_rpc::{decode_jsonl_frame, RuntimeRpcFrame};
     use serde_json::json;
 
-    fn connect(
-        hub: &Arc<RuntimeServerClientHub>,
-    ) -> (EventWriter, mpsc::UnboundedReceiver<String>) {
+    static LARGE_FRAME_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[test]
+    fn capped_json_encoding_includes_lf_and_preserves_utf8_and_escapes() {
+        assert_eq!(
+            encode_with_limit(&serde_json::Value::Null, 5).unwrap(),
+            "null\n"
+        );
+        assert!(matches!(
+            encode_with_limit(&serde_json::Value::Null, 4),
+            Err(RpcEncodeError::TooLarge)
+        ));
+        let value = json!({"text":"中文\r\n"});
+        let expected = format!("{}\n", serde_json::to_string(&value).unwrap());
+        assert_eq!(encode_with_limit(&value, expected.len()).unwrap(), expected);
+        assert!(matches!(
+            encode_with_limit(&value, expected.len() - 1),
+            Err(RpcEncodeError::TooLarge)
+        ));
+    }
+
+    #[test]
+    fn capped_writer_never_appends_over_limit_and_serializer_stops_early() {
+        let mut buffer = RpcFrameBuffer {
+            bytes: Vec::new(),
+            limit: 4,
+            exceeded: false,
+        };
+        assert_eq!(buffer.write(b"1234").unwrap(), 4);
+        assert!(buffer.write(b"5").is_err());
+        assert_eq!(buffer.bytes, b"1234");
+        assert!(buffer.bytes.capacity() <= 4);
+        struct Counted<'a>(&'a AtomicU64);
+        impl serde::Serialize for Counted<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::SerializeSeq;
+                let mut sequence = serializer.serialize_seq(None)?;
+                for _ in 0..1000 {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                    sequence.serialize_element("abcdefgh")?;
+                }
+                sequence.end()
+            }
+        }
+        let serialized = AtomicU64::new(0);
+        assert!(matches!(
+            encode_with_limit(&Counted(&serialized), 32),
+            Err(RpcEncodeError::TooLarge)
+        ));
+        assert!(serialized.load(Ordering::Relaxed) < 10);
+    }
+
+    #[test]
+    fn serialization_failure_remains_distinct_from_capacity_failure() {
+        struct Failed;
+        impl serde::Serialize for Failed {
+            fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("deliberate failure"))
+            }
+        }
+        assert!(matches!(
+            encode_with_limit(&Failed, 32),
+            Err(RpcEncodeError::Serialize(_))
+        ));
+    }
+
+    fn connect(hub: &Arc<RuntimeServerClientHub>) -> (EventWriter, mpsc::Receiver<OutboundFrame>) {
         hub.connect()
             .expect("connect")
             .expect("runtime server accepts client")
@@ -707,6 +1006,213 @@ mod tests {
             assert_eq!(notification.method, "runtime/config-changed");
             assert_eq!(notification.params, json!({}));
         }
+    }
+
+    #[test]
+    fn dispatch_limits_release_and_keep_control_capacity_after_disconnect() {
+        let hub = Arc::new(RuntimeServerClientHub::default());
+        let (origin, _events) = connect(&hub);
+        let permits = (0..RPC_CLIENT_REQUESTS)
+            .map(|_| origin.request_permit(false).unwrap())
+            .collect::<Vec<_>>();
+        assert!(origin.request_permit(false).is_err());
+        let control = origin.request_permit(true).unwrap();
+        hub.disconnect(&origin).unwrap();
+        assert!(origin.request_permit(true).is_err());
+        // Accepted requests own capacity after detach; a replacement still has control headroom.
+        let (replacement, _events) = connect(&hub);
+        let replacement_control = replacement.request_permit(true).unwrap();
+        assert_eq!(
+            hub.requests.available_permits(),
+            RPC_GLOBAL_REQUESTS - RPC_CLIENT_REQUESTS
+        );
+        drop(permits);
+        drop(control);
+        drop(replacement_control);
+        assert_eq!(hub.requests.available_permits(), RPC_GLOBAL_REQUESTS);
+        assert_eq!(
+            hub.controls.available_permits(),
+            RPC_GLOBAL_CONTROL_REQUESTS
+        );
+    }
+
+    #[test]
+    fn global_dispatch_limit_has_reserved_control_and_releases_on_drop() {
+        let hub = Arc::new(RuntimeServerClientHub::default());
+        let writers = (0..5).map(|_| connect(&hub).0).collect::<Vec<_>>();
+        let permits = writers[..4]
+            .iter()
+            .flat_map(|writer| {
+                (0..RPC_CLIENT_REQUESTS).map(move |_| writer.request_permit(false).unwrap())
+            })
+            .collect::<Vec<_>>();
+        assert!(writers[4].request_permit(false).is_err());
+        assert!(writers[4].request_permit(true).is_ok());
+        drop(permits);
+        assert!(writers[4].request_permit(false).is_ok());
+    }
+
+    #[tokio::test]
+    async fn outbound_bytes_are_owned_through_write_and_release_after_drop() {
+        let hub = Arc::new(RuntimeServerClientHub::default());
+        let (writer, mut output) = connect(&hub);
+        let response =
+            serde_json::from_value(json!({"jsonrpc":"2.0","id":1,"result":"x"})).unwrap();
+        writer.send_response(&response).unwrap();
+        let frame = output.recv().await.unwrap();
+        assert_eq!(
+            hub.outbound_bytes.available_permits(),
+            RPC_GLOBAL_OUTBOUND_BYTES - frame.len()
+        );
+        drop(frame);
+        assert_eq!(
+            hub.outbound_bytes.available_permits(),
+            RPC_GLOBAL_OUTBOUND_BYTES
+        );
+    }
+
+    #[test]
+    fn connection_limit_releases_after_disconnect() {
+        let hub = Arc::new(RuntimeServerClientHub::default());
+        let clients = (0..RPC_MAX_CONNECTIONS)
+            .map(|_| connect(&hub))
+            .collect::<Vec<_>>();
+        assert!(hub.connect().is_err());
+        hub.disconnect(&clients[0].0).unwrap();
+        assert!(hub.connect().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn maximum_desktop_preview_remains_deliverable_after_json_expansion() {
+        let _guard = LARGE_FRAME_TEST.lock().await;
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!(
+            "centaeris-rpc-preview-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let chunk = vec![0; 1024 * 1024];
+        for _ in 0..25 {
+            file.write_all(&chunk).unwrap();
+        }
+        drop(file);
+        let preview = crate::desktop_file_preview::read(
+            crate::desktop_file_preview::DesktopFilePreviewReadRequest {
+                path: path.to_string_lossy().into_owned(),
+                workspace_root: None,
+                base_path: None,
+            },
+        )
+        .unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(preview.byte_len, 25 * 1024 * 1024);
+        let id = serde_json::from_value::<crate::runtime_rpc::RuntimeRpcRequest>(
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize"}),
+        )
+        .unwrap()
+        .id;
+        let response = RuntimeRpcResponse::success(id, serde_json::to_value(preview).unwrap());
+        let hub = Arc::new(RuntimeServerClientHub::default());
+        let (writer, mut output) = connect(&hub);
+        writer.send_response(&response).unwrap();
+        let frame = output.recv().await.unwrap();
+        assert!(frame.len() > 150 * 1024 * 1024);
+        assert!(frame.len() < RPC_OUTPUT_FRAME_MAX_BYTES);
+    }
+
+    #[tokio::test]
+    async fn output_frame_boundary_is_inclusive_and_bytes_release() {
+        let _guard = LARGE_FRAME_TEST.lock().await;
+        let hub = Arc::new(RuntimeServerClientHub::default());
+        let (writer, mut output) = connect(&hub);
+        let sender = hub
+            .clients
+            .lock()
+            .unwrap()
+            .get(&writer.client_id)
+            .unwrap()
+            .outbound
+            .clone();
+        sender.send("x".repeat(RPC_OUTPUT_FRAME_MAX_BYTES)).unwrap();
+        let frame = output.recv().await.unwrap();
+        assert_eq!(frame.len(), RPC_OUTPUT_FRAME_MAX_BYTES);
+        drop(frame);
+        assert_eq!(
+            hub.outbound_bytes.available_permits(),
+            RPC_GLOBAL_OUTBOUND_BYTES
+        );
+        assert!(sender
+            .send("x".repeat(RPC_OUTPUT_FRAME_MAX_BYTES + 1))
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn oversized_response_returns_typed_error_without_closing_client() {
+        let _guard = LARGE_FRAME_TEST.lock().await;
+        let hub = Arc::new(RuntimeServerClientHub::default());
+        let (writer, mut output) = connect(&hub);
+        let response: RuntimeRpcResponse = serde_json::from_value(
+            json!({"jsonrpc":"2.0","id":1,"result":"\0".repeat(27 * 1024 * 1024)}),
+        )
+        .unwrap();
+        writer.send_response(&response).unwrap();
+        let frame = output.recv().await.unwrap();
+        assert!(frame.len() < 1024);
+        let RuntimeRpcFrame::Response(response) = decode_jsonl_frame(&frame).unwrap() else {
+            panic!("expected response");
+        };
+        assert!(response.result.is_none());
+        assert_eq!(
+            response.error.unwrap().data.unwrap()["code"],
+            "runtime_rpc_response_too_large"
+        );
+        assert!(!writer.disconnect_token().unwrap().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn outbound_byte_backlog_rejects_a_large_response_before_message_limit() {
+        let _guard = LARGE_FRAME_TEST.lock().await;
+        let hub = Arc::new(RuntimeServerClientHub::default());
+        let (writer, _output) = connect(&hub);
+        let response = serde_json::from_value(
+            json!({"jsonrpc":"2.0","id":1,"result":"\0".repeat(15 * 1024 * 1024)}),
+        )
+        .unwrap();
+        for _ in 0..2 {
+            writer.send_response(&response).unwrap();
+        }
+        assert!(writer.send_response(&response).is_err());
+    }
+
+    #[tokio::test]
+    async fn outbound_backlog_disconnects_only_slow_client() {
+        let hub = Arc::new(RuntimeServerClientHub::default());
+        let (slow, _slow_output) = connect(&hub);
+        let (fast, mut fast_output) = connect(&hub);
+        slow.register_client(RuntimeClientKind::Desktop, "slow")
+            .unwrap();
+        fast.register_client(RuntimeClientKind::Tui, "fast")
+            .unwrap();
+        for _ in 0..129 {
+            hub.broadcaster()
+                .emit("runtime.progress", json!({}))
+                .unwrap();
+            assert!(fast_output.recv().await.is_some());
+        }
+        assert!(slow
+            .send_response(
+                &serde_json::from_value(json!({"jsonrpc":"2.0","id":1,"result":{}})).unwrap()
+            )
+            .is_err());
+        assert!(fast.require_registered().is_ok());
     }
 
     #[test]

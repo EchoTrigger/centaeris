@@ -3854,7 +3854,7 @@ mod tests {
     ) -> (
         Arc<crate::runtime_rpc_transport::RuntimeServerClientHub>,
         EventWriter,
-        tokio::sync::mpsc::UnboundedReceiver<String>,
+        tokio::sync::mpsc::Receiver<crate::runtime_rpc_transport::OutboundFrame>,
     ) {
         let clients = Arc::new(crate::runtime_rpc_transport::RuntimeServerClientHub::default());
         let (event_writer, outbound) = clients

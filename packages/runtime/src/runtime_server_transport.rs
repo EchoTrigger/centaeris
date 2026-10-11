@@ -7,10 +7,13 @@ use crate::protocol::HostCommandRequest;
 use crate::runtime_rpc::{
     decode_jsonl_frame, RuntimeRpcFrame, RuntimeRpcRequest, RuntimeRpcResponse,
 };
-use crate::runtime_rpc_transport::{EventWriter, RuntimeServerClientHub};
+use crate::runtime_rpc_transport::{
+    EventWriter, OutboundFrame, RequestPermit, RuntimeServerClientHub, RPC_INPUT_FRAME_MAX_BYTES,
+};
 use crate::subagent_scheduler;
 use centaeris_core::session::reliability::{ListRuntimeJobsRequest, RuntimeJobStatus};
 use fs2::FileExt;
+use futures::StreamExt;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
@@ -18,8 +21,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Notify;
+use tokio_util::codec::{FramedRead, LinesCodec};
 
 const ENDPOINT_PREFIX: &str = "centaeris-runtime";
 const RUNTIME_SERVER_IDLE_CHECK_INTERVAL_MS: u64 = 1_000;
@@ -516,8 +520,13 @@ async fn serve_windows(
         )?;
         let state = Arc::clone(&state);
         let clients = Arc::clone(&clients);
-        let Some((event_writer, outbound)) = clients.connect()? else {
-            return Ok(());
+        let (event_writer, outbound) = match clients.connect() {
+            Ok(Some(client)) => client,
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                log_runtime_server(format_args!("runtime client connection rejected: {error}"));
+                continue;
+            }
         };
         tokio::spawn(async move {
             serve_connection(connected, state, clients, event_writer, outbound).await;
@@ -562,8 +571,13 @@ async fn serve_unix(
         };
         let state = Arc::clone(&state);
         let clients = Arc::clone(&clients);
-        let Some((event_writer, outbound)) = clients.connect()? else {
-            return Ok(());
+        let (event_writer, outbound) = match clients.connect() {
+            Ok(Some(client)) => client,
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                log_runtime_server(format_args!("runtime client connection rejected: {error}"));
+                continue;
+            }
         };
         tokio::spawn(async move {
             serve_connection(connected, state, clients, event_writer, outbound).await;
@@ -576,10 +590,13 @@ async fn serve_connection<TStream>(
     state: Arc<Mutex<RuntimeHostState>>,
     clients: Arc<RuntimeServerClientHub>,
     event_writer: EventWriter,
-    mut outbound: tokio::sync::mpsc::UnboundedReceiver<String>,
+    mut outbound: tokio::sync::mpsc::Receiver<OutboundFrame>,
 ) where
     TStream: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let Ok(disconnected) = event_writer.disconnect_token() else {
+        return;
+    };
     let (reader, mut writer) = tokio::io::split(stream);
     let mut writer_task = tokio::spawn(async move {
         while let Some(frame) = outbound.recv().await {
@@ -588,15 +605,20 @@ async fn serve_connection<TStream>(
             }
         }
     });
-    let mut lines = BufReader::new(reader).lines();
+    let mut lines = FramedRead::new(
+        reader,
+        LinesCodec::new_with_max_length(RPC_INPUT_FRAME_MAX_BYTES),
+    );
     loop {
         let read_result = tokio::select! {
             _ = &mut writer_task => break,
-            result = lines.next_line() => result,
+            _ = disconnected.cancelled() => break,
+            result = lines.next() => result,
         };
         let next_line = match read_result {
-            Ok(line) => line,
-            Err(error) => {
+            Some(Ok(line)) => Some(line),
+            None => None,
+            Some(Err(error)) => {
                 log_runtime_server(format_args!(
                     "centaeris runtime server client read failed: {error}"
                 ));
@@ -611,7 +633,22 @@ async fn serve_connection<TStream>(
         }
         match decode_jsonl_frame(line.as_str()) {
             Ok(RuntimeRpcFrame::Request(request)) => {
-                spawn_request_handler(Arc::clone(&state), event_writer.clone(), request)
+                let control = crate::commands::RuntimeHostCommand::parse(&request.method)
+                    .ok()
+                    .is_some_and(|command| {
+                        command == crate::commands::RuntimeHostCommand::Initialize
+                            || allowed_while_draining(command)
+                    });
+                let permit = match event_writer.request_permit(control) {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        log_runtime_server(format_args!(
+                            "runtime request dispatch rejected: {error}"
+                        ));
+                        break;
+                    }
+                };
+                spawn_request_handler(Arc::clone(&state), event_writer.clone(), request, permit)
             }
             Ok(RuntimeRpcFrame::Response(_)) => {
                 log_runtime_server(format_args!(
@@ -633,7 +670,10 @@ async fn serve_connection<TStream>(
             }
         }
     }
-    writer_task.abort();
+    if !writer_task.is_finished() {
+        writer_task.abort();
+        let _ = writer_task.await;
+    }
     if let Err(error) = clients.disconnect(&event_writer) {
         log_runtime_server(format_args!(
             "centaeris runtime server client disconnect failed: {error}"
@@ -645,8 +685,10 @@ fn spawn_request_handler(
     state: Arc<Mutex<RuntimeHostState>>,
     event_writer: EventWriter,
     request: RuntimeRpcRequest,
+    permit: RequestPermit,
 ) {
     tokio::spawn(async move {
+        let _permit = permit;
         let response = handle_rpc_request(state, event_writer.clone(), request).await;
         if let Err(error) = event_writer.send_response(&response) {
             log_runtime_server(format_args!(
@@ -751,6 +793,106 @@ mod tests {
         ) -> std::task::Poll<std::io::Result<()>> {
             std::task::Poll::Ready(Ok(()))
         }
+    }
+
+    #[tokio::test]
+    async fn saturated_request_admission_closes_and_capacity_recovers() {
+        let clients = Arc::new(RuntimeServerClientHub::default());
+        let (writer, outbound) = clients.connect().unwrap().unwrap();
+        let permits = (0..8)
+            .map(|_| writer.request_permit(false).unwrap())
+            .collect::<Vec<_>>();
+        let (server, mut peer) = tokio::io::duplex(4096);
+        let serving = tokio::spawn(serve_connection(
+            server,
+            Arc::new(Mutex::new(RuntimeHostState::default())),
+            clients.clone(),
+            writer,
+            outbound,
+        ));
+        peer.write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session/prompt\",\"params\":{}}\n",
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), serving)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(clients.active_action_count(), 0);
+        drop(permits);
+        let (replacement, _events) = clients.connect().unwrap().unwrap();
+        assert!(replacement.request_permit(false).is_ok());
+    }
+
+    #[tokio::test]
+    async fn nonreading_client_disconnect_keeps_run_and_fast_client_alive() {
+        let clients = Arc::new(RuntimeServerClientHub::default());
+        let (slow, outbound) = clients.connect().unwrap().unwrap();
+        let (fast, mut fast_events) = clients.connect().unwrap().unwrap();
+        slow.register_client(
+            crate::runtime_server::RuntimeClientKind::Desktop,
+            "slow-write",
+        )
+        .unwrap();
+        fast.register_client(crate::runtime_server::RuntimeClientKind::Tui, "fast-write")
+            .unwrap();
+        let lease = slow
+            .start_agent_run(
+                "slow-session",
+                "slow-run",
+                "slow-turn",
+                centaeris_core::runtime::TurnControl::new(),
+            )
+            .unwrap();
+        let (server, _peer) = tokio::io::duplex(1);
+        let serving = tokio::spawn(serve_connection(
+            server,
+            Arc::new(Mutex::new(RuntimeHostState::default())),
+            clients.clone(),
+            slow,
+            outbound,
+        ));
+        for _ in 0..130 {
+            clients
+                .broadcaster()
+                .emit("runtime.progress", serde_json::json!({}))
+                .unwrap();
+            fast_events.recv().await.unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(1), serving)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(fast.require_registered().is_ok());
+        let active = fast.active_agent_run("slow-run").unwrap().unwrap();
+        assert_eq!(active.lease, lease);
+        assert_eq!(active.cancellation_reason().unwrap(), None);
+        fast.finish_agent_run(&lease.lease_id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unterminated_oversized_input_closes_connection() {
+        let clients = Arc::new(RuntimeServerClientHub::default());
+        let (writer, outbound) = clients.connect().unwrap().unwrap();
+        let (server, mut peer) = tokio::io::duplex(64 * 1024);
+        let serving = tokio::spawn(serve_connection(
+            server,
+            Arc::new(Mutex::new(RuntimeHostState::default())),
+            clients.clone(),
+            writer,
+            outbound,
+        ));
+        let sending = tokio::spawn(async move {
+            let _ = peer.write_all(&vec![b'x'; 16 * 1024 * 1024 + 1]).await;
+            std::future::pending::<()>().await;
+        });
+        tokio::time::timeout(Duration::from_secs(3), serving)
+            .await
+            .expect("oversized frame must terminate without LF")
+            .unwrap();
+        assert!(!clients.has_clients_or_active_agent_runs().unwrap());
+        sending.abort();
     }
 
     #[tokio::test]
