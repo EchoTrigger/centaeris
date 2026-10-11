@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::env;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::postgres_store::PostgresRuntimeStore;
@@ -29,47 +28,7 @@ fn python_worker_job_kind(value: &str) -> bool {
     PYTHON_WORKER_JOB_KINDS.contains(&value)
 }
 
-pub fn handle(
-    method: &str,
-    path: &str,
-    internal_token: Option<&str>,
-    body: &[u8],
-    store: &PostgresRuntimeStore,
-) -> Option<(u16, Vec<u8>)> {
-    if !path.starts_with("/internal/jobs") && !path.starts_with("/internal/job-outbox") {
-        return None;
-    }
-    let token = match env::var("INTERNAL_API_TOKEN") {
-        Ok(value) if !value.is_empty() => value,
-        _ => return Some(response(500, json!({"error":"internal_token_unavailable"}))),
-    };
-    if Some(token.as_str()) != internal_token {
-        return Some(response(401, json!({"error":"unauthorized"})));
-    }
-    let result = match (method, path) {
-        ("POST", "/internal/jobs/schedule") => schedule(body, store),
-        ("POST", "/internal/jobs/claim") => claim(body, store),
-        ("POST", "/internal/jobs/wait") => wait(body, store),
-        ("POST", "/internal/jobs/start") => start(body, store),
-        ("POST", "/internal/jobs/heartbeat") => heartbeat(body, store),
-        ("POST", "/internal/jobs/yield") => yield_job(body, store),
-        ("POST", "/internal/jobs/complete") => complete(body, store),
-        ("POST", "/internal/jobs/fail") => fail(body, store),
-        ("POST", "/internal/jobs/reconcile") => reconcile(body, store),
-        ("POST", "/internal/job-outbox/pending") => pending_outbox(body, store),
-        ("POST", "/internal/job-outbox/published") => publish_outbox(body, store),
-        ("POST", "/internal/job-outbox/wake-waiter") => wake_waiter(body, store),
-        ("POST", "/internal/job-outbox/reconcile-waiters") => reconcile_waiters(body, store),
-        ("GET", _) if path.starts_with("/internal/jobs/") => get_job(path, store),
-        _ => Err((404, "job_protocol_not_found")),
-    };
-    Some(match result {
-        Ok(value) => response(200, value),
-        Err((status, error)) => response(status, json!({"error":error})),
-    })
-}
-
-type ProtocolResult = Result<Value, (u16, &'static str)>;
+pub(crate) type ProtocolResult = Result<Value, (u16, &'static str)>;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -85,7 +44,7 @@ struct ScheduleRequest {
     workspace_id: Option<String>,
 }
 
-fn schedule(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
+pub(crate) fn schedule(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
     let request: ScheduleRequest = decode(body)?;
     if !valid_schedule_request(&request) {
         return Err((400, "job_schedule_invalid"));
@@ -143,7 +102,7 @@ fn valid_schedule_request(request: &ScheduleRequest) -> bool {
         && request.payload_ref.as_deref().is_none_or(safe_ref)
 }
 
-fn get_job(path: &str, store: &PostgresRuntimeStore) -> ProtocolResult {
+pub(crate) fn get_job(path: &str, store: &PostgresRuntimeStore) -> ProtocolResult {
     let job_id = path.trim_start_matches("/internal/jobs/");
     if !runtime_job_id(job_id) {
         return Err((400, "job_id_invalid"));
@@ -167,7 +126,7 @@ struct ClaimRequest {
     limit: usize,
 }
 
-fn claim(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
+pub(crate) fn claim(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
     let request: ClaimRequest = decode(body)?;
     if request.schema != "runtime.job.claim.v1"
         || !bounded(&request.worker_id, 16, 160)
@@ -210,7 +169,7 @@ struct WaitRequest {
     wait_ms: u64,
 }
 
-fn wait(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
+pub(crate) fn wait(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
     let request: WaitRequest = decode(body)?;
     if !valid_wait_request(&request) {
         return Err((400, "job_wait_invalid"));
@@ -249,7 +208,7 @@ struct LeaseTransitionRequest {
     at_ms: i64,
 }
 
-fn start(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
+pub(crate) fn start(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
     let request: LeaseTransitionRequest = decode(body)?;
     validate_lease_request(&request, "runtime.job.start.v1")?;
     store
@@ -272,7 +231,7 @@ struct HeartbeatRequest {
     lease_ms: u64,
 }
 
-fn heartbeat(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
+pub(crate) fn heartbeat(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
     let request: HeartbeatRequest = decode(body)?;
     if request.schema != "runtime.job.heartbeat.v1"
         || !runtime_job_id(&request.job_id)
@@ -303,7 +262,7 @@ struct YieldRequest {
     transition_reason: String,
 }
 
-fn yield_job(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
+pub(crate) fn yield_job(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
     let request: YieldRequest = decode(body)?;
     if !valid_yield_request(&request) {
         return Err((400, "job_yield_invalid"));
@@ -344,7 +303,7 @@ struct CompleteRequest {
     output_refs: Vec<String>,
 }
 
-fn complete(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
+pub(crate) fn complete(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
     let request: CompleteRequest = decode(body)?;
     if request.schema != "runtime.job.complete.v1"
         || !runtime_job_id(&request.job_id)
@@ -395,7 +354,7 @@ struct FailRequest {
     retryable: bool,
 }
 
-fn fail(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
+pub(crate) fn fail(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
     let request: FailRequest = decode(body)?;
     if request.schema != "runtime.job.fail.v1"
         || !runtime_job_id(&request.job_id)
@@ -490,7 +449,7 @@ struct ReconcileRequest {
     now_ms: i64,
 }
 
-fn reconcile(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
+pub(crate) fn reconcile(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
     let request: ReconcileRequest = decode(body)?;
     if request.schema != "runtime.job.reconcile.v1" {
         return Err((400, "job_reconcile_invalid"));
@@ -510,7 +469,7 @@ struct PendingRequest {
     limit: usize,
 }
 
-fn pending_outbox(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
+pub(crate) fn pending_outbox(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
     let request: PendingRequest = decode(body)?;
     if request.schema != "runtime.job.outbox.pending.v1" || !(1..=256).contains(&request.limit) {
         return Err((400, "job_outbox_request_invalid"));
@@ -531,7 +490,7 @@ struct PublishedRequest {
     published_at_ms: i64,
 }
 
-fn publish_outbox(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
+pub(crate) fn publish_outbox(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
     let request: PublishedRequest = decode(body)?;
     if request.schema != "runtime.job.outbox.published.v1"
         || !runtime_job_id(&request.job_id)
@@ -573,7 +532,7 @@ fn validate_waiter_cursor(
     Ok(())
 }
 
-fn wake_waiter(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
+pub(crate) fn wake_waiter(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
     let request: WakeWaiterRequest = decode(body)?;
     if request.schema != "runtime.job.waiter_wake.v1" || !runtime_job_id(&request.job_id) {
         return Err((400, "job_waiter_wake_invalid"));
@@ -601,7 +560,7 @@ struct ReconcileWaitersRequest {
     after: Option<RuntimeJobWaiterCursor>,
 }
 
-fn reconcile_waiters(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
+pub(crate) fn reconcile_waiters(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
     let request: ReconcileWaitersRequest = decode(body)?;
     if request.schema != "runtime.job.waiters.reconcile.v1" {
         return Err((400, "job_waiters_reconcile_invalid"));
@@ -727,13 +686,6 @@ fn validate_lease_request(
 
 fn decode<T: DeserializeOwned>(body: &[u8]) -> Result<T, (u16, &'static str)> {
     serde_json::from_slice(body).map_err(|_| (400, "invalid_json"))
-}
-
-fn response(status: u16, body: Value) -> (u16, Vec<u8>) {
-    (
-        status,
-        serde_json::to_vec(&body).expect("JSON response serialization must succeed"),
-    )
 }
 
 fn bounded(value: &str, min: usize, max: usize) -> bool {

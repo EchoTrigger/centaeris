@@ -17,8 +17,8 @@ Core behavior.
 | `packages/web` | Browser product consuming REST and SSE |
 | `skills/system` | First-party built-in behavior, separate from installable Plugin inventory |
 
-Runtime HTTP already uses axum and Hyper; its current Router delegates to a
-shared admission/body reader and synchronous protocol dispatch. The
+Runtime HTTP uses axum and Hyper; explicit routes call concrete operations through
+one shared admission/body reader and blocking-task boundary. The
 [Runtime HTTP inventory](../reference/RuntimeHTTP.md) records endpoint ownership,
 framework-reuse opportunities and the behavior protected during transport
 refactors. HTTP framework changes leave Django's product ownership and Core's

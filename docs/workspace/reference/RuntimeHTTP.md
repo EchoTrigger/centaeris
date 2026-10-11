@@ -2,8 +2,7 @@
 
 This document inventories the HTTP surface owned by `packages/runtime_server`
 and the behavior that a transport refactor must preserve. It describes the
-current implementation; the simplification recommendations below are not
-implemented routes, passing test evidence, or a performance claim.
+current implementation. Framework reuse does not establish a performance gain.
 
 Django owns product identity, workspace access, admission receipts, files and
 credentials. Runtime HTTP adapts those accepted operations to Core and the
@@ -15,24 +14,27 @@ An `/internal` prefix alone does not identify which service owns an endpoint.
 
 | Concern | Current source |
 | --- | --- |
-| Connection serving, request admission, dispatch and response headers | [main.rs](../../../packages/runtime_server/src/main.rs): `serve_http`, `dispatch_http_request`, `read_axum_request`, `handle_request`, `http_response` |
+| Connection serving, bounded request reading and response headers | [main.rs](../../../packages/runtime_server/src/main.rs): `serve_http`, `read_axum_request`, `http_response` |
+| Explicit routes, authentication, admission and blocking-task ownership | [http.rs](../../../packages/runtime_server/src/http.rs) |
+| AgentRun HTTP operations | [agent_runs.rs](../../../packages/runtime_server/src/http/agent_runs.rs) |
+| Catalog, package inspection and host-input HTTP operations | [catalogs.rs](../../../packages/runtime_server/src/http/catalogs.rs) |
 | HTTP transport characterization | [runtime_http_tests.rs](../../../packages/runtime_server/src/runtime_http_tests.rs) |
 | Request capacity and deadlines | [request_capacity.rs](../../../packages/runtime_server/src/request_capacity.rs) |
-| Job and outbox dispatch, wire types and validation | [job_protocol.rs](../../../packages/runtime_server/src/job_protocol.rs) |
+| Job and outbox operations, wire types and validation | [job_protocol.rs](../../../packages/runtime_server/src/job_protocol.rs) |
 | Transcript reads and projection checks | [transcript_protocol.rs](../../../packages/runtime_server/src/transcript_protocol.rs) and [wire.rs](../../../packages/runtime_server/src/transcript_protocol/wire.rs) |
 | AgentRun request types and signed-start validation | [contract.rs](../../../packages/runtime_server/src/contract.rs) and [agent_run_authorization.rs](../../../packages/runtime_server/src/agent_run_authorization.rs) |
 | Bounded timing labels and request accounting | [observations.rs](../../../packages/runtime_server/src/observations.rs) |
 | Django callers | [runtime_client.py](../../../packages/api/app_core/runtime_client.py) and [runtime_job_client.py](../../../packages/api/app_core/runtime_job_client.py) |
 | Worker callers, terminal dispatch and waiter reconciliation | [worker.py](../../../packages/worker/worker.py) |
 
-The service already uses axum with Hyper HTTP/1. Its Router sends all requests
-to one fallback. That fallback admits and buffers the request into an axum
-`Request<Bytes>`, and runs synchronous dispatch on `spawn_blocking`. The original
+The service uses axum with Hyper HTTP/1. Its Router registers each operation
+explicitly. Supported operations and fallback share admission, bounded body
+reading and synchronous execution on `spawn_blocking`. The original
 method, URI and `HeaderMap` are retained, and bounded body bytes are moved into
 the request without a second body copy. Header text and duplicate checks still
 precede dispatch. Responses use axum's `Response` and `IntoResponse` directly.
-`handle_request` delegates jobs and transcript reads, and dispatches the other
-operations itself. The wire types and their validators are authoritative;
+Routes call the concrete protocol operation; job and transcript modules do not
+dispatch method/path pairs again. The wire types and validators are authoritative;
 this inventory does not duplicate their field lists.
 
 ## Endpoint inventory
@@ -151,12 +153,12 @@ concurrency layer does not replace these ownership rules.
 The custom Hyper connection loop bounds connections at 128, limits headers to
 64 and the header buffer to 64 KiB, applies a 10-second header-read timeout and
 a 30-second stalled-write timeout, and disables keep-alive. Preserve these
-controls when introducing explicit axum routes; changing the serving helper is
+controls alongside explicit axum routes; changing the serving helper is
 a separate transport change.
 
 ### Request rejection and authentication order
 
-- Routing currently compares `path_and_query`, while capacity and observation
+- Routing preserves complete-target rejection, while capacity and observation
   labels use `uri().path()`. Adding a query string to an otherwise supported
   fixed path prevents dispatch. A job GET query becomes part of its suffix and
   fails identity validation. axum normally matches only the path; do not
@@ -185,9 +187,9 @@ a separate transport change.
   recorded for characterization, not endorsed as a new security policy.
 - After successful job-prefix authentication, unmatched operations return 404
   JSON `job_protocol_not_found`; GET suffix validation can instead return 400.
-  axum's default 405 and automatic GET-to-HEAD handling do not preserve this
-  behavior. Unknown-prefix, trailing-slash, malformed suffix and HEAD cases
-  need explicit coverage before changing dispatch.
+  Method routing uses the shared fallback instead of axum's default 405 or
+  `Allow` header, and HEAD cannot invoke a GET operation. The Router matrix
+  covers unknown-prefix, trailing-slash, malformed suffix and HEAD cases.
 
 Changing one of these rejection rules requires a separate behavioral change
 with focused evidence. A routing cleanup must not silently normalize it.
@@ -214,20 +216,19 @@ HTTP extractors and middleware do not own or replace them. This review includes
 shared worker kinds, worker pending admission and residency-aware teardown from
 the current workspace; they remain protected behavior during routing cleanup.
 
-## Simplification recommendations
+## Framework reuse and remaining boundaries
 
 | Area | Existing capability to use | Smallest useful change and boundary |
 | --- | --- | --- |
-| Repeated method/path dispatch in `main.rs`, `job_protocol.rs` and `transcript_protocol.rs` | axum `Router`, explicit handlers and method routing | Register each supported operation once and call its existing business function directly; retain the documented fallback and rejection behavior |
+| Repeated method/path dispatch | axum `Router`, explicit handlers and method routing | Implemented: register each supported operation once and call its business function directly; retain the documented fallback and rejection behavior |
 | Owned method/path/header copies | axum `Request<Bytes>` and `HeaderMap` | Implemented: retain native request parts and the bounded body; validate headers without cloning names and values into another map |
 | Custom response structure and conversion | axum `Response` and `IntoResponse` | Implemented: construct the framework response once with the existing headers; error JSON uses the infallible serialization of an already constructed `serde_json::Value` |
-| Repeated internal-token checks | A small shared function or axum middleware | Share token comparison while retaining prefix coverage, rejection order and current configuration-error distinctions |
+| Repeated internal-token checks | Shared admission boundary | Implemented: one token comparison retains prefix coverage, rejection order and current configuration-error distinctions |
 | Repeated lane predicates and observation lane selection | Route-local policy plus the existing admission function | Give supported routes their lane policy once; keep unknown-route admission and actual blocking-task permit ownership explicit |
 | Hand-maintained route labels | axum `MatchedPath`, if equivalent | Reuse only when mapped to the existing bounded labels and tested observation contract; no observability redesign is required for routing cleanup |
 
-Continue with the catalog and transcript boundaries after characterization. Then
-move jobs/outbox and AgentRun lifecycle operations without changing their domain
-functions. Keep one concrete shared admission/body/blocking boundary; avoid a
+Catalogs, transcript reads, jobs/outbox and AgentRun lifecycle operations share
+one concrete admission/body/blocking boundary. Keep their domain functions and avoid a
 new generic endpoint framework, route-registration DSL, universal validation
 trait, or one abstraction/file for every operation. Split by cohesive protocol
 only where that makes the call path shorter and easier to inspect.
@@ -251,13 +252,17 @@ error text, structured step failures, a real Hyper error response, the exact
 body limit, body-before-header rejection order, duplicate/non-text headers,
 header name normalization, Content-Type independence and retained query targets.
 These assertions ran green before replacing the custom request/response types.
+The Router characterization reads all 29 method/path entries from this document
+and exercises the production Router with configured, missing and empty server
+tokens in isolated processes. It covers method/query/fallback rejection and
+prohibits database checkout for rejected requests. A controllably blocked
+operation verifies that timeout and disconnect retain capacity until completion.
+These tests ran green before and after replacing dispatch. PostgreSQL outbox,
+worker-pending and transcript HTTP fixtures also use the production Router;
+their durable effects still require the dedicated PostgreSQL gate. Router
+rejection coverage does not establish every successful domain transition.
 Existing coverage also includes incomplete-header timeouts, request-lane
-isolation, exact wire-type validation, catalog envelopes, and real PostgreSQL
-job/outbox/transcript regressions. Some integration tests
-invoke protocol functions directly; they do not establish equivalence of the
-complete HTTP admission and dispatch path. There is not yet a full HTTP route
-characterization matrix. In particular, response transport tests do not establish
-token rejection order across all routes or blocking-task capacity retention.
+isolation, exact wire-type validation and catalog envelopes.
 
 Before a transport refactor, add the smallest missing observable coverage:
 
@@ -289,8 +294,7 @@ Maintain endpoint purpose and transport behavior here, product semantics in
 [Testing.md](../../development/Testing.md). A method/path, purpose, rejection,
 lane or deadline change updates its owning document in the same change. Exact
 wire fields remain derived from their existing Rust types/generated contracts.
-The current inventory was reconciled against dispatch during this review; it is
-not an automated route export. When introducing explicit routing, use the same
-registered operations for an exported inventory or behavioral parity check of
-the documented method/path entries, rather than maintaining another executable
-registry or testing source-text spelling.
+The Router characterization sends the documented method/path entries through
+the registered operations, rather than maintaining another executable registry
+or testing source-text spelling. Add new entries and their observable success
+and rejection coverage together; this table is not an automated route export.

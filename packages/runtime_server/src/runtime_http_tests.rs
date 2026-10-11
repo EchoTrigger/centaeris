@@ -1,5 +1,7 @@
 //! Transport characterization independent of database, Docker and token configuration.
 use super::*;
+use crate::http::dispatch_http_operation;
+use axum::{extract::State, Router};
 use std::convert::Infallible;
 
 fn http_state(runtime: Arc<tokio::runtime::Runtime>) -> HttpServerState {
@@ -16,6 +18,44 @@ fn http_state(runtime: Arc<tokio::runtime::Runtime>) -> HttpServerState {
         }),
         request_capacity: request_capacity::RequestCapacity::for_http_tests(Duration::from_secs(2)),
     }
+}
+
+/// Storage regressions exercise the production Router with their owned database.
+pub(crate) fn stored_request(
+    store: PostgresRuntimeStore,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> (u16, Vec<u8>) {
+    use hyper::service::Service;
+    let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
+    runtime.block_on(async {
+        let mut state = http_state(runtime.clone());
+        state.store = Arc::new(RuntimeStoreActor::start(store.clone()).unwrap());
+        state.job_store = Arc::new(store);
+        state.request_capacity = request_capacity::RequestCapacity::from_env().unwrap();
+        let response = TowerToHyperService::new(http_router(state))
+            .call(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(
+                        "x-internal-token",
+                        env::var("INTERNAL_API_TOKEN").expect("isolated fixture token"),
+                    )
+                    .body(Body::from(body.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        (
+            response.status().as_u16(),
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+    })
 }
 
 #[test]

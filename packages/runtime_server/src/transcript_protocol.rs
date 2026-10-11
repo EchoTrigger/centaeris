@@ -14,20 +14,7 @@ const PATCH_PAGE_SCHEMA: &str = "transcript.patch.page.v1";
 mod wire;
 use wire::*;
 
-pub(crate) fn handle(
-    path: &str,
-    body: &[u8],
-    store: &PostgresRuntimeStore,
-) -> Option<Result<(u16, Vec<u8>), String>> {
-    match path {
-        "/internal/transcript/page" => Some(page(body, store)),
-        "/internal/transcript/patches" => Some(patches(body, store)),
-        "/internal/transcript/content" => Some(content(body, store)),
-        _ => None,
-    }
-}
-
-fn content(body: &[u8], store: &PostgresRuntimeStore) -> Result<(u16, Vec<u8>), String> {
+pub(crate) fn content(body: &[u8], store: &PostgresRuntimeStore) -> Result<(u16, Vec<u8>), String> {
     let request = match serde_json::from_slice::<
         centaeris_core::session::transcript::TranscriptContentRangeReadRequestV1,
     >(body)
@@ -44,7 +31,7 @@ fn content(body: &[u8], store: &PostgresRuntimeStore) -> Result<(u16, Vec<u8>), 
         .map_err(|error| format!("encode transcript content failed: {error}"))
 }
 
-fn page(body: &[u8], store: &PostgresRuntimeStore) -> Result<(u16, Vec<u8>), String> {
+pub(crate) fn page(body: &[u8], store: &PostgresRuntimeStore) -> Result<(u16, Vec<u8>), String> {
     let wire = match serde_json::from_slice::<PageRequest>(body) {
         Ok(wire)
             if wire.schema == PAGE_REQUEST_SCHEMA
@@ -113,7 +100,7 @@ fn page(body: &[u8], store: &PostgresRuntimeStore) -> Result<(u16, Vec<u8>), Str
         .map_err(|error| format!("encode transcript page failed: {error}"))
 }
 
-fn patches(body: &[u8], store: &PostgresRuntimeStore) -> Result<(u16, Vec<u8>), String> {
+pub(crate) fn patches(body: &[u8], store: &PostgresRuntimeStore) -> Result<(u16, Vec<u8>), String> {
     let wire = match serde_json::from_slice::<PatchRequest>(body) {
         Ok(wire)
             if wire.schema == PATCH_REQUEST_SCHEMA
