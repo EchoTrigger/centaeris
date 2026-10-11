@@ -67,6 +67,9 @@ Schema parity does not replace authorization, persistence or cancellation tests.
 framework validation precedence, authorization order and repeatable transcript
 sequences through real Django requests. Keep both valid and invalid repeated
 values: Ninja may reject a value before the route checks multiplicity.
+`test_transcript_runtime_client.py` exercises generated block samples through the
+page response boundary, rejects malformed nested types and separately protects
+integer representation/range and UTF-8 byte limits beyond schema validation.
 For loopback HTTP/HTTPS fixtures, isolate inherited proxy settings in the test
 process. `NO_PROXY` alone may not prevent HTTP clients from initializing optional
 proxy transports; do not change machine-wide proxy settings to run these tests.

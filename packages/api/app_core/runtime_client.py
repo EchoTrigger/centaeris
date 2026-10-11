@@ -549,8 +549,7 @@ def _validate_transcript_conflict(payload: dict, request_body: dict) -> dict | N
     source_high_water = payload.get("sourceHighWater")
     projected_high_water = payload.get("projectedHighWater")
     if (
-        not isinstance(generation, str)
-        or not generation
+        not generation
         or (
             requested_generation is not None
             and generation != requested_generation
@@ -681,9 +680,10 @@ def _valid_transcript_patch(patch: object, page: dict) -> bool:
 def _valid_transcript_block(block: object) -> bool:
     if not valid_transcript_block_structure(block):
         return False
+    # Generated schemas own field presence and JSON types. Keep the stricter
+    # numeric representation, nonblank identities and byte budgets below.
     if (
-        not isinstance(block.get("blockId"), str)
-        or not block["blockId"].strip()
+        not block["blockId"].strip()
         or not _canonical_decimal_u64(block.get("blockRevision"))
         or _transcript_block_order(block) is None
     ):
@@ -694,13 +694,10 @@ def _valid_transcript_block(block: object) -> bool:
         summary = body["summary"]
         summary_ref = body["summaryRef"]
         return (
-            all(
-                isinstance(body.get(field), str) and body[field].strip()
-                for field in ("callId", "toolName")
-            )
+            bool(body["callId"].strip() and body["toolName"].strip())
             and (
                 (
-                    isinstance(summary, str)
+                    summary is not None
                     and len(summary.encode()) <= TRANSCRIPT_PAGE_MAX_INLINE_BYTES
                     and summary_ref is None
                 )
@@ -708,13 +705,9 @@ def _valid_transcript_block(block: object) -> bool:
             )
             and (body["outputRef"] is None or _valid_transcript_content_ref(body["outputRef"]))
         )
-    if kind == "reasoning" and (
-        not isinstance(body.get("requestId"), str) or not body["requestId"].strip()
-    ):
+    if kind == "reasoning" and not body["requestId"].strip():
         return False
-    if kind == "notice" and (
-        not isinstance(body.get("noticeType"), str) or not body["noticeType"].strip()
-    ):
+    if kind == "notice" and not body["noticeType"].strip():
         return False
     return _valid_transcript_content(body.get("content"))
 
@@ -722,9 +715,7 @@ def _valid_transcript_block(block: object) -> bool:
 def _transcript_block_order(block: dict) -> tuple[int, int] | None:
     order = block.get("orderKey")
     if (
-        not isinstance(order, dict)
-        or set(order) != {"sourceSequence", "ordinal"}
-        or not _canonical_decimal_u64(order.get("sourceSequence"))
+        not _canonical_decimal_u64(order["sourceSequence"])
         or type(order.get("ordinal")) is not int
         or not 0 <= order["ordinal"] <= 4_294_967_295
     ):
@@ -736,7 +727,7 @@ def _valid_transcript_content(content: object) -> bool:
     inline = content.get("inlineContent")
     reference = content.get("sourceRef")
     return (
-        isinstance(inline, str)
+        inline is not None
         and reference is None
         and len(inline.encode()) <= TRANSCRIPT_PAGE_MAX_INLINE_BYTES
     ) or (inline is None and _valid_transcript_content_ref(reference))
