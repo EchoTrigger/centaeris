@@ -24,7 +24,8 @@ use crate::session::reliability::{
     RuntimeJobStorePort, ScheduleRuntimeJobRequest, ScheduleRuntimeJobResult,
     StartRuntimeJobRequest,
 };
-use crate::session::store::{RuntimeStoreActor, UpsertExternalContextLinkAndCompleteJobRequest};
+use crate::session::store::job::JobStoreError;
+use crate::session::store::{AsyncJobStorePort, UpsertExternalContextLinkAndCompleteJobRequest};
 use crate::tool::layer::ToolLayer;
 
 pub const SUBAGENT_RUN_JOB_KIND: &str = runtime_job_keys::SUBAGENT_RUN;
@@ -600,10 +601,10 @@ pub fn claim_subagent_run_jobs<S: RuntimeJobStorePort>(
         .collect()
 }
 
-pub async fn claim_subagent_run_jobs_async(
-    store: &RuntimeStoreActor,
+pub async fn claim_subagent_run_jobs_async<S: AsyncJobStorePort + ?Sized>(
+    store: &S,
     req: ClaimSubagentRunJobsRequest,
-) -> Result<Vec<ClaimedSubagentRunJob>, String> {
+) -> Result<Vec<ClaimedSubagentRunJob>, JobStoreError> {
     let jobs = store
         .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
             now_ms: req.now_ms,
@@ -679,10 +680,10 @@ pub fn complete_subagent_run_job<S: RuntimeJobStorePort>(
     )
 }
 
-pub async fn complete_subagent_run_job_async(
-    store: &RuntimeStoreActor,
+pub async fn complete_subagent_run_job_async<S: AsyncJobStorePort + ?Sized>(
+    store: &S,
     req: CompleteSubagentRunJobRequest,
-) -> Result<SubagentSchedulerEvent, String> {
+) -> Result<SubagentSchedulerEvent, JobStoreError> {
     store
         .complete_runtime_job(CompleteRuntimeJobRequest {
             job_id: req.job_id.clone(),
@@ -695,9 +696,12 @@ pub async fn complete_subagent_run_job_async(
         .get_runtime_job(req.job_id.as_str())
         .await?
         .ok_or_else(|| {
-            format!(
-                "subagent runtime job not found after complete: {}",
-                req.job_id
+            JobStoreError::committed(
+                crate::session::store::job::JobStoreOperation::Complete,
+                format!(
+                    "subagent runtime job not found after complete: {}",
+                    req.job_id
+                ),
             )
         })?;
     scheduler_event_from_job(
@@ -708,6 +712,7 @@ pub async fn complete_subagent_run_job_async(
         "Subagent worker completed successfully.",
         req.completed_at_ms,
     )
+    .map_err(Into::into)
 }
 
 pub fn fail_subagent_run_job<S: RuntimeJobStorePort>(
@@ -752,10 +757,10 @@ pub fn fail_subagent_run_job<S: RuntimeJobStorePort>(
     )
 }
 
-pub async fn fail_subagent_run_job_async(
-    store: &RuntimeStoreActor,
+pub async fn fail_subagent_run_job_async<S: AsyncJobStorePort + ?Sized>(
+    store: &S,
     req: FailSubagentRunJobRequest,
-) -> Result<SubagentSchedulerEvent, String> {
+) -> Result<SubagentSchedulerEvent, JobStoreError> {
     let (disposition, next_run_at_ms, kind, status, summary) = if let Some(retry) = req.retry {
         (
             RuntimeJobFailureDisposition::RetryScheduled,
@@ -786,7 +791,12 @@ pub async fn fail_subagent_run_job_async(
     let job = store
         .get_runtime_job(req.job_id.as_str())
         .await?
-        .ok_or_else(|| format!("subagent runtime job not found after fail: {}", req.job_id))?;
+        .ok_or_else(|| {
+            JobStoreError::committed(
+                crate::session::store::job::JobStoreOperation::Fail,
+                format!("subagent runtime job not found after fail: {}", req.job_id),
+            )
+        })?;
     scheduler_event_from_job(
         &job,
         kind,
@@ -795,6 +805,7 @@ pub async fn fail_subagent_run_job_async(
         summary,
         req.failed_at_ms,
     )
+    .map_err(Into::into)
 }
 
 pub fn cancel_subagent_run_job<S: RuntimeJobStorePort>(
@@ -824,18 +835,18 @@ pub fn cancel_subagent_run_job<S: RuntimeJobStorePort>(
     )
 }
 
-pub async fn cancel_subagent_run_job_async(
-    store: &RuntimeStoreActor,
+pub async fn cancel_subagent_run_job_async<S: AsyncJobStorePort + ?Sized>(
+    store: &S,
     req: CancelSubagentRunJobRequest,
-) -> Result<SubagentSchedulerEvent, String> {
+) -> Result<SubagentSchedulerEvent, JobStoreError> {
     cancel_subagent_run_job_with_lease_async(store, req, None).await
 }
 
-async fn cancel_subagent_run_job_with_lease_async(
-    store: &RuntimeStoreActor,
+async fn cancel_subagent_run_job_with_lease_async<S: AsyncJobStorePort + ?Sized>(
+    store: &S,
     req: CancelSubagentRunJobRequest,
     expected_lease_owner: Option<String>,
-) -> Result<SubagentSchedulerEvent, String> {
+) -> Result<SubagentSchedulerEvent, JobStoreError> {
     store
         .cancel_runtime_job(CancelRuntimeJobRequest {
             expected_lease_owner,
@@ -849,9 +860,12 @@ async fn cancel_subagent_run_job_with_lease_async(
         .get_runtime_job(req.job_id.as_str())
         .await?
         .ok_or_else(|| {
-            format!(
-                "subagent runtime job not found after cancel: {}",
-                req.job_id
+            JobStoreError::committed(
+                crate::session::store::job::JobStoreOperation::Cancel,
+                format!(
+                    "subagent runtime job not found after cancel: {}",
+                    req.job_id
+                ),
             )
         })?;
     scheduler_event_from_job(
@@ -862,6 +876,7 @@ async fn cancel_subagent_run_job_with_lease_async(
         "Subagent job cancelled.",
         req.cancelled_at_ms,
     )
+    .map_err(Into::into)
 }
 
 pub fn cancel_subagent_run_jobs<S: RuntimeJobStorePort>(
@@ -923,10 +938,10 @@ pub fn cancel_subagent_run_jobs<S: RuntimeJobStorePort>(
     })
 }
 
-pub async fn cancel_subagent_run_jobs_async(
-    store: &RuntimeStoreActor,
+pub async fn cancel_subagent_run_jobs_async<S: AsyncJobStorePort + ?Sized>(
+    store: &S,
     req: CancelSubagentRunJobsRequest,
-) -> Result<CancelSubagentRunJobsResult, String> {
+) -> Result<CancelSubagentRunJobsResult, JobStoreError> {
     let mut statuses = vec![RuntimeJobStatus::Queued, RuntimeJobStatus::Leased];
     if req.include_running {
         statuses.push(RuntimeJobStatus::Running);
@@ -972,10 +987,11 @@ pub async fn cancel_subagent_run_jobs_async(
                 events.push(event);
             }
             Err(error) => {
-                return Err(format!(
+                let message = format!(
                     "cancel subagent runtime job failed: job_id={} error={error}",
                     job.job_id
-                ));
+                );
+                return Err(error.with_message(message));
             }
         }
     }
@@ -1003,13 +1019,13 @@ pub fn lifecycle_record_from_job(
     })
 }
 
-pub async fn run_claimed_subagent_job_async<R, O>(
-    store: &RuntimeStoreActor,
+pub async fn run_claimed_subagent_job_async<S: AsyncJobStorePort + ?Sized, R, O>(
+    store: &S,
     claimed: ClaimedSubagentRunJob,
     runner: &R,
     observer: &O,
     req: RunClaimedSubagentJobRequest,
-) -> Result<RunClaimedSubagentJobResult, String>
+) -> Result<RunClaimedSubagentJobResult, JobStoreError>
 where
     R: AsyncSubagentWorkerRunner,
     O: AsyncSubagentLifecycleObserver,
@@ -1023,6 +1039,7 @@ where
         })
         .await
     {
+        settle_before_reconciliation(store, &error).await?;
         if let Some(cancelled) = cancelled_subagent_event_if_requested_async(
             store,
             claimed.job.job_id.as_str(),
@@ -1051,13 +1068,18 @@ where
     let running_job = store
         .get_runtime_job(claimed.job.job_id.as_str())
         .await?
-        .unwrap_or(claimed.job.clone());
+        .ok_or_else(|| {
+            JobStoreError::committed(
+                crate::session::store::job::JobStoreOperation::Start,
+                "started subagent job disappeared".to_string(),
+            )
+        })?;
     let (running_lifecycle, running_event) =
         build_running_lifecycle_record(&running_job, req.worker_id.clone(), req.started_at_ms)?;
     let mut events = vec![running_event];
     let work_packet = match load_subagent_work_packet_async(store, &running_job).await {
         Ok(work_packet) => work_packet,
-        Err(err) => {
+        Err(JobStoreError::Rejected(err)) => {
             let failed_event = fail_subagent_run_job_async(
                 store,
                 FailSubagentRunJobRequest {
@@ -1072,7 +1094,12 @@ where
             let final_job = store
                 .get_runtime_job(running_job.job_id.as_str())
                 .await?
-                .unwrap_or_else(|| running_job.clone());
+                .ok_or_else(|| {
+                    JobStoreError::committed(
+                        crate::session::store::job::JobStoreOperation::Fail,
+                        "subagent job disappeared after failure".to_string(),
+                    )
+                })?;
             let final_lifecycle = lifecycle_record_from_job(&final_job, req.finished_at_ms)?;
             events.push(failed_event);
             let result = RunClaimedSubagentJobResult {
@@ -1090,6 +1117,7 @@ where
                 .await?;
             return Ok(result);
         }
+        Err(storage_error) => return Err(storage_error),
     };
     apply_work_packet_description_to_events(&mut events, &work_packet);
     if let Some((cancelled_job, cancelled_event)) = cancelled_subagent_event_if_requested_async(
@@ -1160,6 +1188,7 @@ where
                     lease_ms,
                 }).await;
                 if let Err(error) = renewal {
+                    settle_before_reconciliation(store, &error).await?;
                     if cancelled_subagent_event_if_requested_async(
                         store,
                         running_job.job_id.as_str(),
@@ -1250,9 +1279,12 @@ where
                     .get_runtime_job(running_job.job_id.as_str())
                     .await?
                     .ok_or_else(|| {
-                        format!(
-                            "completed subagent runtime job disappeared: {}",
-                            running_job.job_id
+                        JobStoreError::committed(
+                            crate::session::store::job::JobStoreOperation::Complete,
+                            format!(
+                                "completed subagent runtime job disappeared: {}",
+                                running_job.job_id
+                            ),
                         )
                     })?,
                 SubagentSchedulerEventKind::Succeeded,
@@ -1288,11 +1320,28 @@ where
             .await?
         }
     };
+    let final_operation = match &final_event.kind {
+        SubagentSchedulerEventKind::Succeeded => {
+            crate::session::store::job::JobStoreOperation::Complete
+        }
+        SubagentSchedulerEventKind::Failed | SubagentSchedulerEventKind::Requeued => {
+            crate::session::store::job::JobStoreOperation::Fail
+        }
+        SubagentSchedulerEventKind::Cancelled => {
+            crate::session::store::job::JobStoreOperation::Cancel
+        }
+        _ => crate::session::store::job::JobStoreOperation::Read,
+    };
     events.push(final_event);
     let final_job = store
         .get_runtime_job(running_job.job_id.as_str())
         .await?
-        .unwrap_or(running_job);
+        .ok_or_else(|| {
+            JobStoreError::committed(
+                final_operation,
+                "subagent terminal job disappeared".to_string(),
+            )
+        })?;
     let final_lifecycle = lifecycle_record_from_job(&final_job, finished_at_ms)?;
     let result = RunClaimedSubagentJobResult {
         job_id: final_job.job_id.clone(),
@@ -1310,12 +1359,26 @@ where
     Ok(result)
 }
 
-pub async fn run_due_subagent_jobs_async<R, O>(
-    store: &RuntimeStoreActor,
+async fn settle_before_reconciliation<S: AsyncJobStorePort + ?Sized>(
+    store: &S,
+    error: &JobStoreError,
+) -> Result<(), JobStoreError> {
+    if error.requires_settlement() {
+        store.settle_job_operations().await.map_err(|settlement| {
+            error
+                .clone()
+                .with_message(format!("{error}; Job settlement failed: {settlement}"))
+        })?;
+    }
+    Ok(())
+}
+
+pub async fn run_due_subagent_jobs_async<S: AsyncJobStorePort + ?Sized, R, O>(
+    store: &S,
     runner: &R,
     observer: &O,
     req: RunDueSubagentJobsRequest,
-) -> Result<RunDueSubagentJobsResult, String>
+) -> Result<RunDueSubagentJobsResult, JobStoreError>
 where
     R: AsyncSubagentWorkerRunner,
     O: AsyncSubagentLifecycleObserver,
@@ -1376,13 +1439,13 @@ where
     })
 }
 
-pub async fn run_due_subagent_jobs_with_worker_pool_async<R, O>(
-    store: &RuntimeStoreActor,
+pub async fn run_due_subagent_jobs_with_worker_pool_async<S: AsyncJobStorePort + ?Sized, R, O>(
+    store: &S,
     runner: &R,
     observer: &O,
     req: RunDueSubagentJobsRequest,
     policy: SubagentWorkerPoolPolicy,
-) -> Result<RunDueSubagentJobsResult, String>
+) -> Result<RunDueSubagentJobsResult, JobStoreError>
 where
     R: AsyncSubagentWorkerRunner + Sync,
     O: AsyncSubagentLifecycleObserver + Sync,
@@ -1517,10 +1580,10 @@ pub fn load_subagent_work_packet<S: ExternalContextStorePort>(
     })
 }
 
-pub async fn load_subagent_work_packet_async(
-    store: &RuntimeStoreActor,
+pub async fn load_subagent_work_packet_async<S: AsyncJobStorePort + ?Sized>(
+    store: &S,
     job: &RuntimeJobRecord,
-) -> Result<SubagentWorkPacketEnvelope, String> {
+) -> Result<SubagentWorkPacketEnvelope, JobStoreError> {
     let raw_ref = job
         .payload_ref
         .as_deref()
@@ -1549,13 +1612,13 @@ pub async fn load_subagent_work_packet_async(
     })
 }
 
-async fn recover_panicked_subagent_job_async<O>(
-    store: &RuntimeStoreActor,
+async fn recover_panicked_subagent_job_async<S: AsyncJobStorePort + ?Sized, O>(
+    store: &S,
     observer: &O,
     claimed: &ClaimedSubagentRunJob,
     _worker_id: &str,
     failed_at_ms: TimestampMs,
-) -> Result<RunClaimedSubagentJobResult, String>
+) -> Result<RunClaimedSubagentJobResult, JobStoreError>
 where
     O: AsyncSubagentLifecycleObserver,
 {
@@ -1604,7 +1667,12 @@ where
     let final_job = store
         .get_runtime_job(claimed.job.job_id.as_str())
         .await?
-        .unwrap_or_else(|| claimed.job.clone());
+        .ok_or_else(|| {
+            JobStoreError::committed(
+                crate::session::store::job::JobStoreOperation::Fail,
+                "subagent job disappeared during panic recovery".to_string(),
+            )
+        })?;
     let final_lifecycle = lifecycle_record_from_job(&final_job, failed_at_ms)?;
     let result = RunClaimedSubagentJobResult {
         job_id: final_lifecycle.job_id.clone(),
@@ -1622,11 +1690,11 @@ where
     Ok(result)
 }
 
-async fn next_subagent_worker_batch_async(
-    store: &RuntimeStoreActor,
+async fn next_subagent_worker_batch_async<S: AsyncJobStorePort + ?Sized>(
+    store: &S,
     pending: &mut VecDeque<(usize, ClaimedSubagentRunJob)>,
     max_parallelism: usize,
-) -> Result<Vec<(usize, ClaimedSubagentRunJob)>, String> {
+) -> Result<Vec<(usize, ClaimedSubagentRunJob)>, JobStoreError> {
     let mut batch = Vec::with_capacity(max_parallelism.max(1));
     let mut active_claims = Vec::with_capacity(max_parallelism.max(1));
     let scan_len = pending.len();
@@ -1674,17 +1742,18 @@ pub fn subagent_resource_claim_for_job<S: ExternalContextStorePort>(
     Ok(subagent_resource_claim_from_packet(job, &packet))
 }
 
-pub async fn subagent_resource_claim_for_job_async(
-    store: &RuntimeStoreActor,
+pub async fn subagent_resource_claim_for_job_async<S: AsyncJobStorePort + ?Sized>(
+    store: &S,
     job: &RuntimeJobRecord,
-) -> Result<SubagentResourceClaim, String> {
+) -> Result<SubagentResourceClaim, JobStoreError> {
     let envelope = load_subagent_work_packet_async(store, job)
         .await
         .map_err(|error| {
-            format!(
+            let message = format!(
                 "load subagent resource claim work packet failed: job_id={} error={error}",
                 job.job_id
-            )
+            );
+            error.with_message(message)
         })?;
     let packet =
         decode_work_packet_for_resource_claim(&envelope.content_json).map_err(|error| {
@@ -1907,11 +1976,11 @@ pub(super) fn scheduler_event_from_job(
     })
 }
 
-async fn cancelled_subagent_event_if_requested_async(
-    store: &RuntimeStoreActor,
+async fn cancelled_subagent_event_if_requested_async<S: AsyncJobStorePort + ?Sized>(
+    store: &S,
     job_id: &str,
     at_ms: TimestampMs,
-) -> Result<Option<(RuntimeJobRecord, SubagentSchedulerEvent)>, String> {
+) -> Result<Option<(RuntimeJobRecord, SubagentSchedulerEvent)>, JobStoreError> {
     let Some(job) = store.get_runtime_job(job_id).await? else {
         return Ok(None);
     };

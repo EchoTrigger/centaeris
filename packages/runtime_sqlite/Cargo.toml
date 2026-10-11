@@ -11,18 +11,20 @@ description = "Centaeris SQLite RuntimeStore adapter"
 workspace = true
 
 [dependencies]
+async-trait = "=0.1.89"
 centaeris-core.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 zstd.workspace = true
+thiserror = "=2.0.18"
+tokio-rusqlite = { version = "=0.6.0", features = ["bundled"] }
+tokio-util = { version = "=0.7.18", features = ["rt"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
 tempfile = "=3.27.0"
 rusqlite = { workspace = true, features = ["hooks"] }
-thiserror = "=2.0.18"
-tokio-rusqlite = { version = "=0.6.0", features = ["bundled"] }
-tokio-util = { version = "=0.7.18", features = ["rt"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 
 [[example]]

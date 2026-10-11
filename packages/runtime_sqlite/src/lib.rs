@@ -28,6 +28,9 @@ mod sqlite_transcript;
 #[path = "sqlite_store/sqlite_turn_supplement.rs"]
 mod sqlite_turn_supplement;
 
+pub mod job_store;
+mod sqlite_job_connection;
+
 pub const STORE_SCHEMA_VERSION: i64 = 5;
 
 #[derive(Debug, Clone)]

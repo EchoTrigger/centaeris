@@ -6,7 +6,9 @@ use crate::session::reliability::{
 };
 
 pub mod actor;
+pub mod job;
 pub use actor::RuntimeStoreActor;
+pub use job::AsyncJobStorePort;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

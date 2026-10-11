@@ -86,11 +86,17 @@ async fn blocked_read(driver: &Driver) -> (Pending<Option<RuntimeJobRecord>>, mp
     let (started, ready) = oneshot::channel();
     let (release, wait) = mpsc::channel();
     let pending = driver
-        .submit(Options::default(), move |conn, _| {
-            started.send(()).unwrap();
-            wait.recv_timeout(Duration::from_secs(10)).unwrap();
-            crate::sqlite_reliability::load_runtime_job_by_id(conn, "job")
-        })
+        .submit(
+            Options {
+                read_only: true,
+                ..Options::default()
+            },
+            move |conn, _| {
+                started.send(()).unwrap();
+                wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                crate::sqlite_reliability::load_runtime_job_by_id(conn, "job")
+            },
+        )
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(10), ready)
@@ -101,13 +107,53 @@ async fn blocked_read(driver: &Driver) -> (Pending<Option<RuntimeJobRecord>>, mp
 }
 
 #[tokio::test]
+async fn unconfirmed_write_is_never_inferred_to_be_read_only() {
+    let db = database();
+    let driver = Driver::open(db.store.db_path().to_owned(), 1)
+        .await
+        .unwrap();
+    let pending = driver
+        .submit(Options::default(), |conn, _| {
+            // Deliberately break the adapter's transaction-confirmation contract.
+            conn.execute(
+                "UPDATE runtime_jobs SET last_error='written' WHERE job_id='job'",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let receipt = finish(pending).await;
+    assert_eq!(receipt.outcome, Outcome::Unknown);
+    assert!(!receipt.healthy);
+    assert!(receipt.result.is_err());
+    close(&driver).await;
+    assert_eq!(
+        db.store
+            .get_runtime_job("job")
+            .unwrap()
+            .unwrap()
+            .last_error
+            .as_deref(),
+        Some("written")
+    );
+}
+
+#[tokio::test]
 async fn file_driver_reuses_reads_compound_transactions_and_durability_policy() {
     let db = database();
-    let driver = Driver::open(db.store.db_path().to_owned(), 2).await;
+    let driver = Driver::open(db.store.db_path().to_owned(), 2)
+        .await
+        .unwrap();
     let read = driver
-        .submit(Options::default(), |conn, _| {
-            crate::sqlite_reliability::load_runtime_job_by_id(conn, "job")
-        })
+        .submit(
+            Options {
+                read_only: true,
+                ..Options::default()
+            },
+            |conn, _| crate::sqlite_reliability::load_runtime_job_by_id(conn, "job"),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -145,10 +191,16 @@ async fn file_driver_reuses_reads_compound_transactions_and_durability_policy() 
     assert_eq!(receipt.outcome, Outcome::Committed);
     assert!(receipt.healthy);
     let sync = driver
-        .submit(Options::default(), |conn, _| {
-            conn.pragma_query_value(None, "synchronous", |r| r.get::<_, i64>(0))
-                .map_err(|e| e.to_string())
-        })
+        .submit(
+            Options {
+                read_only: true,
+                ..Options::default()
+            },
+            |conn, _| {
+                conn.pragma_query_value(None, "synchronous", |r| r.get::<_, i64>(0))
+                    .map_err(|e| e.to_string())
+            },
+        )
         .await
         .unwrap();
     assert_eq!(finish(sync).await.result.unwrap(), 1);
@@ -163,7 +215,9 @@ async fn file_driver_reuses_reads_compound_transactions_and_durability_policy() 
 #[tokio::test]
 async fn cancellation_before_admission_leaves_no_work_or_capacity_leak() {
     let db = database();
-    let driver = Driver::open(db.store.db_path().to_owned(), 1).await;
+    let driver = Driver::open(db.store.db_path().to_owned(), 1)
+        .await
+        .unwrap();
     let (first, release) = blocked_read(&driver).await;
     let mut waiting = Box::pin(driver.submit(Options::default(), |conn, observe| {
         upsert_external_context_link_and_complete_job_conn(
@@ -187,7 +241,9 @@ async fn cancellation_before_admission_leaves_no_work_or_capacity_leak() {
 #[tokio::test]
 async fn dropping_a_queued_waiter_does_not_cancel_accepted_write() {
     let db = database();
-    let driver = Driver::open(db.store.db_path().to_owned(), 2).await;
+    let driver = Driver::open(db.store.db_path().to_owned(), 2)
+        .await
+        .unwrap();
     let (first, release) = blocked_read(&driver).await;
     drop(queued_completion(&driver, Options::default()).await);
     release.send(()).unwrap();
@@ -199,7 +255,9 @@ async fn dropping_a_queued_waiter_does_not_cancel_accepted_write() {
 #[tokio::test]
 async fn execution_side_deadline_rejects_queued_write_without_mutation() {
     let db = database();
-    let driver = Driver::open(db.store.db_path().to_owned(), 2).await;
+    let driver = Driver::open(db.store.db_path().to_owned(), 2)
+        .await
+        .unwrap();
     let (first, release) = blocked_read(&driver).await;
     let deadline = Instant::now();
     let clock = Arc::new(Mutex::new(deadline));
@@ -226,7 +284,9 @@ async fn execution_side_deadline_rejects_queued_write_without_mutation() {
 #[tokio::test]
 async fn waiting_timeout_during_execution_keeps_work_owned_until_commit() {
     let db = database();
-    let driver = Driver::open(db.store.db_path().to_owned(), 1).await;
+    let driver = Driver::open(db.store.db_path().to_owned(), 1)
+        .await
+        .unwrap();
     let (started, ready) = oneshot::channel();
     let (release, wait) = mpsc::channel();
     let mut started = Some(started);
@@ -261,7 +321,9 @@ async fn waiting_timeout_during_execution_keeps_work_owned_until_commit() {
 #[tokio::test]
 async fn committed_write_survives_reply_loss_without_replay() {
     let db = database();
-    let driver = Driver::open(db.store.db_path().to_owned(), 1).await;
+    let driver = Driver::open(db.store.db_path().to_owned(), 1)
+        .await
+        .unwrap();
     let (started, ready) = oneshot::channel();
     let (release, wait) = mpsc::channel();
     let mut started = Some(started);
@@ -306,7 +368,9 @@ async fn committed_write_survives_reply_loss_without_replay() {
 async fn unwinding_panics_preserve_facts_and_retire_queued_work() {
     for after_commit in [false, true] {
         let db = database();
-        let driver = Driver::open(db.store.db_path().to_owned(), 2).await;
+        let driver = Driver::open(db.store.db_path().to_owned(), 2)
+            .await
+            .unwrap();
         let (started, ready) = oneshot::channel();
         let (release, wait) = mpsc::channel();
         let mut started = Some(started);
@@ -343,9 +407,13 @@ async fn unwinding_panics_preserve_facts_and_retire_queued_work() {
             .unwrap()
             .unwrap();
         let queued = driver
-            .submit(Options::default(), |conn, _| {
-                crate::sqlite_reliability::load_runtime_job_by_id(conn, "other")
-            })
+            .submit(
+                Options {
+                    read_only: true,
+                    ..Options::default()
+                },
+                |conn, _| crate::sqlite_reliability::load_runtime_job_by_id(conn, "other"),
+            )
             .await
             .unwrap();
         release.send(()).unwrap();
@@ -374,7 +442,9 @@ async fn restoration_failure_preserves_commit_or_rollback_and_rejects_queued_wor
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
     for (commit, cleanup_panic) in [(false, false), (true, false), (false, true), (true, true)] {
         let db = database();
-        let driver = Driver::open(db.store.db_path().to_owned(), 2).await;
+        let driver = Driver::open(db.store.db_path().to_owned(), 2)
+            .await
+            .unwrap();
         let (started, ready) = oneshot::channel();
         let (release, wait) = mpsc::channel();
         let mut started = Some(started);
@@ -423,9 +493,13 @@ async fn restoration_failure_preserves_commit_or_rollback_and_rejects_queued_wor
             .unwrap()
             .unwrap();
         let queued = driver
-            .submit(Options::default(), |conn, _| {
-                crate::sqlite_reliability::load_runtime_job_by_id(conn, "other")
-            })
+            .submit(
+                Options {
+                    read_only: true,
+                    ..Options::default()
+                },
+                |conn, _| crate::sqlite_reliability::load_runtime_job_by_id(conn, "other"),
+            )
             .await
             .unwrap();
         release.send(()).unwrap();
@@ -458,7 +532,9 @@ async fn transaction_start_commit_and_rollback_failures_have_distinct_receipts()
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
     for fault in ["begin", "commit", "rollback"] {
         let db = database();
-        let driver = Driver::open(db.store.db_path().to_owned(), 1).await;
+        let driver = Driver::open(db.store.db_path().to_owned(), 1)
+            .await
+            .unwrap();
         let receipt = finish(
             driver
                 .submit(
@@ -518,7 +594,9 @@ async fn transaction_start_commit_and_rollback_failures_have_distinct_receipts()
 async fn recovery_restores_prior_policy_after_success_and_business_error() {
     for fail in [false, true] {
         let db = database();
-        let driver = Driver::open(db.store.db_path().to_owned(), 1).await;
+        let driver = Driver::open(db.store.db_path().to_owned(), 1)
+            .await
+            .unwrap();
         if fail {
             Connection::open(db.store.db_path()).unwrap().execute_batch("CREATE TRIGGER reject_reclaim_test BEFORE UPDATE ON runtime_jobs BEGIN SELECT RAISE(FAIL,'injected reclaim failure'); END;").unwrap();
         }
@@ -551,10 +629,16 @@ async fn recovery_restores_prior_policy_after_success_and_business_error() {
             }
         );
         let sync = driver
-            .submit(Options::default(), |conn, _| {
-                conn.pragma_query_value(None, "synchronous", |r| r.get::<_, i64>(0))
-                    .map_err(|e| e.to_string())
-            })
+            .submit(
+                Options {
+                    read_only: true,
+                    ..Options::default()
+                },
+                |conn, _| {
+                    conn.pragma_query_value(None, "synchronous", |r| r.get::<_, i64>(0))
+                        .map_err(|e| e.to_string())
+                },
+            )
             .await
             .unwrap();
         assert_eq!(finish(sync).await.result.unwrap(), 1);
@@ -575,7 +659,9 @@ async fn recovery_restores_prior_policy_after_success_and_business_error() {
 async fn recovery_commit_failure_and_panic_restore_policy_and_retire_connection() {
     for panic in [false, true] {
         let db = database();
-        let driver = Driver::open(db.store.db_path().to_owned(), 1).await;
+        let driver = Driver::open(db.store.db_path().to_owned(), 1)
+            .await
+            .unwrap();
         let receipt = finish(
             driver
                 .submit(
@@ -634,14 +720,20 @@ async fn recovery_commit_failure_and_panic_restore_policy_and_retire_connection(
 #[tokio::test]
 async fn closing_stops_admission_drains_accepted_work_and_outlives_waiters() {
     let db = database();
-    let driver = Driver::open(db.store.db_path().to_owned(), 2).await;
+    let driver = Driver::open(db.store.db_path().to_owned(), 2)
+        .await
+        .unwrap();
     let (first, release) = blocked_read(&driver).await;
     let next = queued_completion(&driver, Options::default()).await;
     driver.begin_close();
     let rejected = driver
-        .submit(Options::default(), |conn, _| {
-            crate::sqlite_reliability::load_runtime_job_by_id(conn, "other")
-        })
+        .submit(
+            Options {
+                read_only: true,
+                ..Options::default()
+            },
+            |conn, _| crate::sqlite_reliability::load_runtime_job_by_id(conn, "other"),
+        )
         .await;
     assert!(matches!(rejected, Err(WorkError::AdmissionStopped)));
     assert!(tokio::time::timeout(Duration::ZERO, driver.close())

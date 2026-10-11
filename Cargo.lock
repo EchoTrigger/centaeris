@@ -327,6 +327,7 @@ dependencies = [
 name = "centaeris-core"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "centaeris-model-catalog",
  "futures",
@@ -338,6 +339,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "thiserror 2.0.18",
  "tokio",
  "tree-sitter",
  "tree-sitter-bash",
@@ -401,6 +403,7 @@ dependencies = [
 name = "centaeris-runtime-sqlite"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "centaeris-core",
  "rusqlite",
  "serde_json",

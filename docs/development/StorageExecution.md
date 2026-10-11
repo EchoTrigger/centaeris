@@ -33,18 +33,22 @@ checkpoint or event. No new field limits or payload parsing are introduced.
 
 ## Asynchronous SQLite connection validation
 
-This is an independent, test-only candidate. Production still opens connections
-through `SqliteRuntimeStore` and uses the existing Actor where currently assembled.
-No Core asynchronous port, database format, license or network protocol changes.
+The connection policy is shared by the file-backed characterization tests and
+the native SqliteJobStore adapter. Production assembly still uses the current
+Actor and synchronous Store. The adapter is available through the narrow Core
+AsyncJobStorePort; default local assembly has not switched. See
+[JobStorage.md](JobStorage.md) for results, recovery and outstanding acceptance.
+Database formats, licenses and public network contracts remain unchanged.
 
 The tested combination is `tokio-rusqlite =0.6.0`, `rusqlite =0.32.1` with
 `bundled`, and `libsqlite3-sys 0.30.1`. The candidate's `rusqlite ^0.32` requirement
 resolves to the existing workspace pin. No driver upgrade was necessary, so a
 second version path was not pursued. The lock adds only the candidate and its
-`crossbeam-channel 0.5.17` / `crossbeam-utils 0.8.23` dependencies. Existing
-`thiserror 2.0.18`, `tokio-util 0.7.18` and `tempfile 3.27.0` are reused as test
-dependencies; `rusqlite/hooks` enables real commit/authorizer failure injection.
-The new candidate is not a production dependency.
+`crossbeam-channel 0.5.17` / `crossbeam-utils 0.8.23` dependencies. Existing thiserror 2.0.18 and tokio-util 0.7.18 support the shared adapter policy.
+async-trait 0.1.89 makes the narrow capability injectable without exposing database
+types in Core. tempfile 3.27.0 and rusqlite/hooks remain test facilities. These
+versions already existed in the locked graph. Driver dependencies are available
+to the native adapter; this does not switch host defaults.
 
 The path is test caller -> small admission/lifetime policy -> the library's
 `Connection::call` -> existing connection-level operations. It has one library
@@ -59,7 +63,7 @@ observer. Error strings and outer transaction boundaries remain unchanged.
 Observers also allow deterministic blocking and panic injection while a real
 transaction is open or after its real commit.
 
-The test adapter holds an owned semaphore permit and TaskTracker token inside
+The shared connection policy holds an owned semaphore permit and TaskTracker token inside
 each submitted closure until database execution and cleanup finish. Dropping the
 reply waiter does not release them or cancel accepted work. A controlled execution
 clock rejects expired work before SQL. Stopping admission and registering work
@@ -71,14 +75,14 @@ keeps write outcome separate from connection health and cleanup errors:
 
 | Outcome | Meaning |
 | --- | --- |
-| ReadOnly | A read completed without attempting a write transaction |
+| ReadOnly | An explicitly declared read; never inferred from missing transaction events |
 | NotExecuted | Admission or execution-side rejection, or transaction start failed |
 | RolledBack | Explicit rollback succeeded, or pre-commit unwind finished rollback |
 | Committed | The transaction commit returned successfully |
 | Unknown | Commit or transport did not establish a safe write outcome |
 
 Panic, unknown outcome, unfinished transaction or restoration failure retires the
-connection for this candidate. Every queued closure checks health before executing;
+connection for this owner. Every queued closure checks health before executing;
 new and already queued work cannot use a retired connection. No write is replayed
 automatically. Cleanup failure cannot replace a known commit or rollback fact.
 Configuration-restoration panics are also isolated: the original result is kept,
@@ -88,7 +92,7 @@ and calls library close; cancelling a particular close waiter does not cancel
 that task. The host must still wait for close before dropping its Tokio runtime;
 production host shutdown has not been migrated in this change.
 
-The 13 driver tests use temporary file databases and the real schema. They cover
+The driver tests use temporary file databases and the real schema. They cover
 pre-submission cancellation, dropped queued waiters, explicit expiry, execution
 wait timeout, lost post-commit replies, panic, restoration failure, transaction
 start/commit/rollback failures and close/submit/waiter races. Channels mark exact
@@ -111,30 +115,21 @@ all associated records. A flushed marker proves the child reached the intended
 boundary. No unwind or RAII cleanup is claimed for these abort cases. Process
 exit/reopen checks are not power-loss durability tests.
 
-## Subsequent migration boundaries
+## Full Job call chain boundaries
 
-| Current call chain | Future change / ordering requirement |
-| --- | --- |
-| Local Runtime `agent_runtime_store_actor` -> Core Actor -> blocking operation -> SQLite `with_conn` | Replace only after the selected async capabilities reach the driver directly; then remove local Actor assembly and per-call connection creation for migrated capabilities |
-| Core Subagent functions -> concrete Actor methods -> job/external-context operations | Introduce capability-oriented async ports; retain claim/start/work/atomic result commit order and lease-owner binding |
-| Core `TurnCheckpointStore` async wrappers -> `run_blocking_runtime_operation` -> synchronous Store | Migrate checkpoint read/write and associated events together; remove their blocking wrapper only when all calls use the same ordering owner |
-| Core `SessionManager` -> synchronous snapshot Store and CAS writers | Still synchronous; snapshot read/modify/CAS and recovery/projection ordering must be inventoried before migration |
-| Hosted Runtime -> Core Actor -> PostgreSQL, plus direct PostgreSQL control/job operations | Retain required Actor ports, commands and dispatch; SQLite validation does not authorize changing PostgreSQL assembly or pools |
-| Local server drain -> worker/task shutdown | Integrate stop-admission, actual database-work drain, connection close and observed completion before removing the old local path |
+Core async Subagent functions use AsyncJobStorePort and a settlement barrier.
+SQLite native operations reach the library queue directly. Actor dispatch remains
+for current host assembly and PostgreSQL. Its legacy string transport cannot
+identify every phase, so write errors conservatively remain unknown. Missing
+authority never falls back to an old Job record.
 
-Do not assume operations split between the old Actor and new connection share
-execution order. A candidate driver proves operation-level contracts, not parity
-of a mixed production call graph. SQLite writer serialization must also be
-preserved across cloned handles and other opens of the same file.
+[JobStorage.md](JobStorage.md) inventories the remaining callers and default-switch
+conditions. Snapshot interfaces/SQL and PostgreSQL pools remain outside this
+migration. Actor and native connections do not share FIFO: cross-path handoffs
+require explicit acknowledgements. Native capability tests alone do not establish
+production-call-graph parity or combined resource capacity.
 
-The next smallest units are: first, one caller-owned job sequence with explicit
-claim/start/read/result-commit ordering, its minimal async capabilities and actual
-callers; second, checkpoint/snapshot capability
-migration with ordering tests; then local host close integration and deletion of
-unused SQLite execution paths. Keep PostgreSQL pool work separate. Reassess each
-unit by code actually removed; do not create a second general execution framework.
-
-## Local verification record
+## Initial consolidation verification record
 
 The clean source baseline was `main` at
 `e11adb09458e7038acc797edd0a7e51e2d650587`. The work is kept on

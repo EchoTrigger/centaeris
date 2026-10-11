@@ -783,7 +783,8 @@ async fn run_hosted_subagent_batch(
             max_parallelism: limit,
         },
     )
-    .await?;
+    .await
+    .map_err(|error| error.diagnostic_message())?;
     persist_subagent_result_projection_from_scheduler_events(
         store,
         session_id.as_str(),
