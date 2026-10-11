@@ -231,10 +231,12 @@ material-link failures.
    workflow runs it for relevant pull requests and `main` changes, and supports
    an explicit manual run.
 3. Populate a private `.env`, then run `docker compose config --quiet`.
-4. On fresh Postgres, apply `0001_initial` and confirm the Workspace app starts.
+4. On fresh Postgres, apply all migrations and confirm the Workspace app starts.
    Verify the complete current model schema, foreign keys, checks, unique
-   constraints and the PostgreSQL tool-result expression index. Credentials
-   remain unconfigured until assigned an explicit quota domain.
+   constraints and the PostgreSQL tool-result expression index. Verify that
+   migration `0013_remove_model_quota_domain` preserves encrypted credentials,
+   model configuration and application capacity records. Model calls require
+   valid provider configuration; provider quotas belong to the model gateway.
 5. Build Runtime, API, worker, web, and execution images from root Compose
    contexts; verify health with an empty extension volume.
 6. `docker compose config` must resolve project `centaeris-workspace` and only

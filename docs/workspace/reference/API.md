@@ -616,7 +616,7 @@ status}`. Status is `unconfigured`, `configured` or `unavailable`. The first has
 null selection/effort and requires configuration before a new idle Run;
 unavailable preserves an unusable saved selection and never substitutes another
 model. Configured means a current enabled ModelConfig and effective effort are
-selected, not that credentials, quota or provider connectivity have passed.
+selected, not that credentials, gateway admission or provider connectivity have passed.
 
 `PATCH` accepts exactly `schema: "agent.model_settings.update.v1"`,
 `modelConfigRef` and `thinkingMode`. Both latter fields are required and nullable.

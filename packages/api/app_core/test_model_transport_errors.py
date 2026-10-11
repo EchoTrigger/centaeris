@@ -34,7 +34,7 @@ class ModelTransportErrorTests(SimpleTestCase):
         self.assertEqual(mapped.reasonType, "provider_authentication_failed")
         self.assertEqual(mapped.httpStatus, 403)
 
-    def test_provider_status_and_retry_after_remain_available_for_quota_accounting(self):
+    def test_provider_status_and_retry_after_remain_available_to_the_caller(self):
         request = httpx.Request("POST", "https://synthetic.invalid")
         for status, reason in (
             (408, "provider_timeout"),

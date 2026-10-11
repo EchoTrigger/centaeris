@@ -659,44 +659,12 @@ class ModelConfig(models.Model):
         return super().save(*args, **kwargs)
 
 
-class ModelQuotaDomain(models.Model):
-    # Quota identity and limit are configured explicitly for the external
-    # account. Neither provider names nor secrets establish this relationship.
-    key = models.AutoField(primary_key=True)
-    id = models.CharField(unique=True, max_length=64)
-    maxConcurrent = models.PositiveSmallIntegerField()
-    enabled = models.BooleanField(default=False)
-    cooldownUntilMs = models.BigIntegerField(default=0)
-    createdAt = models.DateTimeField(auto_now_add=True)
-    updatedAt = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        constraints = [
-            models.CheckConstraint(
-                condition=models.Q(maxConcurrent__gte=1, maxConcurrent__lte=64),
-                name="model_quota_domain_concurrency_valid",
-            ),
-        ]
-
-    def save(self, *args, **kwargs):
-        if not self.id.strip() or self.maxConcurrent < 1 or self.maxConcurrent > 64:
-            raise ValueError("ModelQuotaDomain requires an ID and a limit from 1 to 64")
-        return super().save(*args, **kwargs)
-
-
 class ProviderCredential(models.Model):
     id = models.CharField(primary_key=True, max_length=64, default=new_credential_id)
     provider = models.OneToOneField(
         ModelProvider,
         on_delete=models.PROTECT,
         related_name="credential",
-    )
-    quotaDomain = models.ForeignKey(
-        ModelQuotaDomain,
-        null=True,
-        blank=True,
-        on_delete=models.PROTECT,
-        related_name="credentials",
     )
     displayName = models.CharField(max_length=160)
     encryptedSecret = models.TextField()

@@ -660,8 +660,7 @@ fn hosted_model_error(failure: ModelStreamFailure) -> Result<ModelClientError, M
         | "provider_secret_unavailable"
         | "provider_secret_decryption_failed" => (ModelClientErrorKind::AuthFailed, false),
         reason
-            if reason.starts_with("model_quota_")
-                || reason.starts_with("prepared_prompt_")
+            if reason.starts_with("prepared_prompt_")
                 || reason == "provider_request_rejected"
                 || reason == "model_thinking_mode_unsupported" =>
         {
@@ -1041,7 +1040,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut connection, _) = listener.accept().await.unwrap();
             read_http_request(&mut connection).await;
-            let body = "data: {\"schema\":\"api.model.stream.v1\",\"type\":\"error\",\"reasonType\":\"model_quota_domain_required\",\"httpStatus\":null}\n\n";
+            let body = "data: {\"schema\":\"api.model.stream.v1\",\"type\":\"error\",\"reasonType\":\"provider_request_rejected\",\"httpStatus\":null}\n\n";
             connection.write_all(format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(), body
@@ -1064,7 +1063,7 @@ mod tests {
         assert_eq!(error.kind, ModelClientErrorKind::InvalidRequest);
         assert_eq!(
             error.provider_code.as_deref(),
-            Some("model_quota_domain_required")
+            Some("provider_request_rejected")
         );
         assert_eq!(error.provider_attempts, 1);
         assert!(!error.retryable);
@@ -1082,11 +1081,11 @@ mod tests {
             (
                 "model_quota_domain_disabled",
                 None,
-                ModelClientErrorKind::InvalidRequest,
+                ModelClientErrorKind::Provider,
                 false,
             ),
             (
-                "model_quota_backend_unavailable",
+                "prepared_prompt_invalid",
                 None,
                 ModelClientErrorKind::InvalidRequest,
                 false,

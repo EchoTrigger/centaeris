@@ -18,12 +18,10 @@ from app_core.http.schema import ModelResponse
 from app_core.http.stream_response import OwnedAsyncStreamingHttpResponse
 from app_core.http.internal_model import model_runs
 from app_core.model_adapter import stream_model_async
-from app_core.model_adapter.quota import async_model_attempt
 from app_core.runtime_client import request_execution_profile, request_model_catalog
 from app_core.models import (
     Session,
     ModelConfig,
-    ModelQuotaDomain,
     ModelRunLog,
     ModelProvider,
     ProviderCredential,
@@ -1156,9 +1154,6 @@ class AsyncProviderStreamTests(TestCase):
                 apiBase="https://api.deepseek.com",
             ),
             displayName="Provider cancellation credential",
-            quotaDomain=ModelQuotaDomain.objects.create(
-                id="provider-cancellation", maxConcurrent=1, enabled=True
-            ),
             encryptedSecret="unused-by-patched-client",
             createdBy=admin,
             updatedBy=admin,
@@ -1245,14 +1240,6 @@ class AsyncProviderStreamTests(TestCase):
             async_to_sync(cancel_provider_send)()
 
         self.assertEqual(client.close.await_count, 1)
-        async def next_attempt():
-            async with async_model_attempt(model):
-                return True
-
-        async def verify_released():
-            return await asyncio.wait_for(next_attempt(), timeout=2)
-
-        self.assertTrue(async_to_sync(verify_released)())
         audit = ModelRunLog.objects.get(agentRunId="agent_run_provider_cancelled")
         self.assertEqual(audit.status, "error")
         self.assertEqual(audit.error, "provider_stream_cancelled")

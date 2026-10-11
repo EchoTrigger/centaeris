@@ -35,7 +35,6 @@ from .openai_completions import (
     stream_open_ai_completions,
 )
 from .openai_responses import call_open_ai_responses, stream_open_ai_responses
-from .quota import async_model_attempt, model_attempt
 from .diagnostics import report_model_failure
 
 logger = logging.getLogger(__name__)
@@ -60,15 +59,16 @@ def encode_model_stream_event(event_type: str, payload: dict) -> bytes:
 def call_model(model: ModelConfig, request_body: dict, cancel_event=None) -> dict:
     if model.provider_id is None:
         return fake_model_response(model, request_body)
-    with model_attempt(model, cancel_event):
-        api, _ = model_database_operation(resolve_model_route)(model)
-        if api == "openai-completions":
-            return call_open_ai_completions(model, request_body)
-        if api == "openai-responses":
-            return call_open_ai_responses(model, request_body)
-        if api == "anthropic-messages":
-            return call_anthropic_messages(model, request_body)
-        raise ModelProviderError("provider_api_unsupported")
+    if cancel_event is not None and cancel_event.is_set():
+        raise ModelProviderError("model_run_cancelled")
+    api, _ = model_database_operation(resolve_model_route)(model)
+    if api == "openai-completions":
+        return call_open_ai_completions(model, request_body)
+    if api == "openai-responses":
+        return call_open_ai_responses(model, request_body)
+    if api == "anthropic-messages":
+        return call_anthropic_messages(model, request_body)
+    raise ModelProviderError("provider_api_unsupported")
 
 
 def run_model(agent_run_id: str, model_config_ref: str, request_body: dict, cancel_event=None) -> dict:
@@ -116,26 +116,25 @@ async def stream_model_async(agent_run_id: str, model_config_ref: str, request_b
                 await asyncio.sleep(0.02)
                 yield encode_model_stream_event("delta", {"delta": text[index : index + 4]})
         else:
-            async with async_model_attempt(model):
-                api, _ = await sync_to_async(
-                    model_database_operation(resolve_model_route), thread_sensitive=True,
-                )(model)
-                result_holder = {}
-                if api == "openai-completions":
-                    provider_stream = stream_open_ai_completions(model, request_body, result_holder, encode_model_stream_event)
-                elif api == "openai-responses":
-                    provider_stream = stream_open_ai_responses(model, request_body, result_holder, encode_model_stream_event)
-                elif api == "anthropic-messages":
-                    provider_stream = stream_anthropic_messages(model, request_body, result_holder, encode_model_stream_event)
-                else:
-                    raise ModelProviderError("provider_api_unsupported")
-                try:
-                    async for event in provider_stream:
-                        yield event
-                finally:
-                    await provider_stream.aclose()
-                    provider_stream = None
-                result = result_holder["result"]
+            api, _ = await sync_to_async(
+                model_database_operation(resolve_model_route), thread_sensitive=True,
+            )(model)
+            result_holder = {}
+            if api == "openai-completions":
+                provider_stream = stream_open_ai_completions(model, request_body, result_holder, encode_model_stream_event)
+            elif api == "openai-responses":
+                provider_stream = stream_open_ai_responses(model, request_body, result_holder, encode_model_stream_event)
+            elif api == "anthropic-messages":
+                provider_stream = stream_anthropic_messages(model, request_body, result_holder, encode_model_stream_event)
+            else:
+                raise ModelProviderError("provider_api_unsupported")
+            try:
+                async for event in provider_stream:
+                    yield event
+            finally:
+                await provider_stream.aclose()
+                provider_stream = None
+            result = result_holder["result"]
         usage = validated_usage(result.get("usage"))
         yield encode_model_stream_event(
             "result",

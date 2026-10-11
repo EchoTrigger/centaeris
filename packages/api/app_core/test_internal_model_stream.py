@@ -1,7 +1,6 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
@@ -29,9 +28,6 @@ class InternalModelStreamTests(SimpleTestCase):
         self.assertIsNone(provider_error(KeyError("programming defect")))
 
     async def test_unknown_failure_records_safe_diagnostics_without_replacing_its_cause(self):
-        @asynccontextmanager
-        async def attempt(model):
-            yield
 
         async def provider_stream(*args):
             yield encode_model_stream_event("reasoning", {"text": "preparing final answer"})
@@ -39,7 +35,6 @@ class InternalModelStreamTests(SimpleTestCase):
 
         with (
             patch.object(model_adapter.ModelConfig.objects, "get", return_value=Mock(provider_id="provider")),
-            patch.object(model_adapter, "async_model_attempt", attempt),
             patch.object(model_adapter, "resolve_model_route", return_value=("openai-completions", "https://provider.example")),
             patch.object(model_adapter, "stream_open_ai_completions", provider_stream),
             patch.object(model_adapter, "record_model_run", new=AsyncMock()),
@@ -77,9 +72,6 @@ class InternalModelStreamTests(SimpleTestCase):
                 self.assertNotIn(b"secret provider response", chunks[0])
 
     async def test_cancellation_log_failure_cannot_replace_original_cancellation(self):
-        @asynccontextmanager
-        async def attempt(model):
-            yield
 
         for cancellation in (asyncio.CancelledError("cancelled by user"), GeneratorExit()):
             with self.subTest(cancellation_type=type(cancellation).__name__):
@@ -91,7 +83,6 @@ class InternalModelStreamTests(SimpleTestCase):
                 chunks = []
                 with (
                     patch.object(model_adapter.ModelConfig.objects, "get", return_value=Mock(provider_id="provider")),
-                    patch.object(model_adapter, "async_model_attempt", attempt),
                     patch.object(model_adapter, "resolve_model_route", return_value=("openai-completions", "https://provider.example")),
                     patch.object(model_adapter, "stream_open_ai_completions", provider_stream),
                     patch.object(model_adapter, "record_model_run_cancellation_safe", new=record),
@@ -104,18 +95,14 @@ class InternalModelStreamTests(SimpleTestCase):
                 self.assertEqual(chunks, [encode_model_stream_event("delta", {"delta": "partial"})])
 
     async def test_log_failure_cannot_replace_the_original_provider_configuration_failure(self):
-        @asynccontextmanager
-        async def reject_attempt(model):
-            raise ModelProviderError("model_quota_domain_required")
-            yield
 
         with (
             patch.object(model_adapter.ModelConfig.objects, "get", return_value=Mock(provider_id="provider")),
-            patch.object(model_adapter, "async_model_attempt", reject_attempt),
+            patch.object(model_adapter, "resolve_model_route", side_effect=ModelProviderError("provider_configuration_invalid")),
             patch.object(model_adapter, "record_model_run", new=AsyncMock(side_effect=RuntimeError("log unavailable"))),
         ):
             chunks = [part async for part in internal_model._model_stream_response(model_adapter.stream_model_async("run", "model", {}))]
-        self.assertIn(b'"reasonType":"model_quota_domain_required"', chunks[0])
+        self.assertIn(b'"reasonType":"provider_configuration_invalid"', chunks[0])
 
     async def response(self, source):
         request = SimpleNamespace(
@@ -133,7 +120,7 @@ class InternalModelStreamTests(SimpleTestCase):
 
         async def source():
             try:
-                raise ModelProviderError("model_quota_domain_required")
+                raise ModelProviderError("provider_configuration_invalid")
                 yield
             finally:
                 closed.append(True)
@@ -145,7 +132,7 @@ class InternalModelStreamTests(SimpleTestCase):
         payload = json.loads(chunks[0].decode().split("data: ", 1)[1])
         self.assertEqual(payload, {
             "schema": "api.model.stream.v1", "type": "error",
-            "reasonType": "model_quota_domain_required",
+            "reasonType": "provider_configuration_invalid",
             "httpStatus": None,
         })
 

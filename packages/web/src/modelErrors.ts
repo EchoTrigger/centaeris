@@ -1,9 +1,6 @@
 type Translate = (key: string) => string;
 
 const MODEL_ERROR_KEYS: Readonly<Record<string, string>> = {
-  model_quota_domain_required: "modelErrors.quotaRequired",
-  model_quota_domain_disabled: "modelErrors.quotaDisabled",
-  model_quota_backend_unavailable: "modelErrors.quotaUnavailable",
   provider_authentication_failed: "modelErrors.authenticationFailed",
   provider_secret_unavailable: "modelErrors.secretUnavailable",
   provider_secret_decryption_failed: "modelErrors.secretUnavailable",

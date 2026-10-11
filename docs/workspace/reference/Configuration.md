@@ -77,11 +77,11 @@ reverse proxy. Do not expose internal service tokens or database ports through i
   standalone Django processes default to `0` unless explicitly configured.
   `0` disables pooling. Django keeps `CONN_MAX_AGE=0`; its PostgreSQL
   backend uses `psycopg_pool` for connection reuse. The setting does not reach
-  `api-init`, material processing, GC, or mail processes. Quota advisory locks
-  use separate dedicated sessions, and Runtime has its own connection budgets.
+  `api-init`, material processing, GC, or mail processes. Runtime has its own
+  connection budgets. Provider admission belongs to the model gateway.
   Before increasing API workers or replicas, budget
   `API_WORKERS × API replicas × API_POSTGRES_POOL_MAX_SIZE` together with the
-  Runtime pools, quota sessions, other database clients, and operational reserve
+  Runtime pools, other database clients, and operational reserve
   against PostgreSQL `max_connections`. Set the value to `0` and replace only
   the API to return to direct Django connections.
 - `RUNTIME_POSTGRES_POOL_SIZE`, `RUNTIME_POSTGRES_CONTROL_POOL_SIZE`, and

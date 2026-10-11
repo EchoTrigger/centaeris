@@ -22,7 +22,6 @@ from .models import (
     AgentRun,
     ModelConfig,
     ModelProvider,
-    ModelQuotaDomain,
     ProviderCredential,
     Session,
     SessionEvent,
@@ -123,12 +122,11 @@ class AgentMessagePromptTests(TransactionTestCase):
         self.user = get_user_model().objects.create_user(username="agent-greeting-owner")
         self.workspace = Workspace.objects.create(name="Agent greeting", createdBy=self.user)
         self.membership = WorkspaceMembership.objects.create(workspace=self.workspace, user=self.user, role="owner")
-        self.quota = ModelQuotaDomain.objects.create(id="greeting-quota", maxConcurrent=4, enabled=True)
         self.client.force_login(self.user)
 
     def run_for(self, api, *, bound=True):
         provider = ModelProvider.objects.create(displayName=api, api=api, apiBase="https://provider.example.invalid/v1")
-        ProviderCredential.objects.create(provider=provider, quotaDomain=self.quota, displayName="Synthetic credential",
+        ProviderCredential.objects.create(provider=provider, displayName="Synthetic credential",
             encryptedSecret=encrypt_credential_secret("synthetic-key"), createdBy=self.user, updatedBy=self.user)
         model = ModelConfig.objects.create(provider=provider, displayName=api, modelName="synthetic-greeting", maxOutputTokens=64)
         agent = Agent.objects.create(workspace=self.workspace, owner=self.user, name="Greeting Agent", instructions="x" * 16000)
