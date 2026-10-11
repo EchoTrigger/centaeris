@@ -232,6 +232,17 @@ class ModelDatabaseLeaseTests(TransactionTestCase):
               AND a.application_name = 'centaeris-api-quota'
         """, ((-self.domain.pk) & 0xffffffff,)).fetchone()
 
+    def assert_quota_released(self):
+        # Client close returns before PostgreSQL removes its backend from
+        # pg_stat_activity. Bound the server observation, still requiring both
+        # the dedicated connection and its advisory lock to disappear.
+        deadline = time.monotonic() + 2
+        snapshot = self.quota_snapshot()
+        while snapshot != (0, 0) and time.monotonic() < deadline:
+            time.sleep(.01)
+            snapshot = self.quota_snapshot()
+        self.assertEqual(snapshot, (0, 0), "quota ownership survived connection close")
+
     async def request(self, path, body=None, streaming=False):
         from api.asgi import application
         raw = b"" if body is None else json.dumps(body).encode()
@@ -296,7 +307,7 @@ class ModelDatabaseLeaseTests(TransactionTestCase):
                 self.assertEqual(json.loads(content)["text"], "lease-test")
             self.assertEqual(self.provider_requests, [streaming], "one provider attempt is sufficient")
             self.assertEqual(self.provider_failures, [])
-            self.assertEqual(await asyncio.to_thread(self.quota_snapshot), (0, 0))
+            await asyncio.to_thread(self.assert_quota_released)
             pool = DatabaseWrapper._connection_pools["default"]
             self.assertEqual(pool.get_stats()["pool_available"], 1)
             final_status, final_body = await self.request("/lease-test/database-probe")
@@ -392,7 +403,7 @@ class ModelDatabaseLeaseTests(TransactionTestCase):
             if holder is not None:
                 holder.__exit__(None, None, None)
             connections.close_all()
-        self.assertEqual(self.quota_snapshot(), (0, 0))
+        self.assert_quota_released()
         self.assertFalse(ModelRunLog.objects.filter(agentRunId=self.run_id).exists())
         self.assertEqual(status, 200, "quota waiting retained the only ordinary database lease")
         self.assertEqual(json.loads(body), expected_probe)
@@ -434,7 +445,7 @@ class ModelDatabaseLeaseTests(TransactionTestCase):
                 await communicator.send_input({"type": "http.disconnect"})
                 await communicator.wait(timeout=5)
                 self.assertFalse(self.provider_release.is_set(), "disconnect must close ownership without provider completion")
-                self.assertEqual(await asyncio.to_thread(self.quota_snapshot), (0, 0))
+                await asyncio.to_thread(self.assert_quota_released)
                 status, body = await self.request("/lease-test/database-probe")
                 self.assertEqual(status, 200)
                 self.assertEqual(json.loads(body), {"value": 1, "pid": os.getpid()})
@@ -448,7 +459,7 @@ class ModelDatabaseLeaseTests(TransactionTestCase):
         self.assertEqual(log.status, "error")
         self.assertEqual(log.error, "provider_stream_cancelled")
         self.assertEqual(self.provider_requests, [True])
-        self.assertEqual(self.quota_snapshot(), (0, 0))
+        self.assert_quota_released()
 
     def test_quota_attempt_preserves_caller_owned_transaction_and_rollback(self):
         original_name = ModelConfig.objects.get(pk=self.model.pk).displayName
@@ -458,11 +469,11 @@ class ModelDatabaseLeaseTests(TransactionTestCase):
                 with connection.cursor() as cursor:
                     cursor.execute("SELECT 1")
                     self.assertEqual(cursor.fetchone()[0], 1)
-            self.assertEqual(self.quota_snapshot(), (0, 0))
+            self.assert_quota_released()
             # The caller's transaction must remain writable after quota admission exits.
             ModelConfig.objects.filter(pk=self.model.pk).update(displayName="rolled-back-name")
             self.assertEqual(ModelConfig.objects.get(pk=self.model.pk).displayName, "rolled-back-name")
             transaction.set_rollback(True)
         self.assertEqual(ModelConfig.objects.get(pk=self.model.pk).displayName, original_name)
-        self.assertEqual(self.quota_snapshot(), (0, 0))
+        self.assert_quota_released()
         self.assertEqual(self.provider_requests, [])
