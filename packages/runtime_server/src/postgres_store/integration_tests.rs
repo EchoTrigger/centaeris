@@ -45,15 +45,12 @@ fn outbox_protocol(
     path: &str,
     body: serde_json::Value,
 ) -> serde_json::Value {
-    let token = std::env::var("INTERNAL_API_TOKEN").expect("isolated fixture token");
-    let (status, response) = crate::job_protocol::handle(
+    let (status, response) = crate::runtime_http_tests::stored_request(
+        store.clone(),
         "POST",
         path,
-        Some(token.as_str()),
         &serde_json::to_vec(&body).unwrap(),
-        store,
-    )
-    .expect("job protocol response");
+    );
     let result: serde_json::Value = serde_json::from_slice(&response).unwrap();
     assert_eq!(status, 200, "{result}");
     result
@@ -639,13 +636,12 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
     .unwrap();
     let mut served = false;
     for _ in 0..=records.len() {
-        let (status, body) = crate::transcript_protocol::handle(
+        let (status, body) = crate::runtime_http_tests::stored_request(
+            store.clone(),
+            "POST",
             "/internal/transcript/page",
             request.as_slice(),
-            &store,
-        )
-        .expect("transcript protocol route")
-        .expect("transcript protocol response");
+        );
         if status == 200 {
             let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(page["sourceHighWater"], "4");
@@ -689,13 +685,12 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
         "refId":format!("session-event:{}:modelMarkdown", records[2].event.event_id),
         "revision":"1", "byteLength":"4", "offset":"0", "maxBytes":2
     });
-    let (status, body) = crate::transcript_protocol::handle(
+    let (status, body) = crate::runtime_http_tests::stored_request(
+        store.clone(),
+        "POST",
         "/internal/transcript/content",
         &serde_json::to_vec(&content_request).unwrap(),
-        &store,
-    )
-    .unwrap()
-    .unwrap();
+    );
     assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
     let content: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(content["content"], "do");
@@ -707,13 +702,12 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
     ] {
         let mut invalid = content_request.clone();
         invalid[field] = value.into();
-        let (status, _) = crate::transcript_protocol::handle(
+        let (status, _) = crate::runtime_http_tests::stored_request(
+            store.clone(),
+            "POST",
             "/internal/transcript/content",
             &serde_json::to_vec(&invalid).unwrap(),
-            &store,
-        )
-        .unwrap()
-        .unwrap();
+        );
         assert_eq!(status, 409);
     }
 
@@ -4392,7 +4386,9 @@ fn postgres_new_user_turn_admission_commits_closure_and_run_atomically() {
             break;
         }
     }
-    let (status, body) = crate::transcript_protocol::handle(
+    let (status, body) = crate::runtime_http_tests::stored_request(
+        store.clone(),
+        "POST",
         "/internal/transcript/page",
         serde_json::to_vec(&serde_json::json!({
             "schema": "runtime.transcript.page.read.v1",
@@ -4404,10 +4400,7 @@ fn postgres_new_user_turn_admission_commits_closure_and_run_atomically() {
         }))
         .expect("page request")
         .as_slice(),
-        &store,
-    )
-    .expect("transcript protocol route")
-    .expect("transcript protocol response");
+    );
     assert_eq!(status, 200);
     let page: serde_json::Value = serde_json::from_slice(&body).expect("page json");
     let tool = page["blocks"]
