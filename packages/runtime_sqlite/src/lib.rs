@@ -108,6 +108,7 @@ fn to_i64(value: usize) -> Result<i64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod async_connection;
     mod checkpoint_requests;
     mod job_updates;
     use centaeris_core::runtime::contracts::{

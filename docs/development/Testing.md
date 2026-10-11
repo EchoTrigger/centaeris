@@ -15,6 +15,12 @@ gate and inspection of its final artifacts.
 
 ## Test quality
 
+Storage contract consolidation and the file-backed asynchronous SQLite driver
+validation are described in [StorageExecution.md](StorageExecution.md). Its driver
+tests run in the ordinary `centaeris-runtime-sqlite` suite; the separately compiled
+`panic=abort` executable checks abrupt database-worker exit without relying on
+unwind cleanup. Both paths use the same adapter transaction implementations.
+
 Run failure presentation uses shared input/output cases in
 `tests/fixtures/run-error-display.json`. Web validates the complete mapping and
 localized English copy against the local presentation catalog; Desktop tests
