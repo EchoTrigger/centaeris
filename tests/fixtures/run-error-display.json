@@ -1,0 +1,98 @@
+[
+  {
+    "reason": "provider_authentication_failed",
+    "expected": "Model account authentication failed. Update its API key and retry. · provider_authentication_failed"
+  },
+  {
+    "reason": "provider_secret_unavailable",
+    "expected": "The model account’s API key is unavailable. Configure the key again and retry. · provider_secret_unavailable"
+  },
+  {
+    "reason": "provider_secret_decryption_failed",
+    "expected": "The model account’s API key is unavailable. Configure the key again and retry. · provider_secret_decryption_failed"
+  },
+  {
+    "reason": "provider_unavailable",
+    "expected": "The model is unavailable. Check its configuration and retry. · provider_unavailable"
+  },
+  {
+    "reason": "provider_rate_limited",
+    "expected": "The model account’s usage limit was reached. Try again later. · provider_rate_limited"
+  },
+  {
+    "reason": "provider_request_rejected",
+    "expected": "The model service rejected the request. Check its configuration. · provider_request_rejected"
+  },
+  {
+    "reason": "model_thinking_mode_unsupported",
+    "expected": "This model does not support the selected thinking mode. Choose another mode. · model_thinking_mode_unsupported"
+  },
+  {
+    "reason": "provider_timeout",
+    "expected": "The model took too long to respond. Retry the request. · provider_timeout"
+  },
+  {
+    "reason": "provider_unreachable",
+    "expected": "Unable to connect to the model. Check the connection and retry. · provider_unreachable"
+  },
+  {
+    "reason": "provider_stream_interrupted",
+    "expected": "The model response was interrupted. Retry the request. · provider_stream_interrupted"
+  },
+  {
+    "reason": "model_adapter_failed",
+    "expected": "Model request failed · model_adapter_failed"
+  },
+  {
+    "reason": "completion_tool_delivery_required",
+    "expected": "The Agent could not submit its reply. Retry the request. · completion_tool_delivery_required"
+  },
+  {
+    "reason": "completion_delivery_repair_prompt_too_large",
+    "expected": "The context limit prevented the Agent from submitting its reply. Reduce the task and retry. · completion_delivery_repair_prompt_too_large"
+  },
+  {
+    "reason": "The model response was interrupted. Retry the request.",
+    "expected": "The model response was interrupted. Retry the request."
+  },
+  {
+    "reason": "AgentRun did not complete. Retry the request.",
+    "expected": "The request could not be completed. Retry the request."
+  },
+  {
+    "reason": "The execution environment was interrupted. Retry the request.",
+    "expected": "The work session was interrupted. Retry the request."
+  },
+  {
+    "reason": "provider_unknown_fault",
+    "expected": "Model request failed · provider_unknown_fault"
+  },
+  {
+    "reason": "prepared_prompt_invalid_example",
+    "expected": "Model request failed · prepared_prompt_invalid_example"
+  },
+  {
+    "reason": "completion_unknown_fault",
+    "expected": "Model request failed · completion_unknown_fault"
+  },
+  {
+    "reason": "model_unknown_fault",
+    "expected": "Model request failed · model_unknown_fault"
+  },
+  {
+    "reason": "exceeded retry limit, last status: 429 Too Many Requests",
+    "expected": "exceeded retry limit, last status: 429 Too Many Requests"
+  },
+  {
+    "reason": "cancelled",
+    "expected": "cancelled"
+  },
+  {
+    "reason": "",
+    "expected": ""
+  },
+  {
+    "reason": "<b>failure</b>",
+    "expected": "<b>failure</b>"
+  }
+]

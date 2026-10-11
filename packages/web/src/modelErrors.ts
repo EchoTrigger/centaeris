@@ -1,6 +1,6 @@
 type Translate = (key: string) => string;
 
-const MODEL_ERROR_KEYS: Readonly<Record<string, string>> = {
+export const MODEL_ERROR_KEYS: Readonly<Record<string, string>> = {
   provider_authentication_failed: "modelErrors.authenticationFailed",
   provider_secret_unavailable: "modelErrors.secretUnavailable",
   provider_secret_decryption_failed: "modelErrors.secretUnavailable",

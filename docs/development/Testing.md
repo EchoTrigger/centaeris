@@ -2,6 +2,16 @@
 
 ## Test quality
 
+Run failure presentation uses shared input/output cases in
+`tests/fixtures/run-error-display.json`. Web validates the complete mapping and
+localized English copy against the local presentation catalog; Desktop tests
+actual rendered live and historical notices, replay deduplication, ordinary
+notice preservation and referenced-content retry. TUI tests rendered terminal
+notices, history replacement, plain-text wrapping, multi-page UTF-8 reads and
+stale/invalid reference rejection. Start/completion and existing tool/result
+coverage remain independent. Error UI tests assert visible content and behavior,
+not component or CSS names.
+
 Tests protect observable behavior and documented contracts, not the spelling of
 the current implementation. A refactor that preserves behavior should not need
 test changes merely because an internal function, type, variable, CSS class, or

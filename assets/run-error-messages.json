@@ -1,0 +1,69 @@
+{
+  "failureLabel": "Model request failed",
+  "messages": {
+    "provider_authentication_failed": {
+      "translationKey": "modelErrors.authenticationFailed",
+      "english": "Model account authentication failed. Update its API key and retry."
+    },
+    "provider_secret_unavailable": {
+      "translationKey": "modelErrors.secretUnavailable",
+      "english": "The model account’s API key is unavailable. Configure the key again and retry."
+    },
+    "provider_secret_decryption_failed": {
+      "translationKey": "modelErrors.secretUnavailable",
+      "english": "The model account’s API key is unavailable. Configure the key again and retry."
+    },
+    "provider_unavailable": {
+      "translationKey": "modelErrors.modelUnavailable",
+      "english": "The model is unavailable. Check its configuration and retry."
+    },
+    "provider_rate_limited": {
+      "translationKey": "modelErrors.rateLimited",
+      "english": "The model account’s usage limit was reached. Try again later."
+    },
+    "provider_request_rejected": {
+      "translationKey": "modelErrors.requestRejected",
+      "english": "The model service rejected the request. Check its configuration."
+    },
+    "model_thinking_mode_unsupported": {
+      "translationKey": "modelErrors.thinkingUnsupported",
+      "english": "This model does not support the selected thinking mode. Choose another mode."
+    },
+    "provider_timeout": {
+      "translationKey": "modelErrors.timeout",
+      "english": "The model took too long to respond. Retry the request."
+    },
+    "provider_unreachable": {
+      "translationKey": "modelErrors.unreachable",
+      "english": "Unable to connect to the model. Check the connection and retry."
+    },
+    "provider_stream_interrupted": {
+      "translationKey": "modelErrors.interrupted",
+      "english": "The model response was interrupted. Retry the request."
+    },
+    "model_adapter_failed": {
+      "translationKey": "modelErrors.failed",
+      "english": "The request could not be completed. Retry the request."
+    },
+    "completion_tool_delivery_required": {
+      "translationKey": "modelErrors.replyNotDelivered",
+      "english": "The Agent could not submit its reply. Retry the request."
+    },
+    "completion_delivery_repair_prompt_too_large": {
+      "translationKey": "modelErrors.replyContextLimit",
+      "english": "The context limit prevented the Agent from submitting its reply. Reduce the task and retry."
+    },
+    "The model response was interrupted. Retry the request.": {
+      "translationKey": "modelErrors.interrupted",
+      "english": "The model response was interrupted. Retry the request."
+    },
+    "AgentRun did not complete. Retry the request.": {
+      "translationKey": "modelErrors.failed",
+      "english": "The request could not be completed. Retry the request."
+    },
+    "The execution environment was interrupted. Retry the request.": {
+      "translationKey": "modelErrors.executionInterrupted",
+      "english": "The work session was interrupted. Retry the request."
+    }
+  }
+}
