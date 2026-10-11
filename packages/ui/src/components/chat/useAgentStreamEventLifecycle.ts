@@ -13,7 +13,6 @@ import { appendNarrativeChunk, setTurnActivity } from "./chatAreaModel";
 import { runtimeEasterEgg } from "./chatRuntimeCore";
 import {
   applySessionEventToAssistantTurn,
-  formatRuntimeModelError,
   getEventTurnId,
   getSessionEventId,
   isRecord,
@@ -239,12 +238,7 @@ export const useAgentStreamEventLifecycle = ({
       }
 
       if (event.type === "RuntimeError") {
-        finishAssistantStreamWithError(
-          assistantMessageId,
-          formatRuntimeModelError(payload),
-          undefined,
-          eventTurnId,
-        );
+        updateAssistantTurn(assistantMessageId, (turn) => applySessionEventToAssistantTurn(turn, event));
         return;
       }
 

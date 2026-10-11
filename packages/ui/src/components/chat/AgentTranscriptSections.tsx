@@ -2,7 +2,8 @@ import { t } from "../../i18n";
 import { useStreamPresentation } from "../../useStreamPresentation";
 import { memo } from "react";
 import { useShallow } from "zustand/react/shallow";
-import { CornerDownLeft } from "lucide-react";
+import { CircleAlert, CornerDownLeft } from "lucide-react";
+import { runFailureDetail } from "../../runErrors";
 import { MarkdownContent } from "./MarkdownContent";
 import { useChatViewStore } from "./chatViewStore";
 import { TaskGroupTranscriptItem } from "./ToolActivityTranscript";
@@ -20,7 +21,12 @@ type OpenWorkspacePath = AgentResultStreamProps["onOpenWorkspacePath"];
 const renderProcessHeading = (
   entry: TranscriptTextItem,
   onOpenWorkspacePath: OpenWorkspacePath,
-) => (
+) => entry.runFailure ? (
+  <div className="agentRunError" role="status" key={entry.id}>
+    <span className="agentRunErrorIcon" aria-hidden="true"><CircleAlert /></span>
+    <div className="agentRunErrorText">{runFailureDetail(entry.text)}</div>
+  </div>
+) : (
   <div
     className={`agentProcessSectionHeading ${entry.tone === "error" ? "is-error" : ""} ${entry.phase === "compaction" ? "is-compaction" : ""}`}
     data-waterfall-section={entry.waterfall?.section ?? "process"}

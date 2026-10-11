@@ -166,6 +166,7 @@ export const buildTranscriptProcessViewModel = (
         phase: entry.chunk.phase === "compaction" ? "compaction" : "process",
         text: entry.chunk.text,
         tone: entry.chunk.tone,
+        runFailure: entry.chunk.runFailure,
         turnId: entry.chunk.turnId,
         waterfall: entry.chunk.waterfall,
       });

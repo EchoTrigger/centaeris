@@ -6,7 +6,6 @@ import type {
 import { toPositiveInt } from "./numberUtils";
 import {
   compactText,
-  formatRuntimeModelError,
   isRecord,
   makeId,
 } from "./chatRuntimeCore";
@@ -630,9 +629,19 @@ export const applySessionEventToAssistantTurn = (
   event: SessionEvent,
 ): AssistantExecutionTurn => {
   if (getTerminalSessionEventStatus(event)) {
+    const chunks = turn.chunks.filter((chunk) => chunk.kind !== "narrative" || !chunk.provisionalRunFailure)
+      .map((chunk) => chunk.kind === "reasoning" && chunk.status === "streaming" ? { ...chunk, status: "interrupted" as const } : chunk);
+    if (event.type === "AgentRunFailed" || event.type === "AgentRunInterrupted") {
+      const id = `run-boundary:${event.id}`;
+      if (!chunks.some((chunk) => chunk.id === id)) {
+        chunks.push({ id, kind: "narrative", text: getEventPayloadRawString(getEventPayload(event), "message"),
+          tone: "error", runFailure: event.type === "AgentRunFailed" ? "failed" : "interrupted" });
+      }
+    }
     return {
       ...turn,
-      chunks: turn.chunks.map((chunk) => chunk.kind === "reasoning" && chunk.status === "streaming" ? { ...chunk, status: "interrupted" } : chunk),
+      chunks,
+      terminalEventObserved: true,
       isStreaming: false,
       activity: undefined,
       completedAtMs:
@@ -797,12 +806,14 @@ export const applySessionEventToAssistantTurn = (
       );
     }
     case "RuntimeError": {
-      return appendPersistedNarrative(
-        turn,
-        formatRuntimeModelError(payload),
-        "error",
-        eventTurnId,
-      );
+      // Runtime errors precede durable terminal facts. Keep the stream open so
+      // those facts can replace this provisional presentation.
+      const id = `runtime-error:${event.id}`;
+      if (turn.terminalEventObserved || turn.chunks.some((chunk) => chunk.id === id)) return turn;
+      return { ...turn, activity: undefined, chunks: [...turn.chunks.filter((chunk) => chunk.kind !== "narrative" || !chunk.provisionalRunFailure), {
+        id, kind: "narrative", text: getEventPayloadRawString(payload, "message"), turnId: eventTurnId,
+        tone: "error", runFailure: "failed", provisionalRunFailure: true,
+      }] };
     }
     default:
       throw new Error(
