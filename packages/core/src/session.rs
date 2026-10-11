@@ -462,6 +462,10 @@ impl AgentRunSessionState {
         self.committed_checkpoint_ids.contains(checkpoint_id)
     }
 
+    pub fn has_ended_execution(&self, execution_id: &str) -> bool {
+        self.ended_execution_ids.contains(execution_id)
+    }
+
     pub fn tool_ledger_is_checkpointed(&self) -> bool {
         self.tool_ledger_checkpointed
     }
@@ -6585,6 +6589,41 @@ mod tests {
                 4,
             )
             .is_err());
+    }
+
+    #[test]
+    fn ended_execution_evidence_survives_replay_and_excludes_live_and_unknown_executions() {
+        let mut state = AgentRunSessionState::new("ended-session", "ended-run").unwrap();
+        let mut records = state.start("ended-turn", "recover", Vec::new(), 1).unwrap();
+        let digest = format!("sha256:{}", "a".repeat(64));
+        records.push(
+            state
+                .start_execution("ended-turn", "old-execution", &digest, None, 2)
+                .unwrap(),
+        );
+        assert!(!state.has_ended_execution("old-execution"));
+        assert!(!state.has_ended_execution("unknown-execution"));
+        records.push(
+            state
+                .end_execution(
+                    "ended-turn",
+                    "old-execution",
+                    "lost",
+                    "execution_environment_lost",
+                    false,
+                    None,
+                    Vec::new(),
+                    3,
+                )
+                .unwrap(),
+        );
+        assert!(state.has_ended_execution("old-execution"));
+        let mut replay = AgentRunSessionState::new("ended-session", "ended-run").unwrap();
+        for record in records {
+            replay.restore(record).unwrap();
+        }
+        assert!(replay.has_ended_execution("old-execution"));
+        assert!(!replay.has_ended_execution("unknown-execution"));
     }
 
     #[test]
