@@ -352,6 +352,31 @@ impl TranscriptPagingState {
             })
     }
 
+    pub(super) fn run_error_reference(
+        &self,
+        key: &str,
+    ) -> Option<centaeris_core::session::transcript::TranscriptContentRefV1> {
+        self.view.visible_blocks().into_iter().find_map(|block| {
+            let facts = block.presentation.as_ref()?;
+            if key != format!("run:{}", facts.agent_run_id.as_deref()?)
+                || !matches!(
+                    facts.source_type.as_str(),
+                    "agent_run_failed" | "agent_run_interrupted"
+                )
+            {
+                return None;
+            }
+            match &block.body {
+                TranscriptBlockBodyV1::Notice {
+                    notice_type,
+                    content,
+                    ..
+                } if notice_type == "run_boundary" => content.source_ref.clone(),
+                _ => None,
+            }
+        })
+    }
+
     pub(super) fn materialize_history(&self, live_overlay_active: bool) -> Vec<TranscriptLine> {
         self.view
             .visible_blocks()
@@ -396,7 +421,10 @@ fn materialize_block(
                     return TranscriptLine::RunBoundary {
                         run_id: run_id.clone(),
                         state: super::runs::RunState::from_source(&facts.source_type),
-                        reason: materialize_text(content),
+                        reason: content
+                            .inline_content
+                            .clone()
+                            .unwrap_or_else(|| "Loading error details…".into()),
                     };
                 }
             }
