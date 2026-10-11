@@ -150,7 +150,7 @@ impl PostgresRuntimeStore {
         remove: impl FnOnce() -> Result<(), String> + Send,
         inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String> + Send,
     ) -> Result<(), String> {
-        self.remove_resident_scope(host_id, agent_run_id, None, fence, remove, inventory)
+        self.remove_resident_scope(host_id, agent_run_id, None, fence, |_| remove(), inventory)
     }
 
     pub(crate) fn remove_resident_execution(
@@ -170,9 +170,39 @@ impl PostgresRuntimeStore {
             agent_run_id,
             Some(execution_id),
             fence,
-            remove,
+            |_| remove(),
             inventory,
         )
+    }
+
+    // Keep authorization, physical removal and confirmation explicit at this boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn discard_unstarted_resident_execution(
+        &self,
+        host_id: &str,
+        agent_run_id: &str,
+        execution_id: &str,
+        fence: &RuntimeJobLeaseFence,
+        authorize: impl FnOnce(&mut postgres::Transaction<'_>) -> Result<(), String> + Send,
+        remove: impl FnOnce(Option<&str>) -> Result<(), String> + Send,
+        inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String> + Send,
+    ) -> Result<(), String> {
+        if execution_id.trim().is_empty() {
+            return Err("pending recovery execution identity missing".into());
+        }
+        self.remove_resident_scope(host_id, agent_run_id, Some(execution_id), fence,
+            |tx| {
+                authorize(tx)?;
+                let Some(row) = tx.query_opt("SELECT container_id FROM resident_sandboxes WHERE host_id=$1 AND agent_run_id=$2 AND execution_id=$3 FOR UPDATE",
+                    &[&host_id, &agent_run_id, &execution_id]).map_err(|error| error.to_string())? else {
+                    // A prior discard may have committed before the next intent.
+                    // Do not mutate a physical object without a holding; the
+                    // surrounding inventory must still confirm exact absence.
+                    return Ok(());
+                };
+                let known_container_id = row.get::<_, Option<String>>(0);
+                remove(known_container_id.as_deref())
+            }, inventory)
     }
 
     fn remove_resident_scope(
@@ -181,7 +211,7 @@ impl PostgresRuntimeStore {
         agent_run_id: &str,
         execution_id: Option<&str>,
         fence: &RuntimeJobLeaseFence,
-        remove: impl FnOnce() -> Result<(), String> + Send,
+        remove: impl FnOnce(&mut postgres::Transaction<'_>) -> Result<(), String> + Send,
         inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String> + Send,
     ) -> Result<(), String> {
         self.with_client(|client| {
@@ -193,7 +223,7 @@ impl PostgresRuntimeStore {
             verify_removal_fence(&mut tx, agent_run_id, fence)?;
             tx.execute("UPDATE resident_sandboxes SET state='releasing',updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE host_id=$1 AND agent_run_id=$2 AND ($3::text IS NULL OR execution_id=$3)", &[&host_id, &agent_run_id, &execution_id])
                 .map_err(|error| error.to_string())?;
-            remove()?;
+            remove(&mut tx)?;
             if inventory()?.iter().any(|sandbox| sandbox.agent_run_id == agent_run_id && execution_id.is_none_or(|id| sandbox.execution_id == id)) {
                 return Err("resident sandbox removal was not confirmed".into());
             }
