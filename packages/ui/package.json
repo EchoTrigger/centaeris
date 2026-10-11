@@ -13,6 +13,7 @@
     "dev": "vite",
     "build": "node ./scripts/build.mjs --mode build",
     "baseline:transcript": "node ./scripts/run-transcript-baseline.mjs",
+    "test:run-error-ui": "node --test tests/browser/run-error-display.acceptance.mjs",
     "gate": "node ./scripts/build.mjs --mode gate && pnpm run lint && vitest run",
     "lint": "pnpm -w run lint:ui",
     "lint:source": "pnpm -w run lint:ui-source",

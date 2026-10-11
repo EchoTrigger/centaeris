@@ -105,5 +105,12 @@ test("starting the same assistant message and run twice opens one stream", async
   expect(connection.closeActiveStream).toHaveBeenCalledTimes(1);
   expect(turnUpdates.updateAssistantTurn).toHaveBeenCalledTimes(2);
 
+  activeController.processStreamPayload("assistant-one", { type: "runtime_event", agentRunId: "run-one",
+    event: { id: "runtime-error", type: "RuntimeError", payload: { message: "provider_timeout" } } } as AgentStreamPayload);
+  expect(connection.closeStreamForMessage).not.toHaveBeenCalled();
+  activeController.processStreamPayload("assistant-one", { type: "session_event", agentRunId: "run-one",
+    event: { id: "terminal", type: "AgentRunFailed", sessionId: "session-one", payload: { reasonType: "model_adapter_failed", message: "provider_timeout" } } } as AgentStreamPayload);
+  expect(connection.closeStreamForMessage).toHaveBeenCalledWith("assistant-one");
+
   await act(async () => renderer?.unmount());
 });

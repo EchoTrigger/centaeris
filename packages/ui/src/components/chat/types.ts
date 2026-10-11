@@ -192,6 +192,8 @@ export type NarrativeChunk = {
   streamKey?: string;
   sourceItemId?: string;
   tone?: "normal" | "error";
+  runFailure?: "failed" | "interrupted";
+  provisionalRunFailure?: boolean;
   waterfall?: EventWaterfall;
 };
 
@@ -238,6 +240,7 @@ export type EventWaterfall = {
 };
 
 export type AssistantExecutionTurn = {
+  terminalEventObserved?: boolean;
   projectionRunId?: string;
 
   liveRevision?: number;
@@ -376,6 +379,7 @@ export type TranscriptTextItem = {
   phase: TranscriptTextPhase;
   text: string;
   tone?: "normal" | "error";
+  runFailure?: "failed" | "interrupted";
   processState?: string;
   compactLabel?: string;
   detail?: string;

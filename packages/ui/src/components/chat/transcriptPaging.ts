@@ -354,7 +354,14 @@ const materializeBlock = (
       break;
     }
     case "notice":
-      if (body.noticeType === "run_boundary") break;
+      if (body.noticeType === "run_boundary") {
+        const source = block.presentation?.sourceType;
+        if (source === "agent_run_failed" || source === "agent_run_interrupted") {
+          turn.chunks.push({ id: block.blockId, kind: "narrative", text: materializeText(body.content),
+            tone: "error", runFailure: source === "agent_run_failed" ? "failed" : "interrupted" });
+        }
+        break;
+      }
       if (body.noticeType === "turn_supplement") {
         turn.chunks.push({ id: block.blockId, kind: "guidedSupplement", text: materializeText(body.content), timestamp: 0 });
         break;

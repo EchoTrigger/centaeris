@@ -1,16 +1,43 @@
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import { expect, test, vi } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 import { useTranscriptText } from "../src/components/chat/useTranscriptText";
 import type { ChatMessage } from "../src/components/chat/types";
+import { AgentProcessTranscript } from "../src/components/chat/AgentTranscriptSections";
+import { buildTranscriptProcessViewModel } from "../src/components/chat/agentTranscriptModel";
 
 const read = vi.hoisted(() => vi.fn());
 vi.mock("../src/components/chat/transcriptContentRanges", () => ({ loadTranscriptContentRange: read }));
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+beforeEach(() => { read.mockReset(); });
 
 function Text({ message, enabled = true }: { message: ChatMessage; enabled?: boolean }) {
   const resolved = useTranscriptText(message, enabled);
   return <>{resolved.status}<pre>{resolved.message?.role === "assistant" ? resolved.message.turn.finalAnswer : ""}</pre></>;
 }
+
+function ErrorText({ message }: { message: ChatMessage }) {
+  const resolved = useTranscriptText(message);
+  return <>{resolved.status}{resolved.message?.role === "assistant" ? <AgentProcessTranscript
+    processTranscript={buildTranscriptProcessViewModel(resolved.message.turn)} agentRunId="run" onOpenWorkspacePath={undefined} /> : null}</>;
+}
+
+test("referenced run errors retry failed reads and keep plain error presentation after loading", async () => {
+  read.mockReset();
+  read.mockRejectedValueOnce(new Error("disconnected"));
+  read.mockResolvedValueOnce({ content: "provider_timeout", endOffset: "16", hasMore: false });
+  const message: ChatMessage = { id: "run-boundary:event", role: "assistant",
+    turn: { id: "run", chunks: [{ id: "error", kind: "narrative", text: "", tone: "error", runFailure: "failed" }], finalAnswer: "", isStreaming: false },
+    transcriptText: { sessionId: "session", projectionGeneration: "generation", reference: { refId: "ref", revision: "1", byteLength: "16" } } };
+  let renderer: ReactTestRenderer;
+  await act(async () => { renderer = create(<ErrorText message={message} />); });
+  expect(renderer!.root.findByProps({ role: "alert" }).children.join("")).toContain("Unable to load content.");
+  await act(async () => { renderer!.root.findByType("button").props.onClick(); });
+  const strings = JSON.stringify(renderer!.toJSON());
+  expect(strings).toContain("The model took too long to respond. Retry the request. · provider_timeout");
+  expect(strings).not.toContain("Unable to load content.");
+  expect(read).toHaveBeenCalledTimes(2);
+  await act(async () => { renderer!.unmount(); });
+});
 
 test("Desktop pages long referenced answers on demand and drops late results after switching", async () => {
   const message: ChatMessage = { id: "answer", role: "assistant", turn: { id: "answer", chunks: [], finalAnswer: "", isStreaming: false },

@@ -585,6 +585,25 @@
 
 }
 
+.agentRunError {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 20px 24px;
+  border: 1px solid var(--outline-variant);
+  border-radius: 26px;
+  background: var(--surface-color);
+  color: var(--on-surface);
+  font-size: var(--font-size-stage);
+  line-height: 1.5;
+}
+.agentRunErrorIcon { display: flex; align-items: center; justify-content: center; flex: 0 0 20px; height: 1.5em; }
+.agentRunErrorIcon svg { display: block; width: 20px; height: 20px; }
+.agentRunErrorText { min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+@media (max-width: 480px) {
+  .agentRunError { padding: 18px; gap: 12px; border-radius: 22px; }
+}
+
 .agentProcessSectionHeading.is-compaction {
   color: color-mix(in srgb, var(--on-surface-variant) 74%, transparent 26%);
   font-size: var(--font-size-xs);
