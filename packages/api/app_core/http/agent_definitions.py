@@ -25,7 +25,7 @@ router = Router(tags=["agent definitions"], by_alias=True)
 
 
 class CreateAgentDefinitionRequest(CreateAgentRequest):
-    plugin_names: list[str] = Field(default_factory=list, alias="pluginNames")
+    plugin_names: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_plugins(self):
@@ -36,7 +36,7 @@ class CreateAgentDefinitionRequest(CreateAgentRequest):
 
 class UpdateAgentDefinitionRequest(UpdateAgentRequest):
     status: Literal["active", "disabled"] | None = None
-    plugin_names: list[str] | None = Field(default=None, alias="pluginNames")
+    plugin_names: list[str] | None = Field(default=None)
 
     @model_validator(mode="after")
     def validate_plugins(self):
@@ -52,7 +52,7 @@ class EmptyDefinitionRequest(StrictSchema):
 
 class DefinitionAvailabilityRequest(StrictSchema):
     scope: Literal["none", "workspace", "members"]
-    membership_ids: list[str] = Field(default_factory=list, alias="membershipIds")
+    membership_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_scope(self):

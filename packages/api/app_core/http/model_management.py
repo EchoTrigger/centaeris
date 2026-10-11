@@ -82,16 +82,16 @@ def _catalog_templates() -> tuple[dict, dict]:
 
 
 class CreateModelProviderRequest(StrictSchema):
-    display_name: str = Field(alias="displayName")
+    display_name: str
     api: str
-    api_base: str = Field(alias="apiBase")
+    api_base: str
     secret: str
 
 
 class UpdateModelProviderRequest(StrictSchema):
-    display_name: str = Field(default=None, alias="displayName")
+    display_name: str = Field(default=None)
     api: str = None
-    api_base: str = Field(default=None, alias="apiBase")
+    api_base: str = Field(default=None)
     enabled: bool = None
 
 
@@ -100,26 +100,26 @@ class RotateProviderCredentialRequest(StrictSchema):
 
 
 class CreateModelRequest(StrictSchema):
-    display_name: str = Field(default="", alias="displayName")
-    provider_id: str = Field(alias="providerId")
-    model_name: str = Field(alias="modelName")
-    api_override: str | None = Field(default=None, alias="apiOverride")
-    context_tokens: int = Field(alias="contextTokens")
-    max_output_tokens: int = Field(alias="maxOutputTokens")
-    thinking_mode: str | None = Field(default=None, alias="thinkingMode")
-    thinking_modes: list[str] = Field(default_factory=list, alias="thinkingModes")
+    display_name: str = Field(default='')
+    provider_id: str
+    model_name: str
+    api_override: str | None = Field(default=None)
+    context_tokens: int
+    max_output_tokens: int
+    thinking_mode: str | None = Field(default=None)
+    thinking_modes: list[str] = Field(default_factory=list)
     enabled: bool
 
 
 class UpdateModelRequest(StrictSchema):
-    display_name: str = Field(default=None, alias="displayName")
-    provider_id: str = Field(default=None, alias="providerId")
-    model_name: str = Field(default=None, alias="modelName")
-    api_override: str | None = Field(default=None, alias="apiOverride")
-    context_tokens: int = Field(default=None, alias="contextTokens")
-    max_output_tokens: int = Field(default=None, alias="maxOutputTokens")
-    thinking_mode: str | None = Field(default=None, alias="thinkingMode")
-    thinking_modes: list[str] | None = Field(default=None, alias="thinkingModes")
+    display_name: str = Field(default=None)
+    provider_id: str = Field(default=None)
+    model_name: str = Field(default=None)
+    api_override: str | None = Field(default=None)
+    context_tokens: int = Field(default=None)
+    max_output_tokens: int = Field(default=None)
+    thinking_mode: str | None = Field(default=None)
+    thinking_modes: list[str] | None = Field(default=None)
     enabled: bool = None
 
 
@@ -128,7 +128,7 @@ class EmptyRequest(StrictSchema):
 
 
 class ApplyModelCatalogReconciliationRequest(StrictSchema):
-    expected_digest: str = Field(alias="expectedDigest")
+    expected_digest: str
 
 
 def _model_catalog_reconciliation(templates: dict, route_overrides: dict, *, lock: bool = False) -> dict:

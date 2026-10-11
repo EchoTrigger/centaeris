@@ -1,9 +1,11 @@
 from ninja import Schema
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict
+from pydantic.alias_generators import to_camel
 
 
 class StrictSchema(Schema):
     model_config = ConfigDict(
+        alias_generator=to_camel,
         extra="forbid",
         from_attributes=True,
         strict=True,
@@ -24,8 +26,8 @@ class OkResponse(StrictSchema):
 class UserResponse(StrictSchema):
     id: str
     email: str
-    is_staff: bool = Field(alias="isStaff")
-    is_superuser: bool = Field(alias="isSuperuser")
+    is_staff: bool
+    is_superuser: bool
 
 
 class UserEnvelope(StrictSchema):
@@ -34,14 +36,14 @@ class UserEnvelope(StrictSchema):
 
 class ModelResponse(StrictSchema):
     id: str
-    display_name: str = Field(alias="displayName")
-    provider_id: str | None = Field(alias="providerId")
-    provider_display_name: str | None = Field(alias="providerDisplayName")
-    model_name: str = Field(alias="modelName")
-    context_tokens: int = Field(alias="contextTokens")
-    max_output_tokens: int = Field(alias="maxOutputTokens")
-    thinking_mode: str | None = Field(alias="thinkingMode")
-    thinking_modes: list[str] = Field(alias="thinkingModes")
+    display_name: str
+    provider_id: str | None
+    provider_display_name: str | None
+    model_name: str
+    context_tokens: int
+    max_output_tokens: int
+    thinking_mode: str | None
+    thinking_modes: list[str]
 
 
 class ModelsEnvelope(StrictSchema):
@@ -49,7 +51,7 @@ class ModelsEnvelope(StrictSchema):
 
 
 class CsrfTokenResponse(StrictSchema):
-    csrf_token: str = Field(alias="csrfToken")
+    csrf_token: str
 
 
 class LoginRequest(StrictSchema):
@@ -58,8 +60,8 @@ class LoginRequest(StrictSchema):
 
 
 class PasswordChangeRequest(StrictSchema):
-    current_password: str = Field(alias="currentPassword")
-    new_password: str = Field(alias="newPassword")
+    current_password: str
+    new_password: str
 
 
 class PasswordResetRequest(StrictSchema):
@@ -69,7 +71,7 @@ class PasswordResetRequest(StrictSchema):
 class PasswordResetConfirmRequest(StrictSchema):
     uid: str
     token: str
-    new_password: str = Field(alias="newPassword")
+    new_password: str
 
 
 class HealthResponse(StrictSchema):

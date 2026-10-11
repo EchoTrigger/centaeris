@@ -18,9 +18,9 @@ router = Router(tags=["agent-inputs"], by_alias=True)
 
 class SubmitAgentInputRequest(StrictSchema):
     schema_id: Literal["agent.input.submit.v1"] = Field(alias="schema")
-    input_id: str = Field(alias="inputId")
+    input_id: str
     body: str
-    attachment_refs: list[str] = Field(alias="attachmentRefs", max_length=50)
+    attachment_refs: list[str] = Field(max_length=50)
 
     @field_validator("input_id")
     @classmethod
@@ -41,22 +41,22 @@ class SubmitAgentInputRequest(StrictSchema):
 
 
 class AgentInputRead(StrictSchema):
-    agent_run_id: str = Field(alias="agentRunId")
-    event_id: str = Field(alias="eventId")
-    request_id: str = Field(alias="requestId")
-    created_at_ms: int = Field(alias="createdAtMs")
+    agent_run_id: str
+    event_id: str
+    request_id: str
+    created_at_ms: int
 
 
 class AgentInputAttachment(StrictSchema):
-    input_ref: str = Field(alias="inputRef")
-    display_name: str = Field(alias="displayName")
-    content_type: str = Field(alias="contentType")
+    input_ref: str
+    display_name: str
+    content_type: str
 
 
 class AgentInputFact(StrictSchema):
-    input_id: str = Field(alias="inputId")
+    input_id: str
     sequence: int = Field(ge=1)
-    created_at_ms: int = Field(alias="createdAtMs")
+    created_at_ms: int
     body: str
     attachments: list[AgentInputAttachment]
     read: AgentInputRead | None
@@ -64,17 +64,17 @@ class AgentInputFact(StrictSchema):
 
 class AgentInputAccepted(StrictSchema):
     schema_id: Literal["agent.input.accepted.v1"] = Field(alias="schema")
-    agent_id: str = Field(alias="agentId")
-    session_id: str = Field(alias="sessionId")
+    agent_id: str
+    session_id: str
     input: AgentInputFact
 
 
 class AgentInputs(StrictSchema):
     schema_id: Literal["agent.inputs.v1"] = Field(alias="schema")
-    agent_id: str = Field(alias="agentId")
-    session_id: str = Field(alias="sessionId")
+    agent_id: str
+    session_id: str
     inputs: list[AgentInputFact]
-    next_after_sequence: int | None = Field(alias="nextAfterSequence")
+    next_after_sequence: int | None
 
 
 class HistoryInput(StrictSchema):
@@ -91,12 +91,12 @@ class HistoryMessage(StrictSchema):
 
 class AgentHistory(StrictSchema):
     schema_id: Literal["agent.history.v1"] = Field(alias="schema")
-    agent_id: str = Field(alias="agentId")
-    session_id: str = Field(alias="sessionId")
+    agent_id: str
+    session_id: str
     items: list[HistoryInput | HistoryMessage]
-    next_cursor: str | None = Field(alias="nextCursor")
-    newest_cursor: str | None = Field(alias="newestCursor")
-    has_more: bool = Field(alias="hasMore")
+    next_cursor: str | None
+    newest_cursor: str | None
+    has_more: bool
 
 
 @router.post("/agents/{agent_id}/inputs", auth=usage_auth("messages:submit"),

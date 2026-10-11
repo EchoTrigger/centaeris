@@ -59,33 +59,33 @@ MAX_UPLOAD_BATCH_FILES = 50
 
 
 class CreateLibraryFolderRequest(StrictSchema):
-    display_name: str = Field(alias="displayName")
-    parent_folder_id: str = Field(default="", alias="parentFolderId")
+    display_name: str
+    parent_folder_id: str = Field(default='')
 
 
 class CreateLibraryNoteRequest(StrictSchema):
-    display_name: str = Field(alias="displayName")
+    display_name: str
     markdown: str
-    parent_folder_id: str = Field(default="", alias="parentFolderId")
+    parent_folder_id: str = Field(default='')
 
 
 class UpdateLibraryObjectRequest(StrictSchema):
-    display_name: str | None = Field(default=None, alias="displayName")
-    parent_folder_id: str | None = Field(default=None, alias="parentFolderId")
+    display_name: str | None = Field(default=None)
+    parent_folder_id: str | None = Field(default=None)
 
 
 class UpdateLibraryNoteRequest(StrictSchema):
-    display_name: str = Field(alias="displayName")
+    display_name: str
     markdown: str
 
 
 class AttachSessionAssetRequest(StrictSchema):
-    asset_kind: str = Field(alias="assetKind")
-    asset_id: str = Field(alias="assetId")
+    asset_kind: str
+    asset_id: str
 
 
 class DetachSessionAssetRequest(StrictSchema):
-    asset_link_id: str = Field(alias="assetLinkId")
+    asset_link_id: str
 
 
 class LibraryNameConflict(ValueError):

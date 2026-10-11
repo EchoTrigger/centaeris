@@ -14,28 +14,28 @@ COMMON_ERROR_RESPONSES = {
 
 class AgentCoordinationSessionResponse(StrictSchema):
     schema_id: Literal["agent.coordination_session.v1"] = Field(alias="schema")
-    agent_id: str = Field(alias="agentId")
-    session_id: str = Field(alias="sessionId")
+    agent_id: str
+    session_id: str
 
 
 class AgentMessageResponse(StrictSchema):
     id: str
-    agent_run_id: str = Field(alias="agentRunId")
-    turn_id: str = Field(alias="turnId")
-    tool_call_id: str = Field(alias="toolCallId")
-    source_sequence: int = Field(alias="sourceSequence")
-    created_at_ms: int = Field(alias="createdAtMs")
+    agent_run_id: str
+    turn_id: str
+    tool_call_id: str
+    source_sequence: int
+    created_at_ms: int
     body: str
-    session_refs: list[str] = Field(alias="sessionRefs")
-    file_refs: list[str] = Field(alias="fileRefs")
+    session_refs: list[str]
+    file_refs: list[str]
 
 
 class AgentMessagesResponse(StrictSchema):
     schema_id: Literal["agent.messages.v1"] = Field(alias="schema")
-    agent_id: str = Field(alias="agentId")
-    session_id: str = Field(alias="sessionId")
+    agent_id: str
+    session_id: str
     messages: list[AgentMessageResponse]
-    next_after_sequence: int | None = Field(alias="nextAfterSequence")
+    next_after_sequence: int | None
 
 
 class WorkspaceResponse(StrictSchema):
@@ -51,11 +51,11 @@ class WorkspacesEnvelope(StrictSchema):
 
 
 class WorkspaceMemberResponse(StrictSchema):
-    membership_id: str = Field(alias="membershipId")
-    user_id: str = Field(alias="userId")
+    membership_id: str
+    user_id: str
     email: str
     role: Literal["owner", "admin", "member"]
-    created_at: str = Field(alias="createdAt")
+    created_at: str
 
 
 class WorkspaceMembersEnvelope(StrictSchema):
@@ -70,7 +70,7 @@ class WorkspaceGroupResponse(StrictSchema):
     id: str
     name: str
     kind: Literal["custom", "all_members"]
-    created_at: str = Field(alias="createdAt")
+    created_at: str
 
 
 class WorkspaceGroupEnvelope(StrictSchema):
@@ -87,7 +87,7 @@ class WorkspaceGroupMembersEnvelope(StrictSchema):
 
 class WorkspaceOwnershipTransferredResponse(StrictSchema):
     owner: WorkspaceMemberResponse
-    previous_owner: WorkspaceMemberResponse = Field(alias="previousOwner")
+    previous_owner: WorkspaceMemberResponse
 
 
 class WorkspaceInvitationResponse(StrictSchema):
@@ -95,13 +95,13 @@ class WorkspaceInvitationResponse(StrictSchema):
     email: str
     role: Literal["admin", "member"]
     status: Literal["pending", "accepted", "revoked", "expired"]
-    expires_at: str = Field(alias="expiresAt")
-    created_at: str = Field(alias="createdAt")
+    expires_at: str
+    created_at: str
 
 
 class WorkspaceInvitationEnvelope(StrictSchema):
     invitation: WorkspaceInvitationResponse
-    invite_url: str = Field(alias="inviteUrl")
+    invite_url: str
 
 
 class WorkspaceInvitationsEnvelope(StrictSchema):
@@ -109,19 +109,19 @@ class WorkspaceInvitationsEnvelope(StrictSchema):
 
 
 class WorkspaceInvitationPreviewResponse(StrictSchema):
-    workspace_id: str = Field(alias="workspaceId")
-    workspace_name: str = Field(alias="workspaceName")
+    workspace_id: str
+    workspace_name: str
     email: str
     role: Literal["admin", "member"]
-    account_exists: bool = Field(alias="accountExists")
-    expires_at: str = Field(alias="expiresAt")
+    account_exists: bool
+    expires_at: str
 
 
 class WorkspaceInvitationAcceptedResponse(StrictSchema):
-    workspace_id: str = Field(alias="workspaceId")
-    membership_id: str = Field(alias="membershipId")
+    workspace_id: str
+    membership_id: str
     role: Literal["admin", "member"]
-    user_created: bool = Field(alias="userCreated")
+    user_created: bool
 
 
 class PluginResourceResponse(StrictSchema):
@@ -136,26 +136,26 @@ class WorkspaceMcpTransportResponse(StrictSchema):
 
 class WorkspaceMcpAuthResponse(StrictSchema):
     type: Literal["none", "bearer"]
-    credential_ref: str | None = Field(alias="credentialRef")
-    credential_configured: bool | None = Field(alias="credentialConfigured")
+    credential_ref: str | None
+    credential_configured: bool | None
 
 
 class WorkspaceMcpToolResponse(StrictSchema):
-    source_name: str = Field(alias="sourceName")
+    source_name: str
     name: str
     description: str
-    input_schema: dict[str, object] = Field(alias="inputSchema")
-    concurrency_safe: bool = Field(alias="concurrencySafe")
+    input_schema: dict[str, object]
+    concurrency_safe: bool
     scopes: list[str]
 
 
 class WorkspaceMcpServerResponse(StrictSchema):
     id: str
-    model_contract_digest: str = Field(alias="modelContractDigest")
+    model_contract_digest: str
     transport: WorkspaceMcpTransportResponse
     auth: WorkspaceMcpAuthResponse
-    startup_timeout_ms: int = Field(alias="startupTimeoutMs")
-    tool_timeout_ms: int = Field(alias="toolTimeoutMs")
+    startup_timeout_ms: int
+    tool_timeout_ms: int
     tools: list[WorkspaceMcpToolResponse]
 
 
@@ -172,21 +172,21 @@ class WorkspaceHookResponse(StrictSchema):
         "SubagentStop",
     ]
     matcher: str | None
-    timeout_ms: int = Field(alias="timeoutMs")
+    timeout_ms: int
 
 
 class WorkspacePluginResponse(StrictSchema):
     name: str
-    display_name: str = Field(alias="displayName")
-    short_description: str = Field(alias="shortDescription")
+    display_name: str
+    short_description: str
     capabilities: list[str]
     version: str
-    package_digest: str = Field(alias="packageDigest")
+    package_digest: str
     enabled: bool
     skills: list[PluginResourceResponse]
     cli: list[PluginResourceResponse]
-    mcp_servers: list[WorkspaceMcpServerResponse] | None = Field(alias="mcpServers")
-    mcp_credential_refs: list[str] | None = Field(alias="mcpCredentialRefs")
+    mcp_servers: list[WorkspaceMcpServerResponse] | None
+    mcp_credential_refs: list[str] | None
     hooks: list[WorkspaceHookResponse] | None
     errors: list[str]
 
@@ -201,12 +201,12 @@ class WorkspacePluginsEnvelope(StrictSchema):
 
 class GlobalPluginResponse(StrictSchema):
     name: str
-    display_name: str = Field(alias="displayName")
-    short_description: str = Field(alias="shortDescription")
+    display_name: str
+    short_description: str
     capabilities: list[str]
     version: str
-    enabled_workspace_count: int = Field(alias="enabledWorkspaceCount")
-    credential_count: int = Field(alias="credentialCount")
+    enabled_workspace_count: int
+    credential_count: int
     removable: bool
     errors: list[str]
 
@@ -220,12 +220,12 @@ class GlobalPluginsEnvelope(StrictSchema):
 
 
 class WorkspaceSkillResponse(StrictSchema):
-    skill_id: str = Field(alias="skillId")
+    skill_id: str
     name: str
     description: str
     enabled: bool
-    allow_implicit_invocation: bool = Field(alias="allowImplicitInvocation")
-    allowed_tools: list[str] = Field(alias="allowedTools")
+    allow_implicit_invocation: bool
+    allowed_tools: list[str]
 
 
 class WorkspaceSkillsEnvelope(StrictSchema):
@@ -241,17 +241,17 @@ class WorkspaceSkillDetailEnvelope(StrictSchema):
 
 class AgentResponse(StrictSchema):
     id: str
-    workspace_id: str = Field(alias="workspaceId")
-    definition_id: str | None = Field(alias="definitionId")
-    definition_version_id: str | None = Field(alias="definitionVersionId")
+    workspace_id: str
+    definition_id: str | None
+    definition_version_id: str | None
     name: str
     description: str
     instructions: str
-    avatar_kind: Literal["centaeris", "banana"] = Field(alias="avatarKind")
+    avatar_kind: Literal["centaeris", "banana"]
     status: Literal["active", "deleted"]
-    deleted_at: str | None = Field(alias="deletedAt")
-    created_at: str = Field(alias="createdAt")
-    updated_at: str = Field(alias="updatedAt")
+    deleted_at: str | None
+    created_at: str
+    updated_at: str
 
 
 class AgentEnvelope(StrictSchema):
@@ -264,30 +264,30 @@ class AgentsEnvelope(StrictSchema):
 
 class AgentDefinitionResponse(StrictSchema):
     id: str
-    workspace_id: str = Field(alias="workspaceId")
+    workspace_id: str
     name: str
     description: str
     instructions: str
-    plugin_names: list[str] = Field(alias="pluginNames")
-    avatar_kind: Literal["centaeris", "banana"] = Field(alias="avatarKind")
+    plugin_names: list[str]
+    avatar_kind: Literal["centaeris", "banana"]
     status: Literal["active", "disabled"]
-    availability_scope: Literal["none", "workspace", "members"] = Field(alias="availabilityScope")
-    membership_ids: list[str] = Field(alias="membershipIds")
-    published_version_id: str | None = Field(alias="publishedVersionId")
-    created_at: str = Field(alias="createdAt")
-    updated_at: str = Field(alias="updatedAt")
+    availability_scope: Literal["none", "workspace", "members"]
+    membership_ids: list[str]
+    published_version_id: str | None
+    created_at: str
+    updated_at: str
 
 
 class AgentDefinitionVersionResponse(StrictSchema):
     id: str
-    definition_id: str = Field(alias="definitionId")
+    definition_id: str
     version: int
     name: str
     description: str
     instructions: str
-    plugin_names: list[str] = Field(alias="pluginNames")
-    avatar_kind: Literal["centaeris", "banana"] = Field(alias="avatarKind")
-    published_at: str = Field(alias="publishedAt")
+    plugin_names: list[str]
+    avatar_kind: Literal["centaeris", "banana"]
+    published_at: str
 
 
 class AgentDefinitionEnvelope(StrictSchema):
@@ -311,73 +311,71 @@ class AvailableAgentDefinitionsEnvelope(StrictSchema):
 
 
 class ContextMcpToolResponse(StrictSchema):
-    provider_id: str = Field(alias="providerId")
+    provider_id: str
     name: str
     tokens: int
 
 
 class ContextTokenBreakdownResponse(StrictSchema):
-    system_prompt_tokens: int = Field(alias="systemPromptTokens")
-    system_tool_tokens: int = Field(alias="systemToolTokens")
-    mcp_tool_tokens: int = Field(alias="mcpToolTokens")
-    skills_tokens: int = Field(alias="skillsTokens")
-    message_tokens: int = Field(alias="messageTokens")
-    auto_compact_buffer_tokens: int = Field(alias="autoCompactBufferTokens")
-    free_space_tokens: int = Field(alias="freeSpaceTokens")
-    mcp_tools: list[ContextMcpToolResponse] = Field(alias="mcpTools")
+    system_prompt_tokens: int
+    system_tool_tokens: int
+    mcp_tool_tokens: int
+    skills_tokens: int
+    message_tokens: int
+    auto_compact_buffer_tokens: int
+    free_space_tokens: int
+    mcp_tools: list[ContextMcpToolResponse]
 
 
 class ContextUsageResponse(StrictSchema):
-    used_tokens: int = Field(alias="usedTokens")
-    max_context_tokens: int = Field(alias="maxContextTokens")
-    used_percentage: int = Field(alias="usedPercentage")
-    updated_at: int = Field(alias="updatedAt")
-    is_compacting: bool = Field(alias="isCompacting")
+    used_tokens: int
+    max_context_tokens: int
+    used_percentage: int
+    updated_at: int
+    is_compacting: bool
     breakdown: ContextTokenBreakdownResponse
 
 
 class SessionContextUsageEnvelope(StrictSchema):
     schema_id: Literal["session.context_usage.v1"] = Field(alias="schema")
-    session_id: str = Field(alias="sessionId")
-    context_usage: ContextUsageResponse | None = Field(alias="contextUsage")
+    session_id: str
+    context_usage: ContextUsageResponse | None
 
 
 class TranscriptContentRangeResponse(StrictSchema):
     schema_id: Literal["transcript.content.range.v1"] = Field(alias="schema")
-    session_id: str = Field(alias="sessionId")
-    projection_version: Literal["transcript.projection.v1"] = Field(
-        alias="projectionVersion"
-    )
-    projection_generation: str = Field(alias="projectionGeneration")
-    ref_id: str = Field(alias="refId")
+    session_id: str
+    projection_version: Literal["transcript.projection.v1"]
+    projection_generation: str
+    ref_id: str
     revision: Literal["2"]
-    byte_length: str = Field(alias="byteLength")
-    start_offset: str = Field(alias="startOffset")
-    end_offset: str = Field(alias="endOffset")
+    byte_length: str
+    start_offset: str
+    end_offset: str
     content: str
-    has_more: bool = Field(alias="hasMore")
+    has_more: bool
 
 
 class InitialInputOriginResponse(StrictSchema):
-    message_id: str = Field(alias="messageId")
-    agent_id: str = Field(alias="agentId")
-    agent_name: str = Field(alias="agentName")
+    message_id: str
+    agent_id: str
+    agent_name: str
 
 
 class SessionResponse(StrictSchema):
     id: str
-    workspace_id: str = Field(alias="workspaceId")
-    agent_id: str = Field(alias="agentId")
-    project_id: str | None = Field(alias="projectId")
+    workspace_id: str
+    agent_id: str
+    project_id: str | None
     title: str
     origin: str
-    initial_input_origin: InitialInputOriginResponse | None = Field(alias="initialInputOrigin")
+    initial_input_origin: InitialInputOriginResponse | None
     status: Literal["active", "deleted"]
-    deleted_at: str | None = Field(alias="deletedAt")
-    is_pinned: bool = Field(alias="isPinned")
-    is_unread: bool = Field(alias="isUnread")
-    has_active_agent_run: bool = Field(alias="hasActiveAgentRun")
-    updated_at: str = Field(alias="updatedAt")
+    deleted_at: str | None
+    is_pinned: bool
+    is_unread: bool
+    has_active_agent_run: bool
+    updated_at: str
 
 
 class SessionEnvelope(StrictSchema):
@@ -390,19 +388,19 @@ class SessionsEnvelope(StrictSchema):
 
 class AgentWorkSessionsResponse(StrictSchema):
     schema_id: Literal["agent.work_sessions.v1"] = Field(alias="schema")
-    agent_id: str = Field(alias="agentId")
-    workspace_id: str = Field(alias="workspaceId")
+    agent_id: str
+    workspace_id: str
     sessions: list[SessionResponse]
-    next_after_session_id: str | None = Field(alias="nextAfterSessionId")
-    has_more: bool = Field(alias="hasMore")
+    next_after_session_id: str | None
+    has_more: bool
 
 
 class SessionProjectResponse(StrictSchema):
     id: str
-    workspace_id: str = Field(alias="workspaceId")
-    agent_id: str = Field(alias="agentId")
+    workspace_id: str
+    agent_id: str
     name: str
-    created_at: str = Field(alias="createdAt")
+    created_at: str
 
 
 class SessionProjectEnvelope(StrictSchema):
@@ -414,8 +412,8 @@ class SessionProjectsEnvelope(StrictSchema):
 
 
 class SessionTrashEnvelope(SessionsEnvelope):
-    next_cursor: str | None = Field(alias="nextCursor")
-    has_more: bool = Field(alias="hasMore")
+    next_cursor: str | None
+    has_more: bool
 
 
 class DeletedResponse(StrictSchema):
@@ -424,12 +422,12 @@ class DeletedResponse(StrictSchema):
 
 class SourceResponse(StrictSchema):
     id: str
-    workspace_id: str = Field(alias="workspaceId")
-    source_type: str = Field(alias="sourceType")
+    workspace_id: str
+    source_type: str
     name: str
     status: str
-    failure_reason: str = Field(alias="failureReason")
-    access_level: Literal["read", "write", "control"] = Field(alias="accessLevel")
+    failure_reason: str
+    access_level: Literal["read", "write", "control"]
 
 
 class SourceEnvelope(StrictSchema):
@@ -442,16 +440,16 @@ class SourcesEnvelope(StrictSchema):
 
 class SourceObjectResponse(StrictSchema):
     id: str
-    source_id: str = Field(alias="sourceId")
-    object_type: str = Field(alias="objectType")
-    display_path: str = Field(alias="displayPath")
-    display_name: str = Field(alias="displayName")
-    content_type: str = Field(alias="contentType")
-    size_bytes: int | None = Field(alias="sizeBytes")
+    source_id: str
+    object_type: str
+    display_path: str
+    display_name: str
+    content_type: str
+    size_bytes: int | None
     sha256: str
-    source_version: str = Field(alias="sourceVersion")
+    source_version: str
     status: str
-    failure_reason: str = Field(alias="failureReason")
+    failure_reason: str
 
 
 class SourceObjectEnvelope(StrictSchema):
@@ -464,9 +462,9 @@ class SourceObjectsEnvelope(StrictSchema):
 
 class SourceGrantResponse(StrictSchema):
     id: str
-    source_id: str = Field(alias="sourceId")
-    workspace_group_id: str = Field(alias="workspaceGroupId")
-    access_level: Literal["read", "write", "control"] = Field(alias="accessLevel")
+    source_id: str
+    workspace_group_id: str
+    access_level: Literal["read", "write", "control"]
 
 
 class SourceGrantEnvelope(StrictSchema):
@@ -480,17 +478,17 @@ class SourceGrantsEnvelope(StrictSchema):
 class LibraryObjectResponse(StrictSchema):
     id: str
     kind: str
-    display_name: str = Field(alias="displayName")
-    object_kind: str = Field(alias="objectKind")
-    content_type: str = Field(alias="contentType")
-    size_bytes: int | None = Field(alias="sizeBytes")
+    display_name: str
+    object_kind: str
+    content_type: str
+    size_bytes: int | None
     sha256: str
     status: str
-    failure_reason: str = Field(alias="failureReason")
-    parent_folder_id: str | None = Field(alias="parentFolderId")
-    deleted_at: str | None = Field(alias="deletedAt")
-    deletion_generation: int = Field(alias="deletionGeneration")
-    updated_at: str = Field(alias="updatedAt")
+    failure_reason: str
+    parent_folder_id: str | None
+    deleted_at: str | None
+    deletion_generation: int
+    updated_at: str
 
 
 class LibraryObjectEnvelope(StrictSchema):
@@ -502,7 +500,7 @@ class LibraryObjectsEnvelope(StrictSchema):
 
 
 class TrashActorResponse(StrictSchema):
-    user_id: str = Field(alias="userId")
+    user_id: str
     email: str
 
 
@@ -517,23 +515,23 @@ class TrashItemResponse(StrictSchema):
     id: str
     kind: Literal["agent", "session", "source", "library"]
     title: str
-    deleted_at: str = Field(alias="deletedAt")
-    expires_at: str = Field(alias="expiresAt")
+    deleted_at: str
+    expires_at: str
     scope: Literal["workspace", "privateLibrary"]
     location: TrashLocationResponse
-    deleted_by: TrashActorResponse | None = Field(alias="deletedBy")
+    deleted_by: TrashActorResponse | None
 
 
 class TrashFilterOptionsResponse(StrictSchema):
-    deleted_by: list[TrashActorResponse] = Field(alias="deletedBy")
+    deleted_by: list[TrashActorResponse]
     locations: list[TrashLocationResponse]
 
 
 class TrashEnvelope(StrictSchema):
     items: list[TrashItemResponse]
-    filter_options: TrashFilterOptionsResponse = Field(alias="filterOptions")
-    next_cursor: str | None = Field(alias="nextCursor")
-    has_more: bool = Field(alias="hasMore")
+    filter_options: TrashFilterOptionsResponse
+    next_cursor: str | None
+    has_more: bool
 
 
 class LibraryNoteEnvelope(LibraryObjectEnvelope):
@@ -543,22 +541,22 @@ class LibraryNoteEnvelope(LibraryObjectEnvelope):
 class ArtifactResponse(StrictSchema):
     id: str
     kind: str
-    workspace_id: str = Field(alias="workspaceId")
-    session_id: str = Field(alias="sessionId")
-    agent_run_id: str = Field(alias="agentRunId")
-    display_name: str = Field(alias="displayName")
-    content_type: str = Field(alias="contentType")
-    size_bytes: int = Field(alias="sizeBytes")
+    workspace_id: str
+    session_id: str
+    agent_run_id: str
+    display_name: str
+    content_type: str
+    size_bytes: int
     sha256: str
     status: str
-    download_url: str | None = Field(alias="downloadUrl")
+    download_url: str | None
 
 
 class SessionAssetResponse(StrictSchema):
     id: str
-    asset_kind: str = Field(alias="assetKind")
-    display_name: str = Field(alias="displayName")
-    content_type: str = Field(alias="contentType")
+    asset_kind: str
+    display_name: str
+    content_type: str
     asset: SourceObjectResponse | LibraryObjectResponse | ArtifactResponse
 
 
@@ -571,19 +569,19 @@ class SessionAssetsEnvelope(StrictSchema):
 
 
 class SessionUploadEnvelope(StrictSchema):
-    library_objects: list[LibraryObjectResponse] = Field(alias="libraryObjects")
+    library_objects: list[LibraryObjectResponse]
     assets: list[SessionAssetResponse]
 
 
 class ModelProviderResponse(StrictSchema):
     id: str
-    display_name: str = Field(alias="displayName")
-    template_id: str | None = Field(alias="templateId")
+    display_name: str
+    template_id: str | None
     api: str
-    api_base: str = Field(alias="apiBase")
+    api_base: str
     enabled: bool
-    credential_version: int = Field(alias="credentialVersion")
-    updated_at: str = Field(alias="updatedAt")
+    credential_version: int
+    updated_at: str
 
 
 class ModelProviderEnvelope(StrictSchema):
@@ -595,22 +593,22 @@ class ModelProvidersEnvelope(StrictSchema):
 
 
 class ModelProviderTemplateModelResponse(StrictSchema):
-    model_name: str = Field(alias="modelName")
-    display_name: str = Field(alias="displayName")
-    context_tokens: int = Field(alias="contextTokens")
-    max_output_tokens: int = Field(alias="maxOutputTokens")
-    api_override: str | None = Field(default=None, alias="apiOverride")
-    thinking_mode: str | None = Field(default=None, alias="thinkingMode")
-    thinking_modes: list[str] = Field(default_factory=list, alias="thinkingModes")
+    model_name: str
+    display_name: str
+    context_tokens: int
+    max_output_tokens: int
+    api_override: str | None = Field(default=None)
+    thinking_mode: str | None = Field(default=None)
+    thinking_modes: list[str] = Field(default_factory=list)
 
 
 class ModelProviderTemplateResponse(StrictSchema):
     id: str
-    display_name: str = Field(alias="displayName")
+    display_name: str
     tier: str = "direct_api"
-    logo_svg: str | None = Field(default=None, alias="logoSvg")
+    logo_svg: str | None = Field(default=None)
     api: str
-    api_base: str = Field(alias="apiBase")
+    api_base: str
     models: list[ModelProviderTemplateModelResponse]
 
 
@@ -626,11 +624,11 @@ class ModelCatalogReconciliationEnvelope(StrictSchema):
 
 class AdminModelResponse(ModelResponse):
     api: str
-    api_override: str | None = Field(alias="apiOverride")
-    api_base: str = Field(alias="apiBase")
+    api_override: str | None
+    api_base: str
     enabled: bool
     revision: int
-    updated_at: str = Field(alias="updatedAt")
+    updated_at: str
 
 
 class AdminModelEnvelope(StrictSchema):
@@ -642,15 +640,15 @@ class AdminModelsEnvelope(StrictSchema):
 
 
 class RunIdsErrorResponse(ErrorResponse):
-    agent_run_ids: list[str] = Field(alias="agentRunIds")
+    agent_run_ids: list[str]
 
 
 class ModelTestResponse(StrictSchema):
     ok: bool
-    http_status: int | None = Field(alias="httpStatus")
-    latency_ms: int = Field(alias="latencyMs")
-    output_preview: str | None = Field(alias="outputPreview")
-    error_keyword: str | None = Field(alias="errorKeyword")
+    http_status: int | None
+    latency_ms: int
+    output_preview: str | None
+    error_keyword: str | None
 
 
 class RuntimeJobResultRefResponse(StrictSchema):
@@ -661,8 +659,8 @@ class RuntimeJobResultRefResponse(StrictSchema):
 class RuntimeJobResponse(StrictSchema):
     id: str
     status: str
-    progress_topic: str = Field(alias="progressTopic")
-    result_refs: list[RuntimeJobResultRefResponse] = Field(alias="resultRefs")
+    progress_topic: str
+    result_refs: list[RuntimeJobResultRefResponse]
     error: str | None
 
 
@@ -671,23 +669,23 @@ class RuntimeJobEnvelope(StrictSchema):
 
 
 class CitationLineLocatorResponse(StrictSchema):
-    start_line: int = Field(alias="startLine", gt=0)
-    end_line: int = Field(alias="endLine", gt=0)
+    start_line: int = Field(gt=0)
+    end_line: int = Field(gt=0)
 
 
 class CitationPageLocatorResponse(StrictSchema):
-    page_start: int = Field(alias="pageStart", gt=0)
-    page_end: int = Field(alias="pageEnd", gt=0)
+    page_start: int = Field(gt=0)
+    page_end: int = Field(gt=0)
 
 
 class CitationTextSpanLocatorResponse(StrictSchema):
     kind: Literal["textSpan"]
-    page_start: int | None = Field(default=None, alias="pageStart", gt=0)
-    page_end: int | None = Field(default=None, alias="pageEnd", gt=0)
-    start_byte: int = Field(alias="startByte", ge=0)
-    end_byte: int = Field(alias="endByte", gt=0)
-    start_line: int = Field(alias="startLine", gt=0)
-    end_line: int = Field(alias="endLine", gt=0)
+    page_start: int | None = Field(default=None, gt=0)
+    page_end: int | None = Field(default=None, gt=0)
+    start_byte: int = Field(ge=0)
+    end_byte: int = Field(gt=0)
+    start_line: int = Field(gt=0)
+    end_line: int = Field(gt=0)
 
 
 class CitationPageRegionLocatorResponse(StrictSchema):
@@ -699,18 +697,18 @@ class CitationPageRegionLocatorResponse(StrictSchema):
 class CitationTableCellLocatorResponse(StrictSchema):
     kind: Literal["tableCell"]
     page: int = Field(gt=0)
-    table_id: str = Field(alias="tableId")
-    start_row: int = Field(alias="startRow", ge=0)
-    end_row: int = Field(alias="endRow", ge=0)
-    start_column: int = Field(alias="startColumn", ge=0)
-    end_column: int = Field(alias="endColumn", ge=0)
+    table_id: str
+    start_row: int = Field(ge=0)
+    end_row: int = Field(ge=0)
+    start_column: int = Field(ge=0)
+    end_column: int = Field(ge=0)
 
 
 class CitationResponse(StrictSchema):
-    citation_id: str = Field(alias="citationId")
-    input_ref: str = Field(alias="inputRef")
-    display_name: str = Field(alias="displayName")
-    evidence_kind: str = Field(alias="evidenceKind")
+    citation_id: str
+    input_ref: str
+    display_name: str
+    evidence_kind: str
     locator: (
         CitationLineLocatorResponse
         | CitationPageLocatorResponse
@@ -718,10 +716,10 @@ class CitationResponse(StrictSchema):
         | CitationPageRegionLocatorResponse
         | CitationTableCellLocatorResponse
     )
-    source_url: str = Field(alias="sourceUrl")
-    preview_url: str = Field(alias="previewUrl")
-    download_url: str = Field(alias="downloadUrl")
-    origin_label: Literal["库"] = Field(alias="originLabel")
+    source_url: str
+    preview_url: str
+    download_url: str
+    origin_label: Literal["库"]
 
 
 class CitationEnvelope(StrictSchema):
@@ -729,65 +727,65 @@ class CitationEnvelope(StrictSchema):
 
 
 class CitationSummaryResponse(StrictSchema):
-    citation_id: str = Field(alias="citationId")
-    input_ref: str = Field(alias="inputRef")
-    display_name: str = Field(alias="displayName")
-    source_tool_call_id: str = Field(alias="sourceToolCallId")
-    source_url: str = Field(alias="sourceUrl")
+    citation_id: str
+    input_ref: str
+    display_name: str
+    source_tool_call_id: str
+    source_url: str
 
 
 class CitationSnapshotResponse(StrictSchema):
     schema_id: Literal["workspace.citations.v1"] = Field(alias="schema")
-    agent_run_id: str = Field(alias="agentRunId")
-    session_id: str = Field(alias="sessionId")
-    through_sequence: int = Field(alias="throughSequence", ge=0)
+    agent_run_id: str
+    session_id: str
+    through_sequence: int = Field(ge=0)
     citations: list[CitationSummaryResponse]
 
 
 class TranscriptCitationBinding(StrictSchema):
-    source_sequence: str = Field(alias="sourceSequence")
-    source_tool_call_id: str = Field(alias="sourceToolCallId")
+    source_sequence: str
+    source_tool_call_id: str
     snapshot: CitationSnapshotResponse
 
 
 class TranscriptCitationsResponse(StrictSchema):
-    session_id: str = Field(alias="sessionId")
+    session_id: str
     bindings: list[TranscriptCitationBinding]
 
 
 class HostedOperationResponse(StrictSchema):
-    operation_id: str = Field(alias="operationId")
+    operation_id: str
     command: Literal["createSession", "submitMessage"]
     status: Literal["accepted"]
-    session_id: str = Field(alias="sessionId")
-    agent_run_id: str | None = Field(alias="agentRunId")
-    turn_id: str | None = Field(alias="turnId")
+    session_id: str
+    agent_run_id: str | None
+    turn_id: str | None
 
 
 class AgentRunCancellationResponse(StrictSchema):
-    agent_run_id: str = Field(alias="agentRunId")
+    agent_run_id: str
     status: str
     disposition: str
 
 
 class AgentRunSupplementResponse(StrictSchema):
-    agent_run_id: str = Field(alias="agentRunId")
-    session_id: str = Field(alias="sessionId")
-    supplement_id: str = Field(alias="supplementId")
+    agent_run_id: str
+    session_id: str
+    supplement_id: str
     disposition: Literal["accepted", "duplicate"]
-    queued_count: int = Field(alias="queuedCount", ge=0, le=8)
+    queued_count: int = Field(ge=0, le=8)
 
 
 class TranscriptPublishedArtifact(StrictSchema):
-    artifact_ref: str = Field(alias="artifactRef")
+    artifact_ref: str
     filename: str
-    download_url: str = Field(alias="downloadUrl")
+    download_url: str
 
 
 class TranscriptTurnMetadata(StrictSchema):
-    anchor_sequence: str = Field(alias="anchorSequence")
-    started_at_ms: int = Field(alias="startedAtMs")
-    completed_at_ms: int | None = Field(alias="completedAtMs")
+    anchor_sequence: str
+    started_at_ms: int
+    completed_at_ms: int | None
     artifacts: list[TranscriptPublishedArtifact]
 
 

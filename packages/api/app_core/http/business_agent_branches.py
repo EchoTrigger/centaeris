@@ -18,7 +18,7 @@ router = Router(tags=["business-agent-branches"], by_alias=True)
 
 
 class ResolveBusinessBranchRequest(StrictSchema):
-    business_user_id: str = Field(alias="businessUserId", min_length=1, max_length=256)
+    business_user_id: str = Field(min_length=1, max_length=256)
 
     @field_validator("business_user_id")
     @classmethod
@@ -28,45 +28,45 @@ class ResolveBusinessBranchRequest(StrictSchema):
 
 class BusinessBranchResponse(StrictSchema):
     schema_id: Literal["agent.business_branch.v1"] = Field(alias="schema")
-    branch_id: str = Field(alias="branchId")
-    root_agent_id: str = Field(alias="rootAgentId")
-    business_user_id: str = Field(alias="businessUserId")
-    agent_id: str = Field(alias="agentId")
-    session_id: str = Field(alias="sessionId")
+    branch_id: str
+    root_agent_id: str
+    business_user_id: str
+    agent_id: str
+    session_id: str
 
 
 class MaintainedBranchResponse(StrictSchema):
-    branch_id: str = Field(alias="branchId")
-    root_agent_id: str = Field(alias="rootAgentId")
-    business_user_id: str = Field(alias="businessUserId")
-    agent_id: str = Field(alias="agentId")
-    session_id: str = Field(alias="sessionId")
+    branch_id: str
+    root_agent_id: str
+    business_user_id: str
+    agent_id: str
+    session_id: str
     status: Literal["active", "deleted"]
-    session_count: int = Field(alias="sessionCount")
-    created_at: str = Field(alias="createdAt")
+    session_count: int
+    created_at: str
 
 
 class MaintainedBranchesResponse(StrictSchema):
     branches: list[MaintainedBranchResponse]
-    next_after_id: str | None = Field(alias="nextAfterId")
+    next_after_id: str | None
 
 
 class BranchSessionMetadata(StrictSchema):
-    session_id: str = Field(alias="sessionId")
+    session_id: str
     title: str
     status: Literal["active", "deleted"]
-    created_at: str = Field(alias="createdAt")
+    created_at: str
 
 
 class BranchWorkSessionMetadata(BranchSessionMetadata):
-    source_agent_run_id: str = Field(alias="sourceAgentRunId")
+    source_agent_run_id: str
 
 
 class BranchSessionsResponse(StrictSchema):
-    branch_id: str = Field(alias="branchId")
-    coordination_session: BranchSessionMetadata = Field(alias="coordinationSession")
-    work_sessions: list[BranchWorkSessionMetadata] = Field(alias="workSessions")
-    next_after_session_id: str | None = Field(alias="nextAfterSessionId")
+    branch_id: str
+    coordination_session: BranchSessionMetadata
+    work_sessions: list[BranchWorkSessionMetadata]
+    next_after_session_id: str | None
 
 
 def serialize_branch(branch):

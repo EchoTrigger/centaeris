@@ -4,7 +4,6 @@ from django.db import transaction
 from django.http import JsonResponse
 from django.utils import timezone
 from ninja import Router, Status
-from pydantic import Field
 
 from app_core.assistant_connectors import ConnectorRejected, authorize_connector, connector_resource
 from app_core.credentials import CredentialDecryptionError, validate_lower_kebab
@@ -24,23 +23,23 @@ internal_router = Router(tags=["internal"], by_alias=True)
 
 
 class ConnectorApprovalRequest(StrictSchema):
-    workspace_id: str = Field(alias="workspaceId")
-    definition_id: str = Field(alias="definitionId")
-    server_id: str = Field(alias="serverId")
+    workspace_id: str
+    definition_id: str
+    server_id: str
 
 
 class ConnectorBindingRequest(StrictSchema):
-    approval_id: str = Field(alias="approvalId")
+    approval_id: str
 
 
 class ConnectorApprovalResponse(StrictSchema):
     id: str
-    plugin_name: str = Field(alias="pluginName")
-    server_id: str = Field(alias="serverId")
-    resource_path: str = Field(alias="resourcePath")
-    resource_digest: str = Field(alias="resourceDigest")
-    display_name: str = Field(alias="displayName")
-    approved_at: str = Field(alias="approvedAt")
+    plugin_name: str
+    server_id: str
+    resource_path: str
+    resource_digest: str
+    display_name: str
+    approved_at: str
 
 
 class ConnectorApprovalEnvelope(StrictSchema):
@@ -53,9 +52,9 @@ class ConnectorApprovalsEnvelope(StrictSchema):
 
 class ConnectorBindingResponse(StrictSchema):
     id: str
-    plugin_name: str = Field(alias="pluginName")
-    server_id: str = Field(alias="serverId")
-    approval_id: str = Field(alias="approvalId")
+    plugin_name: str
+    server_id: str
+    approval_id: str
 
 
 class ConnectorBindingEnvelope(StrictSchema):

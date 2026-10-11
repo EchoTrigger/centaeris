@@ -55,7 +55,7 @@ def _normalize_source_name(value: str) -> str:
 
 
 class CreateSourceRequest(StrictSchema):
-    source_type: str = Field(alias="sourceType")
+    source_type: str
     name: str = Field(min_length=1, max_length=255)
 
     @field_validator("name")
@@ -74,12 +74,12 @@ class UpdateSourceRequest(StrictSchema):
 
 
 class CreateSourceGrantRequest(StrictSchema):
-    workspace_group_id: str = Field(alias="workspaceGroupId")
-    access_level: Literal["read", "write", "control"] = Field(alias="accessLevel")
+    workspace_group_id: str
+    access_level: Literal["read", "write", "control"]
 
 
 class UpdateSourceGrantRequest(StrictSchema):
-    access_level: Literal["read", "write", "control"] = Field(alias="accessLevel")
+    access_level: Literal["read", "write", "control"]
 
 
 def _serialize_source_grant(grant: SourceGrant) -> dict:

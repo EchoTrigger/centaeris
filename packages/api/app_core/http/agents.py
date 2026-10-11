@@ -84,15 +84,15 @@ class CreateCoordinationSessionRequest(StrictSchema):
 
 class UpdateAgentModelSettings(StrictSchema):
     schema_id: Literal["agent.model_settings.update.v1"] = Field(alias="schema")
-    model_config_ref: str | None = Field(alias="modelConfigRef")
-    thinking_mode: str | None = Field(alias="thinkingMode")
+    model_config_ref: str | None
+    thinking_mode: str | None
 
 
 class AgentModelSettings(StrictSchema):
     schema_id: Literal["agent.model_settings.v1"] = Field(alias="schema")
-    agent_id: str = Field(alias="agentId")
-    model_config_ref: str | None = Field(alias="modelConfigRef")
-    thinking_mode: str | None = Field(alias="thinkingMode")
+    agent_id: str
+    model_config_ref: str | None
+    thinking_mode: str | None
     status: Literal["unconfigured", "configured", "unavailable"]
 
 
@@ -178,10 +178,7 @@ class CreateAgentRequest(StrictSchema):
     name: str
     description: str = ""
     instructions: str = ""
-    avatar_kind: Literal["centaeris", "banana"] = Field(
-        "centaeris",
-        alias="avatarKind",
-    )
+    avatar_kind: Literal["centaeris", "banana"] = Field('centaeris')
 
     @field_validator("name")
     @classmethod
@@ -203,10 +200,7 @@ class UpdateAgentRequest(StrictSchema):
     name: str | None = None
     description: str | None = None
     instructions: str | None = None
-    avatar_kind: Literal["centaeris", "banana"] | None = Field(
-        None,
-        alias="avatarKind",
-    )
+    avatar_kind: Literal["centaeris", "banana"] | None = Field(None)
 
     @field_validator("name")
     @classmethod
