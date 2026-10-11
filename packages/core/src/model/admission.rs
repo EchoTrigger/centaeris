@@ -1,6 +1,7 @@
 //! Per-attempt model admission. Hosts share one coordinator for each quota
 //! domain; a domain is an explicit Host decision, never inferred from secrets,
-//! provider names, or model names. Clones share capacity and cooldown state.
+//! provider names, or model names. Coordinator clones share capacity and the
+//! default cooldown. Hosts can instead select transport-local cooldown explicitly.
 use super::{JsonHttpFuture, JsonHttpRequest, JsonHttpTransport};
 use std::collections::VecDeque;
 use std::num::NonZeroUsize;
@@ -167,12 +168,14 @@ fn retry_after_delay(value: &str, now: SystemTime) -> Option<Duration> {
 
 /// Wrap the actual transport, inside the protocol adapter's retry loop. The
 /// permit covers headers AND the complete JSON body / SSE stream. Returning a
-/// response installs Retry-After before releasing capacity, even on a final
+/// response installs Retry-After in the selected sharing scope before releasing
+/// capacity, even on a final
 /// failed attempt. Backoff and subsequent parsing happen after release.
 pub struct AdmittedJsonHttpTransport<T> {
     inner: T,
     admission: ModelAdmission,
     run_id: String,
+    transport_cooldown: Option<Mutex<Option<Instant>>>,
 }
 impl<T> AdmittedJsonHttpTransport<T> {
     pub fn new(inner: T, admission: ModelAdmission, run_id: String) -> Self {
@@ -180,23 +183,84 @@ impl<T> AdmittedJsonHttpTransport<T> {
             inner,
             admission,
             run_id,
+            transport_cooldown: None,
+        }
+    }
+
+    /// Share local capacity and fairness, but keep Retry-After on this transport.
+    /// Cooling down happens before enqueueing and never holds a capacity ticket.
+    pub fn with_transport_cooldown(inner: T, admission: ModelAdmission, run_id: String) -> Self {
+        Self {
+            inner,
+            admission,
+            run_id,
+            transport_cooldown: Some(Mutex::new(None)),
+        }
+    }
+
+    async fn wait_for_transport_cooldown(&self) {
+        let Some(cooldown) = &self.transport_cooldown else {
+            return;
+        };
+        loop {
+            let until = *cooldown
+                .lock()
+                .expect("model transport cooldown lock poisoned");
+            let Some(until) = until.filter(|until| *until > Instant::now()) else {
+                return;
+            };
+            tokio::time::sleep_until(until).await;
+        }
+    }
+
+    async fn acquire_transport_attempt(&self) -> ModelAttemptTicket {
+        loop {
+            self.wait_for_transport_cooldown().await;
+            let attempt = self.admission.acquire_attempt(&self.run_id).await;
+            // An in-flight response can install cooldown while this call queues.
+            let cooling = self.transport_cooldown.as_ref().is_some_and(|cooldown| {
+                cooldown
+                    .lock()
+                    .expect("model transport cooldown lock poisoned")
+                    .is_some_and(|until| until > Instant::now())
+            });
+            if !cooling {
+                return attempt;
+            }
+            drop(attempt);
+        }
+    }
+    fn observe_response(&self, attempt: &ModelAttemptTicket, response: &super::JsonHttpResponse) {
+        let retry_after = response
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+            .map(|(_, value)| value.as_str());
+        let Some(cooldown) = &self.transport_cooldown else {
+            attempt.observe_http_status(response.status_code, retry_after);
+            return;
+        };
+        if !super::transport::is_retryable_http_status(response.status_code) {
+            return;
+        }
+        let until = retry_after
+            .and_then(|value| retry_after_delay(value, SystemTime::now()))
+            .and_then(|delay| Instant::now().checked_add(delay));
+        if let Some(until) = until {
+            let mut current = cooldown
+                .lock()
+                .expect("model transport cooldown lock poisoned");
+            *current = Some(current.map_or(until, |previous| previous.max(until)));
         }
     }
 }
 impl<T: JsonHttpTransport> JsonHttpTransport for AdmittedJsonHttpTransport<T> {
     fn execute_json<'a>(&'a self, request: &'a JsonHttpRequest) -> JsonHttpFuture<'a> {
         Box::pin(async move {
-            let attempt = self.admission.acquire_attempt(&self.run_id).await;
+            let attempt = self.acquire_transport_attempt().await;
             let response = self.inner.execute_json(request).await;
             if let Ok(response) = &response {
-                attempt.observe_http_status(
-                    response.status_code,
-                    response
-                        .headers
-                        .iter()
-                        .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
-                        .map(|(_, value)| value.as_str()),
-                );
+                self.observe_response(&attempt, response);
             }
             response
         })
@@ -207,17 +271,10 @@ impl<T: JsonHttpTransport> JsonHttpTransport for AdmittedJsonHttpTransport<T> {
         on_data: &'a mut (dyn FnMut(String) + Send),
     ) -> JsonHttpFuture<'a> {
         Box::pin(async move {
-            let attempt = self.admission.acquire_attempt(&self.run_id).await;
+            let attempt = self.acquire_transport_attempt().await;
             let response = self.inner.execute_sse(request, on_data).await;
             if let Ok(response) = &response {
-                attempt.observe_http_status(
-                    response.status_code,
-                    response
-                        .headers
-                        .iter()
-                        .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
-                        .map(|(_, value)| value.as_str()),
-                );
+                self.observe_response(&attempt, response);
             }
             response
         })

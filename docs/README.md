@@ -17,6 +17,8 @@ implementation plans or compatibility aliases.
 - [Architecture](architecture/Architecture.md): ownership and request flow.
 - [Public API index](reference/API.md): where public contracts live.
 - [Runtime protocol](reference/RuntimeProtocol.md): Local Runtime host boundary.
+- [Model HTTP](reference/ModelHTTP.md): response budgets, credential isolation and SSE contracts.
+- [Runtime boundary maintenance](development/RuntimeBoundaries.md): atomic file ownership and replacement acceptance.
 - [Session events](reference/SessionEvents.md): durable and live projections.
 - [Extensions](reference/Extensions.md): Plugin, Skill, MCP, CLI, and Hook boundary.
 - [Plugin and Skill package spec](reference/SkillPackageSpec.md): package layout

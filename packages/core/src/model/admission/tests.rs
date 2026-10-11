@@ -435,3 +435,123 @@ async fn release_wakes_a_spawned_waiter_without_manual_polling() {
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test(start_paused = true)]
+async fn transport_cooldown_rechecks_already_queued_attempts_without_holding_capacity() {
+    let (admission, raw, mut calls, req) = fixture(1);
+    let a = AdmittedJsonHttpTransport::with_transport_cooldown(
+        raw.clone(),
+        admission.clone(),
+        "a".into(),
+    );
+    let b = AdmittedJsonHttpTransport::with_transport_cooldown(raw, admission, "b".into());
+    let mut active = a.execute_json(&req);
+    assert!(poll!(&mut active).is_pending());
+    let reply = calls.try_recv().unwrap();
+    let mut queued = a.execute_json(&req);
+    let mut other = b.execute_json(&req);
+    assert!(poll!(&mut queued).is_pending());
+    assert!(poll!(&mut other).is_pending());
+    reply.send(Ok(response(429, Some("5")))).unwrap();
+    active.await.unwrap();
+    assert!(poll!(&mut queued).is_pending());
+    assert!(
+        calls.try_recv().is_err(),
+        "an already queued attempt bypassed Retry-After"
+    );
+    assert!(poll!(&mut other).is_pending());
+    calls
+        .try_recv()
+        .unwrap()
+        .send(Ok(response(200, None)))
+        .unwrap();
+    other.await.unwrap();
+    drop(queued);
+    tokio::time::advance(Duration::from_secs(5)).await;
+    let mut retry = a.execute_json(&req);
+    assert!(poll!(&mut retry).is_pending());
+    calls
+        .try_recv()
+        .unwrap()
+        .send(Ok(response(200, None)))
+        .unwrap();
+    retry.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn transport_cooldown_preserves_the_longer_in_flight_response_deadline() {
+    let (admission, raw, mut calls, req) = fixture(2);
+    let a = AdmittedJsonHttpTransport::with_transport_cooldown(raw, admission, "a".into());
+    let mut first = a.execute_json(&req);
+    let mut ignore = |_| {};
+    let mut second = a.execute_sse(&req, &mut ignore);
+    assert!(poll!(&mut first).is_pending());
+    assert!(poll!(&mut second).is_pending());
+    let first_reply = calls.try_recv().unwrap();
+    let second_reply = calls.try_recv().unwrap();
+    first_reply.send(Ok(response(429, Some("10")))).unwrap();
+    first.await.unwrap();
+    tokio::time::advance(Duration::from_secs(2)).await;
+    second_reply.send(Ok(response(503, Some("3")))).unwrap();
+    second.await.unwrap();
+    let mut next = a.execute_json(&req);
+    tokio::time::advance(Duration::from_secs(7)).await;
+    assert!(poll!(&mut next).is_pending());
+    assert!(calls.try_recv().is_err());
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert!(poll!(&mut next).is_pending());
+    calls
+        .try_recv()
+        .unwrap()
+        .send(Ok(response(200, None)))
+        .unwrap();
+    next.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn transport_cooldown_sleep_rechecks_extensions_and_cancels_without_capacity() {
+    let (admission, raw, mut calls, req) = fixture(2);
+    let a = AdmittedJsonHttpTransport::with_transport_cooldown(
+        raw.clone(),
+        admission.clone(),
+        "a".into(),
+    );
+    let b = AdmittedJsonHttpTransport::with_transport_cooldown(raw, admission, "b".into());
+    let mut first = a.execute_json(&req);
+    let mut second = a.execute_json(&req);
+    assert!(poll!(&mut first).is_pending());
+    assert!(poll!(&mut second).is_pending());
+    let one = calls.try_recv().unwrap();
+    let two = calls.try_recv().unwrap();
+    one.send(Ok(response(429, Some("5")))).unwrap();
+    first.await.unwrap();
+    let mut waiting = a.execute_json(&req);
+    assert!(poll!(&mut waiting).is_pending());
+    tokio::time::advance(Duration::from_secs(2)).await;
+    two.send(Ok(response(429, Some("10")))).unwrap();
+    second.await.unwrap();
+    tokio::time::advance(Duration::from_secs(3)).await;
+    assert!(poll!(&mut waiting).is_pending());
+    assert!(calls.try_recv().is_err());
+    drop(waiting);
+    let mut other = b.execute_json(&req);
+    assert!(poll!(&mut other).is_pending());
+    calls
+        .try_recv()
+        .unwrap()
+        .send(Ok(response(200, None)))
+        .unwrap();
+    other.await.unwrap();
+    let mut next = a.execute_json(&req);
+    tokio::time::advance(Duration::from_secs(6)).await;
+    assert!(poll!(&mut next).is_pending());
+    assert!(calls.try_recv().is_err());
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert!(poll!(&mut next).is_pending());
+    calls
+        .try_recv()
+        .unwrap()
+        .send(Ok(response(200, None)))
+        .unwrap();
+    next.await.unwrap();
+}
