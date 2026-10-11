@@ -56,7 +56,9 @@ pub(crate) async fn settle_terminal_parent_subagent_jobs(
         .await?;
         let mut owned_seen = false;
         for job in jobs {
-            let packet = load_subagent_work_packet_async(store, &job).await?;
+            let packet = load_subagent_work_packet_async(store, &job)
+                .await
+                .map_err(|error| error.diagnostic_message())?;
             let binding = subagent_work_packet_runtime_binding(&packet, &job)?;
             if binding.parent_agent_run_id != parent_agent_run_id {
                 continue;
@@ -74,13 +76,25 @@ pub(crate) async fn settle_terminal_parent_subagent_jobs(
             {
                 Ok(event) => events.push(event),
                 Err(error) => {
+                    if error.requires_settlement() {
+                        centaeris_core::session::store::AsyncJobStorePort::settle_job_operations(
+                            store,
+                        )
+                        .await
+                        .map_err(|settlement| {
+                            format!(
+                                "{}; reconciliation unavailable: {settlement}",
+                                error.diagnostic_message()
+                            )
+                        })?;
+                    }
                     // A worker may win the terminal race. Preserve its authoritative result.
                     if !store
                         .get_runtime_job(&job.job_id)
                         .await?
                         .is_some_and(|current| current.status.is_terminal())
                     {
-                        return Err(error);
+                        return Err(error.diagnostic_message());
                     }
                 }
             }

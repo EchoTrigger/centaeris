@@ -16,7 +16,8 @@ gate and inspection of its final artifacts.
 ## Test quality
 
 Storage contract consolidation and the file-backed asynchronous SQLite driver
-validation are described in [StorageExecution.md](StorageExecution.md). Its driver
+validation are described in [StorageExecution.md](StorageExecution.md). The narrow
+Job result and recovery contract is in [JobStorage.md](JobStorage.md). Its driver
 tests run in the ordinary `centaeris-runtime-sqlite` suite; the separately compiled
 `panic=abort` executable checks abrupt database-worker exit without relying on
 unwind cleanup. Both paths use the same adapter transaction implementations.

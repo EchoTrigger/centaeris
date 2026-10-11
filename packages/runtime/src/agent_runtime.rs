@@ -528,7 +528,8 @@ fn schedule_child_job_cancellation(
                                 cancelled_at_ms: current_timestamp_ms(),
                             },
                         )
-                        .await?;
+                        .await
+                        .map_err(|error| error.diagnostic_message())?;
                         (parent_session_id, vec![event])
                     } else {
                         let result = cancel_subagent_run_jobs_async(
@@ -543,7 +544,8 @@ fn schedule_child_job_cancellation(
                                 include_running: true,
                             },
                         )
-                        .await?;
+                        .await
+                        .map_err(|error| error.diagnostic_message())?;
                         (session_id.clone(), result.events)
                     };
                 persist_subagent_result_projection_from_scheduler_events(
@@ -558,7 +560,9 @@ fn schedule_child_job_cancellation(
                         .ok_or_else(|| {
                             format!("cancelled Agent runtime job missing: {}", event.job_id)
                         })?;
-                    let packet = load_subagent_work_packet_async(&store, &job).await?;
+                    let packet = load_subagent_work_packet_async(&store, &job)
+                        .await
+                        .map_err(|error| error.diagnostic_message())?;
                     let binding = subagent_work_packet_runtime_binding(&packet, &job)?;
                     let bridge = build_subagent_scheduler_runtime_event(
                         parent_session_id.as_str(),

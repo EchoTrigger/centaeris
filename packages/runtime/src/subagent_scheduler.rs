@@ -192,7 +192,9 @@ async fn next_queued_parent_session() -> Result<Option<String>, String> {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| format!("Agent runtime job session missing: {}", job.job_id))?;
-        let work_packet = load_subagent_work_packet_async(&store, &job).await?;
+        let work_packet = load_subagent_work_packet_async(&store, &job)
+            .await
+            .map_err(|error| error.diagnostic_message())?;
         let binding = subagent_work_packet_runtime_binding(&work_packet, &job)?;
         if agent_session_is_ready(&job, &binding)? {
             return Ok(Some(parent_session_id.to_string()));
@@ -217,7 +219,9 @@ async fn run_parent_batch(
     }
     let mut bindings = HashMap::new();
     for job in queued_jobs {
-        let packet = load_subagent_work_packet_async(&store, &job).await?;
+        let packet = load_subagent_work_packet_async(&store, &job)
+            .await
+            .map_err(|error| error.diagnostic_message())?;
         let binding = subagent_work_packet_runtime_binding(&packet, &job)?;
         if !agent_session_is_ready(&job, &binding)? {
             break;
@@ -266,7 +270,8 @@ async fn run_parent_batch(
             max_parallelism: DEFAULT_SUBAGENT_MAX_PARALLELISM,
         },
     )
-    .await?;
+    .await
+    .map_err(|error| error.diagnostic_message())?;
     let _projected = persist_subagent_result_projection_from_scheduler_events(
         &store,
         session_id,

@@ -15,6 +15,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[path = "core_subagent/call_chain.rs"]
+mod call_chain;
+
 #[derive(Debug)]
 struct RecordingRunner {
     outcome: SubagentWorkerRunOutcome,
@@ -743,8 +746,8 @@ async fn run_claimed_subagent_job_async_requires_claim_lease_owner() {
     .await
     .expect_err("missing subagent lease owner must fail");
 
-    assert!(err.contains("lease_owner"));
-    assert!(err.contains("subagent runtime job"));
+    assert!(err.to_string().contains("lease_owner"));
+    assert!(err.to_string().contains("subagent runtime job"));
 
     drop(store);
     let _ = std::fs::remove_file(db_path);
@@ -829,7 +832,9 @@ async fn run_claimed_subagent_job_async_loud_fails_when_start_observer_fails() {
     .await
     .expect_err("observer failure must loud-fail current scheduler tick");
 
-    assert!(error.contains("forced subagent start observer failure"));
+    assert!(error
+        .to_string()
+        .contains("forced subagent start observer failure"));
     assert!(!runner_called.load(Ordering::SeqCst));
     let job = store
         .get_runtime_job(claimed.job.job_id.as_str())
@@ -1723,9 +1728,13 @@ async fn run_due_subagent_jobs_worker_pool_async_fails_when_resource_claim_packe
     .await
     .expect_err("invalid resource claim packet must fail worker-pool planning");
 
-    assert!(error.contains("decode subagent resource claim failed"));
-    assert!(error.contains("job_id="));
-    assert!(error.contains("invalid subagent work packet resource claim"));
+    assert!(error
+        .to_string()
+        .contains("decode subagent resource claim failed"));
+    assert!(error.to_string().contains("job_id="));
+    assert!(error
+        .to_string()
+        .contains("invalid subagent work packet resource claim"));
 
     drop(store);
     let _ = std::fs::remove_file(db_path);

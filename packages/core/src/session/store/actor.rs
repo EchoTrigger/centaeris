@@ -2376,6 +2376,159 @@ where
         })?
 }
 
+#[async_trait::async_trait]
+impl super::AsyncJobStorePort for RuntimeStoreActor {
+    async fn settle_job_operations(&self) -> Result<(), super::job::JobStoreError> {
+        // The Actor is sequential. The reply to this read follows completion of
+        // every previously accepted command, including a dropped reply waiter.
+        self.list_runtime_jobs(crate::session::reliability::ListRuntimeJobsRequest {
+            limit: 0,
+            ..Default::default()
+        })
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            super::job::JobStoreError::unconfirmed(super::job::JobStoreOperation::Read, error)
+        })
+    }
+    async fn get_runtime_job(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<RuntimeJobRecord>, super::job::JobStoreError> {
+        RuntimeStoreActor::get_runtime_job(self, job_id)
+            .await
+            .map_err(|error| {
+                super::job::JobStoreError::unconfirmed(super::job::JobStoreOperation::Read, error)
+            })
+    }
+    async fn list_runtime_jobs(
+        &self,
+        req: ListRuntimeJobsRequest,
+    ) -> Result<Vec<RuntimeJobRecord>, super::job::JobStoreError> {
+        RuntimeStoreActor::list_runtime_jobs(self, req)
+            .await
+            .map_err(|error| {
+                super::job::JobStoreError::unconfirmed(super::job::JobStoreOperation::Read, error)
+            })
+    }
+    async fn claim_due_runtime_jobs(
+        &self,
+        req: ClaimDueRuntimeJobsRequest,
+    ) -> Result<Vec<RuntimeJobRecord>, super::job::JobStoreError> {
+        RuntimeStoreActor::claim_due_runtime_jobs(self, req)
+            .await
+            .map_err(|error| {
+                super::job::JobStoreError::unconfirmed(super::job::JobStoreOperation::Claim, error)
+            })
+    }
+    async fn start_runtime_job(
+        &self,
+        req: StartRuntimeJobRequest,
+    ) -> Result<(), super::job::JobStoreError> {
+        RuntimeStoreActor::start_runtime_job(self, req)
+            .await
+            .map_err(|error| {
+                super::job::JobStoreError::unconfirmed(super::job::JobStoreOperation::Start, error)
+            })
+    }
+    async fn renew_runtime_job_lease(
+        &self,
+        req: RenewRuntimeJobLeaseRequest,
+    ) -> Result<(), super::job::JobStoreError> {
+        RuntimeStoreActor::renew_runtime_job_lease(self, req)
+            .await
+            .map_err(|error| {
+                super::job::JobStoreError::unconfirmed(super::job::JobStoreOperation::Renew, error)
+            })
+    }
+    async fn complete_runtime_job(
+        &self,
+        req: CompleteRuntimeJobRequest,
+    ) -> Result<(), super::job::JobStoreError> {
+        RuntimeStoreActor::complete_runtime_job(self, req)
+            .await
+            .map_err(|error| {
+                super::job::JobStoreError::unconfirmed(
+                    super::job::JobStoreOperation::Complete,
+                    error,
+                )
+            })
+    }
+    async fn fail_runtime_job(
+        &self,
+        req: FailRuntimeJobRequest,
+    ) -> Result<(), super::job::JobStoreError> {
+        RuntimeStoreActor::fail_runtime_job(self, req)
+            .await
+            .map_err(|error| {
+                super::job::JobStoreError::unconfirmed(super::job::JobStoreOperation::Fail, error)
+            })
+    }
+    async fn cancel_runtime_job(
+        &self,
+        req: CancelRuntimeJobRequest,
+    ) -> Result<(), super::job::JobStoreError> {
+        RuntimeStoreActor::cancel_runtime_job(self, req)
+            .await
+            .map_err(|error| {
+                super::job::JobStoreError::unconfirmed(super::job::JobStoreOperation::Cancel, error)
+            })
+    }
+    async fn reclaim_expired_runtime_job_leases(
+        &self,
+        now_ms: TimestampMs,
+    ) -> Result<usize, super::job::JobStoreError> {
+        RuntimeStoreActor::reclaim_expired_runtime_job_leases(self, now_ms)
+            .await
+            .map_err(|error| {
+                super::job::JobStoreError::unconfirmed(
+                    super::job::JobStoreOperation::Reclaim,
+                    error,
+                )
+            })
+    }
+    async fn load_external_context_object(
+        &self,
+        object_id: &str,
+    ) -> Result<Option<ExternalContextObject>, super::job::JobStoreError> {
+        RuntimeStoreActor::load_external_context_object(self, object_id)
+            .await
+            .map_err(|error| {
+                super::job::JobStoreError::unconfirmed(super::job::JobStoreOperation::Read, error)
+            })
+    }
+    async fn upsert_external_context_and_schedule_job(
+        &self,
+        req: UpsertExternalContextAndScheduleJobRequest,
+    ) -> Result<ScheduleRuntimeJobResult, super::job::JobStoreError> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(
+            RuntimeStoreActorCommand::UpsertExternalContextAndScheduleJob {
+                req,
+                reply: RuntimeStoreActorReply::Async(reply),
+            },
+            receiver,
+        )
+        .await
+        .map_err(|error| {
+            super::job::JobStoreError::unconfirmed(super::job::JobStoreOperation::Create, error)
+        })
+    }
+    async fn upsert_external_context_link_and_complete_job(
+        &self,
+        req: UpsertExternalContextLinkAndCompleteJobRequest,
+    ) -> Result<(), super::job::JobStoreError> {
+        RuntimeStoreActor::upsert_external_context_link_and_complete_job(self, req)
+            .await
+            .map_err(|error| {
+                super::job::JobStoreError::unconfirmed(
+                    super::job::JobStoreOperation::Complete,
+                    error,
+                )
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
