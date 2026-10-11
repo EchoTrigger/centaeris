@@ -43,7 +43,6 @@ from .model_adapter.openai_completions import (
     parse_open_ai_completions_response,
     stream_open_ai_completions,
 )
-from .model_adapter.quota import async_model_attempt, model_attempt
 from .model_adapter.anthropic_messages import (
     build_anthropic_messages_request,
     parse_anthropic_message,
@@ -65,7 +64,6 @@ from .models import (
     KnowledgeSegment,
     AgentRunAuthorization,
     ModelConfig,
-    ModelQuotaDomain,
     ModelProvider,
     ModelRunLog,
     McpBearerCredential,
@@ -4560,181 +4558,6 @@ class McpBearerCredentialAcceptanceTests(TestCase):
 
 
 
-class ModelQuotaAdmissionTests(TransactionTestCase):
-    def test_four_attempts_enter_while_fifth_waits_for_a_slot(self):
-        from contextlib import ExitStack
-
-        self.domain.maxConcurrent = 4
-        self.domain.save(update_fields=["maxConcurrent", "updatedAt"])
-        entered = threading.Event()
-        cancel = threading.Event()
-
-        def fifth():
-            with model_attempt(self.model, cancel):
-                entered.set()
-
-        with ExitStack() as held, ThreadPoolExecutor(max_workers=1) as pool:
-            for _ in range(3):
-                held.enter_context(model_attempt(self.model))
-            try:
-                with model_attempt(self.model):
-                    result = pool.submit(fifth)
-                    self.assertFalse(entered.wait(0.15))
-                self.assertTrue(entered.wait(3))
-                result.result(timeout=3)
-            finally:
-                cancel.set()
-
-    def setUp(self):
-        self.admin = User.objects.create_superuser(
-            username="quota@example.com", email="quota@example.com", password="password"
-        )
-        self.domain = ModelQuotaDomain.objects.create(
-            id="shared-account", maxConcurrent=1, enabled=True
-        )
-        self.provider = ModelProvider.objects.create(
-            displayName="test", api="openai-completions", apiBase="https://models.example.com/v1"
-        )
-        ProviderCredential.objects.create(
-            provider=self.provider,
-            quotaDomain=self.domain,
-            displayName="test",
-            encryptedSecret=encrypt_credential_secret("test-secret"),
-            createdBy=self.admin,
-            updatedBy=self.admin,
-        )
-        self.model = ModelConfig.objects.create(
-            displayName="test", provider=self.provider, modelName="test",
-            resolvedApi=self.provider.api, resolvedApiBase=self.provider.apiBase,
-        )
-
-    def test_two_connections_share_one_slot_until_full_attempt_exits(self):
-        entered = threading.Event()
-        release = threading.Event()
-        second_entered = threading.Event()
-
-        def first():
-            with model_attempt(self.model):
-                entered.set()
-                self.assertTrue(release.wait(3))
-
-        def second():
-            with model_attempt(self.model):
-                second_entered.set()
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            first_result = pool.submit(first)
-            self.assertTrue(entered.wait(3))
-            second_result = pool.submit(second)
-            self.assertFalse(second_entered.wait(0.15))
-            release.set()
-            first_result.result(timeout=3)
-            second_result.result(timeout=3)
-        self.assertTrue(second_entered.is_set())
-
-    def test_sdk_http_attempt_uses_admitted_fake_transport(self):
-        from .model_adapter import test_model_config
-
-        provider_called = threading.Event()
-
-        def fake_provider(request):
-            provider_called.set()
-            self.assertEqual(request.url.path, "/v1/chat/completions")
-            return httpx.Response(200, json={
-                "id": "chatcmpl-test", "object": "chat.completion", "created": 1,
-                "model": "test", "choices": [{
-                    "index": 0, "message": {"role": "assistant", "content": "hello"},
-                    "finish_reason": "stop",
-                }],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-            })
-
-        transport = httpx.MockTransport(fake_provider)
-
-        def client_for_attempt(_model, _request_body):
-            return OpenAI(
-                api_key="test", base_url="https://models.example.com/v1",
-                http_client=httpx.Client(transport=transport), max_retries=0,
-            )
-
-        with patch(
-            "app_core.model_adapter.openai_completions.open_ai_completions_client",
-            side_effect=client_for_attempt,
-        ):
-            self.assertEqual(test_model_config(self.model)["text"], "hello")
-        self.assertTrue(provider_called.is_set())
-
-    def test_cancelled_queued_sync_request_never_enters_provider_attempt(self):
-        entered = threading.Event()
-        cancel = threading.Event()
-
-        def queued():
-            with self.assertRaisesRegex(ModelProviderError, "model_run_cancelled"):
-                with model_attempt(self.model, cancel):
-                    entered.set()
-
-        with model_attempt(self.model), ThreadPoolExecutor(max_workers=1) as pool:
-            result = pool.submit(queued)
-            self.assertFalse(entered.wait(0.15))
-            cancel.set()
-            result.result(timeout=3)
-        self.assertFalse(entered.is_set())
-
-    def test_cancelled_waiter_does_not_keep_a_slot(self):
-        async def exercise():
-            async with async_model_attempt(self.model):
-                waiting = asyncio.create_task(self._waiting_attempt())
-                await asyncio.sleep(0.15)
-                self.assertFalse(waiting.done())
-                waiting.cancel()
-                with self.assertRaises(asyncio.CancelledError):
-                    await waiting
-            await asyncio.wait_for(self._waiting_attempt(), 2)
-
-        async_to_sync(exercise)()
-
-    def test_retry_after_cooldown_is_shared_after_slot_release(self):
-        now = [1000000]
-        with patch("app_core.model_adapter.quota._database_now_ms", side_effect=lambda: now[0]):
-            with self.assertRaises(ModelProviderError):
-                with model_attempt(self.model):
-                    raise ModelProviderError("provider_rate_limited", 429, "2")
-            self.domain.refresh_from_db()
-            self.assertEqual(self.domain.cooldownUntilMs, 1002000)
-            entered = threading.Event()
-
-            def next_attempt():
-                with model_attempt(self.model):
-                    entered.set()
-
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(next_attempt)
-                self.assertFalse(entered.wait(0.15))
-                now[0] = 1002000
-                future.result(timeout=3)
-            self.assertTrue(entered.is_set())
-
-    def test_operator_can_bind_an_explicit_domain(self):
-        credential = ProviderCredential.objects.get(provider=self.provider)
-        credential.quotaDomain = None
-        credential.save(update_fields=["quotaDomain"])
-        with self.assertRaisesRegex(ModelProviderError, "model_quota_domain_required"):
-            with model_attempt(self.model):
-                self.fail("unconfigured provider entered")
-        call_command(
-            "configure_model_quota",
-            domain_id="shared-account",
-            max_concurrent=1,
-            provider_id=self.provider.id,
-            enable=True,
-            stdout=io.StringIO(),
-        )
-        with model_attempt(self.model):
-            pass
-
-    async def _waiting_attempt(self):
-        async with async_model_attempt(self.model):
-            return True
 
 
 class ModelAdminAcceptanceTests(TestCase):
@@ -4750,12 +4573,8 @@ class ModelAdminAcceptanceTests(TestCase):
             api="openai-completions",
             apiBase="https://api.deepseek.com",
         )
-        self.quotaDomain = ModelQuotaDomain.objects.create(
-            id="deepseek-test", maxConcurrent=2, enabled=True
-        )
         self.deepseekCredential = ProviderCredential.objects.create(
             provider=self.deepseekProvider,
-            quotaDomain=self.quotaDomain,
             displayName="DeepSeek test",
             encryptedSecret=encrypt_credential_secret("test-provider-secret"),
             createdBy=self.admin,
@@ -4773,41 +4592,7 @@ class ModelAdminAcceptanceTests(TestCase):
             **values,
         )
 
-    def test_unconfigured_quota_domain_rejects_before_provider_attempt(self):
-        from .model_adapter import test_model_config
 
-        model = self.create_model()
-        self.deepseekCredential.quotaDomain = None
-        self.deepseekCredential.save(update_fields=["quotaDomain"])
-        with patch(
-            "app_core.model_adapter.openai_completions.open_ai_completions_client",
-            side_effect=AssertionError("provider was called before quota configuration"),
-        ):
-            with self.assertRaises(ModelProviderError) as failure:
-                test_model_config(model)
-        self.assertEqual(failure.exception.reasonType, "model_quota_domain_required")
-
-    def test_provider_retry_after_updates_shared_quota_cooldown(self):
-        from .model_adapter import test_model_config
-
-        model = self.create_model()
-        request = httpx.Request("POST", "https://api.deepseek.com/chat/completions")
-        error = RateLimitError(
-            "synthetic rate limit",
-            response=httpx.Response(429, headers={"Retry-After": "3"}, request=request),
-            body=None,
-        )
-        client = Mock()
-        client.chat.completions.create.side_effect = error
-        with patch("app_core.model_adapter.quota._database_now_ms", return_value=1000000), patch(
-            "app_core.model_adapter.openai_completions.open_ai_completions_client",
-            return_value=client,
-        ):
-            with self.assertRaises(ModelProviderError) as failure:
-                test_model_config(model)
-        self.assertEqual(failure.exception.reasonType, "provider_rate_limited")
-        self.quotaDomain.refresh_from_db()
-        self.assertEqual(self.quotaDomain.cooldownUntilMs, 1003000)
 
     def test_provider_first_configuration_creates_no_preset_models(self):
         self.client.force_login(self.admin)

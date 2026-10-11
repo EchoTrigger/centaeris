@@ -49,6 +49,16 @@ Upload alias tests retain their no-refund assertion on both platforms: Unix uses
 a dangling symlink, and Windows uses a dangling directory junction without
 requiring the symlink privilege. Neither case skips the resource-safety check.
 
+
+Hosted model gateway tests exercise real SDK requests with synthetic HTTP
+responses: credentials work without an application quota binding, upstream
+429/503 metadata remains available, and subsequent requests are neither retried
+nor delayed by application-wide provider cooldown. The migration test preserves
+encrypted credentials, model configuration and application capacity records.
+Real HTTPS/ASGI tests retain coverage for ORM connection return, caller-owned
+transactions and stream cancellation. See the
+[hosted model gateway boundary](../workspace/architecture/HostedModelAdmission.md).
+
 ## Focused Core gate
 
 Every Rust change runs at least:

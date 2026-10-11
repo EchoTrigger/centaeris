@@ -1,51 +1,55 @@
-# Hosted model admission
+# Hosted model gateway boundary
 
-Core owns the model and task semantics through `ModelClient`. Workspace Runtime
-implements that interface by calling Django `/internal/model-runs`. Django owns
-the provider credentials and the OpenAI/Anthropic SDK calls, so it is the sole
-hosted admission point for actual provider attempts. The SDK clients have
-`max_retries=0`; Runtime retains its existing proxy retry loop. The Core
-in-process ticket is not used on this hosted path.
+Core owns model and task semantics through `ModelClient`. Hosted Runtime calls
+Django `/internal/model-runs`; Django owns provider credentials, request
+validation and OpenAI/Anthropic SDK adaptation. The configured upstream may be a
+model gateway or a direct provider. Credentials do not require an application
+quota-domain binding.
 
-Each provider credential must be assigned to an explicit `ModelQuotaDomain`.
-No quota identity is inferred from provider name, model name, or secret.
-Released credentials migrate with a null domain and real calls fail closed
-until an operator configures and enables one. A domain may be shared by
-several credentials when the external account actually shares a quota. Use
-the same domain ID and concurrency limit for each binding:
+Supplier-account concurrency, request/token quotas and shared cooldown belong
+to the model gateway or upstream operator. Django does not maintain account
+slots, quota advisory locks, shared cooldown records or a polling queue for
+provider admission. Gateways must count streaming attempts until their streams
+close; an RPM limit alone is not a concurrent-request limit. Direct-provider
+deployments must supply their own upstream quota policy.
 
-```sh
-python manage.py configure_model_quota --domain-id ACCOUNT_QUOTA_ID --max-concurrent LIMIT --provider-id PROVIDER_ID --enable
-```
+Application resource protection remains independent: Run admission and Runtime
+execution/residency limits, HTTP capacity, PostgreSQL pools, upload occupancy
+and storage stream lanes retain their existing contracts. Removing supplier
+quotas does not make these controls account-wide model quotas or a complete
+global limit on every model endpoint. API workers/connections and gateway
+ingress limits must also fit the deployment's memory and connection capacity.
 
-`LIMIT` is the account's configured concurrent attempt ceiling, from 1 to 64;
-it is not the local Desktop default. The command rejects an attempt to reuse
-the same domain ID with a different limit. Run it against the upgraded API
-database before resuming real model traffic.
+SDK clients retain `max_retries=0` and the configured provider timeout. A
+cancelled synchronous call is rejected before provider dispatch; streaming
+cancellation closes its provider iterator/client and records cancellation.
+Ordinary ORM leases are returned before network waits, while caller-owned
+transactions remain intact. This does not promise immediate interruption of an
+already-running synchronous SDK request; it remains bounded by its timeout.
 
-Django holds a PostgreSQL session advisory lock for one slot throughout a
-provider response or streamed iterator. Waiting requests poll without holding
-a slot and cancellation closes their connection. A provider 408, 429, or 5xx
-response with valid `Retry-After` advances a shared database cooldown. The
-database clock is used for that cooldown. Existing calls continue during a
-new cooldown; subsequent calls wait.
+Provider status and `Retry-After` remain on `ModelProviderError`. Django does not
+sleep or automatically resend after an upstream rejection. Runtime retains its
+existing proxy retry loop: the current proxy error body does not forward
+`Retry-After`, and ambiguous network failures can still cause a later external
+attempt. No exactly-once provider execution is promised. Core's local in-process
+model admission is outside this hosted change.
 
-This coordinates multiple API processes and replicas that use the same
-PostgreSQL database through direct or session-pooled connections. Transaction
-pooling is incompatible with session advisory locks and must not sit on this
-connection path. It does not provide a global FIFO queue or rate limit by
-token/request count. If the advisory-lock connection is lost while an SDK call
-is already in flight, PostgreSQL releases its slot and another process may
-start a call; that failure window is outside the strict concurrency guarantee.
-Runtime cannot recover provider `Retry-After` from a lost proxy response, and
-the current proxy error body does not forward that header. Network ambiguity
-may still cause a later proxy retry to repeat an external call; no
-exactly-once execution or reversal of provider effects is promised.
+Retained transcript failures keep their original diagnostic codes. Retired
+quota reasons use the generic failure label rather than instructing operators
+to configure the removed quota domain. Runtime no longer gives those reasons a
+quota-specific classification; they retain the nonretryable unknown-error path.
 
-Before changing quota bindings or deploying the migration, stop accepting new
-tasks and drain or explicitly terminate active model calls. Apply the forward
-migration, configure every real provider, update Runtime and API together,
-check health and a controlled fake-provider call, then resume intake. Do not
-mix old and new ownership binaries. A rollback needs its own tested data and
-binary plan; simply starting the old binary after the new migration is not a
-verified rollback.
+Migration `0013_remove_model_quota_domain` removes the credential binding and
+obsolete quota table, preserving credentials (including encrypted secrets and
+versions), model configuration and host-capacity records. Historical migrations
+remain unchanged. Stop intake and drain model calls before applying the forward
+migration and switching API binaries; old binaries require the removed schema.
+Reversing the migration recreates an empty quota table and null bindings, not
+the discarded account policy. Restoring old behavior requires a backup or
+explicit operator configuration; a schema rollback alone is insufficient.
+
+`test_model_gateway.py` covers credentials without quota configuration, upstream
+failure metadata, no local retry/cooldown and pre-dispatch cancellation.
+`test_model_database_leases.py` exercises real HTTPS calls and disconnects with
+a one-connection ordinary pool. The migration test upgrades populated legacy
+credentials and verifies retained models and upload occupancy.

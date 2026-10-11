@@ -1,10 +1,9 @@
 """Full ASGI model requests must return ordinary leases while providers wait.
 
-These tests require PostgreSQL and use real ORM, pooling and quota advisory locks.
+These tests require PostgreSQL and use real ORM and connection pooling.
 The only provider is a local HTTPS server with a temporary, generated certificate.
 """
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,8 +15,6 @@ import secrets
 import ssl
 import tempfile
 import threading
-import time
-from unittest.mock import patch
 
 from asgiref.testing import ApplicationCommunicator
 from cryptography import x509
@@ -35,8 +32,8 @@ import psycopg
 from api.urls import urlpatterns as application_patterns
 from . import tests as fixtures
 from .models import AgentRun, ModelConfig, ModelRunLog, Workspace
-from .model_adapter import quota
-from .model_adapter.common import ModelProviderError
+from .model_adapter.common import model_database_operation
+from .test_model_gateway import configure_gateway
 
 
 def database_probe(request):
@@ -83,7 +80,7 @@ class ModelDatabaseLeaseTests(TransactionTestCase):
     serialized_rollback = True
 
     def setUp(self):
-        fixtures.ModelQuotaAdmissionTests.setUp(self)
+        configure_gateway(self)
         self.provider_ready = threading.Event()
         self.provider_release = threading.Event()
         self.provider_requests = []
@@ -222,26 +219,6 @@ class ModelDatabaseLeaseTests(TransactionTestCase):
         self.model.resolvedApiBase = self.provider.apiBase
         self.model.save(update_fields=["resolvedApiBase", "updatedAt"])
 
-    def quota_snapshot(self):
-        return self.observer.execute("""
-            SELECT count(DISTINCT a.pid), count(l.pid)
-            FROM pg_stat_activity a LEFT JOIN pg_locks l ON l.pid = a.pid
-              AND l.locktype = 'advisory' AND l.granted AND l.objsubid = 2
-              AND l.classid::bigint = %s AND l.objid::bigint = 1
-            WHERE a.datname = current_database()
-              AND a.application_name = 'centaeris-api-quota'
-        """, ((-self.domain.pk) & 0xffffffff,)).fetchone()
-
-    def assert_quota_released(self):
-        # Client close returns before PostgreSQL removes its backend from
-        # pg_stat_activity. Bound the server observation, still requiring both
-        # the dedicated connection and its advisory lock to disappear.
-        deadline = time.monotonic() + 2
-        snapshot = self.quota_snapshot()
-        while snapshot != (0, 0) and time.monotonic() < deadline:
-            time.sleep(.01)
-            snapshot = self.quota_snapshot()
-        self.assertEqual(snapshot, (0, 0), "quota ownership survived connection close")
 
     async def request(self, path, body=None, streaming=False):
         from api.asgi import application
@@ -285,12 +262,9 @@ class ModelDatabaseLeaseTests(TransactionTestCase):
                 early_status = task.result()[0] if task.done() else None
                 self.assertTrue(reached, f"provider fixture barrier not reached; HTTP status={early_status}")
                 self.assertFalse(task.done())
-                self.assertEqual(await asyncio.to_thread(self.quota_snapshot), (1, 1))
                 probe_status, probe_body = await self.request("/lease-test/database-probe")
                 self.assertFalse(self.provider_release.is_set())
                 self.assertFalse(task.done(), "ordinary query must finish before the model")
-                self.assertEqual(await asyncio.to_thread(self.quota_snapshot), (1, 1),
-                                 "ordinary capacity must not remove quota protection")
             finally:
                 self.provider_release.set()
                 status, content = await asyncio.wait_for(task, 20)
@@ -307,7 +281,6 @@ class ModelDatabaseLeaseTests(TransactionTestCase):
                 self.assertEqual(json.loads(content)["text"], "lease-test")
             self.assertEqual(self.provider_requests, [streaming], "one provider attempt is sufficient")
             self.assertEqual(self.provider_failures, [])
-            await asyncio.to_thread(self.assert_quota_released)
             pool = DatabaseWrapper._connection_pools["default"]
             self.assertEqual(pool.get_stats()["pool_available"], 1)
             final_status, final_body = await self.request("/lease-test/database-probe")
@@ -328,93 +301,8 @@ class ModelDatabaseLeaseTests(TransactionTestCase):
     def test_stream_provider_pause_returns_ordinary_database_lease(self):
         self.assert_provider_wait_releases_ordinary_pool(streaming=True)
 
-    def assert_quota_wait_releases_ordinary_pool(self, cooldown):
-        sleeping = threading.Event()
-        resume = threading.Event()
-        cancel = threading.Event()
-        entered = threading.Event()
-        waiting_thread = []
-        original_sleep = time.sleep
 
-        def controlled_sleep(seconds):
-            # Patch only scheduling at this waiter's real admission boundary.
-            # Other threads, including the provider server and pool, keep real sleep.
-            if waiting_thread and threading.get_ident() == waiting_thread[0]:
-                sleeping.set()
-                if not resume.wait(10):
-                    raise TimeoutError("quota waiter barrier was not released")
-            else:
-                original_sleep(seconds)
-
-        def waiter():
-            waiting_thread.append(threading.get_ident())
-            try:
-                with quota.model_attempt(self.model, cancel):
-                    entered.set()
-            except ModelProviderError as error:
-                return error.reasonType
-            finally:
-                connections.close_all()
-
-        holder = None
-        if cooldown:
-            self.domain.cooldownUntilMs = quota._database_now_ms() + 60_000
-            self.domain.save(update_fields=["cooldownUntilMs", "updatedAt"])
-        else:
-            holder = quota.model_attempt(self.model)
-            holder.__enter__()
-        # Only the holder's dedicated quota connection is allowed to survive.
-        connections.close_all()
-        expected_quota = (0, 0) if cooldown else (1, 1)
-        try:
-            async def exercise():
-                baseline_status, baseline_body = await self.request("/lease-test/database-probe")
-                self.assertEqual(baseline_status, 200)
-                expected_probe = {"value": 1, "pid": os.getpid()}
-                self.assertEqual(json.loads(baseline_body), expected_probe)
-                with patch.object(quota.time, "sleep", side_effect=controlled_sleep), \
-                        ThreadPoolExecutor(max_workers=1) as executor:
-                    result = executor.submit(waiter)
-                    try:
-                        self.assertTrue(await asyncio.to_thread(sleeping.wait, 5),
-                                        "quota fixture did not reach its real polling boundary")
-                        self.assertFalse(entered.is_set())
-                        self.assertEqual(await asyncio.to_thread(self.quota_snapshot), expected_quota)
-                        status, body = await self.request("/lease-test/database-probe")
-                        self.assertFalse(resume.is_set())
-                        self.assertFalse(result.done())
-                        self.assertFalse(entered.is_set())
-                        self.assertEqual(await asyncio.to_thread(self.quota_snapshot), expected_quota)
-                    finally:
-                        cancel.set()
-                        resume.set()
-                        reason = await asyncio.to_thread(result.result, 5)
-                    self.assertEqual(reason, "model_run_cancelled")
-                self.assertFalse(entered.is_set())
-                self.assertEqual(self.provider_requests, [])
-                self.assertEqual(await asyncio.to_thread(self.quota_snapshot), expected_quota)
-                self.assertEqual(DatabaseWrapper._connection_pools["default"].get_stats()["pool_available"], 1)
-                return status, body, expected_probe
-
-            status, body, expected_probe = asyncio.run(exercise())
-        finally:
-            cancel.set()
-            resume.set()
-            if holder is not None:
-                holder.__exit__(None, None, None)
-            connections.close_all()
-        self.assert_quota_released()
-        self.assertFalse(ModelRunLog.objects.filter(agentRunId=self.run_id).exists())
-        self.assertEqual(status, 200, "quota waiting retained the only ordinary database lease")
-        self.assertEqual(json.loads(body), expected_probe)
-
-    def test_saturated_quota_wait_returns_ordinary_lease_and_cancels_without_provider(self):
-        self.assert_quota_wait_releases_ordinary_pool(cooldown=False)
-
-    def test_cooldown_quota_wait_returns_ordinary_lease_and_cancels_without_provider(self):
-        self.assert_quota_wait_releases_ordinary_pool(cooldown=True)
-
-    def test_stream_disconnect_releases_quota_lock_and_records_cancellation(self):
+    def test_stream_disconnect_releases_connections_and_records_cancellation(self):
         async def exercise():
             from api.asgi import application
             raw = json.dumps(self.body).encode()
@@ -441,11 +329,9 @@ class ModelDatabaseLeaseTests(TransactionTestCase):
                     self.assertTrue(message.get("more_body", False), "stream ended before provider pause")
                 self.assertTrue(await asyncio.to_thread(self.provider_ready.wait, 5))
                 self.assertFalse(self.provider_release.is_set())
-                self.assertEqual(await asyncio.to_thread(self.quota_snapshot), (1, 1))
                 await communicator.send_input({"type": "http.disconnect"})
                 await communicator.wait(timeout=5)
                 self.assertFalse(self.provider_release.is_set(), "disconnect must close ownership without provider completion")
-                await asyncio.to_thread(self.assert_quota_released)
                 status, body = await self.request("/lease-test/database-probe")
                 self.assertEqual(status, 200)
                 self.assertEqual(json.loads(body), {"value": 1, "pid": os.getpid()})
@@ -459,21 +345,13 @@ class ModelDatabaseLeaseTests(TransactionTestCase):
         self.assertEqual(log.status, "error")
         self.assertEqual(log.error, "provider_stream_cancelled")
         self.assertEqual(self.provider_requests, [True])
-        self.assert_quota_released()
 
-    def test_quota_attempt_preserves_caller_owned_transaction_and_rollback(self):
+    def test_model_operation_preserves_caller_owned_transaction_and_rollback(self):
         original_name = ModelConfig.objects.get(pk=self.model.pk).displayName
         with transaction.atomic():
-            with quota.model_attempt(self.model):
-                self.assertEqual(self.quota_snapshot(), (1, 1))
-                with connection.cursor() as cursor:
-                    cursor.execute("SELECT 1")
-                    self.assertEqual(cursor.fetchone()[0], 1)
-            self.assert_quota_released()
-            # The caller's transaction must remain writable after quota admission exits.
+            name = model_database_operation(lambda: ModelConfig.objects.get(pk=self.model.pk).displayName)()
+            self.assertEqual(name, original_name)
             ModelConfig.objects.filter(pk=self.model.pk).update(displayName="rolled-back-name")
-            self.assertEqual(ModelConfig.objects.get(pk=self.model.pk).displayName, "rolled-back-name")
             transaction.set_rollback(True)
         self.assertEqual(ModelConfig.objects.get(pk=self.model.pk).displayName, original_name)
-        self.assert_quota_released()
         self.assertEqual(self.provider_requests, [])

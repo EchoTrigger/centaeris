@@ -26,8 +26,8 @@ function render(kind, sourceType, reason = "model_quota_domain_required") {
   return renderToStaticMarkup(createElement(TranscriptBlockRow, { store, blockId: "failure" }));
 }
 
-test("quota configuration failure is translated in trusted failed run notices", () => {
-  assert.ok(render("notice", "agent_run_failed").includes("modelErrors.quotaRequired"));
+test("historical quota failures retain diagnostic codes without obsolete setup instructions", () => {
+  assert.ok(render("notice", "agent_run_failed").includes("modelErrors.failureLabel · model_quota_domain_required"));
 });
 
 test("failed and interrupted runs render a plain error strip with the original code", () => {
@@ -81,15 +81,15 @@ test("configuration reasons have useful product copy and unknown hosted codes ha
   assert.equal(localizedModelError("model_thinking_mode_unsupported", t), "modelErrors.thinkingUnsupported");
   assert.equal(localizedModelError("prepared_prompt_new_validation_failure", t), "modelErrors.failed");
   const error = new ApiError("model_run_failed", 502);
-  error.payload = { reasonType: "model_quota_domain_required" };
-  assert.equal(modelErrorText(error, t), "modelErrors.quotaRequired");
+  error.payload = { reasonType: "provider_authentication_failed" };
+  assert.equal(modelErrorText(error, t), "modelErrors.authenticationFailed");
 });
 
-test("model settings displays the translated quota error from the API", async () => {
+test("model settings displays the translated provider authentication error from the API", async () => {
   const { default: ModelSettings } = await import(await subjectLoader()(fileURLToPath(new URL("../../src/routes/ModelSettings.jsx", import.meta.url))));
-  const error = new ApiError("model_quota_domain_required", 400);
+  const error = new ApiError("provider_authentication_failed", 401);
   const subject = renderer(ModelSettings, { onClose() {}, onModelsChanged() {} }, environment({ request: async () => { throw error; } }));
   await subject.settle();
-  assert.ok(nodes(subject.tree, node => node.props.children === "modelErrors.quotaRequired").length);
+  assert.ok(nodes(subject.tree, node => node.props.children === "modelErrors.authenticationFailed").length);
   subject.unmount();
 });
