@@ -2039,12 +2039,23 @@ fn execution_recovery_waiting(retry_at_ms: i64) -> AgentRunStepOutcome {
     }
 }
 
+fn recovery_preparation_waiting(reason: &str) -> AgentRunStepOutcome {
+    AgentRunStepOutcome {
+        disposition: "waiting",
+        terminal_state: None,
+        transition_reason: reason.into(),
+        retry_at_ms: None,
+    }
+}
+
 fn prepare_execution_host_with_recovery<T>(
+    retire_lost_execution: impl FnOnce() -> Result<(), String>,
     mut reserve_recovery: impl FnMut(Option<&mut postgres::Client>) -> Result<(), String> + Send,
     prepare: impl FnOnce(
         &mut (dyn FnMut(Option<&mut postgres::Client>) -> Result<(), String> + Send),
     ) -> Result<T, String>,
 ) -> Result<T, String> {
+    retire_lost_execution()?;
     prepare(&mut reserve_recovery)
 }
 
@@ -2319,11 +2330,20 @@ fn execute_agent_run(
         .map_err(|_| "session record sequence lock poisoned".to_string())?
         .active_execution()
         .cloned();
-    let recovery_checkpoint = select_agent_run_recovery_checkpoint(
+    let recovery_checkpoint = match select_agent_run_recovery_checkpoint(
         job_store.as_ref(),
         &agent_run_start,
         &*sequence_guard(&session_record_sequence)?,
-    )?;
+    ) {
+        Ok(checkpoint) => checkpoint,
+        Err(error) if active_execution.is_none() => {
+            eprintln!("recovery checkpoint verification retained old execution: {error}");
+            return Ok(recovery_preparation_waiting(
+                "session_workspace_resolve_unavailable",
+            ));
+        }
+        Err(error) => return Err(error),
+    };
     let has_execution_fact = active_execution.is_some();
     let mut execution_id = active_execution
         .as_ref()
@@ -2431,9 +2451,130 @@ fn execute_agent_run(
     )));
     let runtime_prelude_ms = startup_started.elapsed().as_millis();
     let sandbox_started = Instant::now();
+    let recovery_workspace_lease = SessionWorkspaceLease {
+        job_id: lifecycle_job_id.clone(),
+        lease_owner: lifecycle_lease_owner.clone(),
+    };
+    let mut prepared_recovery_restore = None;
+    if let Some((_, checkpoint)) = recovery_checkpoint.as_ref() {
+        let preflight_inputs = (|| -> Result<_, String> {
+            Ok((
+                recovery_uses_session_workspace(
+                    &checkpoint.workspace_snapshot,
+                    &agent_run_start.authorization.session_workspace,
+                )?,
+                workspace_input_upper_bound_bytes(&agent_run_start)?,
+            ))
+        })();
+        let (uses_session_workspace, input_upper_bound_bytes) = match preflight_inputs {
+            Ok(inputs) => inputs,
+            Err(error) => {
+                eprintln!("recovery workspace preflight rejected before retirement: {error}");
+                return Ok(recovery_preparation_waiting(
+                    "session_workspace_resolve_unavailable",
+                ));
+            }
+        };
+        let prepared = docker_execution_host::prepare_recovery_workspace_restore(
+            docker_execution_host::RecoveryRestoreBinding {
+                api_url: &api_url,
+                api_token: &token,
+                agent_run_id: &agent_run_start.agent_run_id,
+                authorization_digest: &agent_run_start.authorization_digest,
+                lease: &recovery_workspace_lease,
+                checkpoint_id: &checkpoint.checkpoint_id,
+                data_tmpfs_bytes: agent_run_start.authorization.resources.data_tmpfs_bytes,
+                input_upper_bound_bytes,
+            },
+            &checkpoint.workspace_snapshot,
+            uses_session_workspace.then_some(&agent_run_start.authorization.session_workspace),
+        );
+        match prepared {
+            Ok(prepared) if prepared.resolution() == SessionWorkspaceResolution::Advanced => {
+                let completion = (|| -> Result<AgentRunStepOutcome, String> {
+                    let session = SessionManager::new((*store).clone())
+                        .load_session(&agent_run_start.authorization.session_id)?
+                        .ok_or("completed recovery Session missing")?;
+                    let projection = session
+                        .completed_turn
+                        .ok_or("workspace_advanced_without_completed_projection")?;
+                    let mut sequence = sequence_guard(&session_record_sequence)?.clone();
+                    retry_completed_workspace_commit(
+                        SessionWorkspaceResolution::Advanced,
+                        || {
+                            validate_completed_projection_session_log(
+                                job_store.as_ref(),
+                                &agent_run_start,
+                                &projection,
+                                &sequence,
+                            )
+                        },
+                        || Err("advanced workspace must not require collection".into()),
+                    )?;
+                    let completed = sequence.complete(
+                        &agent_run_start.agent_run_id,
+                        &projection.completion_reason,
+                        now_ms()?,
+                    )?;
+                    let receipt = append_agent_run_session_records(
+                        runtime.as_ref(),
+                        &session_log,
+                        &agent_run_start,
+                        &[completed],
+                        &terminal_lease_fence,
+                    )?;
+                    accept_session_commit(
+                        &mut sequence,
+                        &mut *session_stream_guard(&session_stream)?,
+                        &receipt,
+                    )?;
+                    *sequence_guard(&session_record_sequence)? = sequence;
+                    acknowledge_terminal_completed_projection(store.as_ref(), &agent_run_start)?;
+                    Ok(AgentRunStepOutcome {
+                        retry_at_ms: None,
+                        disposition: "terminal",
+                        terminal_state: Some("completed"),
+                        transition_reason: "runtime_completed_projection_recovered".into(),
+                    })
+                })();
+                return match completion {
+                    Ok(outcome) => Ok(outcome),
+                    Err(error) => {
+                        eprintln!("advanced recovery workspace retained old execution: {error}");
+                        Ok(recovery_preparation_waiting(
+                            "session_workspace_resolve_unavailable",
+                        ))
+                    }
+                };
+            }
+            Ok(prepared) => prepared_recovery_restore = Some(prepared),
+            Err(error) => {
+                eprintln!("recovery workspace preflight retained old execution: {error:?}");
+                return Ok(recovery_preparation_waiting(
+                    "session_workspace_resolve_unavailable",
+                ));
+            }
+        }
+    }
     let mut recovery_reservation_error = None;
+    let mut recovery_retirement_error = None;
     let mut recovery_projection_receipt = None;
     let docker_execution = prepare_execution_host_with_recovery(
+        || {
+            if let Some((_, checkpoint)) = recovery_checkpoint.as_ref() {
+                let result = DockerExecutionHostRunner::retire_recovery_execution(
+                    &agent_run_start.agent_run_id,
+                    &checkpoint.execution_id,
+                    job_store.as_ref(),
+                    &terminal_lease_fence,
+                );
+                if let Err(error) = &result {
+                    recovery_retirement_error = Some(error.clone());
+                }
+                result?;
+            }
+            Ok(())
+        },
         |mut admitted_client| {
             let result = (|| {
                 let Some((_, checkpoint)) = recovery_checkpoint.as_ref() else {
@@ -2514,6 +2655,12 @@ fn execute_agent_run(
     }
     if let Some(error) = recovery_reservation_error {
         return Err(error);
+    }
+    if let Some(error) = recovery_retirement_error {
+        eprintln!("recovery execution retirement retained resident budget: {error}");
+        return Ok(recovery_preparation_waiting(
+            "execution_resident_capacity_wait",
+        ));
     }
     let docker_execution = match docker_execution {
         Ok(runner) => runner,
@@ -2876,7 +3023,10 @@ fn execute_agent_run(
     )?;
     let completing_recovery = completed_projection.is_some();
     let workspace_restore_started = Instant::now();
-    let workspace_resolution = match if let Some((_, checkpoint)) = recovery_checkpoint.as_ref() {
+    let workspace_resolution = match if let Some(prepared) = prepared_recovery_restore.as_mut() {
+        docker_execution
+            .restore_prepared_recovery_workspace(prepared, workspace_input_upper_bound_bytes)
+    } else if let Some((_, checkpoint)) = recovery_checkpoint.as_ref() {
         if recovery_uses_session_workspace(
             &checkpoint.workspace_snapshot,
             &agent_run_start.authorization.session_workspace,
@@ -5819,11 +5969,12 @@ fn select_agent_run_recovery_checkpoint(
     if sequence.is_empty() || sequence.active_execution().is_some() {
         return Ok(None);
     }
-    latest_recovery_checkpoint(store, start, sequence, true)?
-        .map(Some)
-        .ok_or_else(|| {
-            "AgentRun execution environment was lost without a recovery checkpoint".to_string()
-        })
+    let checkpoint = latest_recovery_checkpoint(store, start, sequence, true)?
+        .ok_or("AgentRun execution environment was lost without a recovery checkpoint")?;
+    if !sequence.has_ended_execution(&checkpoint.1.execution_id) {
+        return Err("recovery checkpoint Execution has not ended".into());
+    }
+    Ok(Some(checkpoint))
 }
 
 fn latest_recovery_checkpoint(
@@ -6382,6 +6533,7 @@ mod tests {
         let (mut state, mut records) = recovery_preparation_state();
         let events = Mutex::new(Vec::new());
         let result = prepare_execution_host_with_recovery(
+            || Ok(()),
             |_client| {
                 commit_execution_recovery_attempt(
                     &mut state,
@@ -6429,6 +6581,7 @@ mod tests {
         let (mut state, records) = recovery_preparation_state();
         let created = std::sync::atomic::AtomicBool::new(false);
         let result = prepare_execution_host_with_recovery(
+            || Ok(()),
             |_client| {
                 commit_execution_recovery_attempt(
                     &mut state,
@@ -6461,6 +6614,7 @@ mod tests {
         let (mut state, mut records) = recovery_preparation_state();
         for tick in 0..maximum_attempts + 3 {
             let result = prepare_execution_host_with_recovery(
+                || Ok(()),
                 |_client| {
                     commit_execution_recovery_attempt(
                         &mut state,
@@ -6487,6 +6641,7 @@ mod tests {
         }
         let events = Mutex::new(Vec::new());
         prepare_execution_host_with_recovery(
+            || Ok(()),
             |_client| {
                 commit_execution_recovery_attempt(
                     &mut state,
@@ -6952,7 +7107,7 @@ mod tests {
         )));
     }
 
-    fn agent_run_start() -> AgentRunStart {
+    pub(super) fn agent_run_start() -> AgentRunStart {
         let authorization = serde_json::json!({
             "schema": "workspace.agent_run_authorization.v1",
             "id": "authorization_1",

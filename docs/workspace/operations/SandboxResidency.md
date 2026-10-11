@@ -39,6 +39,31 @@ the intended concurrency; admission limits are fuses, not a throughput promise.
 This change keeps legal waits resident. It adds no automatic unload protocol,
 task-duration limit, model usage ledger or account spending guarantee.
 
+Checkpoint recovery validates and holds the immutable restore source before
+retiring the exact ended execution. Its `remove_stopped` operation refuses a
+running container; cancellation and terminal teardown keep their existing
+deletion policy. A lost deletion reply or unavailable inventory keeps the charge
+until the current owner confirms physical absence. Replacement admission then
+uses that released capacity. The physical restore checks and pins the current
+lifecycle owner, so an owner already lost cannot write the held checkpoint.
+
+The ignored `real_docker_checkpoint_recovery_releases_only_confirmed_old_residency_and_restores_one_slot`
+test covers retained PID and charge, ambiguous deletion, confirmed release and
+actual file restoration under the shipped single-sandbox Workspace profile.
+It requires `CENTAERIS_RECOVERY_DOCKER_TEST=isolated`, a dedicated database named
+`centaeris_recovery_docker_test`, explicitly selected local execution-agent image,
+and dedicated plugin/memory volumes with the `centaeris-recovery-test-` prefix.
+Supply the dedicated endpoint through `CENTAERIS_RECOVERY_DOCKER_POSTGRES_URL`,
+the image through `CENTAERIS_RECOVERY_DOCKER_IMAGE_DIGEST`, and the two volumes
+through `PLUGIN_VOLUME_NAME` and `AGENT_MEMORY_VOLUME_NAME`; select `OCI_RUNTIME`.
+The memory volume must contain its matching `.centaeris-recovery-test-volume`
+marker. The test rejects colliding test identities and only removes its own
+containers; it is not a capacity or saturation certification.
+
+```sh
+cargo test --locked -p runtime_server real_docker_checkpoint_recovery_releases_only_confirmed_old_residency_and_restores_one_slot -- --ignored --nocapture --test-threads=1
+```
+
 ## Upgrade and rollback
 
 The PostgreSQL forward migration upgrades Runtime schema 6 to 7, preserving the

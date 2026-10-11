@@ -921,6 +921,83 @@ impl DockerExecutionHostRunner {
         resident_store.reconcile_resident_sandboxes(&host_id, observed_resident_sandboxes)
     }
 
+    pub(crate) fn retire_recovery_execution(
+        agent_run_id: &str,
+        execution_id: &str,
+        resident_store: &PostgresRuntimeStore,
+        fence: &centaeris_core::session::RuntimeJobLeaseFence,
+    ) -> Result<(), String> {
+        resident_store.remove_resident_execution(
+            &resident_host_id()?,
+            agent_run_id,
+            execution_id,
+            fence,
+            || {
+                let name = container_name(execution_id);
+                if let Some(facts) = inspect_container(&name)? {
+                    if !facts.has_identity(agent_run_id, execution_id) {
+                        return Err(
+                            "sandbox container identity mismatch; refusing recovery retirement"
+                                .into(),
+                        );
+                    }
+                    crate::docker_engine::remove_stopped(&facts.id)?;
+                    if inspect_container(&name)?.is_some() {
+                        return Err("sandbox recovery retirement was not confirmed".into());
+                    }
+                }
+                Ok(())
+            },
+            || observed_resident_sandboxes_for_run(agent_run_id),
+        )
+    }
+
+    pub(crate) fn restore_prepared_recovery_workspace(
+        &self,
+        prepared: &mut PreparedRecoveryWorkspaceRestore,
+        input_upper_bound_bytes: u64,
+    ) -> Result<SessionWorkspaceResolution, SessionWorkspaceApiError> {
+        if let Some(artifact) = prepared.artifact.as_mut() {
+            self.require_workspace_capacity(
+                artifact.descriptor.expanded_size_bytes,
+                input_upper_bound_bytes,
+            )
+            .map_err(SessionWorkspaceApiError::Rejected)?;
+            let store = self.resident_store.as_ref().ok_or_else(|| {
+                SessionWorkspaceApiError::Unavailable(
+                    "resident restore accounting binding missing".into(),
+                )
+            })?;
+            let fence = self.resident_lease.as_ref().ok_or_else(|| {
+                SessionWorkspaceApiError::Unavailable(
+                    "resident restore lease binding missing".into(),
+                )
+            })?;
+            store
+                .with_resident_execution_restore(
+                    &resident_host_id().map_err(SessionWorkspaceApiError::Unavailable)?,
+                    &self.agent_run_id,
+                    &self.execution_id,
+                    fence,
+                    || -> Result<(), SessionWorkspaceApiError> {
+                        let capture = self.restore_activity()?;
+                        artifact.file.rewind().map_err(|error| {
+                            SessionWorkspaceApiError::Unavailable(error.to_string())
+                        })?;
+                        self.restore_snapshot_stream(
+                            &mut artifact.file,
+                            artifact.descriptor.size_bytes,
+                            &artifact.descriptor.sha256,
+                            &capture,
+                        )
+                        .map_err(SessionWorkspaceApiError::Rejected)
+                    },
+                )
+                .map_err(SessionWorkspaceApiError::Unavailable)??;
+        }
+        Ok(prepared.resolution)
+    }
+
     fn teardown_inner(agent_run_id: &str) -> Result<(), String> {
         for name in container_ids_for_agent_run(agent_run_id)? {
             let Some(facts) = inspect_container(name.as_str())? else {
@@ -1002,35 +1079,7 @@ impl DockerExecutionHostRunner {
                     "decode session workspace resolve failed: {error}"
                 ))
             })?;
-        if resolved.schema != SESSION_WORKSPACE_RESOLVED_SCHEMA {
-            return Err(SessionWorkspaceApiError::Rejected(
-                "session workspace resolve schema mismatch".to_string(),
-            ));
-        }
-        match resolved.disposition.as_str() {
-            "empty" if &resolved.session_workspace == frozen && frozen.snapshot_size_bytes == 0 => {
-                Ok(SessionWorkspaceResolution::Empty)
-            }
-            "download"
-                if &resolved.session_workspace == frozen && frozen.snapshot_size_bytes != 0 =>
-            {
-                Ok(SessionWorkspaceResolution::Download)
-            }
-            "advanced"
-                if resolved.session_workspace.generation
-                    == frozen.generation.checked_add(1).ok_or_else(|| {
-                        SessionWorkspaceApiError::Rejected(
-                            "session workspace generation overflow".to_string(),
-                        )
-                    })?
-                    && resolved.session_workspace.validate().is_ok() =>
-            {
-                Ok(SessionWorkspaceResolution::Advanced)
-            }
-            _ => Err(SessionWorkspaceApiError::Rejected(
-                "session workspace resolve binding mismatch".to_string(),
-            )),
-        }
+        resolved_resolution(&resolved, frozen)
     }
 
     pub(crate) fn restore_session_workspace(
@@ -1606,14 +1655,11 @@ impl DockerExecutionHostRunner {
         expanded_size_bytes: u64,
         input_upper_bound_bytes: u64,
     ) -> Result<(), String> {
-        if expanded_size_bytes
-            .checked_add(input_upper_bound_bytes)
-            .and_then(|value| value.checked_add(SESSION_WORKSPACE_RESTORE_OVERHEAD_BYTES))
-            .is_none_or(|value| value > self.resources.data_tmpfs_bytes)
-        {
-            return Err("session workspace exceeds sandbox dataTmpfsBytes".to_string());
-        }
-        Ok(())
+        require_workspace_capacity_for_limit(
+            expanded_size_bytes,
+            input_upper_bound_bytes,
+            self.resources.data_tmpfs_bytes,
+        )
     }
 
     fn snapshot_collect_command(
@@ -3225,6 +3271,195 @@ struct ImmutableWorkspaceSnapshot {
     descriptor: WorkspaceSnapshotDescriptor,
 }
 
+pub(crate) struct PreparedRecoveryWorkspaceRestore {
+    artifact: Option<ImmutableWorkspaceSnapshot>,
+    resolution: SessionWorkspaceResolution,
+}
+
+impl PreparedRecoveryWorkspaceRestore {
+    pub(crate) fn resolution(&self) -> SessionWorkspaceResolution {
+        self.resolution
+    }
+}
+
+pub(crate) struct RecoveryRestoreBinding<'a> {
+    pub api_url: &'a str,
+    pub api_token: &'a str,
+    pub agent_run_id: &'a str,
+    pub authorization_digest: &'a str,
+    pub lease: &'a SessionWorkspaceLease,
+    pub checkpoint_id: &'a str,
+    pub data_tmpfs_bytes: u64,
+    pub input_upper_bound_bytes: u64,
+}
+
+pub(crate) fn prepare_recovery_workspace_restore(
+    binding: RecoveryRestoreBinding<'_>,
+    snapshot: &RecoveryWorkspaceSnapshotV1,
+    session_workspace: Option<&SessionWorkspace>,
+) -> Result<PreparedRecoveryWorkspaceRestore, SessionWorkspaceApiError> {
+    snapshot
+        .validate()
+        .map_err(SessionWorkspaceApiError::Rejected)?;
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|error| SessionWorkspaceApiError::Unavailable(error.to_string()))?;
+    let session_request = |schema| SessionWorkspaceLeaseRequest {
+        schema,
+        job_id: &binding.lease.job_id,
+        lease_owner: &binding.lease.lease_owner,
+        agent_run_id: binding.agent_run_id,
+        authorization_digest: binding.authorization_digest,
+    };
+    if let Some(frozen) = session_workspace {
+        let response = client
+            .post(format!(
+                "{}/internal/agent-runs/session-workspace/resolve",
+                binding.api_url
+            ))
+            .header("X-Internal-Token", binding.api_token)
+            .json(&session_request(SESSION_WORKSPACE_RESOLVE_SCHEMA))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .map_err(|error| SessionWorkspaceApiError::Unavailable(error.to_string()))?;
+        if !response.status().is_success() {
+            return Err(SessionWorkspaceApiError::Unavailable(format!(
+                "recovery session workspace resolve returned {}",
+                response.status()
+            )));
+        }
+        let resolved = response
+            .json::<SessionWorkspaceResolveResponse>()
+            .map_err(|error| SessionWorkspaceApiError::Rejected(error.to_string()))?;
+        let resolution = resolved_resolution(&resolved, frozen)?;
+        if resolution == SessionWorkspaceResolution::Advanced {
+            return Ok(PreparedRecoveryWorkspaceRestore {
+                artifact: None,
+                resolution,
+            });
+        }
+    }
+    require_workspace_capacity_for_limit(
+        snapshot.expanded_size_bytes,
+        binding.input_upper_bound_bytes,
+        binding.data_tmpfs_bytes,
+    )
+    .map_err(SessionWorkspaceApiError::Rejected)?;
+    if snapshot.object_ref.is_none() {
+        return Ok(PreparedRecoveryWorkspaceRestore {
+            artifact: None,
+            resolution: SessionWorkspaceResolution::Empty,
+        });
+    }
+    let request = if session_workspace.is_some() {
+        client
+            .post(format!(
+                "{}/internal/agent-runs/session-workspace/download",
+                binding.api_url
+            ))
+            .json(&session_request(SESSION_WORKSPACE_DOWNLOAD_SCHEMA))
+    } else {
+        client
+            .post(format!(
+                "{}/internal/agent-runs/execution-workspace/download",
+                binding.api_url
+            ))
+            .json(&ExecutionWorkspaceDownloadRequest {
+                schema: EXECUTION_WORKSPACE_DOWNLOAD_SCHEMA,
+                job_id: &binding.lease.job_id,
+                lease_owner: &binding.lease.lease_owner,
+                agent_run_id: binding.agent_run_id,
+                authorization_digest: binding.authorization_digest,
+                checkpoint_id: binding.checkpoint_id,
+            })
+    };
+    let mut response = request
+        .header("X-Internal-Token", binding.api_token)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .map_err(|error| SessionWorkspaceApiError::Unavailable(error.to_string()))?;
+    if !response.status().is_success() {
+        return Err(SessionWorkspaceApiError::Unavailable(format!(
+            "recovery workspace download returned {}",
+            response.status()
+        )));
+    }
+    if response.content_length() != Some(snapshot.snapshot_size_bytes)
+        || response
+            .headers()
+            .get("x-content-sha256")
+            .and_then(|value| value.to_str().ok())
+            != Some(snapshot.snapshot_sha256.as_str())
+    {
+        return Err(SessionWorkspaceApiError::Rejected(
+            "recovery workspace download binding mismatch".into(),
+        ));
+    }
+    let artifact = prepare_recovery_restore_artifact(&mut response, snapshot)?;
+    Ok(PreparedRecoveryWorkspaceRestore {
+        artifact: Some(artifact),
+        resolution: SessionWorkspaceResolution::Download,
+    })
+}
+
+fn prepare_recovery_restore_artifact(
+    source: &mut impl Read,
+    snapshot: &RecoveryWorkspaceSnapshotV1,
+) -> Result<ImmutableWorkspaceSnapshot, SessionWorkspaceApiError> {
+    let artifact = capture_snapshot_artifact(source, snapshot.snapshot_size_bytes)
+        .map_err(SessionWorkspaceApiError::Unavailable)?;
+    if !snapshot_matches_recovery_workspace(&artifact.descriptor, snapshot) {
+        return Err(SessionWorkspaceApiError::Rejected(
+            "recovery workspace artifact binding mismatch".into(),
+        ));
+    }
+    Ok(artifact)
+}
+
+fn require_workspace_capacity_for_limit(
+    expanded_size_bytes: u64,
+    input_upper_bound_bytes: u64,
+    limit: u64,
+) -> Result<(), String> {
+    if expanded_size_bytes
+        .checked_add(input_upper_bound_bytes)
+        .and_then(|value| value.checked_add(SESSION_WORKSPACE_RESTORE_OVERHEAD_BYTES))
+        .is_none_or(|value| value > limit)
+    {
+        return Err("session workspace exceeds sandbox dataTmpfsBytes".into());
+    }
+    Ok(())
+}
+
+fn resolved_resolution(
+    resolved: &SessionWorkspaceResolveResponse,
+    frozen: &SessionWorkspace,
+) -> Result<SessionWorkspaceResolution, SessionWorkspaceApiError> {
+    if resolved.schema != SESSION_WORKSPACE_RESOLVED_SCHEMA {
+        return Err(SessionWorkspaceApiError::Rejected(
+            "session workspace resolve schema mismatch".into(),
+        ));
+    }
+    match resolved.disposition.as_str() {
+        "empty" if &resolved.session_workspace == frozen && frozen.snapshot_size_bytes == 0 => {
+            Ok(SessionWorkspaceResolution::Empty)
+        }
+        "download" if &resolved.session_workspace == frozen && frozen.snapshot_size_bytes != 0 => {
+            Ok(SessionWorkspaceResolution::Download)
+        }
+        "advanced"
+            if Some(resolved.session_workspace.generation) == frozen.generation.checked_add(1)
+                && resolved.session_workspace.validate().is_ok() =>
+        {
+            Ok(SessionWorkspaceResolution::Advanced)
+        }
+        _ => Err(SessionWorkspaceApiError::Rejected(
+            "session workspace resolve binding mismatch".into(),
+        )),
+    }
+}
+
 pub(crate) struct PreparedRecoveryWorkspace {
     content: PreparedRecoveryContent,
     evidence: WorkspaceReuseEvidence,
@@ -3578,6 +3813,381 @@ enum ProjectedInputState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires explicitly isolated Postgres, dedicated Docker volumes and an execution_agent image"]
+    fn real_docker_checkpoint_recovery_releases_only_confirmed_old_residency_and_restores_one_slot()
+    {
+        use postgres::{Client, NoTls};
+        use std::net::TcpListener;
+        assert_eq!(
+            env::var("CENTAERIS_RECOVERY_DOCKER_TEST").as_deref(),
+            Ok("isolated")
+        );
+        let url = env::var("CENTAERIS_RECOVERY_DOCKER_POSTGRES_URL")
+            .expect("dedicated Postgres required");
+        let mut db = Client::connect(&url, NoTls).unwrap();
+        assert_eq!(
+            db.query_one("SELECT current_database()", &[])
+                .unwrap()
+                .get::<_, String>(0),
+            "centaeris_recovery_docker_test"
+        );
+        for name in [PLUGIN_VOLUME_NAME_ENV, AGENT_MEMORY_VOLUME_NAME_ENV] {
+            assert!(
+                docker_volume_name_from_environment(name)
+                    .unwrap()
+                    .starts_with("centaeris-recovery-test-"),
+                "dedicated test volumes required"
+            );
+        }
+        let marker = Path::new(MEMORY_RUNTIME_VOLUME_ROOT).join(".centaeris-recovery-test-volume");
+        assert!(!fs::symlink_metadata(&marker)
+            .expect("dedicated memory root marker required")
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_to_string(marker).unwrap().trim(),
+            docker_volume_name_from_environment(AGENT_MEMORY_VOLUME_NAME_ENV).unwrap()
+        );
+        let image = parse_docker_image_digest(
+            env::var("CENTAERIS_RECOVERY_DOCKER_IMAGE_DIGEST")
+                .expect("local execution_agent image digest required")
+                .as_bytes(),
+        )
+        .unwrap();
+        let run = "centaeris-recovery-test-run";
+        let old_id = "centaeris-recovery-test-old";
+        let replacement_id = "centaeris-recovery-test-replacement";
+        let late_id = "centaeris-recovery-test-late";
+        assert!(
+            container_ids_for_agent_run(run).unwrap().is_empty(),
+            "test run identity already occupied"
+        );
+        for execution in [old_id, replacement_id, late_id] {
+            assert!(
+                inspect_container(&container_name(execution))
+                    .unwrap()
+                    .is_none(),
+                "test execution identity already occupied"
+            );
+        }
+        let observed = observed_resident_sandboxes().unwrap();
+        db.batch_execute("DROP SCHEMA IF EXISTS runtime CASCADE; CREATE TABLE IF NOT EXISTS public.app_core_agentrun(id text PRIMARY KEY,session_id text NOT NULL,workspace_id text NOT NULL,status text NOT NULL); DELETE FROM public.app_core_agentrun WHERE id='centaeris-recovery-test-run'; INSERT INTO public.app_core_agentrun VALUES('centaeris-recovery-test-run','centaeris-recovery-test-session','centaeris-recovery-test-tenant','running');").unwrap();
+        let store = Arc::new(PostgresRuntimeStore::new(&url).unwrap());
+        let owner = "centaeris-recovery-test-owner";
+        let job = centaeris_core::session::reliability::agent_run_lifecycle_job_id(run).unwrap();
+        let now = db
+            .query_one(
+                "SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint",
+                &[],
+            )
+            .unwrap()
+            .get::<_, i64>(0);
+        let backoff = serde_json::to_string(
+            &centaeris_core::session::reliability::RuntimeBackoffPolicy::default(),
+        )
+        .unwrap();
+        let mut bind = |run: &str, tenant: &str| {
+            let job =
+                centaeris_core::session::reliability::agent_run_lifecycle_job_id(run).unwrap();
+            db.execute("INSERT INTO runtime.runtime_jobs(job_id,job_kind,status,run_at_ms,lease_owner,lease_expires_at_ms,backoff_policy_json,idempotency_key,created_at_ms,updated_at_ms) VALUES($1,'agent_run.lifecycle','running',$2::bigint,$3,$2::bigint+600000,$4,$1,$2::bigint,$2::bigint) ON CONFLICT(job_id) DO NOTHING", &[&job, &now, &owner, &backoff]).unwrap();
+            db.execute("INSERT INTO runtime.execution_job_tenants VALUES($1,$2) ON CONFLICT(job_id) DO NOTHING", &[&job, &tenant]).unwrap();
+        };
+        // Other daemon holdings are observed and charged only in this isolated database.
+        for sandbox in observed {
+            bind(
+                &sandbox.agent_run_id,
+                "centaeris-recovery-test-observed-tenant",
+            );
+        }
+        bind(run, "centaeris-recovery-test-tenant");
+        let defaults = crate::resident_capacity::ResidentCapacity::default();
+        let configured = crate::resident_capacity::ResidentCapacity::from_env().unwrap();
+        assert_eq!(configured.global, defaults.global);
+        assert_eq!(configured.tenant, defaults.tenant);
+        let example = include_str!("../../../.env.example");
+        let setting = |name: &str| {
+            example
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{name}=")))
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+        };
+        let resources = SandboxResources {
+            memory_bytes: setting("SANDBOX_MEMORY_BYTES"),
+            cpu_milli: setting("SANDBOX_CPU_MILLI") as u32,
+            pids_limit: setting("SANDBOX_PIDS_LIMIT") as u32,
+            data_tmpfs_bytes: setting("SANDBOX_DATA_TMPFS_BYTES"),
+        };
+        let activation = centaeris_core::extension::build_plugin_activation_snapshot(&[]).unwrap();
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let api_url = format!("http://{}", listener.local_addr().unwrap());
+        let create = |execution: &str| {
+            DockerExecutionHostRunner::new_with_admitted(
+                DockerExecutionHostRequest {
+                    workspace_id: "centaeris-recovery-test-tenant".into(),
+                    lifecycle_job_id: job.clone(),
+                    lifecycle_lease_owner: owner.into(),
+                    resident_store: store.clone(),
+                    agent_run_id: run.into(),
+                    execution_id: execution.into(),
+                    user_id: "centaeris-recovery-test-user".into(),
+                    agent_id: "centaeris-recovery-test-agent".into(),
+                    authorization_digest: digest.clone(),
+                    image_digest: image.clone(),
+                    resources,
+                    has_execution_fact: false,
+                    api_url: api_url.clone(),
+                    api_token: "centaeris-recovery-test-token".into(),
+                    plugin_activation: &activation,
+                },
+                &mut |_| Ok(()),
+            )
+        };
+        let charged = || {
+            Client::connect(&url, NoTls)
+                .unwrap()
+                .query_one(
+                    "SELECT COUNT(*) FROM runtime.resident_sandboxes WHERE agent_run_id=$1",
+                    &[&run],
+                )
+                .unwrap()
+                .get::<_, i64>(0)
+        };
+        let old = create(old_id).unwrap();
+        assert_eq!(charged(), 1);
+        assert_eq!(
+            create(replacement_id).err().unwrap(),
+            crate::resident_capacity::RESIDENT_CAPACITY_WAIT
+        );
+        let mut write_request = old.exec_request(vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "printf 'checkpoint contents' > /mnt/data/report.txt".into(),
+        ]);
+        write_request.user = Some(AGENT_USER.into());
+        let written = exec_with_input(&write_request, &[], 1024).unwrap();
+        assert!(written.status.success());
+        let capture = old.recovery_activity.wait_snapshot_activity().unwrap();
+        let mut artifact = old.capture_snapshot_collect(&capture).unwrap();
+        drop(capture);
+        let snapshot = RecoveryWorkspaceSnapshotV1 {
+            object_ref: Some("centaeris-recovery-test-checkpoint-object".into()),
+            snapshot_sha256: artifact.descriptor.sha256.clone(),
+            snapshot_size_bytes: artifact.descriptor.size_bytes,
+            expanded_size_bytes: artifact.descriptor.expanded_size_bytes,
+            file_count: artifact.descriptor.file_count,
+        };
+        let mut body = Vec::new();
+        artifact.file.read_to_end(&mut body).unwrap();
+        let hash = snapshot.snapshot_sha256.clone();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                socket.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            assert!(request.starts_with(
+                b"POST /internal/agent-runs/execution-workspace/download HTTP/1.1\r\n"
+            ));
+            let length = String::from_utf8(request)
+                .unwrap()
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap();
+            let mut request_body = vec![0; length];
+            socket.read_exact(&mut request_body).unwrap();
+            write!(socket, "HTTP/1.1 200 fixture\r\nContent-Length: {}\r\nX-Content-Sha256: {hash}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            socket.write_all(&body).unwrap();
+        });
+        let lease = SessionWorkspaceLease {
+            job_id: job.clone(),
+            lease_owner: owner.into(),
+        };
+        let mut prepared = prepare_recovery_workspace_restore(
+            RecoveryRestoreBinding {
+                api_url: &api_url,
+                api_token: "centaeris-recovery-test-token",
+                agent_run_id: run,
+                authorization_digest: &digest,
+                lease: &lease,
+                checkpoint_id: "centaeris-recovery-test-checkpoint",
+                data_tmpfs_bytes: resources.data_tmpfs_bytes,
+                input_upper_bound_bytes: 0,
+            },
+            &snapshot,
+            None,
+        )
+        .unwrap();
+        server.join().unwrap();
+        let fence = centaeris_core::session::RuntimeJobLeaseFence {
+            job_id: job.clone(),
+            job_kind: "agent_run.lifecycle".into(),
+            lease_owner: owner.into(),
+        };
+        let before_retirement = inspect_container(&container_name(old_id)).unwrap().unwrap();
+        let old_pid = before_retirement.raw["State"]["Pid"].as_i64().unwrap();
+        assert!(old_pid > 0 && before_retirement.running);
+        assert!(
+            DockerExecutionHostRunner::retire_recovery_execution(
+                run,
+                old_id,
+                store.as_ref(),
+                &fence
+            )
+            .is_err(),
+            "running old container must be retained"
+        );
+        assert_eq!(charged(), 1);
+        let old_facts = inspect_container(&container_name(old_id)).unwrap().unwrap();
+        assert!(old_facts.running && old_facts.has_identity(run, old_id));
+        assert_eq!(old_facts.id, before_retirement.id);
+        assert_eq!(old_facts.raw["State"]["Pid"].as_i64(), Some(old_pid));
+        assert!(Command::new("docker")
+            .args(["stop", "-t", "2", &old_facts.id])
+            .status()
+            .unwrap()
+            .success());
+        let host_id = resident_host_id().unwrap();
+        let unknown_delete = store.remove_resident_execution(
+            &host_id,
+            run,
+            old_id,
+            &fence,
+            || {
+                crate::docker_engine::remove_stopped(&old_facts.id)?;
+                Err("reply lost after physical removal".into())
+            },
+            || observed_resident_sandboxes_for_run(run),
+        );
+        assert_eq!(
+            unknown_delete.unwrap_err(),
+            "reply lost after physical removal"
+        );
+        assert!(inspect_container(&container_name(old_id))
+            .unwrap()
+            .is_none());
+        assert_eq!(charged(), 1, "lost delete reply must retain the charge");
+        let unknown_inventory = store.remove_resident_execution(
+            &host_id,
+            run,
+            old_id,
+            &fence,
+            || Ok(()),
+            || Err("inventory unavailable after physical removal".into()),
+        );
+        assert_eq!(
+            unknown_inventory.unwrap_err(),
+            "inventory unavailable after physical removal"
+        );
+        assert_eq!(charged(), 1, "unknown inventory must retain the charge");
+        DockerExecutionHostRunner::retire_recovery_execution(run, old_id, store.as_ref(), &fence)
+            .unwrap();
+        assert!(inspect_container(&container_name(old_id))
+            .unwrap()
+            .is_none());
+        assert_eq!(charged(), 0);
+        let replacement = create(replacement_id).unwrap();
+        assert_eq!(charged(), 1);
+        assert_eq!(
+            replacement
+                .restore_prepared_recovery_workspace(&mut prepared, 0)
+                .unwrap(),
+            SessionWorkspaceResolution::Download
+        );
+        let restored = exec_with_input(
+            &replacement.exec_request(vec!["/bin/cat".into(), "/mnt/data/report.txt".into()]),
+            &[],
+            1024,
+        )
+        .unwrap();
+        assert!(restored.status.success());
+        assert_eq!(restored.stdout, b"checkpoint contents");
+        let replacement_facts = inspect_container(&container_name(replacement_id))
+            .unwrap()
+            .unwrap();
+        assert!(replacement_facts.has_identity(run, replacement_id));
+        assert!(Command::new("docker")
+            .args(["stop", "-t", "2", &replacement_facts.id])
+            .status()
+            .unwrap()
+            .success());
+        DockerExecutionHostRunner::retire_recovery_execution(
+            run,
+            replacement_id,
+            store.as_ref(),
+            &fence,
+        )
+        .unwrap();
+        assert_eq!(charged(), 0);
+        let late = create(late_id).unwrap();
+        assert_eq!(charged(), 1);
+        let absence_request = late.exec_request(vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "test ! -e /mnt/data/report.txt".into(),
+        ]);
+        assert!(
+            exec_with_input(&absence_request, &[], 1024)
+                .unwrap()
+                .status
+                .success(),
+            "late execution must start empty"
+        );
+        let new_owner = "centaeris-recovery-test-new-owner";
+        assert_eq!(
+            db.execute(
+                "UPDATE runtime.runtime_jobs SET lease_owner=$2 WHERE job_id=$1 AND lease_owner=$3",
+                &[&fence.job_id, &new_owner, &owner]
+            )
+            .unwrap(),
+            1
+        );
+        let late_restore = late.restore_prepared_recovery_workspace(&mut prepared, 0);
+        let remained_empty = exec_with_input(&absence_request, &[], 1024).unwrap();
+        let current_fence = centaeris_core::session::RuntimeJobLeaseFence {
+            lease_owner: new_owner.into(),
+            ..fence
+        };
+        let facts = inspect_container(&container_name(late_id))
+            .unwrap()
+            .unwrap();
+        assert!(facts.has_identity(run, late_id));
+        assert!(Command::new("docker")
+            .args(["stop", "-t", "2", &facts.id])
+            .status()
+            .unwrap()
+            .success());
+        DockerExecutionHostRunner::retire_recovery_execution(
+            run,
+            late_id,
+            store.as_ref(),
+            &current_fence,
+        )
+        .unwrap();
+        assert_eq!(charged(), 0);
+        assert!(
+            late_restore.is_err(),
+            "stale first restore outcome={late_restore:?}; report absent={}",
+            remained_empty.status.success()
+        );
+        assert!(
+            remained_empty.status.success(),
+            "stale worker must leave the empty workspace untouched"
+        );
+    }
+
     #[test]
     fn command_capture_bounds_retention_and_keeps_failure_evidence() {
         let captured = super::capture_command_output(&b"0123456789"[..], 4);
@@ -4192,6 +4802,68 @@ mod tests {
         corrupt_frame.extend_from_slice(corrupt_manifest.as_slice());
         corrupt_frame.extend_from_slice(bytes);
         assert!(inspect_workspace_snapshot(&mut Cursor::new(corrupt_frame)).is_err());
+    }
+
+    #[test]
+    fn prepared_recovery_restore_holds_the_verified_immutable_source() {
+        let bytes = b"checkpoint contents";
+        let manifest = SandboxWorkspaceSnapshotManifest {
+            schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA.into(),
+            files: vec![SandboxWorkspaceSnapshotFile {
+                path: "restored.txt".into(),
+                size_bytes: bytes.len() as u64,
+                sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+                executable: false,
+            }],
+        };
+        let frame = encode_frame(&manifest, bytes).unwrap();
+        let snapshot = RecoveryWorkspaceSnapshotV1 {
+            object_ref: Some("immutable-checkpoint".into()),
+            snapshot_sha256: format!("sha256:{:x}", Sha256::digest(&frame)),
+            snapshot_size_bytes: frame.len() as u64,
+            expanded_size_bytes: bytes.len() as u64,
+            file_count: 1,
+        };
+        let mut source = Cursor::new(frame.clone());
+        let mut artifact = prepare_recovery_restore_artifact(&mut source, &snapshot).unwrap();
+        source.get_mut().fill(0);
+        let mut held = Vec::new();
+        artifact.file.read_to_end(&mut held).unwrap();
+        assert_eq!(held, frame);
+        assert!(prepare_recovery_restore_artifact(&mut source, &snapshot).is_err());
+        let mut wrong_binding = snapshot.clone();
+        wrong_binding.file_count = 2;
+        assert!(
+            prepare_recovery_restore_artifact(&mut Cursor::new(frame), &wrong_binding).is_err()
+        );
+    }
+
+    #[test]
+    fn recovery_session_resolution_preserves_advanced_completion_without_download() {
+        let frozen = SessionWorkspace {
+            generation: 0,
+            snapshot_sha256: String::new(),
+            snapshot_size_bytes: 0,
+            expanded_size_bytes: 0,
+            file_count: 0,
+        };
+        let mut resolved = SessionWorkspaceResolveResponse {
+            schema: SESSION_WORKSPACE_RESOLVED_SCHEMA.into(),
+            disposition: "empty".into(),
+            session_workspace: frozen.clone(),
+        };
+        assert_eq!(
+            resolved_resolution(&resolved, &frozen).unwrap(),
+            SessionWorkspaceResolution::Empty
+        );
+        resolved.disposition = "advanced".into();
+        resolved.session_workspace.generation = 1;
+        assert_eq!(
+            resolved_resolution(&resolved, &frozen).unwrap(),
+            SessionWorkspaceResolution::Advanced
+        );
+        resolved.session_workspace.generation = 2;
+        assert!(resolved_resolution(&resolved, &frozen).is_err());
     }
 
     #[test]

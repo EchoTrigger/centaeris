@@ -33,6 +33,32 @@ fn lock_host(client: &mut Client) -> Result<ResidentHostLock<'_>, String> {
 }
 
 impl PostgresRuntimeStore {
+    pub(crate) fn with_resident_execution_restore<T: Send>(
+        &self,
+        host_id: &str,
+        agent_run_id: &str,
+        execution_id: &str,
+        fence: &RuntimeJobLeaseFence,
+        restore: impl FnOnce() -> T + Send,
+    ) -> Result<T, String> {
+        self.with_client(|client| {
+            let mut tx = client.transaction().map_err(|error| error.to_string())?;
+            // Pin the current owner throughout the bounded physical restore.
+            // Lease reclaimers skip this row until the operation has finished.
+            verify_removal_fence(&mut tx, agent_run_id, fence)?;
+            let resident = tx.query_opt(
+                "SELECT 1 FROM resident_sandboxes s JOIN execution_job_tenants t ON t.job_id=$4 JOIN app_core_agentrun a ON a.id=s.agent_run_id WHERE s.host_id=$1 AND s.agent_run_id=$2 AND s.execution_id=$3 AND s.state='resident' AND s.container_id IS NOT NULL AND s.workspace_id=t.workspace_id AND a.workspace_id=t.workspace_id AND a.status IN('queued','running') FOR UPDATE OF s",
+                &[&host_id, &agent_run_id, &execution_id, &fence.job_id],
+            ).map_err(|error| format!("verify resident restore binding failed: {error}"))?;
+            if resident.is_none() {
+                return Err("resident restore binding rejected".into());
+            }
+            let restored = restore();
+            tx.commit().map_err(|error| format!("release resident restore lease fence failed: {error}"))?;
+            Ok(restored)
+        })
+    }
+
     pub(crate) fn reconcile_resident_sandboxes(
         &self,
         host_id: &str,
@@ -124,6 +150,40 @@ impl PostgresRuntimeStore {
         remove: impl FnOnce() -> Result<(), String> + Send,
         inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String> + Send,
     ) -> Result<(), String> {
+        self.remove_resident_scope(host_id, agent_run_id, None, fence, remove, inventory)
+    }
+
+    pub(crate) fn remove_resident_execution(
+        &self,
+        host_id: &str,
+        agent_run_id: &str,
+        execution_id: &str,
+        fence: &RuntimeJobLeaseFence,
+        remove: impl FnOnce() -> Result<(), String> + Send,
+        inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String> + Send,
+    ) -> Result<(), String> {
+        if execution_id.trim().is_empty() {
+            return Err("resident removal execution identity missing".into());
+        }
+        self.remove_resident_scope(
+            host_id,
+            agent_run_id,
+            Some(execution_id),
+            fence,
+            remove,
+            inventory,
+        )
+    }
+
+    fn remove_resident_scope(
+        &self,
+        host_id: &str,
+        agent_run_id: &str,
+        execution_id: Option<&str>,
+        fence: &RuntimeJobLeaseFence,
+        remove: impl FnOnce() -> Result<(), String> + Send,
+        inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String> + Send,
+    ) -> Result<(), String> {
         self.with_client(|client| {
             let lock = lock_host(client)?;
             let mut tx = lock.0.transaction().map_err(|error| error.to_string())?;
@@ -131,18 +191,18 @@ impl PostgresRuntimeStore {
             // Pin the validated owner until the bounded physical mutation and
             // confirmed budget release finish. Reclaimers skip this locked row.
             verify_removal_fence(&mut tx, agent_run_id, fence)?;
-            tx.execute("UPDATE resident_sandboxes SET state='releasing',updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE host_id=$1 AND agent_run_id=$2", &[&host_id, &agent_run_id])
+            tx.execute("UPDATE resident_sandboxes SET state='releasing',updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE host_id=$1 AND agent_run_id=$2 AND ($3::text IS NULL OR execution_id=$3)", &[&host_id, &agent_run_id, &execution_id])
                 .map_err(|error| error.to_string())?;
             remove()?;
-            if inventory()?.iter().any(|sandbox| sandbox.agent_run_id == agent_run_id) {
+            if inventory()?.iter().any(|sandbox| sandbox.agent_run_id == agent_run_id && execution_id.is_none_or(|id| sandbox.execution_id == id)) {
                 return Err("resident sandbox removal was not confirmed".into());
             }
-            tx.execute("DELETE FROM resident_sandboxes WHERE host_id=$1 AND agent_run_id=$2", &[&host_id, &agent_run_id])
+            tx.execute("DELETE FROM resident_sandboxes WHERE host_id=$1 AND agent_run_id=$2 AND ($3::text IS NULL OR execution_id=$3)", &[&host_id, &agent_run_id, &execution_id])
                 .map_err(|error| format!("release resident sandbox budget failed: {error}"))?;
             let holdings_remain = tx.query_one("SELECT EXISTS(SELECT 1 FROM resident_sandboxes WHERE agent_run_id=$1)", &[&agent_run_id])
                 .map_err(|error| error.to_string())?.get::<_, bool>(0);
             tx.commit().map_err(|error| format!("commit resident removal failed: {error}"))?;
-            if holdings_remain {
+            if holdings_remain && execution_id.is_none() {
                 return Err("resident holdings remain on another host; budget retained".into());
             }
             Ok(())
