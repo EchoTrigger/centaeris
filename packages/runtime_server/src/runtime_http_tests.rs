@@ -31,7 +31,7 @@ fn runtime_http_response_contract() {
                 ("application/json", br#"{"schema":"test.v1"}"#.as_slice()),
             ] {
                 assert_response(
-                    http_response(status, content_type, body.to_vec()).into_axum_response(),
+                    http_response(status, content_type, body.to_vec()),
                     status,
                     content_type,
                     body,
@@ -42,16 +42,14 @@ fn runtime_http_response_contract() {
         for error in ["unauthorized", "runtime_busy", "quote\" newline\n 中文"] {
             let expected = serde_json::to_vec(&json!({"error": error})).unwrap();
             assert_response(
-                bounded_json_error_response(503, error).into_axum_response(),
+                bounded_json_error_response(503, error),
                 503,
                 "application/json",
                 &expected,
             )
             .await;
             assert_response(
-                json_error_response(400, error)
-                    .unwrap()
-                    .into_axum_response(),
+                json_error_response(400, error).unwrap(),
                 400,
                 "application/json",
                 &expected,
@@ -66,9 +64,7 @@ fn runtime_http_response_contract() {
         }))
         .unwrap();
         assert_response(
-            agent_run_step_failure_response("run_test", "execution", true, "test_reason")
-                .unwrap()
-                .into_axum_response(),
+            agent_run_step_failure_response("run_test", "execution", true, "test_reason").unwrap(),
             500,
             "application/json",
             &expected,
@@ -97,8 +93,7 @@ fn runtime_http_body_and_header_rejection_order() {
         ] {
             let response = read_axum_request(duplicate_headers().body(Body::from(body)).unwrap())
                 .await
-                .unwrap_err()
-                .into_axum_response();
+                .unwrap_err();
             assert_response(
                 response,
                 status,
@@ -112,10 +107,7 @@ fn runtime_http_body_and_header_rejection_order() {
             .body(Body::empty())
             .unwrap();
         assert_response(
-            read_axum_request(request)
-                .await
-                .unwrap_err()
-                .into_axum_response(),
+            read_axum_request(request).await.unwrap_err(),
             400,
             "application/json",
             br#"{"error":"request_header_invalid"}"#,
@@ -131,8 +123,29 @@ fn runtime_http_body_and_header_rejection_order() {
         )
         .await
         .unwrap();
-        assert_eq!(parsed.path, "/internal/transcript/page?cursor=1");
-        assert_eq!(parsed.body.len(), MAX_HTTP_BODY_BYTES);
+        assert_eq!(
+            parsed.uri().path_and_query().unwrap().as_str(),
+            "/internal/transcript/page?cursor=1"
+        );
+        assert_eq!(parsed.body().len(), MAX_HTTP_BODY_BYTES);
+        let parsed = read_axum_request(
+            Request::builder()
+                .method("GET")
+                .uri("/internal/model-catalog")
+                .header("X-Internal-Token", "synthetic-token")
+                .header("Content-Type", "text/plain")
+                .body(Body::from("unchanged body"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(parsed.method(), "GET");
+        assert_eq!(
+            parsed.headers().get("x-internal-token").unwrap(),
+            "synthetic-token"
+        );
+        assert_eq!(parsed.headers().get("content-type").unwrap(), "text/plain");
+        assert_eq!(parsed.body().as_ref(), b"unchanged body");
     });
 }
 
@@ -145,7 +158,7 @@ fn runtime_http_error_response_crosses_hyper_with_retry_headers() {
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let service = hyper::service::service_fn(|_| async {
-                Ok::<_, Infallible>(bounded_json_error_response(503, "runtime_busy").into_axum_response())
+                Ok::<_, Infallible>(bounded_json_error_response(503, "runtime_busy"))
             });
             runtime_http1_builder(HTTP_HEADER_TIMEOUT)
                 .serve_connection(TokioIo::new(stream), service).await.unwrap();

@@ -3,6 +3,10 @@
 This document owns only Workspace transports. Exact fields are enforced by the
 Django and Rust definitions in this repository.
 
+[Runtime HTTP](RuntimeHTTP.md) inventories the endpoints owned by the Rust
+Runtime service, their purpose and the admission/rejection behavior preserved by
+transport refactors. Django-owned internal routes remain described here.
+
 Browser REST and SSE routes are rooted at `/api`. Postgres is truth; Redis holds
 bounded transient live projection. Unknown fields and schemas fail. Public
 Runtime event and tool semantics belong only to the exact public Cargo revision.

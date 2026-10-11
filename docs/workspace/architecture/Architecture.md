@@ -17,6 +17,13 @@ Core behavior.
 | `packages/web` | Browser product consuming REST and SSE |
 | `skills/system` | First-party built-in behavior, separate from installable Plugin inventory |
 
+Runtime HTTP already uses axum and Hyper; its current Router delegates to a
+shared admission/body reader and synchronous protocol dispatch. The
+[Runtime HTTP inventory](../reference/RuntimeHTTP.md) records endpoint ownership,
+framework-reuse opportunities and the behavior protected during transport
+refactors. HTTP framework changes leave Django's product ownership and Core's
+runtime semantics at their existing boundaries.
+
 Workspace owns Agent Memory behavior and storage. Public Core receives generic
 execution file operations and mutation facts; it does not interpret the private
 memory namespace.

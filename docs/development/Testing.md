@@ -49,6 +49,13 @@ Upload alias tests retain their no-refund assertion on both platforms: Unix uses
 a dangling symlink, and Windows uses a dangling directory junction without
 requiring the symlink privilege. Neither case skips the resource-safety check.
 
+HTTP transport refactors first characterize actual request dispatch, rejection
+order, response envelopes/headers and cancellation/timeout resource ownership.
+Protocol-function and storage tests remain necessary but do not substitute for
+the complete HTTP path. For hosted Runtime endpoints, use the protected
+behaviors and coverage gaps in [Runtime HTTP](../workspace/reference/RuntimeHTTP.md).
+Keep domain effects under their existing real store/provider tests; add only the
+smallest observation seam needed for controlled blocking or write detection.
 
 Hosted model gateway tests exercise real SDK requests with synthetic HTTP
 responses: credentials work without an application quota binding, upstream

@@ -45,14 +45,11 @@ fn outbox_protocol(
     path: &str,
     body: serde_json::Value,
 ) -> serde_json::Value {
-    let headers = std::collections::HashMap::from([(
-        "x-internal-token".to_string(),
-        std::env::var("INTERNAL_API_TOKEN").expect("test token"),
-    )]);
+    let token = std::env::var("INTERNAL_API_TOKEN").expect("isolated fixture token");
     let (status, response) = crate::job_protocol::handle(
         "POST",
         path,
-        &headers,
+        Some(token.as_str()),
         &serde_json::to_vec(&body).unwrap(),
         store,
     )
