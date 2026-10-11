@@ -3,6 +3,13 @@
 This document owns only Workspace transports. Exact fields are enforced by the
 Django and Rust definitions in this repository.
 
+Django JSON schemas inherit `StrictSchema`: ordinary Python field names map to
+exact camelCase through Pydantic's shared alias generator. Exceptional wire names
+such as `schema_id` to `schema` remain explicit. Python names are not alternate
+input aliases; unknown fields and implicit type coercions remain rejected.
+Operation validation and malformed JSON share one error-code mapping while
+retaining their distinct defaults, method-specific codes and status codes.
+
 [Runtime HTTP](RuntimeHTTP.md) inventories the endpoints owned by the Rust
 Runtime service, their purpose and the admission/rejection behavior preserved by
 transport refactors. Django-owned internal routes remain described here.

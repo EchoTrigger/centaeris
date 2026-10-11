@@ -1,9 +1,10 @@
 import json
 import time
 import urllib.error
-import urllib.request
 
 from django.conf import settings
+
+from .runtime_http import request_json
 
 from .transcript_contract import valid_transcript_block_structure, valid_transcript_structure
 
@@ -33,16 +34,11 @@ RUNTIME_EXECUTION_PROFILE_SCHEMA = "runtime.execution_profile.v1"
 
 
 def request_execution_profile() -> dict:
-    request = urllib.request.Request(
-        f"{settings.RUNTIME_URL.rstrip('/')}/internal/execution-profile",
-        headers={"X-Internal-Token": settings.INTERNAL_API_TOKEN},
-        method="GET",
-    )
     try:
-        with urllib.request.urlopen(
-            request, timeout=settings.RUNTIME_START_TIMEOUT_SECONDS
-        ) as response:
-            result = json.loads(response.read())
+        result = request_json(
+            '/internal/execution-profile',
+            timeout=settings.RUNTIME_START_TIMEOUT_SECONDS,
+        )
     except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError) as error:
         if isinstance(error, urllib.error.HTTPError):
             error.close()
@@ -62,16 +58,11 @@ def request_execution_profile() -> dict:
 
 
 def request_model_catalog() -> dict:
-    request = urllib.request.Request(
-        f"{settings.RUNTIME_URL.rstrip('/')}/internal/model-catalog",
-        headers={"X-Internal-Token": settings.INTERNAL_API_TOKEN},
-        method="GET",
-    )
     try:
-        with urllib.request.urlopen(
-            request, timeout=settings.RUNTIME_START_TIMEOUT_SECONDS
-        ) as response:
-            result = json.loads(response.read())
+        result = request_json(
+            '/internal/model-catalog',
+            timeout=settings.RUNTIME_START_TIMEOUT_SECONDS,
+        )
     except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError) as error:
         raise RuntimeError("workspace_model_catalog_request_failed") from error
     if (
@@ -165,14 +156,18 @@ def build_agent_run_start(agent_run) -> dict:
 
 def request_host_event_input(session_id, input_id, source, content):
     """Core owns native input identity; the API persists its opaque result."""
-    request = urllib.request.Request(
-        f"{settings.RUNTIME_URL.rstrip('/')}/internal/host-event-input",
-        data=json.dumps({"schema": "runtime.host_event_input.create.v1", "sessionId": session_id,
-            "inputId": input_id, "source": source, "content": content}, separators=(",", ":")).encode(),
-        headers={"Content-Type": "application/json", "X-Internal-Token": settings.INTERNAL_API_TOKEN}, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=settings.RUNTIME_START_TIMEOUT_SECONDS) as response:
-            result = json.loads(response.read())
+        result = request_json(
+            '/internal/host-event-input',
+            {
+                'schema': 'runtime.host_event_input.create.v1',
+                'sessionId': session_id,
+                'inputId': input_id,
+                'source': source,
+                'content': content,
+            },
+            timeout=settings.RUNTIME_START_TIMEOUT_SECONDS,
+        )
     except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError) as error:
         if isinstance(error, urllib.error.HTTPError):
             error.close()
@@ -223,20 +218,12 @@ def request_agent_run_cancellation(agent_run) -> dict:
         "schema": "runtime.agent_run.cancel.v1",
         "agentRunStart": build_agent_run_start(agent_run),
     }
-    request = urllib.request.Request(
-        f"{settings.RUNTIME_URL.rstrip('/')}/agent-runs/cancel",
-        data=json.dumps(body, separators=(",", ":")).encode(),
-        headers={
-            "Content-Type": "application/json",
-            "X-Internal-Token": settings.INTERNAL_API_TOKEN,
-        },
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(
-            request, timeout=settings.RUNTIME_CONTROL_TIMEOUT_SECONDS
-        ) as response:
-            result = json.loads(response.read())
+        result = request_json(
+            '/agent-runs/cancel',
+            body,
+            timeout=settings.RUNTIME_CONTROL_TIMEOUT_SECONDS,
+        )
     except (
         urllib.error.HTTPError,
         urllib.error.URLError,
@@ -272,20 +259,12 @@ def request_agent_run_supplement(agent_run, supplement_id: str, message: str) ->
         "message": message,
         "agentRunStart": build_agent_run_start(agent_run),
     }
-    request = urllib.request.Request(
-        f"{settings.RUNTIME_URL.rstrip('/')}/internal/agent-runs/supplement",
-        data=json.dumps(body, separators=(",", ":")).encode(),
-        headers={
-            "Content-Type": "application/json",
-            "X-Internal-Token": settings.INTERNAL_API_TOKEN,
-        },
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(
-            request, timeout=settings.RUNTIME_START_TIMEOUT_SECONDS
-        ) as response:
-            result = json.loads(response.read())
+        result = request_json(
+            '/internal/agent-runs/supplement',
+            body,
+            timeout=settings.RUNTIME_START_TIMEOUT_SECONDS,
+        )
     except urllib.error.HTTPError as error:
         try:
             payload = json.loads(error.read())
@@ -399,20 +378,12 @@ def request_plugin_inspection(package_path: str) -> dict:
         "schema": WORKSPACE_PLUGIN_INSPECT_SCHEMA,
         "packagePath": package_path,
     }
-    request = urllib.request.Request(
-        f"{settings.RUNTIME_URL.rstrip('/')}/internal/plugins/inspect",
-        data=json.dumps(body, separators=(",", ":")).encode(),
-        headers={
-            "Content-Type": "application/json",
-            "X-Internal-Token": settings.INTERNAL_API_TOKEN,
-        },
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(
-            request, timeout=settings.RUNTIME_START_TIMEOUT_SECONDS
-        ) as response:
-            result = json.loads(response.read())
+        result = request_json(
+            '/internal/plugins/inspect',
+            body,
+            timeout=settings.RUNTIME_START_TIMEOUT_SECONDS,
+        )
     except urllib.error.HTTPError as error:
         try:
             payload = json.loads(error.read())
@@ -443,20 +414,12 @@ def _request_workspace_projection(
     *,
     not_found_error: str | None = None,
 ) -> dict:
-    request = urllib.request.Request(
-        f"{settings.RUNTIME_URL.rstrip('/')}{path}",
-        data=json.dumps(body, separators=(",", ":")).encode(),
-        headers={
-            "Content-Type": "application/json",
-            "X-Internal-Token": settings.INTERNAL_API_TOKEN,
-        },
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(
-            request, timeout=settings.RUNTIME_START_TIMEOUT_SECONDS
-        ) as response:
-            result = json.loads(response.read())
+        result = request_json(
+            path,
+            body,
+            timeout=settings.RUNTIME_START_TIMEOUT_SECONDS,
+        )
     except urllib.error.HTTPError as error:
         try:
             payload = json.loads(error.read())
@@ -548,20 +511,12 @@ def request_transcript_patches(body: dict) -> dict:
 
 
 def _request_transcript_read(path: str, body: dict) -> dict:
-    request = urllib.request.Request(
-        f"{settings.RUNTIME_URL.rstrip('/')}{path}",
-        data=json.dumps(body, separators=(",", ":")).encode(),
-        headers={
-            "Content-Type": "application/json",
-            "X-Internal-Token": settings.INTERNAL_API_TOKEN,
-        },
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(
-            request, timeout=settings.RUNTIME_START_TIMEOUT_SECONDS
-        ) as response:
-            result = json.loads(response.read())
+        result = request_json(
+            path,
+            body,
+            timeout=settings.RUNTIME_START_TIMEOUT_SECONDS,
+        )
     except urllib.error.HTTPError as error:
         try:
             payload = json.loads(error.read())
