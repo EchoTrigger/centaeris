@@ -1,19 +1,17 @@
 import json
 import urllib.error
-import urllib.request
 
 from django.conf import settings
 
+from .runtime_http import request_json
+
 
 def get_runtime_job(job_id: str) -> dict | None:
-    request = urllib.request.Request(
-        f"{settings.RUNTIME_URL.rstrip('/')}/internal/jobs/{job_id}",
-        headers={"X-Internal-Token": settings.INTERNAL_API_TOKEN},
-        method="GET",
-    )
     try:
-        with urllib.request.urlopen(request, timeout=settings.RUNTIME_CONTROL_TIMEOUT_SECONDS) as response:
-            body = json.loads(response.read())
+        body = request_json(
+            f'/internal/jobs/{job_id}',
+            timeout=settings.RUNTIME_CONTROL_TIMEOUT_SECONDS,
+        )
     except urllib.error.HTTPError as error:
         error.close()
         if error.code == 404:
@@ -27,15 +25,12 @@ def get_runtime_job(job_id: str) -> dict | None:
 
 
 def schedule_runtime_job(payload: dict, *, timeout=None) -> dict:
-    request = urllib.request.Request(
-        f"{settings.RUNTIME_URL.rstrip('/')}/internal/jobs/schedule",
-        data=json.dumps(payload, separators=(",", ":")).encode(),
-        headers={"Content-Type": "application/json", "X-Internal-Token": settings.INTERNAL_API_TOKEN},
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(request, timeout=settings.RUNTIME_START_TIMEOUT_SECONDS if timeout is None else timeout) as response:
-            body = json.loads(response.read())
+        body = request_json(
+            '/internal/jobs/schedule',
+            payload,
+            timeout=settings.RUNTIME_START_TIMEOUT_SECONDS if timeout is None else timeout,
+        )
     except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError) as error:
         if isinstance(error, urllib.error.HTTPError):
             error.close()

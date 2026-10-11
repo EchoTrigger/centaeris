@@ -24,6 +24,13 @@ framework-reuse opportunities and the behavior protected during transport
 refactors. HTTP framework changes leave Django's product ownership and Core's
 runtime semantics at their existing boundaries.
 
+Django Runtime clients share `app_core/runtime_http.py` for JSON request
+construction, token headers and response reading/closure. Each operation retains
+its timeout, HTTP error interpretation and response binding checks in
+`runtime_client.py` or `runtime_job_client.py`. The transport does not retry calls
+or translate uncertain writes into successful outcomes. Worker keeps its own
+dependency-free transport and durable scheduling policy.
+
 Workspace owns Agent Memory behavior and storage. Public Core receives generic
 execution file operations and mutation facts; it does not interpret the private
 memory namespace.

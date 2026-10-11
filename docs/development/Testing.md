@@ -54,6 +54,19 @@ order, response envelopes/headers and cancellation/timeout resource ownership.
 Protocol-function and storage tests remain necessary but do not substitute for
 the complete HTTP path. For hosted Runtime endpoints, use the protected
 behaviors and coverage gaps in [Runtime HTTP](../workspace/reference/RuntimeHTTP.md).
+
+For Django schema refactors, compare the generated OpenAPI and both validation
+and serialization schemas before and after, in addition to request tests.
+`test_schema_wire_contract.py` covers nested camelCase fields, strict types,
+exceptional aliases and unset/null/false distinctions. `test_http_error_contract.py`
+exercises shared-path method routing and public error statuses through Django
+and Ninja. `test_runtime_http_client.py` uses a loopback HTTP server to check
+request bytes, operation-specific errors and absence of automatic retries.
+Schema parity does not replace authorization, persistence or cancellation tests.
+For loopback HTTP/HTTPS fixtures, isolate inherited proxy settings in the test
+process. `NO_PROXY` alone may not prevent HTTP clients from initializing optional
+proxy transports; do not change machine-wide proxy settings to run these tests.
+
 Keep domain effects under their existing real store/provider tests; add only the
 smallest observation seam needed for controlled blocking or write detection.
 
