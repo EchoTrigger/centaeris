@@ -26,6 +26,8 @@ mod observations;
 mod platform_materials;
 mod postgres_store;
 mod recovery_upload;
+#[cfg(test)]
+mod runtime_http_tests;
 mod request_capacity;
 mod resident_capacity;
 mod session_delivery;
