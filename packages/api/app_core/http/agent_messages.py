@@ -9,6 +9,7 @@ from app_core.app_delegations import session_authority_is_current
 from app_core.models import AgentCoordinationSession
 from app_core.runtime_contract import require_opaque_ref, require_sha256
 
+from .query import valid_query_fields
 from .response_schema import AgentMessagesResponse, COMMON_ERROR_RESPONSES
 from .schema import StrictSchema
 from .security import internal_token_auth, usage_auth
@@ -76,8 +77,7 @@ def validate_message(request, payload: ValidateAgentMessageRequest):
 @router.get("/agents/{agent_id}/messages", auth=usage_auth("sessions:read"),
             response={200: AgentMessagesResponse} | COMMON_ERROR_RESPONSES)
 def get_messages(request, agent_id: str, afterSequence: int = 0, limit: int = 50):
-    if (set(request.GET) - {"afterSequence", "limit"}
-            or any(len(request.GET.getlist(field)) != 1 for field in request.GET)
+    if (not valid_query_fields(request.GET, {"afterSequence", "limit"})
             or afterSequence < 0 or not 1 <= limit <= 100):
         return Status(400, {"error": "agent_messages_cursor_invalid"})
     require_native_agent_delegation(request, "sessions:read", agent_id=agent_id)

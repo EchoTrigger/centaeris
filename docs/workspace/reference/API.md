@@ -10,6 +10,12 @@ input aliases; unknown fields and implicit type coercions remain rejected.
 Operation validation and malformed JSON share one error-code mapping while
 retaining their distinct defaults, method-specific codes and status codes.
 
+Scalar query endpoints share `app_core/http/query.py` to reject unknown or
+repeated fields and enforce required field names. Each handler retains its
+value rules, error response and authorization order; Ninja still parses typed
+parameters before entering the handler. Transcript citations and turn metadata
+explicitly accept repeated `sequence` values and do not use the scalar check.
+
 [Runtime HTTP](RuntimeHTTP.md) inventories the endpoints owned by the Rust
 Runtime service, their purpose and the admission/rejection behavior preserved by
 transport refactors. Django-owned internal routes remain described here.

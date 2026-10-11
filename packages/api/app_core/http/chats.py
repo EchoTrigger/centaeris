@@ -15,6 +15,7 @@ from app_core.app_delegations import DelegationRejected, authenticate_delegation
 from app_core.assets import DeferredInputResolutionError
 from app_core.business_agent_branches import BRANCH_HEADER, require_business_branch, resolve_business_branch, validate_business_user_id
 from .agent_previews import PreviewRejected
+from .query import valid_query_fields
 from .response_schema import COMMON_ERROR_RESPONSES
 from .schema import StrictSchema
 from .security import ProductUsageAuth
@@ -126,7 +127,7 @@ def boundary(fn):
 
 
 def query(request, allowed):
-    if set(request.GET) - allowed or any(len(request.GET.getlist(k)) != 1 for k in request.GET):
+    if not valid_query_fields(request.GET, allowed):
         raise AgentInputError(400, "request_invalid")
 
 

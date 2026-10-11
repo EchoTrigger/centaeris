@@ -63,6 +63,10 @@ exercises shared-path method routing and public error statuses through Django
 and Ninja. `test_runtime_http_client.py` uses a loopback HTTP server to check
 request bytes, operation-specific errors and absence of automatic retries.
 Schema parity does not replace authorization, persistence or cancellation tests.
+`test_http_query_contract.py` protects scalar query multiplicity, required fields,
+framework validation precedence, authorization order and repeatable transcript
+sequences through real Django requests. Keep both valid and invalid repeated
+values: Ninja may reject a value before the route checks multiplicity.
 For loopback HTTP/HTTPS fixtures, isolate inherited proxy settings in the test
 process. `NO_PROXY` alone may not prevent HTTP clients from initializing optional
 proxy transports; do not change machine-wide proxy settings to run these tests.

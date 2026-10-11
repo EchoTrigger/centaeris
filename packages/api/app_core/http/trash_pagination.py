@@ -2,6 +2,8 @@ import base64
 import binascii
 import json
 
+from .query import valid_query_fields
+
 
 TRASH_PAGE_SIZE = 50
 
@@ -12,10 +14,7 @@ def read_trash_cursor(
     fields: set[str],
     allowed_query_fields: set[str] | None = None,
 ) -> dict | None:
-    query_fields = set(request.GET.keys())
-    if query_fields - (allowed_query_fields or {"cursor"}) or any(
-        len(request.GET.getlist(field)) != 1 for field in query_fields
-    ):
+    if not valid_query_fields(request.GET, allowed_query_fields or {"cursor"}):
         raise ValueError("trash_query_invalid")
     raw_cursor = request.GET.get("cursor")
     if raw_cursor is None:
