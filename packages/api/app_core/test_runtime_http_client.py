@@ -71,6 +71,16 @@ class RuntimeHttpClientTests(SimpleTestCase):
         self.assertEqual(headers["Content-Type"], "application/json")
         self.assertEqual(body, b'{"schema":"workspace.skill.catalog.v1","pluginActivation":{}}')
 
+    def test_schedule_preserves_caller_deadline_and_default_timeout(self):
+        result = {"disposition": "inserted", "job": {"jobId": "job_1"}}
+        self.reply(200, result)
+        for options, expected in [({}, 7), ({"timeout": 0.25}, 0.25)]:
+            with self.subTest(options=options), patch("urllib.request.urlopen", wraps=urllib.request.urlopen) as opened:
+                self.assertEqual(runtime_job_client.schedule_runtime_job({"jobId": "job_1"}, **options), result)
+                self.assertEqual(opened.call_args.kwargs["timeout"], expected)
+            method, path, _, body = self.server.requests[-1]
+            self.assertEqual((method, path, body), ("POST", "/internal/jobs/schedule", b'{"jobId":"job_1"}'))
+
     def test_operation_specific_http_errors_are_not_retried(self):
         run = SimpleNamespace(id="agent_1", session_id="session_1")
         for operation, status, payload, exception, message in [

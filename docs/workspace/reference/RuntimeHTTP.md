@@ -59,8 +59,8 @@ identity, lifecycle binding and current storage fences remain domain checks.
 ### Jobs
 
 Request types, schema identities, worker-kind restrictions and transition
-validation are in `job_protocol.rs`. Worker kinds come from the shared
-[worker_jobs.json](../../../packages/worker/worker_jobs.json) contract.
+validation are in `job_protocol.rs`. Its `PYTHON_WORKER_JOB_KINDS` list defines
+the worker kinds accepted by these operations.
 
 | Method | Path | Responsibility | Success |
 | --- | --- | --- | --- |
@@ -212,9 +212,9 @@ credentials or unsanitized paths into observations.
 Core validation, signed authorization, current lease fences, job idempotency,
 terminal facts, supplement identity, projection generation, durable waiter
 recovery, storage admission and Docker residency are application behavior.
-HTTP extractors and middleware do not own or replace them. This review includes
-shared worker kinds, worker pending admission and residency-aware teardown from
-the current workspace; they remain protected behavior during routing cleanup.
+HTTP extractors and middleware do not own or replace them. The current mainline
+execution, database and residency protections remain intact during routing
+cleanup; provider quota admission belongs to the model gateway.
 
 ## Framework reuse and remaining boundaries
 
@@ -257,8 +257,8 @@ and exercises the production Router with configured, missing and empty server
 tokens in isolated processes. It covers method/query/fallback rejection and
 prohibits database checkout for rejected requests. A controllably blocked
 operation verifies that timeout and disconnect retain capacity until completion.
-These tests ran green before and after replacing dispatch. PostgreSQL outbox,
-worker-pending and transcript HTTP fixtures also use the production Router;
+These tests ran green before and after replacing dispatch. PostgreSQL outbox
+and transcript HTTP fixtures also use the production Router;
 their durable effects still require the dedicated PostgreSQL gate. Router
 rejection coverage does not establish every successful domain transition.
 Existing coverage also includes incomplete-header timeouts, request-lane
