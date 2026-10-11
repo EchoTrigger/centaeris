@@ -1,5 +1,15 @@
 # Testing
 
+Package license scope is checked with `python -B scripts/test_product_licensing.py`:
+parsed Cargo metadata must match `LICENSING.md`, Apache packages must not depend
+on AGPL workspace packages, and independent crate payloads must retain license
+and README files, including the model catalog's original logo notices.
+`node --test scripts/product-licenses.test.mjs` checks distribution license
+assembly and rejects missing or changed notices. Desktop and TUI packaging use
+the same assembly and validation helper; container builds copy the same license
+texts and scope statement. A public release still requires the complete release
+gate and inspection of its final artifacts.
+
 ## Test quality
 
 Run failure presentation uses shared input/output cases in

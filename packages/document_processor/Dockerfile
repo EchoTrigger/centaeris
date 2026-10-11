@@ -25,7 +25,7 @@ ARG PROCESSOR_DEVICE=cpu
 ENV CENTAERIS_PROCESSOR_DEVICE=${PROCESSOR_DEVICE}
 
 WORKDIR /app
-COPY LICENSE /usr/share/licenses/centaeris-workspace/LICENSE
+COPY LICENSE LICENSE-APACHE LICENSING.md COPYRIGHT /usr/share/licenses/centaeris-workspace/
 COPY pyproject.toml uv.lock .python-version ./
 COPY packages/api/pyproject.toml packages/api/pyproject.toml
 COPY packages/hosted_execution/pyproject.toml packages/hosted_execution/pyproject.toml

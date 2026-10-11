@@ -16,7 +16,7 @@ FROM nginx:1.30.4-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a
 COPY packages/web/nginx.conf /etc/nginx/upload-boundary.conf.template
 COPY packages/web/entrypoint.sh /entrypoint.sh
 COPY --from=build /app/packages/web/dist /usr/share/nginx/html
-COPY LICENSE /usr/share/licenses/centaeris-workspace/LICENSE
+COPY LICENSE LICENSE-APACHE LICENSING.md COPYRIGHT /usr/share/licenses/centaeris-workspace/
 
 EXPOSE 3000
 ENTRYPOINT ["/bin/sh", "/entrypoint.sh"]

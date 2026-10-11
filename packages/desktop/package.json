@@ -22,7 +22,7 @@
     "check:syntax": "node ./scripts/check-javascript-syntax.mjs",
     "check:host-parity": "node ./scripts/check-host-parity.mjs",
     "check:dist-licenses": "node ./scripts/check-dist-licenses.mjs --dist \"./dist/Centaeris Desktop\"",
-    "test:third-party-licenses": "node --test ./scripts/third-party-licenses.test.mjs",
+    "test:third-party-licenses": "node --test ./scripts/third-party-licenses.test.mjs ../../scripts/product-licenses.test.mjs",
     "smoke:runtime": "node ./scripts/ensure-runtime.mjs && node ./scripts/smoke-runtime.mjs",
     "presmoke:window": "node ./scripts/ensure-electron.mjs",
     "smoke:window": "node ./scripts/build-dist.mjs && node ./scripts/smoke-window.mjs"

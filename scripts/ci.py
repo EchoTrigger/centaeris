@@ -29,6 +29,7 @@ def run_command(args, capture=False):
 def run_gate(stage, run=run_command, platform=sys.platform, frontend_tests=False):
     if stage not in ("Rust", "Node", "Source"):
         raise ValueError(f"Unknown source gate: {stage}")
+    run([sys.executable, "-B", "scripts/test_product_licensing.py"])
     pnpm = "pnpm.cmd" if platform == "win32" else "pnpm"
     run([sys.executable, "-B", "scripts/test_product_version.py"])
     if stage in ("Rust", "Source"):

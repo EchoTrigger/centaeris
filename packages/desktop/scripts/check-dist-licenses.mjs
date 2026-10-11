@@ -4,6 +4,7 @@ import path from "node:path";
 import { collectThirdPartyLicenses } from "./third-party-licenses.mjs";
 import { inspectSystemSkillsBundle } from "../src/systemSkills.mjs";
 import { DESKTOP_RUNTIME_TARGET } from "../src/runtimeArtifact.mjs";
+import { checkProductLicenses } from "../../../scripts/product-licenses.mjs";
 
 const hostRoot = path.resolve(import.meta.dirname, "..");
 const repoRoot = path.resolve(hostRoot, "..", "..");
@@ -45,6 +46,7 @@ for (const item of index.packages) {
 }
 
 if (distRoot) {
+  await checkProductLicenses(repoRoot, path.resolve(distRoot));
   const required = [
     "LICENSE",
     "LICENSES.chromium.html",
