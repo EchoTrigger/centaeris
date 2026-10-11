@@ -41,6 +41,43 @@ embedded newlines, so one frame occupies exactly one JSONL line. Empty lines are
 ignored by the server. The server accepts requests only; an inbound response or
 notification closes that client connection.
 
+The local transport has explicit process-memory boundaries. Each input line
+is limited to 16 MiB; encoded output frames are limited to 160 MiB (including LF).
+The output limit accommodates the existing 25 MiB desktop-preview contract even
+with JSON's worst-case six-byte escaping, with room for its envelope. These finite
+resource caps are not throughput targets. Previously unbounded `session/load`
+and `session/list` results exceeding the output limit return the typed error
+`runtime_rpc_response_too_large`, without truncation or closing the connection.
+Serialization writes directly into a capped buffer and stops before adding bytes
+beyond the output limit, including the final LF. Domain-result construction is
+separate and is not claimed to have a process-wide memory bound.
+Desktop and TUI restore transcripts through bounded `transcript/page`, patches
+and content ranges; the Session metadata list itself currently has no pagination. Oversized input closes that connection before JSON
+parsing. Up to 32 connections are accepted; excess connections close without
+stopping the listener.
+
+Request admission happens before spawning: at most eight ordinary requests per
+connection and 32 across the server. Initialization, reads and the existing drain-allowed
+cancel/detach/exit/shutdown commands have separate headroom of four per connection
+and eight globally. These are stability defaults, not measured throughput optima.
+There is no extra queue of spawned tasks waiting for permits. Exhaustion closes
+the offending connection; an admitted action continues and retains its capacity
+until its handler and response enqueue finish. Reconnect to observe/reconcile
+uncertain outcomes; never automatically retry a one-shot action solely because
+its connection closed.
+
+Each client has at most 128 queued messages and 256 MiB of output bytes; all clients
+share a 512 MiB byte budget. Byte accounting includes the frame currently being
+written, and is released on complete write or discard during disconnect. Queue message
+or byte exhaustion signals connection closure and makes direct response delivery
+fail; broadcasts continue to other clients. An oversized broadcast fails during
+encoding before any client enqueue. No blocking send
+runs while holding the client registry lock. Disconnect removes the viewer
+binding and queued output, but does not cancel Runtime-owned AgentRuns or already
+admitted host actions. Clients must resynchronize through the existing durable
+read methods after reconnecting. Broadcast delivery is transient, not a durable
+acknowledgement.
+
 The Runtime executable exposes two transport entry points:
 
 ```text
@@ -88,6 +125,10 @@ A successful response contains exactly one `result`:
   "result": {}
 }
 ```
+
+A `result` may be JSON `null`; it remains a present success result. The decoder
+rejects missing result/error, both fields present (even if either is null), and
+`error: null`. Direct typed deserialization and JSONL decoding share this rule.
 
 A failed response contains exactly one `error`:
 
