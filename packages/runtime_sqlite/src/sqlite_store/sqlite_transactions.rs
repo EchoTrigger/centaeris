@@ -86,39 +86,7 @@ impl RuntimeStoreTransactionPort for SqliteRuntimeStore {
         &self,
         req: UpsertExternalContextAndScheduleJobRequest,
     ) -> Result<ScheduleRuntimeJobResult, String> {
-        self.with_conn(|conn| {
-            let tx = conn.transaction().map_err(|err| {
-                format!("begin upsert_external_context_and_schedule_job transaction failed: {err}")
-            })?;
-            super::sqlite_external_context::upsert_external_context_object_conn(&tx, &req.object)?;
-            let inserted = super::sqlite_reliability::insert_runtime_job(&tx, &req.job)?;
-            let result = if inserted {
-                ScheduleRuntimeJobResult {
-                    disposition: ScheduleRuntimeJobDisposition::Inserted,
-                    job: req.job,
-                }
-            } else {
-                let job = super::sqlite_reliability::load_runtime_job_by_kind_and_idempotency(
-                    &tx,
-                    req.job.job_kind.as_str(),
-                    req.job.idempotency_key.as_str(),
-                )?
-                .ok_or_else(|| {
-                    format!(
-                        "upsert_external_context_and_schedule_job existing row missing job_kind={} idempotency_key={}",
-                        req.job.job_kind, req.job.idempotency_key
-                    )
-                })?;
-                ScheduleRuntimeJobResult {
-                    disposition: ScheduleRuntimeJobDisposition::Existing,
-                    job,
-                }
-            };
-            tx.commit().map_err(|err| {
-                format!("commit upsert_external_context_and_schedule_job transaction failed: {err}")
-            })?;
-            Ok(result)
-        })
+        self.with_conn(|conn| upsert_external_context_and_schedule_job_conn(conn, req, &mut |_| {}))
     }
 
     fn upsert_external_context_link_and_complete_job(
@@ -196,6 +164,33 @@ pub(super) enum TransactionEvent {
     RollbackFailed,
 }
 
+/// Observe the actual SQLite transaction result, without owning connections,
+/// queuing work, retrying writes, or deciding Job policy.
+pub(super) fn commit_job_write<T>(
+    tx: rusqlite::Transaction<'_>,
+    commit_error: &str,
+    observe: &mut dyn FnMut(TransactionEvent),
+    write: impl FnOnce(&rusqlite::Connection) -> Result<T, String>,
+) -> Result<T, String> {
+    observe(TransactionEvent::Began);
+    let result = match write(&tx) {
+        Ok(value) => value,
+        Err(error) => {
+            observe(match tx.rollback() {
+                Ok(()) => TransactionEvent::RolledBack,
+                Err(_) => TransactionEvent::RollbackFailed,
+            });
+            return Err(error);
+        }
+    };
+    observe(TransactionEvent::BeforeCommit);
+    observe(TransactionEvent::CommitAttempted);
+    tx.commit()
+        .map_err(|error| format!("{commit_error}: {error}"))?;
+    observe(TransactionEvent::Committed);
+    Ok(result)
+}
+
 pub(super) fn upsert_external_context_link_and_complete_job_conn(
     conn: &mut rusqlite::Connection,
     req: UpsertExternalContextLinkAndCompleteJobRequest,
@@ -204,34 +199,66 @@ pub(super) fn upsert_external_context_link_and_complete_job_conn(
     let tx = conn.transaction().map_err(|err| {
         format!("begin upsert_external_context_link_and_complete_job transaction failed: {err}")
     })?;
-    observe(TransactionEvent::Began);
-    let result = (|| {
-        if let Some(object) = req.object.as_ref() {
-            super::sqlite_external_context::upsert_external_context_object_conn(&tx, object)?;
-        }
-        if let Some(link) = req.link.as_ref() {
-            super::sqlite_external_context::link_external_context_object_conn(&tx, link)?;
-        }
-        super::sqlite_reliability::complete_runtime_job_conn(&tx, &req.complete_job)?;
-        super::sqlite_reliability::upsert_runtime_job_outbox_event(
-            &tx,
-            req.complete_job.job_id.as_str(),
-            RUNTIME_JOB_TERMINAL_EVENT,
-        )?;
-        Ok(())
-    })();
-    if let Err(error) = result {
-        match tx.rollback() {
-            Ok(()) => observe(TransactionEvent::RolledBack),
-            Err(_) => observe(TransactionEvent::RollbackFailed),
-        }
-        return Err(error);
-    }
-    observe(TransactionEvent::BeforeCommit);
-    observe(TransactionEvent::CommitAttempted);
-    tx.commit().map_err(|err| {
-        format!("commit upsert_external_context_link_and_complete_job transaction failed: {err}")
+    commit_job_write(
+        tx,
+        "commit upsert_external_context_link_and_complete_job transaction failed",
+        observe,
+        |tx| {
+            if let Some(object) = req.object.as_ref() {
+                super::sqlite_external_context::upsert_external_context_object_conn(tx, object)?;
+            }
+            if let Some(link) = req.link.as_ref() {
+                super::sqlite_external_context::link_external_context_object_conn(tx, link)?;
+            }
+            super::sqlite_reliability::complete_runtime_job_conn(tx, &req.complete_job)?;
+            super::sqlite_reliability::upsert_runtime_job_outbox_event(
+                tx,
+                req.complete_job.job_id.as_str(),
+                RUNTIME_JOB_TERMINAL_EVENT,
+            )?;
+            Ok(())
+        },
+    )
+}
+
+pub(super) fn upsert_external_context_and_schedule_job_conn(
+    conn: &mut rusqlite::Connection,
+    req: UpsertExternalContextAndScheduleJobRequest,
+    observe: &mut dyn FnMut(TransactionEvent),
+) -> Result<ScheduleRuntimeJobResult, String> {
+    let tx = conn.transaction().map_err(|err| {
+        format!("begin upsert_external_context_and_schedule_job transaction failed: {err}")
     })?;
-    observe(TransactionEvent::Committed);
-    Ok(())
+    commit_job_write(
+        tx,
+        "commit upsert_external_context_and_schedule_job transaction failed",
+        observe,
+        |tx| {
+            super::sqlite_external_context::upsert_external_context_object_conn(tx, &req.object)?;
+            let inserted = super::sqlite_reliability::insert_runtime_job(tx, &req.job)?;
+            let result = if inserted {
+                ScheduleRuntimeJobResult {
+                    disposition: ScheduleRuntimeJobDisposition::Inserted,
+                    job: req.job,
+                }
+            } else {
+                let job = super::sqlite_reliability::load_runtime_job_by_kind_and_idempotency(
+                    tx,
+                    req.job.job_kind.as_str(),
+                    req.job.idempotency_key.as_str(),
+                )?
+                .ok_or_else(|| {
+                    format!(
+                        "upsert_external_context_and_schedule_job existing row missing job_kind={} idempotency_key={}",
+                        req.job.job_kind, req.job.idempotency_key
+                    )
+                })?;
+                ScheduleRuntimeJobResult {
+                    disposition: ScheduleRuntimeJobDisposition::Existing,
+                    job,
+                }
+            };
+            Ok(result)
+        },
+    )
 }
