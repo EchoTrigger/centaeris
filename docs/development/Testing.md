@@ -36,6 +36,14 @@ not. Retain security and public-contract checks when consolidating tests. Do not
 implement this policy as another blacklist of source patterns in tests; enforce
 it through review and evidence.
 
+Keep unrelated outbound calls outside controlled timeout fixtures. The real
+Core/HTTP admission-response tests isolate return-job scheduling, whose real
+HTTP/store recovery has separate coverage; a closed port's platform-dependent
+connection delay must not determine whether the response-loss window is reached.
+Upload alias tests retain their no-refund assertion on both platforms: Unix uses
+a dangling symlink, and Windows uses a dangling directory junction without
+requiring the symlink privilege. Neither case skips the resource-safety check.
+
 ## Focused Core gate
 
 Every Rust change runs at least:

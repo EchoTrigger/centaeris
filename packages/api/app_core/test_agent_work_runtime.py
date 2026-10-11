@@ -118,7 +118,10 @@ class AgentWorkRuntimeTests(LiveServerTestCase):
             "fastTriggerCase": fast_trigger_case,
             "database": {key: database[key] for key in ("NAME", "USER", "PASSWORD", "HOST", "PORT")}}
         from .test_agent_work import PROFILE
+        # Return-job transport has its own real HTTP/store acceptance. Keep it
+        # outside this fixture's controlled admission-response loss window.
         with patch("app_core.agent_work.request_execution_profile", return_value=PROFILE), \
+             patch("app_core.agent_work_return_jobs.schedule_work_return_job", return_value="inserted"), \
              patch("app_core.agent_work.schedule_agent_run_lifecycle", return_value="inserted") as schedule:
             result = subprocess.run(["cargo", "test", "--locked", "-p", "runtime_server",
                 "agent_work::tests::runtime::django_work_commit_boundary", "--", "--ignored", "--exact", "--nocapture"],
@@ -185,6 +188,7 @@ class AgentWorkRuntimeTests(LiveServerTestCase):
     def recover_with_worker(self):
         from .test_agent_work import PROFILE
         with patch("app_core.agent_work.request_execution_profile", return_value=PROFILE), \
+             patch("app_core.agent_work_return_jobs.schedule_work_return_job", return_value="inserted"), \
              patch("app_core.agent_work.schedule_agent_run_lifecycle", return_value="inserted") as schedule:
             self.run_recovery_worker()
         return schedule.call_count
