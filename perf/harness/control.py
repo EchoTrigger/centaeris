@@ -37,7 +37,11 @@ def initialize(root, oci_runtime=None):
                   POSTGRES_TEST_HOST_PORT='55433', REDIS_TEST_HOST_PORT='16379',
                   BOOTSTRAP_SUPERADMIN_EMAIL='perf-admin@localhost.invalid',
                   DJANGO_DEBUG='0', PASSWORD_RESET_ENABLED='0', PASSWORD_RESET_MAIL_SENDER='0',
-                  WORKER_SLOT_COUNT='2')
+                  WORKER_SLOT_COUNT='2',
+                  # Explicit synthetic inputs for this isolated two-slot fixture.
+                  # Two overlapping spool copies per 1 MiB upload fit two slots.
+                  UPLOAD_BODY_MAX_BYTES='1048576', UPLOAD_TEMP_MAX_BYTES='4194304',
+                  UPLOAD_MAX_CONCURRENT='2')
     path = root / 'perf/.state/test.env'
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('x', encoding='utf-8') as output:

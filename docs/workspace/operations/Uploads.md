@@ -6,6 +6,17 @@ oversized part following valid files. Content-Length and uploaded size metadata
 do not substitute for counting received bytes. The existing library batch count
 of 50 files remains unchanged.
 
+The ingress adapter normalizes bytes header names to lowercase for both its
+classification and the downstream Django request. `Content-Type`, `Content-Length`
+and `Transfer-Encoding` are singleton fields: repeated occurrences, including
+different casing or identical values, return 400 `upload_headers_ambiguous`.
+`Content-Length` together with `Transfer-Encoding` also returns that error.
+These framing checks run before body reads, downstream calls, upload database or
+temporary-filesystem work, and before control/snapshot exclusions. They apply
+even when the pool is full or the declared body exceeds the upload envelope;
+valid single headers retain normal 429/413 upload behavior and the unchanged
+control/signed-snapshot transport paths.
+
 ## Deployment inputs
 
 | Setting | Policy |
