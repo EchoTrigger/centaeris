@@ -2,6 +2,307 @@
 use super::*;
 use std::convert::Infallible;
 
+fn http_state(runtime: Arc<tokio::runtime::Runtime>) -> HttpServerState {
+    let job_store = PostgresRuntimeStore::rejecting_http_test_store();
+    HttpServerState {
+        runtime,
+        store: Arc::new(RuntimeStoreActor::start(job_store.clone()).unwrap()),
+        job_store: Arc::new(job_store),
+        tool_layers: Default::default(),
+        execution_profile: Arc::new(RuntimeExecutionProfile {
+            schema: RUNTIME_EXECUTION_PROFILE_SCHEMA,
+            image_capability: "workspace-general",
+            image_digest: "sha256:synthetic-http-fixture".into(),
+        }),
+        request_capacity: request_capacity::RequestCapacity::for_http_tests(Duration::from_secs(2)),
+    }
+}
+
+#[test]
+fn runtime_http_timeout_and_disconnect_hold_capacity_until_blocking_work_exits() {
+    let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
+    runtime.block_on(async {
+        for disconnect in [false, true] {
+            let mut state = http_state(runtime.clone());
+            state.request_capacity =
+                request_capacity::RequestCapacity::for_http_tests(Duration::from_millis(100));
+            let slots = state.request_capacity.lane("POST", "/skills/catalog").slots;
+            let (entered, entered_rx) = tokio::sync::oneshot::channel();
+            let (release, release_rx) = std::sync::mpsc::channel();
+            let task = tokio::spawn(dispatch_http_operation(
+                State(state),
+                Request::builder()
+                    .method("POST")
+                    .uri("/skills/catalog")
+                    .body(Body::empty())
+                    .unwrap(),
+                move |_, _| {
+                    entered.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(http_response(200, "text/plain", b"completed".to_vec()))
+                },
+            ));
+            tokio::time::timeout(Duration::from_secs(3), entered_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            if disconnect {
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            } else {
+                assert_eq!(task.await.unwrap().status(), 504);
+            }
+            assert_eq!(
+                slots.available_permits(),
+                0,
+                "detaching the response must not refund running work"
+            );
+            assert!(slots.clone().try_acquire_owned().is_err());
+            release.send(()).unwrap();
+            let permit = tokio::time::timeout(Duration::from_secs(3), slots.acquire_owned())
+                .await
+                .unwrap()
+                .unwrap();
+            drop(permit);
+        }
+    });
+}
+
+async fn router_request(router: &Router, request: Request<Body>) -> (u16, serde_json::Value) {
+    use hyper::service::Service;
+    let method = request.method().to_string();
+    let target = request.uri().to_string();
+    let response = TowerToHyperService::new(router.clone())
+        .call(request)
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    assert_eq!(
+        response.headers()[header::CONNECTION],
+        "close",
+        "{method} {target}"
+    );
+    assert!(
+        !response.headers().contains_key(header::ALLOW),
+        "{method} {target}"
+    );
+    let headers: std::collections::BTreeMap<_, _> = response
+        .headers()
+        .iter()
+        .map(|(name, value)| (name.as_str().to_owned(), value.to_str().unwrap().to_owned()))
+        .collect();
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (
+        status,
+        json!({"method": method, "target": target, "status": status,
+        "headers": headers, "body": String::from_utf8(body.to_vec()).unwrap()}),
+    )
+}
+
+#[test]
+fn runtime_http_router_contract() {
+    let mode = match env::var("CENTAERIS_HTTP_CONTRACT_CHILD") {
+        Ok(mode) => mode,
+        Err(_) => {
+            // Configuration is process-wide. Each case runs alone without changing
+            // environment variables under other parallel Rust tests.
+            for mode in ["configured", "missing", "empty"] {
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command
+                    .args([
+                        "--exact",
+                        "runtime_http_tests::runtime_http_router_contract",
+                        "--nocapture",
+                    ])
+                    .env("CENTAERIS_HTTP_CONTRACT_CHILD", mode);
+                match mode {
+                    "missing" => {
+                        command.env_remove("INTERNAL_API_TOKEN");
+                    }
+                    "empty" => {
+                        command.env("INTERNAL_API_TOKEN", "");
+                    }
+                    _ => {
+                        command.env("INTERNAL_API_TOKEN", "synthetic-http-token");
+                    }
+                }
+                let output = command.output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{mode}: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        }
+    };
+    let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
+    runtime.block_on(async {
+        let state = http_state(runtime.clone());
+        let router = http_router(state.clone());
+        let mut records = Vec::new();
+        // Exercise the documented surface instead of maintaining a second route list.
+        let routes: Vec<_> = include_str!("../../../docs/workspace/reference/RuntimeHTTP.md")
+            .lines()
+            .filter(|line| line.starts_with("| GET |") || line.starts_with("| POST |"))
+            .map(|line| {
+                let fields: Vec<_> = line.split('|').collect();
+                (
+                    fields[1].trim(),
+                    fields[2]
+                        .trim()
+                        .trim_matches('`')
+                        .replace("{jobId}", "bad%2Fid"),
+                )
+            })
+            .collect();
+        assert_eq!(routes.len(), 29);
+        for (method, path) in routes {
+            let jobs =
+                path.starts_with("/internal/jobs") || path.starts_with("/internal/job-outbox");
+            for token in [
+                None,
+                Some("wrong-token"),
+                Some(if mode == "empty" {
+                    ""
+                } else {
+                    "synthetic-http-token"
+                }),
+            ] {
+                let mut request = Request::builder().method(method).uri(&path);
+                if let Some(token) = token {
+                    request = request.header("x-internal-token", token);
+                }
+                let (status, record) =
+                    router_request(&router, request.body(Body::from("{")).unwrap()).await;
+                let expected = if mode == "missing" || (jobs && mode == "empty") {
+                    500
+                } else if token
+                    != Some(if mode == "empty" {
+                        ""
+                    } else {
+                        "synthetic-http-token"
+                    })
+                {
+                    401
+                } else if method == "POST" || jobs {
+                    400
+                } else {
+                    200
+                };
+                assert_eq!(status, expected, "{method} {path}: {record}");
+                records.push(record);
+            }
+            for (other_method, target) in [
+                ("HEAD", path.clone()),
+                ("OPTIONS", path.clone()),
+                ("PUT", path.clone()),
+                (method, format!("{path}?ignored=1")),
+                (method, format!("{path}/")),
+            ] {
+                let (status, record) = router_request(
+                    &router,
+                    Request::builder()
+                        .method(other_method)
+                        .uri(&target)
+                        .header(
+                            "x-internal-token",
+                            if mode == "empty" {
+                                ""
+                            } else {
+                                "synthetic-http-token"
+                            },
+                        )
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await;
+                let expected = if jobs && mode != "configured" {
+                    500
+                } else if jobs && other_method == "GET" {
+                    400
+                } else {
+                    404
+                };
+                assert_eq!(status, expected, "{other_method} {target}: {record}");
+                records.push(record);
+            }
+        }
+        for (method, path) in [
+            ("GET", "/banana"),
+            ("POST", "/internal/jobsXYZ"),
+            ("POST", "/internal/job-outboxXYZ"),
+            ("GET", "/internal/jobs/"),
+            ("GET", "/internal/jobs/internal/jobs/bad%2Fid"),
+            ("GET", "/internal/%6dodel-catalog"),
+            ("POST", "/skills%2Fcatalog"),
+        ] {
+            let (status, record) = router_request(
+                &router,
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("x-internal-token", "synthetic-http-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            let jobs =
+                path.starts_with("/internal/jobs") || path.starts_with("/internal/job-outbox");
+            let expected = if jobs && mode != "configured" {
+                500
+            } else if jobs && method == "GET" && path.starts_with("/internal/jobs/") {
+                400
+            } else {
+                404
+            };
+            assert_eq!(status, expected, "{method} {path}: {record}");
+            records.push(record);
+        }
+        // Admission and body validation still precede routing and authentication.
+        for (body, expected) in [(vec![], 400), (vec![0; MAX_HTTP_BODY_BYTES + 1], 413)] {
+            let (status, record) = router_request(
+                &router,
+                Request::builder()
+                    .method("POST")
+                    .uri("/banana")
+                    .header("x-test", "one")
+                    .header("X-Test", "two")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(status, expected);
+            records.push(record);
+        }
+        let _slot = state
+            .request_capacity
+            .lane("POST", "/agent-runs/step")
+            .slots
+            .try_acquire_owned()
+            .unwrap();
+        let (status, record) = router_request(
+            &router,
+            Request::builder()
+                .uri("/banana")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, 503);
+        records.push(record);
+        if let Ok(directory) = env::var("CENTAERIS_HTTP_CONTRACT_RECORD_DIR") {
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(
+                Path::new(&directory).join(format!("{mode}.json")),
+                serde_json::to_vec_pretty(&records).unwrap(),
+            )
+            .unwrap();
+        }
+    });
+}
+
 async fn assert_response(response: Response<Body>, status: u16, content_type: &str, body: &[u8]) {
     assert_eq!(response.status().as_u16(), status);
     assert_eq!(response.headers()[header::CONTENT_TYPE], content_type);

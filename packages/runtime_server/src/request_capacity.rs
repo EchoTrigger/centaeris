@@ -19,6 +19,17 @@ pub(crate) struct RequestLane {
 }
 
 impl RequestCapacity {
+    #[cfg(test)]
+    pub(crate) fn for_http_tests(deadline: Duration) -> Self {
+        Self {
+            ordinary: Arc::new(Semaphore::new(1)),
+            listeners: Arc::new(Semaphore::new(1)),
+            control: Arc::new(Semaphore::new(1)),
+            ordinary_deadline: deadline,
+            control_deadline: deadline,
+        }
+    }
+
     pub(crate) fn from_env() -> Result<Self, String> {
         Ok(Self {
             ordinary: Arc::new(Semaphore::new(capacity("RUNTIME_HTTP_REQUEST_LIMIT", 24)?)),
