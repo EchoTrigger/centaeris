@@ -1,9 +1,12 @@
 # Testing
 
 Package license scope is checked with `python -B scripts/test_product_licensing.py`:
-parsed Cargo metadata must match `LICENSING.md`, Apache packages must not depend
-on AGPL workspace packages, and independent crate payloads must retain license
-and README files, including the model catalog's original logo notices.
+parsed TOML/JSON manifests must match `LICENSING.md`, and Apache packages must
+not depend on AGPL workspace packages. This check requires no Cargo installation
+or dependency cache and runs in both Node and Rust gates. After Rust dependencies
+are prepared, `python -B scripts/test_product_licensing.py --crate-payloads`
+also checks that independent crate payloads retain license and README files,
+including the model catalog's original logo notices.
 `node --test scripts/product-licenses.test.mjs` checks distribution license
 assembly and rejects missing or changed notices. Desktop and TUI packaging use
 the same assembly and validation helper; container builds copy the same license

@@ -42,6 +42,7 @@ def run_gate(stage, run=run_command, platform=sys.platform, frontend_tests=False
             ["run", "--locked", "-p", "centaeris-runtime", "--bin", "centaeris-runtime-protocol-docs", "--", "--check"],
         ):
             run(["cargo", *args])
+        run([sys.executable, "-B", "scripts/test_product_licensing.py", "--crate-payloads"])
         tree = run(["cargo", "tree", "--locked", "-p", "centaeris-core", "--edges", "normal,build,dev"], capture=True)
         if re.search(r"centaeris-runtime-sqlite|rusqlite", tree):
             raise RuntimeError("Core depends on the SQLite adapter")
