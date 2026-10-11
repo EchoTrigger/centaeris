@@ -253,11 +253,50 @@ pub struct SaveWaitCheckpointRequest {
     pub event: RuntimeEvent,
 }
 
+impl SaveWaitCheckpointRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        let checkpoint = &self.checkpoint;
+        let event = &self.event;
+        if checkpoint.session_id != event.session_id
+            || event.task_id.as_deref() != Some(checkpoint.turn_id.as_str())
+        {
+            return Err(format!(
+                "save_wait_checkpoint scope mismatch: checkpointChat={} eventChat={} checkpointTurn={} eventTask={:?}",
+                checkpoint.session_id, event.session_id, checkpoint.turn_id, event.task_id
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ConsumeWaitCheckpointRequest {
     pub checkpoint: CheckpointRecord,
     pub events: Vec<RuntimeEvent>,
 }
+
+impl ConsumeWaitCheckpointRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.events.is_empty() {
+            return Err("consume_wait_checkpoint requires events".to_string());
+        }
+        let mut event_ids = std::collections::HashSet::new();
+        for event in &self.events {
+            if event.session_id != self.checkpoint.session_id
+                || event.task_id.as_deref() != Some(self.checkpoint.turn_id.as_str())
+            {
+                return Err("consume_wait_checkpoint event scope mismatch".to_string());
+            }
+            if !event_ids.insert(event.event_id.as_str()) {
+                return Err("consume_wait_checkpoint duplicate event id".to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests;
 
 pub trait RuntimeStoreTransactionPort {
     fn save_wait_checkpoint(&self, req: SaveWaitCheckpointRequest) -> Result<(), String>;

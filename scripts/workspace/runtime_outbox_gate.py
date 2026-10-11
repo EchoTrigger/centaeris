@@ -53,6 +53,7 @@ def main():
                 ['cargo', 'test', '--locked', '-p', 'runtime_server',
                  'postgres_store::integration_tests::residency_tests', '--']]
     exact_tests = [
+        'checkpoint_requests::postgres_direct_store_validates_checkpoint_requests_before_transactions',
         'snapshot_cas_tests::postgres_snapshot_cas_rejects_stale_writers_and_preserves_concurrent_results',
         'postgres_transcript_concurrent_duplicate_commit_is_idempotent',
         'postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_state',
