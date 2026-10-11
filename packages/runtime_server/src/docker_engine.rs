@@ -361,10 +361,14 @@ fn start_inner(id: &str) -> Result<(), String> {
 }
 
 pub(crate) fn remove(id: &str, volumes: bool) -> Result<(), String> {
-    crate::observations::timed("dockerRemove", || remove_inner(id, volumes))
+    crate::observations::timed("dockerRemove", || remove_inner(id, volumes, true))
 }
 
-fn remove_inner(id: &str, volumes: bool) -> Result<(), String> {
+pub(crate) fn remove_stopped(id: &str) -> Result<(), String> {
+    crate::observations::timed("dockerRemove", || remove_inner(id, false, false))
+}
+
+fn remove_inner(id: &str, volumes: bool, force: bool) -> Result<(), String> {
     // Callers verify ownership and pass the immutable ID, never a mutable name.
     if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("Docker removal requires an immutable container ID".to_string());
@@ -377,7 +381,7 @@ fn remove_inner(id: &str, volumes: bool) -> Result<(), String> {
             .remove_container(
                 id,
                 Some(RemoveContainerOptions {
-                    force: true,
+                    force,
                     v: volumes,
                     ..Default::default()
                 }),

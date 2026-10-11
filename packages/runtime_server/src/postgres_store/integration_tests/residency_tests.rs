@@ -385,7 +385,7 @@ impl SandboxFixture {
         ObservedResidentSandbox {
             execution_id: self.execution.clone(),
             agent_run_id: self.run.clone(),
-            container_id: format!("container-{}", self.run),
+            container_id: format!("container-{}", self.execution),
             resources: resources(),
         }
     }
@@ -880,4 +880,531 @@ fn postgres_resident_forward_migration_preserves_reclaim_budget_and_rejects_bad_
         .unwrap_err()
         .contains("memory_bytes constraint mismatch"));
     assert_eq!(count(&url), 0);
+}
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_resident_checkpoint_recovery_retires_old_execution_before_single_slot_restore() {
+    use centaeris_core::runtime::contracts::{CheckpointKindV1, CheckpointRecord};
+    use centaeris_core::session::AgentRunSessionState;
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let (url, store) = setup();
+    let old = sandbox(
+        &store,
+        &url,
+        "checkpoint-recovery",
+        "default-recovery-tenant",
+    );
+    let mut replacement = old.clone();
+    replacement.execution = "replacement-execution".into();
+    let session = format!("session-{}", old.run);
+    let mut state = AgentRunSessionState::new(&session, &old.run).unwrap();
+    let mut records = state
+        .start("recovery-turn", "restore checkpoint", Vec::new(), 1)
+        .unwrap();
+    let digest = format!("sha256:{}", "a".repeat(64));
+    records.push(
+        state
+            .start_execution("recovery-turn", &old.execution, &digest, None, 2)
+            .unwrap(),
+    );
+    records.push(
+        state
+            .checkpoint_ref(&CheckpointRecord {
+                checkpoint_id: "recovery-checkpoint".into(),
+                kind: CheckpointKindV1::Recovery,
+                session_id: session.clone(),
+                turn_id: "recovery-turn".into(),
+                status: "committed".into(),
+                done_reason: None,
+                updated_at_ms: 3,
+                payload_json: "{}".into(),
+            })
+            .unwrap(),
+    );
+    records.push(
+        state
+            .end_execution(
+                "recovery-turn",
+                &old.execution,
+                "lost",
+                "execution_environment_lost",
+                true,
+                Some("recovery-checkpoint"),
+                Vec::new(),
+                4,
+            )
+            .unwrap(),
+    );
+    let example = include_str!("../../../../../.env.example");
+    let configured = |name: &str| {
+        example
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{name}=")))
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+    };
+    let shipped = ResidentResourceUsage {
+        sandbox_count: 1,
+        memory_bytes: configured("SANDBOX_MEMORY_BYTES"),
+        cpu_milli: configured("SANDBOX_CPU_MILLI"),
+        pids: configured("SANDBOX_PIDS_LIMIT"),
+        workspace_bytes: configured("SANDBOX_DATA_TMPFS_BYTES"),
+    };
+    let capacity = ResidentCapacity::default()
+        .bound_to_host(64 * 1024 * 1024 * 1024, 16, 8 * 1024 * 1024 * 1024, 1600)
+        .unwrap();
+    let host = Arc::new(Mutex::new(Vec::new()));
+    let events = Mutex::new(Vec::new());
+    let admit = |fixture: &SandboxFixture,
+                 before: &mut (dyn FnMut(Option<&mut postgres::Client>) -> Result<(), String>
+                           + Send)| {
+        let mut request = fixture.request();
+        request.resources = shipped;
+        store.prepare_resident_sandbox_with_client(
+            "fake-docker-host",
+            &request,
+            capacity,
+            || Ok(host.lock().unwrap().clone()),
+            |client| {
+                before(Some(client))?;
+                let mut observed = fixture.observed();
+                observed.resources = shipped;
+                observed.container_id = format!("container-{}", fixture.execution);
+                let id = observed.container_id.clone();
+                host.lock().unwrap().push(observed);
+                Ok(id)
+            },
+        )
+    };
+    admit(&old, &mut |_| Ok(())).unwrap();
+    assert_eq!(
+        admit(&replacement, &mut |_| Ok(())).unwrap_err(),
+        RESIDENT_CAPACITY_WAIT
+    );
+    crate::prepare_execution_host_with_recovery(
+        || {
+            store.remove_resident_execution(
+                "fake-docker-host",
+                &old.run,
+                &old.execution,
+                &old.fence(),
+                || {
+                    assert_eq!(count(&url), 1, "charge remains during physical removal");
+                    host.lock()
+                        .unwrap()
+                        .retain(|resident| resident.execution_id != old.execution);
+                    events.lock().unwrap().push("remove");
+                    Ok(())
+                },
+                || Ok(host.lock().unwrap().clone()),
+            )
+        },
+        |_| {
+            records.push(state.reserve_execution_recovery(
+                "recovery-turn",
+                "recovery-checkpoint",
+                5,
+                5,
+            )?);
+            events.lock().unwrap().push("persist-attempt");
+            Ok(())
+        },
+        |before| {
+            admit(&replacement, before)?;
+            events.lock().unwrap().push("create");
+            Ok(())
+        },
+    )
+    .unwrap();
+    let mut replay = AgentRunSessionState::new(&session, &old.run).unwrap();
+    for record in records {
+        replay.restore(record).unwrap();
+    }
+    replay
+        .start_execution(
+            "recovery-turn",
+            &replacement.execution,
+            &digest,
+            Some("recovery-checkpoint"),
+            6,
+        )
+        .unwrap();
+    events.lock().unwrap().push("restore");
+    assert_eq!(
+        replay.active_execution_id(),
+        Some(replacement.execution.as_str())
+    );
+    assert_eq!(replay.recovery_execution_count(), 1);
+    assert_eq!(
+        events.into_inner().unwrap(),
+        ["remove", "persist-attempt", "create", "restore"]
+    );
+    assert_eq!(count(&url), 1);
+    assert_eq!(host.lock().unwrap()[0].execution_id, replacement.execution);
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_resident_recovery_removal_failure_or_unknown_inventory_keeps_charge_and_blocks_create()
+{
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let (url, store) = setup();
+    let old = sandbox(&store, &url, "recovery-remove-failure", "recovery-tenant");
+    let host = Arc::new(Mutex::new(Vec::new()));
+    prepare(&store, &old, &host, limits(1, 1)).unwrap();
+    for failure in [
+        "remove unavailable",
+        "inventory unavailable",
+        "resident sandbox removal was not confirmed",
+    ] {
+        let created = std::sync::atomic::AtomicBool::new(false);
+        let attempted = std::sync::atomic::AtomicBool::new(false);
+        let result = crate::prepare_execution_host_with_recovery(
+            || {
+                store.remove_resident_execution(
+                    "fake-docker-host",
+                    &old.run,
+                    &old.execution,
+                    &old.fence(),
+                    || {
+                        if failure == "remove unavailable" {
+                            Err(failure.into())
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    || {
+                        if failure == "inventory unavailable" {
+                            Err(failure.into())
+                        } else {
+                            Ok(host.lock().unwrap().clone())
+                        }
+                    },
+                )
+            },
+            |_| {
+                attempted.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+            |before| {
+                before(None)?;
+                created.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        assert_eq!(result.unwrap_err(), failure);
+        assert!(!attempted.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!created.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(count(&url), 1);
+        assert_eq!(host.lock().unwrap().len(), 1);
+    }
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_resident_exact_recovery_retirement_fences_old_worker_and_preserves_replacement() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let (url, store) = setup();
+    let old = sandbox(&store, &url, "exact-recovery", "exact-tenant");
+    let mut replacement = old.clone();
+    replacement.execution = "already-created-replacement".into();
+    let host = Arc::new(Mutex::new(Vec::new()));
+    prepare(&store, &old, &host, limits(2, 2)).unwrap();
+    prepare(&store, &replacement, &host, limits(2, 2)).unwrap();
+    let mut db = Client::connect(&url, NoTls).unwrap();
+    db.execute(
+        "UPDATE runtime.runtime_jobs SET lease_owner='replacement-worker' WHERE job_id=$1",
+        &[&old.job],
+    )
+    .unwrap();
+    let removed = std::sync::atomic::AtomicBool::new(false);
+    let result = store.remove_resident_execution(
+        "fake-docker-host",
+        &old.run,
+        &old.execution,
+        &old.fence(),
+        || {
+            removed.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        },
+        || Ok(host.lock().unwrap().clone()),
+    );
+    assert_eq!(result.unwrap_err(), "resident removal lease rejected");
+    assert!(!removed.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(count(&url), 2);
+    let mut current = old.clone();
+    current.owner = "replacement-worker".into();
+    let result = store.remove_resident_execution(
+        "fake-docker-host",
+        &old.run,
+        &old.execution,
+        &current.fence(),
+        || {
+            host.lock()
+                .unwrap()
+                .retain(|sandbox| sandbox.execution_id != old.execution);
+            Ok(())
+        },
+        || Err("response lost after physical removal".into()),
+    );
+    assert_eq!(result.unwrap_err(), "response lost after physical removal");
+    assert_eq!(count(&url), 2, "unknown physical outcome retains charge");
+    assert_eq!(host.lock().unwrap()[0].execution_id, replacement.execution);
+    store
+        .remove_resident_execution(
+            "fake-docker-host",
+            &old.run,
+            &old.execution,
+            &current.fence(),
+            || Ok(()),
+            || Ok(host.lock().unwrap().clone()),
+        )
+        .unwrap();
+    assert_eq!(count(&url), 1);
+    assert_eq!(host.lock().unwrap()[0].execution_id, replacement.execution);
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_resident_legal_question_and_runtime_job_waits_reuse_their_live_execution() {
+    use centaeris_core::session::AgentRunSessionState;
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let (url, store) = setup();
+    let host = Arc::new(Mutex::new(Vec::new()));
+    for (index, reason) in ["question_wait", "runtime_job_wait"]
+        .into_iter()
+        .enumerate()
+    {
+        let fixture = sandbox(&store, &url, reason, reason);
+        prepare(&store, &fixture, &host, limits(2, 1)).unwrap();
+        let mut start = crate::tests::agent_run_start();
+        start.agent_run_id = fixture.run.clone();
+        start.authorization.workspace_id = fixture.tenant.clone();
+        start.authorization.session_id = format!("session-{}", fixture.run);
+        let mut state =
+            AgentRunSessionState::new(&start.authorization.session_id, &fixture.run).unwrap();
+        state
+            .start(&start.turn_id, "legitimate wait", Vec::new(), 1)
+            .unwrap();
+        state
+            .start_execution(
+                &start.turn_id,
+                &fixture.execution,
+                &start.authorization_digest,
+                None,
+                2,
+            )
+            .unwrap();
+        let now = Client::connect(&url, NoTls)
+            .unwrap()
+            .query_one(
+                "SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint",
+                &[],
+            )
+            .unwrap()
+            .get::<_, i64>(0);
+        store
+            .yield_runtime_job(YieldRuntimeJobRequest {
+                job_id: fixture.job.clone(),
+                lease_owner: fixture.owner.clone(),
+                yielded_at_ms: now,
+                run_at_ms: now + 600000,
+                transition_reason: reason.into(),
+            })
+            .unwrap();
+        assert!(
+            crate::select_agent_run_recovery_checkpoint(&store, &start, &state)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!state.has_ended_execution(&fixture.execution));
+        assert_eq!(host.lock().unwrap()[index].execution_id, fixture.execution);
+        store
+            .wake_runtime_job(
+                centaeris_core::session::reliability::WakeRuntimeJobRequest {
+                    job_id: fixture.job.clone(),
+                    source_job_id: "wait-resume".into(),
+                    woken_at_ms: now,
+                    transition_reason: "resume".into(),
+                },
+            )
+            .unwrap();
+        let claimed = store
+            .claim_due_runtime_jobs(
+                centaeris_core::session::reliability::ClaimDueRuntimeJobsRequest {
+                    now_ms: now,
+                    worker_id: "resume-worker".into(),
+                    job_id: Some(fixture.job.clone()),
+                    job_kind: None,
+                    session_id: None,
+                    limit: 1,
+                    lease_ms: 600000,
+                },
+            )
+            .unwrap()
+            .remove(0);
+        let mut resumed = fixture.clone();
+        resumed.owner = claimed.lease_owner.unwrap();
+        let mut request = resumed.request();
+        request.must_exist = true;
+        store
+            .prepare_resident_sandbox(
+                "fake-docker-host",
+                &request,
+                limits(2, 1),
+                || Ok(host.lock().unwrap().clone()),
+                || Ok(resumed.observed().container_id),
+            )
+            .unwrap();
+        assert_eq!(host.lock().unwrap().len(), index + 1);
+    }
+    assert_eq!(count(&url), 2);
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_resident_unavailable_or_corrupt_restore_source_preserves_old_execution() {
+    use crate::docker_execution_host::{
+        prepare_recovery_workspace_restore, RecoveryRestoreBinding, SessionWorkspaceLease,
+    };
+    use centaeris_core::runtime::contracts::RecoveryWorkspaceSnapshotV1;
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let (url, store) = setup();
+    let old = sandbox(&store, &url, "preflight-recovery", "preflight-tenant");
+    let host = Arc::new(Mutex::new(Vec::new()));
+    prepare(&store, &old, &host, limits(1, 1)).unwrap();
+    let body = b"corrupt snapshot";
+    let snapshot = RecoveryWorkspaceSnapshotV1 {
+        object_ref: Some("immutable-checkpoint-object".into()),
+        snapshot_sha256: format!("sha256:{:x}", Sha256::digest(body)),
+        snapshot_size_bytes: body.len() as u64,
+        expanded_size_bytes: 3,
+        file_count: 1,
+    };
+    let lease = SessionWorkspaceLease {
+        job_id: old.job.clone(),
+        lease_owner: old.owner.clone(),
+    };
+    for status in [404, 200] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let api_url = format!("http://{}", listener.local_addr().unwrap());
+        let hash = snapshot.snapshot_sha256.clone();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                socket.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            assert!(request.starts_with(
+                b"POST /internal/agent-runs/execution-workspace/download HTTP/1.1\r\n"
+            ));
+            write!(socket, "HTTP/1.1 {status} fixture\r\nContent-Length: {}\r\nX-Content-Sha256: {hash}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            socket.write_all(body).unwrap();
+        });
+        let result = prepare_recovery_workspace_restore(
+            RecoveryRestoreBinding {
+                api_url: &api_url,
+                api_token: "local-test-token",
+                agent_run_id: &old.run,
+                authorization_digest: &format!("sha256:{}", "a".repeat(64)),
+                lease: &lease,
+                checkpoint_id: "preflight-checkpoint",
+                data_tmpfs_bytes: 1024 * 1024 * 1024,
+                input_upper_bound_bytes: 0,
+            },
+            &snapshot,
+            None,
+        );
+        assert!(result.is_err());
+        server.join().unwrap();
+        assert_eq!(count(&url), 1);
+        assert_eq!(host.lock().unwrap()[0].execution_id, old.execution);
+        assert_eq!(
+            crate::recovery_preparation_waiting("session_workspace_resolve_unavailable")
+                .disposition,
+            "waiting"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_resident_restore_pins_owner_until_physical_completion_and_rejects_stale_dispatch() {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+    use std::time::Duration;
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let (url, store) = setup();
+    let fixture = sandbox(&store, &url, "restore-owner-fence", "restore-owner-tenant");
+    let host = Arc::new(Mutex::new(Vec::new()));
+    prepare(&store, &fixture, &host, limits(1, 1)).unwrap();
+    let expiry = Client::connect(&url, NoTls)
+        .unwrap()
+        .query_one(
+            "SELECT lease_expires_at_ms FROM runtime.runtime_jobs WHERE job_id=$1",
+            &[&fixture.job],
+        )
+        .unwrap()
+        .get::<_, i64>(0);
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+    let restoring = store.clone();
+    let owned = fixture.clone();
+    let task = std::thread::spawn(move || {
+        restoring.with_resident_execution_restore(
+            "fake-docker-host",
+            &owned.run,
+            &owned.execution,
+            &owned.fence(),
+            move || {
+                entered_tx.send(()).unwrap();
+                resume_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|error| error.to_string())
+            },
+        )
+    });
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let reclaimed = store
+        .reclaim_expired_runtime_job_leases(expiry + 1)
+        .unwrap();
+    resume_tx.send(()).unwrap();
+    task.join().unwrap().unwrap().unwrap();
+    assert_eq!(
+        reclaimed, 0,
+        "lease takeover must skip the owner pinned across physical restore"
+    );
+    assert_eq!(
+        store
+            .reclaim_expired_runtime_job_leases(expiry + 1)
+            .unwrap(),
+        1
+    );
+    let dispatched = AtomicBool::new(false);
+    assert!(store
+        .with_resident_execution_restore(
+            "fake-docker-host",
+            &fixture.run,
+            &fixture.execution,
+            &fixture.fence(),
+            || dispatched.store(true, Ordering::SeqCst)
+        )
+        .is_err());
+    assert!(
+        !dispatched.load(Ordering::SeqCst),
+        "stale owner must not enter physical restore"
+    );
+    assert_eq!(count(&url), 1);
+    assert_eq!(host.lock().unwrap()[0].execution_id, fixture.execution);
 }
