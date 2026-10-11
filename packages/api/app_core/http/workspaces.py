@@ -76,6 +76,7 @@ from app_core.workspace_access import (
     workspace_membership_for,
 )
 
+from .query import valid_query_fields
 from .response_schema import (
     COMMON_ERROR_RESPONSES,
     DeletedResponse,
@@ -395,9 +396,7 @@ def list_session_projects(request, workspace_id: str):
     workspace = _workspace_for_user(request.user, workspace_id)
     if workspace is None:
         return Status(404, {"error": "workspace_not_found"})
-    if set(request.GET.keys()) != {"agentId"} or len(
-        request.GET.getlist("agentId")
-    ) != 1:
+    if not valid_query_fields(request.GET, {"agentId"}, required={"agentId"}):
         return Status(400, {"error": "session_project_filter_invalid"})
     agent_id = request.GET["agentId"]
     try:
@@ -462,10 +461,7 @@ def list_workspace_sessions(request, workspace_id: str):
     workspace = _workspace_for_user(request.user, workspace_id)
     if workspace is None:
         return Status(404, {"error": "workspace_not_found"})
-    query_fields = set(request.GET.keys())
-    if query_fields - {"agentId"} or any(
-        len(request.GET.getlist(field)) != 1 for field in query_fields
-    ):
+    if not valid_query_fields(request.GET, {"agentId"}):
         return Status(400, {"error": "session_filter_unsupported"})
     grant = require_request_delegation(request, "sessions:read", workspace_id=workspace_id)
     agent_id = request.GET.get("agentId")
@@ -752,7 +748,7 @@ def session_transcript(request, session_id: str):
     if session is None:
         return _transcript_json_response({"error": "session_not_found"}, status=404)
     fields = set(request.GET.keys())
-    if any(len(request.GET.getlist(field)) != 1 for field in fields):
+    if not valid_query_fields(request.GET, fields):
         return _transcript_json_response(
             {"error": "transcript_page_query_invalid"}, status=400
         )
@@ -812,7 +808,7 @@ def session_transcript_patches(request, session_id: str):
     if session is None:
         return _transcript_json_response({"error": "session_not_found"}, status=404)
     fields = set(request.GET.keys())
-    if any(len(request.GET.getlist(field)) != 1 for field in fields) or fields not in (
+    if not valid_query_fields(request.GET, fields) or fields not in (
         {"afterSourceHighWater", "projectionGeneration"},
         {"afterSourceHighWater", "throughSourceHighWater", "projectionGeneration"},
     ):
@@ -870,9 +866,7 @@ def session_transcript_content(request, session_id: str):
         "byteLength",
         "offset",
     }
-    if set(request.GET.keys()) != fields or any(
-        len(request.GET.getlist(field)) != 1 for field in fields
-    ):
+    if not valid_query_fields(request.GET, fields, required=fields):
         return _transcript_json_response(
             {"error": "transcript_content_query_invalid"}, status=400
         )
@@ -1015,11 +1009,9 @@ def session_transcript_active_agent_run(request, session_id: str):
     session = _authorized_transcript_session(request.user, session_id)
     if session is None:
         return _transcript_json_response({"error": "session_not_found"}, status=404)
-    fields = set(request.GET.keys())
     source_high_water = request.GET.get("sourceHighWater")
     if (
-        fields != {"sourceHighWater"}
-        or len(request.GET.getlist("sourceHighWater")) != 1
+        not valid_query_fields(request.GET, {"sourceHighWater"}, required={"sourceHighWater"})
         or not _canonical_waterline(source_high_water)
         or int(source_high_water) > _session_source_high_water(session.id)
     ):

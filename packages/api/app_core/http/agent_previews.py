@@ -20,6 +20,7 @@ from app_core.session_event import committed_session_terminal_state
 
 from .downloads import _is_code_preview
 from .office_preview import FORMATS, _owner, _preview_selection
+from .query import valid_query_fields
 from .response_schema import COMMON_ERROR_RESPONSES
 from .schema import StrictSchema
 from .security import usage_auth
@@ -75,7 +76,7 @@ class PreviewRejected(Exception):
 
 
 def _query(request, fields):
-    if set(request.GET) - fields or any(len(request.GET.getlist(key)) != 1 for key in request.GET):
+    if not valid_query_fields(request.GET, fields):
         raise PreviewRejected(400, 'preview_query_invalid')
 
 

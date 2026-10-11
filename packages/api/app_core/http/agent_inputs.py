@@ -7,6 +7,7 @@ from pydantic import Field, field_validator, model_validator
 from app_core.agent_input_contract import validate_input_body, validate_input_id
 from app_core.agent_inputs import AgentInputError, accept_agent_input, input_history, require_native_agent_delegation, serialize_input
 
+from .query import valid_query_fields
 from .response_schema import COMMON_ERROR_RESPONSES
 from .response_schema import AgentMessageResponse
 from .schema import StrictSchema
@@ -114,9 +115,8 @@ def submit_input(request, agent_id: str, payload: SubmitAgentInputRequest):
 @router.get("/agents/{agent_id}/history", auth=usage_auth("sessions:read"),
     response={200: AgentHistory} | COMMON_ERROR_RESPONSES)
 def get_history(request, agent_id: str, afterCursor: str | None = None, beforeCursor: str | None = None, limit: int = 50):
-    if (set(request.GET) - {"afterCursor", "beforeCursor", "limit"}
+    if (not valid_query_fields(request.GET, {"afterCursor", "beforeCursor", "limit"})
             or afterCursor is not None and beforeCursor is not None
-            or any(len(request.GET.getlist(field)) != 1 for field in request.GET)
             or not 1 <= limit <= 100):
         return Status(400, {"error": "agent_history_cursor_invalid"})
     from app_core.agent_history import agent_history
@@ -130,8 +130,7 @@ def get_history(request, agent_id: str, afterCursor: str | None = None, beforeCu
 @router.get("/agents/{agent_id}/inputs", auth=usage_auth("sessions:read"),
     response={200: AgentInputs} | COMMON_ERROR_RESPONSES)
 def get_inputs(request, agent_id: str, afterSequence: int = 0, limit: int = 50):
-    if (set(request.GET) - {"afterSequence", "limit"}
-            or any(len(request.GET.getlist(field)) != 1 for field in request.GET)
+    if (not valid_query_fields(request.GET, {"afterSequence", "limit"})
             or afterSequence < 0 or not 1 <= limit <= 100):
         return Status(400, {"error": "agent_inputs_cursor_invalid"})
     try:

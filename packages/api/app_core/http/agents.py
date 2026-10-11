@@ -23,6 +23,7 @@ from app_core.workspace_access import (
     workspace_membership_for,
 )
 
+from .query import valid_query_fields
 from .response_schema import (
     AgentCoordinationSessionResponse,
     AgentWorkSessionsResponse,
@@ -47,8 +48,7 @@ def list_work_sessions(request, agent_id: str, afterSessionId: str | None = None
     from app_core.agent_work_presentation import verified_work
     from app_core.app_delegations import session_authority_is_current
     from app_core.models import AgentWorkSession
-    if (set(request.GET) - {"afterSessionId", "limit"}
-            or any(len(request.GET.getlist(field)) != 1 for field in request.GET)
+    if (not valid_query_fields(request.GET, {"afterSessionId", "limit"})
             or not 1 <= limit <= 100):
         return Status(400, {"error": "agent_work_sessions_cursor_invalid"})
     agent = _owned_agent(request.user, agent_id)

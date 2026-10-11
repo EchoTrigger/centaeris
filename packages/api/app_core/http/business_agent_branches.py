@@ -9,6 +9,7 @@ from pydantic import Field, field_validator
 from app_core.business_agent_branches import resolve_business_branch, validate_business_user_id
 from app_core.models import Agent, BusinessAgentBranch, Session
 from app_core.workspace_access import workspace_membership_for
+from .query import valid_query_fields
 from .response_schema import COMMON_ERROR_RESPONSES
 from .schema import StrictSchema
 from .security import session_auth, usage_auth
@@ -87,9 +88,7 @@ def resolve_business_agent_branch(request, response: HttpResponse, root_agent_id
     response={200: MaintainedBranchesResponse} | COMMON_ERROR_RESPONSES)
 def list_business_agent_branches(request, response: HttpResponse, root_agent_id: str):
     response["Cache-Control"] = "no-store"
-    keys = set(request.GET)
-    if (not keys <= {"appId", "afterBranchId", "limit"} or "appId" not in keys
-            or any(len(request.GET.getlist(key)) != 1 for key in keys)):
+    if not valid_query_fields(request.GET, {"appId", "afterBranchId", "limit"}, required={"appId"}):
         return Status(400, {"error": "business_branch_request_invalid"})
     app_id = request.GET["appId"]
     after = request.GET.get("afterBranchId")
@@ -120,9 +119,7 @@ def list_business_agent_branches(request, response: HttpResponse, root_agent_id:
     response={200: BranchSessionsResponse} | COMMON_ERROR_RESPONSES)
 def list_business_branch_sessions(request, response: HttpResponse, root_agent_id: str, branch_id: str):
     response["Cache-Control"] = "no-store"
-    keys = set(request.GET)
-    if (not keys <= {"appId", "afterSessionId", "limit"} or "appId" not in keys
-            or any(len(request.GET.getlist(key)) != 1 for key in keys)):
+    if not valid_query_fields(request.GET, {"appId", "afterSessionId", "limit"}, required={"appId"}):
         return Status(400, {"error": "business_branch_request_invalid"})
     app_id = request.GET["appId"]
     after = request.GET.get("afterSessionId")
