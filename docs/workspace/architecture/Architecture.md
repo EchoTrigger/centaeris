@@ -31,6 +31,19 @@ its timeout, HTTP error interpretation and response binding checks in
 or translate uncertain writes into successful outcomes. Worker keeps its own
 dependency-free transport and durable scheduling policy.
 
+Transcript response structure comes from the generated Rust JSON schemas.
+Python checks that structure before applying identity bindings, ordered waterlines,
+nonblank identifiers, exact integer representations and UTF-8 byte budgets.
+JSON Schema's `integer` also accepts integral floats, and a `uint32` format label
+alone does not enforce its upper bound; those transport guards remain explicit.
+Avoid maintaining a second field/type registry in Python after schema validation.
+
+Product response serializers retain computed role/access fields, published
+definition overrides, failure redaction and explicit timestamp formatting.
+Replacing these with ORM attribute serialization requires equal wire output and
+query counts, including the current `+00:00` timestamp spelling. Framework use
+should remove maintenance work rather than move it into additional resolvers.
+
 Workspace owns Agent Memory behavior and storage. Public Core receives generic
 execution file operations and mutation facts; it does not interpret the private
 memory namespace.

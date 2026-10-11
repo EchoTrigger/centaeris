@@ -26,6 +26,47 @@ def _http_conflict(payload: dict) -> urllib.error.HTTPError:
 
 
 class TranscriptRuntimeClientTests(SimpleTestCase):
+    def test_page_rejects_malformed_block_types(self):
+        samples = json.loads((Path(__file__).parent / "generated/transcript_block.samples.json").read_text(encoding="utf-8"))
+        request = {"sessionId": "s", "projectionVersion": "v", "sourceHighWater": "1"}
+        for sample in samples:
+            page = {"schema": "transcript.page.v1", "sessionId": "s", "projectionVersion": "v",
+                    "projectionGeneration": "g", "sourceHighWater": "1", "blocks": [sample],
+                    "olderCursor": None, "hasOlder": False,
+                    "resumeCursors": [{"streamId": "workspace-transcript.v1", "cursor": "1"}]}
+            with patch("app_core.runtime_client._request_transcript_read", return_value=page):
+                self.assertEqual(request_transcript_page(request), page)
+            paths = [("blockId",), ("orderKey",), ("orderKey", "sourceSequence")]
+            paths += [("body", key) for key in ("callId", "toolName", "requestId", "noticeType") if key in sample["body"]]
+            for path in paths:
+                for value in (None, False, 1, [], {}):
+                    invalid = copy.deepcopy(page)
+                    child = invalid["blocks"][0]
+                    for key in path[:-1]:
+                        child = child[key]
+                    child[path[-1]] = value
+                    with self.subTest(kind=sample["body"]["kind"], path=path, value=value), \
+                            patch("app_core.runtime_client._request_transcript_read", return_value=invalid):
+                        with self.assertRaisesRegex(RuntimeError, "transcript_page_response_invalid"):
+                            request_transcript_page(request)
+
+    def test_block_semantics_remain_stricter_than_generated_json_types(self):
+        from app_core.runtime_client import _valid_transcript_block, TRANSCRIPT_PAGE_MAX_INLINE_BYTES
+        sample = {"blockId": "b", "blockRevision": "1",
+                  "orderKey": {"sourceSequence": "1", "ordinal": 0},
+                  "body": {"kind": "userText", "content": {"inlineContent": "中", "sourceRef": None}}}
+        for ordinal, accepted in [(0, True), (2**32 - 1, True), (2**32, False), (-1, False), (1.0, False), (True, False)]:
+            block = copy.deepcopy(sample)
+            block["orderKey"]["ordinal"] = ordinal
+            self.assertEqual(_valid_transcript_block(block), accepted, ordinal)
+        for field, value in [("blockId", " "), ("blockRevision", "01"), ("blockRevision", str(2**64))]:
+            self.assertFalse(_valid_transcript_block({**sample, field: value}))
+        for text, accepted in [("a" * TRANSCRIPT_PAGE_MAX_INLINE_BYTES, True),
+                               ("中" * (TRANSCRIPT_PAGE_MAX_INLINE_BYTES // 3 + 1), False)]:
+            block = copy.deepcopy(sample)
+            block["body"]["content"]["inlineContent"] = text
+            self.assertEqual(_valid_transcript_block(block), accepted)
+
     def test_core_serialized_samples_pass_the_consumers_contract(self):
         from app_core.runtime_client import _valid_transcript_block
         samples = json.loads((Path(__file__).parent / "generated/transcript_block.samples.json").read_text(encoding="utf-8"))
