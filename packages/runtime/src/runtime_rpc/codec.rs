@@ -292,4 +292,23 @@ mod tests {
         assert_eq!(error.response_id, RuntimeRpcId::String("req-2".to_string()));
         assert!(error.error.message.contains("outer_whitespace"));
     }
+    #[test]
+    fn jsonl_null_result_roundtrips_and_invalid_responses_preserve_id() {
+        let frame = RuntimeRpcFrame::Response(RuntimeRpcResponse::success(
+            RuntimeRpcId::Number(8),
+            Value::Null,
+        ));
+        let encoded = encode_jsonl_frame(&frame).unwrap();
+        assert_eq!(decode_jsonl_frame(&encoded).unwrap(), frame);
+        for raw in [
+            r#"{"jsonrpc":"2.0","id":8,"result":null,"error":{"code":-1,"message":"bad"}}"#,
+            r#"{"jsonrpc":"2.0","id":8,"result":42,"error":null}"#,
+            r#"{"jsonrpc":"2.0","id":8,"error":null}"#,
+            r#"{"jsonrpc":"2.0","id":8}"#,
+        ] {
+            let error = decode_jsonl_frame(raw).unwrap_err();
+            assert_eq!(error.response_id, RuntimeRpcId::Number(8));
+            assert_eq!(error.error.code, -32600);
+        }
+    }
 }

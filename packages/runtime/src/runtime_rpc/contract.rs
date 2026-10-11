@@ -122,7 +122,7 @@ impl RuntimeRpcNotification {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase", try_from = "RuntimeRpcResponseFields")]
 pub struct RuntimeRpcResponse {
     pub jsonrpc: String,
     pub id: RuntimeRpcId,
@@ -130,6 +130,45 @@ pub struct RuntimeRpcResponse {
     pub result: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<RuntimeRpcError>,
+}
+
+// A present null is a result, while a present error must be an object.
+// Deserialize the field itself instead of Option's null-as-absence default.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RuntimeRpcResponseFields {
+    jsonrpc: String,
+    id: RuntimeRpcId,
+    #[serde(default, deserialize_with = "present_result")]
+    result: Option<Value>,
+    #[serde(default, deserialize_with = "present_error")]
+    error: Option<RuntimeRpcError>,
+}
+
+fn present_result<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
+}
+
+fn present_error<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<RuntimeRpcError>, D::Error> {
+    RuntimeRpcError::deserialize(deserializer).map(Some)
+}
+
+impl TryFrom<RuntimeRpcResponseFields> for RuntimeRpcResponse {
+    type Error = String;
+    fn try_from(fields: RuntimeRpcResponseFields) -> Result<Self, Self::Error> {
+        let response = Self {
+            jsonrpc: fields.jsonrpc,
+            id: fields.id,
+            result: fields.result,
+            error: fields.error,
+        };
+        response.validate()?;
+        Ok(response)
+    }
 }
 
 impl RuntimeRpcResponse {
@@ -344,5 +383,21 @@ mod tests {
             "banana": true
         }))
         .is_err());
+    }
+    #[test]
+    fn response_preserves_present_null_and_rejects_invalid_field_presence() {
+        let raw = json!({"jsonrpc":"2.0", "id":7, "result":null});
+        let response: RuntimeRpcResponse = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(response.result, Some(Value::Null));
+        response.validate().unwrap();
+        assert_eq!(serde_json::to_value(response).unwrap(), raw);
+        for raw in [
+            json!({"jsonrpc":"2.0", "id":7, "result":null, "error":{"code":-1,"message":"bad"}}),
+            json!({"jsonrpc":"2.0", "id":7, "result":42, "error":null}),
+            json!({"jsonrpc":"2.0", "id":7, "error":null}),
+            json!({"jsonrpc":"2.0", "id":7}),
+        ] {
+            assert!(serde_json::from_value::<RuntimeRpcResponse>(raw).is_err());
+        }
     }
 }
