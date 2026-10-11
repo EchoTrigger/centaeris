@@ -54,6 +54,44 @@ class WorkReturnJobTests(unittest.TestCase):
             worker.execute_claimed_job(self.job(), "synthetic-lease-owner")
         failed.assert_called_once_with(self.job(), "synthetic-lease-owner", "dependency_unavailable", True)
 
+    def test_unstructured_server_failure_is_retryable_at_the_http_boundary(self):
+        for payload in (b'{"error":"temporary_materialization_failure"}', b"Internal Server Error"):
+            with self.subTest(payload=payload), patch.object(worker.urllib.request, "urlopen",
+                    side_effect=urllib.error.HTTPError("http://api.invalid", 500, "Internal Server Error",
+                                                      {}, io.BytesIO(payload))):
+                with self.assertRaises(worker.DependencyUnavailable) as failure:
+                    worker.api_request("/internal/agent-work/returns/materialize", {}, "return_unavailable")
+                self.assertEqual(failure.exception.http_status, 500)
+
+    def test_client_rejections_and_structured_permanent_failures_do_not_retry(self):
+        structured = {"schema": "runtime.agent_run.step.failure.v1", "agentRunId": "run_1",
+                      "failureClass": "permanent", "retryable": False,
+                      "transitionReason": "runtime_step_failed", "error": "runtime_step_failed"}
+        for status, payload, expected in ((400, {"error": "invalid_request"}, RuntimeError),
+                (401, {"error": "unauthorized"}, RuntimeError),
+                (409, {"error": "binding_invalid"}, RuntimeError),
+                (500, structured, worker.RuntimeStepFailed),
+                (500, {**structured, "unknown": True}, RuntimeError)):
+            with self.subTest(status=status, payload=payload), patch.object(worker.urllib.request, "urlopen",
+                    side_effect=urllib.error.HTTPError("http://api.invalid", status, "Rejected", {},
+                                                      io.BytesIO(json.dumps(payload).encode()))):
+                with self.assertRaises(expected) as failure:
+                    worker.api_request("/internal/agent-work/returns/materialize", {}, "return_unavailable")
+                self.assertNotIsInstance(failure.exception, worker.DependencyUnavailable)
+                if expected is worker.RuntimeStepFailed:
+                    self.assertFalse(failure.exception.retryable)
+
+    def test_structured_server_failure_still_requires_the_requested_run_identity(self):
+        payload = {"schema": "runtime.agent_run.step.failure.v1", "agentRunId": "other_run",
+                   "failureClass": "permanent", "retryable": False,
+                   "transitionReason": "runtime_step_failed", "error": "runtime_step_failed"}
+        with patch.object(worker.urllib.request, "urlopen", side_effect=urllib.error.HTTPError(
+                "http://runtime.invalid/agent-runs/step", 500, "Internal Server Error", {},
+                io.BytesIO(json.dumps(payload).encode()))):
+            with self.assertRaisesRegex(RuntimeError, "^runtime_step_failure_response_invalid$") as failure:
+                worker.agent_run_step_request({"agentRunStart": {"agentRunId": "run_1"}})
+            self.assertNotIsInstance(failure.exception, worker.DependencyUnavailable)
+
     def test_currently_unbound_source_is_not_completed_or_discarded(self):
         with patch.object(worker, "fail_claimed_job") as failed:
             _, complete, yielded = self.invoke({"schema": "workspace.agent_work.return_materialized.v1",

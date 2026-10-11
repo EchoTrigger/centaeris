@@ -41,7 +41,8 @@ def initialize(root, oci_runtime=None):
                   # Explicit synthetic inputs for this isolated two-slot fixture.
                   # Two overlapping spool copies per 1 MiB upload fit two slots.
                   UPLOAD_BODY_MAX_BYTES='1048576', UPLOAD_TEMP_MAX_BYTES='4194304',
-                  UPLOAD_MAX_CONCURRENT='2')
+                  UPLOAD_MAX_CONCURRENT='2',
+                  WORK_RETURN_AUDIT_INTERVAL_SECONDS='3600')
     path = root / 'perf/.state/test.env'
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('x', encoding='utf-8') as output:

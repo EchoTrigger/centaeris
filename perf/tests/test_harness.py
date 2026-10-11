@@ -14,11 +14,23 @@ spec.loader.exec_module(control)
 
 
 class IsolationTests(unittest.TestCase):
+    def test_isolated_fixture_supplies_required_work_return_audit_without_host_override(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / '.env.example').write_bytes((control.ROOT / '.env.example').read_bytes())
+            with patch.object(control.subprocess, 'check_output', return_value='ffffffffffffffffffffffffffffffffffffffff\n'), patch.dict(os.environ, {
+                    'WORK_RETURN_AUDIT_INTERVAL_SECONDS': 'untrusted-host-value'}):
+                env_file = control.initialize(root)
+                values = control.read_env(env_file)
+                _, process_env = control.compose_command(control.ROOT, env_file, ['config', '--format', 'json'])
+            self.assertEqual(values['WORK_RETURN_AUDIT_INTERVAL_SECONDS'], '3600')
+            self.assertNotIn('WORK_RETURN_AUDIT_INTERVAL_SECONDS', process_env)
+
     def test_isolated_fixture_contains_finite_upload_capacity_without_inheriting_host_inputs(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / '.env.example').write_bytes((control.ROOT / '.env.example').read_bytes())
-            with patch.dict(os.environ, {
+            with patch.object(control.subprocess, 'check_output', return_value='ffffffffffffffffffffffffffffffffffffffff\n'), patch.dict(os.environ, {
                     'UPLOAD_BODY_MAX_BYTES': 'untrusted-host-value',
                     'UPLOAD_TEMP_MAX_BYTES': 'untrusted-host-value',
                     'UPLOAD_MAX_CONCURRENT': 'untrusted-host-value'}):
@@ -30,6 +42,7 @@ class IsolationTests(unittest.TestCase):
             self.assertEqual(values['UPLOAD_MAX_CONCURRENT'], '2')
             for key in ('UPLOAD_BODY_MAX_BYTES', 'UPLOAD_TEMP_MAX_BYTES', 'UPLOAD_MAX_CONCURRENT'):
                 self.assertNotIn(key, process_env)
+
 
     def test_manifest_records_the_shared_checkout_without_external_core_tools(self):
         stack = object.__new__(control.Stack)
