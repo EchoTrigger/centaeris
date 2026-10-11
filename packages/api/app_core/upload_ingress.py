@@ -70,7 +70,20 @@ class StorageIngressApplication:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.application(scope, receive, send)
-        headers = dict(scope.get("headers", []))
+        headers = {}
+        normalized_headers = []
+        singleton_headers = {b"content-type", b"content-length", b"transfer-encoding"}
+        for name, value in scope.get("headers", []):
+            name = name.lower()
+            if name in singleton_headers and name in headers:
+                return await reject(send, 400, "upload_headers_ambiguous")
+            headers[name] = value
+            normalized_headers.append((name, value))
+        if b"content-length" in headers and b"transfer-encoding" in headers:
+            return await reject(send, 400, "upload_headers_ambiguous")
+        # Django must classify the same bytes headers as this adapter. Preserve
+        # order and other repeated headers while normalizing names consistently.
+        scope = {**scope, "headers": normalized_headers}
         content_type = headers.get(b"content-type", b"").split(b";", 1)[0].strip().lower()
         if scope.get("path") in SNAPSHOT_PATHS or content_type != b"multipart/form-data":
             return await self.application(scope, receive, send)
