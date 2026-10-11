@@ -79,53 +79,6 @@ VALIDATION_ERROR_CODE_OVERRIDES = {
     ("POST", "list_source_grants"): "invalid_source_grant",
 }
 
-MALFORMED_JSON_ERROR_CODES = {
-    "register_business_app": "business_app_request_invalid",
-    "update_business_app": "business_app_request_invalid",
-    "issue_app_delegation": "delegation_request_invalid",
-    "rotate_app_delegation": "delegation_request_invalid",
-    "resolve_business_agent_branch": "business_branch_request_invalid",
-    "approve_assistant_credential": "mcp_connector_request_invalid",
-    "bind_assistant_connector": "mcp_connector_request_invalid",
-    "create_agent_definition": "agent_definition_invalid",
-    "update_agent_definition": "agent_definition_invalid",
-    "publish_agent_definition": "agent_definition_invalid",
-    "set_agent_definition_availability": "agent_definition_invalid",
-    "use_agent_definition": "agent_definition_invalid",
-    "change_password": "account_password_request_invalid",
-    "request_password_reset": "account_password_reset_request_invalid",
-    "confirm_password_reset": "account_password_reset_request_invalid",
-    "create_agent": "agent_invalid",
-    "update_agent": "agent_invalid",
-    "create_source": "invalid_source",
-    "update_source": "invalid_source",
-    "create_source_grant": "invalid_source_grant",
-    "update_source_grant": "invalid_source_grant",
-    "create_credential": "credential_invalid",
-    "rotate_credential": "credential_invalid",
-    "create_model": "model_config_invalid",
-    "update_model": "model_config_invalid",
-    "create_library_folder": "library_folder_request_invalid",
-    "create_library_note": "library_note_request_invalid",
-    "move_library_object": "library_move_request_invalid",
-    "update_library_note": "library_note_request_invalid",
-    "attach_session_asset": "asset_not_accessible",
-    "detach_session_asset": "asset_link_not_found",
-    "create_workspace_invitation": "workspace_invitation_invalid",
-    "preview_workspace_invitation": "workspace_invitation_preview_invalid",
-    "accept_workspace_invitation": "workspace_invitation_accept_invalid",
-    "update_workspace_member_role": "workspace_member_role_invalid",
-    "transfer_workspace_ownership": "workspace_owner_transfer_invalid",
-    "create_workspace_group": "workspace_group_invalid",
-    "update_workspace_group": "workspace_group_invalid",
-}
-
-MALFORMED_JSON_ERROR_CODE_OVERRIDES = {
-    key: value
-    for key, value in VALIDATION_ERROR_CODE_OVERRIDES.items()
-    if key[0] != "PATCH" or key[1] != "get_session"
-}
-
 VALIDATION_ERROR_STATUSES = {
     "asset_not_accessible": 403,
     "asset_link_not_found": 404,
@@ -140,14 +93,11 @@ def _resolved_operation(request) -> tuple[str, str]:
 def _mapped_error_code(request, *, malformed_json: bool) -> str:
     operation_key = _resolved_operation(request)
     operation_name = operation_key[1]
-    if malformed_json:
-        return MALFORMED_JSON_ERROR_CODE_OVERRIDES.get(
-            operation_key,
-            MALFORMED_JSON_ERROR_CODES.get(operation_name, "invalid_json"),
-        )
     return VALIDATION_ERROR_CODE_OVERRIDES.get(
         operation_key,
-        VALIDATION_ERROR_CODES.get(operation_name, "request_invalid"),
+        VALIDATION_ERROR_CODES.get(
+            operation_name, "invalid_json" if malformed_json else "request_invalid"
+        ),
     )
 
 
