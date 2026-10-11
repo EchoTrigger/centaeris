@@ -8,7 +8,9 @@ import asyncio
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 from unittest.mock import patch
 
@@ -333,7 +335,14 @@ class UploadTemporaryBoundaryTests(TransactionTestCase):
         from .models import UploadCapacity
         lease = reserve_ingress(4)
         namespace = self.pool / lease.pk
-        namespace.symlink_to(self.root / "absent-target", target_is_directory=True)
+        target = self.root / "absent-target"
+        if os.name == "nt":
+            # A directory junction exercises the same rejected reparse-point
+            # boundary without requiring the Windows symlink privilege.
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(namespace), str(target)],
+                           check=True, capture_output=True)
+        else:
+            namespace.symlink_to(target, target_is_directory=True)
         with self.assertRaisesRegex(UploadCapacityError, "upload_temp_cleanup_unconfirmed"):
             release_ingress(lease.pk)
         with self.assertRaises(CommandError):
