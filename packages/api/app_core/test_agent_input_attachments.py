@@ -152,7 +152,6 @@ class AgentInputAttachmentTests(TransactionTestCase):
             self.assertEqual(self.submit("preview-input", "", [attached]).status_code, 201)
         link = models.SessionAssetLink.objects.get(pk=attached)
         query = HttpRequest()
-        query.GET = {}
         selected = _select_content(self.user, query, str(link.capturedContentGeneration),
             link.capturedSha256, "zh-CN", agent_id=self.agent.pk, input_id="preview-input",
             input_ref=attached, agent_attachment=True)
