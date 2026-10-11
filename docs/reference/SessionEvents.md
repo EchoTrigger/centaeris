@@ -15,6 +15,47 @@ The three related contracts have different jobs:
 Hosted Workspace persistence and its Redis delivery cache are outside this
 local Runtime contract. Redis is not part of the public Session format.
 
+## Run failure presentation
+
+Desktop and TUI display failed and interrupted runs as dedicated, plain-text
+notices in transcript order, matching Web. A projected `notice` is a run error
+only when `noticeType` is `run_boundary` and `presentation.sourceType` is
+`agent_run_failed` or `agent_run_interrupted`. The boundary body's status is not
+the failure discriminator. Start and completion boundaries retain their normal
+lifecycle behavior. Tool failures, transport problems and protocol errors keep
+their own presentation and do not become run failures merely because their text
+contains an error code.
+
+The displayed reason is the durable event's `message`, projected into the
+boundary's content; `reasonType` still governs the interruption contract.
+Known model/provider/completion codes get a readable explanation followed by
+the original code. Unknown codes in those namespaces retain their code after
+the generic failure label. Ordinary descriptions remain plain text, except for
+the explicit fixed-message translations already used by Web.
+`assets/run-error-messages.json` supplies English presentation copy to the local
+clients. Web owns its localized copy; parity tests protect the complete mapping
+and English wording. This catalog is presentation data, not Runtime semantics.
+
+Desktop uses an alert icon aligned to the first line in a rounded strip. TUI
+uses an ASCII `!` marker and indented continuation lines. Both retain reasons
+after history reload and replace the live overlay with authoritative transcript
+history without displaying the same terminal event twice. Presentation does not
+change cancellation, retry or run completion semantics.
+
+Local Runtime can send `RuntimeError` before its durable terminal event. Clients
+show this as provisional run-error copy and keep observing the run. The terminal
+fact replaces the provisional notice, ends observation and remains authoritative
+after reload; late runtime errors cannot replace the settled reason.
+
+Referenced reasons must be read through `transcript/content-range`, never
+presented as a byte-count placeholder. Desktop uses its existing paged content
+reader and read retry. TUI starts reads only for visible error rows, uses its
+existing 16 KiB request chunks, four-request concurrency and 32-entry preview
+cache, and assembles the declared reason before display. Loading and read
+failure are explicit. Session, generation, reference and byte offsets are
+validated; stale results cannot become another view's reason. Reopening the
+TUI Session clears the preview cache and retries a failed read.
+
 ## Session document
 
 A local Session is UTF-8 JSONL. The first line is exactly one manifest. Every

@@ -1,12 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createJsxSubjectLoader } from "./jsxSubject.mjs";
 import { ApiError, environment, nodes, renderer, subjectLoader } from "./componentHarness.mjs";
-import { localizedModelError, modelErrorText } from "../../src/modelErrors.ts";
+import { MODEL_ERROR_KEYS, localizedModelError, modelErrorText, modelFailureDetail } from "../../src/modelErrors.ts";
 import { createTranscriptViewStore } from "../../src/chat/transcriptViewStore.ts";
+
+test("local clients share the web error wording and diagnostic code contract", () => {
+  const read = path => JSON.parse(readFileSync(new URL(path, import.meta.url), "utf8"));
+  const english = read("../../src/locales/en.json");
+  const catalog = read("../../../../assets/run-error-messages.json");
+  assert.deepEqual(Object.keys(catalog.messages).sort(), Object.keys(MODEL_ERROR_KEYS).sort());
+  assert.equal(catalog.failureLabel, english["modelErrors.failureLabel"]);
+  for (const [reason, entry] of Object.entries(catalog.messages)) {
+    assert.equal(localizedModelError(reason, key => key), entry.translationKey);
+    assert.equal(entry.english, english[entry.translationKey]);
+  }
+  for (const { reason, expected } of read("../../../../tests/fixtures/run-error-display.json")) {
+    assert.equal(modelFailureDetail(reason, key => english[key]), expected);
+  }
+});
 
 const stub = code => `data:text/javascript;base64,${Buffer.from(code).toString("base64")}`;
 const loader = createJsxSubjectLoader(new Map([
