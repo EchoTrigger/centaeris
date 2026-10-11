@@ -236,9 +236,12 @@ impl AsyncJobStorePort for SqliteJobStore {
             ));
         }
         self.execute(JobStoreOperation::Read, move |conn, _| {
-            sqlite_external_context::load_external_context_object_conn(conn, &id)
+            Ok(sqlite_external_context::load_external_context_object_conn(
+                conn, &id,
+            ))
         })
-        .await
+        .await?
+        .map_err(sqlite_external_context::ObjectLoadError::into_job_error)
     }
     async fn upsert_external_context_and_schedule_job(
         &self,

@@ -97,11 +97,20 @@ handoff with an acknowledged operation.
 
 ## Remaining default-switch acceptance
 
+The local scan isolates missing objects, malformed JSON, unsupported WorkPacket
+schemas and encoded-content integrity failures. These are rejected payloads and
+use the normal fenced claim/failure transaction and terminal outbox. A failed
+database read remains a storage failure: it does not terminalize the Job.
+The SQLite codec reader has a typed query/decode result shared by its ordinary
+entry and native Job port. The existing Actor command carries that classification;
+no additional queue, command or copied query is required. A real local scan test
+proves valid Jobs remain selectable after these four corrupt entries.
+
 - Outbox recovery repairs parent projection and child Run terminal after exits
   at each boundary and partial batch delivery. Completed Workers never rerun;
   sibling failure does not lose successful delivery.
-- The real scheduler progresses past absent/corrupt WorkPackets. Existing defects
-  require focused failing tests and independent fixes.
+- Queue scan progress now has a real-entry regression test. Worker execution and
+  durable terminal recovery still require complete scheduler acceptance.
 - Business producers/workers stop before database admission; final writes and
   delivery settle before close. Cover host startup failure, normal close, idle
   exit, failed connection and close timeout.
@@ -138,3 +147,25 @@ Production default switching, aggregate legacy/native resource evidence, host
 lifecycle acceptance and the remaining caller/delivery migration above are not
 verified by this capability change. Packaged distribution acceptance and power
 loss durability were not run. Source validation is not deployment.
+
+## Queue defect verification
+
+This pre-existing scan defect is an independent change. The actual local scan
+test failed on unsupported schema before the fix, and still failed on encoded
+content corruption until the shared reader preserved query/decode classification.
+Afterward it selected the valid Job on repeated scans, recorded four failed Jobs
+and four durable outbox entries, and left the valid Job queued.
+
+The updated Rust gate passed 1,387 local-product tests, with the same three
+existing opt-in exclusions. SQLite has 123 executed tests. Agent scheduling and
+host automation transport acceptance both passed using isolated profiles,
+loopback models and an SSH argv fixture. The automation script required building
+the debug TUI as well as Runtime; its initial missing-executable failure was not
+counted as coverage.
+
+The isolated PostgreSQL gate passed all 67 discovered tests on recheck. The first
+attempt failed an unchanged SessionLog connection-count equality assertion when
+the observed count decreased from two to one. No PostgreSQL pool or SessionLog
+code/test was modified, and this intermittent observation remains recorded rather
+than being treated as a successful first run. Driver/default migration and durable
+terminal delivery are still separate outstanding acceptance.
