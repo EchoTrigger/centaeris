@@ -49,8 +49,9 @@ reqwest = { workspace = true, features = ["json", "rustls-tls", "socks"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tempfile = "=3.27.0"
 tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "sync"] }
-tokio-util = { version = "=0.7.18", features = ["rt"] }
+tokio-util = { version = "=0.7.18", features = ["codec", "rt"] }
 toml.workspace = true
 zstd.workspace = true
 chrono-tz = "=0.10.4"
