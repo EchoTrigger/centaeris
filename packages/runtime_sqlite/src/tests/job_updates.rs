@@ -1,12 +1,12 @@
 use super::*;
 
-struct Database {
+pub(super) struct Database {
     directory: PathBuf,
-    store: SqliteRuntimeStore,
+    pub(super) store: SqliteRuntimeStore,
 }
 
 impl Database {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let mut nonce = 0;
         let directory = loop {
             let path = temp_db_path(&format!("job_updates_{nonce}"));
@@ -22,7 +22,7 @@ impl Database {
         }
     }
 
-    fn terminal_outbox(&self) -> i64 {
+    pub(super) fn terminal_outbox(&self) -> i64 {
         Connection::open(self.store.db_path())
             .unwrap()
             .query_row(
@@ -46,7 +46,7 @@ impl Drop for Database {
     }
 }
 
-fn completion(owner: &str, at: i64) -> CompleteRuntimeJobRequest {
+pub(super) fn completion(owner: &str, at: i64) -> CompleteRuntimeJobRequest {
     CompleteRuntimeJobRequest {
         job_id: "job".into(),
         lease_owner: owner.into(),
@@ -55,7 +55,7 @@ fn completion(owner: &str, at: i64) -> CompleteRuntimeJobRequest {
     }
 }
 
-fn combined_completion(
+pub(super) fn combined_completion(
     req: CompleteRuntimeJobRequest,
 ) -> UpsertExternalContextLinkAndCompleteJobRequest {
     UpsertExternalContextLinkAndCompleteJobRequest {

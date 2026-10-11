@@ -18,4 +18,13 @@ sha2.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+tempfile = "=3.27.0"
+rusqlite = { workspace = true, features = ["hooks"] }
+thiserror = "=2.0.18"
+tokio-rusqlite = { version = "=0.6.0", features = ["bundled"] }
+tokio-util = { version = "=0.7.18", features = ["rt"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+
+[[example]]
+name = "sqlite_abort"
+test = false

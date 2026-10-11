@@ -530,41 +530,7 @@ impl RuntimeJobStorePort for SqliteRuntimeStore {
     ) -> Result<usize, String> {
         self.with_conn(|conn| {
             require_durable_lease_reclaim(conn)?;
-            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .map_err(|error| format!("begin expired lease reclaim failed: {error}"))?;
-            let expired = {
-                let mut stmt = tx.prepare("SELECT job_id,session_id,lease_owner,lease_reclaim_count,status,last_error FROM runtime_jobs WHERE status IN ('leased','running') AND lease_expires_at_ms<=?1 ORDER BY lease_expires_at_ms,job_id LIMIT ?2")
-                    .map_err(|error| format!("select expired leases failed: {error}"))?;
-                let rows = stmt.query_map(params![now_ms, to_i64(RUNTIME_JOB_LEASE_RECLAIM_BATCH_LIMIT)?], |row| Ok((
-                    row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?, row.get::<_, i64>(3)?,
-                    row.get::<_, String>(4)?, row.get::<_, Option<String>>(5)?,
-                ))).map_err(|error| format!("query expired leases failed: {error}"))?;
-                rows.collect::<Result<Vec<_>, _>>().map_err(|error| format!("decode expired leases failed: {error}"))?
-            };
-            let policy = RuntimeJobLeaseReclaimPolicy::default();
-            for (job_id, session_id, lease_owner, previous_count, status, prior_error) in &expired {
-                let prior_status = runtime_job_status_from_db(status).map_err(|error| error.to_string())?;
-                let decision = policy.decide(job_id, u32::try_from(*previous_count).map_err(|error| error.to_string())?, &prior_status, now_ms)?;
-                tx.execute("UPDATE runtime_jobs SET status=?1,run_at_ms=?2,updated_at_ms=?3,lease_owner=NULL,lease_expires_at_ms=NULL,lease_reclaim_count=?4,lease_reclaim_not_before_ms=?2,last_error=?5 WHERE job_id=?6",
-                    params![runtime_job_status_to_db(&decision.status), decision.not_before_ms, now_ms, i64::from(decision.reclaim_count), decision.reason, job_id])
-                    .map_err(|error| format!("update expired lease failed: {error}"))?;
-                let payload = serde_json::json!({
-                    "schema": "runtime.job.lease_reclaimed.v1", "jobId": job_id,
-                    "leaseOwner": lease_owner, "reclaimCount": decision.reclaim_count,
-                    "maxReclaims": policy.max_reclaims, "notBeforeMs": decision.not_before_ms,
-                    "transitionReason": decision.reason,
-                    "previousError": prior_error,
-                }).to_string();
-                tx.execute("INSERT INTO runtime_events(event_id,session_id,task_id,event_type,at_ms,visibility,payload_json) VALUES(?1,?2,?3,'runtime_job_lease_reclaimed',?4,'internal',?5)",
-                    params![format!("runtime_job_lease_reclaimed:{job_id}:{}", decision.reclaim_count), session_id.clone().unwrap_or_else(|| format!("runtime_job:{job_id}")), job_id, now_ms, payload])
-                    .map_err(|error| format!("append expired lease diagnostic failed: {error}"))?;
-                if decision.status.is_terminal() {
-                    upsert_runtime_job_outbox_event(&tx, job_id, RUNTIME_JOB_TERMINAL_EVENT)?;
-                }
-            }
-            tx.commit().map_err(|error| format!("commit expired lease reclaim failed: {error}"))?;
-            Ok(expired.len())
+            reclaim_expired_runtime_job_leases_conn(conn, now_ms, &mut |_| {})
         })
     }
 }
@@ -1538,6 +1504,180 @@ fn row_to_dead_letter(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeadLetterRec
     })
 }
 
+pub(super) fn complete_runtime_job_conn(
+    conn: &rusqlite::Connection,
+    req: &centaeris_core::session::reliability::CompleteRuntimeJobRequest,
+) -> Result<(), String> {
+    let output_refs_json = serde_json::to_string(&req.output_refs)
+        .map_err(|err| format!("serialize complete_runtime_job output_refs failed: {err}"))?;
+    let updated = conn
+        .execute(
+            "
+            UPDATE runtime_jobs
+            SET status = ?1,
+                output_refs_json = ?2,
+                updated_at_ms = ?3,
+                lease_owner = NULL,
+                lease_expires_at_ms = NULL,
+                last_error = NULL
+            WHERE job_id = ?4
+              AND lease_owner = ?5
+              AND status IN ('leased', 'running')
+              AND lease_expires_at_ms > ?3
+            ",
+            params![
+                runtime_job_status_to_db(&RuntimeJobStatus::Succeeded),
+                output_refs_json,
+                req.completed_at_ms,
+                req.job_id.as_str(),
+                req.lease_owner.as_str(),
+            ],
+        )
+        .map_err(|err| format!("complete_runtime_job failed: {err}"))?;
+    if updated == 0 {
+        return Err(format!(
+            "complete_runtime_job lease mismatch or job not found: {}",
+            req.job_id
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn fail_runtime_job_conn(
+    conn: &rusqlite::Connection,
+    req: &centaeris_core::session::reliability::FailRuntimeJobRequest,
+) -> Result<(), String> {
+    let (next_status, next_run_at_ms) = match req.disposition {
+        RuntimeJobFailureDisposition::RetryScheduled => {
+            let next = req.next_run_at_ms.ok_or_else(|| {
+                format!(
+                    "fail_runtime_job retry_scheduled requires next_run_at_ms job_id={}",
+                    req.job_id
+                )
+            })?;
+            (RuntimeJobStatus::Queued, next)
+        }
+        RuntimeJobFailureDisposition::Failed => (RuntimeJobStatus::Failed, req.failed_at_ms),
+        RuntimeJobFailureDisposition::DeadLettered => {
+            (RuntimeJobStatus::DeadLettered, req.failed_at_ms)
+        }
+    };
+    let updated = conn
+        .execute(
+            "
+            UPDATE runtime_jobs
+            SET status = ?1,
+                run_at_ms = ?2,
+                retry_count = retry_count + 1,
+                lease_owner = NULL,
+                lease_expires_at_ms = NULL,
+                last_error = ?3,
+                updated_at_ms = ?4
+            WHERE job_id = ?5
+              AND lease_owner = ?6
+              AND status IN ('leased', 'running')
+              AND lease_expires_at_ms > ?4
+            ",
+            params![
+                runtime_job_status_to_db(&next_status),
+                next_run_at_ms,
+                req.last_error.as_str(),
+                req.failed_at_ms,
+                req.job_id.as_str(),
+                req.lease_owner.as_str(),
+            ],
+        )
+        .map_err(|err| format!("fail_runtime_job failed: {err}"))?;
+    if updated == 0 {
+        return Err(format!(
+            "fail_runtime_job lease mismatch or job not found: {}",
+            req.job_id
+        ));
+    }
+    Ok(())
+}
+
+/// Complete recovery transaction; its caller owns the connection sync policy.
+pub(super) fn reclaim_expired_runtime_job_leases_conn(
+    conn: &mut rusqlite::Connection,
+    now_ms: centaeris_core::runtime::contracts::TimestampMs,
+    observe: &mut dyn FnMut(super::sqlite_transactions::TransactionEvent),
+) -> Result<usize, String> {
+    use super::sqlite_transactions::TransactionEvent;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|error| format!("begin expired lease reclaim failed: {error}"))?;
+    observe(TransactionEvent::Began);
+    let result = (|| {
+        let expired = {
+            let mut stmt = tx.prepare("SELECT job_id,session_id,lease_owner,lease_reclaim_count,status,last_error FROM runtime_jobs WHERE status IN ('leased','running') AND lease_expires_at_ms<=?1 ORDER BY lease_expires_at_ms,job_id LIMIT ?2")
+                    .map_err(|error| format!("select expired leases failed: {error}"))?;
+            let rows = stmt
+                .query_map(
+                    params![now_ms, to_i64(RUNTIME_JOB_LEASE_RECLAIM_BATCH_LIMIT)?],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                        ))
+                    },
+                )
+                .map_err(|error| format!("query expired leases failed: {error}"))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("decode expired leases failed: {error}"))?
+        };
+        let policy = RuntimeJobLeaseReclaimPolicy::default();
+        for (job_id, session_id, lease_owner, previous_count, status, prior_error) in &expired {
+            let prior_status =
+                runtime_job_status_from_db(status).map_err(|error| error.to_string())?;
+            let decision = policy.decide(
+                job_id,
+                u32::try_from(*previous_count).map_err(|error| error.to_string())?,
+                &prior_status,
+                now_ms,
+            )?;
+            tx.execute("UPDATE runtime_jobs SET status=?1,run_at_ms=?2,updated_at_ms=?3,lease_owner=NULL,lease_expires_at_ms=NULL,lease_reclaim_count=?4,lease_reclaim_not_before_ms=?2,last_error=?5 WHERE job_id=?6",
+                    params![runtime_job_status_to_db(&decision.status), decision.not_before_ms, now_ms, i64::from(decision.reclaim_count), decision.reason, job_id])
+                    .map_err(|error| format!("update expired lease failed: {error}"))?;
+            let payload = serde_json::json!({
+                "schema": "runtime.job.lease_reclaimed.v1", "jobId": job_id,
+                "leaseOwner": lease_owner, "reclaimCount": decision.reclaim_count,
+                "maxReclaims": policy.max_reclaims, "notBeforeMs": decision.not_before_ms,
+                "transitionReason": decision.reason,
+                "previousError": prior_error,
+            })
+            .to_string();
+            tx.execute("INSERT INTO runtime_events(event_id,session_id,task_id,event_type,at_ms,visibility,payload_json) VALUES(?1,?2,?3,'runtime_job_lease_reclaimed',?4,'internal',?5)",
+                    params![format!("runtime_job_lease_reclaimed:{job_id}:{}", decision.reclaim_count), session_id.clone().unwrap_or_else(|| format!("runtime_job:{job_id}")), job_id, now_ms, payload])
+                    .map_err(|error| format!("append expired lease diagnostic failed: {error}"))?;
+            if decision.status.is_terminal() {
+                upsert_runtime_job_outbox_event(&tx, job_id, RUNTIME_JOB_TERMINAL_EVENT)?;
+            }
+        }
+        Ok(expired.len())
+    })();
+    let count = match result {
+        Ok(count) => count,
+        Err(error) => {
+            match tx.rollback() {
+                Ok(()) => observe(TransactionEvent::RolledBack),
+                Err(_) => observe(TransactionEvent::RollbackFailed),
+            }
+            return Err(error);
+        }
+    };
+    observe(TransactionEvent::BeforeCommit);
+    observe(TransactionEvent::CommitAttempted);
+    tx.commit()
+        .map_err(|error| format!("commit expired lease reclaim failed: {error}"))?;
+    observe(TransactionEvent::Committed);
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2126,97 +2266,4 @@ mod tests {
             .is_err());
         let _ = std::fs::remove_file(db_path);
     }
-}
-
-pub(super) fn complete_runtime_job_conn(
-    conn: &rusqlite::Connection,
-    req: &centaeris_core::session::reliability::CompleteRuntimeJobRequest,
-) -> Result<(), String> {
-    let output_refs_json = serde_json::to_string(&req.output_refs)
-        .map_err(|err| format!("serialize complete_runtime_job output_refs failed: {err}"))?;
-    let updated = conn
-        .execute(
-            "
-            UPDATE runtime_jobs
-            SET status = ?1,
-                output_refs_json = ?2,
-                updated_at_ms = ?3,
-                lease_owner = NULL,
-                lease_expires_at_ms = NULL,
-                last_error = NULL
-            WHERE job_id = ?4
-              AND lease_owner = ?5
-              AND status IN ('leased', 'running')
-              AND lease_expires_at_ms > ?3
-            ",
-            params![
-                runtime_job_status_to_db(&RuntimeJobStatus::Succeeded),
-                output_refs_json,
-                req.completed_at_ms,
-                req.job_id.as_str(),
-                req.lease_owner.as_str(),
-            ],
-        )
-        .map_err(|err| format!("complete_runtime_job failed: {err}"))?;
-    if updated == 0 {
-        return Err(format!(
-            "complete_runtime_job lease mismatch or job not found: {}",
-            req.job_id
-        ));
-    }
-    Ok(())
-}
-
-pub(super) fn fail_runtime_job_conn(
-    conn: &rusqlite::Connection,
-    req: &centaeris_core::session::reliability::FailRuntimeJobRequest,
-) -> Result<(), String> {
-    let (next_status, next_run_at_ms) = match req.disposition {
-        RuntimeJobFailureDisposition::RetryScheduled => {
-            let next = req.next_run_at_ms.ok_or_else(|| {
-                format!(
-                    "fail_runtime_job retry_scheduled requires next_run_at_ms job_id={}",
-                    req.job_id
-                )
-            })?;
-            (RuntimeJobStatus::Queued, next)
-        }
-        RuntimeJobFailureDisposition::Failed => (RuntimeJobStatus::Failed, req.failed_at_ms),
-        RuntimeJobFailureDisposition::DeadLettered => {
-            (RuntimeJobStatus::DeadLettered, req.failed_at_ms)
-        }
-    };
-    let updated = conn
-        .execute(
-            "
-            UPDATE runtime_jobs
-            SET status = ?1,
-                run_at_ms = ?2,
-                retry_count = retry_count + 1,
-                lease_owner = NULL,
-                lease_expires_at_ms = NULL,
-                last_error = ?3,
-                updated_at_ms = ?4
-            WHERE job_id = ?5
-              AND lease_owner = ?6
-              AND status IN ('leased', 'running')
-              AND lease_expires_at_ms > ?4
-            ",
-            params![
-                runtime_job_status_to_db(&next_status),
-                next_run_at_ms,
-                req.last_error.as_str(),
-                req.failed_at_ms,
-                req.job_id.as_str(),
-                req.lease_owner.as_str(),
-            ],
-        )
-        .map_err(|err| format!("fail_runtime_job failed: {err}"))?;
-    if updated == 0 {
-        return Err(format!(
-            "fail_runtime_job lease mismatch or job not found: {}",
-            req.job_id
-        ));
-    }
-    Ok(())
 }

@@ -126,29 +126,7 @@ impl RuntimeStoreTransactionPort for SqliteRuntimeStore {
         req: UpsertExternalContextLinkAndCompleteJobRequest,
     ) -> Result<(), String> {
         self.with_conn(|conn| {
-            let tx = conn.transaction().map_err(|err| {
-                format!(
-                    "begin upsert_external_context_link_and_complete_job transaction failed: {err}"
-                )
-            })?;
-            if let Some(object) = req.object.as_ref() {
-                super::sqlite_external_context::upsert_external_context_object_conn(&tx, object)?;
-            }
-            if let Some(link) = req.link.as_ref() {
-                super::sqlite_external_context::link_external_context_object_conn(&tx, link)?;
-            }
-            super::sqlite_reliability::complete_runtime_job_conn(&tx, &req.complete_job)?;
-            super::sqlite_reliability::upsert_runtime_job_outbox_event(
-                &tx,
-                req.complete_job.job_id.as_str(),
-                RUNTIME_JOB_TERMINAL_EVENT,
-            )?;
-            tx.commit().map_err(|err| {
-                format!(
-                    "commit upsert_external_context_link_and_complete_job transaction failed: {err}"
-                )
-            })?;
-            Ok(())
+            upsert_external_context_link_and_complete_job_conn(conn, req, &mut |_| {})
         })
     }
 
@@ -204,4 +182,56 @@ impl RuntimeStoreTransactionPort for SqliteRuntimeStore {
             )
         })
     }
+}
+
+/// Internal observation seam for transaction outcome and deterministic fault tests.
+/// The ordinary Store path passes a no-op observer.
+#[derive(Debug, Clone)]
+pub(super) enum TransactionEvent {
+    Began,
+    BeforeCommit,
+    CommitAttempted,
+    Committed,
+    RolledBack,
+    RollbackFailed,
+}
+
+pub(super) fn upsert_external_context_link_and_complete_job_conn(
+    conn: &mut rusqlite::Connection,
+    req: UpsertExternalContextLinkAndCompleteJobRequest,
+    observe: &mut dyn FnMut(TransactionEvent),
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|err| {
+        format!("begin upsert_external_context_link_and_complete_job transaction failed: {err}")
+    })?;
+    observe(TransactionEvent::Began);
+    let result = (|| {
+        if let Some(object) = req.object.as_ref() {
+            super::sqlite_external_context::upsert_external_context_object_conn(&tx, object)?;
+        }
+        if let Some(link) = req.link.as_ref() {
+            super::sqlite_external_context::link_external_context_object_conn(&tx, link)?;
+        }
+        super::sqlite_reliability::complete_runtime_job_conn(&tx, &req.complete_job)?;
+        super::sqlite_reliability::upsert_runtime_job_outbox_event(
+            &tx,
+            req.complete_job.job_id.as_str(),
+            RUNTIME_JOB_TERMINAL_EVENT,
+        )?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        match tx.rollback() {
+            Ok(()) => observe(TransactionEvent::RolledBack),
+            Err(_) => observe(TransactionEvent::RollbackFailed),
+        }
+        return Err(error);
+    }
+    observe(TransactionEvent::BeforeCommit);
+    observe(TransactionEvent::CommitAttempted);
+    tx.commit().map_err(|err| {
+        format!("commit upsert_external_context_link_and_complete_job transaction failed: {err}")
+    })?;
+    observe(TransactionEvent::Committed);
+    Ok(())
 }
