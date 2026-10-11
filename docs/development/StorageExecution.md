@@ -17,3 +17,16 @@ owners, the exact expiry boundary, terminal records, retries and missing retry
 timestamps. An injected outbox failure must roll back the job and all associated
 objects, links or dead-letter records. These tests pass before and after SQL
 consolidation; they assert stored facts and errors rather than source spelling.
+
+## Checkpoint request validation
+
+`SaveWaitCheckpointRequest::validate` and
+`ConsumeWaitCheckpointRequest::validate` in Core own the existing session/turn
+binding, nonempty event list and unique event-ID rules. Both database adapters
+invoke validation before acquiring a connection or starting a transaction,
+including direct Store calls. Stored-record comparisons, replay conflicts,
+conditional deletion and rollback remain adapter responsibilities.
+
+Core tests preserve error text and rejection precedence. SQLite and the isolated
+PostgreSQL gate test direct Store calls and assert rejected requests write no
+checkpoint or event. No new field limits or payload parsing are introduced.
