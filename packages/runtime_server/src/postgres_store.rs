@@ -131,6 +131,20 @@ pub struct AgentRunExecutionControlState {
 }
 
 impl PostgresRuntimeStore {
+    #[cfg(test)]
+    pub(crate) fn rejecting_http_test_store() -> Self {
+        let pool = Arc::new(PostgresConnectionPool::new(
+            postgres::Config::new(),
+            0,
+            Duration::from_millis(1),
+        ));
+        Self {
+            ordinary_connections: pool.clone(),
+            control_connections: pool.clone(),
+            listener_connections: pool,
+        }
+    }
+
     /// Route every ordinary operation in a control RPC through the reserved pool,
     /// including preflight Session reads. This shares the pool, not its capacity.
     pub(crate) fn execution_control_view(&self) -> Self {
@@ -329,6 +343,8 @@ impl PostgresConnectionPool {
     }
 
     fn checkout(&self) -> Result<Client, String> {
+        #[cfg(test)]
+        assert_ne!(self.maximum, 0, "HTTP rejection must not access a database");
         let deadline = Instant::now()
             + remaining_request_time()?.map_or(self.checkout_timeout, |remaining| {
                 remaining.min(self.checkout_timeout)

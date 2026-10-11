@@ -1077,9 +1077,7 @@ async fn serve_http(
     listener: tokio::net::TcpListener,
     state: HttpServerState,
 ) -> Result<(), String> {
-    let router = Router::new()
-        .fallback(dispatch_http_request)
-        .with_state(state);
+    let router = http_router(state);
     let connection_slots = Arc::new(Semaphore::new(MAX_HTTP_CONNECTIONS));
     loop {
         let connection_slot = connection_slots
@@ -1103,6 +1101,12 @@ async fn serve_http(
     }
 }
 
+fn http_router(state: HttpServerState) -> Router {
+    Router::new()
+        .fallback(dispatch_http_request)
+        .with_state(state)
+}
+
 fn runtime_http1_builder(header_timeout: Duration) -> http1::Builder {
     let mut builder = http1::Builder::new();
     builder
@@ -1118,6 +1122,27 @@ async fn dispatch_http_request(
     State(state): State<HttpServerState>,
     request: Request<Body>,
 ) -> Response<Body> {
+    dispatch_http_operation(State(state), request, |state, request| {
+        handle_request(
+            request,
+            state.runtime,
+            state.store,
+            state.job_store,
+            state.tool_layers,
+            state.execution_profile,
+        )
+    })
+    .await
+}
+
+async fn dispatch_http_operation<F>(
+    State(state): State<HttpServerState>,
+    request: Request<Body>,
+    operation: F,
+) -> Response<Body>
+where
+    F: FnOnce(HttpServerState, Request<Bytes>) -> Result<Response<Body>, String> + Send + 'static,
+{
     let observed_route = observations::route(request.uri().path());
     let observed_lane =
         if request.method().as_str() == "POST" && request.uri().path() == "/internal/jobs/wait" {
@@ -1179,19 +1204,11 @@ async fn dispatch_http_request(
                 "request_deadline_exceeded",
             ));
         }
-        let job_store = if lane.control {
-            Arc::new(state.job_store.execution_control_view())
-        } else {
-            state.job_store
-        };
-        handle_request(
-            request,
-            state.runtime,
-            state.store,
-            job_store,
-            state.tool_layers,
-            state.execution_profile,
-        )
+        let mut state = state;
+        if lane.control {
+            state.job_store = Arc::new(state.job_store.execution_control_view());
+        }
+        operation(state, request)
     });
     let result = if let Some(deadline) = deadline {
         match tokio::time::timeout_at(deadline.into(), task).await {
