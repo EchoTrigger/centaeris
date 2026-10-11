@@ -170,7 +170,7 @@ def _json_request(url, body, token_header, token, default_reason, timeout=10):
             raise RuntimeStepFailed(
                 reason, payload["retryable"], payload["agentRunId"], http_status=status
             ) from error
-        if status in {502, 503, 504}:
+        if status in {500, 502, 503, 504}:
             raise DependencyUnavailable(reason, http_status=status) from error
         failure = RuntimeError(reason)
         failure.http_status = status
