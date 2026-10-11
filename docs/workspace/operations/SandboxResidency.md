@@ -47,9 +47,31 @@ until the current owner confirms physical absence. Replacement admission then
 uses that released capacity. The physical restore checks and pins the current
 lifecycle owner, so an owner already lost cannot write the held checkpoint.
 
+A committed recovery attempt can leave a created setup container behind if its
+worker exits before `execution_started`, including after restoring the files.
+On the next claim, the host replays Core records and fetches the committed
+checkpoint source again. Under the current lifecycle owner's row lock it replays
+those records once more and requires the same pending attempt, latest unused
+checkpoint and no active execution. Only that exact unstarted setup can be
+force-discarded; lawful waits and executions already started from the checkpoint
+cannot enter this path. The next attempt is admitted after Docker absence is
+confirmed and its old charge released, using the existing attempt budget.
+
+Repeating a committed discard before the next attempt is reserved is safe: a
+missing holding skips physical deletion, while inventory must still confirm the
+exact container is absent. A reservation with no known container ID and no
+inspectable physical object retains its unknown creation charge. Unavailable
+inventory also retains the charge.
+
 The ignored `real_docker_checkpoint_recovery_releases_only_confirmed_old_residency_and_restores_one_slot`
 test covers retained PID and charge, ambiguous deletion, confirmed release and
 actual file restoration under the shipped single-sandbox Workspace profile.
+It also covers a simulated worker interruption after restore but before `execution_started`,
+then a new owner rebuilding its store, replaying durable Core records and
+fetching the source again. The shared Main preparation path repeats the pending
+discard, creates and restores the next execution, commits its started fact and
+replays that fact to verify the active execution and used checkpoint. A stale
+owner's first restore into an empty workspace is rejected.
 It requires `CENTAERIS_RECOVERY_DOCKER_TEST=isolated`, a dedicated database named
 `centaeris_recovery_docker_test`, explicitly selected local execution-agent image,
 and dedicated plugin/memory volumes with the `centaeris-recovery-test-` prefix.

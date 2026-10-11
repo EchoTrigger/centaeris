@@ -952,6 +952,52 @@ impl DockerExecutionHostRunner {
         )
     }
 
+    pub(crate) fn discard_unstarted_recovery_execution(
+        agent_run_id: &str,
+        execution_id: &str,
+        resident_store: &PostgresRuntimeStore,
+        fence: &centaeris_core::session::RuntimeJobLeaseFence,
+        authorize: impl FnOnce(&mut postgres::Transaction<'_>) -> Result<(), String> + Send,
+    ) -> Result<(), String> {
+        resident_store.discard_unstarted_resident_execution(
+            &resident_host_id()?,
+            agent_run_id,
+            execution_id,
+            fence,
+            authorize,
+            |known_container_id| {
+                if known_container_id.is_some_and(|id| {
+                    id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                }) {
+                    return Err("pending recovery known container identity invalid".into());
+                }
+                let name = container_name(execution_id);
+                let Some(facts) = inspect_container(&name)? else {
+                    return if known_container_id.is_some() {
+                        Ok(())
+                    } else {
+                        Err("pending recovery creation outcome remains unknown".into())
+                    };
+                };
+                if !facts.has_identity(agent_run_id, execution_id)
+                    || known_container_id.is_some_and(|id| id != facts.id)
+                {
+                    return Err(
+                        "pending recovery container identity mismatch; refusing discard".into(),
+                    );
+                }
+                // This is a proven unstarted setup, not an ended live Execution.
+                // Force removes its orphaned setup processes while retaining volumes.
+                crate::docker_engine::remove(&facts.id, false)?;
+                if inspect_container(&name)?.is_some() {
+                    return Err("pending recovery discard was not confirmed".into());
+                }
+                Ok(())
+            },
+            || observed_resident_sandboxes_for_run(agent_run_id),
+        )
+    }
+
     pub(crate) fn restore_prepared_recovery_workspace(
         &self,
         prepared: &mut PreparedRecoveryWorkspaceRestore,
@@ -3817,6 +3863,11 @@ mod tests {
     #[ignore = "requires explicitly isolated Postgres, dedicated Docker volumes and an execution_agent image"]
     fn real_docker_checkpoint_recovery_releases_only_confirmed_old_residency_and_restores_one_slot()
     {
+        use centaeris_core::runtime::contracts::{
+            CheckpointKindV1, CheckpointRecord, RuntimeRecoveryCheckpointV1,
+            RUNTIME_RECOVERY_CHECKPOINT_SCHEMA_V1,
+        };
+        use centaeris_core::session::{store::RuntimeStore, AgentRunSessionState};
         use postgres::{Client, NoTls};
         use std::net::TcpListener;
         assert_eq!(
@@ -3857,7 +3908,15 @@ mod tests {
         .unwrap();
         let run = "centaeris-recovery-test-run";
         let old_id = "centaeris-recovery-test-old";
-        let replacement_id = "centaeris-recovery-test-replacement";
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let checkpoint_id = "centaeris-recovery-test-checkpoint";
+        let mut start = crate::tests::agent_run_start();
+        start.agent_run_id = run.into();
+        start.authorization.workspace_id = "centaeris-recovery-test-tenant".into();
+        start.authorization.session_id = "centaeris-recovery-test-session".into();
+        start.authorization_digest = digest.clone();
+        let replacement_key = crate::replacement_execution_id(&start, checkpoint_id, 1);
+        let replacement_id = replacement_key.as_str();
         let late_id = "centaeris-recovery-test-late";
         assert!(
             container_ids_for_agent_run(run).unwrap().is_empty(),
@@ -3901,6 +3960,12 @@ mod tests {
             );
         }
         bind(run, "centaeris-recovery-test-tenant");
+        db.execute(
+            "UPDATE runtime.runtime_jobs SET session_id=$2 WHERE job_id=$1",
+            &[&job, &start.authorization.session_id],
+        )
+        .unwrap();
+        db.batch_execute("DROP TABLE IF EXISTS public.app_core_sessionevent; DROP TABLE IF EXISTS public.app_core_session CASCADE; CREATE TABLE public.app_core_session(id text PRIMARY KEY,workspace_id text NOT NULL); CREATE TABLE public.app_core_sessionevent(\"eventId\" text PRIMARY KEY,workspace_id text NOT NULL,session_id text NOT NULL,agent_run_id text NOT NULL,sequence integer NOT NULL,agent_run_sequence integer,session_level boolean NOT NULL DEFAULT false,projects_to_agent_run_stream boolean NOT NULL,payload jsonb NOT NULL,\"createdAtMs\" bigint NOT NULL,\"insertedAt\" timestamptz NOT NULL DEFAULT clock_timestamp(),UNIQUE(session_id,sequence),UNIQUE(agent_run_id,agent_run_sequence)); INSERT INTO public.app_core_session VALUES('centaeris-recovery-test-session','centaeris-recovery-test-tenant');").unwrap();
         let defaults = crate::resident_capacity::ResidentCapacity::default();
         let configured = crate::resident_capacity::ResidentCapacity::from_env().unwrap();
         assert_eq!(configured.global, defaults.global);
@@ -3921,31 +3986,34 @@ mod tests {
             data_tmpfs_bytes: setting("SANDBOX_DATA_TMPFS_BYTES"),
         };
         let activation = centaeris_core::extension::build_plugin_activation_snapshot(&[]).unwrap();
-        let digest = format!("sha256:{}", "a".repeat(64));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let api_url = format!("http://{}", listener.local_addr().unwrap());
-        let create = |execution: &str| {
-            DockerExecutionHostRunner::new_with_admitted(
-                DockerExecutionHostRequest {
-                    workspace_id: "centaeris-recovery-test-tenant".into(),
-                    lifecycle_job_id: job.clone(),
-                    lifecycle_lease_owner: owner.into(),
-                    resident_store: store.clone(),
-                    agent_run_id: run.into(),
-                    execution_id: execution.into(),
-                    user_id: "centaeris-recovery-test-user".into(),
-                    agent_id: "centaeris-recovery-test-agent".into(),
-                    authorization_digest: digest.clone(),
-                    image_digest: image.clone(),
-                    resources,
-                    has_execution_fact: false,
-                    api_url: api_url.clone(),
-                    api_token: "centaeris-recovery-test-token".into(),
-                    plugin_activation: &activation,
-                },
-                &mut |_| Ok(()),
-            )
-        };
+        let create =
+            |execution: &str,
+             lease_owner: &str,
+             resident_store: Arc<PostgresRuntimeStore>,
+             before: &mut (dyn FnMut(&mut Client) -> Result<(), String> + Send)| {
+                DockerExecutionHostRunner::new_with_admitted(
+                    DockerExecutionHostRequest {
+                        workspace_id: "centaeris-recovery-test-tenant".into(),
+                        lifecycle_job_id: job.clone(),
+                        lifecycle_lease_owner: lease_owner.into(),
+                        resident_store,
+                        agent_run_id: run.into(),
+                        execution_id: execution.into(),
+                        user_id: "centaeris-recovery-test-user".into(),
+                        agent_id: "centaeris-recovery-test-agent".into(),
+                        authorization_digest: digest.clone(),
+                        image_digest: image.clone(),
+                        resources,
+                        has_execution_fact: false,
+                        api_url: api_url.clone(),
+                        api_token: "centaeris-recovery-test-token".into(),
+                        plugin_activation: &activation,
+                    },
+                    before,
+                )
+            };
         let charged = || {
             Client::connect(&url, NoTls)
                 .unwrap()
@@ -3956,10 +4024,12 @@ mod tests {
                 .unwrap()
                 .get::<_, i64>(0)
         };
-        let old = create(old_id).unwrap();
+        let old = create(old_id, owner, store.clone(), &mut |_| Ok(())).unwrap();
         assert_eq!(charged(), 1);
         assert_eq!(
-            create(replacement_id).err().unwrap(),
+            create(replacement_id, owner, store.clone(), &mut |_| Ok(()))
+                .err()
+                .unwrap(),
             crate::resident_capacity::RESIDENT_CAPACITY_WAIT
         );
         let mut write_request = old.exec_request(vec![
@@ -3982,34 +4052,103 @@ mod tests {
         };
         let mut body = Vec::new();
         artifact.file.read_to_end(&mut body).unwrap();
+        let checkpoint = RuntimeRecoveryCheckpointV1 {
+            schema: RUNTIME_RECOVERY_CHECKPOINT_SCHEMA_V1.into(),
+            checkpoint_id: checkpoint_id.into(),
+            session_id: start.authorization.session_id.clone(),
+            agent_run_id: run.into(),
+            execution_id: old_id.into(),
+            authorization_digest: digest.clone(),
+            session_sequence: 3,
+            model_request_id: "centaeris-recovery-test-request".into(),
+            workspace_snapshot: snapshot.clone(),
+            workspace_generation: ExecutionWorkspaceGeneration::Unknown {
+                reason: "explicit test capture".into(),
+            },
+            created_at_ms: 3,
+        };
+        let checkpoint_record = CheckpointRecord {
+            checkpoint_id: checkpoint_id.into(),
+            kind: CheckpointKindV1::Recovery,
+            session_id: start.authorization.session_id.clone(),
+            turn_id: start.turn_id.clone(),
+            status: "committed".into(),
+            done_reason: None,
+            updated_at_ms: 3,
+            payload_json: serde_json::to_string(&checkpoint).unwrap(),
+        };
+        store.save_checkpoint(checkpoint_record.clone()).unwrap();
+        let fence = centaeris_core::session::RuntimeJobLeaseFence {
+            job_id: job.clone(),
+            job_kind: "agent_run.lifecycle".into(),
+            lease_owner: owner.into(),
+        };
+        let log = store.session_log(
+            start.authorization.workspace_id.clone(),
+            start.authorization.session_id.clone(),
+            "recover".into(),
+        );
+        let mut sequence = AgentRunSessionState::new(&start.authorization.session_id, run).unwrap();
+        let mut records = sequence
+            .start(&start.turn_id, "recover", Vec::new(), 1)
+            .unwrap();
+        records.push(
+            sequence
+                .start_execution(&start.turn_id, old_id, &digest, None, 2)
+                .unwrap(),
+        );
+        records.push(sequence.checkpoint_ref(&checkpoint_record).unwrap());
+        records.push(
+            sequence
+                .end_execution(
+                    &start.turn_id,
+                    old_id,
+                    "lost",
+                    "execution_environment_lost",
+                    true,
+                    Some(checkpoint_id),
+                    Vec::new(),
+                    4,
+                )
+                .unwrap(),
+        );
+        log.append_session_records_with_runtime_job_lease_blocking(run, &records, &fence)
+            .unwrap();
+        sequence = crate::load_existing_session_sequence(store.as_ref(), &start).unwrap();
+        assert_eq!(
+            crate::next_recovery_execution_id(&start, &sequence, checkpoint_id),
+            replacement_id
+        );
         let hash = snapshot.snapshot_sha256.clone();
         let server = thread::spawn(move || {
-            let (mut socket, _) = listener.accept().unwrap();
-            socket
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let mut request = Vec::new();
-            while !request.ends_with(b"\r\n\r\n") {
-                let mut byte = [0];
-                socket.read_exact(&mut byte).unwrap();
-                request.push(byte[0]);
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    socket.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                assert!(request.starts_with(
+                    b"POST /internal/agent-runs/execution-workspace/download HTTP/1.1\r\n"
+                ));
+                let length = String::from_utf8(request)
+                    .unwrap()
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                let mut request_body = vec![0; length];
+                socket.read_exact(&mut request_body).unwrap();
+                write!(socket, "HTTP/1.1 200 fixture\r\nContent-Length: {}\r\nX-Content-Sha256: {hash}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+                socket.write_all(&body).unwrap();
             }
-            assert!(request.starts_with(
-                b"POST /internal/agent-runs/execution-workspace/download HTTP/1.1\r\n"
-            ));
-            let length = String::from_utf8(request)
-                .unwrap()
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().unwrap())
-                })
-                .unwrap();
-            let mut request_body = vec![0; length];
-            socket.read_exact(&mut request_body).unwrap();
-            write!(socket, "HTTP/1.1 200 fixture\r\nContent-Length: {}\r\nX-Content-Sha256: {hash}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
-            socket.write_all(&body).unwrap();
         });
         let lease = SessionWorkspaceLease {
             job_id: job.clone(),
@@ -4030,12 +4169,6 @@ mod tests {
             None,
         )
         .unwrap();
-        server.join().unwrap();
-        let fence = centaeris_core::session::RuntimeJobLeaseFence {
-            job_id: job.clone(),
-            job_kind: "agent_run.lifecycle".into(),
-            lease_owner: owner.into(),
-        };
         let before_retirement = inspect_container(&container_name(old_id)).unwrap().unwrap();
         let old_pid = before_retirement.raw["State"]["Pid"].as_i64().unwrap();
         assert!(old_pid > 0 && before_retirement.running);
@@ -4098,7 +4231,50 @@ mod tests {
             .unwrap()
             .is_none());
         assert_eq!(charged(), 0);
-        let replacement = create(replacement_id).unwrap();
+        let retirement_sequence = sequence.clone();
+        let replacement = crate::prepare_execution_host_with_recovery(
+            || {
+                crate::retire_recovery_preparation(
+                    &start,
+                    &retirement_sequence,
+                    checkpoint_id,
+                    old_id,
+                    |execution| {
+                        DockerExecutionHostRunner::retire_recovery_execution(
+                            run,
+                            execution,
+                            store.as_ref(),
+                            &fence,
+                        )
+                    },
+                    |_, _| Err("no pending preparation before the first attempt".into()),
+                )
+            },
+            |mut client| {
+                crate::commit_execution_recovery_attempt(
+                    &mut sequence,
+                    &start.turn_id,
+                    checkpoint_id,
+                    5,
+                    now,
+                    |_, record| {
+                        log.append_session_records_with_runtime_job_lease_on_client(
+                            client.as_deref_mut().unwrap(),
+                            run,
+                            std::slice::from_ref(record),
+                            &fence,
+                        )
+                        .map(|_| ())
+                    },
+                )
+            },
+            |admitted| {
+                create(replacement_id, owner, store.clone(), &mut |client| {
+                    admitted(Some(client))
+                })
+            },
+        )
+        .unwrap();
         assert_eq!(charged(), 1);
         assert_eq!(
             replacement
@@ -4114,10 +4290,207 @@ mod tests {
         .unwrap();
         assert!(restored.status.success());
         assert_eq!(restored.stdout, b"checkpoint contents");
-        let replacement_facts = inspect_container(&container_name(replacement_id))
+        // The worker ends after physical restore but before execution_started.
+        drop(replacement);
+        drop(prepared);
+        drop(sequence);
+        drop(log);
+        let resumed_owner = "centaeris-recovery-test-resumed-owner";
+        assert_eq!(
+            db.execute(
+                "UPDATE runtime.runtime_jobs SET lease_owner=$2 WHERE job_id=$1 AND lease_owner=$3",
+                &[&job, &resumed_owner, &owner]
+            )
+            .unwrap(),
+            1
+        );
+        let resumed_store = Arc::new(PostgresRuntimeStore::new(&url).unwrap());
+        let resumed_log = resumed_store.session_log(
+            start.authorization.workspace_id.clone(),
+            start.authorization.session_id.clone(),
+            "recover".into(),
+        );
+        let mut resumed_sequence =
+            crate::load_existing_session_sequence(resumed_store.as_ref(), &start).unwrap();
+        let (persisted_record, persisted_checkpoint) = crate::select_agent_run_recovery_checkpoint(
+            resumed_store.as_ref(),
+            &start,
+            &resumed_sequence,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(persisted_record.checkpoint_id, checkpoint_id);
+        assert_eq!(
+            resumed_sequence
+                .pending_recovery_attempt(checkpoint_id)
+                .unwrap()
+                .number,
+            1
+        );
+        assert_eq!(resumed_sequence.active_execution_id(), None);
+        let resumed_lease = SessionWorkspaceLease {
+            job_id: job.clone(),
+            lease_owner: resumed_owner.into(),
+        };
+        let mut resumed_prepared = prepare_recovery_workspace_restore(
+            RecoveryRestoreBinding {
+                api_url: &api_url,
+                api_token: "centaeris-recovery-test-token",
+                agent_run_id: run,
+                authorization_digest: &digest,
+                lease: &resumed_lease,
+                checkpoint_id: &persisted_checkpoint.checkpoint_id,
+                data_tmpfs_bytes: resources.data_tmpfs_bytes,
+                input_upper_bound_bytes: 0,
+            },
+            &persisted_checkpoint.workspace_snapshot,
+            None,
+        )
+        .unwrap();
+        server.join().unwrap();
+        let resumed_fence = centaeris_core::session::RuntimeJobLeaseFence {
+            lease_owner: resumed_owner.into(),
+            ..fence.clone()
+        };
+        let next_execution =
+            crate::next_recovery_execution_id(&start, &resumed_sequence, checkpoint_id);
+        assert_ne!(next_execution, replacement_id);
+        let retirement_sequence = resumed_sequence.clone();
+        let reentry = crate::prepare_execution_host_with_recovery(
+            || {
+                let retire = || {
+                    crate::retire_recovery_preparation(
+                        &start,
+                        &retirement_sequence,
+                        checkpoint_id,
+                        &persisted_checkpoint.execution_id,
+                        |execution| {
+                            DockerExecutionHostRunner::retire_recovery_execution(
+                                run,
+                                execution,
+                                resumed_store.as_ref(),
+                                &resumed_fence,
+                            )
+                        },
+                        |execution, pending| {
+                            assert_eq!(pending.number, 1);
+                            assert_eq!(execution, replacement_id);
+                            crate::discard_unstarted_recovery_execution(
+                                resumed_store.as_ref(),
+                                &start,
+                                &resumed_fence,
+                                execution,
+                                pending,
+                            )
+                        },
+                    )
+                };
+                retire()?;
+                assert_eq!(charged(), 0);
+                // Re-enter after discard committed, before the next attempt exists.
+                retire()
+            },
+            |mut client| {
+                crate::commit_execution_recovery_attempt(
+                    &mut resumed_sequence,
+                    &start.turn_id,
+                    checkpoint_id,
+                    5,
+                    now + 1,
+                    |_, record| {
+                        resumed_log
+                            .append_session_records_with_runtime_job_lease_on_client(
+                                client.as_deref_mut().unwrap(),
+                                run,
+                                std::slice::from_ref(record),
+                                &resumed_fence,
+                            )
+                            .map(|_| ())
+                    },
+                )
+            },
+            |admitted| {
+                create(
+                    &next_execution,
+                    resumed_owner,
+                    resumed_store.clone(),
+                    &mut |client| admitted(Some(client)),
+                )
+            },
+        );
+        let replacement = match reentry {
+            Ok(replacement) => replacement,
+            Err(error) => {
+                if let Some(facts) = inspect_container(&container_name(replacement_id)).unwrap() {
+                    assert!(facts.has_identity(run, replacement_id));
+                    resumed_store
+                        .remove_resident_execution(
+                            &resident_host_id().unwrap(),
+                            run,
+                            replacement_id,
+                            &resumed_fence,
+                            || crate::docker_engine::remove(&facts.id, false),
+                            || observed_resident_sandboxes_for_run(run),
+                        )
+                        .unwrap();
+                }
+                assert_eq!(charged(), 0);
+                panic!("replayed pending attempt blocked reentry: {error}");
+            }
+        };
+        assert_eq!(
+            replacement
+                .restore_prepared_recovery_workspace(&mut resumed_prepared, 0)
+                .unwrap(),
+            SessionWorkspaceResolution::Download
+        );
+        let started = resumed_sequence
+            .start_execution(
+                &start.turn_id,
+                &next_execution,
+                &digest,
+                Some(checkpoint_id),
+                now + 2,
+            )
+            .unwrap();
+        resumed_log
+            .append_session_records_with_runtime_job_lease_blocking(run, &[started], &resumed_fence)
+            .unwrap();
+        let replayed =
+            crate::load_existing_session_sequence(resumed_store.as_ref(), &start).unwrap();
+        assert_eq!(
+            replayed.active_execution_id(),
+            Some(next_execution.as_str())
+        );
+        assert!(replayed.has_used_recovery_checkpoint(checkpoint_id));
+        assert!(replayed.pending_recovery_attempt(checkpoint_id).is_none());
+        let restored = exec_with_input(
+            &replacement.exec_request(vec!["/bin/cat".into(), "/mnt/data/report.txt".into()]),
+            &[],
+            1024,
+        )
+        .unwrap();
+        assert!(restored.status.success());
+        assert_eq!(restored.stdout, b"checkpoint contents");
+        let ended = resumed_sequence
+            .end_execution(
+                &start.turn_id,
+                &next_execution,
+                "completed",
+                "completed",
+                false,
+                None,
+                Vec::new(),
+                now + 3,
+            )
+            .unwrap();
+        resumed_log
+            .append_session_records_with_runtime_job_lease_blocking(run, &[ended], &resumed_fence)
+            .unwrap();
+        let replacement_facts = inspect_container(&container_name(&next_execution))
             .unwrap()
             .unwrap();
-        assert!(replacement_facts.has_identity(run, replacement_id));
+        assert!(replacement_facts.has_identity(run, &next_execution));
         assert!(Command::new("docker")
             .args(["stop", "-t", "2", &replacement_facts.id])
             .status()
@@ -4125,13 +4498,16 @@ mod tests {
             .success());
         DockerExecutionHostRunner::retire_recovery_execution(
             run,
-            replacement_id,
-            store.as_ref(),
-            &fence,
+            &next_execution,
+            resumed_store.as_ref(),
+            &resumed_fence,
         )
         .unwrap();
         assert_eq!(charged(), 0);
-        let late = create(late_id).unwrap();
+        let late = create(late_id, resumed_owner, resumed_store.clone(), &mut |_| {
+            Ok(())
+        })
+        .unwrap();
         assert_eq!(charged(), 1);
         let absence_request = late.exec_request(vec![
             "/bin/sh".into(),
@@ -4149,16 +4525,16 @@ mod tests {
         assert_eq!(
             db.execute(
                 "UPDATE runtime.runtime_jobs SET lease_owner=$2 WHERE job_id=$1 AND lease_owner=$3",
-                &[&fence.job_id, &new_owner, &owner]
+                &[&resumed_fence.job_id, &new_owner, &resumed_owner]
             )
             .unwrap(),
             1
         );
-        let late_restore = late.restore_prepared_recovery_workspace(&mut prepared, 0);
+        let late_restore = late.restore_prepared_recovery_workspace(&mut resumed_prepared, 0);
         let remained_empty = exec_with_input(&absence_request, &[], 1024).unwrap();
         let current_fence = centaeris_core::session::RuntimeJobLeaseFence {
             lease_owner: new_owner.into(),
-            ..fence
+            ..resumed_fence
         };
         let facts = inspect_container(&container_name(late_id))
             .unwrap()
@@ -4172,7 +4548,7 @@ mod tests {
         DockerExecutionHostRunner::retire_recovery_execution(
             run,
             late_id,
-            store.as_ref(),
+            resumed_store.as_ref(),
             &current_fence,
         )
         .unwrap();

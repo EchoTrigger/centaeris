@@ -2059,6 +2059,67 @@ fn prepare_execution_host_with_recovery<T>(
     prepare(&mut reserve_recovery)
 }
 
+fn next_recovery_execution_id(
+    start: &AgentRunStart,
+    sequence: &AgentRunSessionState,
+    checkpoint_id: &str,
+) -> String {
+    replacement_execution_id(
+        start,
+        checkpoint_id,
+        sequence
+            .recovery_attempt()
+            .map_or(0, |attempt| attempt.number)
+            + 1,
+    )
+}
+
+fn retire_recovery_preparation(
+    start: &AgentRunStart,
+    sequence: &AgentRunSessionState,
+    checkpoint_id: &str,
+    ended_execution_id: &str,
+    retire_ended: impl FnOnce(&str) -> Result<(), String>,
+    discard_unstarted: impl FnOnce(
+        &str,
+        &centaeris_core::session::ExecutionRecoveryAttempt,
+    ) -> Result<(), String>,
+) -> Result<(), String> {
+    retire_ended(ended_execution_id)?;
+    if let Some(pending) = sequence.pending_recovery_attempt(checkpoint_id) {
+        let execution_id = replacement_execution_id(start, checkpoint_id, pending.number);
+        discard_unstarted(&execution_id, pending)?;
+    }
+    Ok(())
+}
+
+fn discard_unstarted_recovery_execution(
+    store: &PostgresRuntimeStore,
+    start: &AgentRunStart,
+    fence: &RuntimeJobLeaseFence,
+    execution_id: &str,
+    expected: &centaeris_core::session::ExecutionRecoveryAttempt,
+) -> Result<(), String> {
+    DockerExecutionHostRunner::discard_unstarted_recovery_execution(
+        &start.agent_run_id,
+        execution_id,
+        store,
+        fence,
+        |client| {
+            // The caller already holds the job row. Read committed Core facts
+            // through that same connection without locking the Session row.
+            let current = load_existing_session_sequence_on_client(client, start)?;
+            if current.pending_recovery_attempt(&expected.checkpoint_id) != Some(expected)
+                || replacement_execution_id(start, &expected.checkpoint_id, expected.number)
+                    != execution_id
+            {
+                return Err("unstarted recovery intent changed; refusing discard".into());
+            }
+            Ok(())
+        },
+    )
+}
+
 fn commit_execution_recovery_attempt(
     state: &mut AgentRunSessionState,
     turn_id: &str,
@@ -2415,11 +2476,8 @@ fn execute_agent_run(
         if now_ms()? < retry_at_ms {
             return Ok(execution_recovery_waiting(retry_at_ms));
         }
-        execution_id = replacement_execution_id(
-            &agent_run_start,
-            checkpoint.checkpoint_id.as_str(),
-            attempts + 1,
-        );
+        execution_id =
+            next_recovery_execution_id(&agent_run_start, &sequence, &checkpoint.checkpoint_id);
     }
     let workspace_skill_catalog_config =
         workspace_skill_catalog_config(&agent_run_start.authorization.plugin_activation)?;
@@ -2562,11 +2620,29 @@ fn execute_agent_run(
     let docker_execution = prepare_execution_host_with_recovery(
         || {
             if let Some((_, checkpoint)) = recovery_checkpoint.as_ref() {
-                let result = DockerExecutionHostRunner::retire_recovery_execution(
-                    &agent_run_start.agent_run_id,
+                let sequence = sequence_guard(&session_record_sequence)?.clone();
+                let result = retire_recovery_preparation(
+                    &agent_run_start,
+                    &sequence,
+                    &checkpoint.checkpoint_id,
                     &checkpoint.execution_id,
-                    job_store.as_ref(),
-                    &terminal_lease_fence,
+                    |execution_id| {
+                        DockerExecutionHostRunner::retire_recovery_execution(
+                            &agent_run_start.agent_run_id,
+                            execution_id,
+                            job_store.as_ref(),
+                            &terminal_lease_fence,
+                        )
+                    },
+                    |execution_id, pending| {
+                        discard_unstarted_recovery_execution(
+                            job_store.as_ref(),
+                            &agent_run_start,
+                            &terminal_lease_fence,
+                            execution_id,
+                            pending,
+                        )
+                    },
                 );
                 if let Err(error) = &result {
                     recovery_retirement_error = Some(error.clone());
@@ -5880,7 +5956,13 @@ fn load_existing_session_sequence(
     store: &PostgresRuntimeStore,
     agent_run_start: &AgentRunStart,
 ) -> Result<AgentRunSessionState, String> {
-    store.with_client(|client| {
+    store.with_client(|client| load_existing_session_sequence_on_client(client, agent_run_start))
+}
+
+fn load_existing_session_sequence_on_client(
+    client: &mut impl postgres::GenericClient,
+    agent_run_start: &AgentRunStart,
+) -> Result<AgentRunSessionState, String> {
     let rows = client
         .query(
             "SELECT agent_run_sequence, \"eventId\", payload->>'type', session_id, payload::text FROM app_core_sessionevent WHERE agent_run_id = $1 AND session_level = false ORDER BY agent_run_sequence",
@@ -5921,7 +6003,8 @@ fn load_existing_session_sequence(
     }
     if !rows.is_empty() {
         let input_record_type = match agent_run_start.initial_input {
-            AgentRunStartInitialInput::UserMessage {} | AgentRunStartInitialInput::UserInput { .. } => "user_message",
+            AgentRunStartInitialInput::UserMessage {}
+            | AgentRunStartInitialInput::UserInput { .. } => "user_message",
             AgentRunStartInitialInput::HostEvent { .. } => "host_event_input",
         };
         let types = rows
@@ -5952,7 +6035,6 @@ fn load_existing_session_sequence(
             .map_err(|_| "committed session position is invalid".to_string())?,
     );
     Ok(sequence)
-    })
 }
 
 fn select_agent_run_recovery_checkpoint(

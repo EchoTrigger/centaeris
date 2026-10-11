@@ -483,6 +483,18 @@ impl AgentRunSessionState {
         self.recovery_attempt.as_ref()
     }
 
+    pub fn pending_recovery_attempt(
+        &self,
+        checkpoint_id: &str,
+    ) -> Option<&ExecutionRecoveryAttempt> {
+        self.recovery_attempt.as_ref().filter(|attempt| {
+            self.active_execution.is_none()
+                && self.latest_recovery_checkpoint_id.as_deref() == Some(checkpoint_id)
+                && !self.used_recovery_checkpoint_ids.contains(checkpoint_id)
+                && attempt.checkpoint_id == checkpoint_id
+        })
+    }
+
     pub fn last_execution_ended_at_ms(&self) -> Option<i64> {
         self.last_execution_ended_at_ms
     }
@@ -6624,6 +6636,98 @@ mod tests {
         }
         assert!(replay.has_ended_execution("old-execution"));
         assert!(!replay.has_ended_execution("unknown-execution"));
+    }
+
+    #[test]
+    fn pending_recovery_intent_survives_replay_and_excludes_started_executions() {
+        use crate::runtime::contracts::CheckpointKindV1;
+        let mut state = AgentRunSessionState::new("pending-session", "pending-run").unwrap();
+        let mut records = state
+            .start("pending-turn", "recover", Vec::new(), 1)
+            .unwrap();
+        let digest = format!("sha256:{}", "a".repeat(64));
+        records.push(
+            state
+                .start_execution("pending-turn", "old-execution", &digest, None, 2)
+                .unwrap(),
+        );
+        records.push(
+            state
+                .checkpoint_ref(&CheckpointRecord {
+                    checkpoint_id: "pending-checkpoint".into(),
+                    kind: CheckpointKindV1::Recovery,
+                    session_id: "pending-session".into(),
+                    turn_id: "pending-turn".into(),
+                    status: "committed".into(),
+                    done_reason: None,
+                    updated_at_ms: 3,
+                    payload_json: "{}".into(),
+                })
+                .unwrap(),
+        );
+        records.push(
+            state
+                .end_execution(
+                    "pending-turn",
+                    "old-execution",
+                    "lost",
+                    "execution_environment_lost",
+                    true,
+                    Some("pending-checkpoint"),
+                    Vec::new(),
+                    4,
+                )
+                .unwrap(),
+        );
+        records.push(
+            state
+                .reserve_execution_recovery("pending-turn", "pending-checkpoint", 5, 5)
+                .unwrap(),
+        );
+        let mut replay = AgentRunSessionState::new("pending-session", "pending-run").unwrap();
+        for record in records {
+            replay.restore(record).unwrap();
+        }
+        assert_eq!(
+            replay
+                .pending_recovery_attempt("pending-checkpoint")
+                .unwrap()
+                .number,
+            1
+        );
+        assert!(replay
+            .pending_recovery_attempt("other-checkpoint")
+            .is_none());
+        replay
+            .start_execution(
+                "pending-turn",
+                "replacement-execution",
+                &digest,
+                Some("pending-checkpoint"),
+                6,
+            )
+            .unwrap();
+        assert!(replay
+            .pending_recovery_attempt("pending-checkpoint")
+            .is_none());
+        replay
+            .end_execution(
+                "pending-turn",
+                "replacement-execution",
+                "completed",
+                "completed",
+                false,
+                None,
+                Vec::new(),
+                7,
+            )
+            .unwrap();
+        assert!(
+            replay
+                .pending_recovery_attempt("pending-checkpoint")
+                .is_none(),
+            "a checkpoint used by a started execution is permanently excluded"
+        );
     }
 
     #[test]
