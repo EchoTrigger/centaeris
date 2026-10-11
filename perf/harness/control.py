@@ -32,6 +32,7 @@ def initialize(root, oci_runtime=None):
                 'POSTGRES_PASSWORD', 'BOOTSTRAP_SUPERADMIN_PASSWORD'):
         values[key] = secrets.token_hex(32)
     values['CREDENTIAL_ENCRYPTION_KEY'] = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
+    values['WORK_RETURN_AUDIT_INTERVAL_SECONDS'] = '3600'
     values.update(COMPOSE_PROJECT_NAME=PROJECT, API_HOST_PORT='18000', WEB_HOST_PORT='13000',
                   API_BASE_URL='http://localhost:18000', WEB_ORIGIN='http://localhost:13000',
                   POSTGRES_TEST_HOST_PORT='55433', REDIS_TEST_HOST_PORT='16379',
@@ -41,8 +42,7 @@ def initialize(root, oci_runtime=None):
                   # Explicit synthetic inputs for this isolated two-slot fixture.
                   # Two overlapping spool copies per 1 MiB upload fit two slots.
                   UPLOAD_BODY_MAX_BYTES='1048576', UPLOAD_TEMP_MAX_BYTES='4194304',
-                  UPLOAD_MAX_CONCURRENT='2',
-                  WORK_RETURN_AUDIT_INTERVAL_SECONDS='3600')
+                  UPLOAD_MAX_CONCURRENT='2')
     path = root / 'perf/.state/test.env'
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('x', encoding='utf-8') as output:
