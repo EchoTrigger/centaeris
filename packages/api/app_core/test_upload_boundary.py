@@ -6,6 +6,7 @@ instead of treating a missing module as regression evidence.
 """
 import asyncio
 import importlib.util
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -88,6 +89,90 @@ class UploadTemporaryBoundaryTests(TransactionTestCase):
             UPLOAD_BODY_MAX_BYTES=8, UPLOAD_TEMP_MAX_BYTES=128, UPLOAD_MAX_CONCURRENT=1)
         isolated.enable()
         self.addCleanup(isolated.disable)
+
+    def ambiguous_headers_response(self, headers, path="/api/library"):
+        from . import upload_ingress
+        received, downstream, sent = [], [], []
+        async def receive():
+            received.append(True)
+            return {"type": "http.request", "body": b"x" * 64, "more_body": False}
+        async def send(message):
+            sent.append(message)
+        async def app(scope, body_receive, body_send):
+            downstream.append(scope)
+            await body_receive()
+            await body_send({"type": "http.response.start", "status": 200, "headers": []})
+            await body_send({"type": "http.response.body", "body": b"downstream"})
+        with (patch.object(upload_ingress, "database_call", wraps=upload_ingress.database_call) as database,
+              patch.object(upload_ingress, "initialize_upload_temp_root", wraps=upload_ingress.initialize_upload_temp_root) as filesystem):
+            asyncio.run(ingress(app)({"type": "http", "path": path, "headers": headers}, receive, send))
+            self.assertEqual(sent[0]["status"], 400, sent)
+            self.assertEqual(json.loads(sent[-1]["body"]), {"error": "upload_headers_ambiguous"})
+            self.assertEqual(received, [])
+            self.assertEqual(downstream, [])
+            database.assert_not_called()
+            filesystem.assert_not_called()
+
+    def test_duplicate_content_type_is_rejected_in_both_orders_before_body_or_upload_work(self):
+        from .models import UploadCapacity, UploadLease
+        from .upload_capacity import reserve_ingress
+        occupied = reserve_ingress(64)
+        for types in (
+            [(b"content-type", b"multipart/form-data; boundary=boundary"), (b"content-type", b"application/json")],
+            [(b"content-type", b"application/json"), (b"content-type", b"multipart/form-data; boundary=boundary")],
+            [(b"Content-Type", b"multipart/form-data; boundary=boundary"), (b"CONTENT-TYPE", b"application/json")],
+        ):
+            with self.subTest(types=types):
+                self.ambiguous_headers_response([*types, (b"content-length", b"64")])
+        self.assertEqual(UploadCapacity.objects.values_list("reservedBytes", "activeUploads").get(pk=1), (128, 1))
+        self.assertEqual(list(UploadLease.objects.values_list("pk", flat=True)), [occupied.pk])
+
+    def test_ambiguous_framing_is_rejected_before_control_or_signed_snapshot_bypass(self):
+        from .models import UploadCapacity, UploadLease
+        from .upload_capacity import reserve_ingress
+        occupied = reserve_ingress(64)
+        framing = (
+            [(b"content-length", b"1"), (b"Content-Length", b"64")],
+            [(b"transfer-encoding", b"chunked"), (b"Transfer-Encoding", b"chunked")],
+            [(b"CONTENT-LENGTH", b"64"), (b"Transfer-Encoding", b"chunked")],
+        )
+        for path, kind in (("/internal/agent-run-lifecycle/resolve", b"application/json"),
+                           ("/internal/agent-runs/session-workspace/commit", b"application/octet-stream")):
+            for fields in framing:
+                with self.subTest(path=path, fields=fields):
+                    self.ambiguous_headers_response([(b"content-type", kind),
+                        (b"x-internal-token", settings.INTERNAL_API_TOKEN.encode()), *fields], path=path)
+        self.assertEqual(UploadCapacity.objects.values_list("reservedBytes", "activeUploads").get(pk=1), (128, 1))
+        self.assertEqual(list(UploadLease.objects.values_list("pk", flat=True)), [occupied.pk])
+
+    def test_single_mixed_case_headers_share_the_same_upload_classification_with_django(self):
+        from django.core.handlers.asgi import ASGIRequest
+        from .upload_capacity import reserve_ingress
+        seen = []
+        async def app(scope, receive, send):
+            body = (await receive())["body"]
+            parsed = ASGIRequest(scope, io.BytesIO(body))
+            self.assertEqual(parsed.content_type, "multipart/form-data")
+            self.assertEqual(parsed.META["CONTENT_LENGTH"], "4")
+            seen.append(body)
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+        async def run():
+            sent = []
+            async def receive():
+                return {"type": "http.request", "body": b"part", "more_body": False}
+            async def send(message):
+                sent.append(message)
+            await ingress(app)({"type": "http", "method": "POST", "path": "/api/library", "query_string": b"",
+                "http_version": "1.1", "scheme": "http", "root_path": "", "server": ("localhost", 80),
+                "headers": [(b"CoNtEnT-TyPe", b"multipart/form-data; boundary=boundary"), (b"Content-Length", b"4")]},
+                receive, send)
+            return sent
+        self.assertEqual(asyncio.run(run())[0]["status"], 200)
+        self.assertEqual(seen, [b"part"])
+        reserve_ingress(64)
+        self.assertEqual(asyncio.run(run())[0]["status"], 429)
+        self.assertEqual(seen, [b"part"])
 
     def test_full_upload_capacity_preserves_control_json_without_upload_database_or_filesystem_calls(self):
         from . import upload_ingress
