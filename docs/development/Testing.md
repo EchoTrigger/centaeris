@@ -36,6 +36,11 @@ not. Retain security and public-contract checks when consolidating tests. Do not
 implement this policy as another blacklist of source patterns in tests; enforce
 it through review and evidence.
 
+After closing a PostgreSQL client, observe backend and advisory-lock removal
+with a bounded deadline: client close does not synchronize `pg_stat_activity`.
+Continue asserting both counts reach zero, and use a retained-connection
+negative control to prove that a real leak still fails.
+
 Keep unrelated outbound calls outside controlled timeout fixtures. The real
 Core/HTTP admission-response tests isolate return-job scheduling, whose real
 HTTP/store recovery has separate coverage; a closed port's platform-dependent
