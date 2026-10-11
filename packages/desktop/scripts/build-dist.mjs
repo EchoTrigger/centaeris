@@ -4,6 +4,7 @@ import { packageDirectory } from "./package-directory.mjs";
 import { spawnSync } from "node:child_process";
 import * as ResEdit from "resedit";
 import { writeThirdPartyLicenses } from "./third-party-licenses.mjs";
+import { writeProductLicenses } from "../../../scripts/product-licenses.mjs";
 import { inspectSystemSkillsBundle } from "../src/systemSkills.mjs";
 import { runtimeArtifactPath, DESKTOP_RUNTIME_TARGET } from "../src/runtimeArtifact.mjs";
 
@@ -64,14 +65,7 @@ await fs.rm(path.join(appRoot, "resources", "default_app.asar"), {
   force: true,
 });
 
-await fs.copyFile(
-  path.join(repoRoot, "LICENSE"),
-  path.join(appRoot, "LICENSE.centaeris.txt"),
-);
-await fs.copyFile(
-  path.join(repoRoot, "COPYRIGHT"),
-  path.join(appRoot, "COPYRIGHT"),
-);
+await writeProductLicenses(repoRoot, appRoot);
 const distNotices = (await fs.readFile(path.join(repoRoot, "THIRD_PARTY_NOTICES.md"), "utf8"))
   .replaceAll("packages/ui/public/licenses/", "resources/ui-dist/licenses/")
   .replaceAll("system-skills/", "resources/system-skills/");

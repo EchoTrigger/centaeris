@@ -15,7 +15,7 @@ COPY packages/document_processor/pyproject.toml packages/document_processor/pypr
 COPY packages/api packages/api
 COPY packages/code_preview_languages.json packages/code_preview_languages.json
 COPY scripts/workspace scripts/workspace
-COPY LICENSE /usr/share/licenses/centaeris-workspace/LICENSE
+COPY LICENSE LICENSE-APACHE LICENSING.md COPYRIGHT /usr/share/licenses/centaeris-workspace/
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --package api
 WORKDIR /app/packages/api
 ENTRYPOINT ["sh", "/app/packages/api/entrypoint.sh"]

@@ -22,7 +22,8 @@ RUN apt-get update \
     && mkdir -p /var/lib/centaeris-runtime
 
 COPY --from=build /src/target/release/runtime_server /usr/local/bin/runtime_server
-COPY LICENSE /usr/share/licenses/centaeris-workspace/LICENSE
+COPY LICENSE LICENSE-APACHE LICENSING.md COPYRIGHT /usr/share/licenses/centaeris-workspace/
+COPY packages/model-catalog/centaeris_model_catalog/logos/LICENSE /usr/share/licenses/centaeris-workspace/packages/model-catalog/centaeris_model_catalog/logos/LICENSE
 COPY skills/system /opt/centaeris/system-skills
 
 CMD ["runtime_server"]

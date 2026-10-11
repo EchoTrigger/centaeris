@@ -147,8 +147,12 @@ $tuiName = "centa.exe"
 $runtimeName = "centaeris-runtime.exe"
 Copy-Item -LiteralPath $tuiBinary -Destination (Join-Path $distRoot $tuiName)
 Copy-Item -LiteralPath $runtimeBinary -Destination (Join-Path $distRoot $runtimeName)
-Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE") -Destination (Join-Path $distRoot "LICENSE.centaeris.txt")
-Copy-Item -LiteralPath (Join-Path $repoRoot "COPYRIGHT") -Destination (Join-Path $distRoot "COPYRIGHT")
+Invoke-Checked "product license assembly" "node.exe" @(
+    (Join-Path $repoRoot "scripts/product-licenses.mjs"), "write", $distRoot
+) $repoRoot
+Invoke-Checked "product license validation" "node.exe" @(
+    (Join-Path $repoRoot "scripts/product-licenses.mjs"), "check", $distRoot
+) $repoRoot
 $notices = (Get-Content -Raw -LiteralPath (Join-Path $repoRoot "THIRD_PARTY_NOTICES.md")).Replace("packages/ui/public/licenses/", "licenses/")
 Set-Content -LiteralPath (Join-Path $distRoot "THIRD_PARTY_NOTICES.md") -Value $notices -Encoding utf8NoBOM
 Copy-Item -LiteralPath (Join-Path $repoRoot "packages/ui/public/licenses") -Destination (Join-Path $distRoot "licenses") -Recurse
@@ -195,6 +199,9 @@ $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $distR
 
 foreach ($requiredPath in @(
     "LICENSE.centaeris.txt",
+    "LICENSE-APACHE",
+    "LICENSING.md",
+    "packages/model-catalog/centaeris_model_catalog/logos/LICENSE",
     "COPYRIGHT",
     "THIRD_PARTY_NOTICES.md",
     "licenses/OFL-GoogleSansCode.txt",

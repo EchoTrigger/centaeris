@@ -84,6 +84,8 @@ Copyright (C) 2026 EchoTrigger。所有权声明见 [COPYRIGHT](COPYRIGHT)。
 
 除文件或声明另有说明外，本仓库原创源代码和文档采用 [GNU Affero General Public License v3.0 only](LICENSE) 许可。
 
+Core、模型目录、MCP 和 SQLite 基础包采用 Apache-2.0。目录例外及第三方材料说明见 [LICENSING.md](LICENSING.md)；完整 Desktop、TUI 和 Workspace 产品继续采用 AGPL。
+
 Centaeris 名称、标志和官方视觉标识不在 AGPL 授权范围内，软件许可证不授予商标权。第三方材料保留各自声明的许可证。
 
 捆绑字体的许可证索引见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

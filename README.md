@@ -109,6 +109,10 @@ Except where a file or notice says otherwise, the original source code and
 documentation in this repository are licensed under the
 [GNU Affero General Public License v3.0 only](LICENSE).
 
+The Core, model catalog, MCP, and SQLite foundation packages are licensed under
+Apache-2.0. See [LICENSING.md](LICENSING.md) for directory exceptions and
+third-party notices. Complete Desktop, TUI, and Workspace products remain AGPL.
+
 The Centaeris name, logo, and official visual identity are not licensed under
 the AGPL, and the software license grants no trademark rights. Third-party
 materials remain under their stated licenses.

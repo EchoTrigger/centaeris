@@ -34,3 +34,9 @@ cargo test --locked -p centaeris-core query_loop
 Every Rust change in the workspace runs at least this gate; see
 [Testing](../../docs/development/Testing.md) for the full local gate and test
 quality policy.
+
+## License
+
+Copyright (C) 2026 EchoTrigger. Original source code and documentation in this
+package are licensed under Apache-2.0; see [LICENSE](LICENSE). Third-party
+materials retain their stated licenses and notices.

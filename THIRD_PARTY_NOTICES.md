@@ -1,5 +1,11 @@
 # Third-party notices
 
+The model catalog bundles provider logo SVGs under their original licenses
+and attribution notices. These are not covered by the package's Apache-2.0
+grant. Preserve [`the logo notice`](packages/model-catalog/centaeris_model_catalog/logos/LICENSE)
+when distributing the catalog or products containing it. No provider trademark
+rights are granted by the software license.
+
 This repository bundles the following fonts in `packages/ui`:
 
 | Font | Copyright and source | License text |

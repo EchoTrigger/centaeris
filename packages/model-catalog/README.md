@@ -15,3 +15,13 @@ perform provider HTTP calls, admission, or credential storage. Those live in
 
 See [Provider catalog](../../docs/reference/ProviderCatalog.md) for model
 identities, routing, and reasoning-effort preferences.
+
+## License
+
+Copyright (C) 2026 EchoTrigger. Original source code and documentation in this
+package are licensed under Apache-2.0; see [LICENSE](LICENSE). Third-party
+materials retain their stated licenses and notices.
+
+Provider logos retain the original licenses and attribution in
+[`centaeris_model_catalog/logos/LICENSE`](centaeris_model_catalog/logos/LICENSE).
+The package's software license does not grant provider trademark rights.

@@ -1,5 +1,8 @@
 import importlib.util
+import os
 from pathlib import Path
+import subprocess
+import tempfile
 import unittest
 
 spec = importlib.util.spec_from_file_location("ci", Path(__file__).with_name("ci.py"))
@@ -8,6 +11,28 @@ spec.loader.exec_module(ci)
 
 
 class PortableGateTests(unittest.TestCase):
+    def test_license_metadata_checks_work_without_cargo_or_cached_dependencies(self):
+        with tempfile.TemporaryDirectory(dir=ci.ROOT) as cargo_home:
+            result = subprocess.run(
+                [ci.sys.executable, "-B", str(Path(__file__).with_name("test_product_licensing.py"))],
+                env={**os.environ, "PATH": "", "CARGO_HOME": cargo_home,
+                     "RUSTUP_AUTO_INSTALL": "0"},
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_crate_payload_checks_run_only_after_rust_dependencies_are_prepared(self):
+        payload_check = [ci.sys.executable, "-B", "scripts/test_product_licensing.py", "--crate-payloads"]
+        for stage in ("Node", "Rust", "Source"):
+            calls = []
+            ci.run_gate(stage, lambda args, **kw: calls.append(args) or "")
+            if stage == "Node":
+                self.assertNotIn(payload_check, calls)
+            else:
+                prepare = ["cargo", "check", "--locked", *ci.package_flags()]
+                self.assertIn(payload_check, calls)
+                self.assertLess(calls.index(prepare), calls.index(payload_check))
+
     def test_rust_gate_keeps_focused_and_full_behavioral_gates_on_each_platform(self):
         for platform in ("win32", "darwin", "linux"):
             calls = []

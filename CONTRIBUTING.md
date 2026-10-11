@@ -47,8 +47,12 @@ one maintainer, an additional approving review is not a required merge condition
 ## License
 
 Except where a file or notice says otherwise, the original source code and
-documentation are licensed under `AGPL-3.0-only`. Third-party materials remain
-under their stated licenses. The software license grants no trademark rights.
+documentation are licensed under `AGPL-3.0-only`. [LICENSING.md](LICENSING.md)
+lists the Apache-2.0 directory exceptions and third-party notices. Contributions
+are submitted under the license applicable to the files being changed; changes
+spanning license boundaries retain each file's applicable license. Third-party
+materials remain under their stated licenses. The software licenses grant no
+trademark rights.
 
 ## Contribution provenance
 
@@ -63,7 +67,7 @@ Use `git commit --signoff` after reviewing the DCO and confirming that you can
 make its certification. The sign-off records your certification of the
 contribution's origin and your right to submit it under the applicable project
 license. It does not transfer copyright or grant separate relicensing rights;
-the project's original source code and documentation remain `AGPL-3.0-only`.
+contributions follow the applicable license described in [LICENSING.md](LICENSING.md).
 
 The DCO also records that contributions and sign-off information are public,
 maintained indefinitely, and may be redistributed under the applicable license.
