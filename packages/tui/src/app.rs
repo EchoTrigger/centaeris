@@ -48,6 +48,7 @@ mod paging;
 mod presentation;
 mod process_ui;
 mod reasoning;
+mod run_errors;
 mod runs;
 mod session_transcript;
 mod theme;
@@ -4839,6 +4840,8 @@ fn apply_session_event_inner(app: &mut App, event: &Value, agent_run_id: Option<
         }
         if let Some(agent_run_id) = agent_run_id {
             mark_agent_run_terminal(app, agent_run_id);
+            app.transcript.retain(|item| !matches!(item, TranscriptLine::RunItem { run_id, line, .. }
+                if run_id == agent_run_id && matches!(line.content(), TranscriptLine::RunFailure { .. })));
             app.transcript.push(TranscriptLine::RunBoundary {
                 run_id: agent_run_id.into(),
                 state: match event_type {
@@ -5010,8 +5013,31 @@ fn apply_session_event_inner(app: &mut App, event: &Value, agent_run_id: Option<
         "RuntimeError" | "Error" => {
             let message = raw_payload_string(payload, "message")
                 .unwrap_or_else(|| "runtime error".to_string());
-            app.transcript.push(TranscriptLine::Error(message));
-            finish_active_agent_run(app);
+            if event_type == "RuntimeError" {
+                if let Some(run_id) = agent_run_id {
+                    if app.transcript.iter().any(|line| matches!(line, TranscriptLine::RunBoundary { run_id: terminal_run, state, .. }
+                        if terminal_run == run_id && matches!(state, runs::RunState::Completed | runs::RunState::Failed | runs::RunState::Interrupted))) {
+                        return;
+                    }
+                    // The Runtime sends this before its durable terminal event.
+                    // Replace provisional copy without closing that observation.
+                    app.transcript.retain(|item| !matches!(item, TranscriptLine::RunItem { run_id: existing, line, .. }
+                        if existing == run_id && matches!(line.content(), TranscriptLine::RunFailure { .. })));
+                    app.transcript.push(
+                        TranscriptLine::RunFailure {
+                            key: format!("run:{run_id}"),
+                            reason: message,
+                        }
+                        .for_run(Some(run_id), false),
+                    );
+                } else {
+                    app.transcript.push(TranscriptLine::Error(message));
+                    finish_active_agent_run(app);
+                }
+            } else {
+                app.transcript.push(TranscriptLine::Error(message));
+                finish_active_agent_run(app);
+            }
         }
         "QuestionRequired" => match parse_pending_question(payload) {
             Ok(question) => {

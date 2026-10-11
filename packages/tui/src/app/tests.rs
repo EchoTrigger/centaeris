@@ -5396,8 +5396,8 @@ fn run_event(app: &mut App, run: &str, id: &str, kind: &str, payload: Value) {
 fn run_terminal_states_keep_results_and_do_not_require_final() {
     for (kind, label, reason) in [
         ("AgentRunCompleted", "└", ""),
-        ("AgentRunFailed", "Failed", "Provider unavailable"),
-        ("AgentRunInterrupted", "Interrupted", "Stopped by user"),
+        ("AgentRunFailed", "! ", "Provider unavailable"),
+        ("AgentRunInterrupted", "! ", "Stopped by user"),
     ] {
         for final_first in [true, false] {
             let path = PathBuf::from("D:/presentation-test");
@@ -5560,7 +5560,7 @@ fn historical_runs_use_authoritative_terminal_state_and_preserve_user_disclosure
         assert!(text.contains("Inspecting source"));
         match terminal {
             None => assert!(!text.contains('─')),
-            Some("agent_run_failed") => assert!(text.contains("Failed · Provider unavailable")),
+            Some("agent_run_failed") => assert!(text.contains("! Provider unavailable")),
             _ => {
                 assert!(text.contains('─'));
                 for _ in 0..2 {
@@ -5570,6 +5570,195 @@ fn historical_runs_use_authoritative_terminal_state_and_preserve_user_disclosure
                     .contains("Inspecting source"));
             }
         }
+    }
+}
+
+#[test]
+fn run_failure_display_matches_web_for_history_and_repeated_sync() {
+    let vectors: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/run-error-display.json"
+    ))
+    .unwrap();
+    for vector in vectors {
+        let reason = vector["reason"].as_str().unwrap();
+        let expected = vector["expected"].as_str().unwrap();
+        let path = PathBuf::from("D:/presentation-test");
+        let mut app = test_app("", path.clone(), path);
+        let mut page = history_run_page(Some("agent_run_failed"));
+        if let TranscriptBlockBodyV1::Notice { content, .. } =
+            &mut page.blocks.last_mut().unwrap().body
+        {
+            *content = TranscriptTextContentV1::inline(reason.into());
+        }
+        app.transcript_paging = Some(TranscriptPagingState::open(page).unwrap());
+        for _ in 0..2 {
+            sync_materialized_transcript_history(&mut app);
+            let text = rendered_lines_text(&build_transcript_view(&app, 240).lines);
+            assert!(text.contains(&format!("! {expected}")), "{reason}: {text}");
+            assert_eq!(text.matches("! ").count(), 1, "{reason}: {text}");
+            assert!(text.contains("Useful result"));
+        }
+    }
+}
+
+#[test]
+fn run_failure_live_replay_and_history_patch_show_one_reason() {
+    for (event_type, source) in [
+        ("AgentRunFailed", "agent_run_failed"),
+        ("AgentRunInterrupted", "agent_run_interrupted"),
+    ] {
+        let path = PathBuf::from("D:/presentation-test");
+        let mut app = test_app("", path.clone(), path);
+        app.active_agent_run_id = Some("run".into());
+        app.transcript_paging =
+            Some(TranscriptPagingState::open(transcript_test_page(vec![], None)).unwrap());
+        run_event(
+            &mut app,
+            "run",
+            "runtime-error",
+            "RuntimeError",
+            json!({"message":"provider_timeout"}),
+        );
+        assert!(
+            has_active_agent_run(&app),
+            "runtime error must await the durable terminal event"
+        );
+        let payload = json!({"reasonType":"cancelled","message":"provider_timeout"});
+        for _ in 0..2 {
+            run_event(&mut app, "run", "terminal", event_type, payload.clone());
+        }
+        let before = rendered_lines_text(&build_transcript_view(&app, 240).lines);
+        assert_eq!(before.matches("! ").count(), 1);
+        assert!(before
+            .contains("The model took too long to respond. Retry the request. · provider_timeout"));
+        run_event(
+            &mut app,
+            "run",
+            "late-runtime-error",
+            "RuntimeError",
+            json!({"message":"wrong late reason"}),
+        );
+        assert_eq!(
+            rendered_lines_text(&build_transcript_view(&app, 240).lines),
+            before
+        );
+        let mut history = history_run_page(Some(source));
+        if let TranscriptBlockBodyV1::Notice { content, .. } =
+            &mut history.blocks.last_mut().unwrap().body
+        {
+            *content = TranscriptTextContentV1::inline("provider_timeout".into());
+        }
+        app.transcript_paging = Some(TranscriptPagingState::open(history).unwrap());
+        sync_materialized_transcript_history(&mut app);
+        let after = rendered_lines_text(&build_transcript_view(&app, 240).lines);
+        assert_eq!(after.matches("! ").count(), 1);
+        assert!(after.contains("provider_timeout"));
+    }
+}
+
+#[test]
+fn run_failure_wrap_preserves_plain_text_and_continuation_indent() {
+    let reason = "<b>broken</b> 中文 ".repeat(20);
+    let item = TranscriptLine::RunFailure {
+        key: "run:r".into(),
+        reason: reason.clone(),
+    };
+    for width in [12, 40, 100] {
+        let lines = transcript_to_lines(std::slice::from_ref(&item), width);
+        assert!(rendered_line_text(&lines[0]).starts_with("! "));
+        assert!(lines
+            .iter()
+            .skip(1)
+            .all(|line| rendered_line_text(line).starts_with("  ")));
+        assert!(lines.iter().all(|line| line.width() <= usize::from(width)));
+        let restored: String = lines
+            .iter()
+            .map(|line| rendered_line_text(line)[2..].to_owned())
+            .collect();
+        assert_eq!(restored, reason);
+    }
+}
+
+#[test]
+fn referenced_run_failure_reads_all_pages_and_rejects_stale_or_invalid_content() {
+    let path = PathBuf::from("D:/presentation-test");
+    let mut app = test_app("", path.clone(), path);
+    let reason = format!("{} final error detail", "中".repeat(6000));
+    let mut page = history_run_page(Some("agent_run_failed"));
+    if let TranscriptBlockBodyV1::Notice { content, .. } = &mut page.blocks.last_mut().unwrap().body
+    {
+        *content = TranscriptTextContentV1 {
+            inline_content: None,
+            source_ref: Some(
+                centaeris_core::session::transcript::TranscriptContentRefV1 {
+                    ref_id: "error-ref".into(),
+                    revision: "1".into(),
+                    byte_length: reason.len().to_string(),
+                },
+            ),
+        };
+    }
+    let invalid = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let invalid_response = invalid.clone();
+    let body = reason.clone();
+    app.runtime = Some(RuntimeClient::from_test_request_handler(move |frame| {
+        assert_eq!(frame["method"], "transcript/content-range");
+        let request = &frame["params"]["request"];
+        let start: usize = request["offset"].as_str().unwrap().parse().unwrap();
+        let mut end = (start + request["maxBytes"].as_u64().unwrap() as usize).min(body.len());
+        while !body.is_char_boundary(end) {
+            end -= 1;
+        }
+        json!({"schema":"transcript.content.range.v1", "sessionId":request["sessionId"], "projectionVersion":request["projectionVersion"],
+            "projectionGeneration":request["projectionGeneration"], "refId":if invalid_response.load(std::sync::atomic::Ordering::SeqCst) { "wrong" } else { "error-ref" },
+            "revision":"1","byteLength":body.len().to_string(),"startOffset":start.to_string(),"endOffset":end.to_string(),
+            "content":&body[start..end],"hasMore":end<body.len()})
+    }));
+    app.transcript_paging = Some(TranscriptPagingState::open(page.clone()).unwrap());
+    sync_materialized_transcript_history(&mut app);
+    let initial = build_transcript_view(&app, 80);
+    assert!(rendered_lines_text(&initial.lines).contains("Loading error details"));
+    assert!(!rendered_lines_text(&initial.lines).contains("referenced content"));
+    output_preview::prepare_visible(&mut app, &initial, 100);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        output_preview::poll(&mut app);
+        if output_preview::run_error_text(&app, "run:run").as_deref() == Some(reason.as_str()) {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(1));
+    }
+    let rendered = build_transcript_view(&app, 80);
+    let error_start = rendered
+        .source_rows
+        .iter()
+        .find(|(key, _)| key == "run:run")
+        .unwrap()
+        .1 as usize;
+    let restored: String = rendered.lines[error_start..]
+        .iter()
+        .map(|line| rendered_line_text(line)[2..].to_owned())
+        .collect();
+    assert_eq!(restored, reason);
+    page.projection_generation = "replacement-generation".into();
+    app.transcript_paging = Some(TranscriptPagingState::open(page).unwrap());
+    sync_materialized_transcript_history(&mut app);
+    assert_eq!(output_preview::run_error_text(&app, "run:run"), None);
+    assert!(output_preview::poll(&mut app));
+    invalid.store(true, std::sync::atomic::Ordering::SeqCst);
+    let next = build_transcript_view(&app, 80);
+    output_preview::prepare_visible(&mut app, &next, 100);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        output_preview::poll(&mut app);
+        if output_preview::run_error_text(&app, "run:run")
+            .is_some_and(|text| text.starts_with("Unable to load error details:"))
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(1));
     }
 }
 

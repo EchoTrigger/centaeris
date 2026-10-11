@@ -137,21 +137,9 @@ pub(super) fn visible_transcript(app: &App) -> Vec<TranscriptLine> {
                     })
                 }
                 RunState::Failed | RunState::Interrupted => {
-                    visible.push(TranscriptLine::ProcessEnd {
+                    visible.push(TranscriptLine::RunFailure {
                         key: format!("run:{run_id}"),
-                        label: format!(
-                            "{}{}",
-                            if *state == RunState::Failed {
-                                "Failed"
-                            } else {
-                                "Interrupted"
-                            },
-                            if reason.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" · {reason}")
-                            }
-                        ),
+                        reason: reason.clone(),
                     })
                 }
                 _ => {}

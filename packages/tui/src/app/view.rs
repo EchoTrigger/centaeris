@@ -721,13 +721,23 @@ pub(super) fn build_transcript_view(app: &App, width: u16) -> TranscriptView {
                 };
                 lines.push(Line::styled(text, Style::default().fg(theme().muted)));
             }
+            TranscriptLine::RunFailure { key, reason } => {
+                source_line_indices.push((key.clone(), lines.len()));
+                let loaded = output_preview::run_error_text(app, key);
+                lines.extend(run_failure_lines(
+                    loaded.as_deref().unwrap_or(reason),
+                    width,
+                ));
+            }
             _ => {
                 let end = transcript[cursor..]
                     .iter()
                     .position(|item| {
                         matches!(
                             item,
-                            TranscriptLine::Tool(_) | TranscriptLine::ProcessEnd { .. }
+                            TranscriptLine::Tool(_)
+                                | TranscriptLine::ProcessEnd { .. }
+                                | TranscriptLine::RunFailure { .. }
                         )
                     })
                     .map_or(transcript.len(), |offset| cursor + offset);
@@ -2129,6 +2139,30 @@ pub(super) fn transcript_to_lines(items: &[TranscriptLine], width: u16) -> Vec<L
     transcript_to_lines_from(items, 0, width)
 }
 
+fn run_failure_lines(reason: &str, width: u16) -> Vec<Line<'static>> {
+    let text = super::run_errors::detail(reason);
+    let content_width = usize::from(width.saturating_sub(2).max(1));
+    let mut lines = hard_wrap_input_lines(
+        text.split('\n')
+            .map(|line| Line::raw(line.to_owned()))
+            .collect(),
+        content_width,
+    );
+    if lines.is_empty() {
+        lines.push(Line::raw(""));
+    }
+    for (index, line) in lines.iter_mut().enumerate() {
+        line.spans.insert(
+            0,
+            Span::styled(
+                if index == 0 { "! " } else { "  " },
+                Style::default().fg(ratatui::style::Color::Red),
+            ),
+        );
+    }
+    lines
+}
+
 pub(super) fn transcript_to_lines_from(
     items: &[TranscriptLine],
     start: usize,
@@ -2146,6 +2180,12 @@ pub(super) fn transcript_to_lines_from(
             TranscriptLine::RunItem { .. }
             | TranscriptLine::RunBoundary { .. }
             | TranscriptLine::ProcessEnd { .. } => {}
+            TranscriptLine::RunFailure { reason, .. } => {
+                live_in_code_block = false;
+                if emit {
+                    lines.extend(run_failure_lines(reason, width));
+                }
+            }
             TranscriptLine::User(text) => {
                 live_in_code_block = false;
                 if emit {

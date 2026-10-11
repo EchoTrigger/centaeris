@@ -6,6 +6,23 @@ routing. Record the tested commit, Windows version, display scale, and result.
 
 ## Desktop conversation
 
+- Trigger a failed and an interrupted run with a local fixture. Confirm the
+  rounded error strip shows a readable reason and the original model error code,
+  with the icon aligned to the first text line. Check wrapped text in both themes
+  and at increased zoom: no clipping or horizontal overflow. Ordinary assistant
+  and tool content must keep its existing appearance. Reload and switch Sessions;
+  each terminal failure remains visible once in the same transcript position.
+- In TUI, exercise the same terminal facts and a long referenced reason. Confirm
+  the `!` marker, readable explanation/code and continuation indent; resize while
+  reading, reconnect and reload, and confirm no duplicate error or lost answer.
+  Referenced reasons show loading/read failure explicitly and do not expose
+  another Session's cached content.
+  The isolated browser fixture can be checked with
+  `pnpm --filter centaeris-ui run test:run-error-ui` after setting `CHROME_BIN` to
+  a local Chromium executable. It verifies first-line alignment, plain text,
+  wrapping and containment in both themes and at increased zoom; it supplements
+  the packaged-application checklist and is not part of remote CI.
+
 - Open a short and a long Session; confirm the newest content opens without an
   automatic chain of older-page requests.
 - Scroll away from the bottom while live answer and reasoning text arrive;

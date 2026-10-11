@@ -16,6 +16,10 @@ pub(super) enum TranscriptLine {
         key: String,
         label: String,
     },
+    RunFailure {
+        key: String,
+        reason: String,
+    },
     User(String),
     Summary(String),
     LiveAssistant {

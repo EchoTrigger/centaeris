@@ -13,6 +13,7 @@ pub(super) struct OutputPreview {
     requested: String,
     has_more: bool,
     error: Option<String>,
+    run_error: bool,
 }
 
 const CACHE_ENTRIES: usize = 32;
@@ -46,23 +47,31 @@ pub(super) fn prepare_visible(app: &mut App, view: &TranscriptView, height: u16)
         {
             break;
         }
-        let Some(tool) = app.transcript.iter().find_map(|line| match line.content() {
+        let tool = app.transcript.iter().find_map(|line| match line.content() {
             TranscriptLine::Tool(tool) if &tool.key == key && tool.full_text.is_none() => {
                 Some(tool)
             }
             _ => None,
-        }) else {
+        });
+        let run_error = app
+            .transcript_paging
+            .as_ref()
+            .and_then(|state| state.run_error_reference(key));
+        if tool.is_none() && run_error.is_none() {
             continue;
-        };
+        }
         let Some((session, generation, reference)) =
             app.transcript_paging.as_ref().and_then(|state| {
-                state.tool_output_reference(key).map(|reference| {
-                    (
-                        state.session_id().to_string(),
-                        state.projection_generation().to_string(),
-                        reference,
-                    )
-                })
+                state
+                    .tool_output_reference(key)
+                    .or(run_error.clone())
+                    .map(|reference| {
+                        (
+                            state.session_id().to_string(),
+                            state.projection_generation().to_string(),
+                            reference,
+                        )
+                    })
             })
         else {
             continue;
@@ -78,7 +87,16 @@ pub(super) fn prepare_visible(app: &mut App, view: &TranscriptView, height: u16)
             };
             app.output_preview.remove(&evicted);
         }
-        let mut detail = inline_preview(tool);
+        let mut detail = tool.map(inline_preview).unwrap_or_else(|| OutputPreview {
+            content: String::new(),
+            readable_range: None,
+            identity: None,
+            pending: None,
+            requested: "0".into(),
+            has_more: false,
+            error: None,
+            run_error: true,
+        });
         detail.identity = Some((session.clone(), generation.clone(), reference.clone()));
         let result = app.runtime.as_mut().ok_or_else(|| "Runtime is unavailable".to_string()).and_then(|runtime| runtime.request_async("transcript/content-range", json!({"request": {
             "schema":"transcript.content.range.read.v1", "sessionId":session,
@@ -104,6 +122,7 @@ fn inline_preview(tool: &ToolTranscriptLine) -> OutputPreview {
         requested: tool.readable_range.map_or(0, |r| r.0).to_string(),
         has_more: false,
         error: None,
+        run_error: false,
     };
     if let Some(text) = &tool.full_text {
         let start = detail
@@ -178,17 +197,25 @@ fn accept_page(detail: &mut OutputPreview, value: Value) -> Result<(), String> {
     {
         return Err("Output page identity or range mismatch".into());
     }
-    detail.content = page.content;
+    if detail.run_error {
+        detail.content.push_str(&page.content);
+    } else {
+        detail.content = page.content;
+    }
     detail.has_more = page.has_more;
     Ok(())
 }
 pub(super) fn poll(app: &mut App) -> bool {
     let before = app.output_preview.len();
     app.output_preview.retain(|key, detail| {
-        let exists = app
-            .transcript
-            .iter()
-            .any(|line| matches!(line.content(), TranscriptLine::Tool(tool) if &tool.key == key));
+        let exists = detail.run_error
+            && app
+                .transcript_paging
+                .as_ref()
+                .is_some_and(|state| state.run_error_reference(key).is_some())
+            || app.transcript.iter().any(
+                |line| matches!(line.content(), TranscriptLine::Tool(tool) if &tool.key == key),
+            );
         exists
             && detail
                 .identity
@@ -197,7 +224,11 @@ pub(super) fn poll(app: &mut App) -> bool {
                     app.transcript_paging.as_ref().is_some_and(|state| {
                         state.session_id() == session
                             && state.projection_generation() == generation
-                            && state.tool_output_reference(key).as_ref() == Some(reference)
+                            && state
+                                .tool_output_reference(key)
+                                .or_else(|| state.run_error_reference(key))
+                                .as_ref()
+                                == Some(reference)
                     })
                 })
     });
@@ -217,10 +248,62 @@ pub(super) fn poll(app: &mut App) -> bool {
         }
         changed = true;
     }
+    let mut pending_count = app
+        .output_preview
+        .values()
+        .filter(|detail| detail.pending.is_some())
+        .count();
+    for detail in app.output_preview.values_mut().filter(|detail| {
+        detail.run_error && detail.pending.is_none() && detail.has_more && detail.error.is_none()
+    }) {
+        if pending_count >= MAX_PENDING {
+            break;
+        }
+        let Some((session, generation, reference)) = &detail.identity else {
+            continue;
+        };
+        detail.requested = detail.content.len().to_string();
+        let result = app.runtime.as_mut().ok_or_else(|| "Runtime is unavailable".to_string()).and_then(|runtime| runtime.request_async("transcript/content-range", json!({"request": {
+            "schema":"transcript.content.range.read.v1", "sessionId":session,
+            "projectionVersion":TRANSCRIPT_PROJECTION_VERSION_V1, "projectionGeneration":generation,
+            "refId":reference.ref_id,"revision":reference.revision,"byteLength":reference.byte_length,
+            "offset":detail.requested,"maxBytes":PAGE_BYTES,
+        }})));
+        match result {
+            Ok(response) => {
+                detail.pending = Some(response);
+                pending_count += 1;
+            }
+            Err(error) => detail.error = Some(error),
+        }
+        changed = true;
+    }
     if changed {
         invalidate_transcript_layout(app);
     }
     changed
+}
+
+pub(super) fn run_error_text(app: &App, key: &str) -> Option<String> {
+    let detail = app.output_preview.get(key)?;
+    if !detail.run_error {
+        return None;
+    }
+    let (session, generation, reference) = detail.identity.as_ref()?;
+    if !app.transcript_paging.as_ref().is_some_and(|state| {
+        state.session_id() == session
+            && state.projection_generation() == generation
+            && state.run_error_reference(key).as_ref() == Some(reference)
+    }) {
+        return None;
+    }
+    if let Some(error) = &detail.error {
+        return Some(format!("Unable to load error details: {error}"));
+    }
+    if detail.pending.is_some() || detail.has_more {
+        return Some("Loading error details…".into());
+    }
+    Some(detail.content.clone())
 }
 
 pub(super) fn preview_lines(
@@ -321,6 +404,7 @@ mod tests {
             requested: "0".into(),
             has_more: false,
             error: None,
+            run_error: false,
         };
         let page = json!({"schema":"transcript.content.range.v1","sessionId":"s","projectionVersion":TRANSCRIPT_PROJECTION_VERSION_V1,
             "projectionGeneration":"g","refId":"r","revision":"1","byteLength":"4","startOffset":"0","endOffset":"3","content":"中","hasMore":true});
