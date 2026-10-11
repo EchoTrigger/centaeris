@@ -353,3 +353,45 @@ async fn failed_initialization_closes_the_connection_without_mutating_unsupporte
     // On Windows this also checks the failed owner left no file handle alive.
     std::fs::remove_file(path).unwrap();
 }
+
+#[tokio::test]
+async fn invalid_object_and_failed_database_read_have_distinct_results() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("runtime.db");
+    let jobs = SqliteJobStore::open(path.clone(), 1).await.unwrap();
+    jobs.upsert_external_context_and_schedule_job(creation("job"))
+        .await
+        .unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE external_context_objects SET content_sha256='corrupt' WHERE object_id='packet:job'",
+        [],
+    )
+    .unwrap();
+    assert!(matches!(
+        jobs.load_external_context_object("packet:job").await,
+        Err(JobStoreError::Rejected(_))
+    ));
+    assert_eq!(
+        jobs.list_runtime_jobs(ListRuntimeJobsRequest {
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .len(),
+        1
+    );
+    conn.execute("DROP TABLE external_context_objects", [])
+        .unwrap();
+    assert!(matches!(
+        jobs.load_external_context_object("packet:job").await,
+        Err(JobStoreError::Storage {
+            operation: JobStoreOperation::Read,
+            outcome: JobWriteOutcome::ReadOnly,
+            ..
+        })
+    ));
+    assert_eq!(jobs.capacity().await, (1, 0));
+    jobs.close().await.unwrap();
+}

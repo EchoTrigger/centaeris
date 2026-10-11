@@ -138,6 +138,20 @@ pub trait ExternalContextStorePort {
         &self,
         object_id: &str,
     ) -> Result<Option<ExternalContextObject>, String>;
+    /// Job consumers distinguish an invalid stored object from a failed read.
+    /// String-only adapters stay conservative; codecs belong to their adapter.
+    fn load_external_context_object_for_job(
+        &self,
+        object_id: &str,
+    ) -> Result<Option<ExternalContextObject>, super::store::job::JobStoreError> {
+        self.load_external_context_object(object_id)
+            .map_err(|error| {
+                super::store::job::JobStoreError::unconfirmed(
+                    super::store::job::JobStoreOperation::Read,
+                    error,
+                )
+            })
+    }
     fn link_external_context_object(&self, link: ExternalContextObjectLink) -> Result<(), String>;
     fn load_external_context_object_link(
         &self,

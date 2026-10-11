@@ -190,6 +190,23 @@ impl RuntimeStoreActorReplyError for String {
     }
 }
 
+impl RuntimeStoreActorReplyError for super::job::JobStoreError {
+    fn from_actor_transport(error: RuntimeStoreActorTransportError) -> Self {
+        let not_executed = matches!(
+            &error,
+            RuntimeStoreActorTransportError::Closed { .. }
+                | RuntimeStoreActorTransportError::QueueTimeout { .. }
+                | RuntimeStoreActorTransportError::InvalidRuntimeContext
+        );
+        let message = error.into_runtime_store_error().to_string();
+        if not_executed {
+            Self::not_executed(super::job::JobStoreOperation::Read, message)
+        } else {
+            Self::unconfirmed(super::job::JobStoreOperation::Read, message)
+        }
+    }
+}
+
 impl RuntimeStoreActor {
     pub fn start<S>(store: S) -> Result<Self, RuntimeStoreError>
     where
@@ -975,6 +992,14 @@ impl ExternalContextStorePort for RuntimeStoreActor {
         &self,
         object_id: &str,
     ) -> Result<Option<ExternalContextObject>, String> {
+        self.load_external_context_object_for_job(object_id)
+            .map_err(|error| error.to_string())
+    }
+
+    fn load_external_context_object_for_job(
+        &self,
+        object_id: &str,
+    ) -> Result<Option<ExternalContextObject>, super::job::JobStoreError> {
         let object_id = object_id.to_string();
         self.send_blocking(
             |reply| RuntimeStoreActorCommand::LoadExternalContextObject { object_id, reply },
@@ -1448,6 +1473,15 @@ impl RuntimeStoreActor {
         &self,
         object_id: &str,
     ) -> Result<Option<ExternalContextObject>, String> {
+        self.load_job_external_context_object(object_id)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn load_job_external_context_object(
+        &self,
+        object_id: &str,
+    ) -> Result<Option<ExternalContextObject>, super::job::JobStoreError> {
         let (reply, receiver) = oneshot::channel();
         self.send(
             RuntimeStoreActorCommand::LoadExternalContextObject {
@@ -1625,7 +1659,7 @@ enum RuntimeStoreActorCommand {
     },
     LoadExternalContextObject {
         object_id: String,
-        reply: RuntimeStoreActorReply<Option<ExternalContextObject>>,
+        reply: RuntimeStoreActorReply<Option<ExternalContextObject>, super::job::JobStoreError>,
     },
     LinkExternalContextObject {
         link: ExternalContextObjectLink,
@@ -2073,7 +2107,7 @@ async fn run_runtime_store_actor<S>(
             RuntimeStoreActorCommand::LoadExternalContextObject { object_id, reply } => {
                 reply.send(
                     run_store_operation(store.clone(), move |store| {
-                        store.load_external_context_object(object_id.as_str())
+                        store.load_external_context_object_for_job(object_id.as_str())
                     })
                     .await,
                 );
@@ -2491,11 +2525,7 @@ impl super::AsyncJobStorePort for RuntimeStoreActor {
         &self,
         object_id: &str,
     ) -> Result<Option<ExternalContextObject>, super::job::JobStoreError> {
-        RuntimeStoreActor::load_external_context_object(self, object_id)
-            .await
-            .map_err(|error| {
-                super::job::JobStoreError::unconfirmed(super::job::JobStoreOperation::Read, error)
-            })
+        self.load_job_external_context_object(object_id).await
     }
     async fn upsert_external_context_and_schedule_job(
         &self,

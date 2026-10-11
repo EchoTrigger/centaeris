@@ -23,9 +23,10 @@ use centaeris_core::runtime::{
     ToolSafePoint, ToolSafePointCommitPort, TurnUpdate,
 };
 use centaeris_core::session::reliability::{
-    ListRuntimeJobsRequest, RuntimeJobRecord, RuntimeJobStatus,
+    ClaimDueRuntimeJobsRequest, FailRuntimeJobRequest, ListRuntimeJobsRequest,
+    RuntimeJobFailureDisposition, RuntimeJobRecord, RuntimeJobStatus,
 };
-use centaeris_core::session::store::RuntimeStoreActor;
+use centaeris_core::session::store::{job::JobStoreError, AsyncJobStorePort, RuntimeStoreActor};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -192,15 +193,86 @@ async fn next_queued_parent_session() -> Result<Option<String>, String> {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| format!("Agent runtime job session missing: {}", job.job_id))?;
-        let work_packet = load_subagent_work_packet_async(&store, &job)
+        let binding = match load_subagent_work_packet_async(&store, &job)
             .await
-            .map_err(|error| error.diagnostic_message())?;
-        let binding = subagent_work_packet_runtime_binding(&work_packet, &job)?;
+            .and_then(|packet| {
+                subagent_work_packet_runtime_binding(&packet, &job).map_err(Into::into)
+            }) {
+            Ok(binding) => binding,
+            Err(JobStoreError::Rejected(reason)) => {
+                reject_invalid_work_packet(&store, &job, reason).await?;
+                continue;
+            }
+            Err(error) => return Err(error.diagnostic_message()),
+        };
         if agent_session_is_ready(&job, &binding)? {
             return Ok(Some(parent_session_id.to_string()));
         }
     }
     Ok(None)
+}
+
+/// Invalid payloads are Job failures, not global scan failures. Acquire the
+/// ordinary fenced lease before failing one record; a concurrent owner wins.
+async fn reject_invalid_work_packet<S: AsyncJobStorePort + ?Sized>(
+    store: &S,
+    job: &RuntimeJobRecord,
+    reason: String,
+) -> Result<(), String> {
+    let now_ms = current_timestamp_ms();
+    let Some(claimed) = store
+        .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
+            now_ms,
+            worker_id: format!("local-work-packet-validator-{}", std::process::id()),
+            job_id: Some(job.job_id.clone()),
+            job_kind: Some(SUBAGENT_RUN_JOB_KIND.into()),
+            session_id: job.session_id.clone(),
+            limit: 1,
+            lease_ms: DEFAULT_SUBAGENT_SCHEDULER_LEASE_MS,
+        })
+        .await
+        .map_err(|error| error.diagnostic_message())?
+        .pop()
+    else {
+        return Ok(());
+    };
+    let lease_owner = claimed.lease_owner.ok_or_else(|| {
+        format!(
+            "invalid WorkPacket claim missing lease owner: {}",
+            job.job_id
+        )
+    })?;
+    if let Err(error) = store
+        .fail_runtime_job(FailRuntimeJobRequest {
+            job_id: job.job_id.clone(),
+            lease_owner: lease_owner.clone(),
+            failed_at_ms: current_timestamp_ms(),
+            last_error: reason,
+            next_run_at_ms: None,
+            disposition: RuntimeJobFailureDisposition::Failed,
+        })
+        .await
+    {
+        if error.requires_settlement() {
+            store.settle_job_operations().await.map_err(|settlement| {
+                format!(
+                    "{}; settlement failed: {settlement}",
+                    error.diagnostic_message()
+                )
+            })?;
+        }
+        let current = store
+            .get_runtime_job(&job.job_id)
+            .await
+            .map_err(|error| error.diagnostic_message())?;
+        if !current.is_some_and(|current| {
+            current.status.is_terminal()
+                || current.lease_owner.as_deref() != Some(lease_owner.as_str())
+        }) {
+            return Err(error.diagnostic_message());
+        }
+    }
+    Ok(())
 }
 
 async fn run_parent_batch(
@@ -625,6 +697,9 @@ fn subagent_engine_config(
     engine_config.allowed_tools = allowed_tools;
     Ok(engine_config)
 }
+
+#[cfg(test)]
+mod queue_tests;
 
 #[cfg(test)]
 mod tests {

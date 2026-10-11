@@ -40,7 +40,26 @@ impl ExternalContextStorePort for SqliteRuntimeStore {
         if object_id.is_empty() {
             return Err("external context object_id is required".to_string());
         }
-        self.with_conn(|conn| load_external_context_object_conn(conn, object_id))
+        self.with_conn(|conn| {
+            load_external_context_object_conn(conn, object_id).map_err(|error| error.to_string())
+        })
+    }
+
+    fn load_external_context_object_for_job(
+        &self,
+        object_id: &str,
+    ) -> Result<Option<ExternalContextObject>, centaeris_core::session::store::job::JobStoreError>
+    {
+        use centaeris_core::session::store::job::{JobStoreError, JobStoreOperation};
+        let object_id = object_id.trim();
+        if object_id.is_empty() {
+            return Err(JobStoreError::Rejected(
+                "external context object_id is required".into(),
+            ));
+        }
+        self.with_conn(|conn| Ok(load_external_context_object_conn(conn, object_id)))
+            .map_err(|error| JobStoreError::unconfirmed(JobStoreOperation::Read, error))?
+            .map_err(ObjectLoadError::into_job_error)
     }
 
     fn link_external_context_object(&self, link: ExternalContextObjectLink) -> Result<(), String> {
@@ -400,10 +419,28 @@ fn row_to_external_context_index_entry(
     })
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ObjectLoadError {
+    #[error("load external context object failed: {0}")]
+    Query(#[source] rusqlite::Error),
+    #[error("load external context object failed: {0}")]
+    Decode(String),
+}
+
+impl ObjectLoadError {
+    pub(super) fn into_job_error(self) -> centaeris_core::session::store::job::JobStoreError {
+        use centaeris_core::session::store::job::{JobStoreError, JobStoreOperation};
+        match &self {
+            Self::Decode(_) => JobStoreError::Rejected(self.to_string()),
+            Self::Query(_) => JobStoreError::unconfirmed(JobStoreOperation::Read, self.to_string()),
+        }
+    }
+}
+
 pub(super) fn load_external_context_object_conn(
     conn: &rusqlite::Connection,
     object_id: &str,
-) -> Result<Option<ExternalContextObject>, String> {
+) -> Result<Option<ExternalContextObject>, ObjectLoadError> {
     let stored = conn
         .query_row(
             "
@@ -417,9 +454,9 @@ pub(super) fn load_external_context_object_conn(
             row_to_stored_external_context_object,
         )
         .optional()
-        .map_err(|err| format!("load external context object failed: {err}"))?;
+        .map_err(ObjectLoadError::Query)?;
     stored
         .map(decode_stored_external_context_object)
         .transpose()
-        .map_err(|err| format!("load external context object failed: {err}"))
+        .map_err(ObjectLoadError::Decode)
 }
