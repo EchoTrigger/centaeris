@@ -50,8 +50,8 @@ class ChatAuth(ProductUsageAuth):
 
 
 class CreateChat(StrictSchema):
-    agent_id: str = Field(alias="agentId")
-    business_user_id: str = Field(alias="businessUserId")
+    agent_id: str
+    business_user_id: str
 
     @field_validator("business_user_id")
     @classmethod
@@ -61,14 +61,14 @@ class CreateChat(StrictSchema):
 
 class SubmitMessage(StrictSchema):
     text: str
-    file_ids: list[str] = Field(default_factory=list, alias="fileIds", max_length=50)
+    file_ids: list[str] = Field(default_factory=list, max_length=50)
 
 
 class Chat(StrictSchema):
     id: str
-    agent_id: str = Field(alias="agentId")
-    business_user_id: str = Field(alias="businessUserId")
-    created_at: str = Field(alias="createdAt")
+    agent_id: str
+    business_user_id: str
+    created_at: str
 
 
 class ChatEnvelope(StrictSchema):
@@ -77,12 +77,12 @@ class ChatEnvelope(StrictSchema):
 
 class Message(StrictSchema):
     id: str
-    chat_id: str = Field(alias="chatId")
+    chat_id: str
     author: Literal["user", "agent"]
     text: str
-    file_ids: list[str] = Field(alias="fileIds")
-    created_at: str = Field(alias="createdAt")
-    read_at: str | None = Field(alias="readAt")
+    file_ids: list[str]
+    created_at: str
+    read_at: str | None
 
 
 class MessageEnvelope(StrictSchema):
@@ -91,15 +91,15 @@ class MessageEnvelope(StrictSchema):
 
 class MessagePage(StrictSchema):
     data: list[Message]
-    next_cursor: str | None = Field(alias="nextCursor")
-    has_more: bool = Field(alias="hasMore")
+    next_cursor: str | None
+    has_more: bool
 
 
 class File(StrictSchema):
     id: str
     name: str
-    content_type: str = Field(alias="contentType")
-    size_bytes: int = Field(alias="sizeBytes")
+    content_type: str
+    size_bytes: int
 
 
 class FileEnvelope(StrictSchema):

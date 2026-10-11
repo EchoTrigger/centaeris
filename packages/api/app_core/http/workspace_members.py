@@ -87,16 +87,8 @@ class WorkspaceGroupNameRequest(StrictSchema):
 
 
 class TransferWorkspaceOwnershipRequest(StrictSchema):
-    target_membership_id: str = Field(
-        alias="targetMembershipId",
-        min_length=1,
-        max_length=64,
-    )
-    current_password: str = Field(
-        alias="currentPassword",
-        min_length=1,
-        max_length=4096,
-    )
+    target_membership_id: str = Field(min_length=1, max_length=64)
+    current_password: str = Field(min_length=1, max_length=4096)
 
 
 def _token_digest(token: str) -> str | None:

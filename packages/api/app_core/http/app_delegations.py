@@ -51,12 +51,12 @@ class AppStatusRequest(StrictSchema):
 
 
 class DelegationRequest(StrictSchema):
-    app_id: str = Field(alias="appId", min_length=1, max_length=64)
-    workspace_id: str = Field(alias="workspaceId", min_length=1, max_length=64)
-    definition_id: str | None = Field(None, alias="definitionId", min_length=1, max_length=64)
-    agent_id: str | None = Field(None, alias="agentId", min_length=1, max_length=64)
+    app_id: str = Field(min_length=1, max_length=64)
+    workspace_id: str = Field(min_length=1, max_length=64)
+    definition_id: str | None = Field(None, min_length=1, max_length=64)
+    agent_id: str | None = Field(None, min_length=1, max_length=64)
     scopes: list[str]
-    expires_in_seconds: int | None = Field(3600, alias="expiresInSeconds", ge=300, le=86400)
+    expires_in_seconds: int | None = Field(3600, ge=300, le=86400)
 
     @field_validator("scopes")
     @classmethod
@@ -73,26 +73,26 @@ class DelegationRequest(StrictSchema):
 
 
 class RotateDelegationRequest(StrictSchema):
-    expected_credential_version: int = Field(alias="expectedCredentialVersion", ge=1, strict=True)
+    expected_credential_version: int = Field(ge=1, strict=True)
 
 
 class DelegationResponse(StrictSchema):
     id: str
-    app_id: str = Field(alias="appId")
-    app_name: str = Field(alias="appName")
-    workspace_id: str = Field(alias="workspaceId")
-    workspace_name: str = Field(alias="workspaceName")
-    definition_id: str | None = Field(alias="definitionId")
-    definition_name: str | None = Field(alias="definitionName")
-    agent_id: str | None = Field(alias="agentId")
-    agent_name: str | None = Field(alias="agentName")
-    credential_version: int = Field(alias="credentialVersion")
+    app_id: str
+    app_name: str
+    workspace_id: str
+    workspace_name: str
+    definition_id: str | None
+    definition_name: str | None
+    agent_id: str | None
+    agent_name: str | None
+    credential_version: int
     scopes: list[str]
     issuer: str
     audience: str
-    created_at: str = Field(alias="createdAt")
-    expires_at: str | None = Field(alias="expiresAt")
-    revoked_at: str | None = Field(alias="revokedAt")
+    created_at: str
+    expires_at: str | None
+    revoked_at: str | None
 
 
 class DelegationsEnvelope(StrictSchema):
@@ -101,8 +101,8 @@ class DelegationsEnvelope(StrictSchema):
 
 class IssuedDelegationResponse(StrictSchema):
     delegation: DelegationResponse
-    access_token: str = Field(alias="accessToken")
-    token_type: Literal["Bearer"] = Field(alias="tokenType")
+    access_token: str
+    token_type: Literal["Bearer"]
 
 
 def serialize_app(app):

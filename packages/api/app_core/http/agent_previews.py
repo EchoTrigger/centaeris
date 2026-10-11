@@ -30,42 +30,42 @@ router = Router(tags=['agent-previews'], by_alias=True)
 
 
 class RunFact(StrictSchema):
-    agent_run_id: str = Field(alias='agentRunId')
+    agent_run_id: str
     status: Literal['queued', 'running', 'completed', 'failed', 'cancelled']
-    source_type: Literal['hostedRun', 'sessionEvent', 'preAdmissionCancellation'] = Field(alias='sourceType')
-    event_id: str | None = Field(alias='eventId')
-    created_at_ms: int = Field(alias='createdAtMs')
+    source_type: Literal['hostedRun', 'sessionEvent', 'preAdmissionCancellation']
+    event_id: str | None
+    created_at_ms: int
 
 
 class PreviewFile(StrictSchema):
-    input_ref: str | None = Field(alias='inputRef')
-    agent_run_id: str = Field(alias='agentRunId')
-    owner_kind: Literal['artifact', 'userLibraryObject', 'sourceObject'] = Field(alias='ownerKind')
-    object_ref: str = Field(alias='objectRef')
-    source_version: str = Field(alias='sourceVersion')
+    input_ref: str | None
+    agent_run_id: str
+    owner_kind: Literal['artifact', 'userLibraryObject', 'sourceObject']
+    object_ref: str
+    source_version: str
     sha256: str
-    display_name: str = Field(alias='displayName')
-    content_type: str = Field(alias='contentType')
-    size_bytes: int = Field(alias='sizeBytes')
-    preview_url: str = Field(alias='previewUrl')
-    download_url: str = Field(alias='downloadUrl')
+    display_name: str
+    content_type: str
+    size_bytes: int
+    preview_url: str
+    download_url: str
 
 
 class SessionPreview(StrictSchema):
     schema_id: Literal['session.preview.v1'] = Field(alias='schema')
-    session_id: str = Field(alias='sessionId')
-    run_fact: RunFact | None = Field(alias='runFact')
+    session_id: str
+    run_fact: RunFact | None
     outputs: list[PreviewFile]
-    next_after_artifact_id: str | None = Field(alias='nextAfterArtifactId')
-    has_more: bool = Field(alias='hasMore')
+    next_after_artifact_id: str | None
+    has_more: bool
 
 
 class MessageFiles(StrictSchema):
     schema_id: Literal['agent.message.files.v1'] = Field(alias='schema')
-    agent_id: str = Field(alias='agentId')
-    session_id: str = Field(alias='sessionId')
-    message_id: str = Field(alias='messageId')
-    agent_run_id: str = Field(alias='agentRunId')
+    agent_id: str
+    session_id: str
+    message_id: str
+    agent_run_id: str
     files: list[PreviewFile]
 
 

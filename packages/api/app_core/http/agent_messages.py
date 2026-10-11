@@ -20,13 +20,13 @@ internal_router = Router(tags=["internal-agent-messages"], by_alias=True)
 
 class ValidateAgentMessageRequest(StrictSchema):
     schema_id: Literal["workspace.agent_message.validate.v1"] = Field(alias="schema")
-    agent_run_id: str = Field(alias="agentRunId")
-    authorization_digest: str = Field(alias="authorizationDigest")
-    coordination_session_id: str = Field(alias="coordinationSessionId")
-    tool_call_id: str = Field(alias="toolCallId")
+    agent_run_id: str
+    authorization_digest: str
+    coordination_session_id: str
+    tool_call_id: str
     body: str
-    session_refs: list[str] = Field(alias="sessionRefs", max_length=8)
-    file_refs: list[str] = Field(alias="fileRefs", max_length=8)
+    session_refs: list[str] = Field(max_length=8)
+    file_refs: list[str] = Field(max_length=8)
 
     @field_validator("agent_run_id", "coordination_session_id", "tool_call_id")
     @classmethod
@@ -56,12 +56,12 @@ class ValidateAgentMessageRequest(StrictSchema):
 
 class ValidatedAgentMessageResponse(StrictSchema):
     schema_id: Literal["workspace.agent_message.validated.v1"] = Field(alias="schema")
-    agent_id: str = Field(alias="agentId")
-    session_id: str = Field(alias="sessionId")
-    agent_run_id: str = Field(alias="agentRunId")
-    tool_call_id: str = Field(alias="toolCallId")
-    authorization_digest: str = Field(alias="authorizationDigest")
-    input_digest: str = Field(alias="inputDigest")
+    agent_id: str
+    session_id: str
+    agent_run_id: str
+    tool_call_id: str
+    authorization_digest: str
+    input_digest: str
 
 
 @internal_router.post("/agent-messages/validate", auth=internal_token_auth,

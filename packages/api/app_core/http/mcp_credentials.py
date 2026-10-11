@@ -6,7 +6,6 @@ from django.db import IntegrityError, transaction
 from django.http import JsonResponse
 from ninja import Router, Status
 from ninja.responses import codes_4xx
-from pydantic import Field
 
 from app_core.credentials import (
     CredentialDecryptionError,
@@ -45,9 +44,9 @@ MCP_CREDENTIAL_RESOLVED_SCHEMA = "runtime.mcp_bearer_credential.resolved.v1"
 
 
 class McpBearerCredentialRequest(StrictSchema):
-    plugin_name: str = Field(alias="pluginName")
-    credential_ref: str = Field(alias="credentialRef")
-    display_name: str = Field(alias="displayName")
+    plugin_name: str
+    credential_ref: str
+    display_name: str
     secret: str
 
 
@@ -57,11 +56,11 @@ class RotateMcpBearerCredentialRequest(StrictSchema):
 
 class McpBearerCredentialResponse(StrictSchema):
     id: str
-    plugin_name: str = Field(alias="pluginName")
-    credential_ref: str = Field(alias="credentialRef")
-    display_name: str = Field(alias="displayName")
+    plugin_name: str
+    credential_ref: str
+    display_name: str
     version: int
-    updated_at: str = Field(alias="updatedAt")
+    updated_at: str
 
 
 class McpBearerCredentialEnvelope(StrictSchema):

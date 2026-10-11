@@ -136,22 +136,19 @@ class AcceptedOperationReplay(Exception):
 
 class RewriteLastUserTailRequest(StrictSchema):
     type: Literal["rewriteLastUser"]
-    target_message_id: str = Field(alias="targetMessageId", min_length=1, max_length=160)
-    expected_tail_message_id: str = Field(alias="expectedTailMessageId", min_length=1, max_length=160)
+    target_message_id: str = Field(min_length=1, max_length=160)
+    expected_tail_message_id: str = Field(min_length=1, max_length=160)
 
 
 class SessionMessageRequest(StrictSchema):
-    operation_id: str = Field(alias="operationId", pattern=OPERATION_ID_PATTERN)
+    operation_id: str = Field(pattern=OPERATION_ID_PATTERN)
     text: str = ""
-    agent_id: str | None = Field(default=None, alias="agentId")
-    project_id: str | None = Field(default=None, alias="projectId")
-    model_config_ref: str = Field(default="", alias="modelConfigRef")
-    thinking_mode: str | None = Field(default=None, alias="thinkingMode")
-    attachment_refs: list[str] = Field(
-        default_factory=list,
-        alias="attachmentRefs",
-    )
-    tail_action: RewriteLastUserTailRequest | None = Field(default=None, alias="tailAction")
+    agent_id: str | None = Field(default=None)
+    project_id: str | None = Field(default=None)
+    model_config_ref: str = Field(default='')
+    thinking_mode: str | None = Field(default=None)
+    attachment_refs: list[str] = Field(default_factory=list)
+    tail_action: RewriteLastUserTailRequest | None = Field(default=None)
 
     @field_validator("agent_id")
     @classmethod
@@ -160,9 +157,9 @@ class SessionMessageRequest(StrictSchema):
 
 
 class SessionCreateRequest(StrictSchema):
-    operation_id: str = Field(alias="operationId", pattern=OPERATION_ID_PATTERN)
-    agent_id: str = Field(alias="agentId")
-    project_id: str | None = Field(default=None, alias="projectId")
+    operation_id: str = Field(pattern=OPERATION_ID_PATTERN)
+    agent_id: str
+    project_id: str | None = Field(default=None)
 
     @field_validator("agent_id")
     @classmethod
@@ -171,7 +168,7 @@ class SessionCreateRequest(StrictSchema):
 
 
 class SessionProjectCreateRequest(StrictSchema):
-    agent_id: str = Field(alias="agentId")
+    agent_id: str
     name: str
 
     @field_validator("agent_id")
@@ -189,7 +186,7 @@ class SessionProjectCreateRequest(StrictSchema):
 
 
 class AgentRunSupplementRequest(StrictSchema):
-    supplement_id: str = Field(alias="supplementId", min_length=1, max_length=64)
+    supplement_id: str = Field(min_length=1, max_length=64)
     message: str = Field(min_length=1)
 
     @field_validator("supplement_id")
@@ -219,8 +216,8 @@ class AgentRunSupplementRequest(StrictSchema):
 
 class SessionMetadataRequest(StrictSchema):
     title: str | None = None
-    is_pinned: bool | None = Field(default=None, alias="isPinned")
-    is_unread: bool | None = Field(default=None, alias="isUnread")
+    is_pinned: bool | None = Field(default=None)
+    is_unread: bool | None = Field(default=None)
 
 
 class PluginEnablementRequest(StrictSchema):

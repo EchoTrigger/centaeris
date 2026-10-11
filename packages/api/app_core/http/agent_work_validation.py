@@ -17,13 +17,13 @@ router = Router(tags=["internal-agent-work"], by_alias=True)
 
 class ValidateAgentWorkRequest(StrictSchema):
     schema_id: Literal["workspace.agent_work.validate.v1"] = Field(alias="schema")
-    agent_run_id: str = Field(alias="agentRunId")
-    authorization_digest: str = Field(alias="authorizationDigest")
-    coordination_session_id: str = Field(alias="coordinationSessionId")
-    tool_call_id: str = Field(alias="toolCallId")
+    agent_run_id: str
+    authorization_digest: str
+    coordination_session_id: str
+    tool_call_id: str
     objective: str
-    session_refs: list[str] = Field(alias="sessionRefs", max_length=8)
-    file_refs: list[str] = Field(alias="fileRefs", max_length=8)
+    session_refs: list[str] = Field(max_length=8)
+    file_refs: list[str] = Field(max_length=8)
 
     @field_validator("agent_run_id", "coordination_session_id", "tool_call_id")
     @classmethod
@@ -53,12 +53,12 @@ class ValidateAgentWorkRequest(StrictSchema):
 
 class ValidatedAgentWorkResponse(StrictSchema):
     schema_id: Literal["workspace.agent_work.validated.v1"] = Field(alias="schema")
-    agent_id: str = Field(alias="agentId")
-    session_id: str = Field(alias="sessionId")
-    agent_run_id: str = Field(alias="agentRunId")
-    tool_call_id: str = Field(alias="toolCallId")
-    authorization_digest: str = Field(alias="authorizationDigest")
-    input_digest: str = Field(alias="inputDigest")
+    agent_id: str
+    session_id: str
+    agent_run_id: str
+    tool_call_id: str
+    authorization_digest: str
+    input_digest: str
 
 
 @router.post("/agent-work/validate", auth=internal_token_auth,
@@ -72,12 +72,12 @@ def validate_work(request, payload: ValidateAgentWorkRequest):
 
 class QueryAgentWorkRequest(StrictSchema):
     schema_id: Literal["workspace.agent_work.query.v1"] = Field(alias="schema")
-    agent_run_id: str = Field(alias="agentRunId", max_length=160)
-    authorization_digest: str = Field(alias="authorizationDigest")
-    coordination_session_id: str = Field(alias="coordinationSessionId", max_length=160)
-    tool_call_id: str = Field(alias="toolCallId", max_length=160)
-    source_agent_run_id: str = Field(alias="sourceAgentRunId", max_length=160)
-    source_tool_call_id: str = Field(alias="sourceToolCallId", max_length=160)
+    agent_run_id: str = Field(max_length=160)
+    authorization_digest: str
+    coordination_session_id: str = Field(max_length=160)
+    tool_call_id: str = Field(max_length=160)
+    source_agent_run_id: str = Field(max_length=160)
+    source_tool_call_id: str = Field(max_length=160)
 
     @field_validator("agent_run_id", "coordination_session_id", "tool_call_id", "source_agent_run_id", "source_tool_call_id")
     @classmethod
@@ -93,25 +93,25 @@ class QueryAgentWorkRequest(StrictSchema):
 
 
 class WorkRequestSourceResponse(StrictSchema):
-    source_agent_run_id: str = Field(alias="sourceAgentRunId")
-    source_turn_id: str = Field(alias="sourceTurnId")
-    source_tool_call_id: str = Field(alias="sourceToolCallId")
-    source_event_id: str | None = Field(alias="sourceEventId")
-    projects_to_agent_run_stream: bool | None = Field(alias="projectsToAgentRunStream")
+    source_agent_run_id: str
+    source_turn_id: str
+    source_tool_call_id: str
+    source_event_id: str | None
+    projects_to_agent_run_stream: bool | None
 
 
 class WorkReturnAttemptResponse(StrictSchema):
-    attempt_id: str = Field(alias="attemptId")
-    agent_run_id: str | None = Field(alias="agentRunId")
+    attempt_id: str
+    agent_run_id: str | None
 
 
 class WorkReturnConfirmationSourceResponse(StrictSchema):
-    event_id: str = Field(alias="eventId")
-    call_event_id: str = Field(alias="callEventId")
+    event_id: str
+    call_event_id: str
     sequence: int
-    agent_run_id: str = Field(alias="agentRunId")
-    turn_id: str = Field(alias="turnId")
-    tool_call_id: str = Field(alias="toolCallId")
+    agent_run_id: str
+    turn_id: str
+    tool_call_id: str
 
 
 class WorkReturnViewResponse(StrictSchema):
@@ -123,7 +123,7 @@ class WorkReturnViewResponse(StrictSchema):
 
 class WorkRequestResourceResponse(StrictSchema):
     available: bool
-    agent_run_status: str | None = Field(alias="agentRunStatus")
+    agent_run_status: str | None
     returns: list[WorkReturnViewResponse]
     output: "WorkOutputResponse | None"
 
@@ -131,22 +131,22 @@ class WorkRequestResourceResponse(StrictSchema):
 class WorkOutputResponse(StrictSchema):
     schema_id: Literal["workspace.agent_work.output.v1"] = Field(alias="schema")
     source: Literal["untrustedWorkOutput"]
-    session_id: str = Field(alias="sessionId")
-    agent_run_id: str = Field(alias="agentRunId")
-    event_id: str = Field(alias="eventId")
-    through_sequence: int = Field(alias="throughSequence")
+    session_id: str
+    agent_run_id: str
+    event_id: str
+    through_sequence: int
     body: str
 
 
 class WorkRequestQueryResponse(StrictSchema):
     schema_id: Literal["workspace.agent_work.query_result.v1"] = Field(alias="schema")
-    agent_id: str = Field(alias="agentId")
-    session_id: str = Field(alias="sessionId")
-    agent_run_id: str = Field(alias="agentRunId")
-    tool_call_id: str = Field(alias="toolCallId")
-    authorization_digest: str = Field(alias="authorizationDigest")
-    source_agent_run_id: str = Field(alias="sourceAgentRunId")
-    source_tool_call_id: str = Field(alias="sourceToolCallId")
+    agent_id: str
+    session_id: str
+    agent_run_id: str
+    tool_call_id: str
+    authorization_digest: str
+    source_agent_run_id: str
+    source_tool_call_id: str
     status: Literal["notRecorded", "pending", "admitted"]
     source: WorkRequestSourceResponse | None
     operation: HostedOperationResponse | None
@@ -164,12 +164,12 @@ def query_work(request, payload: QueryAgentWorkRequest):
 
 class ValidateWorkReturnConfirmationRequest(StrictSchema):
     schema_id: Literal["workspace.agent_work.return_confirm.validate.v1"] = Field(alias="schema")
-    agent_run_id: str = Field(alias="agentRunId", max_length=160)
-    authorization_digest: str = Field(alias="authorizationDigest")
-    coordination_session_id: str = Field(alias="coordinationSessionId", max_length=160)
-    tool_call_id: str = Field(alias="toolCallId", max_length=160)
-    notice_id: str = Field(alias="noticeId", max_length=160)
-    attempt_id: str = Field(alias="attemptId", max_length=160)
+    agent_run_id: str = Field(max_length=160)
+    authorization_digest: str
+    coordination_session_id: str = Field(max_length=160)
+    tool_call_id: str = Field(max_length=160)
+    notice_id: str = Field(max_length=160)
+    attempt_id: str = Field(max_length=160)
 
     @field_validator("agent_run_id", "coordination_session_id", "tool_call_id", "notice_id", "attempt_id")
     @classmethod
@@ -186,15 +186,15 @@ class ValidateWorkReturnConfirmationRequest(StrictSchema):
 
 class ValidatedWorkReturnConfirmationResponse(StrictSchema):
     schema_id: Literal["workspace.agent_work.return_confirm.validated.v1"] = Field(alias="schema")
-    agent_id: str = Field(alias="agentId")
-    session_id: str = Field(alias="sessionId")
-    agent_run_id: str = Field(alias="agentRunId")
-    tool_call_id: str = Field(alias="toolCallId")
-    authorization_digest: str = Field(alias="authorizationDigest")
-    input_digest: str = Field(alias="inputDigest")
-    notice_id: str = Field(alias="noticeId")
-    attempt_id: str = Field(alias="attemptId")
-    notice_identity: dict = Field(alias="noticeIdentity")
+    agent_id: str
+    session_id: str
+    agent_run_id: str
+    tool_call_id: str
+    authorization_digest: str
+    input_digest: str
+    notice_id: str
+    attempt_id: str
+    notice_identity: dict
 
 
 @router.post("/agent-work/returns/confirm/validate", auth=internal_token_auth,
