@@ -9,10 +9,9 @@ use std::num::NonZeroUsize;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-// The local Host has no account/project quota binding yet. Use one conservative
-// process-wide domain across all providers and models, rather than guessing a
-// quota identity from provider names or credentials. No cross-process guarantee.
-const MODEL_ATTEMPT_LIMIT: usize = 4;
+// One process-wide local resource budget, shared across providers and runs.
+// Supplier Retry-After remains transport-local; no account quota is inferred.
+const LOCAL_MODEL_IN_FLIGHT_LIMIT: usize = 4;
 // Wire-buffer safety ceilings, independently bounded per response/line/event.
 const MODEL_BODY_MAX_BYTES: usize = 16 * 1024 * 1024;
 const SSE_LINE_MAX_BYTES: usize = 16 * 1024 * 1024;
@@ -21,10 +20,10 @@ fn admit_runtime_transport<T>(inner: T, run_id: String) -> AdmittedJsonHttpTrans
     static DOMAIN: OnceLock<ModelAdmission> = OnceLock::new();
     let admission = DOMAIN.get_or_init(|| {
         ModelAdmission::new(
-            NonZeroUsize::new(MODEL_ATTEMPT_LIMIT).expect("positive attempt limit"),
+            NonZeroUsize::new(LOCAL_MODEL_IN_FLIGHT_LIMIT).expect("positive attempt limit"),
         )
     });
-    AdmittedJsonHttpTransport::new(inner, admission.clone(), run_id)
+    AdmittedJsonHttpTransport::with_transport_cooldown(inner, admission.clone(), run_id)
 }
 
 pub(crate) struct ReqwestJsonHttpTransport {
@@ -554,18 +553,18 @@ mod tests {
         for attempt in &mut attempts {
             assert!(poll!(attempt).is_pending());
         }
-        assert_eq!(started.load(Ordering::SeqCst), MODEL_ATTEMPT_LIMIT);
+        assert_eq!(started.load(Ordering::SeqCst), LOCAL_MODEL_IN_FLIGHT_LIMIT);
         drop(attempts.remove(0));
         assert!(poll!(attempts.last_mut().unwrap()).is_pending());
         assert_eq!(
             started.load(Ordering::SeqCst),
-            MODEL_ATTEMPT_LIMIT + 1
+            LOCAL_MODEL_IN_FLIGHT_LIMIT + 1
         );
         drop(attempts);
         // No capacity lost after dropping both active and previously queued calls.
         let mut again: Vec<_> = clients
             .iter()
-            .take(MODEL_ATTEMPT_LIMIT)
+            .take(LOCAL_MODEL_IN_FLIGHT_LIMIT)
             .map(|client| client.execute_json(&request))
             .collect();
         for attempt in &mut again {
@@ -573,7 +572,7 @@ mod tests {
         }
         assert_eq!(
             started.load(Ordering::SeqCst),
-            MODEL_ATTEMPT_LIMIT * 2 + 1
+            LOCAL_MODEL_IN_FLIGHT_LIMIT * 2 + 1
         );
     }
 
@@ -767,6 +766,8 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod admission_tests;
 
 #[cfg(test)]
 mod boundary_tests;
