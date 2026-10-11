@@ -17,6 +17,8 @@ boundaries, and release verification.
   access, durable processing, evidence receipts and citation presentation.
 - [Versioning](reference/Versioning.md): product versions, source revision, and contract identities.
 - [API](reference/API.md): REST, SSE, and internal service contracts.
+- [Runtime HTTP](reference/RuntimeHTTP.md): Runtime-owned endpoints, HTTP behavior,
+  framework reuse and transport-refactor verification.
 - [Web chat presentation](reference/WebChatPresentation.md): typography roles,
   motion inventory, disclosure rules and focused browser checks.
 - [Configuration](reference/Configuration.md): environment variables and secret

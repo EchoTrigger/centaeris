@@ -26,10 +26,10 @@ mod observations;
 mod platform_materials;
 mod postgres_store;
 mod recovery_upload;
-#[cfg(test)]
-mod runtime_http_tests;
 mod request_capacity;
 mod resident_capacity;
+#[cfg(test)]
+mod runtime_http_tests;
 mod session_delivery;
 mod skill_projection;
 mod terminal_subagents;
@@ -56,7 +56,9 @@ use artifact_publication::WorkspaceArtifactPublicationPort;
 use axum::body::{to_bytes, Body};
 use axum::extract::State;
 use axum::http::{header, Request, Response};
+use axum::response::IntoResponse;
 use axum::Router;
+use bytes::Bytes;
 #[cfg(test)]
 use centaeris_core::execution::ExecutionWorkspaceGenerationV1;
 use centaeris_core::execution::{
@@ -1146,7 +1148,7 @@ async fn dispatch_http_request(
         Some(slot) => slot,
         None => {
             observations::Request::rejected(observed_route, observed_lane, admission_started);
-            return bounded_json_error_response(503, "runtime_busy").into_axum_response();
+            return bounded_json_error_response(503, "runtime_busy");
         }
     };
     let observed_request =
@@ -1156,8 +1158,7 @@ async fn dispatch_http_request(
         match tokio::time::timeout_at(deadline.into(), read).await {
             Ok(result) => result,
             Err(_) => {
-                return bounded_json_error_response(408, "request_body_timeout")
-                    .into_axum_response();
+                return bounded_json_error_response(408, "request_body_timeout");
             }
         }
     } else {
@@ -1165,10 +1166,10 @@ async fn dispatch_http_request(
     };
     let request = match read_result {
         Ok(request) => request,
-        Err(response) => return response.into_axum_response(),
+        Err(response) => return response,
     };
     let task = tokio::task::spawn_blocking(move || {
-        let _context = observations::Context::enter(&request.body);
+        let _context = observations::Context::enter(request.body());
         let _observed_request = observed_request;
         let _request_slot = request_slot;
         let _deadline = postgres_store::RequestDeadline::enter(deadline);
@@ -1199,59 +1200,46 @@ async fn dispatch_http_request(
             // the permit until it actually exits; timeout must not mint capacity
             // or imply that an uncertain write was rolled back.
             Err(_) => {
-                return bounded_json_error_response(504, "request_deadline_exceeded")
-                    .into_axum_response();
+                return bounded_json_error_response(504, "request_deadline_exceeded");
             }
         }
     } else {
         task.await
     };
     if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-        return bounded_json_error_response(504, "request_deadline_exceeded").into_axum_response();
+        return bounded_json_error_response(504, "request_deadline_exceeded");
     }
     match result {
-        Ok(Ok(response)) => response.into_axum_response(),
+        Ok(Ok(response)) => response,
         Ok(Err(error)) => {
             eprintln!("runtime request failed: {error}");
-            bounded_json_error_response(500, "internal_error").into_axum_response()
+            bounded_json_error_response(500, "internal_error")
         }
         Err(error) => {
             eprintln!("runtime request task failed: {error}");
-            bounded_json_error_response(500, "internal_error").into_axum_response()
+            bounded_json_error_response(500, "internal_error")
         }
     }
 }
 
-async fn read_axum_request(request: Request<Body>) -> Result<HttpRequest, RuntimeHttpResponse> {
+async fn read_axum_request(request: Request<Body>) -> Result<Request<Bytes>, Response<Body>> {
     let (parts, body) = request.into_parts();
     let body =
         match tokio::time::timeout(HTTP_BODY_TIMEOUT, to_bytes(body, MAX_HTTP_BODY_BYTES)).await {
-            Ok(Ok(body)) => body.to_vec(),
+            Ok(Ok(body)) => body,
             Ok(Err(_)) => return Err(bounded_json_error_response(413, "request_body_too_large")),
             Err(_) => return Err(bounded_json_error_response(408, "request_body_timeout")),
         };
-    let mut headers = HashMap::new();
+    let mut seen = HashSet::new();
     for (name, value) in &parts.headers {
-        let value = value
+        value
             .to_str()
             .map_err(|_| bounded_json_error_response(400, "request_header_invalid"))?;
-        if headers
-            .insert(name.as_str().to_string(), value.to_string())
-            .is_some()
-        {
+        if !seen.insert(name) {
             return Err(bounded_json_error_response(400, "request_header_duplicate"));
         }
     }
-    Ok(HttpRequest {
-        method: parts.method.as_str().to_string(),
-        path: parts
-            .uri
-            .path_and_query()
-            .map_or_else(|| parts.uri.path(), |value| value.as_str())
-            .to_string(),
-        headers,
-        body,
-    })
+    Ok(Request::from_parts(parts, body))
 }
 
 struct WriteTimeoutIo {
@@ -1348,34 +1336,45 @@ impl AsyncWrite for WriteTimeoutIo {
 }
 
 fn handle_request(
-    request: HttpRequest,
+    request: Request<Bytes>,
     runtime: Arc<tokio::runtime::Runtime>,
     store: Arc<RuntimeStoreActor>,
     job_store: Arc<PostgresRuntimeStore>,
     tool_layers: ToolLayerRegistry,
     execution_profile: Arc<RuntimeExecutionProfile>,
-) -> Result<RuntimeHttpResponse, String> {
+) -> Result<Response<Body>, String> {
+    let (parts, body) = request.into_parts();
+    // Matching the complete target preserves rejection of query suffixes.
+    let path = parts
+        .uri
+        .path_and_query()
+        .map_or(parts.uri.path(), |value| value.as_str());
+    let method = parts.method.as_str();
+    let internal_token = parts
+        .headers
+        .get("x-internal-token")
+        .and_then(|value| value.to_str().ok());
     if let Some((status, response)) = job_protocol::handle(
-        request.method.as_str(),
-        request.path.as_str(),
-        &request.headers,
-        request.body.as_slice(),
+        method,
+        path,
+        internal_token,
+        body.as_ref(),
         job_store.as_ref(),
     ) {
         return Ok(http_response(status, "application/json", response));
     }
-    if request.method == "GET"
+    if method == "GET"
         && matches!(
-            request.path.as_str(),
+            path,
             "/internal/model-catalog" | "/internal/execution-profile"
         )
     {
         let token = env::var("INTERNAL_API_TOKEN")
             .map_err(|_| "INTERNAL_API_TOKEN is required".to_string())?;
-        if request.headers.get("x-internal-token").map(String::as_str) != Some(token.as_str()) {
+        if internal_token != Some(token.as_str()) {
             return json_error_response(401, "unauthorized");
         }
-        if request.path == "/internal/execution-profile" {
+        if path == "/internal/execution-profile" {
             let response = serde_json::to_vec(execution_profile.as_ref())
                 .map_err(|error| format!("encode Runtime execution profile failed: {error}"))?;
             return Ok(http_response(200, "application/json", response));
@@ -1384,9 +1383,9 @@ fn handle_request(
             .map_err(|error| format!("encode workspace model catalog failed: {error}"))?;
         return Ok(http_response(200, "application/json", response));
     }
-    if request.method != "POST"
+    if method != "POST"
         || !matches!(
-            request.path.as_str(),
+            path,
             "/agent-runs/step"
                 | "/agent-runs/cancel"
                 | "/internal/agent-runs/supplement"
@@ -1406,11 +1405,11 @@ fn handle_request(
     }
     let token =
         env::var("INTERNAL_API_TOKEN").map_err(|_| "INTERNAL_API_TOKEN is required".to_string())?;
-    if request.headers.get("x-internal-token").map(String::as_str) != Some(token.as_str()) {
+    if internal_token != Some(token.as_str()) {
         return json_error_response(401, "unauthorized");
     }
-    if request.path == "/internal/host-event-input" {
-        let input = match serde_json::from_slice::<HostEventInputRequest>(&request.body)
+    if path == "/internal/host-event-input" {
+        let input = match serde_json::from_slice::<HostEventInputRequest>(&body)
             .map_err(|error| error.to_string())
             .and_then(HostEventInputRequest::create)
         {
@@ -1426,18 +1425,12 @@ fn handle_request(
             .map_err(|error| error.to_string())?,
         ));
     }
-    if let Some(response) = transcript_protocol::handle(
-        request.path.as_str(),
-        request.body.as_slice(),
-        job_store.as_ref(),
-    ) {
+    if let Some(response) = transcript_protocol::handle(path, body.as_ref(), job_store.as_ref()) {
         let (status, body) = response?;
         return Ok(http_response(status, "application/json", body));
     }
-    if request.path == "/internal/plugins/inspect" {
-        let request = match serde_json::from_slice::<WorkspacePluginInspectRequest>(
-            request.body.as_slice(),
-        ) {
+    if path == "/internal/plugins/inspect" {
+        let request = match serde_json::from_slice::<WorkspacePluginInspectRequest>(body.as_ref()) {
             Ok(value) if value.schema == WORKSPACE_PLUGIN_INSPECT_SCHEMA => value,
             Ok(_) | Err(_) => {
                 return json_error_response(400, "plugin_inspection_request_invalid");
@@ -1461,19 +1454,18 @@ fn handle_request(
             .map_err(|error| format!("encode workspace Plugin inspection failed: {error}"))?;
         return Ok(http_response(200, "application/json", response));
     }
-    if request.path == "/skills/catalog" {
-        let request =
-            match serde_json::from_slice::<WorkspaceSkillCatalogRequest>(request.body.as_slice())
-                .map_err(|error| format!("invalid json: {error}"))
-            {
-                Ok(value) if value.schema == WORKSPACE_SKILL_CATALOG_SCHEMA => value,
-                Ok(_) => {
-                    return json_error_response(400, "workspace_skill_catalog_schema_mismatch");
-                }
-                Err(error) => {
-                    return json_error_response(400, error.as_str());
-                }
-            };
+    if path == "/skills/catalog" {
+        let request = match serde_json::from_slice::<WorkspaceSkillCatalogRequest>(body.as_ref())
+            .map_err(|error| format!("invalid json: {error}"))
+        {
+            Ok(value) if value.schema == WORKSPACE_SKILL_CATALOG_SCHEMA => value,
+            Ok(_) => {
+                return json_error_response(400, "workspace_skill_catalog_schema_mismatch");
+            }
+            Err(error) => {
+                return json_error_response(400, error.as_str());
+            }
+        };
         let response = match workspace_skill_catalog(&request.plugin_activation) {
             Ok(value) => value,
             Err(error) => {
@@ -1485,19 +1477,18 @@ fn handle_request(
             .map_err(|error| format!("encode workspace skill catalog failed: {error}"))?;
         return Ok(http_response(200, "application/json", response));
     }
-    if request.path == "/skills/detail" {
-        let request =
-            match serde_json::from_slice::<WorkspaceSkillDetailRequest>(request.body.as_slice())
-                .map_err(|error| format!("invalid json: {error}"))
-            {
-                Ok(value) if value.schema == WORKSPACE_SKILL_DETAIL_SCHEMA => value,
-                Ok(_) => {
-                    return json_error_response(400, "workspace_skill_detail_schema_mismatch");
-                }
-                Err(error) => {
-                    return json_error_response(400, error.as_str());
-                }
-            };
+    if path == "/skills/detail" {
+        let request = match serde_json::from_slice::<WorkspaceSkillDetailRequest>(body.as_ref())
+            .map_err(|error| format!("invalid json: {error}"))
+        {
+            Ok(value) if value.schema == WORKSPACE_SKILL_DETAIL_SCHEMA => value,
+            Ok(_) => {
+                return json_error_response(400, "workspace_skill_detail_schema_mismatch");
+            }
+            Err(error) => {
+                return json_error_response(400, error.as_str());
+            }
+        };
         let response =
             match workspace_skill_detail(&request.plugin_activation, request.skill_id.as_str()) {
                 Ok(Some(value)) => value,
@@ -1513,15 +1504,14 @@ fn handle_request(
             .map_err(|error| format!("encode workspace skill detail failed: {error}"))?;
         return Ok(http_response(200, "application/json", response));
     }
-    if request.path == "/mcp/catalog" {
-        let request =
-            match serde_json::from_slice::<WorkspaceMcpCatalogRequest>(request.body.as_slice())
-                .map_err(|error| format!("invalid json: {error}"))
-            {
-                Ok(value) if value.schema == WORKSPACE_MCP_CATALOG_SCHEMA => value,
-                Ok(_) => return json_error_response(400, "workspace_mcp_catalog_schema_mismatch"),
-                Err(error) => return json_error_response(400, error.as_str()),
-            };
+    if path == "/mcp/catalog" {
+        let request = match serde_json::from_slice::<WorkspaceMcpCatalogRequest>(body.as_ref())
+            .map_err(|error| format!("invalid json: {error}"))
+        {
+            Ok(value) if value.schema == WORKSPACE_MCP_CATALOG_SCHEMA => value,
+            Ok(_) => return json_error_response(400, "workspace_mcp_catalog_schema_mismatch"),
+            Err(error) => return json_error_response(400, error.as_str()),
+        };
         let response = match workspace_mcp_catalog(&request.plugin_activation) {
             Ok(value) => value,
             Err(error) => {
@@ -1533,15 +1523,14 @@ fn handle_request(
             .map_err(|error| format!("encode workspace MCP catalog failed: {error}"))?;
         return Ok(http_response(200, "application/json", response));
     }
-    if request.path == "/hooks/catalog" {
-        let request =
-            match serde_json::from_slice::<WorkspaceHookCatalogRequest>(request.body.as_slice())
-                .map_err(|error| format!("invalid json: {error}"))
-            {
-                Ok(value) if value.schema == WORKSPACE_HOOK_CATALOG_SCHEMA => value,
-                Ok(_) => return json_error_response(400, "workspace_hook_catalog_schema_mismatch"),
-                Err(error) => return json_error_response(400, error.as_str()),
-            };
+    if path == "/hooks/catalog" {
+        let request = match serde_json::from_slice::<WorkspaceHookCatalogRequest>(body.as_ref())
+            .map_err(|error| format!("invalid json: {error}"))
+        {
+            Ok(value) if value.schema == WORKSPACE_HOOK_CATALOG_SCHEMA => value,
+            Ok(_) => return json_error_response(400, "workspace_hook_catalog_schema_mismatch"),
+            Err(error) => return json_error_response(400, error.as_str()),
+        };
         let response = match workspace_hook_catalog(&request.plugin_activation) {
             Ok(value) => value,
             Err(error) => {
@@ -1553,8 +1542,8 @@ fn handle_request(
             .map_err(|error| format!("encode workspace Hook catalog failed: {error}"))?;
         return Ok(http_response(200, "application/json", response));
     }
-    if request.path == "/agent-runs/cancel" {
-        let request = match serde_json::from_slice::<AgentRunCancelRequest>(request.body.as_slice())
+    if path == "/agent-runs/cancel" {
+        let request = match serde_json::from_slice::<AgentRunCancelRequest>(body.as_ref())
             .map_err(|error| format!("invalid json: {error}"))
             .and_then(|request| {
                 let signing_key = env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY")
@@ -1610,22 +1599,19 @@ fn handle_request(
         .map_err(|error| format!("encode AgentRun cancel response failed: {error}"))?;
         return Ok(http_response(200, "application/json", response));
     }
-    if request.path == "/internal/agent-runs/supplement" {
-        let request =
-            match serde_json::from_slice::<AgentRunSupplementRequest>(request.body.as_slice())
-                .map_err(|error| format!("invalid json: {error}"))
-                .and_then(|request| {
-                    let signing_key =
-                        env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY").map_err(|_| {
-                            "AGENT_RUN_AUTHORIZATION_SIGNING_KEY is required".to_string()
-                        })?;
-                    request.validate(signing_key.as_bytes())
-                }) {
-                Ok(value) => value,
-                Err(error) => {
-                    return json_error_response(400, error.as_str());
-                }
-            };
+    if path == "/internal/agent-runs/supplement" {
+        let request = match serde_json::from_slice::<AgentRunSupplementRequest>(body.as_ref())
+            .map_err(|error| format!("invalid json: {error}"))
+            .and_then(|request| {
+                let signing_key = env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY")
+                    .map_err(|_| "AGENT_RUN_AUTHORIZATION_SIGNING_KEY is required".to_string())?;
+                request.validate(signing_key.as_bytes())
+            }) {
+            Ok(value) => value,
+            Err(error) => {
+                return json_error_response(400, error.as_str());
+            }
+        };
         let result = job_store.enqueue_turn_supplement(EnqueueTurnSupplementRequest {
             agent_run_id: request.agent_run_start.agent_run_id.clone(),
             lifecycle_job_id: request.job_id,
@@ -1662,22 +1648,19 @@ fn handle_request(
         .map_err(|error| format!("encode AgentRun supplement response failed: {error}"))?;
         return Ok(http_response(202, "application/json", response));
     }
-    if request.path == "/agent-runs/teardown" {
-        let teardown =
-            match serde_json::from_slice::<AgentRunTeardownRequest>(request.body.as_slice())
-                .map_err(|error| format!("invalid json: {error}"))
-                .and_then(|request| {
-                    let signing_key =
-                        env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY").map_err(|_| {
-                            "AGENT_RUN_AUTHORIZATION_SIGNING_KEY is required".to_string()
-                        })?;
-                    request.validate(signing_key.as_bytes())
-                }) {
-                Ok(value) => value,
-                Err(error) => {
-                    return json_error_response(400, error.as_str());
-                }
-            };
+    if path == "/agent-runs/teardown" {
+        let teardown = match serde_json::from_slice::<AgentRunTeardownRequest>(body.as_ref())
+            .map_err(|error| format!("invalid json: {error}"))
+            .and_then(|request| {
+                let signing_key = env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY")
+                    .map_err(|_| "AGENT_RUN_AUTHORIZATION_SIGNING_KEY is required".to_string())?;
+                request.validate(signing_key.as_bytes())
+            }) {
+            Ok(value) => value,
+            Err(error) => {
+                return json_error_response(400, error.as_str());
+            }
+        };
         if let Err(error) = validate_agent_run_lifecycle_job(
             teardown.job_id.as_str(),
             teardown.lease_owner.as_str(),
@@ -1748,19 +1731,18 @@ fn handle_request(
         .map_err(|error| format!("encode AgentRun teardown response failed: {error}"))?;
         return Ok(http_response(200, "application/json", response));
     }
-    let agent_run_step =
-        match serde_json::from_slice::<AgentRunStepRequest>(request.body.as_slice())
-            .map_err(|error| format!("invalid json: {error}"))
-            .and_then(|request| {
-                let signing_key = env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY")
-                    .map_err(|_| "AGENT_RUN_AUTHORIZATION_SIGNING_KEY is required".to_string())?;
-                request.validate(signing_key.as_bytes())
-            }) {
-            Ok(value) => value,
-            Err(error) => {
-                return json_error_response(400, error.as_str());
-            }
-        };
+    let agent_run_step = match serde_json::from_slice::<AgentRunStepRequest>(body.as_ref())
+        .map_err(|error| format!("invalid json: {error}"))
+        .and_then(|request| {
+            let signing_key = env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY")
+                .map_err(|_| "AGENT_RUN_AUTHORIZATION_SIGNING_KEY is required".to_string())?;
+            request.validate(signing_key.as_bytes())
+        }) {
+        Ok(value) => value,
+        Err(error) => {
+            return json_error_response(400, error.as_str());
+        }
+    };
     if let Err(error) = validate_agent_run_lifecycle_job(
         agent_run_step.job_id.as_str(),
         agent_run_step.lease_owner.as_str(),
@@ -6486,62 +6468,41 @@ fn now_ms() -> Result<i64, String> {
     i64::try_from(millis).map_err(|_| "current timestamp exceeds i64".to_string())
 }
 
-#[derive(Debug)]
-struct HttpRequest {
-    method: String,
-    path: String,
-    headers: HashMap<String, String>,
-    body: Vec<u8>,
-}
-
-#[derive(Debug)]
-struct RuntimeHttpResponse {
-    status: u16,
-    content_type: &'static str,
-    body: Vec<u8>,
-}
-
-impl RuntimeHttpResponse {
-    fn into_axum_response(self) -> Response<Body> {
-        let mut builder = Response::builder()
-            .status(self.status)
-            .header(header::CONTENT_TYPE, self.content_type)
-            .header(header::CONNECTION, "close");
-        if self.status == 429 || self.status == 503 {
-            builder = builder.header(header::RETRY_AFTER, "5");
+fn http_response(status: u16, content_type: &'static str, body: Vec<u8>) -> Response<Body> {
+    let status = match axum::http::StatusCode::from_u16(status) {
+        Ok(status) => status,
+        Err(error) => {
+            eprintln!("build runtime HTTP response failed: {error}");
+            return Response::new(Body::from("internal_error"));
         }
-        match builder.body(Body::from(self.body)) {
-            Ok(response) => response,
-            Err(error) => {
-                eprintln!("build runtime HTTP response failed: {error}");
-                Response::new(Body::from("internal_error"))
-            }
-        }
-    }
-}
-
-fn http_response(status: u16, content_type: &'static str, body: Vec<u8>) -> RuntimeHttpResponse {
-    RuntimeHttpResponse {
+    };
+    let mut response = (
         status,
-        content_type,
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CONNECTION, "close"),
+        ],
         body,
+    )
+        .into_response();
+    if status == 429 || status == 503 {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, header::HeaderValue::from_static("5"));
     }
+    response
 }
 
-fn json_error_response(status: u16, error: &str) -> Result<RuntimeHttpResponse, String> {
-    let body = serde_json::to_vec(&json!({"error": error}))
-        .map_err(|encode_error| format!("encode error response failed: {encode_error}"))?;
-    Ok(http_response(status, "application/json", body))
+fn json_error_response(status: u16, error: &str) -> Result<Response<Body>, String> {
+    Ok(bounded_json_error_response(status, error))
 }
 
-fn bounded_json_error_response(status: u16, error: &str) -> RuntimeHttpResponse {
-    match json_error_response(status, error) {
-        Ok(response) => response,
-        Err(encode_error) => {
-            eprintln!("encode runtime HTTP error failed: {encode_error}");
-            http_response(500, "text/plain", b"internal_error".to_vec())
-        }
-    }
+fn bounded_json_error_response(status: u16, error: &str) -> Response<Body> {
+    http_response(
+        status,
+        "application/json",
+        json!({"error": error}).to_string().into_bytes(),
+    )
 }
 
 fn agent_run_step_failure_response(
@@ -6549,7 +6510,7 @@ fn agent_run_step_failure_response(
     failure_class: &str,
     retryable: bool,
     transition_reason: &str,
-) -> Result<RuntimeHttpResponse, String> {
+) -> Result<Response<Body>, String> {
     let body = serde_json::to_vec(&json!({
         "schema": "runtime.agent_run.step.failure.v1",
         "agentRunId": agent_run_id,
@@ -7003,7 +6964,7 @@ mod tests {
             .await
             .expect_err("oversized body must fail")
         });
-        assert_eq!(response.status, 413);
+        assert_eq!(response.status(), 413);
     }
 
     #[test]

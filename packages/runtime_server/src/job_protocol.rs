@@ -32,7 +32,7 @@ fn python_worker_job_kind(value: &str) -> bool {
 pub fn handle(
     method: &str,
     path: &str,
-    headers: &HashMap<String, String>,
+    internal_token: Option<&str>,
     body: &[u8],
     store: &PostgresRuntimeStore,
 ) -> Option<(u16, Vec<u8>)> {
@@ -43,7 +43,7 @@ pub fn handle(
         Ok(value) if !value.is_empty() => value,
         _ => return Some(response(500, json!({"error":"internal_token_unavailable"}))),
     };
-    if Some(token.as_str()) != headers.get("x-internal-token").map(String::as_str) {
+    if Some(token.as_str()) != internal_token {
         return Some(response(401, json!({"error":"unauthorized"})));
     }
     let result = match (method, path) {
