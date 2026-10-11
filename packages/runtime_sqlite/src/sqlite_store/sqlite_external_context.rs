@@ -40,26 +40,7 @@ impl ExternalContextStorePort for SqliteRuntimeStore {
         if object_id.is_empty() {
             return Err("external context object_id is required".to_string());
         }
-        self.with_conn(|conn| {
-            let stored = conn
-                .query_row(
-                    "
-                SELECT schema_version, object_id, object_kind, source_provider_id, source_tool_name,
-                       title, content, content_codec, content_uncompressed_bytes,
-                       content_sha256, metadata_json, updated_at_ms
-                FROM external_context_objects
-                WHERE object_id = ?1
-                ",
-                    params![object_id],
-                    row_to_stored_external_context_object,
-                )
-                .optional()
-                .map_err(|err| format!("load external context object failed: {err}"))?;
-            stored
-                .map(decode_stored_external_context_object)
-                .transpose()
-                .map_err(|err| format!("load external context object failed: {err}"))
-        })
+        self.with_conn(|conn| load_external_context_object_conn(conn, object_id))
     }
 
     fn link_external_context_object(&self, link: ExternalContextObjectLink) -> Result<(), String> {
@@ -417,4 +398,28 @@ fn row_to_external_context_index_entry(
         link_count: usize::try_from(link_count_i64).unwrap_or(usize::MAX),
         last_linked_at_ms: row.get(7)?,
     })
+}
+
+pub(super) fn load_external_context_object_conn(
+    conn: &rusqlite::Connection,
+    object_id: &str,
+) -> Result<Option<ExternalContextObject>, String> {
+    let stored = conn
+        .query_row(
+            "
+                SELECT schema_version, object_id, object_kind, source_provider_id, source_tool_name,
+                       title, content, content_codec, content_uncompressed_bytes,
+                       content_sha256, metadata_json, updated_at_ms
+                FROM external_context_objects
+                WHERE object_id = ?1
+                ",
+            params![object_id],
+            row_to_stored_external_context_object,
+        )
+        .optional()
+        .map_err(|err| format!("load external context object failed: {err}"))?;
+    stored
+        .map(decode_stored_external_context_object)
+        .transpose()
+        .map_err(|err| format!("load external context object failed: {err}"))
 }

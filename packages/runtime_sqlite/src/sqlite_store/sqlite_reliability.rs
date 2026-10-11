@@ -71,158 +71,18 @@ impl RuntimeJobStorePort for SqliteRuntimeStore {
         &self,
         req: ClaimDueRuntimeJobsRequest,
     ) -> Result<Vec<RuntimeJobRecord>, String> {
-        self.with_conn(|conn| {
-            let limit_i64 = to_i64(req.limit)?;
-            let lease_ms = i64::try_from(req.lease_ms)
-                .map_err(|_| format!("lease_ms overflow: {}", req.lease_ms))?;
-            let lease_expires_at_ms = req.now_ms.saturating_add(lease_ms);
-
-            let tx = conn
-                .transaction()
-                .map_err(|err| format!("begin claim_due_runtime_jobs transaction failed: {err}"))?;
-
-            let due_job_ids = {
-                let mut ids = Vec::new();
-                let mut conditions = vec![
-                    "status = 'queued'".to_string(),
-                    "run_at_ms <= ?".to_string(),
-                    "COALESCE(lease_reclaim_not_before_ms, run_at_ms) <= ?".to_string(),
-                ];
-                let mut params_vec = vec![SqlValue::from(req.now_ms), SqlValue::from(req.now_ms)];
-                if let Some(job_id) = req
-                    .job_id
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                {
-                    conditions.push("job_id = ?".to_string());
-                    params_vec.push(SqlValue::from(job_id.to_string()));
-                }
-                if let Some(job_kind) = req
-                    .job_kind
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                {
-                    conditions.push("job_kind = ?".to_string());
-                    params_vec.push(SqlValue::from(job_kind.to_string()));
-                }
-                if let Some(session_id) = req
-                    .session_id
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                {
-                    conditions.push("session_id = ?".to_string());
-                    params_vec.push(SqlValue::from(session_id.to_string()));
-                }
-                params_vec.push(SqlValue::from(limit_i64));
-                let sql = format!(
-                    "
-                    SELECT job_id
-                    FROM runtime_jobs
-                    WHERE {}
-                    ORDER BY run_at_ms ASC, created_at_ms ASC, job_id ASC
-                    LIMIT ?
-                    ",
-                    conditions.join(" AND ")
-                );
-                let mut stmt = tx
-                    .prepare(sql.as_str())
-                    .map_err(|err| format!("prepare claim_due_runtime_jobs failed: {err}"))?;
-                let rows = stmt
-                    .query_map(params_from_iter(params_vec.iter()), |row| {
-                        row.get::<_, String>(0)
-                    })
-                    .map_err(|err| format!("query claim_due_runtime_jobs failed: {err}"))?;
-                for row in rows {
-                    ids.push(row.map_err(|err| {
-                        format!("decode claim_due_runtime_jobs id failed: {err}")
-                    })?);
-                }
-                ids
-            };
-
-            let mut claimed_ids = Vec::new();
-            for job_id in due_job_ids {
-                let updated = tx
-                    .execute(
-                        "
-                        UPDATE runtime_jobs
-                        SET status = 'leased',
-                            lease_owner = ?1 || ':' || lower(hex(randomblob(16))),
-                            lease_expires_at_ms = ?2,
-                            updated_at_ms = ?3,
-                            heartbeat_at_ms = ?3
-                        WHERE job_id = ?4
-                          AND status = 'queued'
-                        ",
-                        params![
-                            req.worker_id.as_str(),
-                            lease_expires_at_ms,
-                            req.now_ms,
-                            job_id.as_str(),
-                        ],
-                    )
-                    .map_err(|err| format!("update claim_due_runtime_jobs failed: {err}"))?;
-                if updated > 0 {
-                    claimed_ids.push(job_id);
-                }
-            }
-
-            let claimed = load_runtime_jobs_by_ids(&tx, &claimed_ids)?;
-            tx.commit().map_err(|err| {
-                format!("commit claim_due_runtime_jobs transaction failed: {err}")
-            })?;
-            Ok(claimed)
-        })
+        self.with_conn(|conn| claim_due_runtime_jobs_transaction_conn(conn, req, &mut |_| {}))
     }
 
     fn start_runtime_job(&self, req: StartRuntimeJobRequest) -> Result<(), String> {
-        self.with_conn(|conn| {
-            let updated = conn
-                .execute(
-                    "
-                    UPDATE runtime_jobs
-                    SET status = 'running',
-                        updated_at_ms = ?1,
-                        heartbeat_at_ms = ?1
-                    WHERE job_id = ?2
-                      AND status = 'leased'
-                      AND lease_owner = ?3
-                      AND lease_expires_at_ms > ?1
-                    ",
-                    params![
-                        req.started_at_ms,
-                        req.job_id.as_str(),
-                        req.lease_owner.as_str(),
-                    ],
-                )
-                .map_err(|err| format!("start_runtime_job failed: {err}"))?;
-            if updated == 0 {
-                return Err(format!(
-                    "start_runtime_job lease mismatch or job not found: {}",
-                    req.job_id
-                ));
-            }
-            Ok(())
-        })
+        self.with_conn(|conn| start_runtime_job_conn(conn, &req))
     }
 
     fn renew_runtime_job_lease(&self, req: RenewRuntimeJobLeaseRequest) -> Result<(), String> {
         let lease_ms = i64::try_from(req.lease_ms)
             .map_err(|_| format!("lease_ms overflow: {}", req.lease_ms))?;
         let lease_expires_at_ms = req.heartbeat_at_ms.saturating_add(lease_ms);
-        self.with_conn(|conn| {
-            let updated = conn.execute(
-                "UPDATE runtime_jobs SET heartbeat_at_ms=?1,lease_expires_at_ms=?2,updated_at_ms=?1 WHERE job_id=?3 AND status IN('leased','running') AND lease_owner=?4 AND lease_expires_at_ms>?1",
-                params![req.heartbeat_at_ms, lease_expires_at_ms, req.job_id, req.lease_owner],
-            ).map_err(|error| format!("renew_runtime_job_lease failed: {error}"))?;
-            if updated != 1 {
-                return Err(format!("renew_runtime_job_lease lease mismatch, expired lease, or job not found: {}", req.job_id));
-            }
-            Ok(())
-        })
+        self.with_conn(|conn| renew_runtime_job_lease_conn(conn, &req, lease_expires_at_ms))
     }
 
     fn yield_runtime_job(&self, req: YieldRuntimeJobRequest) -> Result<(), String> {
@@ -448,80 +308,15 @@ impl RuntimeJobStorePort for SqliteRuntimeStore {
     }
 
     fn complete_runtime_job(&self, req: CompleteRuntimeJobRequest) -> Result<(), String> {
-        self.with_conn(|conn| {
-            let tx = conn
-                .transaction()
-                .map_err(|err| format!("begin complete_runtime_job transaction failed: {err}"))?;
-            complete_runtime_job_conn(&tx, &req)?;
-            upsert_runtime_job_outbox_event(&tx, req.job_id.as_str(), RUNTIME_JOB_TERMINAL_EVENT)?;
-            tx.commit()
-                .map_err(|err| format!("commit complete_runtime_job failed: {err}"))
-        })
+        self.with_conn(|conn| complete_runtime_job_transaction_conn(conn, req, &mut |_| {}))
     }
 
     fn fail_runtime_job(&self, req: FailRuntimeJobRequest) -> Result<(), String> {
-        self.with_conn(|conn| {
-            let tx = conn
-                .transaction()
-                .map_err(|err| format!("begin fail_runtime_job transaction failed: {err}"))?;
-            fail_runtime_job_conn(&tx, &req)?;
-            if !matches!(
-                req.disposition,
-                RuntimeJobFailureDisposition::RetryScheduled
-            ) {
-                upsert_runtime_job_outbox_event(
-                    &tx,
-                    req.job_id.as_str(),
-                    RUNTIME_JOB_TERMINAL_EVENT,
-                )?;
-            }
-            tx.commit()
-                .map_err(|err| format!("commit fail_runtime_job failed: {err}"))
-        })
+        self.with_conn(|conn| fail_runtime_job_transaction_conn(conn, req, &mut |_| {}))
     }
 
     fn cancel_runtime_job(&self, req: CancelRuntimeJobRequest) -> Result<(), String> {
-        self.with_conn(|conn| {
-            let tx = conn
-                .transaction()
-                .map_err(|err| format!("begin cancel_runtime_job transaction failed: {err}"))?;
-            let updated = tx
-                .execute(
-                    "
-                    UPDATE runtime_jobs
-                    SET status = 'cancelled',
-                        updated_at_ms = ?1,
-                        lease_owner = NULL,
-                        lease_expires_at_ms = NULL,
-                        last_error = CASE
-                            WHEN COALESCE(last_error, '') = '' THEN ?2
-                            ELSE last_error
-                        END
-                    WHERE job_id = ?3
-                      AND status NOT IN ('succeeded', 'failed', 'dead_lettered', 'cancelled')
-                      AND (?4 IS NULL OR status = ?4)
-                      AND (?5 IS NULL OR (status IN ('leased', 'running')
-                           AND lease_owner = ?5 AND lease_expires_at_ms > ?1))
-                    ",
-                    params![
-                        req.cancelled_at_ms,
-                        req.reason.as_str(),
-                        req.job_id.as_str(),
-                        req.expected_status.as_ref().map(runtime_job_status_to_db),
-                        req.expected_lease_owner.as_deref(),
-                    ],
-                )
-                .map_err(|err| format!("cancel_runtime_job failed: {err}"))?;
-            if updated == 0 {
-                return Err(format!(
-                    "cancel_runtime_job not found or already terminal: {}",
-                    req.job_id
-                ));
-            }
-            upsert_runtime_job_outbox_event(&tx, req.job_id.as_str(), RUNTIME_JOB_TERMINAL_EVENT)?;
-            tx.commit()
-                .map_err(|err| format!("commit cancel_runtime_job failed: {err}"))
-        })
+        self.with_conn(|conn| cancel_runtime_job_transaction_conn(conn, req, &mut |_| {}))
     }
 
     fn reclaim_expired_runtime_job_leases(
@@ -1231,7 +1026,7 @@ pub(super) fn load_dead_letter_by_original_job(
         .map_err(|err| format!("query load_dead_letter_by_original_job failed: {err}"))
 }
 
-fn list_runtime_jobs_with_filters(
+pub(super) fn list_runtime_jobs_with_filters(
     conn: &rusqlite::Connection,
     req: ListRuntimeJobsRequest,
 ) -> Result<Vec<RuntimeJobRecord>, String> {
@@ -1676,6 +1471,270 @@ pub(super) fn reclaim_expired_runtime_job_leases_conn(
         .map_err(|error| format!("commit expired lease reclaim failed: {error}"))?;
     observe(TransactionEvent::Committed);
     Ok(count)
+}
+
+pub(super) fn claim_due_runtime_jobs_transaction_conn(
+    conn: &mut rusqlite::Connection,
+    req: ClaimDueRuntimeJobsRequest,
+    observe: &mut dyn FnMut(super::sqlite_transactions::TransactionEvent),
+) -> Result<Vec<RuntimeJobRecord>, String> {
+    let limit_i64 = to_i64(req.limit)?;
+    let lease_ms =
+        i64::try_from(req.lease_ms).map_err(|_| format!("lease_ms overflow: {}", req.lease_ms))?;
+    let lease_expires_at_ms = req.now_ms.saturating_add(lease_ms);
+
+    let tx = conn
+        .transaction()
+        .map_err(|err| format!("begin claim_due_runtime_jobs transaction failed: {err}"))?;
+    super::sqlite_transactions::commit_job_write(
+        tx,
+        "commit claim_due_runtime_jobs transaction failed",
+        observe,
+        |tx| {
+            let due_job_ids = {
+                let mut ids = Vec::new();
+                let mut conditions = vec![
+                    "status = 'queued'".to_string(),
+                    "run_at_ms <= ?".to_string(),
+                    "COALESCE(lease_reclaim_not_before_ms, run_at_ms) <= ?".to_string(),
+                ];
+                let mut params_vec = vec![SqlValue::from(req.now_ms), SqlValue::from(req.now_ms)];
+                if let Some(job_id) = req
+                    .job_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    conditions.push("job_id = ?".to_string());
+                    params_vec.push(SqlValue::from(job_id.to_string()));
+                }
+                if let Some(job_kind) = req
+                    .job_kind
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    conditions.push("job_kind = ?".to_string());
+                    params_vec.push(SqlValue::from(job_kind.to_string()));
+                }
+                if let Some(session_id) = req
+                    .session_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    conditions.push("session_id = ?".to_string());
+                    params_vec.push(SqlValue::from(session_id.to_string()));
+                }
+                params_vec.push(SqlValue::from(limit_i64));
+                let sql = format!(
+                    "
+            SELECT job_id
+            FROM runtime_jobs
+            WHERE {}
+            ORDER BY run_at_ms ASC, created_at_ms ASC, job_id ASC
+            LIMIT ?
+            ",
+                    conditions.join(" AND ")
+                );
+                let mut stmt = tx
+                    .prepare(sql.as_str())
+                    .map_err(|err| format!("prepare claim_due_runtime_jobs failed: {err}"))?;
+                let rows = stmt
+                    .query_map(params_from_iter(params_vec.iter()), |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .map_err(|err| format!("query claim_due_runtime_jobs failed: {err}"))?;
+                for row in rows {
+                    ids.push(row.map_err(|err| {
+                        format!("decode claim_due_runtime_jobs id failed: {err}")
+                    })?);
+                }
+                ids
+            };
+
+            let mut claimed_ids = Vec::new();
+            for job_id in due_job_ids {
+                let updated = tx
+                    .execute(
+                        "
+                UPDATE runtime_jobs
+                SET status = 'leased',
+                    lease_owner = ?1 || ':' || lower(hex(randomblob(16))),
+                    lease_expires_at_ms = ?2,
+                    updated_at_ms = ?3,
+                    heartbeat_at_ms = ?3
+                WHERE job_id = ?4
+                  AND status = 'queued'
+                ",
+                        params![
+                            req.worker_id.as_str(),
+                            lease_expires_at_ms,
+                            req.now_ms,
+                            job_id.as_str(),
+                        ],
+                    )
+                    .map_err(|err| format!("update claim_due_runtime_jobs failed: {err}"))?;
+                if updated > 0 {
+                    claimed_ids.push(job_id);
+                }
+            }
+
+            let claimed = load_runtime_jobs_by_ids(tx, &claimed_ids)?;
+            Ok(claimed)
+        },
+    )
+}
+
+pub(super) fn complete_runtime_job_transaction_conn(
+    conn: &mut rusqlite::Connection,
+    req: CompleteRuntimeJobRequest,
+    observe: &mut dyn FnMut(super::sqlite_transactions::TransactionEvent),
+) -> Result<(), String> {
+    let tx = conn
+        .transaction()
+        .map_err(|err| format!("begin complete_runtime_job transaction failed: {err}"))?;
+    super::sqlite_transactions::commit_job_write(
+        tx,
+        "commit complete_runtime_job transaction failed",
+        observe,
+        |tx| {
+            complete_runtime_job_conn(tx, &req)?;
+            upsert_runtime_job_outbox_event(tx, req.job_id.as_str(), RUNTIME_JOB_TERMINAL_EVENT)?;
+            Ok(())
+        },
+    )
+}
+
+pub(super) fn fail_runtime_job_transaction_conn(
+    conn: &mut rusqlite::Connection,
+    req: FailRuntimeJobRequest,
+    observe: &mut dyn FnMut(super::sqlite_transactions::TransactionEvent),
+) -> Result<(), String> {
+    let tx = conn
+        .transaction()
+        .map_err(|err| format!("begin fail_runtime_job transaction failed: {err}"))?;
+    super::sqlite_transactions::commit_job_write(
+        tx,
+        "commit fail_runtime_job transaction failed",
+        observe,
+        |tx| {
+            fail_runtime_job_conn(tx, &req)?;
+            if !matches!(
+                req.disposition,
+                RuntimeJobFailureDisposition::RetryScheduled
+            ) {
+                upsert_runtime_job_outbox_event(
+                    tx,
+                    req.job_id.as_str(),
+                    RUNTIME_JOB_TERMINAL_EVENT,
+                )?;
+            }
+            Ok(())
+        },
+    )
+}
+
+pub(super) fn cancel_runtime_job_transaction_conn(
+    conn: &mut rusqlite::Connection,
+    req: CancelRuntimeJobRequest,
+    observe: &mut dyn FnMut(super::sqlite_transactions::TransactionEvent),
+) -> Result<(), String> {
+    let tx = conn
+        .transaction()
+        .map_err(|err| format!("begin cancel_runtime_job transaction failed: {err}"))?;
+    super::sqlite_transactions::commit_job_write(
+        tx,
+        "commit cancel_runtime_job transaction failed",
+        observe,
+        |tx| {
+            let updated = tx
+                .execute(
+                    "
+            UPDATE runtime_jobs
+            SET status = 'cancelled',
+                updated_at_ms = ?1,
+                lease_owner = NULL,
+                lease_expires_at_ms = NULL,
+                last_error = CASE
+                    WHEN COALESCE(last_error, '') = '' THEN ?2
+                    ELSE last_error
+                END
+            WHERE job_id = ?3
+              AND status NOT IN ('succeeded', 'failed', 'dead_lettered', 'cancelled')
+              AND (?4 IS NULL OR status = ?4)
+              AND (?5 IS NULL OR (status IN ('leased', 'running')
+                   AND lease_owner = ?5 AND lease_expires_at_ms > ?1))
+            ",
+                    params![
+                        req.cancelled_at_ms,
+                        req.reason.as_str(),
+                        req.job_id.as_str(),
+                        req.expected_status.as_ref().map(runtime_job_status_to_db),
+                        req.expected_lease_owner.as_deref(),
+                    ],
+                )
+                .map_err(|err| format!("cancel_runtime_job failed: {err}"))?;
+            if updated == 0 {
+                return Err(format!(
+                    "cancel_runtime_job not found or already terminal: {}",
+                    req.job_id
+                ));
+            }
+            upsert_runtime_job_outbox_event(tx, req.job_id.as_str(), RUNTIME_JOB_TERMINAL_EVENT)?;
+            Ok(())
+        },
+    )
+}
+
+pub(super) fn start_runtime_job_conn(
+    conn: &rusqlite::Connection,
+    req: &StartRuntimeJobRequest,
+) -> Result<(), String> {
+    let updated = conn
+        .execute(
+            "
+                    UPDATE runtime_jobs
+                    SET status = 'running',
+                        updated_at_ms = ?1,
+                        heartbeat_at_ms = ?1
+                    WHERE job_id = ?2
+                      AND status = 'leased'
+                      AND lease_owner = ?3
+                      AND lease_expires_at_ms > ?1
+                    ",
+            params![
+                req.started_at_ms,
+                req.job_id.as_str(),
+                req.lease_owner.as_str(),
+            ],
+        )
+        .map_err(|err| format!("start_runtime_job failed: {err}"))?;
+    if updated == 0 {
+        return Err(format!(
+            "start_runtime_job lease mismatch or job not found: {}",
+            req.job_id
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn renew_runtime_job_lease_conn(
+    conn: &rusqlite::Connection,
+    req: &RenewRuntimeJobLeaseRequest,
+    lease_expires_at_ms: i64,
+) -> Result<(), String> {
+    let updated = conn.execute(
+                "UPDATE runtime_jobs SET heartbeat_at_ms=?1,lease_expires_at_ms=?2,updated_at_ms=?1 WHERE job_id=?3 AND status IN('leased','running') AND lease_owner=?4 AND lease_expires_at_ms>?1",
+                params![req.heartbeat_at_ms, lease_expires_at_ms, req.job_id, req.lease_owner],
+            ).map_err(|error| format!("renew_runtime_job_lease failed: {error}"))?;
+    if updated != 1 {
+        return Err(format!(
+            "renew_runtime_job_lease lease mismatch, expired lease, or job not found: {}",
+            req.job_id
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
