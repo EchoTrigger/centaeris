@@ -452,38 +452,7 @@ impl RuntimeJobStorePort for SqliteRuntimeStore {
             let tx = conn
                 .transaction()
                 .map_err(|err| format!("begin complete_runtime_job transaction failed: {err}"))?;
-            let output_refs_json = serde_json::to_string(&req.output_refs).map_err(|err| {
-                format!("serialize complete_runtime_job output_refs failed: {err}")
-            })?;
-            let updated = tx
-                .execute(
-                    "
-                    UPDATE runtime_jobs
-                    SET status = 'succeeded',
-                        output_refs_json = ?1,
-                        updated_at_ms = ?2,
-                        lease_owner = NULL,
-                        lease_expires_at_ms = NULL,
-                        last_error = NULL
-                    WHERE job_id = ?3
-                      AND status IN ('leased', 'running')
-                      AND lease_owner = ?4
-                      AND lease_expires_at_ms > ?2
-                    ",
-                    params![
-                        output_refs_json,
-                        req.completed_at_ms,
-                        req.job_id.as_str(),
-                        req.lease_owner.as_str(),
-                    ],
-                )
-                .map_err(|err| format!("complete_runtime_job failed: {err}"))?;
-            if updated == 0 {
-                return Err(format!(
-                    "complete_runtime_job lease mismatch or job not found: {}",
-                    req.job_id
-                ));
-            }
+            complete_runtime_job_conn(&tx, &req)?;
             upsert_runtime_job_outbox_event(&tx, req.job_id.as_str(), RUNTIME_JOB_TERMINAL_EVENT)?;
             tx.commit()
                 .map_err(|err| format!("commit complete_runtime_job failed: {err}"))
@@ -495,52 +464,7 @@ impl RuntimeJobStorePort for SqliteRuntimeStore {
             let tx = conn
                 .transaction()
                 .map_err(|err| format!("begin fail_runtime_job transaction failed: {err}"))?;
-            let (status_raw, run_at_ms) = match req.disposition {
-                RuntimeJobFailureDisposition::RetryScheduled => (
-                    "queued",
-                    req.next_run_at_ms.ok_or_else(|| {
-                        format!(
-                            "fail_runtime_job retry_scheduled requires next_run_at_ms job_id={}",
-                            req.job_id
-                        )
-                    })?,
-                ),
-                RuntimeJobFailureDisposition::Failed => ("failed", req.failed_at_ms),
-                RuntimeJobFailureDisposition::DeadLettered => ("dead_lettered", req.failed_at_ms),
-            };
-
-            let updated = tx
-                .execute(
-                    "
-                    UPDATE runtime_jobs
-                    SET status = ?1,
-                        run_at_ms = ?2,
-                        retry_count = retry_count + 1,
-                        updated_at_ms = ?3,
-                        lease_owner = NULL,
-                        lease_expires_at_ms = NULL,
-                        last_error = ?4
-                    WHERE job_id = ?5
-                      AND status IN ('leased', 'running')
-                      AND lease_owner = ?6
-                      AND lease_expires_at_ms > ?3
-                    ",
-                    params![
-                        status_raw,
-                        run_at_ms,
-                        req.failed_at_ms,
-                        req.last_error.as_str(),
-                        req.job_id.as_str(),
-                        req.lease_owner.as_str(),
-                    ],
-                )
-                .map_err(|err| format!("fail_runtime_job failed: {err}"))?;
-            if updated == 0 {
-                return Err(format!(
-                    "fail_runtime_job lease mismatch or job not found: {}",
-                    req.job_id
-                ));
-            }
+            fail_runtime_job_conn(&tx, &req)?;
             if !matches!(
                 req.disposition,
                 RuntimeJobFailureDisposition::RetryScheduled
@@ -2202,4 +2126,97 @@ mod tests {
             .is_err());
         let _ = std::fs::remove_file(db_path);
     }
+}
+
+pub(super) fn complete_runtime_job_conn(
+    conn: &rusqlite::Connection,
+    req: &centaeris_core::session::reliability::CompleteRuntimeJobRequest,
+) -> Result<(), String> {
+    let output_refs_json = serde_json::to_string(&req.output_refs)
+        .map_err(|err| format!("serialize complete_runtime_job output_refs failed: {err}"))?;
+    let updated = conn
+        .execute(
+            "
+            UPDATE runtime_jobs
+            SET status = ?1,
+                output_refs_json = ?2,
+                updated_at_ms = ?3,
+                lease_owner = NULL,
+                lease_expires_at_ms = NULL,
+                last_error = NULL
+            WHERE job_id = ?4
+              AND lease_owner = ?5
+              AND status IN ('leased', 'running')
+              AND lease_expires_at_ms > ?3
+            ",
+            params![
+                runtime_job_status_to_db(&RuntimeJobStatus::Succeeded),
+                output_refs_json,
+                req.completed_at_ms,
+                req.job_id.as_str(),
+                req.lease_owner.as_str(),
+            ],
+        )
+        .map_err(|err| format!("complete_runtime_job failed: {err}"))?;
+    if updated == 0 {
+        return Err(format!(
+            "complete_runtime_job lease mismatch or job not found: {}",
+            req.job_id
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn fail_runtime_job_conn(
+    conn: &rusqlite::Connection,
+    req: &centaeris_core::session::reliability::FailRuntimeJobRequest,
+) -> Result<(), String> {
+    let (next_status, next_run_at_ms) = match req.disposition {
+        RuntimeJobFailureDisposition::RetryScheduled => {
+            let next = req.next_run_at_ms.ok_or_else(|| {
+                format!(
+                    "fail_runtime_job retry_scheduled requires next_run_at_ms job_id={}",
+                    req.job_id
+                )
+            })?;
+            (RuntimeJobStatus::Queued, next)
+        }
+        RuntimeJobFailureDisposition::Failed => (RuntimeJobStatus::Failed, req.failed_at_ms),
+        RuntimeJobFailureDisposition::DeadLettered => {
+            (RuntimeJobStatus::DeadLettered, req.failed_at_ms)
+        }
+    };
+    let updated = conn
+        .execute(
+            "
+            UPDATE runtime_jobs
+            SET status = ?1,
+                run_at_ms = ?2,
+                retry_count = retry_count + 1,
+                lease_owner = NULL,
+                lease_expires_at_ms = NULL,
+                last_error = ?3,
+                updated_at_ms = ?4
+            WHERE job_id = ?5
+              AND lease_owner = ?6
+              AND status IN ('leased', 'running')
+              AND lease_expires_at_ms > ?4
+            ",
+            params![
+                runtime_job_status_to_db(&next_status),
+                next_run_at_ms,
+                req.last_error.as_str(),
+                req.failed_at_ms,
+                req.job_id.as_str(),
+                req.lease_owner.as_str(),
+            ],
+        )
+        .map_err(|err| format!("fail_runtime_job failed: {err}"))?;
+    if updated == 0 {
+        return Err(format!(
+            "fail_runtime_job lease mismatch or job not found: {}",
+            req.job_id
+        ));
+    }
+    Ok(())
 }

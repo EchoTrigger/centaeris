@@ -1,7 +1,7 @@
 use super::*;
 use centaeris_core::session::reliability::{
-    RuntimeJobFailureDisposition, RuntimeJobStatus, ScheduleRuntimeJobDisposition,
-    ScheduleRuntimeJobResult, RUNTIME_JOB_TERMINAL_EVENT,
+    RuntimeJobFailureDisposition, ScheduleRuntimeJobDisposition, ScheduleRuntimeJobResult,
+    RUNTIME_JOB_TERMINAL_EVENT,
 };
 use centaeris_core::session::store::{
     ConsumeWaitCheckpointRequest, CreateDeadLetterAndFailJobRequest, RuntimeStoreTransactionPort,
@@ -137,7 +137,7 @@ impl RuntimeStoreTransactionPort for SqliteRuntimeStore {
             if let Some(link) = req.link.as_ref() {
                 super::sqlite_external_context::link_external_context_object_conn(&tx, link)?;
             }
-            complete_runtime_job_conn(&tx, &req.complete_job)?;
+            super::sqlite_reliability::complete_runtime_job_conn(&tx, &req.complete_job)?;
             super::sqlite_reliability::upsert_runtime_job_outbox_event(
                 &tx,
                 req.complete_job.job_id.as_str(),
@@ -164,7 +164,7 @@ impl RuntimeStoreTransactionPort for SqliteRuntimeStore {
                 &tx,
                 &req.dead_letter.dead_letter,
             )?;
-            fail_runtime_job_conn(&tx, &req.fail_job)?;
+            super::sqlite_reliability::fail_runtime_job_conn(&tx, &req.fail_job)?;
             if !matches!(
                 req.fail_job.disposition,
                 RuntimeJobFailureDisposition::RetryScheduled
@@ -235,99 +235,6 @@ fn validate_consume_wait_checkpoint(req: &ConsumeWaitCheckpointRequest) -> Resul
         if !event_ids.insert(event.event_id.as_str()) {
             return Err("consume_wait_checkpoint duplicate event id".to_string());
         }
-    }
-    Ok(())
-}
-
-fn complete_runtime_job_conn(
-    conn: &rusqlite::Connection,
-    req: &centaeris_core::session::reliability::CompleteRuntimeJobRequest,
-) -> Result<(), String> {
-    let output_refs_json = serde_json::to_string(&req.output_refs)
-        .map_err(|err| format!("serialize complete_runtime_job output_refs failed: {err}"))?;
-    let updated = conn
-        .execute(
-            "
-            UPDATE runtime_jobs
-            SET status = ?1,
-                output_refs_json = ?2,
-                updated_at_ms = ?3,
-                lease_owner = NULL,
-                lease_expires_at_ms = NULL,
-                last_error = NULL
-            WHERE job_id = ?4
-              AND lease_owner = ?5
-              AND status IN ('leased', 'running')
-              AND lease_expires_at_ms > ?3
-            ",
-            params![
-                super::sqlite_reliability::runtime_job_status_to_db(&RuntimeJobStatus::Succeeded),
-                output_refs_json,
-                req.completed_at_ms,
-                req.job_id.as_str(),
-                req.lease_owner.as_str(),
-            ],
-        )
-        .map_err(|err| format!("complete_runtime_job failed: {err}"))?;
-    if updated == 0 {
-        return Err(format!(
-            "complete_runtime_job lease mismatch or job not found: {}",
-            req.job_id
-        ));
-    }
-    Ok(())
-}
-
-fn fail_runtime_job_conn(
-    conn: &rusqlite::Connection,
-    req: &centaeris_core::session::reliability::FailRuntimeJobRequest,
-) -> Result<(), String> {
-    let (next_status, next_run_at_ms) = match req.disposition {
-        RuntimeJobFailureDisposition::RetryScheduled => {
-            let next = req.next_run_at_ms.ok_or_else(|| {
-                format!(
-                    "fail_runtime_job retry_scheduled requires next_run_at_ms job_id={}",
-                    req.job_id
-                )
-            })?;
-            (RuntimeJobStatus::Queued, next)
-        }
-        RuntimeJobFailureDisposition::Failed => (RuntimeJobStatus::Failed, req.failed_at_ms),
-        RuntimeJobFailureDisposition::DeadLettered => {
-            (RuntimeJobStatus::DeadLettered, req.failed_at_ms)
-        }
-    };
-    let updated = conn
-        .execute(
-            "
-            UPDATE runtime_jobs
-            SET status = ?1,
-                run_at_ms = ?2,
-                retry_count = retry_count + 1,
-                lease_owner = NULL,
-                lease_expires_at_ms = NULL,
-                last_error = ?3,
-                updated_at_ms = ?4
-            WHERE job_id = ?5
-              AND lease_owner = ?6
-              AND status IN ('leased', 'running')
-              AND lease_expires_at_ms > ?4
-            ",
-            params![
-                super::sqlite_reliability::runtime_job_status_to_db(&next_status),
-                next_run_at_ms,
-                req.last_error.as_str(),
-                req.failed_at_ms,
-                req.job_id.as_str(),
-                req.lease_owner.as_str(),
-            ],
-        )
-        .map_err(|err| format!("fail_runtime_job failed: {err}"))?;
-    if updated == 0 {
-        return Err(format!(
-            "fail_runtime_job lease mismatch or job not found: {}",
-            req.job_id
-        ));
     }
     Ok(())
 }
