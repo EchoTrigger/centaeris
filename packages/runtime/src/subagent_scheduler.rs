@@ -255,10 +255,7 @@ async fn next_queued_parent_session() -> Result<Option<String>, String> {
                 }
                 Err(error) => return Err(error.diagnostic_message()),
             };
-            if !sessions::list(sessions::SessionListRequest {})?
-                .iter()
-                .any(|item| item.id == parent_session_id)
-            {
+            if sessions::listed_session(parent_session_id)?.is_none() {
                 stop_job(store.as_ref(), &job, "session_deleted").await?;
                 offset += usize::from(queued_job_is_retained(store.as_ref(), &job.job_id).await?);
                 continue;

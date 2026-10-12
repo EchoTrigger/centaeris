@@ -143,14 +143,7 @@ async fn deliver_terminal_job_in_scope(
         .as_deref()
         .ok_or("terminal delivery parent missing")?;
     let _work = writer.begin_background_work(parent)?;
-    let native = sessions::list(sessions::SessionListRequest {})?
-        .into_iter()
-        .filter(|session| {
-            session.session_kind == "subagent"
-                && session.runtime_job_id.as_deref() == Some(job_id)
-                && session.parent_session_id.as_deref() == Some(parent)
-        })
-        .collect::<Vec<_>>();
+    let native = sessions::listed_children_for_job(parent, job_id)?;
     let [child] = native.as_slice() else {
         return Err(format!(
             "terminal delivery requires one authoritative child binding: {job_id}"

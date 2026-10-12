@@ -11,6 +11,11 @@ use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 use std::sync::{Mutex, OnceLock};
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_SESSION_RESPONSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 const SESSION_CREATE_METHOD: &str = "session/new";
 static SESSION_CREATE_OPERATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -188,6 +193,17 @@ pub(crate) fn list(_request: SessionListRequest) -> Result<Vec<SessionItemRespon
         .iter()
         .map(|item| to_response_with_activity(item, &idle_session_ids))
         .collect()
+}
+
+pub(crate) fn listed_session(session_id: &str) -> Result<Option<SessionFileItem>, String> {
+    session_files()?.listed_session(session_id)
+}
+
+pub(crate) fn listed_children_for_job(
+    parent: &str,
+    job: &str,
+) -> Result<Vec<SessionFileItem>, String> {
+    session_files()?.listed_children_for_job(parent, job)
 }
 
 pub(crate) fn diagnostics(
@@ -644,11 +660,7 @@ pub(crate) fn find_agent_runtime_binding(
     if session_id.is_empty() {
         return Err("sessionId is required".to_string());
     }
-    let Some(item) = session_files()?
-        .list()?
-        .into_iter()
-        .find(|item| item.id == session_id)
-    else {
+    let Some(item) = listed_session(session_id)? else {
         return Ok(None);
     };
     if item.session_kind != "subagent" {
@@ -707,6 +719,8 @@ fn to_response_with_activity(
     item: &SessionFileItem,
     idle_session_ids: &std::collections::HashSet<String>,
 ) -> Result<SessionItemResponse, String> {
+    #[cfg(test)]
+    TEST_SESSION_RESPONSE_COUNT.with(|count| count.set(count.get() + 1));
     Ok(SessionItemResponse {
         id: item.id.clone(),
         title: item.title.clone(),
