@@ -465,11 +465,13 @@ fn run_message_runtime_contract(revocation_window: bool) {
     tools
         .register_dynamic_tool_provider(Arc::new(ProbeProvider))
         .unwrap();
+    let executor = tokio::runtime::Runtime::new().unwrap();
     let engine = AgentRuntime::new(
-        std::sync::Arc::new(
+        std::sync::Arc::new({
+            let _guard = executor.enter();
             centaeris_core::session::store::RuntimeStoreActor::start(store.clone())
-                .expect("test Job Actor"),
-        ),
+                .expect("test Job Actor")
+        }),
         store.clone(),
         tools,
         AgentRuntimeConfig {
@@ -489,7 +491,6 @@ fn run_message_runtime_contract(revocation_window: bool) {
         revocation_window,
     };
     let mut batches = vec![];
-    let executor = tokio::runtime::Runtime::new().unwrap();
     let result=executor.block_on(engine.process_turn_loop_online_with_model_client_stream_cancellable_and_tool_safe_point_async(
         AgentRunRequest {session_id:session.clone(),initial_turn_id:start.turn_id.clone(),initial_input:AgentRunInitialInput::UserMessage(start.prompt.clone()),
             agent_run_identity:Some(RuntimeAgentRunIdentityV1 {agent_run_id:run.clone(),execution_id:"synthetic-message-execution".into(),
