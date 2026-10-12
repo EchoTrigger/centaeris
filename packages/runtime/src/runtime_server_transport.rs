@@ -590,7 +590,29 @@ async fn serve_connection<TStream>(
     state: Arc<Mutex<RuntimeHostState>>,
     clients: Arc<RuntimeServerClientHub>,
     event_writer: EventWriter,
+    outbound: tokio::sync::mpsc::Receiver<OutboundFrame>,
+) where
+    TStream: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    serve_connection_with_dispatch(
+        stream,
+        state,
+        clients,
+        event_writer,
+        outbound,
+        spawn_request_handler,
+    )
+    .await;
+}
+
+async fn serve_connection_with_dispatch<TStream>(
+    stream: TStream,
+    state: Arc<Mutex<RuntimeHostState>>,
+    clients: Arc<RuntimeServerClientHub>,
+    event_writer: EventWriter,
     mut outbound: tokio::sync::mpsc::Receiver<OutboundFrame>,
+    dispatch: impl Fn(Arc<Mutex<RuntimeHostState>>, EventWriter, RuntimeRpcRequest, RequestPermit)
+        + Send,
 ) where
     TStream: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -635,10 +657,7 @@ async fn serve_connection<TStream>(
             Ok(RuntimeRpcFrame::Request(request)) => {
                 let control = crate::commands::RuntimeHostCommand::parse(&request.method)
                     .ok()
-                    .is_some_and(|command| {
-                        command == crate::commands::RuntimeHostCommand::Initialize
-                            || allowed_while_draining(command)
-                    });
+                    .is_some_and(uses_control_admission);
                 let permit = match event_writer.request_permit(control) {
                     Ok(permit) => permit,
                     Err(error) => {
@@ -648,7 +667,7 @@ async fn serve_connection<TStream>(
                         break;
                     }
                 };
-                spawn_request_handler(Arc::clone(&state), event_writer.clone(), request, permit)
+                dispatch(Arc::clone(&state), event_writer.clone(), request, permit)
             }
             Ok(RuntimeRpcFrame::Response(_)) => {
                 log_runtime_server(format_args!(
@@ -735,6 +754,22 @@ async fn handle_rpc_request(
     }
 }
 
+// Transport headroom is reserved for lifecycle control, independently of which
+// operations remain legal during shutdown. Ordinary reads use ordinary capacity.
+fn uses_control_admission(command: crate::commands::RuntimeHostCommand) -> bool {
+    use crate::commands::RuntimeHostCommand;
+    matches!(
+        command,
+        RuntimeHostCommand::Initialize
+            | RuntimeHostCommand::AgentRunCancel
+            | RuntimeHostCommand::AgentRunDetach
+            | RuntimeHostCommand::AgentRunDetachViewer
+            | RuntimeHostCommand::AppExit
+            | RuntimeHostCommand::RuntimeShutdown
+            | RuntimeHostCommand::SidecarStop
+    )
+}
+
 fn allowed_while_draining(command: crate::commands::RuntimeHostCommand) -> bool {
     use crate::commands::RuntimeHostCommand;
     command.operation_kind() == crate::runtime_command_registry::RuntimeOperationKind::Read
@@ -792,6 +827,120 @@ mod tests {
             _cx: &mut std::task::Context<'_>,
         ) -> std::task::Poll<std::io::Result<()>> {
             std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn slow_reads_fill_ordinary_capacity_without_consuming_cancel_headroom() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        use tokio_util::sync::CancellationToken;
+
+        let clients = Arc::new(RuntimeServerClientHub::default());
+        let (writer, outbound) = clients.connect().unwrap().unwrap();
+        writer
+            .register_client(
+                crate::runtime_server::RuntimeClientKind::Desktop,
+                "control-read-test",
+            )
+            .unwrap();
+        let (server, mut peer) = tokio::io::duplex(4096);
+        let (observed, mut observations) = tokio::sync::mpsc::channel(9);
+        let release_reads = CancellationToken::new();
+        let _release_on_failure = release_reads.clone().drop_guard();
+        let release_for_dispatch = release_reads.clone();
+        let handlers = Arc::new(Mutex::new(Vec::new()));
+        let handlers_for_dispatch = handlers.clone();
+        // Isolate business handlers: exercise real framing, command classification,
+        // admission and response writing while keeping reads deterministically active.
+        let serving = tokio::spawn(serve_connection_with_dispatch(
+            server,
+            Arc::new(Mutex::new(RuntimeHostState::default())),
+            clients,
+            writer,
+            outbound,
+            move |_state, writer, request, permit| {
+                let observed = observed.clone();
+                let release = release_for_dispatch.clone();
+                let handler = tokio::spawn(async move {
+                    let _permit = permit;
+                    let is_read = request.method == "session/list";
+                    assert!(is_read || request.method == "_centaeris/session/agent-runs/cancel");
+                    observed.send(request.method).await.unwrap();
+                    drop(observed);
+                    if is_read {
+                        release.cancelled().await;
+                    }
+                    writer
+                        .send_response(&RuntimeRpcResponse::success(
+                            request.id,
+                            serde_json::Value::Null,
+                        ))
+                        .unwrap();
+                });
+                handlers_for_dispatch.lock().unwrap().push(handler);
+            },
+        ));
+        for id in 0..8 {
+            let request =
+                serde_json::json!({"jsonrpc":"2.0", "id":id, "method":"session/list", "params":{}});
+            peer.write_all(format!("{request}\n").as_bytes())
+                .await
+                .unwrap();
+            let observed = tokio::time::timeout(Duration::from_secs(1), observations.recv())
+                .await
+                .unwrap();
+            assert_eq!(
+                observed.as_deref(),
+                Some("session/list"),
+                "all eight reads must enter before cancellation"
+            );
+        }
+        let request = serde_json::json!({"jsonrpc":"2.0", "id":99, "method":"_centaeris/session/agent-runs/cancel", "params":{"agentRunId":"run"}});
+        peer.write_all(format!("{request}\n").as_bytes())
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), observations.recv())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("_centaeris/session/agent-runs/cancel")
+        );
+        let mut peer = BufReader::new(peer);
+        let mut response = String::new();
+        tokio::time::timeout(Duration::from_secs(1), peer.read_line(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        let RuntimeRpcFrame::Response(response) = decode_jsonl_frame(&response).unwrap() else {
+            panic!("cancel response expected")
+        };
+        assert_eq!(
+            serde_json::to_value(&response.id).unwrap(),
+            serde_json::json!(99)
+        );
+        assert_eq!(response.result, Some(serde_json::Value::Null));
+        release_reads.cancel();
+        // Drain all previously accepted reads before disconnecting their writer.
+        for _ in 0..8 {
+            let mut response = String::new();
+            tokio::time::timeout(Duration::from_secs(1), peer.read_line(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                decode_jsonl_frame(&response).unwrap(),
+                RuntimeRpcFrame::Response(_)
+            ));
+        }
+        drop(peer);
+        tokio::time::timeout(Duration::from_secs(1), serving)
+            .await
+            .unwrap()
+            .unwrap();
+        let handlers = std::mem::take(&mut *handlers.lock().unwrap());
+        for handler in handlers {
+            handler.await.unwrap();
         }
     }
 
@@ -1213,6 +1362,7 @@ mod tests {
                 == crate::runtime_command_registry::RuntimeOperationKind::Read
             {
                 assert!(allowed_while_draining(command), "{}", descriptor.command);
+                assert!(!uses_control_admission(command), "{}", descriptor.command);
             }
         }
         for method in [

@@ -16,6 +16,20 @@ credentials or supplier calls are needed. Regression tests cover invalid input,
 finite buffers, cancellation and failure cleanup; they do not lock source names.
 The portable Rust gate and focused Core query-loop gate remain required.
 
+## RPC lifecycle control admission
+
+Request capacity and shutdown eligibility are separate policies. Ordinary reads
+share the ordinary request lane. Only initialization, AgentRun cancel/detach/
+detach-viewer, app exit, Runtime shutdown and sidecar stop use reserved lifecycle
+control capacity. Reads remain legal during shutdown drain, but do not consume
+that reserved capacity; the finite control lane can still exhaust on control traffic.
+
+A real duplex-connection regression holds eight read handlers pending, confirms
+that all were dispatched, and verifies a cancel request and its response while
+those reads remain active. The test isolates business handlers to avoid store-lock
+interference; framing, command classification, admission and writing are real.
+Existing shutdown and active-action rules remain unchanged.
+
 ## Atomic file publication
 
 Temporary files are created exclusively in the target's directory using tempfile.
