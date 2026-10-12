@@ -488,6 +488,7 @@ class LibraryObjectResponse(StrictSchema):
     parent_folder_id: str | None
     deleted_at: str | None
     deletion_generation: int
+    content_generation: int
     updated_at: str
 
 
@@ -536,6 +537,11 @@ class TrashEnvelope(StrictSchema):
 
 class LibraryNoteEnvelope(LibraryObjectEnvelope):
     markdown: str
+
+
+class LibraryNoteSaveEnvelope(LibraryObjectEnvelope):
+    save_id: str
+    applied_generation: int
 
 
 class ArtifactResponse(StrictSchema):

@@ -6544,6 +6544,7 @@ class WorkspaceAssetAcceptanceTests(TestCase):
             data=json.dumps(
                 {
                     "displayName": "讨论",
+                    "saveId": "1234567890abcdef1234567890abcdef",
                     "markdown": "# 结论",
                     "parentFolderId": folderId,
                 }
@@ -6567,12 +6568,13 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         updated = self.client.put(
             f"/api/library/{noteId}/note",
             data=json.dumps(
-                {"displayName": "更新后的讨论", "markdown": "更新后的讨论\n\n# 正文"}
+                {"displayName": "更新后的讨论", "markdown": "更新后的讨论\n\n# 正文",
+                 "saveId": "abcdef1234567890abcdef1234567890", "baseGeneration": 1}
             ),
             content_type="application/json",
         )
         self.assertEqual(updated.status_code, 200)
-        self.assertEqual(updated.json()["markdown"], "更新后的讨论\n\n# 正文")
+        self.assertEqual(self.client.get(f"/api/library/{noteId}/note").json()["markdown"], "更新后的讨论\n\n# 正文")
         self.assertEqual(updated.json()["object"]["displayName"], "更新后的讨论")
         moved = self.client.patch(
             f"/api/library/{noteId}",
