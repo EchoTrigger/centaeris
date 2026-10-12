@@ -3718,7 +3718,7 @@ fn normalize_session_id(raw: Option<&str>) -> String {
         .unwrap_or_else(|| "chat-default".to_string())
 }
 
-fn agent_runtime_store_db_path() -> PathBuf {
+pub(crate) fn agent_runtime_store_db_path() -> PathBuf {
     if let Some(path_raw) = std::env::var_os("CENTAERIS_AGENT_RUNTIME_DB_PATH") {
         return PathBuf::from(path_raw);
     }

@@ -1686,20 +1686,39 @@ pub(super) fn list_pending_runtime_job_outbox_conn(
     job_kind: Option<&str>,
     job_id: Option<&str>,
 ) -> Result<Vec<RuntimeJobOutboxRecord>, String> {
+    list_pending_runtime_job_outbox_after_conn(conn, limit, job_kind, job_id, None)
+}
+
+pub(super) fn list_pending_runtime_job_outbox_after_conn(
+    conn: &rusqlite::Connection,
+    limit: usize,
+    job_kind: Option<&str>,
+    job_id: Option<&str>,
+    after: Option<(&str, &str)>,
+) -> Result<Vec<RuntimeJobOutboxRecord>, String> {
     let mut statement = conn
-                .prepare("SELECT job_id,event_type,published_at_ms,generation FROM runtime_job_outbox WHERE published_at_ms IS NULL AND (?2 IS NULL OR EXISTS(SELECT 1 FROM runtime_jobs j WHERE j.job_id=runtime_job_outbox.job_id AND j.job_kind=?2)) AND (?3 IS NULL OR job_id=?3) ORDER BY job_id,event_type LIMIT ?1")
+                .prepare("SELECT job_id,event_type,published_at_ms,generation FROM runtime_job_outbox WHERE published_at_ms IS NULL AND (?2 IS NULL OR EXISTS(SELECT 1 FROM runtime_jobs j WHERE j.job_id=runtime_job_outbox.job_id AND j.job_kind=?2)) AND (?3 IS NULL OR job_id=?3) AND (?4 IS NULL OR (job_id,event_type) > (?4,?5)) ORDER BY job_id,event_type LIMIT ?1")
                 .map_err(|error| format!("prepare runtime job outbox list failed: {error}"))?;
     let records = statement
-        .query_map(params![to_i64(limit)?, job_kind, job_id], |row| {
-            let generation = row.get::<_, i64>(3)?;
-            Ok(RuntimeJobOutboxRecord {
-                job_id: row.get(0)?,
-                event_type: row.get(1)?,
-                published_at_ms: row.get(2)?,
-                generation: u32::try_from(generation)
-                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, generation))?,
-            })
-        })
+        .query_map(
+            params![
+                to_i64(limit)?,
+                job_kind,
+                job_id,
+                after.map(|key| key.0),
+                after.map(|key| key.1)
+            ],
+            |row| {
+                let generation = row.get::<_, i64>(3)?;
+                Ok(RuntimeJobOutboxRecord {
+                    job_id: row.get(0)?,
+                    event_type: row.get(1)?,
+                    published_at_ms: row.get(2)?,
+                    generation: u32::try_from(generation)
+                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, generation))?,
+                })
+            },
+        )
         .map_err(|error| format!("query runtime job outbox failed: {error}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("decode runtime job outbox failed: {error}"))?;
