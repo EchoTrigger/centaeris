@@ -21,7 +21,7 @@ from .models import Artifact, MaterialProcessingTask, Source, SourceObject, User
 @dataclass(frozen=True)
 class ProcessingSource:
     owner: object
-    storage_key: str
+    content_source: object
     input_identity: dict
     size_bytes: int
 
@@ -61,11 +61,12 @@ def resolve_task_source(task, *, lock=False):
         raise KnowledgeError("material_task_payload_invalid")
     model = {"userLibraryObject": UserLibraryObject, "sourceObject": SourceObject, "artifact": Artifact}[identity["ownerKind"]]
     try:
-        owner = model.objects.get(pk=identity["ownerId"])
+        query = model.objects.select_related("noteHead") if model is UserLibraryObject else model.objects
+        owner = query.get(pk=identity["ownerId"])
         if lock:
             # Parent-before-child agrees with source deletion/GC ordering.
             source = Source.objects.select_for_update().get(pk=owner.source_id) if isinstance(owner, SourceObject) else None
-            owner = model.objects.select_for_update().get(pk=identity["ownerId"])
+            owner = query.select_for_update(of=("self",)).get(pk=identity["ownerId"])
             if source is not None:
                 if owner.source_id != source.pk:
                     raise KnowledgeError("material_source_identity_changed", 409)
@@ -82,6 +83,9 @@ def resolve_task_source(task, *, lock=False):
     if (owner.contentGeneration != identity["generation"] or owner.sha256 != identity["sha256"]
             or owner.sizeBytes != payload["sizeBytes"]):
         raise KnowledgeError("material_source_identity_changed", 409)
-    if not owner.storageKey or not default_storage.exists(owner.storageKey):
+    from .note_content import content_source
+    try:
+        source = content_source(owner)
+    except FileNotFoundError:
         raise KnowledgeError("material_source_unavailable", 404)
-    return ProcessingSource(owner, owner.storageKey, identity, payload["sizeBytes"])
+    return ProcessingSource(owner, source, identity, payload["sizeBytes"])

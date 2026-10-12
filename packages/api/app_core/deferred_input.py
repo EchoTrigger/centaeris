@@ -83,7 +83,7 @@ def _current_input(agent_run, input_ref: str, expected_authorization_digest: str
     try:
         link = SessionAssetLink.objects.select_related(
             "sourceObject__source",
-            "userLibraryObject",
+            "userLibraryObject__noteHead",
             "artifact",
         ).get(
             id=input_ref,
@@ -115,7 +115,9 @@ def _current_input(agent_run, input_ref: str, expected_authorization_digest: str
             "resolved input identity changed after AgentRun authorization"
         )
     owner = link.sourceObject or link.userLibraryObject or link.artifact
-    storage_key = owner.storageKey
-    if not storage_key or not default_storage.exists(storage_key):
+    from .note_content import content_source
+    try:
+        storage_key = content_source(owner)
+    except FileNotFoundError:
         raise DeferredInputResolutionError("asset_unavailable")
     return {"resolvedInput": resolved, "storageKey": storage_key}

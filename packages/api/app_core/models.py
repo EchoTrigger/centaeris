@@ -2110,6 +2110,10 @@ class UserLibraryObject(models.Model):
     sizeBytes = models.BigIntegerField(null=True, blank=True)
     sha256 = models.CharField(max_length=71, blank=True, default="")
     storageKey = models.CharField(max_length=1000, blank=True, default="")
+    noteHead = models.ForeignKey(
+        "LibraryNoteRevision", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="currentFor",
+    )
     parentFolder = models.ForeignKey(
         "self",
         on_delete=models.PROTECT,
@@ -2302,6 +2306,39 @@ class ArtifactPublication(models.Model):
         if self.artifact_id is not None and self.artifact.agent_run_id != self.agent_run_id:
             raise ValueError("ArtifactPublication AgentRun binding mismatch")
         return super().save(*args, **kwargs)
+
+
+class LibraryNoteRevision(models.Model):
+    note = models.ForeignKey(UserLibraryObject, on_delete=models.CASCADE, related_name="noteRevisions")
+    generation = models.PositiveBigIntegerField()
+    displayName = models.CharField(max_length=255)
+    markdown = models.TextField()
+    sha256 = models.CharField(max_length=71)
+    sizeBytes = models.PositiveBigIntegerField()
+    protected = models.BooleanField(default=False)
+    createdAt = models.DateTimeField(auto_now_add=True)
+    createdBy = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+")
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["note", "generation"], name="unique_note_revision_generation")]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValueError("note_revision_immutable")
+        super().save(*args, **kwargs)
+
+
+class LibraryNoteSaveReceipt(models.Model):
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+")
+    saveId = models.CharField(max_length=64)
+    requestDigest = models.CharField(max_length=64)
+    noteId = models.CharField(max_length=64)
+    appliedGeneration = models.PositiveBigIntegerField()
+    resultMetadata = models.JSONField()
+    createdAt = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["owner", "saveId"], name="unique_note_save_receipt")]
 
 
 class DerivedResource(models.Model):

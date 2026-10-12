@@ -1059,7 +1059,8 @@ async def read_deferred_input(request):
     if isinstance(prepared, JsonResponse):
         return prepared
     resolved_input, storage_key = prepared
-    response = await stored_file_response(
+    from app_core.note_content import content_response
+    response = await content_response(
         storage_key,
         resolved_input["contentType"],
         resolved_input["displayName"],

@@ -18,6 +18,7 @@ from .models import DerivedResource, UserLibraryObject
 
 
 class LibraryNoteFileSaveTests(TransactionTestCase):
+    serialized_rollback = True
     def setUp(self):
         directory = tempfile.TemporaryDirectory(prefix="note-save-")
         self.addCleanup(directory.cleanup)

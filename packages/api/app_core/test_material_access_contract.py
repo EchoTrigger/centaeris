@@ -108,7 +108,7 @@ class MaterialAccessContractTests(SimpleTestCase):
         self.storage.assert_not_called()
 
     def test_revoked_or_deleted_input_is_not_resolved_from_the_snapshot(self):
-        self.assertEqual(self.bind()[0].storage_key, "private/source")
+        self.assertEqual(self.bind()[0].content_source, "private/source")
         self.storage.side_effect = access.DeferredInputResolutionError("asset_unavailable")
         with self.assertRaisesRegex(KnowledgeError, "asset_unavailable"):
             self.bind()

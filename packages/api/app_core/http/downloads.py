@@ -140,7 +140,8 @@ async def _stream_selected(selected):
     if isinstance(selected, JsonResponse):
         return selected
     storage_key, content_type, filename, as_attachment, content_length = selected
-    return await stored_file_response(
+    from app_core.note_content import content_response
+    return await content_response(
         storage_key,
         content_type,
         filename,
@@ -211,14 +212,19 @@ def _select_library_object(user_id: int, library_object_id: str, *, preview: boo
     else:
         filters["status__in"] = {"processing", "ready", "failed"}
     try:
-        item = UserLibraryObject.objects.get(**filters)
+        item = UserLibraryObject.objects.select_related("noteHead").get(**filters)
     except UserLibraryObject.DoesNotExist:
         return JsonResponse({"error": "library_object_not_found"}, status=404)
     content_type = item.contentType
     if preview and _is_code_preview(item.displayName, content_type):
         content_type = "text/plain"
+    from app_core.note_content import content_source
+    try:
+        source = content_source(item)
+    except FileNotFoundError:
+        return JsonResponse({"error": "stored_object_not_available"}, status=409)
     return (
-        item.storageKey,
+        source,
         content_type,
         item.displayName,
         not preview,

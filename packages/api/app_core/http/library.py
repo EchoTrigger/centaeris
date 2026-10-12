@@ -6,6 +6,7 @@ from django.conf import settings
 from django.core.files.storage import default_storage
 from django.db import transaction
 from django.utils import timezone
+from app_core.note_content import content_source
 from ninja import Router, Status
 from pydantic import Field
 
@@ -439,11 +440,11 @@ def get_library_note(request, library_object_id: str):
         item = _library_object(request.user, library_object_id)
         if item.objectKind != "note" or item.status != "ready":
             raise UserLibraryObject.DoesNotExist
-        if not item.storageKey or not default_storage.exists(item.storageKey):
-            return Status(409, {"error": "library_note_not_available"})
         try:
-            with default_storage.open(item.storageKey, "rb") as handle:
+            with content_source(item).open() as handle:
                 markdown = handle.read().decode("utf-8")
+        except FileNotFoundError:
+            return Status(409, {"error": "library_note_not_available"})
         except UnicodeDecodeError:
             return Status(409, {"error": "library_note_not_utf8"})
     except UserLibraryObject.DoesNotExist:
@@ -918,7 +919,7 @@ def _library_object(user, library_object_id: str, *, locked: bool = False):
     if locked:
         query = query.select_for_update()
     else:
-        query = query.select_related("parentFolder")
+        query = query.select_related("parentFolder", "noteHead")
     return query.get(id=library_object_id, owner=user)
 
 

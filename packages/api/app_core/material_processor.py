@@ -198,7 +198,7 @@ class MaterialWorker:
             root = Path(directory)
             with tempfile.TemporaryFile() as archive:
                 with tarfile.open(fileobj=archive, mode="w") as tar:
-                    with tempfile.TemporaryFile() as original, default_storage.open(source.storage_key, "rb") as stored:
+                    with tempfile.TemporaryFile() as original, source.content_source.open() as stored:
                         size, digest = 0, hashlib.sha256()
                         while chunk := stored.read(65536):
                             size += len(chunk)

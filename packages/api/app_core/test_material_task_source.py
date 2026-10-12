@@ -20,7 +20,7 @@ class PlatformTaskSourceTests(TestCase):
         temporary = TemporaryDirectory(prefix="material-task-source-")
         self.addCleanup(temporary.cleanup)
         self.storage = FileSystemStorage(location=temporary.name)
-        storage_patch = patch.object(sources, "default_storage", self.storage)
+        storage_patch = patch("app_core.note_content.default_storage", self.storage)
         storage_patch.start()
         self.addCleanup(storage_patch.stop)
         self.owner = User.objects.create(username="material-owner")
@@ -56,7 +56,8 @@ class PlatformTaskSourceTests(TestCase):
         self.assertFalse(task.operations.exists())
         # Load only persisted state: no originating access object is needed.
         source = sources.resolve_task_source(MaterialProcessingTask.objects.get(pk=task.pk))
-        self.assertEqual(source.storage_key, "original.txt")
+        with source.content_source.open() as content:
+            self.assertEqual(content.read(), self.content)
         self.assertEqual(source.owner.pk, self.material.pk)
 
     def test_admission_failure_does_not_create_task(self):

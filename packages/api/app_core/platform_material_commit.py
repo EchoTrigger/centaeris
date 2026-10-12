@@ -27,7 +27,7 @@ def commit_processing_output(lease, output: ProcessingOutput, stream):
             if task.status == "completed" and not DerivedRepresentation.objects.filter(pk=task.pk).exists():
                 raise KnowledgeError("material_processing_result_missing")
             recover_staging(task)
-            bound = BoundInput({}, source.storage_key, source.owner, source.input_identity, task.pk)
+            bound = BoundInput({}, source.content_source, source.owner, source.input_identity, task.pk)
 
             def complete():
                 # Recheck DB time after receiving/verifying the potentially slow

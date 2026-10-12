@@ -16,3 +16,17 @@ python manage.py test app_core.test_library_note_save --settings=api.test_settin
 
 These tests use `TransactionTestCase` to observe actual commit failures and GC
 claims, alongside the existing library HTTP lifecycle acceptance test.
+
+## Immutable body reads
+
+`LibraryNoteRevision` owns one UTF-8 body and its generation. `noteHead` selects
+the current version. Existing file-backed notes remain readable during backfill;
+ordinary files continue using the storage backend. Internal content sources
+capture database revision bytes when selected, so later history pruning cannot
+invalidate an already selected read. Metadata and the head are selected together.
+Authorization remains in the existing caller: retaining an older revision does
+not bypass captured-input generation checks.
+
+Editor reads, downloads, deferred Agent inputs and platform material processing
+share this content selection. `test_note_content` checks exact bytes including
+CRLF and Unicode, owner isolation, immutable reads and stale-generation rejection.
