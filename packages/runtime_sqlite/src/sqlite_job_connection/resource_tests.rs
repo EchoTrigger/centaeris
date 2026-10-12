@@ -15,6 +15,315 @@ async fn until(mut condition: impl FnMut() -> bool) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_admission_bounds_mixed_actual_work_and_retains_dropped_waiters() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("runtime.db");
+    let admission = Arc::new(Semaphore::new(129));
+    let actor = RuntimeStoreActor::start_with_admission(
+        crate::SqliteRuntimeStore::new(&path).unwrap(),
+        admission.clone(),
+    )
+    .unwrap();
+    let driver = Driver::open_with_admission(path.clone(), 129, Some(admission.clone()))
+        .await
+        .unwrap();
+    let lock = rusqlite::Connection::open(path).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let (started, start) = mpsc::channel();
+    let (release, blocked) = mpsc::channel();
+    let first = driver
+        .submit(
+            Options {
+                read_only: true,
+                ..Default::default()
+            },
+            move |conn, _| {
+                // Confirm execution on the actual library-owned SQL connection.
+                conn.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))
+                    .unwrap();
+                started.send(()).unwrap();
+                blocked.recv().unwrap();
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    start.recv_timeout(Duration::from_secs(5)).unwrap();
+    drop(first);
+    let mut native = Vec::new();
+    for _ in 0..64 {
+        native.push(
+            driver
+                .submit(
+                    Options {
+                        read_only: true,
+                        ..Default::default()
+                    },
+                    |_, _| Ok(()),
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    // A real Actor write waits on the database lock while its channel fills.
+    let writing = tokio::spawn({
+        let actor = actor.clone();
+        async move {
+            actor
+                .append_event(RuntimeEvent {
+                    event_id: "shared-event".into(),
+                    session_id: "parent".into(),
+                    task_id: None,
+                    event_type: "test".into(),
+                    at_ms: 10,
+                    visibility: EventVisibility::Internal,
+                    payload_json: "{}".into(),
+                })
+                .await
+        }
+    });
+    until(|| actor.resource_metrics().executing == 1).await;
+    let mut reads = Vec::new();
+    for _ in 0..63 {
+        reads.push(tokio::spawn({
+            let actor = actor.clone();
+            async move { actor.load_latest_checkpoint("parent").await }
+        }));
+    }
+    until(|| actor.resource_metrics().queued == 63).await;
+    // Cancellation affects replies, not queued SQL or its shared permit.
+    for read in &reads {
+        read.abort();
+    }
+    drop(reads);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), native.pop().unwrap())
+            .await
+            .is_err()
+    );
+    let held = 129 - admission.available_permits();
+    let native_held = driver.metrics().in_flight;
+    let mut extra = tokio::spawn({
+        let driver = driver.clone();
+        async move {
+            driver
+                .submit(
+                    Options {
+                        read_only: true,
+                        ..Default::default()
+                    },
+                    |_, _| Ok(()),
+                )
+                .await
+        }
+    });
+    let extra_blocked = tokio::time::timeout(Duration::from_millis(20), &mut extra)
+        .await
+        .is_err();
+    release.send(()).unwrap();
+    lock.execute_batch("ROLLBACK").unwrap();
+    writing.await.unwrap().unwrap();
+    for pending in native {
+        pending.await.result.unwrap();
+    }
+    // If the red seam admitted extra work, the timeout consumed its JoinHandle.
+    if extra_blocked {
+        extra.await.unwrap().unwrap().await.result.unwrap();
+    }
+    driver.close().await.unwrap();
+    actor.close().await.unwrap();
+    assert_eq!(
+        held, 129,
+        "both paths must use the same accepted-work budget"
+    );
+    assert_eq!(native_held, 65);
+    assert!(
+        extra_blocked,
+        "the 130th managed operation must wait outside both queues"
+    );
+    assert_eq!(admission.available_permits(), 129);
+    assert!(!admission.is_closed());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_admission_close_rejects_own_waiters_without_closing_other_path() {
+    for close_native in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("runtime.db");
+        let admission = Arc::new(Semaphore::new(1));
+        let actor = RuntimeStoreActor::start_with_admission(
+            crate::SqliteRuntimeStore::new(&path).unwrap(),
+            admission.clone(),
+        )
+        .unwrap();
+        let driver = Driver::open_with_admission(path, 129, Some(admission.clone()))
+            .await
+            .unwrap();
+        let held = admission.clone().acquire_owned().await.unwrap();
+        if close_native {
+            let mut waiting = Box::pin(driver.submit(
+                Options {
+                    read_only: true,
+                    ..Default::default()
+                },
+                |_, _| Ok(()),
+            ));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), &mut waiting)
+                    .await
+                    .is_err()
+            );
+            driver.close().await.unwrap();
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_secs(1), waiting)
+                    .await
+                    .unwrap(),
+                Err(WorkError::AdmissionStopped)
+            ));
+            assert!(!admission.is_closed());
+            drop(held);
+            assert!(actor
+                .load_latest_checkpoint("other-path")
+                .await
+                .unwrap()
+                .is_none());
+            actor.close().await.unwrap();
+        } else {
+            let mut waiting = Box::pin(actor.load_latest_checkpoint("waiting"));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), &mut waiting)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(actor.resource_metrics().admission_waiting, 1);
+            actor.close().await.unwrap();
+            assert!(tokio::time::timeout(Duration::from_secs(1), waiting)
+                .await
+                .unwrap()
+                .is_err());
+            assert_eq!(actor.resource_metrics().admission_waiting, 0);
+            assert!(!admission.is_closed());
+            drop(held);
+            driver
+                .submit(
+                    Options {
+                        read_only: true,
+                        ..Default::default()
+                    },
+                    |_, _| Ok(()),
+                )
+                .await
+                .unwrap()
+                .await
+                .result
+                .unwrap();
+            driver.close().await.unwrap();
+        }
+        assert_eq!(admission.available_permits(), 1);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_admission_actor_sync_bridge_waits_then_releases_before_native_sql() {
+    use centaeris_core::session::store::RuntimeStore;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("runtime.db");
+    let admission = Arc::new(Semaphore::new(1));
+    let actor = RuntimeStoreActor::start_with_admission(
+        crate::SqliteRuntimeStore::new(&path).unwrap(),
+        admission.clone(),
+    )
+    .unwrap();
+    let driver = Driver::open_with_admission(path, 129, Some(admission.clone()))
+        .await
+        .unwrap();
+    let held = admission.clone().acquire_owned().await.unwrap();
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let sync = std::thread::spawn({
+        let actor = actor.clone();
+        move || {
+            started.send(()).unwrap();
+            RuntimeStore::load_latest_checkpoint(&actor, "sync")
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    until(|| actor.resource_metrics().admission_waiting == 1).await;
+    assert!(!sync.is_finished());
+    assert_eq!(actor.resource_metrics().started, 0);
+    drop(held);
+    assert!(sync.join().unwrap().unwrap().is_none());
+    assert_eq!(actor.resource_metrics().admission_waiting, 0);
+    // The same logical flow calls native after confirmation. Capacity one proves
+    // no retained Actor permit or nested admission is needed by native SQL.
+    let receipt = tokio::time::timeout(Duration::from_secs(1), async {
+        driver
+            .submit(
+                Options {
+                    read_only: true,
+                    ..Default::default()
+                },
+                |conn, _| {
+                    conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+                        .map_err(|e| e.to_string())
+                },
+            )
+            .await
+            .unwrap()
+            .await
+    })
+    .await
+    .unwrap();
+    assert_eq!(receipt.result.unwrap(), 1);
+    assert_eq!(admission.available_permits(), 1);
+    driver.close().await.unwrap();
+    actor.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_admission_native_keeps_permit_through_transaction_cleanup_after_timeout() {
+    let directory = tempfile::tempdir().unwrap();
+    let admission = Arc::new(Semaphore::new(1));
+    let driver = Driver::open_with_admission(
+        directory.path().join("runtime.db"),
+        129,
+        Some(admission.clone()),
+    )
+    .await
+    .unwrap();
+    let (restoring, restore) = mpsc::channel();
+    let (release, blocked) = mpsc::channel();
+    let pending = driver
+        .submit(
+            Options {
+                full_sync: true,
+                read_only: true,
+                before_restore: Some(Box::new(move || {
+                    restoring.send(()).unwrap();
+                    blocked.recv_timeout(Duration::from_secs(5)).unwrap();
+                })),
+                ..Default::default()
+            },
+            |conn, _| {
+                conn.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))
+                    .map_err(|e| e.to_string())
+            },
+        )
+        .await
+        .unwrap();
+    restore.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(tokio::time::timeout(Duration::from_millis(20), pending)
+        .await
+        .is_err());
+    assert_eq!(admission.available_permits(), 0);
+    release.send(()).unwrap();
+    driver.close().await.unwrap();
+    assert_eq!(admission.available_permits(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resource_metrics_retain_actual_work_after_reply_drop_and_timeout() {
     let directory = tempfile::tempdir().unwrap();
     let driver = Driver::open(directory.path().join("runtime.db"), 129)
@@ -95,7 +404,7 @@ async fn resource_metrics_retain_actual_work_after_reply_drop_and_timeout() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn resource_metrics_show_independent_actor_and_native_order_on_one_database() {
+async fn unbudgeted_resource_metrics_show_independent_actor_and_native_order_on_one_database() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("runtime.db");
     let store = crate::SqliteRuntimeStore::new(&path).unwrap();
@@ -165,6 +474,8 @@ async fn resource_metrics_show_independent_actor_and_native_order_on_one_databas
                 .unwrap(),
         );
     }
+    // This explicit, unbudgeted API baseline characterizes independent callers.
+    // The managed host injects shared admission, covered by the mixed-work test.
     // Drop both reply waiters without releasing either path's real work.
     drop(pending);
     assert_eq!(

@@ -107,11 +107,20 @@ facts, rather than claiming SQL cancellation or completed closure.
 
 ## Resource and behavioral evidence
 
-Actor admits 128 queued + one executing; native admits 129 submitted operations
-including execution. Shared-file tests observed both: 258 managed operations.
+The local host shares one 129-permit accepted-work budget per database between
+the snapshot Actor and native Job driver. The Actor's queue and the native
+driver's close-aware local limit remain; neither can independently double the
+shared budget. Each path acquires once and transfers its shared permit to actual
+database work through execution and cleanup, including after a dropped waiter.
+Closing one path does not close the other path's shared budget. Replacement
+connection epochs retain the same budget.
 This is neither a global bound on direct SQLite connections nor a memory limit.
 Permit/tracking follows real accepted work after dropped/timed-out waiters.
 Snapshots expose executing/in-flight and cumulative monotonic admission/queue wait.
+Actor admission_waiting counts callers waiting outside accepted work; native
+local capacity usage can include callers still waiting for the shared budget.
+Native in-flight tracks accepted work. Per-path observations do not replace the
+shared semaphore's accepted-work count.
 Typed native BEGIN/COMMIT lock counts include reclaim but exclude String-converted
 internal SQL and synchronous Actor SQL. Native counters reset per epoch.
 These observations establish lifecycle behavior, not throughput.

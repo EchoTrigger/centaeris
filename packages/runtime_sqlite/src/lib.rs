@@ -47,6 +47,13 @@ impl SqliteRuntimeStore {
     ) -> Result<job_store::SqliteJobStore, centaeris_core::session::store::job::JobStoreError> {
         job_store::SqliteJobStore::new(self.db_path.clone(), limit)
     }
+    pub fn job_store_with_admission(
+        &self,
+        limit: usize,
+        admission: std::sync::Arc<tokio::sync::Semaphore>,
+    ) -> Result<job_store::SqliteJobStore, centaeris_core::session::store::job::JobStoreError> {
+        job_store::SqliteJobStore::new_with_admission(self.db_path.clone(), limit, admission)
+    }
     pub fn new<P: AsRef<Path>>(db_path: P) -> Result<Self, String> {
         let path = db_path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {

@@ -56,11 +56,13 @@ use std::fmt::{Display, Formatter};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Instant;
 
 static AGENT_RUN_COUNTER: AtomicU64 = AtomicU64::new(1);
 static AGENT_RUNTIME_STORE_ACTOR: OnceLock<Mutex<Option<AgentRuntimeStoreActorState>>> =
+    OnceLock::new();
+static RUNTIME_STORE_ADMISSION: OnceLock<Mutex<HashMap<PathBuf, Weak<tokio::sync::Semaphore>>>> =
     OnceLock::new();
 #[cfg(feature = "native-job-store")]
 static AGENT_RUNTIME_JOB_STORE: OnceLock<
@@ -69,12 +71,17 @@ static AGENT_RUNTIME_JOB_STORE: OnceLock<
 static SESSION_PROMPT_OPERATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 const SESSION_PROMPT_METHOD: &str = "session/prompt";
 const RUNTIME_JOB_WAIT_POLL_MS: u64 = 500;
+// Preserve the original Actor's 128 queued + one executing accepted work,
+// shared by snapshot Actor and native Job operations for this database.
+const RUNTIME_STORE_ACCEPTED_WORK_LIMIT: usize = 129;
 const LIVE_TEXT_FLUSH_INTERVAL_MS: u64 = 75;
 
 #[derive(Clone)]
 struct AgentRuntimeStoreActorState {
     db_path: PathBuf,
     actor: RuntimeStoreActor,
+    #[cfg(feature = "native-job-store")]
+    admission: Arc<tokio::sync::Semaphore>,
 }
 
 pub(crate) type LocalJobStore = Arc<dyn centaeris_core::session::store::AsyncJobStorePort>;
@@ -94,6 +101,7 @@ pub(crate) fn agent_runtime_job_store() -> Result<LocalJobStore, String> {
 pub(crate) fn native_job_store_handle(
 ) -> Result<centaeris_runtime_sqlite::job_store::SqliteJobStore, String> {
     let path = agent_runtime_store_db_path();
+    let actor_state = agent_runtime_store_actor_state()?;
     let cache = AGENT_RUNTIME_JOB_STORE.get_or_init(|| Mutex::new(None));
     let mut cache = cache
         .lock()
@@ -105,7 +113,7 @@ pub(crate) fn native_job_store_handle(
     }
     let snapshots = SqliteRuntimeStore::new(&path)?;
     let jobs = snapshots
-        .job_store(129)
+        .job_store_with_admission(RUNTIME_STORE_ACCEPTED_WORK_LIMIT, actor_state.admission)
         .map_err(|error| error.diagnostic_message())?;
     *cache = Some((path, jobs.clone()));
     Ok(jobs)
@@ -3726,6 +3734,10 @@ pub(crate) fn agent_runtime_store_db_path() -> PathBuf {
 }
 
 pub(crate) fn agent_runtime_store_actor() -> Result<RuntimeStoreActor, String> {
+    Ok(agent_runtime_store_actor_state()?.actor)
+}
+
+fn agent_runtime_store_actor_state() -> Result<AgentRuntimeStoreActorState, String> {
     let db_path = agent_runtime_store_db_path();
     let actor_state = AGENT_RUNTIME_STORE_ACTOR.get_or_init(|| Mutex::new(None));
     let mut guard = actor_state
@@ -3733,17 +3745,47 @@ pub(crate) fn agent_runtime_store_actor() -> Result<RuntimeStoreActor, String> {
         .map_err(|_| "agent runtime store actor lock poisoned".to_string())?;
     if let Some(state) = guard.as_ref() {
         if state.db_path == db_path {
-            return Ok(state.actor.clone());
+            return Ok(state.clone());
         }
     }
 
     let store = SqliteRuntimeStore::new(db_path.as_path())?;
-    let actor = RuntimeStoreActor::start(store).map_err(|error| error.to_string())?;
-    *guard = Some(AgentRuntimeStoreActorState {
+    let admission = runtime_store_admission(
+        RUNTIME_STORE_ADMISSION.get_or_init(|| Mutex::new(HashMap::new())),
+        &db_path,
+    )?;
+    let actor = RuntimeStoreActor::start_with_admission(store, admission.clone())
+        .map_err(|error| error.to_string())?;
+    let state = AgentRuntimeStoreActorState {
         db_path,
-        actor: actor.clone(),
-    });
-    Ok(actor)
+        actor,
+        #[cfg(feature = "native-job-store")]
+        admission,
+    };
+    *guard = Some(state.clone());
+    Ok(state)
+}
+
+fn runtime_store_admission(
+    budgets: &Mutex<HashMap<PathBuf, Weak<tokio::sync::Semaphore>>>,
+    db_path: &Path,
+) -> Result<Arc<tokio::sync::Semaphore>, String> {
+    // Assembly has already opened this database. Relative paths and aliases
+    // must not create an additional accepted-work budget for the same file.
+    let key = std::fs::canonicalize(db_path)
+        .map_err(|error| format!("canonicalize runtime store admission path failed: {error}"))?;
+    let mut budgets = budgets
+        .lock()
+        .map_err(|_| "runtime store admission registry lock poisoned")?;
+    if let Some(admission) = budgets.get(&key).and_then(Weak::upgrade) {
+        return Ok(admission);
+    }
+    budgets.retain(|_, budget| budget.strong_count() != 0);
+    let admission = Arc::new(tokio::sync::Semaphore::new(
+        RUNTIME_STORE_ACCEPTED_WORK_LIMIT,
+    ));
+    budgets.insert(key, Arc::downgrade(&admission));
+    Ok(admission)
 }
 
 fn required_string(raw: &str, field_name: &str) -> Result<String, String> {
@@ -3761,6 +3803,42 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use std::time::Duration;
+
+    #[test]
+    fn shared_admission_registry_reuses_live_database_budget_across_paths_and_switches() {
+        let cwd = std::env::current_dir().unwrap();
+        let relative =
+            PathBuf::from("target").join(format!("admission-registry-{}", new_turn_id()));
+        let directory = cwd.join(&relative);
+        fs::create_dir_all(&directory).unwrap();
+        let a = directory.join("a.db");
+        let b = directory.join("b.db");
+        fs::write(&a, []).unwrap();
+        fs::write(&b, []).unwrap();
+        let registry = Mutex::new(HashMap::new());
+        let first = runtime_store_admission(&registry, &a).unwrap();
+        let other = runtime_store_admission(&registry, &b).unwrap();
+        let returned = runtime_store_admission(&registry, &relative.join("a.db")).unwrap();
+        let alias = runtime_store_admission(&registry, &directory.join(".").join("a.db")).unwrap();
+        assert!(Arc::ptr_eq(&first, &returned));
+        assert!(Arc::ptr_eq(&first, &alias));
+        assert!(!Arc::ptr_eq(&first, &other));
+        let held = first
+            .clone()
+            .try_acquire_many_owned(RUNTIME_STORE_ACCEPTED_WORK_LIMIT as u32)
+            .unwrap();
+        assert_eq!(returned.available_permits(), 0);
+        assert_eq!(alias.available_permits(), 0);
+        assert_eq!(other.available_permits(), RUNTIME_STORE_ACCEPTED_WORK_LIMIT);
+        drop(held);
+        drop(first);
+        drop(returned);
+        drop(alias);
+        // A dead budget has no accepted work and can be reconstructed.
+        let fresh = runtime_store_admission(&registry, &a).unwrap();
+        assert_eq!(fresh.available_permits(), RUNTIME_STORE_ACCEPTED_WORK_LIMIT);
+        fs::remove_dir_all(&directory).unwrap();
+    }
 
     fn prompt_request(operation_id: &str, session_id: &str, message: &str) -> AgentInputRequest {
         serde_json::from_value(serde_json::json!({

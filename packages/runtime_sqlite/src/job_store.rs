@@ -14,7 +14,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{watch, Mutex, Semaphore};
 
 pub use crate::sqlite_job_connection::JobConnectionMetrics;
 
@@ -26,6 +26,7 @@ struct Owner {
 pub struct SqliteJobStore {
     path: PathBuf,
     limit: usize,
+    admission: Option<Arc<Semaphore>>,
     owner: Arc<Mutex<Owner>>,
     closing: Arc<AtomicBool>,
     closed: watch::Sender<Option<Result<(), String>>>,
@@ -167,6 +168,23 @@ impl SqliteJobStore {
     /// Synchronous assembly only. The library takes ownership of the configured
     /// connection; all Job operations subsequently use its asynchronous queue.
     pub fn new(path: PathBuf, limit: usize) -> Result<Self, JobStoreError> {
+        Self::new_inner(path, limit, None)
+    }
+
+    /// The host supplies the same budget used by its other managed store paths.
+    pub fn new_with_admission(
+        path: PathBuf,
+        limit: usize,
+        admission: Arc<Semaphore>,
+    ) -> Result<Self, JobStoreError> {
+        Self::new_inner(path, limit, Some(admission))
+    }
+
+    fn new_inner(
+        path: PathBuf,
+        limit: usize,
+        admission: Option<Arc<Semaphore>>,
+    ) -> Result<Self, JobStoreError> {
         if limit == 0 {
             return Err(JobStoreError::Rejected(
                 "SQLite Job capacity must be positive".into(),
@@ -178,29 +196,48 @@ impl SqliteJobStore {
         crate::sqlite_schema::ensure_schema(&conn)
             .and_then(|()| crate::configure_conn(&conn))
             .map_err(|error| JobStoreError::not_executed(JobStoreOperation::Read, error))?;
-        Ok(Self::from_driver(
-            path,
-            limit,
-            Driver::from_connection(conn, limit),
-        ))
+        let driver = Driver::from_connection_with_admission(conn, limit, admission.clone());
+        Ok(Self::from_driver(path, limit, driver, admission))
     }
     pub async fn open(path: PathBuf, limit: usize) -> Result<Self, JobStoreError> {
+        Self::open_inner(path, limit, None).await
+    }
+
+    pub async fn open_with_admission(
+        path: PathBuf,
+        limit: usize,
+        admission: Arc<Semaphore>,
+    ) -> Result<Self, JobStoreError> {
+        Self::open_inner(path, limit, Some(admission)).await
+    }
+
+    async fn open_inner(
+        path: PathBuf,
+        limit: usize,
+        admission: Option<Arc<Semaphore>>,
+    ) -> Result<Self, JobStoreError> {
         if limit == 0 {
             return Err(JobStoreError::Rejected(
                 "SQLite Job capacity must be positive".into(),
             ));
         }
-        let driver = Driver::open(path.clone(), limit)
+        let driver = Driver::open_with_admission(path.clone(), limit, admission.clone())
             .await
             .map_err(|error| JobStoreError::not_executed(JobStoreOperation::Read, error))?;
-        Ok(Self::from_driver(path, limit, driver))
+        Ok(Self::from_driver(path, limit, driver, admission))
     }
 
-    fn from_driver(path: PathBuf, limit: usize, driver: Driver) -> Self {
+    fn from_driver(
+        path: PathBuf,
+        limit: usize,
+        driver: Driver,
+        admission: Option<Arc<Semaphore>>,
+    ) -> Self {
         let (closed, _) = watch::channel(None);
         Self {
             path,
             limit,
+            admission,
             owner: Arc::new(Mutex::new(Owner { driver })),
             closing: Arc::new(AtomicBool::new(false)),
             closed,
@@ -232,9 +269,10 @@ impl SqliteJobStore {
                 .await
                 .map_err(|error| JobStoreError::not_executed(operation, error))?;
             self.require_admission(operation)?;
-            owner.driver = Driver::open(self.path.clone(), self.limit)
-                .await
-                .map_err(|error| JobStoreError::not_executed(operation, error))?;
+            owner.driver =
+                Driver::open_with_admission(self.path.clone(), self.limit, self.admission.clone())
+                    .await
+                    .map_err(|error| JobStoreError::not_executed(operation, error))?;
         }
         self.require_admission(operation)?;
         Ok(owner.driver.clone())
@@ -458,3 +496,6 @@ impl AsyncJobStorePort for SqliteJobStore {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod shared_admission_tests;
