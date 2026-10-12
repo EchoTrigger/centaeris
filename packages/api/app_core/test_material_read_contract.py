@@ -8,6 +8,7 @@ from django.test import SimpleTestCase
 
 from . import material_reads as materials
 from . import material_contract, material_evidence
+from .note_content import StoredObject
 
 
 class MaterialReadContractTests(SimpleTestCase):
@@ -23,7 +24,7 @@ class MaterialReadContractTests(SimpleTestCase):
                 "sha256": "sha256:" + "a" * 64,
                 "citationAllowed": True,
             },
-            storage_key="private/source",
+            content_source=StoredObject("private/source"),
             owner=SimpleNamespace(updatedAt=datetime(2026, 1, 1, tzinfo=UTC)),
             input_identity={"generation": 3},
             representation_id="representation:sha256:" + "b" * 64,

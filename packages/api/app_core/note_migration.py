@@ -16,16 +16,30 @@ def _identity(note):
             note.sizeBytes, note.displayName, note.status, note.noteHead_id)
 
 
+def verify_note(note_id, *, dry_run=False):
+    from .note_content import content_source
+    note = UserLibraryObject.objects.select_related("noteHead").get(pk=note_id, objectKind="note", purgedAt__isnull=True)
+    if not note.noteHead_id:
+        raise ValueError("note_migration_required")
+    content_source(note)
+    return "verified"
+
+
 def migrate_note(note_id, *, dry_run=False):
     captured = UserLibraryObject.objects.get(pk=note_id, objectKind="note", purgedAt__isnull=True)
     if captured.noteHead_id:
+        verify_note(note_id)
         return "already_migrated"
     with default_storage.open(captured.storageKey, "rb") as source:
         body = source.read(getattr(settings, "NOTE_MAX_BYTES", 1024 * 1024) + 1)
+    if len(body) > settings.NOTE_MAX_BYTES:
+        raise ValueError("note_body_too_large")
     if (len(body) != captured.sizeBytes or "sha256:" + hashlib.sha256(body).hexdigest() != captured.sha256
             or captured.contentGeneration <= 0):
         raise ValueError("note_migration_identity_mismatch")
     markdown = body.decode("utf-8")
+    if "\x00" in markdown:
+        raise ValueError("note_migration_invalid_text")
     if dry_run:
         return "would_migrate"
     with transaction.atomic():

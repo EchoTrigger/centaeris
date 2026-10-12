@@ -3,6 +3,14 @@
 import django.db.models.deletion
 from django.conf import settings
 from django.db import migrations, models
+from django.db.migrations.exceptions import IrreversibleError
+
+
+def guard_note_schema_reversal(apps, schema_editor):
+    alias = schema_editor.connection.alias
+    if (apps.get_model("app_core", "LibraryNoteRevision").objects.using(alias).exists()
+            or apps.get_model("app_core", "LibraryNoteSaveReceipt").objects.using(alias).exists()):
+        raise IrreversibleError("note_history_requires_export_and_retained_schema")
 
 
 class Migration(migrations.Migration):
@@ -54,4 +62,5 @@ class Migration(migrations.Migration):
             model_name='librarynotesavereceipt',
             constraint=models.UniqueConstraint(fields=('owner', 'saveId'), name='unique_note_save_receipt'),
         ),
+        migrations.RunPython(migrations.RunPython.noop, guard_note_schema_reversal),
     ]

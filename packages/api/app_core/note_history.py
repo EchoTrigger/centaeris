@@ -1,18 +1,21 @@
 """Bound note history independently from durable save-operation receipts."""
 
 from datetime import timedelta
+import logging
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.utils import timezone
 
-from .library_notes import NoteSaveError, _receipt, _replay, _revision, request_digest, validate_save
+from .library_notes import NoteSaveError, _receipt, _replay, _revision, request_digest, validate_save, require_current_revision
 from .models import LibraryNoteRevision, UserLibraryObject
+
+logger = logging.getLogger(__name__)
 
 
 def _plan(note):
-    revisions = list(note.noteRevisions.order_by("-generation"))
+    revisions = list(note.noteRevisions.only("id", "generation", "sizeBytes", "protected", "createdAt").order_by("-generation"))
     current = next((item for item in revisions if item.id == note.noteHead_id), None)
     if current is None:
         return []
@@ -58,13 +61,25 @@ def collect_history(note_id, *, dry_run=False):
         return prune_history(note, dry_run=dry_run)
 
 
+def collect_note_history_gc(dry_run=False):
+    count, failures = 0, 0
+    ids = UserLibraryObject.objects.filter(objectKind="note", noteHead__isnull=False).values_list("id", flat=True)
+    for note_id in ids.iterator(chunk_size=100):
+        try:
+            count += len(collect_history(note_id, dry_run=dry_run))
+        except (ValueError, UserLibraryObject.DoesNotExist):
+            failures += 1
+            logger.error("Note history collection failed: noteId=%s", note_id)
+    return count, failures
+
+
 def protect_revision(owner, note_id, generation, protected):
     with transaction.atomic():
         get_user_model().objects.select_for_update().get(pk=owner.pk)
         note = UserLibraryObject.objects.select_for_update().get(pk=note_id, owner=owner, status="ready")
         revision = note.noteRevisions.get(generation=generation)
         if protected:
-            others = list(note.noteRevisions.filter(protected=True).exclude(pk=revision.pk))
+            others = list(note.noteRevisions.filter(protected=True).exclude(pk=revision.pk).only("id", "sizeBytes"))
             if (sum(item.sizeBytes for item in others) + revision.sizeBytes
                     > settings.NOTE_HISTORY_MAX_BYTES - settings.NOTE_MAX_BYTES
                     or len(others) + 1 >= settings.NOTE_HISTORY_MAX_VERSIONS):
@@ -83,6 +98,7 @@ def restore_revision(owner, note_id, *, save_id, base_generation, revision_gener
         if replay is not None:
             return replay
         note = UserLibraryObject.objects.select_for_update().get(pk=note_id, owner=owner, status="ready", objectKind="note")
+        require_current_revision(note)
         if note.contentGeneration != base_generation:
             raise NoteSaveError("note_generation_conflict")
         revision = note.noteRevisions.get(generation=revision_generation)

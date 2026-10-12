@@ -10,6 +10,7 @@ from app_core.deleted_resource_gc import (
 )
 from app_core.trash_retention import trash_cutoff
 from app_core.workspace_snapshot_gc import collect_workspace_snapshot_gc
+from app_core.note_history import collect_note_history_gc
 
 
 class Command(BaseCommand):
@@ -32,6 +33,7 @@ class Command(BaseCommand):
         cutoff = timezone.now() - timedelta(seconds=older_than_seconds)
         collectors = [
             ("Trash expiration", lambda: self.expire(dry_run)),
+            ("Note history GC", lambda: self.note_history(dry_run)),
             ("Deleted resource GC", lambda: self.deleted(cutoff, dry_run)),
             ("Workspace snapshot GC", lambda: self.snapshots(cutoff, dry_run)),
         ]
@@ -57,6 +59,12 @@ class Command(BaseCommand):
             f"{expired.sources} sources, {expired.library_objects} library objects"
         )
         return 0
+
+    def note_history(self, dry_run):
+        count, failures = collect_note_history_gc(dry_run)
+        action = "Would clean" if dry_run else "Cleaned"
+        self.stdout.write(f"{action} {count} note revisions; failed {failures}")
+        return failures
 
     def deleted(self, cutoff, dry_run):
         report = collect_deleted_resource_gc(cutoff, dry_run)

@@ -9,19 +9,19 @@ must also fence the lease and serialize with material lifecycle changes.
 
 from dataclasses import dataclass
 
-from django.core.files.storage import default_storage
 from django.db import transaction
 
 from .material_access import bind_inputs
 from .material_contract import KnowledgeError
 from .material_identity import processing_spec_digest, representation_id
 from .models import Artifact, MaterialProcessingTask, Source, SourceObject, UserLibraryObject
+from .note_content import ContentSource
 
 
 @dataclass(frozen=True)
 class ProcessingSource:
     owner: object
-    content_source: object
+    content_source: ContentSource
     input_identity: dict
     size_bytes: int
 

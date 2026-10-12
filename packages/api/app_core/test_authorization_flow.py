@@ -79,7 +79,7 @@ class AuthorizationFlowTests(SimpleTestCase):
         query.return_value.get.return_value = link
         self.resource = self.enterContext(patch.object(inputs, "resolved_input_for_link", return_value=self.resolved))
         self.enterContext(patch.object(inputs, "allocated_virtual_paths", return_value={"input_1": "/mnt/inputs/test"}))
-        self.blob_exists = self.enterContext(patch.object(inputs.default_storage, "exists", return_value=True))
+        self.blob_exists = self.enterContext(patch("app_core.note_content.default_storage.exists", return_value=True))
         return inputs.input_storage_batch(self.run, self.digest)
 
     def test_batch_rechecks_membership_and_current_resource(self):

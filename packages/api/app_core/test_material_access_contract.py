@@ -7,6 +7,7 @@ from django.test import SimpleTestCase
 
 from . import material_access as access
 from .material_contract import KnowledgeError
+from .note_content import StoredObject
 
 
 class MaterialAccessContractTests(SimpleTestCase):
@@ -43,7 +44,7 @@ class MaterialAccessContractTests(SimpleTestCase):
         for name, patcher in patches.items():
             setattr(self, name, patcher.start())
             self.addCleanup(patcher.stop)
-        self.storage = Mock(return_value=({"objectRef": "source_1"}, "private/source"))
+        self.storage = Mock(return_value=({"objectRef": "source_1"}, StoredObject("private/source")))
         self.batch.return_value = self.storage
         self.query.return_value.get.return_value = self.run
         self.owner = SimpleNamespace(id="source_1")
@@ -108,7 +109,7 @@ class MaterialAccessContractTests(SimpleTestCase):
         self.storage.assert_not_called()
 
     def test_revoked_or_deleted_input_is_not_resolved_from_the_snapshot(self):
-        self.assertEqual(self.bind()[0].content_source, "private/source")
+        self.assertEqual(self.bind()[0].content_source.storage_key, "private/source")
         self.storage.side_effect = access.DeferredInputResolutionError("asset_unavailable")
         with self.assertRaisesRegex(KnowledgeError, "asset_unavailable"):
             self.bind()

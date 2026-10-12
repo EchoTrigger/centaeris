@@ -1,7 +1,6 @@
 from copy import deepcopy
 
 from django.conf import settings
-from django.core.files.storage import default_storage
 
 from .assets import (
     DeferredInputResolutionError,
@@ -9,6 +8,7 @@ from .assets import (
     resolved_input_for_link,
 )
 from .models import SessionAssetLink
+from .note_content import ContentSource
 from .runtime_contract import (
     authorization_digest,
     _verify_authorization_digest_signature,
@@ -27,9 +27,9 @@ def resolve_deferred_input(agent_run, input_ref: str, expected_authorization_dig
 
 def resolved_input_storage(
     agent_run, input_ref: str, expected_authorization_digest: str
-) -> tuple[dict, str]:
+) -> tuple[dict, ContentSource]:
     current = _current_input(agent_run, input_ref, expected_authorization_digest)
-    return current["resolvedInput"], current["storageKey"]
+    return current["resolvedInput"], current["contentSource"]
 
 
 def input_storage_batch(agent_run, expected_authorization_digest: str):
@@ -38,7 +38,7 @@ def input_storage_batch(agent_run, expected_authorization_digest: str):
 
     def resolve(input_ref):
         current = _current_input(agent_run, input_ref, expected_authorization_digest, verified)
-        return current["resolvedInput"], current["storageKey"]
+        return current["resolvedInput"], current["contentSource"]
 
     return resolve
 
@@ -120,4 +120,4 @@ def _current_input(agent_run, input_ref: str, expected_authorization_digest: str
         storage_key = content_source(owner)
     except FileNotFoundError:
         raise DeferredInputResolutionError("asset_unavailable")
-    return {"resolvedInput": resolved, "storageKey": storage_key}
+    return {"resolvedInput": resolved, "contentSource": storage_key}

@@ -166,6 +166,25 @@ class AgentInputAttachmentTests(TransactionTestCase):
         self.assertEqual(rejected.exception.status, 409)
         self.assertEqual(self.client.get(self.input_url).json()["inputs"][0]["attachments"][0]["displayName"], "evidence.txt")
 
+    def test_database_note_attachment_download_preserves_bytes_and_current_authorization(self):
+        from .library_notes import create_note
+        from .tests import streaming_response_bytes
+        from uuid import uuid4
+        result = create_note(self.user, save_id=uuid4().hex, display_name="note", markdown="正文\r\n🌱")
+        attached = self.client.post(f"/api/sessions/{self.session.pk}/assets", data=json.dumps({
+            "assetKind": "userLibraryObject", "assetId": result["object"]["id"],
+        }), content_type="application/json")
+        self.assertEqual(attached.status_code, 201, attached.content)
+        ref = attached.json()["asset"]["id"]
+        with patch("app_core.agent_input_delivery.dispatch_agent_inputs"):
+            self.assertEqual(self.submit("database-note-input", "", [ref]).status_code, 201)
+        path = f"/api/agents/{self.agent.pk}/inputs/database-note-input/attachments/{ref}/download"
+        response = self.client.get(path)
+        self.assertEqual(response.status_code, 200, response.content if not response.streaming else "")
+        self.assertEqual(streaming_response_bytes(response), "正文\r\n🌱".encode("utf-8"))
+        models.UserLibraryObject.objects.filter(pk=result["object"]["id"]).update(contentGeneration=2)
+        self.assertEqual(self.client.get(path).status_code, 409)
+
     def test_explicit_forward_migration_preserves_existing_input_and_refuses_lossy_reversal(self):
         from django.db.migrations.executor import MigrationExecutor
         from .migration_testing import isolated_migration_database

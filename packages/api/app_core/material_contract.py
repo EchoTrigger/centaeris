@@ -2,6 +2,10 @@
 
 import hashlib
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .note_content import ContentSource
 
 
 MAX_READ_BYTES = 50 * 1024
@@ -19,7 +23,7 @@ class KnowledgeError(RuntimeError):
 @dataclass(frozen=True)
 class BoundInput:
     resolved: dict
-    content_source: object
+    content_source: "ContentSource"
     owner: object
     input_identity: dict
     representation_id: str
