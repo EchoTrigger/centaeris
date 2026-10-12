@@ -230,6 +230,24 @@ impl SessionFiles {
             .ok_or_else(|| format!("session not found: {session_id}"))
     }
 
+    pub(crate) fn listed_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<SessionFileItem>, String> {
+        let session_id = required_session_id(session_id)?;
+        let _guard = lock_session_files()?;
+        crate::session_catalog::listed_session(&self.sessions_dir, &session_id)
+    }
+
+    pub(crate) fn listed_children_for_job(
+        &self,
+        parent: &str,
+        job: &str,
+    ) -> Result<Vec<SessionFileItem>, String> {
+        let _guard = lock_session_files()?;
+        crate::session_catalog::listed_children_for_job(&self.sessions_dir, parent, job)
+    }
+
     pub fn deletion_items(&self, session_id: &str) -> Result<Vec<SessionFileItem>, String> {
         let session_id = required_session_id(session_id)?;
         let _guard = lock_session_files()?;

@@ -96,22 +96,47 @@ operation; normal Desktop/TUI discovery does not use it. Delete responses includ
 loading all child summaries.
 
 Ordinary appends reuse Core's existing `reduce_event` and `AgentRunSessionState`.
-Host reducer checkpoints are disposable in-memory state, capped at eight Sessions
-and a conservative estimated 64 MiB. Event fingerprints preserve duplicate/conflict
+Host reducer checkpoints are disposable in-memory state. The cache keeps at most
+eight idle Sessions; active Sessions retain their state separately and do not
+count toward this idle limit. There is no byte-budget or 64 MiB memory guarantee.
+Event fingerprints preserve duplicate/conflict
 checks. Successful appends advance the checkpoint only after source sync. Errors
 discard the tentative state. Warm catalog repair publishes only changed run rows;
 stream delivery reads requested events by location instead of replaying the full
 run. Content-location caches have Session and entry-count limits.
+
+Internal scheduler parent checks, child-runtime binding reads, and terminal-delivery
+binding discovery share full-list visibility rules: duplicated source IDs are
+hidden even when only one source is valid, and subagent Sessions need a unique
+valid main parent. These operations construct only selected summaries; delivery
+iterates candidate metadata and returns at most two visible matches to detect
+ambiguity, including an extra child without a Run. All dirty sources are still
+reconciled first. This change does not claim target-only disk I/O, constant-time
+cold startup, or a two-row SQL scan. Strict Session lookup, public full-history
+reads, and complete deletion-subtree enumeration keep their existing contracts.
+Narrow reads validate the selected summary, referenced parent, and visited binding
+candidates; they do not build all public summaries or query the idle registry as
+an incidental health probe. They therefore do not promise the former full-list's
+propagation of every unrelated summary/registry error. Source/index and query
+failures still propagate. Cached summary identities must match their indexed
+source identity; a mismatch fails loudly in full and narrow views. This is strict
+validation of a disposable corrupted cache, not an assertion that every old error
+path remains identical.
 
 Cold cache misses, eviction, source identity changes, and tombstone rewrites rebuild
 the affected Session through authoritative Core reduction. These are **not durable
 Core reducer checkpoints**. The existing full runtime-snapshot reconstruction and
 explicit full-history requests still read the selected Session. These paths have
 no constant-latency guarantee as that individual Session grows. There is no claim
-that every operation becomes independent of history length. The protected boundary
-is no unrelated history reads for ordinary catalog queries, and no full historical
-reread for tested warm append/summary/stream operations. No Core semantics or Session
-record format changed, and no additional cleanup UI was introduced.
+that every operation becomes independent of history length. With the index already
+established and no dirty sources awaiting repair, warm catalog queries do not read
+unrelated full source documents. Cold initialization and dirty repair may read the
+affected sources, including sources outside the requested page or workspace;
+read-state misses and eviction may require full reconstruction of those sources.
+Page size bounds returned summaries, not that preparation cost. Tested warm
+append/summary/stream operations avoid full historical rereads while their validated
+read state remains available. No Core semantics or Session record format changed,
+and no additional cleanup UI was introduced.
 
 Catalog regression tests include zero source-document reads on warm queries,
 durable-intent interruption/reopen, portable reconstruction, and query plans.

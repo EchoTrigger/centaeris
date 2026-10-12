@@ -238,24 +238,130 @@ fn with_index<T>(
     action(&mut conn)
 }
 
+// Summaries are generated from validated source records. Duplicate source IDs
+// are hidden regardless of whether one of their summaries is invalid or absent.
+const UNIQUE_SESSION_SOURCES: &str = "SELECT session_id,summary FROM sources WHERE summary IS NOT NULL AND session_id NOT IN (SELECT session_id FROM sources GROUP BY session_id HAVING count(*)>1)";
+
+fn refresh_listed_sources(conn: &mut Connection, root: &Path) -> Result<(), String> {
+    refresh(conn, root, None)?;
+    conn.execute(
+        "UPDATE state SET runs_imported=1 WHERE id=1 AND runs_imported=0",
+        [],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn listed_visibility(item: &SessionFileItem, main_parent_visible: bool) -> bool {
+    item.session_kind != "subagent" || (item.parent_session_id.is_some() && main_parent_visible)
+}
+
+fn decode_summary(source_id: &str, json: &str) -> Result<SessionFileItem, String> {
+    let item: SessionFileItem = serde_json::from_str(json).map_err(|error| error.to_string())?;
+    if item.id != source_id {
+        return Err(format!(
+            "Session catalog summary identity mismatch: source={source_id} summary={}",
+            item.id
+        ));
+    }
+    Ok(item)
+}
+
+fn unique_item(conn: &Connection, id: &str) -> Result<Option<SessionFileItem>, String> {
+    let json: Option<String> = conn
+        .query_row(
+            &format!("{UNIQUE_SESSION_SOURCES} AND session_id=?1"),
+            [id],
+            |row| row.get(1),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    json.map(|json| decode_summary(id, &json)).transpose()
+}
+
+fn item_is_listed(conn: &Connection, item: &SessionFileItem) -> Result<bool, String> {
+    let main_parent_visible = if item.session_kind == "subagent" {
+        match item.parent_session_id.as_deref() {
+            Some(parent) => {
+                unique_item(conn, parent)?.is_some_and(|parent| parent.session_kind == "main")
+            }
+            None => false,
+        }
+    } else {
+        false
+    };
+    Ok(listed_visibility(item, main_parent_visible))
+}
+
+/// Full-list visibility with a single returned summary. All dirty sources are
+/// still reconciled first; this narrows result construction, not source I/O.
+pub(crate) fn listed_session(root: &Path, id: &str) -> Result<Option<SessionFileItem>, String> {
+    let _source = message_log::lock_session_logs_for_read()?;
+    with_index(root, |conn| {
+        refresh_listed_sources(conn, root)?;
+        let Some(item) = unique_item(conn, id)? else {
+            return Ok(None);
+        };
+        Ok(if item_is_listed(conn, &item)? {
+            Some(item)
+        } else {
+            None
+        })
+    })
+}
+
+/// Return enough visible metadata bindings to distinguish zero, one and many.
+/// Candidate rows are decoded individually; visibility is checked before counting.
+pub(crate) fn listed_children_for_job(
+    root: &Path,
+    parent: &str,
+    job: &str,
+) -> Result<Vec<SessionFileItem>, String> {
+    let _source = message_log::lock_session_logs_for_read()?;
+    with_index(root, |conn| {
+        refresh_listed_sources(conn, root)?;
+        let mut stmt = conn
+            .prepare(&format!(
+                "{UNIQUE_SESSION_SOURCES} AND json_extract(summary,'$.runtime_job_id')=?1"
+            ))
+            .map_err(|error| error.to_string())?;
+        let mut rows = stmt.query([job]).map_err(|error| error.to_string())?;
+        let mut items = Vec::new();
+        while let Some(row) = rows.next().map_err(|error| error.to_string())? {
+            let id: String = row.get(0).map_err(|error| error.to_string())?;
+            let json: String = row.get(1).map_err(|error| error.to_string())?;
+            let item = decode_summary(&id, &json)?;
+            if item_is_listed(conn, &item)?
+                && item.session_kind == "subagent"
+                && item.parent_session_id.as_deref() == Some(parent)
+            {
+                items.push(item);
+                if items.len() == 2 {
+                    break;
+                }
+            }
+        }
+        Ok(items)
+    })
+}
+
 pub(crate) fn sessions(root: &Path) -> Result<Vec<SessionFileItem>, String> {
     let _source = message_log::lock_session_logs_for_read()?;
     with_index(root, |conn| {
-        refresh(conn, root, None)?;
-        conn.execute(
-            "UPDATE state SET runs_imported=1 WHERE id=1 AND runs_imported=0",
-            [],
-        )
-        .map_err(|e| e.to_string())?;
-        let mut stmt = conn.prepare("SELECT summary FROM sources WHERE summary IS NOT NULL AND session_id NOT IN (SELECT session_id FROM sources GROUP BY session_id HAVING count(*)>1)").map_err(|e| e.to_string())?;
+        refresh_listed_sources(conn, root)?;
+        let mut stmt = conn
+            .prepare(UNIQUE_SESSION_SOURCES)
+            .map_err(|e| e.to_string())?;
         let json = stmt
-            .query_map([], |r| r.get::<_, String>(0))
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
         let mut items = json
             .into_iter()
-            .map(|v| serde_json::from_str::<SessionFileItem>(&v).map_err(|e| e.to_string()))
+            .map(|(id, json)| decode_summary(&id, &json))
             .collect::<Result<Vec<_>, _>>()?;
         let parents: std::collections::HashSet<_> = items
             .iter()
@@ -263,10 +369,12 @@ pub(crate) fn sessions(root: &Path) -> Result<Vec<SessionFileItem>, String> {
             .map(|v| v.id.clone())
             .collect();
         items.retain(|v| {
-            v.session_kind != "subagent"
-                || v.parent_session_id
+            listed_visibility(
+                v,
+                v.parent_session_id
                     .as_ref()
-                    .is_some_and(|id| parents.contains(id))
+                    .is_some_and(|id| parents.contains(id)),
+            )
         });
         Ok(items)
     })
@@ -467,6 +575,374 @@ mod tests {
     }
     fn reads() -> Vec<PathBuf> {
         message_log::TEST_DOCUMENT_READS.with(|r| r.borrow().clone())
+    }
+
+    fn assert_listed_queries_match_full_list(root: &Path, ids: &[&str], parent: &str, job: &str) {
+        let all = sessions(root).unwrap();
+        let public = crate::sessions::list(crate::sessions::SessionListRequest {}).unwrap();
+        assert_eq!(
+            all.iter()
+                .map(|item| item.id.clone())
+                .collect::<std::collections::HashSet<_>>(),
+            public
+                .iter()
+                .map(|item| item.id.clone())
+                .collect::<std::collections::HashSet<_>>()
+        );
+        for id in ids {
+            let expected = all
+                .iter()
+                .find(|item| item.id == *id)
+                .map(|item| serde_json::to_value(item).unwrap());
+            let actual = listed_session(root, id)
+                .unwrap()
+                .map(|item| serde_json::to_value(item).unwrap());
+            assert_eq!(actual, expected, "listed query visibility differs for {id}");
+        }
+        let mut expected = all
+            .iter()
+            .filter(|item| {
+                item.session_kind == "subagent"
+                    && item.parent_session_id.as_deref() == Some(parent)
+                    && item.runtime_job_id.as_deref() == Some(job)
+            })
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>();
+        let mut actual = listed_children_for_job(root, parent, job)
+            .unwrap()
+            .into_iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        assert_eq!(actual.len(), expected.len().min(2));
+        if expected.len() <= 2 {
+            expected.sort();
+            actual.sort();
+            assert_eq!(actual, expected);
+        } else {
+            assert!(actual.iter().all(|id| expected.contains(id)));
+        }
+    }
+
+    #[test]
+    fn listed_queries_match_full_list_when_sources_change() {
+        let _env = message_log::test_env_mutex()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let f = Fixture::new();
+        let parent = f.create("query-parent");
+        let other = f.create("other-parent");
+        // A visible binding for another parent must not consume the two-result limit.
+        f.store()
+            .create_agent_session(
+                "other-query-child",
+                &other.id,
+                "query-job",
+                "other",
+                f.root.to_str().unwrap(),
+                1_800_000_000_001,
+            )
+            .unwrap();
+        let child = f
+            .store()
+            .create_agent_session(
+                "query-child",
+                &parent.id,
+                "query-job",
+                "child",
+                f.root.to_str().unwrap(),
+                1_800_000_000_001,
+            )
+            .unwrap();
+        let root = f.root.join("sessions");
+        let check = || {
+            assert_listed_queries_match_full_list(
+                &root,
+                &[&parent.id, &other.id, &child.id, "missing"],
+                &parent.id,
+                "query-job",
+            )
+        };
+        check();
+        let duplicate = root.join("99/01/01").join(format!("{}.jsonl", parent.id));
+        fs::create_dir_all(duplicate.parent().unwrap()).unwrap();
+        fs::copy(f.root.join(&parent.session_path), &duplicate).unwrap();
+        mark_dirty(&duplicate, &[]).unwrap();
+        check();
+        fs::write(&duplicate, b"invalid JSON\n").unwrap();
+        mark_dirty(&duplicate, &[]).unwrap();
+        check();
+        fs::remove_file(&duplicate).unwrap();
+        mark_dirty(&duplicate, &[]).unwrap();
+        check();
+        let duplicate_child = root.join("99/01/02").join(format!("{}.jsonl", child.id));
+        fs::create_dir_all(duplicate_child.parent().unwrap()).unwrap();
+        fs::write(&duplicate_child, b"invalid JSON\n").unwrap();
+        mark_dirty(&duplicate_child, &[]).unwrap();
+        check();
+        assert!(session(&root, &child.id).is_err());
+        fs::remove_file(&duplicate_child).unwrap();
+        mark_dirty(&duplicate_child, &[]).unwrap();
+        check();
+        for (id, at) in [("query-child-two", 2), ("query-child-three", 3)] {
+            f.store()
+                .create_agent_session(
+                    id,
+                    &parent.id,
+                    "query-job",
+                    id,
+                    f.root.to_str().unwrap(),
+                    1_800_000_000_000 + at,
+                )
+                .unwrap();
+        }
+        check();
+        fs::remove_file(f.root.join(&parent.session_path)).unwrap();
+        mark_dirty(&f.root.join(&parent.session_path), &[]).unwrap();
+        check();
+    }
+
+    #[test]
+    fn internal_listed_queries_do_not_construct_full_public_dtos() {
+        let _env = message_log::test_env_mutex()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let f = Fixture::new();
+        let parent = f.create("dto-parent");
+        let unrelated = f.create("dto-unrelated");
+        let child = f
+            .store()
+            .create_agent_session(
+                "dto-child",
+                &parent.id,
+                "dto-job",
+                "child",
+                f.root.to_str().unwrap(),
+                1_800_000_000_001,
+            )
+            .unwrap();
+        crate::sessions::TEST_SESSION_RESPONSE_COUNT.with(|count| count.set(0));
+        let public = crate::sessions::list(crate::sessions::SessionListRequest {}).unwrap();
+        assert!(public.iter().any(|item| item.id == unrelated.id));
+        assert_eq!(
+            crate::sessions::TEST_SESSION_RESPONSE_COUNT.with(|count| count.get()),
+            public.len()
+        );
+        crate::sessions::TEST_SESSION_RESPONSE_COUNT.with(|count| count.set(0));
+        clear_reads();
+        assert_eq!(
+            crate::sessions::listed_session(&parent.id)
+                .unwrap()
+                .unwrap()
+                .id,
+            parent.id
+        );
+        assert_eq!(
+            crate::sessions::find_agent_runtime_binding(&child.id).unwrap(),
+            Some((parent.id.clone(), "dto-job".into()))
+        );
+        assert_eq!(
+            crate::sessions::listed_children_for_job(&parent.id, "dto-job")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(crate::sessions::TEST_SESSION_RESPONSE_COUNT.with(|count| count.get() == 0));
+        assert!(
+            reads().is_empty(),
+            "warm queries must not replay complete source documents"
+        );
+        assert!(crate::sessions::find_agent_runtime_binding(&parent.id)
+            .unwrap_err()
+            .contains("sessionKind=subagent"));
+        assert!(crate::sessions::find_agent_runtime_binding(" ").is_err());
+        assert!(crate::sessions::find_agent_runtime_binding("missing")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn cached_summary_identity_mismatch_is_never_a_visible_parent() {
+        let _env = message_log::test_env_mutex()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let f = Fixture::new();
+        let parent = f.create("identity-parent");
+        let child = f
+            .store()
+            .create_agent_session(
+                "identity-child",
+                &parent.id,
+                "identity-job",
+                "child",
+                f.root.to_str().unwrap(),
+                1_800_000_000_001,
+            )
+            .unwrap();
+        let root = f.root.join("sessions");
+        sessions(&root).unwrap();
+        let conn = open(&root).unwrap();
+        let mut mismatch = serde_json::to_value(&parent).unwrap();
+        mismatch["id"] = "different-parent".into();
+        conn.execute(
+            "UPDATE sources SET summary=?1 WHERE session_id=?2",
+            params![mismatch.to_string(), parent.id],
+        )
+        .unwrap();
+        assert!(
+            listed_session(&root, &child.id).is_err(),
+            "a mismatched cached identity cannot authorize a child's parent"
+        );
+        assert!(listed_session(&root, &parent.id).is_err());
+        assert!(listed_children_for_job(&root, &parent.id, "identity-job").is_err());
+        assert!(
+            sessions(&root).is_err(),
+            "full-list also rejects a corrupted summary identity"
+        );
+    }
+
+    #[test]
+    fn listed_queries_reject_invalid_cached_candidates_and_parent_identity() {
+        let _env = message_log::test_env_mutex()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let f = Fixture::new();
+        let parent = f.create("cached-parent");
+        let child = f
+            .store()
+            .create_agent_session(
+                "cached-child",
+                &parent.id,
+                "cached-job",
+                "child",
+                f.root.to_str().unwrap(),
+                1_800_000_000_001,
+            )
+            .unwrap();
+        let root = f.root.join("sessions");
+        sessions(&root).unwrap();
+        let conn = open(&root).unwrap();
+        let mut invalid = serde_json::to_value(&child).unwrap();
+        invalid["unexpected"] = true.into();
+        conn.execute(
+            "UPDATE sources SET summary=?1 WHERE session_id=?2",
+            params![invalid.to_string(), child.id],
+        )
+        .unwrap();
+        assert!(listed_session(&root, &child.id).is_err());
+        assert!(listed_children_for_job(&root, &parent.id, "cached-job").is_err());
+        conn.execute(
+            "UPDATE sources SET summary=?1 WHERE session_id=?2",
+            params![serde_json::to_string(&child).unwrap(), child.id],
+        )
+        .unwrap();
+        let mut invalid = serde_json::to_value(&parent).unwrap();
+        invalid.as_object_mut().unwrap().remove("session_kind");
+        conn.execute(
+            "UPDATE sources SET summary=?1 WHERE session_id=?2",
+            params![invalid.to_string(), parent.id],
+        )
+        .unwrap();
+        assert!(listed_session(&root, &child.id).is_err());
+        assert!(listed_children_for_job(&root, &parent.id, "cached-job").is_err());
+        assert!(sessions(&root).is_err());
+    }
+
+    #[test]
+    fn full_list_visibility_excludes_duplicate_and_invalid_parents() {
+        let _env = message_log::test_env_mutex()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let f = Fixture::new();
+        let parent = f.create("visible-parent");
+        let child = f
+            .store()
+            .create_agent_session(
+                "visible-child",
+                &parent.id,
+                "visible-job",
+                "child",
+                f.root.to_str().unwrap(),
+                1_800_000_000_001,
+            )
+            .unwrap();
+        let root = f.root.join("sessions");
+        let ids = || {
+            sessions(&root)
+                .unwrap()
+                .into_iter()
+                .map(|item| item.id)
+                .collect::<std::collections::HashSet<_>>()
+        };
+        assert!(ids().contains(&parent.id));
+        assert!(ids().contains(&child.id));
+        let duplicate = root.join("99/01/01").join(format!("{}.jsonl", parent.id));
+        fs::create_dir_all(duplicate.parent().unwrap()).unwrap();
+        fs::write(&duplicate, b"not JSON\n").unwrap();
+        mark_dirty(&duplicate, &[]).unwrap();
+        let hidden = ids();
+        assert!(!hidden.contains(&parent.id));
+        assert!(!hidden.contains(&child.id));
+        assert!(
+            session(&root, &parent.id).is_err(),
+            "strict lookup remains an error on duplicate identity"
+        );
+        fs::remove_file(&duplicate).unwrap();
+        mark_dirty(&duplicate, &[]).unwrap();
+        assert!(ids().contains(&child.id));
+        let parent_path = f.root.join(&parent.session_path);
+        fs::remove_file(&parent_path).unwrap();
+        mark_dirty(&parent_path, &[]).unwrap();
+        assert!(!ids().contains(&child.id));
+    }
+
+    #[test]
+    fn full_list_child_binding_counts_metadata_without_a_run() {
+        let _env = message_log::test_env_mutex()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let f = Fixture::new();
+        let parent = f.create("binding-parent");
+        let first = f
+            .store()
+            .create_agent_session(
+                "binding-first",
+                &parent.id,
+                "binding-job",
+                "first",
+                f.root.to_str().unwrap(),
+                1_800_000_000_001,
+            )
+            .unwrap();
+        let second = f
+            .store()
+            .create_agent_session(
+                "binding-second",
+                &parent.id,
+                "binding-job",
+                "second",
+                f.root.to_str().unwrap(),
+                1_800_000_000_002,
+            )
+            .unwrap();
+        message_log::append_agent_run_started(
+            &first.id,
+            "binding-turn",
+            "binding-job",
+            "input",
+            1_800_000_000_003,
+        )
+        .unwrap();
+        let matches = sessions(&f.root.join("sessions"))
+            .unwrap()
+            .into_iter()
+            .filter(|item| {
+                item.session_kind == "subagent"
+                    && item.parent_session_id.as_deref() == Some(parent.id.as_str())
+                    && item.runtime_job_id.as_deref() == Some("binding-job")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 2);
+        assert!(matches.iter().any(|item| item.id == second.id));
     }
 
     #[test]
