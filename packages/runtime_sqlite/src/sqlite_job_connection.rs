@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Instant;
 use tokio::sync::{watch, Semaphore};
+use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 pub(crate) use centaeris_core::session::store::job::JobWriteOutcome as Outcome;
@@ -127,6 +128,8 @@ pub(crate) struct Driver {
     connection: tokio_rusqlite::Connection,
     state: Arc<Mutex<Admission>>,
     capacity: Arc<Semaphore>,
+    admission: Option<Arc<Semaphore>>,
+    stop: CancellationToken,
     tracker: TaskTracker,
     closed: watch::Sender<Option<Result<(), String>>>,
     limit: usize,
@@ -134,11 +137,23 @@ pub(crate) struct Driver {
 }
 
 impl Driver {
-    pub fn from_connection(connection: rusqlite::Connection, limit: usize) -> Self {
-        Self::from_handle(tokio_rusqlite::Connection::from(connection), limit)
+    pub fn from_connection_with_admission(
+        connection: rusqlite::Connection,
+        limit: usize,
+        admission: Option<Arc<Semaphore>>,
+    ) -> Self {
+        Self::from_handle(
+            tokio_rusqlite::Connection::from(connection),
+            limit,
+            admission,
+        )
     }
 
-    fn from_handle(connection: tokio_rusqlite::Connection, limit: usize) -> Self {
+    fn from_handle(
+        connection: tokio_rusqlite::Connection,
+        limit: usize,
+        admission: Option<Arc<Semaphore>>,
+    ) -> Self {
         let (closed, _) = watch::channel(None);
         Self {
             connection,
@@ -148,6 +163,8 @@ impl Driver {
                 closing: false,
             })),
             capacity: Arc::new(Semaphore::new(limit)),
+            admission,
+            stop: CancellationToken::new(),
             tracker: TaskTracker::new(),
             closed,
             limit,
@@ -175,7 +192,16 @@ impl Driver {
                 .load(Ordering::Relaxed),
         }
     }
+    #[cfg(test)]
     pub async fn open(path: std::path::PathBuf, limit: usize) -> Result<Self, String> {
+        Self::open_with_admission(path, limit, None).await
+    }
+
+    pub async fn open_with_admission(
+        path: std::path::PathBuf,
+        limit: usize,
+        admission: Option<Arc<Semaphore>>,
+    ) -> Result<Self, String> {
         let connection = tokio_rusqlite::Connection::open(path)
             .await
             .map_err(|error| error.to_string())?;
@@ -197,7 +223,7 @@ impl Driver {
                 }
             });
         }
-        Ok(Self::from_handle(connection, limit))
+        Ok(Self::from_handle(connection, limit, admission))
     }
 
     /// Poll once before returning: the library has accepted the closure, or the
@@ -221,6 +247,15 @@ impl Driver {
             .acquire_owned()
             .await
             .map_err(|_| WorkError::AdmissionStopped)?;
+        let admission = if let Some(admission) = &self.admission {
+            Some(tokio::select! {
+                biased;
+                _ = self.stop.cancelled() => return Err(WorkError::AdmissionStopped),
+                permit = admission.clone().acquire_owned() => permit.map_err(|_| WorkError::AdmissionStopped)?,
+            })
+        } else {
+            None
+        };
         let token = {
             let state = self.state.lock().unwrap();
             if !state.accepting {
@@ -245,6 +280,7 @@ impl Driver {
             let reply = connection
                 .call(move |conn| {
                     let _permit = permit;
+                    let _admission = admission;
                     let _token = token;
                     metrics
                         .queue_wait_ns
@@ -436,6 +472,7 @@ impl Driver {
         }
         state.closing = true;
         state.accepting = false;
+        self.stop.cancel();
         self.capacity.close();
         self.tracker.close();
         let tracker = self.tracker.clone();

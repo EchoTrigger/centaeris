@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use futures::FutureExt;
 use tokio::sync::watch;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -90,6 +90,13 @@ struct RuntimeStoreActorOperationMeta {
 struct RuntimeStoreActorEnvelope {
     meta: RuntimeStoreActorOperationMeta,
     command: RuntimeStoreActorCommand,
+    admission: Option<OwnedSemaphorePermit>,
+}
+
+#[derive(Clone)]
+struct ActorAdmission {
+    budget: Arc<Semaphore>,
+    runtime: tokio::runtime::Handle,
 }
 
 #[derive(Clone)]
@@ -98,6 +105,7 @@ pub struct RuntimeStoreActor {
     next_operation_id: Arc<AtomicU64>,
     metrics: Arc<ActorMetrics>,
     lifecycle: Arc<ActorLifecycle>,
+    admission: Option<ActorAdmission>,
 }
 
 struct ActorLifecycle {
@@ -117,6 +125,7 @@ impl Default for ActorLifecycle {
 
 #[derive(Default)]
 struct ActorMetrics {
+    admission_waiting: AtomicUsize,
     executing: AtomicUsize,
     started: AtomicU64,
     wait_ns: AtomicU64,
@@ -126,6 +135,8 @@ struct ActorMetrics {
 #[derive(Debug, Clone, Copy)]
 pub struct RuntimeStoreActorResourceMetrics {
     pub accepting: bool,
+    /// Callers waiting for shared capacity, outside accepted work and SQL queues.
+    pub admission_waiting: usize,
     pub queue_capacity: usize,
     pub queued: usize,
     pub executing: usize,
@@ -138,6 +149,13 @@ struct ActorExecuting(Arc<ActorMetrics>);
 impl Drop for ActorExecuting {
     fn drop(&mut self) {
         self.0.executing.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+struct ActorAdmissionWaiting(Arc<ActorMetrics>);
+impl Drop for ActorAdmissionWaiting {
+    fn drop(&mut self) {
+        self.0.admission_waiting.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -259,6 +277,27 @@ impl RuntimeStoreActor {
     where
         S: RuntimeStoreActorBackend,
     {
+        Self::start_inner(store, None)
+    }
+
+    /// Shares the host's accepted-work budget with other managed store paths.
+    pub fn start_with_admission<S>(
+        store: S,
+        admission: Arc<Semaphore>,
+    ) -> Result<Self, RuntimeStoreError>
+    where
+        S: RuntimeStoreActorBackend,
+    {
+        Self::start_inner(store, Some(admission))
+    }
+
+    fn start_inner<S>(
+        store: S,
+        admission: Option<Arc<Semaphore>>,
+    ) -> Result<Self, RuntimeStoreError>
+    where
+        S: RuntimeStoreActorBackend,
+    {
         let handle = tokio::runtime::Handle::try_current().map_err(|error| {
             RuntimeStoreError::ActorRuntimeUnavailable {
                 message: format!("runtime store actor requires an active tokio runtime: {error}"),
@@ -290,12 +329,17 @@ impl RuntimeStoreActor {
             next_operation_id: Arc::new(AtomicU64::new(1)),
             metrics,
             lifecycle,
+            admission: admission.map(|budget| ActorAdmission {
+                budget,
+                runtime: handle,
+            }),
         })
     }
 
     pub fn resource_metrics(&self) -> RuntimeStoreActorResourceMetrics {
         RuntimeStoreActorResourceMetrics {
             accepting: !self.sender.is_closed(),
+            admission_waiting: self.metrics.admission_waiting.load(Ordering::Relaxed),
             queue_capacity: self.sender.max_capacity(),
             queued: self.sender.max_capacity() - self.sender.capacity(),
             executing: self.metrics.executing.load(Ordering::Relaxed),
@@ -662,13 +706,23 @@ impl RuntimeStoreActor {
             enqueued_at_ms: crate::runtime::contracts::current_timestamp_ms(),
             deadline_after_ms: None,
         };
-        let envelope = RuntimeStoreActorEnvelope { meta, command };
-        self.sender.send(envelope).await.map_err(|_| {
+        let closed = || {
             E::from_actor_transport(RuntimeStoreActorTransportError::Closed {
                 operation_id: Some(operation_id),
                 operation_kind: Some(operation_kind),
             })
-        })?;
+        };
+        let admission = self.acquire_admission().await.map_err(|()| closed())?;
+        let envelope = RuntimeStoreActorEnvelope {
+            meta,
+            command,
+            admission,
+        };
+        tokio::select! {
+            biased;
+            _ = self.lifecycle.stop.cancelled() => return Err(closed()),
+            sent = self.sender.send(envelope) => sent.map_err(|_| closed())?,
+        }
         receiver.await.map_err(|_| {
             E::from_actor_transport(RuntimeStoreActorTransportError::ResponseDropped {
                 operation_id: Some(operation_id),
@@ -700,10 +754,42 @@ impl RuntimeStoreActor {
             enqueued_at_ms: crate::runtime::contracts::current_timestamp_ms(),
             deadline_after_ms: Some(RUNTIME_STORE_ACTOR_SYNC_TIMEOUT_MS),
         };
-        let mut envelope = RuntimeStoreActorEnvelope { meta, command };
         let wait_for_reply = || {
             let deadline = Instant::now() + RUNTIME_STORE_ACTOR_SYNC_TIMEOUT;
+            let admission = if let Some(admission) = &self.admission {
+                admission.runtime.block_on(async {
+                    tokio::time::timeout_at(deadline.into(), self.acquire_admission())
+                        .await
+                        .map_err(|_| {
+                            E::from_actor_transport(RuntimeStoreActorTransportError::QueueTimeout {
+                                operation_id,
+                                operation_kind,
+                            })
+                        })?
+                        .map_err(|()| {
+                            E::from_actor_transport(RuntimeStoreActorTransportError::Closed {
+                                operation_id: Some(operation_id),
+                                operation_kind: Some(operation_kind),
+                            })
+                        })
+                })?
+            } else {
+                None
+            };
+            let mut envelope = RuntimeStoreActorEnvelope {
+                meta,
+                command,
+                admission,
+            };
             loop {
+                if self.lifecycle.stop.is_cancelled() {
+                    return Err(E::from_actor_transport(
+                        RuntimeStoreActorTransportError::Closed {
+                            operation_id: Some(operation_id),
+                            operation_kind: Some(operation_kind),
+                        },
+                    ));
+                }
                 match self.sender.try_send(envelope) {
                     Ok(()) => break,
                     Err(mpsc::error::TrySendError::Full(returned)) => {
@@ -752,6 +838,24 @@ impl RuntimeStoreActor {
             wait_for_reply()
         };
         reply?
+    }
+
+    async fn acquire_admission(&self) -> Result<Option<OwnedSemaphorePermit>, ()> {
+        if self.lifecycle.stop.is_cancelled() || self.sender.is_closed() {
+            return Err(());
+        }
+        let Some(admission) = &self.admission else {
+            return Ok(None);
+        };
+        self.metrics
+            .admission_waiting
+            .fetch_add(1, Ordering::Relaxed);
+        let _waiting = ActorAdmissionWaiting(self.metrics.clone());
+        tokio::select! {
+            biased;
+            _ = self.lifecycle.stop.cancelled() => Err(()),
+            permit = admission.budget.clone().acquire_owned() => permit.map(Some).map_err(|_| ()),
+        }
     }
 }
 
@@ -1965,7 +2069,11 @@ async fn run_runtime_store_actor<S>(
                 None => break,
             }
         };
-        let RuntimeStoreActorEnvelope { meta, command } = envelope;
+        let RuntimeStoreActorEnvelope {
+            meta,
+            command,
+            admission,
+        } = envelope;
         let started_at_ms = crate::runtime::contracts::current_timestamp_ms();
         if operation_deadline_expired(&meta, started_at_ms) {
             continue;
@@ -1981,7 +2089,7 @@ async fn run_runtime_store_actor<S>(
             match command {
                 RuntimeStoreActorCommand::SaveWaitCheckpoint { req, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.save_wait_checkpoint(req)
                         })
                         .await,
@@ -1989,7 +2097,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::ConsumeWaitCheckpoint { req, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.consume_wait_checkpoint(req)
                         })
                         .await,
@@ -1997,7 +2105,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::SaveCheckpoint { checkpoint, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.save_checkpoint(checkpoint)
                         })
                         .await,
@@ -2005,7 +2113,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::LoadLatestCheckpoint { session_id, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.load_latest_checkpoint(session_id.as_str())
                         })
                         .await,
@@ -2017,7 +2125,7 @@ async fn run_runtime_store_actor<S>(
                     reply,
                 } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.load_checkpoint_by_turn(session_id.as_str(), turn_id.as_str())
                         })
                         .await,
@@ -2030,7 +2138,7 @@ async fn run_runtime_store_actor<S>(
                     reply,
                 } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.list_checkpoints(session_id.as_str(), limit, offset)
                         })
                         .await,
@@ -2042,7 +2150,7 @@ async fn run_runtime_store_actor<S>(
                     reply,
                 } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.list_waiting_runtime_job_checkpoints(after.as_ref(), limit)
                         })
                         .await,
@@ -2050,8 +2158,10 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::AppendEvent { event, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| store.append_event(event))
-                            .await,
+                        run_store_operation(store.clone(), admission, move |store| {
+                            store.append_event(event)
+                        })
+                        .await,
                     );
                 }
                 RuntimeStoreActorCommand::ListRuntimeJobWaiters {
@@ -2061,7 +2171,7 @@ async fn run_runtime_store_actor<S>(
                     reply,
                 } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.list_runtime_job_waiters(
                                 source_job_id.as_deref(),
                                 after.as_ref(),
@@ -2078,7 +2188,7 @@ async fn run_runtime_store_actor<S>(
                     reply,
                 } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.list_events(session_id.as_str(), limit, offset)
                         })
                         .await,
@@ -2086,7 +2196,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::ScheduleRuntimeJob { req, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.schedule_runtime_job(req)
                         })
                         .await,
@@ -2094,7 +2204,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::GetRuntimeJob { job_id, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.get_runtime_job(job_id.as_str())
                         })
                         .await,
@@ -2102,7 +2212,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::ListRuntimeJobs { req, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.list_runtime_jobs(req)
                         })
                         .await,
@@ -2110,7 +2220,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::ClaimDueRuntimeJobs { req, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.claim_due_runtime_jobs(req)
                         })
                         .await,
@@ -2118,7 +2228,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::StartRuntimeJob { req, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.start_runtime_job(req)
                         })
                         .await,
@@ -2126,7 +2236,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::RenewRuntimeJobLease { req, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.renew_runtime_job_lease(req)
                         })
                         .await,
@@ -2134,7 +2244,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::YieldRuntimeJob { req, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.yield_runtime_job(req)
                         })
                         .await,
@@ -2142,7 +2252,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::WakeRuntimeJob { req, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.wake_runtime_job(req)
                         })
                         .await,
@@ -2150,7 +2260,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::CompleteRuntimeJob { req, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.complete_runtime_job(req)
                         })
                         .await,
@@ -2158,7 +2268,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::FailRuntimeJob { req, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.fail_runtime_job(req)
                         })
                         .await,
@@ -2166,7 +2276,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::CancelRuntimeJob { req, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.cancel_runtime_job(req)
                         })
                         .await,
@@ -2174,7 +2284,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::ReclaimExpiredRuntimeJobLeases { now_ms, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.reclaim_expired_runtime_job_leases(now_ms)
                         })
                         .await,
@@ -2182,7 +2292,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::CreateDeadLetter { req, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.create_dead_letter(req)
                         })
                         .await,
@@ -2193,7 +2303,7 @@ async fn run_runtime_store_actor<S>(
                     reply,
                 } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.get_dead_letter(dead_letter_id.as_str())
                         })
                         .await,
@@ -2201,7 +2311,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::ListDeadLetters { req, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.list_dead_letters(req)
                         })
                         .await,
@@ -2209,7 +2319,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::MarkDeadLetterReplaying { req, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.mark_dead_letter_replaying(req)
                         })
                         .await,
@@ -2217,7 +2327,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::MarkDeadLetterReplayed { req, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.mark_dead_letter_replayed(req)
                         })
                         .await,
@@ -2225,7 +2335,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::ReplayDeadLetter { req, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.replay_dead_letter(req)
                         })
                         .await,
@@ -2233,7 +2343,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::DismissDeadLetter { req, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.dismiss_dead_letter(req)
                         })
                         .await,
@@ -2241,7 +2351,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::UpsertExternalContextObject { object, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.upsert_external_context_object(object)
                         })
                         .await,
@@ -2249,7 +2359,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::LoadExternalContextObject { object_id, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.load_external_context_object_for_job(object_id.as_str())
                         })
                         .await,
@@ -2257,7 +2367,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::LinkExternalContextObject { link, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.link_external_context_object(link)
                         })
                         .await,
@@ -2271,7 +2381,7 @@ async fn run_runtime_store_actor<S>(
                     reply,
                 } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.load_external_context_object_link(
                                 session_id.as_str(),
                                 object_id.as_str(),
@@ -2284,7 +2394,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::ListExternalContextObjects { req, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.list_external_context_objects(req)
                         })
                         .await,
@@ -2292,7 +2402,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::AcquireResourceClaim { req, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.acquire_resource_claim(req)
                         })
                         .await,
@@ -2304,7 +2414,7 @@ async fn run_runtime_store_actor<S>(
                     reply,
                 } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.get_resource_claim(resource_kind.as_str(), resource_key.as_str())
                         })
                         .await,
@@ -2312,7 +2422,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::ReleaseResourceClaim { req, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.release_resource_claim(req)
                         })
                         .await,
@@ -2320,7 +2430,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::ReclaimExpiredResourceClaims { now_ms, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.reclaim_expired_resource_claims(now_ms)
                         })
                         .await,
@@ -2328,7 +2438,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::UpsertExternalContextAndScheduleJob { req, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.upsert_external_context_and_schedule_job(req)
                         })
                         .await,
@@ -2339,7 +2449,7 @@ async fn run_runtime_store_actor<S>(
                     reply,
                 } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.upsert_external_context_link_and_complete_job(req)
                         })
                         .await,
@@ -2347,7 +2457,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::CreateDeadLetterAndFailJob { req, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.create_dead_letter_and_fail_job(req)
                         })
                         .await,
@@ -2355,7 +2465,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::LoadAgentRuntimeSnapshot { session_id, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.load_agent_runtime_snapshot(session_id.as_str())
                         })
                         .await,
@@ -2369,7 +2479,7 @@ async fn run_runtime_store_actor<S>(
                     reply,
                 } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.compare_and_save_agent_runtime_snapshot(
                                 &session_id,
                                 expected_snapshot.as_deref(),
@@ -2387,7 +2497,7 @@ async fn run_runtime_store_actor<S>(
                     reply,
                 } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.save_agent_runtime_snapshot(
                                 session_id.as_str(),
                                 snapshot_json.as_str(),
@@ -2399,7 +2509,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::AppendEventIdempotent { event, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.append_event_idempotent(event)
                         })
                         .await,
@@ -2407,7 +2517,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::DeleteSessionData { session_id, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.delete_session_data(session_id.as_str())
                         })
                         .await,
@@ -2415,7 +2525,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::CommitTranscriptProjection { commit, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.commit_transcript_projection(commit)
                         })
                         .await,
@@ -2427,7 +2537,7 @@ async fn run_runtime_store_actor<S>(
                     reply,
                 } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.load_transcript_projection_head(
                                 session_id.as_str(),
                                 projection_generation.as_str(),
@@ -2441,7 +2551,7 @@ async fn run_runtime_store_actor<S>(
                     reply,
                 } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.load_current_transcript_projection_generation(session_id.as_str())
                         })
                         .await,
@@ -2452,7 +2562,7 @@ async fn run_runtime_store_actor<S>(
                     reply,
                 } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.rotate_current_transcript_projection_generation(rotation)
                         })
                         .await,
@@ -2460,7 +2570,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::LoadTranscriptPage { request, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.load_transcript_page(request)
                         })
                         .await,
@@ -2473,7 +2583,7 @@ async fn run_runtime_store_actor<S>(
                     reply,
                 } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.load_latest_transcript_checkpoint(
                                 session_id.as_str(),
                                 projection_generation.as_str(),
@@ -2490,7 +2600,7 @@ async fn run_runtime_store_actor<S>(
                     reply,
                 } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.load_latest_transcript_recovery(
                                 session_id.as_str(),
                                 projection_generation.as_str(),
@@ -2502,7 +2612,7 @@ async fn run_runtime_store_actor<S>(
                 }
                 RuntimeStoreActorCommand::LoadTranscriptPatches { request, reply } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.load_transcript_patches(request)
                         })
                         .await,
@@ -2515,7 +2625,7 @@ async fn run_runtime_store_actor<S>(
                     reply,
                 } => {
                     reply.send(
-                        run_store_operation(store.clone(), move |store| {
+                        run_store_operation(store.clone(), admission, move |store| {
                             store.load_transcript_resume_cursors(
                                 session_id.as_str(),
                                 projection_generation.as_str(),
@@ -2552,20 +2662,28 @@ fn operation_deadline_expired(
     started_at_ms > meta.enqueued_at_ms.saturating_add(deadline_after_ms)
 }
 
-async fn run_store_operation<S, T, E, F>(store: S, operation: F) -> Result<T, E>
+async fn run_store_operation<S, T, E, F>(
+    store: S,
+    admission: Option<OwnedSemaphorePermit>,
+    operation: F,
+) -> Result<T, E>
 where
     S: Send + 'static,
     T: Send + 'static,
     E: RuntimeStoreActorReplyError + Send + 'static,
     F: FnOnce(S) -> Result<T, E> + Send + 'static,
 {
-    tokio::task::spawn_blocking(move || operation(store))
-        .await
-        .map_err(|error| {
-            E::from_actor_transport(RuntimeStoreActorTransportError::OperationJoinFailed(
-                format!("runtime store actor operation join failed: {error}"),
-            ))
-        })?
+    tokio::task::spawn_blocking(move || {
+        // SQL and backend cleanup own admission even if the Actor future exits.
+        let _admission = admission;
+        operation(store)
+    })
+    .await
+    .map_err(|error| {
+        E::from_actor_transport(RuntimeStoreActorTransportError::OperationJoinFailed(
+            format!("runtime store actor operation join failed: {error}"),
+        ))
+    })?
 }
 
 #[async_trait::async_trait]
@@ -2735,6 +2853,38 @@ mod tests {
         RuntimeStoreActorEnvelope, RuntimeStoreActorOperationMeta, RuntimeStoreActorReply,
     };
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shared_admission_actor_actual_closure_keeps_permit_after_future_abort() {
+        let admission = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = admission.clone().acquire_owned().await.unwrap();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let waiting = tokio::spawn(super::run_store_operation((), Some(permit), move |_| {
+            started.send(()).unwrap();
+            blocked.recv_timeout(Duration::from_secs(5)).unwrap();
+            Ok::<_, super::RuntimeStoreError>(())
+        }));
+        tokio::time::timeout(Duration::from_secs(5), ready)
+            .await
+            .unwrap()
+            .unwrap();
+        waiting.abort();
+        assert!(waiting.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            admission.available_permits(),
+            0,
+            "real backend work still owns admission"
+        );
+        release.send(()).unwrap();
+        let recovered =
+            tokio::time::timeout(Duration::from_secs(5), admission.clone().acquire_owned())
+                .await
+                .unwrap()
+                .unwrap();
+        drop(recovered);
+        assert_eq!(admission.available_permits(), 1);
+    }
+
     #[test]
     fn runtime_store_actor_deadline_gate_rejects_expired_operation_before_start() {
         let meta = RuntimeStoreActorOperationMeta {
@@ -2764,6 +2914,7 @@ mod tests {
             next_operation_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
             metrics: Default::default(),
             lifecycle: Default::default(),
+            admission: None,
         };
         let request = TranscriptPatchReadRequestV1 {
             session_id: "chat-patches".to_string(),
@@ -2808,6 +2959,7 @@ mod tests {
             next_operation_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
             metrics: Default::default(),
             lifecycle: Default::default(),
+            admission: None,
         };
         let load = tokio::spawn({
             let actor = actor.clone();
@@ -2893,6 +3045,7 @@ mod tests {
             next_operation_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
             metrics: Default::default(),
             lifecycle: Default::default(),
+            admission: None,
         };
         let task = tokio::spawn(async move {
             actor
@@ -2931,10 +3084,12 @@ mod tests {
             next_operation_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
             metrics: Default::default(),
             lifecycle: Default::default(),
+            admission: None,
         };
         let (prefill_reply, _prefill_receiver) = std::sync::mpsc::sync_channel(1);
         sender
             .try_send(RuntimeStoreActorEnvelope {
+                admission: None,
                 meta: RuntimeStoreActorOperationMeta {
                     waiting_since: Instant::now(),
                     enqueued_at_ms: 0,
