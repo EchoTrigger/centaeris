@@ -103,6 +103,28 @@ impl SqliteJobStore {
         .await
     }
 
+    /// Continue an ordered outbox scan after the last attempted delivery.
+    /// Generation remains an acknowledgement fence, not a pagination key.
+    pub async fn pending_terminal_deliveries_after(
+        &self,
+        limit: usize,
+        job_kind: Option<String>,
+        after: Option<(String, String)>,
+    ) -> Result<Vec<RuntimeJobOutboxRecord>, JobStoreError> {
+        self.execute(JobStoreOperation::Read, move |conn, _| {
+            sqlite_reliability::list_pending_runtime_job_outbox_after_conn(
+                conn,
+                limit,
+                job_kind.as_deref(),
+                None,
+                after
+                    .as_ref()
+                    .map(|(job, event)| (job.as_str(), event.as_str())),
+            )
+        })
+        .await
+    }
+
     pub async fn pending_terminal_delivery(
         &self,
         job_id: &str,

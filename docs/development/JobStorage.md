@@ -77,6 +77,10 @@ error boilerplate rather than deciding outcome.
 Outbox recovery independently validates Job/child manifest/child Run, persists
 parent projection and child terminal, then acknowledges generation. Interrupted
 delivery remains pending; one corrupt result does not lose successful siblings.
+Each recovery invocation attempts at most 64 records in stable Job/event order.
+The database-bound cursor advances past failed attempts, then wraps at the tail
+to retry failures and newer generations behind it. Restart begins a new scan;
+failed records remain pending, and generation still fences acknowledgement.
 
 Creation recovery uses native authority and Core WorkPacket binding. Missing
 parents are not recreated. Unavailable working directories retain the Job with a

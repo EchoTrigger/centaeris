@@ -6,6 +6,149 @@ use centaeris_core::session::store::RuntimeStoreTransactionPort;
 use std::sync::Arc;
 
 #[test]
+fn terminal_delivery_pages_past_a_full_failed_page_after_process_restart() {
+    let _guard = message_log::test_env_mutex()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    if let Ok(good_id) = std::env::var("CENTAERIS_TERMINAL_PAGE_TEST_JOB") {
+        runtime.block_on(async {
+            let writer = Arc::new(RuntimeServerClientHub::default()).broadcaster();
+            assert!(reconcile_terminal_jobs(&writer).await.is_err());
+            reconcile_terminal_jobs(&writer).await.unwrap();
+            assert_terminal_page_delivery(&good_id).await;
+            agent_runtime::close_storage_owners().await.unwrap();
+        });
+        return;
+    }
+    let profile = Profile::new();
+    let good_id = runtime.block_on(async {
+        let parent = sessions::create(sessions::SessionCreateRequest {
+            title: None,
+            cwd: profile.root.join("workspace").to_string_lossy().into(),
+        })
+        .unwrap();
+        let mut rows = Vec::new();
+        for index in 0..65 {
+            let name = format!("page-child-{index:03}");
+            rows.push((queued_child(&profile, &parent.id, &name).await, name));
+        }
+        rows.sort_by(|left, right| left.0.job_id.cmp(&right.0.job_id));
+        let mut completed = Vec::new();
+        for (row, name) in rows {
+            completed.push(complete_queued_child(row, &name).await);
+        }
+        // Complete the last scan key last so it remains in the bounded parent projection.
+        let good = completed.pop().unwrap();
+        let conn = rusqlite::Connection::open(profile.root.join("runtime.sqlite3")).unwrap();
+        for bad in completed {
+            conn.execute(
+                "UPDATE external_context_objects SET content_sha256='corrupt' WHERE object_id=?1",
+                [&bad.output_refs[0]],
+            )
+            .unwrap();
+        }
+        let writer = Arc::new(RuntimeServerClientHub::default()).broadcaster();
+        assert!(reconcile_terminal_jobs(&writer).await.is_err());
+        let jobs = agent_runtime::native_job_store_handle().unwrap();
+        assert_eq!(
+            jobs.pending_terminal_deliveries(100, Some(SUBAGENT_RUN_JOB_KIND.into()))
+                .await
+                .unwrap()
+                .len(),
+            65,
+            "one bounded pass must not reach the sixty-fifth delivery"
+        );
+        assert_eq!(
+            message_log::project_agent_run(&good.job_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "running"
+        );
+        good.job_id
+    });
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["subagent_delivery::tests::terminal_delivery_pages_past_a_full_failed_page_after_process_restart", "--exact", "--nocapture"])
+        .env("CENTAERIS_TERMINAL_PAGE_TEST_JOB", &good_id)
+        .output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    runtime.block_on(async {
+        assert_terminal_page_delivery(&good_id).await;
+        let writer = Arc::new(RuntimeServerClientHub::default()).broadcaster();
+        let mut failed_passes = 0;
+        for _ in 0..3 {
+            failed_passes += usize::from(reconcile_terminal_jobs(&writer).await.is_err());
+        }
+        assert!(
+            failed_passes > 0,
+            "wrapped scans must retry failed deliveries"
+        );
+        assert_terminal_page_delivery(&good_id).await;
+        agent_runtime::close_storage_owners().await.unwrap();
+    });
+}
+
+async fn assert_terminal_page_delivery(good_id: &str) {
+    let jobs = agent_runtime::native_job_store_handle().unwrap();
+    let pending = jobs
+        .pending_terminal_deliveries(100, Some(SUBAGENT_RUN_JOB_KIND.into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        pending.len(),
+        64,
+        "failed deliveries must remain unacknowledged"
+    );
+    assert!(pending.iter().all(|record| record.job_id != good_id));
+    for record in &pending {
+        assert_eq!(
+            message_log::project_agent_run(&record.job_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "running",
+            "failed delivery must not invent a child terminal"
+        );
+    }
+    assert_eq!(
+        message_log::project_agent_run(good_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "succeeded"
+    );
+    let row = jobs.get_runtime_job(good_id).await.unwrap().unwrap();
+    assert_eq!(row.status, RuntimeJobStatus::Succeeded);
+    let snapshots = agent_runtime::agent_runtime_store_actor().unwrap();
+    let raw =
+        centaeris_core::session::store::AgentRuntimeSnapshotStorePort::load_agent_runtime_snapshot(
+            &snapshots,
+            row.session_id.as_deref().unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+    let state: centaeris_core::session::state::SessionStateSnapshot =
+        serde_json::from_str(&raw).unwrap();
+    let projection = state
+        .metadata
+        .values()
+        .filter_map(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .find(|value| value["schema"] == "subagent_result_projection_v1")
+        .unwrap();
+    assert!(projection["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["subagentRunRef"] == format!("runtime_job:{good_id}")));
+}
+
+#[test]
 fn terminal_delivery_emits_parent_runtime_hint_and_child_terminal_once_after_ack() {
     let _guard = message_log::test_env_mutex()
         .lock()
@@ -63,7 +206,10 @@ pub(super) async fn completed_child(
     parent: &str,
     name: &str,
 ) -> RuntimeJobRecord {
-    let mut row = queued_child(profile, parent, name).await;
+    complete_queued_child(queued_child(profile, parent, name).await, name).await
+}
+
+async fn complete_queued_child(mut row: RuntimeJobRecord, name: &str) -> RuntimeJobRecord {
     let jobs = agent_runtime::native_job_store_handle().unwrap();
     let now = centaeris_core::runtime::contracts::current_timestamp_ms();
     row = jobs

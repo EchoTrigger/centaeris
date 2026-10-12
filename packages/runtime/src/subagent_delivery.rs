@@ -9,6 +9,17 @@ use centaeris_core::runtime::subagent::{
 };
 use centaeris_core::session::store::{job::JobStoreError, AsyncJobStorePort};
 
+struct TerminalDeliveryScan {
+    path: std::path::PathBuf,
+    after: Option<(String, String)>,
+}
+
+// Serialize scans and retain attempted keys, including failures. A new process
+// starts at the beginning; later pages are reached in subsequent bounded scans.
+static TERMINAL_DELIVERY_SCAN: tokio::sync::Mutex<Option<TerminalDeliveryScan>> =
+    tokio::sync::Mutex::const_new(None);
+const TERMINAL_DELIVERY_PAGE_SIZE: usize = 64;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeliveryPoint {
     BeforeParent,
@@ -35,12 +46,28 @@ pub(crate) fn checkpoint(point: DeliveryPoint, job_id: &str) {
 
 pub(crate) async fn reconcile_terminal_jobs(writer: &EventWriter) -> Result<(), String> {
     let jobs = agent_runtime::native_job_store_handle()?;
+    let path = agent_runtime::agent_runtime_store_db_path();
+    let mut scan_guard = TERMINAL_DELIVERY_SCAN.lock().await;
+    let scan = scan_guard.get_or_insert_with(|| TerminalDeliveryScan {
+        path: path.clone(),
+        after: None,
+    });
+    if scan.path != path {
+        scan.path = path;
+        scan.after = None;
+    }
     let pending = jobs
-        .pending_terminal_deliveries(64, Some(SUBAGENT_RUN_JOB_KIND.into()))
+        .pending_terminal_deliveries_after(
+            TERMINAL_DELIVERY_PAGE_SIZE,
+            Some(SUBAGENT_RUN_JOB_KIND.into()),
+            scan.after.clone(),
+        )
         .await
         .map_err(|error| error.diagnostic_message())?;
+    let reached_end = pending.len() < TERMINAL_DELIVERY_PAGE_SIZE;
     let mut errors = Vec::new();
     for record in pending {
+        scan.after = Some((record.job_id.clone(), record.event_type.clone()));
         let delivered = deliver_terminal_job(writer, &record.job_id).await;
         match delivered {
             Ok(()) => {
@@ -57,6 +84,10 @@ pub(crate) async fn reconcile_terminal_jobs(writer: &EventWriter) -> Result<(), 
             }
             Err(error) => errors.push(error),
         }
+    }
+    if reached_end {
+        // Revisit failures and records inserted or regenerated behind the cursor.
+        scan.after = None;
     }
     if errors.is_empty() {
         Ok(())
