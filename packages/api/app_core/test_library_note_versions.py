@@ -128,3 +128,22 @@ class LibraryNoteVersionTests(TransactionTestCase):
         self.assertEqual(note.contentGeneration, 2)
         self.assertEqual(note.noteHead.generation, 2)
         self.assertEqual(note.noteHead.markdown, "# independent title\r\n正文")
+
+    def test_history_routes_are_owner_scoped_and_restore_is_idempotent(self):
+        first, _ = self.create()
+        note_id = first["object"]["id"]
+        self.update(note_id, 1)
+        history = self.client.get(f"/api/library/{note_id}/note/revisions")
+        self.assertEqual(history.status_code, 200)
+        self.assertEqual([item["generation"] for item in history.json()["revisions"]], [2, 1])
+        protected = self.request("patch", f"/api/library/{note_id}/note/protection", {"generation": 1, "protected": True})
+        self.assertEqual(protected.status_code, 200)
+        payload = {"saveId": uuid4().hex, "baseGeneration": 2, "revisionGeneration": 1}
+        restored = self.request("post", f"/api/library/{note_id}/note/restore", payload)
+        self.assertEqual(restored.status_code, 200)
+        replay = self.request("post", f"/api/library/{note_id}/note/restore", payload)
+        self.assertEqual(replay.json(), restored.json())
+        other = get_user_model().objects.create_user(username="history-outsider")
+        self.client.force_login(other)
+        self.assertEqual(self.client.get(f"/api/library/{note_id}/note/revisions").status_code, 404)
+        self.assertEqual(self.request("post", f"/api/library/{note_id}/note/restore", payload).status_code, 404)

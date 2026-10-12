@@ -257,7 +257,7 @@ def _verify_deleted_owner(resource: DerivedResource) -> None:
     }[resource.ownerKind]
     fields = ["status", "contentGeneration", "deletionGeneration", "deletedAt"]
     if resource.ownerKind == "userLibraryObject":
-        fields.append("purgedAt")
+        fields.extend(["purgedAt", "noteHead", "storageKey", "objectKind"])
     owner = model.objects.filter(id=resource.ownerId).only(*fields).first()
     if owner is None:
         raise ValueError("derived resource owner is missing")
@@ -274,7 +274,10 @@ def _verify_deleted_owner(resource: DerivedResource) -> None:
         resource.ownerContentGeneration > 0
         and owner.contentGeneration > resource.ownerContentGeneration
     )
-    if not (deleted or stale):
+    migrated_note = (resource.ownerKind == "userLibraryObject" and owner.objectKind == "note"
+                     and owner.noteHead_id is not None and not owner.storageKey
+                     and resource.resourceKind == "storageObject")
+    if not (deleted or stale or migrated_note):
         raise ValueError("derived resource owner generation is no longer reclaimable")
 
 

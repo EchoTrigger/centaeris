@@ -1,7 +1,7 @@
 from django.core.management.base import BaseCommand, CommandError
 
 from app_core.models import UserLibraryObject
-from app_core.note_migration import export_note, migrate_note
+from app_core.note_migration import export_note, migrate_note, release_migration_file
 
 
 class Command(BaseCommand):
@@ -11,15 +11,21 @@ class Command(BaseCommand):
         parser.add_argument("--dry-run", action="store_true")
         parser.add_argument("--limit", type=int, default=100)
         parser.add_argument("--export-for-rollback", action="store_true")
+        parser.add_argument("--release-files", action="store_true")
 
     def handle(self, *args, **options):
         if options["limit"] <= 0:
             raise CommandError("--limit must be positive")
         export = options["export_for_rollback"]
+        release = options["release_files"]
+        if export and release:
+            raise CommandError("Choose export or release, not both")
         query = UserLibraryObject.objects.filter(objectKind="note", purgedAt__isnull=True,
-                                                 noteHead__isnull=not export).order_by("id")
+                                                 noteHead__isnull=not (export or release)).order_by("id")
+        if release:
+            query = query.exclude(storageKey="")
         ids = list(query.values_list("id", flat=True)[:options["limit"]])
-        operation = export_note if export else migrate_note
+        operation = release_migration_file if release else export_note if export else migrate_note
         failures = []
         for note_id in ids:
             try:

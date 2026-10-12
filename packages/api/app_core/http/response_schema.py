@@ -544,6 +544,20 @@ class LibraryNoteSaveEnvelope(LibraryObjectEnvelope):
     applied_generation: int
 
 
+class LibraryNoteRevisionResponse(StrictSchema):
+    generation: int
+    display_name: str
+    sha256: str
+    size_bytes: int
+    protected: bool
+    created_at: str
+
+
+class LibraryNoteHistoryEnvelope(StrictSchema):
+    current_generation: int
+    revisions: list[LibraryNoteRevisionResponse]
+
+
 class ArtifactResponse(StrictSchema):
     id: str
     kind: str
