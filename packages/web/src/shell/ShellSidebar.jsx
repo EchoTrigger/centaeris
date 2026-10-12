@@ -336,7 +336,7 @@ export function ShellSidebar({ workspace, agents, activeAgent, sessionProps, rec
 
   function createNote(template) {
     setPrivateCreateOpen(false);
-    navigate(`${base}/library/new`, { state: { noteDraft: template } });
+    navigate(`${base}/library/new?draft=${crypto.randomUUID().replaceAll("-", "")}`, { state: { noteDraft: template } });
   }
 
   function openUpload() {

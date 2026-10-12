@@ -304,7 +304,7 @@ function LibraryPageContent() {
 
   function createNote() {
     setNewMenuOpen(false);
-    navigate(`${base}/library/new${folderId ? `?folder=${encodeURIComponent(folderId)}` : ""}`, {
+    navigate(`${base}/library/new?${new URLSearchParams({ draft: crypto.randomUUID().replaceAll("-", ""), ...(folderId ? { folder: folderId } : {}) })}`, {
       state: { noteDraft: { name: "Untitled", markdown: "" } },
     });
   }
