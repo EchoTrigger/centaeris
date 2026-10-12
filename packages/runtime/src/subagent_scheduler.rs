@@ -17,10 +17,9 @@ use centaeris_core::runtime::subagent::{
     SubagentWorkerRunOutcome, SubagentWorkerRunRequest, SUBAGENT_RUN_JOB_KIND,
 };
 use centaeris_core::runtime::{
-    build_subagent_scheduler_runtime_event,
-    persist_subagent_result_projection_from_scheduler_events, AgentRuntimeConfig,
-    AgentRuntimeSubagentRunnerConfig, ModelClientSubagentRunner, QueryLifecycleSubagentObserver,
-    ToolSafePoint, ToolSafePointCommitPort, TurnUpdate,
+    build_subagent_scheduler_runtime_event, AgentRuntimeConfig, AgentRuntimeSubagentRunnerConfig,
+    ModelClientSubagentRunner, QueryLifecycleSubagentObserver, ToolSafePoint,
+    ToolSafePointCommitPort, TurnUpdate,
 };
 use centaeris_core::session::reliability::{
     ClaimDueRuntimeJobsRequest, FailRuntimeJobRequest, ListRuntimeJobsRequest,
@@ -46,6 +45,10 @@ pub(crate) async fn run_background_worker(
         if clients.is_draining() {
             return;
         }
+        #[cfg(feature = "native-job-store")]
+        if let Err(error) = crate::subagent_delivery::reconcile_terminal_jobs(&event_writer).await {
+            eprintln!("centaeris terminal Job delivery recovery failed: {error}");
+        }
         match next_queued_parent_session().await {
             Ok(Some(session_id)) => {
                 if clients.is_draining() {
@@ -66,7 +69,7 @@ pub(crate) async fn run_background_worker(
 }
 
 pub(crate) async fn stop_pending_jobs(shutdown_jobs: &ShutdownJobs) -> Result<(), String> {
-    let store = agent_runtime::agent_runtime_store_actor()?;
+    let store = agent_runtime::agent_runtime_job_store()?;
     loop {
         let jobs = store
             .list_runtime_jobs(ListRuntimeJobsRequest {
@@ -78,13 +81,30 @@ pub(crate) async fn stop_pending_jobs(shutdown_jobs: &ShutdownJobs) -> Result<()
                 limit: SUBAGENT_QUEUE_SCAN_LIMIT,
                 ..Default::default()
             })
-            .await?;
+            .await
+            .map_err(|error| error.diagnostic_message())?;
         if jobs.is_empty() {
             return Ok(());
         }
         for job in jobs {
             let mut stopped = shutdown_jobs.lock().await;
-            if stop_job(&store, &job, "runtime_server_shutdown").await? {
+            #[cfg(feature = "native-job-store")]
+            let did_stop = if job.job_kind == SUBAGENT_RUN_JOB_KIND {
+                let native = agent_runtime::native_job_store_handle()?;
+                let result = native
+                    .cancel_for_service_shutdown(stop_request(&job, "runtime_server_shutdown"))
+                    .await;
+                resolve_stop_result(store.as_ref(), &job, result).await?
+                    || native
+                        .was_service_stopped(&job.job_id)
+                        .await
+                        .map_err(|error| error.diagnostic_message())?
+            } else {
+                stop_job(store.as_ref(), &job, "runtime_server_shutdown").await?
+            };
+            #[cfg(not(feature = "native-job-store"))]
+            let did_stop = stop_job(store.as_ref(), &job, "runtime_server_shutdown").await?;
+            if did_stop {
                 stopped.insert(job.job_id.clone());
                 if job.status == RuntimeJobStatus::Queued {
                     let job_id = job.job_id.clone();
@@ -106,33 +126,52 @@ pub(crate) async fn stop_pending_jobs(shutdown_jobs: &ShutdownJobs) -> Result<()
     }
 }
 
-async fn stop_job(
-    store: &RuntimeStoreActor,
+pub(crate) async fn stop_job<S: AsyncJobStorePort + ?Sized>(
+    store: &S,
     job: &RuntimeJobRecord,
     reason: &str,
 ) -> Result<bool, String> {
-    let result = store
-        .cancel_runtime_job(
-            centaeris_core::session::reliability::CancelRuntimeJobRequest {
-                expected_lease_owner: None,
-                job_id: job.job_id.clone(),
-                reason: reason.to_string(),
-                cancelled_at_ms: current_timestamp_ms(),
-                expected_status: Some(job.status.clone()),
-            },
-        )
-        .await;
+    let result = store.cancel_runtime_job(stop_request(job, reason)).await;
+    resolve_stop_result(store, job, result).await
+}
+
+fn stop_request(
+    job: &RuntimeJobRecord,
+    reason: &str,
+) -> centaeris_core::session::reliability::CancelRuntimeJobRequest {
+    centaeris_core::session::reliability::CancelRuntimeJobRequest {
+        expected_lease_owner: None,
+        job_id: job.job_id.clone(),
+        reason: reason.into(),
+        cancelled_at_ms: current_timestamp_ms(),
+        expected_status: Some(job.status.clone()),
+    }
+}
+
+async fn resolve_stop_result<S: AsyncJobStorePort + ?Sized>(
+    store: &S,
+    job: &RuntimeJobRecord,
+    result: Result<(), centaeris_core::session::store::job::JobStoreError>,
+) -> Result<bool, String> {
     match result {
         Ok(()) => Ok(true),
         Err(error) => {
+            if error.requires_settlement() {
+                if let Err(settle) = store.settle_job_operations().await {
+                    return Err(error
+                        .with_message(settle.diagnostic_message())
+                        .diagnostic_message());
+                }
+            }
             if store
                 .get_runtime_job(&job.job_id)
-                .await?
+                .await
+                .map_err(|error| error.diagnostic_message())?
                 .is_some_and(|current| current.status.is_terminal() || current.status != job.status)
             {
                 Ok(false)
             } else {
-                Err(error)
+                Err(error.diagnostic_message())
             }
         }
     }
@@ -141,7 +180,7 @@ async fn stop_job(
 /// Startup reconciles job admission with authoritative Session terminals before
 /// reclaiming expired leases. Stopped child work is never made runnable again.
 pub(crate) async fn reconcile_stopped_jobs() -> Result<(), String> {
-    let store = agent_runtime::agent_runtime_store_actor()?;
+    let store = agent_runtime::agent_runtime_job_store()?;
     let mut offset = 0;
     loop {
         let jobs = store
@@ -155,7 +194,8 @@ pub(crate) async fn reconcile_stopped_jobs() -> Result<(), String> {
                 offset,
                 ..Default::default()
             })
-            .await?;
+            .await
+            .map_err(|error| error.diagnostic_message())?;
         if jobs.is_empty() {
             return Ok(());
         }
@@ -163,7 +203,7 @@ pub(crate) async fn reconcile_stopped_jobs() -> Result<(), String> {
             if message_log::project_agent_run(&job.job_id)?
                 .is_some_and(|run| !matches!(run.status.as_str(), "running" | "stalled"))
             {
-                stop_job(&store, &job, "runtime_server_recovered_interrupted").await?;
+                stop_job(store.as_ref(), &job, "runtime_server_recovered_interrupted").await?;
             } else {
                 offset += 1;
             }
@@ -172,44 +212,120 @@ pub(crate) async fn reconcile_stopped_jobs() -> Result<(), String> {
 }
 
 async fn next_queued_parent_session() -> Result<Option<String>, String> {
-    let store = agent_runtime::agent_runtime_store_actor()?;
+    let store = agent_runtime::agent_runtime_job_store()?;
     store
         .reclaim_expired_runtime_job_leases(current_timestamp_ms())
-        .await?;
-    let jobs = store
-        .list_runtime_jobs(ListRuntimeJobsRequest {
-            statuses: vec![RuntimeJobStatus::Queued],
-            job_kind: Some(SUBAGENT_RUN_JOB_KIND.to_string()),
-            session_id: None,
-            branch_id: None,
-            limit: SUBAGENT_QUEUE_SCAN_LIMIT,
-            offset: 0,
-        })
-        .await?;
-    for job in jobs {
-        let parent_session_id = job
-            .session_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| format!("Agent runtime job session missing: {}", job.job_id))?;
-        let binding = match load_subagent_work_packet_async(&store, &job)
+        .await
+        .map_err(|error| error.diagnostic_message())?;
+    let mut offset = 0;
+    let mut errors = Vec::new();
+    loop {
+        let jobs = store
+            .list_runtime_jobs(ListRuntimeJobsRequest {
+                statuses: vec![RuntimeJobStatus::Queued],
+                job_kind: Some(SUBAGENT_RUN_JOB_KIND.to_string()),
+                session_id: None,
+                branch_id: None,
+                limit: SUBAGENT_QUEUE_SCAN_LIMIT,
+                offset,
+            })
             .await
-            .and_then(|packet| {
-                subagent_work_packet_runtime_binding(&packet, &job).map_err(Into::into)
-            }) {
-            Ok(binding) => binding,
-            Err(JobStoreError::Rejected(reason)) => {
-                reject_invalid_work_packet(&store, &job, reason).await?;
+            .map_err(|error| error.diagnostic_message())?;
+        if jobs.is_empty() {
+            break;
+        }
+        for job in jobs {
+            let parent_session_id = job
+                .session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| format!("Agent runtime job session missing: {}", job.job_id))?;
+            let binding = match load_subagent_work_packet_async(store.as_ref(), &job)
+                .await
+                .and_then(|packet| {
+                    subagent_work_packet_runtime_binding(&packet, &job).map_err(Into::into)
+                }) {
+                Ok(binding) => binding,
+                Err(JobStoreError::Rejected(reason)) => {
+                    reject_invalid_work_packet(store.as_ref(), &job, reason).await?;
+                    offset +=
+                        usize::from(queued_job_is_retained(store.as_ref(), &job.job_id).await?);
+                    continue;
+                }
+                Err(error) => return Err(error.diagnostic_message()),
+            };
+            if !sessions::list(sessions::SessionListRequest {})?
+                .iter()
+                .any(|item| item.id == parent_session_id)
+            {
+                stop_job(store.as_ref(), &job, "session_deleted").await?;
+                offset += usize::from(queued_job_is_retained(store.as_ref(), &job.job_id).await?);
                 continue;
             }
-            Err(error) => return Err(error.diagnostic_message()),
-        };
-        if agent_session_is_ready(&job, &binding)? {
-            return Ok(Some(parent_session_id.to_string()));
+            if let Some(parent_run) = message_log::project_agent_run(&binding.parent_agent_run_id)?
+                .filter(|run| {
+                    run.session_id == parent_session_id
+                        && run.turn_id == binding.parent_turn_id
+                        && matches!(run.status.as_str(), "cancelled" | "stopped")
+                })
+            {
+                stop_job(
+                    store.as_ref(),
+                    &job,
+                    parent_run.error.as_deref().unwrap_or("parent_cancelled"),
+                )
+                .await?;
+                offset += usize::from(queued_job_is_retained(store.as_ref(), &job.job_id).await?);
+                continue;
+            }
+            let materialized = sessions::cwd_for_session_id(parent_session_id).and_then(|cwd| {
+                agent_runtime::materialize_agent_session_blocking(
+                    parent_session_id,
+                    &binding.child_session_id,
+                    &binding.child_turn_id,
+                    &job.job_id,
+                    &binding.description,
+                    &cwd,
+                    job.created_at_ms,
+                )
+            });
+            if let Err(error) = materialized {
+                errors.push(format!(
+                    "Agent creation recovery failed: jobId={} error={error}",
+                    job.job_id
+                ));
+                offset += usize::from(queued_job_is_retained(store.as_ref(), &job.job_id).await?);
+                continue;
+            }
+            if agent_session_is_ready(&job, &binding)? {
+                if !errors.is_empty() {
+                    eprintln!(
+                        "centaeris Agent creation recovery deferred: {}",
+                        errors.join("; ")
+                    );
+                }
+                return Ok(Some(parent_session_id.to_string()));
+            }
+            offset += usize::from(queued_job_is_retained(store.as_ref(), &job.job_id).await?);
         }
     }
-    Ok(None)
+    if errors.is_empty() {
+        Ok(None)
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+async fn queued_job_is_retained<S: AsyncJobStorePort + ?Sized>(
+    store: &S,
+    job_id: &str,
+) -> Result<bool, String> {
+    Ok(store
+        .get_runtime_job(job_id)
+        .await
+        .map_err(|error| error.diagnostic_message())?
+        .is_some_and(|job| job.status == RuntimeJobStatus::Queued))
 }
 
 /// Invalid payloads are Job failures, not global scan failures. Acquire the
@@ -280,24 +396,33 @@ async fn run_parent_batch(
     event_writer: EventWriter,
     shutdown_jobs: &ShutdownJobs,
 ) -> Result<(), String> {
+    #[cfg(feature = "native-job-store")]
+    let _work = event_writer.begin_background_work(session_id)?;
+    #[cfg(feature = "native-job-store")]
+    let _ = shutdown_jobs;
     let started_at_ms = current_timestamp_ms();
     let cwd = PathBuf::from(sessions::cwd_for_session_id(session_id)?);
     let worker_id = format!("electron-agent-worker-{}", std::process::id());
-    let store = agent_runtime::agent_runtime_store_actor()?;
+    let store = agent_runtime::agent_runtime_job_store()?;
+    let snapshots = agent_runtime::agent_runtime_store_actor()?;
     let queued_jobs =
-        queued_subagent_jobs(&store, session_id, DEFAULT_SUBAGENT_MAX_PARALLELISM).await?;
+        queued_subagent_jobs(store.as_ref(), session_id, DEFAULT_SUBAGENT_MAX_PARALLELISM).await?;
     if queued_jobs.is_empty() {
         return Ok(());
     }
     let mut bindings = HashMap::new();
+    #[cfg(feature = "native-job-store")]
+    let mut child_work = Vec::new();
     for job in queued_jobs {
-        let packet = load_subagent_work_packet_async(&store, &job)
+        let packet = load_subagent_work_packet_async(store.as_ref(), &job)
             .await
             .map_err(|error| error.diagnostic_message())?;
         let binding = subagent_work_packet_runtime_binding(&packet, &job)?;
         if !agent_session_is_ready(&job, &binding)? {
             break;
         }
+        #[cfg(feature = "native-job-store")]
+        child_work.push(event_writer.begin_background_work(&binding.child_session_id)?);
         bindings.insert(job.job_id.clone(), binding);
     }
     if bindings.is_empty() {
@@ -306,7 +431,7 @@ async fn run_parent_batch(
     let runtime_config = runtime_config::get(runtime_config::AgentRuntimeConfigGetRequest {})?;
     let observer_runtime =
         agent_runtime::build_agent_runtime(agent_runtime::AgentRuntimeBuildRequest {
-            store: store.clone(),
+            store: snapshots.clone(),
             session_id: session_id.to_string(),
             concurrency_scope_id: session_id.to_string(),
             cwd: cwd.clone(),
@@ -319,7 +444,7 @@ async fn run_parent_batch(
         })?;
     let observer = QueryLifecycleSubagentObserver::new(&observer_runtime);
     let runner = ElectronSubagentRunner {
-        store: store.clone(),
+        store: snapshots.clone(),
         parent_session_id: session_id.to_string(),
         cwd,
         event_writer: event_writer.clone(),
@@ -333,8 +458,8 @@ async fn run_parent_batch(
         started_at_ms,
         finished_at_ms: current_timestamp_ms(),
     };
-    let result = run_due_subagent_jobs_with_worker_pool_async(
-        &store,
+    let execution = run_due_subagent_jobs_with_worker_pool_async(
+        store.as_ref(),
         &runner,
         &observer,
         run_request,
@@ -342,40 +467,70 @@ async fn run_parent_batch(
             max_parallelism: DEFAULT_SUBAGENT_MAX_PARALLELISM,
         },
     )
-    .await
-    .map_err(|error| error.diagnostic_message())?;
-    let _projected = persist_subagent_result_projection_from_scheduler_events(
-        &store,
-        session_id,
-        result.events.as_slice(),
-    )?;
-    for item in &result.results {
-        let binding = bindings.get(item.job_id.as_str()).ok_or_else(|| {
-            format!(
-                "Agent runtime binding missing after execution: {}",
-                item.job_id
-            )
-        })?;
-        persist_agent_session_terminal_projection(
-            &store,
+    .await;
+    #[cfg(feature = "native-job-store")]
+    let progress = match &execution {
+        Ok(result) => emit_parent_subagent_updates(
             &event_writer,
-            item.job_id.as_str(),
-            binding.child_session_id.as_str(),
-            binding.child_turn_id.as_str(),
-            shutdown_jobs,
-        )
-        .await?;
+            session_id,
+            &bindings,
+            &result
+                .events
+                .iter()
+                .filter(|event| !event.status.is_terminal())
+                .cloned()
+                .collect::<Vec<_>>(),
+        ),
+        Err(_) => Ok(()),
+    };
+    #[cfg(feature = "native-job-store")]
+    let recovered = crate::subagent_delivery::reconcile_terminal_jobs(&event_writer).await;
+    let result = execution.map_err(|error| error.diagnostic_message())?;
+    #[cfg(feature = "native-job-store")]
+    {
+        progress?;
+        recovered?;
+        let _ = result;
+        Ok(())
     }
-    emit_parent_subagent_updates(
-        &event_writer,
+    #[cfg(not(feature = "native-job-store"))]
+    {
+        let _projected = centaeris_core::runtime::persist_subagent_result_projection_from_scheduler_events_async(
+        &snapshots,
+        store.as_ref(),
         session_id,
-        &bindings,
         result.events.as_slice(),
     )
+    .await
+    .map_err(|error| error.diagnostic_message())?;
+        for item in &result.results {
+            let binding = bindings.get(item.job_id.as_str()).ok_or_else(|| {
+                format!(
+                    "Agent runtime binding missing after execution: {}",
+                    item.job_id
+                )
+            })?;
+            persist_agent_session_terminal_projection(
+                store.as_ref(),
+                &event_writer,
+                item.job_id.as_str(),
+                binding.child_session_id.as_str(),
+                binding.child_turn_id.as_str(),
+                shutdown_jobs,
+            )
+            .await?;
+        }
+        emit_parent_subagent_updates(
+            &event_writer,
+            session_id,
+            &bindings,
+            result.events.as_slice(),
+        )
+    }
 }
 
-async fn persist_agent_session_terminal_projection(
-    store: &centaeris_core::session::store::RuntimeStoreActor,
+pub(crate) async fn persist_agent_session_terminal_projection<S: AsyncJobStorePort + ?Sized>(
+    store: &S,
     event_writer: &EventWriter,
     runtime_job_id: &str,
     child_session_id: &str,
@@ -384,13 +539,21 @@ async fn persist_agent_session_terminal_projection(
 ) -> Result<(), String> {
     let job = store
         .get_runtime_job(runtime_job_id)
-        .await?
+        .await
+        .map_err(|error| error.diagnostic_message())?
         .ok_or_else(|| format!("Agent runtime job missing: {runtime_job_id}"))?;
     if message_log::project_agent_run(runtime_job_id)?
         .is_some_and(|run| !matches!(run.status.as_str(), "running" | "stalled"))
     {
         return Ok(());
     }
+    #[cfg(feature = "native-job-store")]
+    let service_stopped = agent_runtime::native_job_store_handle()?
+        .was_service_stopped(runtime_job_id)
+        .await
+        .map_err(|error| error.diagnostic_message())?;
+    #[cfg(not(feature = "native-job-store"))]
+    let service_stopped = false;
     let (status, content) = match job.status {
         RuntimeJobStatus::Succeeded => {
             let result_ref = job
@@ -399,7 +562,8 @@ async fn persist_agent_session_terminal_projection(
                 .ok_or_else(|| format!("Agent resultRef missing after success: {}", job.job_id))?;
             let object = store
                 .load_external_context_object(result_ref.as_str())
-                .await?
+                .await
+                .map_err(|error| error.diagnostic_message())?
                 .ok_or_else(|| format!("Agent result object missing: {result_ref}"))?;
             ("succeeded", object.content)
         }
@@ -410,7 +574,7 @@ async fn persist_agent_session_terminal_projection(
                 .unwrap_or_else(|| "Agent failed without an error message.".to_string()),
         ),
         RuntimeJobStatus::Cancelled => (
-            if shutdown_jobs.lock().await.contains(&job.job_id) {
+            if service_stopped || shutdown_jobs.lock().await.contains(&job.job_id) {
                 "shutdown"
             } else {
                 "cancelled"
@@ -438,6 +602,11 @@ async fn persist_agent_session_terminal_projection(
         },
         at_ms,
     )?;
+    #[cfg(feature = "native-job-store")]
+    crate::subagent_delivery::checkpoint(
+        crate::subagent_delivery::DeliveryPoint::BeforeChildTerminal,
+        &job.job_id,
+    );
     let task = message_log::append_agent_run_terminal(
         child_session_id,
         child_turn_id,
@@ -476,8 +645,8 @@ fn emit_parent_subagent_updates(
     Ok(())
 }
 
-async fn queued_subagent_jobs(
-    store: &RuntimeStoreActor,
+async fn queued_subagent_jobs<S: AsyncJobStorePort + ?Sized>(
+    store: &S,
     session_id: &str,
     limit: usize,
 ) -> Result<Vec<RuntimeJobRecord>, String> {
@@ -490,7 +659,8 @@ async fn queued_subagent_jobs(
             limit,
             offset: 0,
         })
-        .await?;
+        .await
+        .map_err(|error| error.diagnostic_message())?;
     Ok(jobs)
 }
 
@@ -699,7 +869,13 @@ fn subagent_engine_config(
 }
 
 #[cfg(test)]
-mod queue_tests;
+pub(crate) mod queue_tests;
+
+#[cfg(all(test, feature = "native-job-store"))]
+mod job_chain_tests;
+
+#[cfg(all(test, feature = "native-job-store"))]
+mod creation_tests;
 
 #[cfg(test)]
 mod tests {
@@ -707,6 +883,77 @@ mod tests {
     use centaeris_core::session::reliability::{
         CancelRuntimeJobRequest, ScheduleRuntimeJobRequest,
     };
+
+    #[cfg(feature = "native-job-store")]
+    #[test]
+    fn service_shutdown_cancels_sessionless_provider_poll_job() {
+        let _guard = message_log::test_env_mutex()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _profile = super::queue_tests::Profile::new();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            assert!(sessions::list(sessions::SessionListRequest {})
+                .unwrap()
+                .is_empty());
+            let raw = agent_runtime::agent_runtime_store_actor().unwrap();
+            raw.schedule_runtime_job(ScheduleRuntimeJobRequest {
+                job: RuntimeJobRecord {
+                    job_id: "global-provider-poll".into(),
+                    job_kind:
+                        centaeris_core::model::provider_polling::PROVIDER_POLL_RUNTIME_JOB_KIND
+                            .into(),
+                    status: RuntimeJobStatus::Queued,
+                    run_at_ms: 1,
+                    lease_owner: None,
+                    lease_expires_at_ms: None,
+                    heartbeat_at_ms: None,
+                    retry_count: 0,
+                    max_retries: 1,
+                    backoff_policy: Default::default(),
+                    idempotency_key: "global-provider-poll".into(),
+                    session_id: None,
+                    branch_id: None,
+                    checkpoint_id: None,
+                    payload_ref: None,
+                    output_refs: vec![],
+                    last_error: None,
+                    created_at_ms: 1,
+                    updated_at_ms: 1,
+                },
+            })
+            .await
+            .unwrap();
+            let stopped = stop_pending_jobs(&ShutdownJobs::default()).await;
+            let row = raw
+                .get_runtime_job("global-provider-poll")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                row.status,
+                RuntimeJobStatus::Cancelled,
+                "stop result: {stopped:?}"
+            );
+            assert!(stopped.is_ok(), "{stopped:?}");
+            assert!(row.session_id.is_none());
+            assert_eq!(row.last_error.as_deref(), Some("runtime_server_shutdown"));
+            assert!(sessions::list(sessions::SessionListRequest {})
+                .unwrap()
+                .is_empty());
+            let native = agent_runtime::native_job_store_handle().unwrap();
+            assert!(!native.was_service_stopped(&row.job_id).await.unwrap());
+            assert_eq!(
+                native
+                    .pending_terminal_deliveries(10, Some(row.job_kind))
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            agent_runtime::close_storage_owners().await.unwrap();
+        });
+    }
 
     #[test]
     fn subagent_prompt_preparation_uses_process_scoped_model_budgets() {

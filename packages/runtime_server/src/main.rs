@@ -760,6 +760,7 @@ async fn run_hosted_subagent_batch(
         context: context.clone(),
     };
     let observer_runtime = AgentRuntime::new(
+        std::sync::Arc::new(store.clone()),
         store.clone(),
         context.tool_layer.clone(),
         context.agent_runtime_config.clone(),
@@ -933,6 +934,7 @@ impl HostedSubagentRunner {
         let mut config = self.context.agent_runtime_config.clone();
         config.allowed_tools = Some(binding.allowed_tools.clone());
         let runtime = AgentRuntime::new(
+            std::sync::Arc::new(self.store.clone()),
             self.store.clone(),
             tool_layer,
             config,
@@ -2405,6 +2407,7 @@ fn execute_agent_run(
             },
         );
     let agent_runtime = AgentRuntime::new(
+        std::sync::Arc::new((*store).clone()),
         (*store).clone(),
         tool_layer,
         agent_runtime_config,
@@ -6851,6 +6854,7 @@ mod tests {
                 .clone();
             let store = SqliteRuntimeStore::new(root.join("runtime.sqlite")).expect("store");
             let engine = AgentRuntime::new(
+                std::sync::Arc::new(store.job_store(129).expect("native test Job store")),
                 store,
                 layer,
                 AgentRuntimeConfig {

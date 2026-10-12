@@ -27,6 +27,9 @@ const RUNTIME_SERVER_IDLE_TIMEOUT_MS: u64 = 5_000;
 const RUNTIME_SERVER_SHUTDOWN_DRAIN_MS: u64 = 5_000;
 const RUNTIME_SERVER_SHUTDOWN_CLEANUP_MS: u64 = 5_000;
 
+#[cfg(all(test, feature = "native-job-store"))]
+mod storage_tests;
+
 fn log_runtime_server(message: std::fmt::Arguments<'_>) {
     let _ = writeln!(std::io::stderr(), "{message}");
 }
@@ -53,6 +56,25 @@ pub(crate) fn print_endpoint() -> Result<(), RuntimeHostError> {
 }
 
 pub(crate) async fn run_server() -> Result<(), RuntimeHostError> {
+    let result = run_server_with_business_owners().await;
+    #[cfg(feature = "native-job-store")]
+    let result = {
+        let closed = tokio::time::timeout(
+            Duration::from_millis(RUNTIME_SERVER_SHUTDOWN_CLEANUP_MS),
+            agent_runtime::close_storage_owners(),
+        )
+        .await;
+        let closed = match closed {
+            Ok(result) => result.map_err(|error| RuntimeHostError::new("runtime_server_store_shutdown_failed", error)),
+            Err(_) => Err(RuntimeHostError::new("runtime_server_store_shutdown_unconfirmed",
+                "Database shutdown is still pending; accepted work was not declared cancelled or closed")),
+        };
+        result.and(closed)
+    };
+    result
+}
+
+async fn run_server_with_business_owners() -> Result<(), RuntimeHostError> {
     crate::user_data_layout::ensure_runtime_endpoint_layout()
         .map_err(|error| RuntimeHostError::new("runtime_endpoint_layout_init_failed", error))?;
     let endpoint = current_endpoint()?;
@@ -74,6 +96,15 @@ pub(crate) async fn run_server() -> Result<(), RuntimeHostError> {
     subagent_scheduler::reconcile_stopped_jobs()
         .await
         .map_err(|error| RuntimeHostError::new("runtime_server_job_recovery_failed", error))?;
+    #[cfg(feature = "native-job-store")]
+    {
+        let startup = Arc::new(RuntimeServerClientHub::default());
+        if let Err(error) =
+            crate::subagent_delivery::reconcile_terminal_jobs(&startup.broadcaster()).await
+        {
+            eprintln!("centaeris startup terminal recovery has pending failures: {error}");
+        }
+    }
     let state = Arc::new(Mutex::new(RuntimeHostState::default()));
     let clients = Arc::new(RuntimeServerClientHub::default());
     let shutdown_jobs = Arc::new(subagent_scheduler::ShutdownJobs::default());
@@ -107,6 +138,9 @@ pub(crate) async fn run_server() -> Result<(), RuntimeHostError> {
         result = serve => result,
         _ = clients.service_shutdown_requested() => Ok(()),
     };
+    // A listener error also closes business admission before storage admission.
+    // Idle and explicit shutdown already share this same admission boundary.
+    clients.request_service_shutdown()?;
     crate::terminal_sessions::manager().begin_shutdown();
     crate::process_sessions::manager().begin_shutdown();
     // The listener may finish because a new connection observes draining at
@@ -128,6 +162,25 @@ pub(crate) async fn run_server() -> Result<(), RuntimeHostError> {
     process_worker.abort();
     schedule_worker.abort();
     idle_monitor.abort();
+    let _ = background_worker.await;
+    let _ = process_worker.await;
+    let _ = schedule_worker.await;
+    let _ = idle_monitor.await;
+    #[cfg(feature = "native-job-store")]
+    let result = result.and(
+        match tokio::time::timeout(
+            Duration::from_millis(RUNTIME_SERVER_SHUTDOWN_CLEANUP_MS),
+            clients.drain_background_work(),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(RuntimeHostError::new(
+                "runtime_server_business_shutdown_unconfirmed",
+                "Accepted background sequences remain unfinished; recovery facts are retained",
+            )),
+        },
+    );
     let processes = tokio::task::spawn_blocking(|| {
         crate::terminal_sessions::manager().shutdown()?;
         crate::process_sessions::manager().shutdown()?;
@@ -179,7 +232,17 @@ async fn drain_service_shutdown(
         Ok(result) => result,
         Err(_) => {
             log_runtime_server(format_args!("runtime server shutdown cleanup timed out; unfinished outcomes will be reconciled on restart"));
-            Ok(())
+            #[cfg(feature = "native-job-store")]
+            {
+                Err(RuntimeHostError::new(
+                    "runtime_server_business_shutdown_unconfirmed",
+                    "Business shutdown did not finish before its deadline",
+                ))
+            }
+            #[cfg(not(feature = "native-job-store"))]
+            {
+                Ok(())
+            }
         }
     }
 }
@@ -189,7 +252,7 @@ async fn wait_for_runtime_work(
     background_worker: &tokio::task::JoinHandle<()>,
 ) -> Result<(), RuntimeHostError> {
     loop {
-        let store = agent_runtime::agent_runtime_store_actor()
+        let store = agent_runtime::agent_runtime_job_store()
             .map_err(|error| RuntimeHostError::new("runtime_server_shutdown_failed", error))?;
         let jobs = store
             .list_runtime_jobs(ListRuntimeJobsRequest {
@@ -202,7 +265,9 @@ async fn wait_for_runtime_work(
                 ..Default::default()
             })
             .await
-            .map_err(|error| RuntimeHostError::new("runtime_server_shutdown_failed", error))?;
+            .map_err(|error| {
+                RuntimeHostError::new("runtime_server_shutdown_failed", error.diagnostic_message())
+            })?;
         if clients.active_agent_runs()?.is_empty()
             && clients.active_action_count() == 0
             && jobs.is_empty()
@@ -278,7 +343,7 @@ async fn runtime_server_is_idle(
     {
         return Ok(false);
     }
-    let store = agent_runtime::agent_runtime_store_actor()
+    let store = agent_runtime::agent_runtime_job_store()
         .map_err(|error| RuntimeHostError::new("runtime_server_idle_state_failed", error))?;
     let active_jobs = store
         .list_runtime_jobs(ListRuntimeJobsRequest {
@@ -294,7 +359,12 @@ async fn runtime_server_is_idle(
             offset: 0,
         })
         .await
-        .map_err(|error| RuntimeHostError::new("runtime_server_idle_state_failed", error))?;
+        .map_err(|error| {
+            RuntimeHostError::new(
+                "runtime_server_idle_state_failed",
+                error.diagnostic_message(),
+            )
+        })?;
     Ok(active_jobs.is_empty())
 }
 
@@ -812,6 +882,9 @@ mod tests {
                     tokio::task::yield_now().await;
                     release.send(()).unwrap();
                 });
+                #[cfg(feature = "native-job-store")]
+                if !finishes { assert!(drained.unwrap_err().to_string().contains("runtime_server_business_shutdown_unconfirmed")); } else { drained.unwrap(); }
+                #[cfg(not(feature = "native-job-store"))]
                 drained.unwrap();
                 if !finishes {
                     assert!(started.elapsed() >= Duration::from_millis(200));
@@ -910,6 +983,9 @@ mod tests {
                     tokio::task::yield_now().await;
                     release.send(()).unwrap();
                 });
+                #[cfg(feature = "native-job-store")]
+                if outcome == "unknown" { assert!(drained.unwrap_err().to_string().contains("runtime_server_business_shutdown_unconfirmed")); } else { drained.unwrap(); }
+                #[cfg(not(feature = "native-job-store"))]
                 drained.unwrap();
                 if outcome == "unknown" {
                     assert!(started.elapsed() < Duration::from_secs(2), "unresponsive owner shutdown must remain bounded");

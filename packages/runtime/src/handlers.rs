@@ -673,6 +673,16 @@ pub(crate) async fn handle_request_async(
 ) -> Result<serde_json::Value, RuntimeHostError> {
     let command = RuntimeHostCommand::parse(request.command.as_str())?;
     match command {
+        #[cfg(feature = "native-job-store")]
+        RuntimeHostCommand::SessionDelete => {
+            let payload = runtime_bridge::deserialize_request(request.payload)?;
+            let response = sessions::delete_async(event_writer, payload)
+                .await
+                .map_err(|error| RuntimeHostError::new("session_failed", error))?;
+            serde_json::to_value(response).map_err(|error| {
+                RuntimeHostError::new("serialize_response_failed", error.to_string())
+            })
+        }
         RuntimeHostCommand::McpConfigure => {
             let payload = runtime_bridge::deserialize_request(request.payload)?;
             let response = mcp::configure(payload)

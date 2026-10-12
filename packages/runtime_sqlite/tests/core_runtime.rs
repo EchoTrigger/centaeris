@@ -127,6 +127,7 @@ async fn public_agent_runtime_persists_through_sqlite_adapter() {
     )
     .expect("create tool layer");
     let runtime = AgentRuntime::new(
+        std::sync::Arc::new(store.job_store(129).expect("native Job store")),
         store,
         tool_layer,
         AgentRuntimeConfig::default(),

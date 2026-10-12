@@ -70,8 +70,10 @@ pub use self::loop_runtime::persist_answer_now_requested_fact;
 use self::prompt_compaction_metadata::*;
 use self::provider_polling::*;
 pub use self::subagent_projection::{
-    persist_subagent_result_projection_from_scheduler_events, reconstruct_wait_recovery_snapshot,
-    restore_wait_recovery_snapshot, validate_wait_recovery_replay,
+    persist_subagent_result_projection_from_scheduler_events,
+    persist_subagent_result_projection_from_scheduler_events_async,
+    reconstruct_wait_recovery_snapshot, restore_wait_recovery_snapshot,
+    validate_wait_recovery_replay,
 };
 pub use self::subagent_runner::{
     build_subagent_scheduler_runtime_event, AgentRuntimeSubagentRunnerConfig,
@@ -273,6 +275,7 @@ pub struct AgentRuntime<
 > {
     checkpoint_store: TurnCheckpointStore<S>,
     runtime_store: S,
+    job_store: Arc<dyn crate::session::store::AsyncJobStorePort>,
     session_manager: SessionManager<S>,
     message_handler: MessageHandler,
     tools_port: ToolLayer,
@@ -311,6 +314,7 @@ impl<
     > AgentRuntime<S>
 {
     pub fn new(
+        job_store: Arc<dyn crate::session::store::AsyncJobStorePort>,
         store: S,
         tools_port: ToolLayer,
         config: AgentRuntimeConfig,
@@ -332,6 +336,7 @@ impl<
         Self {
             checkpoint_store: TurnCheckpointStore::new(store.clone()),
             runtime_store: store.clone(),
+            job_store,
             session_manager: SessionManager::new(store.clone()),
             message_handler,
             tools_port,
@@ -345,19 +350,33 @@ impl<
     }
 
     #[cfg(test)]
-    fn new_for_test(store: S, config: AgentRuntimeConfig) -> Self {
+    fn new_for_test(store: S, config: AgentRuntimeConfig) -> Self
+    where
+        S: crate::session::store::AsyncJobStorePort,
+    {
         let tool_concurrency = ToolConcurrencyCoordinator::new(config.tool_parallelism);
-        Self::new(store, ToolLayer::new(), config, tool_concurrency)
+        Self::new(
+            Arc::new(store.clone()),
+            store,
+            ToolLayer::new(),
+            config,
+            tool_concurrency,
+        )
     }
 
     #[cfg(test)]
-    fn new_for_test_with_tools(
-        store: S,
-        tools_port: ToolLayer,
-        config: AgentRuntimeConfig,
-    ) -> Self {
+    fn new_for_test_with_tools(store: S, tools_port: ToolLayer, config: AgentRuntimeConfig) -> Self
+    where
+        S: crate::session::store::AsyncJobStorePort,
+    {
         let tool_concurrency = ToolConcurrencyCoordinator::new(config.tool_parallelism);
-        Self::new(store, tools_port, config, tool_concurrency)
+        Self::new(
+            Arc::new(store.clone()),
+            store,
+            tools_port,
+            config,
+            tool_concurrency,
+        )
     }
 
     pub fn prepare_completed_turn_projection(

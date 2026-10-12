@@ -3,6 +3,7 @@
 use crate::sqlite_transactions::TransactionEvent;
 use std::future::{poll_fn, Future};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Instant;
@@ -26,6 +27,9 @@ pub(crate) enum WorkError {
     #[error("driver reply unavailable: {0}")]
     ReplyUnavailable(String),
 }
+
+#[cfg(test)]
+mod resource_tests;
 
 #[derive(Debug)]
 pub(crate) struct Receipt<T> {
@@ -84,6 +88,40 @@ struct Admission {
     closing: bool,
 }
 
+/// A connection epoch's actual work, rather than the number of reply waiters.
+#[derive(Debug, Clone, Copy)]
+pub struct JobConnectionMetrics {
+    pub capacity: usize,
+    pub in_flight: usize,
+    pub executing: usize,
+    pub started: u64,
+    pub admission_wait_ns: u64,
+    pub queue_wait_ns: u64,
+    /// Typed BUSY/LOCKED errors observed at transaction begin/commit boundaries.
+    /// String-returning business helpers do not expose their inner SQL errors.
+    pub transaction_lock_conflicts: u64,
+}
+
+#[derive(Default)]
+struct Metrics {
+    executing: AtomicUsize,
+    started: AtomicU64,
+    admission_wait_ns: AtomicU64,
+    queue_wait_ns: AtomicU64,
+    transaction_lock_conflicts: AtomicU64,
+}
+
+struct Executing(Arc<Metrics>);
+impl Drop for Executing {
+    fn drop(&mut self) {
+        self.0.executing.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+fn elapsed_ns(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
 #[derive(Clone)]
 pub(crate) struct Driver {
     connection: tokio_rusqlite::Connection,
@@ -92,15 +130,50 @@ pub(crate) struct Driver {
     tracker: TaskTracker,
     closed: watch::Sender<Option<Result<(), String>>>,
     limit: usize,
+    metrics: Arc<Metrics>,
 }
 
 impl Driver {
+    pub fn from_connection(connection: rusqlite::Connection, limit: usize) -> Self {
+        Self::from_handle(tokio_rusqlite::Connection::from(connection), limit)
+    }
+
+    fn from_handle(connection: tokio_rusqlite::Connection, limit: usize) -> Self {
+        let (closed, _) = watch::channel(None);
+        Self {
+            connection,
+            state: Arc::new(Mutex::new(Admission {
+                accepting: true,
+                healthy: true,
+                closing: false,
+            })),
+            capacity: Arc::new(Semaphore::new(limit)),
+            tracker: TaskTracker::new(),
+            closed,
+            limit,
+            metrics: Arc::new(Metrics::default()),
+        }
+    }
     pub fn is_healthy(&self) -> bool {
         self.state.lock().unwrap().healthy
     }
 
     pub fn capacity(&self) -> (usize, usize) {
         (self.limit, self.limit - self.capacity.available_permits())
+    }
+    pub fn metrics(&self) -> JobConnectionMetrics {
+        JobConnectionMetrics {
+            capacity: self.limit,
+            in_flight: self.tracker.len(),
+            executing: self.metrics.executing.load(Ordering::Relaxed),
+            started: self.metrics.started.load(Ordering::Relaxed),
+            admission_wait_ns: self.metrics.admission_wait_ns.load(Ordering::Relaxed),
+            queue_wait_ns: self.metrics.queue_wait_ns.load(Ordering::Relaxed),
+            transaction_lock_conflicts: self
+                .metrics
+                .transaction_lock_conflicts
+                .load(Ordering::Relaxed),
+        }
     }
     pub async fn open(path: std::path::PathBuf, limit: usize) -> Result<Self, String> {
         let connection = tokio_rusqlite::Connection::open(path)
@@ -124,19 +197,7 @@ impl Driver {
                 }
             });
         }
-        let (closed, _) = watch::channel(None);
-        Ok(Self {
-            connection,
-            state: Arc::new(Mutex::new(Admission {
-                accepting: true,
-                healthy: true,
-                closing: false,
-            })),
-            capacity: Arc::new(Semaphore::new(limit)),
-            tracker: TaskTracker::new(),
-            closed,
-            limit,
-        })
+        Ok(Self::from_handle(connection, limit))
     }
 
     /// Poll once before returning: the library has accepted the closure, or the
@@ -153,6 +214,7 @@ impl Driver {
             + Send
             + 'static,
     {
+        let admission_started = Instant::now();
         let permit = self
             .capacity
             .clone()
@@ -170,14 +232,26 @@ impl Driver {
             // Close acquires the same lock before stopping admission and waiting.
             self.tracker.token()
         };
+        self.metrics
+            .admission_wait_ns
+            .fetch_add(elapsed_ns(admission_started), Ordering::Relaxed);
+        let enqueued_at = Instant::now();
+        let metrics = self.metrics.clone();
         let state = self.state.clone();
         let error_state = state.clone();
         let connection = self.connection.clone();
+        let read_only = options.read_only;
         let mut pending: Pending<T> = Box::pin(async move {
             let reply = connection
                 .call(move |conn| {
                     let _permit = permit;
                     let _token = token;
+                    metrics
+                        .queue_wait_ns
+                        .fetch_add(elapsed_ns(enqueued_at), Ordering::Relaxed);
+                    metrics.started.fetch_add(1, Ordering::Relaxed);
+                    metrics.executing.fetch_add(1, Ordering::Relaxed);
+                    let _executing = Executing(metrics.clone());
                     if !state.lock().unwrap().healthy {
                         return Ok(Receipt {
                             outcome: Outcome::NotExecuted,
@@ -236,6 +310,17 @@ impl Driver {
                             TransactionEvent::RollbackFailed => {
                                 healthy = false;
                                 cleanup_error = Some("transaction rollback failed".into());
+                            }
+                            TransactionEvent::SqliteError(code) => {
+                                if matches!(
+                                    code,
+                                    rusqlite::ErrorCode::DatabaseBusy
+                                        | rusqlite::ErrorCode::DatabaseLocked
+                                ) {
+                                    metrics
+                                        .transaction_lock_conflicts
+                                        .fetch_add(1, Ordering::Relaxed);
+                                }
                             }
                         })
                     }));
@@ -317,7 +402,11 @@ impl Driver {
                 Err(error) => {
                     error_state.lock().unwrap().healthy = false;
                     Receipt {
-                        outcome: Outcome::Unknown,
+                        outcome: if read_only {
+                            Outcome::ReadOnly
+                        } else {
+                            Outcome::Unknown
+                        },
                         result: Err(WorkError::ReplyUnavailable(error.to_string())),
                         healthy: false,
                         cleanup_error: None,

@@ -41,6 +41,8 @@ mod sidecars;
 mod skills;
 mod terminal_sessions;
 use centaeris_runtime_sqlite as sqlite_store;
+#[cfg(feature = "native-job-store")]
+mod subagent_delivery;
 mod subagent_scheduler;
 mod system_skills_deployment;
 mod transcript_runtime;

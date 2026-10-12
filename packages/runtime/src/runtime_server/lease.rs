@@ -104,11 +104,13 @@ impl ActiveAgentRun {
 struct AgentRunRegistryState {
     active_by_session: HashMap<String, ActiveAgentRun>,
     deleting_session_ids: HashSet<String>,
+    #[cfg(feature = "native-job-store")]
+    background_work: HashMap<String, tokio_util::task::TaskTracker>,
 }
 
 #[derive(Debug, Default)]
 pub struct AgentRunRegistry {
-    state: Mutex<AgentRunRegistryState>,
+    state: Arc<Mutex<AgentRunRegistryState>>,
     changed: Condvar,
 }
 
@@ -270,6 +272,16 @@ impl AgentRunRegistry {
         session_ids: &[String],
         delete: impl FnOnce() -> Result<TResult, String>,
     ) -> Result<TResult, String> {
+        let registration = self.begin_session_deletion(session_ids)?;
+        let result = delete();
+        drop(registration);
+        result
+    }
+
+    pub fn begin_session_deletion(
+        &self,
+        session_ids: &[String],
+    ) -> Result<SessionDeletionRegistration, String> {
         let mut session_ids = session_ids
             .iter()
             .map(|session_id| required_identifier(session_id, "sessionId"))
@@ -293,14 +305,96 @@ impl AgentRunRegistry {
             state
                 .deleting_session_ids
                 .extend(session_ids.iter().cloned());
+            #[cfg(feature = "native-job-store")]
+            for session in &session_ids {
+                if let Some(tracker) = state.background_work.get(session) {
+                    tracker.close();
+                }
+            }
         }
-        let registration = SessionDeletionRegistration {
-            registry: self,
+        Ok(SessionDeletionRegistration {
+            state: self.state.clone(),
             session_ids,
+        })
+    }
+
+    #[cfg(feature = "native-job-store")]
+    pub fn begin_background_work(
+        &self,
+        session: &str,
+    ) -> Result<tokio_util::task::task_tracker::TaskTrackerToken, String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "Session AgentRun registry lock poisoned")?;
+        if state.deleting_session_ids.contains(session) {
+            return Err(format!("session is being deleted: {session}"));
+        }
+        Ok(state
+            .background_work
+            .entry(session.into())
+            .or_default()
+            .token())
+    }
+
+    #[cfg(feature = "native-job-store")]
+    pub async fn wait_for_background_work(&self, sessions: &[String]) -> Result<(), String> {
+        let trackers = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Session AgentRun registry lock poisoned")?;
+            if sessions
+                .iter()
+                .any(|s| !state.deleting_session_ids.contains(s))
+            {
+                return Err("background drain requires closed Session admission".into());
+            }
+            sessions
+                .iter()
+                .filter_map(|s| state.background_work.get(s).cloned())
+                .collect::<Vec<_>>()
         };
-        let result = delete();
-        drop(registration);
-        result
+        for tracker in trackers {
+            tracker.wait().await;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "native-job-store")]
+    pub async fn drain_background_work(&self) -> Result<(), String> {
+        let trackers = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Session AgentRun registry lock poisoned")?;
+            let trackers = state.background_work.values().cloned().collect::<Vec<_>>();
+            for tracker in &trackers {
+                tracker.close();
+            }
+            trackers
+        };
+        for tracker in trackers {
+            tracker.wait().await;
+        }
+        Ok(())
+    }
+
+    pub fn background_work_count(&self) -> usize {
+        #[cfg(feature = "native-job-store")]
+        {
+            self.state
+                .lock()
+                .unwrap()
+                .background_work
+                .values()
+                .map(|tracker| tracker.len())
+                .sum()
+        }
+        #[cfg(not(feature = "native-job-store"))]
+        {
+            0
+        }
     }
 
     pub fn wait_until_sessions_inactive(&self, session_ids: &[String]) -> Result<(), String> {
@@ -321,16 +415,24 @@ impl AgentRunRegistry {
     }
 }
 
-struct SessionDeletionRegistration<'a> {
-    registry: &'a AgentRunRegistry,
+pub struct SessionDeletionRegistration {
+    state: Arc<Mutex<AgentRunRegistryState>>,
     session_ids: Vec<String>,
 }
 
-impl Drop for SessionDeletionRegistration<'_> {
+impl Drop for SessionDeletionRegistration {
     fn drop(&mut self) {
-        if let Ok(mut state) = self.registry.state.lock() {
+        if let Ok(mut state) = self.state.lock() {
             for session_id in &self.session_ids {
                 state.deleting_session_ids.remove(session_id);
+                #[cfg(feature = "native-job-store")]
+                if let Some(tracker) = state.background_work.get(session_id) {
+                    if tracker.is_empty() {
+                        state.background_work.remove(session_id);
+                    } else {
+                        tracker.reopen();
+                    }
+                }
             }
         }
     }

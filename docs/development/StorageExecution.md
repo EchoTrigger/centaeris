@@ -34,10 +34,10 @@ checkpoint or event. No new field limits or payload parsing are introduced.
 ## Asynchronous SQLite connection validation
 
 The connection policy is shared by the file-backed characterization tests and
-the native SqliteJobStore adapter. Production assembly still uses the current
-Actor and synchronous Store. The adapter is available through the narrow Core
-AsyncJobStorePort; default local assembly has not switched. See
-[JobStorage.md](JobStorage.md) for results, recovery and outstanding acceptance.
+the native SqliteJobStore adapter. Default local Job assembly uses the narrow Core
+AsyncJobStorePort and native library connection. The Actor/synchronous Store remain
+for snapshots and other retained capabilities. See
+[JobStorage.md](JobStorage.md) for results, recovery and the caller inventory.
 Database formats, licenses and public network contracts remain unchanged.
 
 The tested combination is `tokio-rusqlite =0.6.0`, `rusqlite =0.32.1` with
@@ -48,7 +48,7 @@ second version path was not pursued. The lock adds only the candidate and its
 async-trait 0.1.89 makes the narrow capability injectable without exposing database
 types in Core. tempfile 3.27.0 and rusqlite/hooks remain test facilities. These
 versions already existed in the locked graph. Driver dependencies are available
-to the native adapter; this does not switch host defaults.
+to the native adapter and the default local Job assembly.
 
 The path is test caller -> small admission/lifetime policy -> the library's
 `Connection::call` -> existing connection-level operations. It has one library
@@ -119,12 +119,12 @@ exit/reopen checks are not power-loss durability tests.
 
 Core async Subagent functions use AsyncJobStorePort and a settlement barrier.
 SQLite native operations reach the library queue directly. Actor dispatch remains
-for current host assembly and PostgreSQL. Its legacy string transport cannot
+for synchronous host capabilities and PostgreSQL. Its legacy string transport cannot
 identify every phase, so write errors conservatively remain unknown. Missing
 authority never falls back to an old Job record.
 
-[JobStorage.md](JobStorage.md) inventories the remaining callers and default-switch
-conditions. Snapshot interfaces/SQL and PostgreSQL pools remain outside this
+[JobStorage.md](JobStorage.md) inventories migrated and retained callers.
+Snapshot interfaces/SQL and PostgreSQL pools remain outside this
 migration. Actor and native connections do not share FIFO: cross-path handoffs
 require explicit acknowledgements. Native capability tests alone do not establish
 production-call-graph parity or combined resource capacity.

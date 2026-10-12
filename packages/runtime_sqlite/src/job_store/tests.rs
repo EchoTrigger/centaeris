@@ -51,6 +51,114 @@ async fn claim(jobs: &SqliteJobStore, id: &str, at: i64) -> RuntimeJobRecord {
 }
 
 #[tokio::test]
+async fn service_stop_provenance_commits_with_cancellation_and_cannot_be_faked_by_reason() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("runtime.db");
+    let jobs = SqliteJobStore::open(path.clone(), 2).await.unwrap();
+    let make_request = |job: &RuntimeJobRecord, status| CancelRuntimeJobRequest {
+        job_id: job.job_id.clone(),
+        reason: "runtime_server_shutdown".into(),
+        cancelled_at_ms: 20,
+        expected_status: Some(status),
+        expected_lease_owner: None,
+    };
+    let service = jobs
+        .upsert_external_context_and_schedule_job(creation("service"))
+        .await
+        .unwrap()
+        .job;
+    let user = jobs
+        .upsert_external_context_and_schedule_job(creation("user"))
+        .await
+        .unwrap()
+        .job;
+    let rejected = jobs
+        .upsert_external_context_and_schedule_job(creation("rejected"))
+        .await
+        .unwrap()
+        .job;
+    jobs.cancel_for_service_shutdown(make_request(&service, RuntimeJobStatus::Queued))
+        .await
+        .unwrap();
+    jobs.cancel_runtime_job(make_request(&user, RuntimeJobStatus::Queued))
+        .await
+        .unwrap();
+    assert!(matches!(
+        jobs.cancel_for_service_shutdown(make_request(&rejected, RuntimeJobStatus::Running))
+            .await,
+        Err(JobStoreError::Storage {
+            outcome: JobWriteOutcome::RolledBack,
+            ..
+        })
+    ));
+    jobs.close().await.unwrap();
+    let reopened = SqliteJobStore::open(path, 2).await.unwrap();
+    assert!(reopened.was_service_stopped(&service.job_id).await.unwrap());
+    assert!(!reopened.was_service_stopped(&user.job_id).await.unwrap());
+    assert!(!reopened
+        .was_service_stopped(&rejected.job_id)
+        .await
+        .unwrap());
+    assert_eq!(
+        reopened
+            .get_runtime_job(&rejected.job_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        RuntimeJobStatus::Queued
+    );
+    assert_eq!(
+        reopened
+            .pending_terminal_deliveries(64, None)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    reopened.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_close_waiter_stops_admission_even_while_the_epoch_owner_is_locked() {
+    use std::future::Future;
+    use std::task::Poll;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("runtime.db");
+    let jobs = SqliteJobStore::open(path.clone(), 2).await.unwrap();
+    let owner = jobs.owner.lock().await;
+    let mut close = Box::pin(jobs.close());
+    std::future::poll_fn(|cx| {
+        assert!(matches!(close.as_mut().poll(cx), Poll::Pending));
+        Poll::Ready(())
+    })
+    .await;
+    drop(close);
+    let rejected = tokio::time::timeout(
+        Duration::from_millis(100),
+        jobs.get_runtime_job("never-written"),
+    )
+    .await;
+    drop(owner);
+    jobs.close().await.unwrap();
+    assert!(
+        matches!(
+            rejected,
+            Ok(Err(JobStoreError::Storage {
+                outcome: JobWriteOutcome::NotExecuted,
+                ..
+            }))
+        ),
+        "a cancelled close waiter must not reopen admission behind the epoch lock: {rejected:?}"
+    );
+    let independent = rusqlite::Connection::open(path).unwrap();
+    let count: i64 = independent
+        .query_row("SELECT COUNT(*) FROM runtime_jobs", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
 async fn native_operations_preserve_job_and_outbox_facts() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("runtime.db");
@@ -301,7 +409,6 @@ async fn cancelled_close_waiter_does_not_reopen_admission_or_cancel_drain() {
         Poll::Ready(())
     })
     .await;
-    assert!(jobs.owner.lock().await.stopped);
     drop(closing);
     assert!(matches!(
         jobs.get_runtime_job("any").await,

@@ -11,7 +11,8 @@ use crate::session::reliability::{
     ScheduleRuntimeJobResult, StartRuntimeJobRequest,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum JobStoreOperation {
     Read,
     Create,
@@ -22,9 +23,11 @@ pub enum JobStoreOperation {
     Complete,
     Fail,
     Cancel,
+    Acknowledge,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum JobWriteOutcome {
     ReadOnly,
     NotExecuted,
@@ -36,7 +39,13 @@ pub enum JobWriteOutcome {
 /// Storage uncertainty remains distinct from a Core business rejection.
 /// A caller must establish actual work completion before reconciling an unknown
 /// write through a healthy connection; a reply timeout is not that barrier.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "detail",
+    rename_all = "camelCase",
+    deny_unknown_fields
+)]
 pub enum JobStoreError {
     #[error("{0}")]
     Rejected(String),

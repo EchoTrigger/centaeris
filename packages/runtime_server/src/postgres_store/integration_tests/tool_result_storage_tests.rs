@@ -98,6 +98,10 @@ fn postgres_new_turn_recovers_control_byte_output_from_core_receipt_without_reex
     }
     // The real Core planner reads its own TEXT receipt. No tool or model is invoked.
     let engine = AgentRuntime::new(
+        std::sync::Arc::new(rt.block_on(async {
+            centaeris_core::session::store::RuntimeStoreActor::start(store.clone())
+                .expect("test Job Actor")
+        })),
         store.clone(),
         tools,
         AgentRuntimeConfig::default(),

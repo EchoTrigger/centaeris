@@ -1673,8 +1673,9 @@ impl<
                 .is_some();
 
             if call.name == "agent" && !has_dynamic_contract {
-                let mut report =
-                    self.execute_agent_tool_call(session_id, turn_id, agent_run_identity, &call);
+                let mut report = self
+                    .execute_agent_tool_call(session_id, turn_id, agent_run_identity, &call)
+                    .await;
                 report.parallel_group = Some("serial".to_string());
                 let report = self.persist_tool_execution_receipt(
                     &mut execution_facts,
@@ -1696,7 +1697,7 @@ impl<
             }
 
             if is_task_runtime_tool_name(call.name.as_str()) && !has_dynamic_contract {
-                let mut report = self.execute_task_runtime_tool_call(session_id, &call);
+                let mut report = self.execute_task_runtime_tool_call(session_id, &call).await;
                 report.parallel_group = Some("serial".to_string());
                 report.transition_reason = Some("serial_task_runtime_exec".to_string());
                 let report = self.persist_tool_execution_receipt(
@@ -1850,7 +1851,8 @@ impl<
             } else if let Some(agent_wait) = agent_wait {
                 indexed_waits.push((
                     index,
-                    self.agent_task_output_runtime_job_wait(session, &report, &agent_wait)?,
+                    self.agent_task_output_runtime_job_wait(session, &report, &agent_wait)
+                        .await?,
                 ));
             } else {
                 terminal_reports.push((index, report));
@@ -2190,15 +2192,17 @@ impl<
         Ok(wait)
     }
 
-    fn agent_task_output_runtime_job_wait(
+    async fn agent_task_output_runtime_job_wait(
         &self,
         session: &SessionStateSnapshot,
         report: &ToolExecutionResult,
         output_ref: &AgentTaskOutputRefV1,
     ) -> Result<RuntimeJobWaitV1, String> {
         let job = self
-            .runtime_store
-            .get_runtime_job(output_ref.runtime_job_id.as_str())?
+            .job_store
+            .get_runtime_job(output_ref.runtime_job_id.as_str())
+            .await
+            .map_err(|error| error.diagnostic_message())?
             .ok_or_else(|| {
                 format!(
                     "TaskOutput runtime job not found: {}",
@@ -2283,7 +2287,7 @@ impl<
         evaluate_tool_action(&request)
     }
 
-    pub(super) fn execute_agent_tool_call(
+    pub(super) async fn execute_agent_tool_call(
         &self,
         session_id: &str,
         turn_id: &str,
@@ -2291,8 +2295,9 @@ impl<
         call: &ToolCallEnvelope,
     ) -> ToolExecutionResult {
         let started_at_ms = now_ms();
-        let result =
-            self.build_and_schedule_agent_run(session_id, turn_id, agent_run_identity, call);
+        let result = self
+            .build_and_schedule_agent_run(session_id, turn_id, agent_run_identity, call)
+            .await;
         match result {
             Ok(output) => ToolExecutionResult {
                 tool_call_id: call.id.clone(),
@@ -2312,10 +2317,13 @@ impl<
                 tool_call_id: call.id.clone(),
                 tool_name: "agent".to_string(),
                 status: "error".to_string(),
-                content: err.clone(),
-                details: json!({ "message": err }),
+                content: err.diagnostic_message(),
+                details: json!({ "message": err.diagnostic_message(), "storageResult": err }),
                 facts: Vec::new(),
-                error: Some(ToolErrorInfo::from_unstructured_error(err)),
+                error: Some(
+                    ToolErrorInfo::from_unstructured_error(err.diagnostic_message())
+                        .with_retryable(false),
+                ),
                 started_at_ms,
                 completed_at_ms: now_ms(),
                 latency_ms: now_ms().saturating_sub(started_at_ms),
@@ -2325,13 +2333,13 @@ impl<
         }
     }
 
-    fn build_and_schedule_agent_run(
+    async fn build_and_schedule_agent_run(
         &self,
         session_id: &str,
         turn_id: &str,
         agent_run_identity: Option<&RuntimeAgentRunIdentityV1>,
         call: &ToolCallEnvelope,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, crate::session::store::job::JobStoreError> {
         let agent_run_identity = agent_run_identity
             .ok_or_else(|| "Agent requires the active runtime AgentRun identity".to_string())?;
         agent_run_identity.validate()?;
@@ -2463,10 +2471,8 @@ impl<
             updated_at_ms: now,
         };
         let scheduled = self
-            .runtime_store
-            .upsert_external_context_and_schedule_job(
-                UpsertExternalContextAndScheduleJobRequest { object, job },
-            )?;
+            .persist_subagent_creation(UpsertExternalContextAndScheduleJobRequest { object, job })
+            .await?;
         if scheduled.job.job_kind != SUBAGENT_RUN_JOB_KIND
             || scheduled.job.session_id.as_deref() != Some(session_id)
             || scheduled.job.payload_ref.as_deref() != Some(work_packet_ref.as_str())
@@ -2474,7 +2480,8 @@ impl<
             return Err(format!(
                 "Agent scheduled runtime job identity mismatch: {}",
                 scheduled.job.job_id
-            ));
+            )
+            .into());
         }
         Ok(json!({
             "schema": AGENT_TOOL_RESULT_SCHEMA_V1,
@@ -2495,7 +2502,83 @@ impl<
         }))
     }
 
-    pub(super) fn execute_task_runtime_tool_call(
+    async fn persist_subagent_creation(
+        &self,
+        req: UpsertExternalContextAndScheduleJobRequest,
+    ) -> Result<
+        crate::session::reliability::ScheduleRuntimeJobResult,
+        crate::session::store::job::JobStoreError,
+    > {
+        use crate::session::store::job::{JobStoreError, JobWriteOutcome};
+        match self
+            .job_store
+            .upsert_external_context_and_schedule_job(req.clone())
+            .await
+        {
+            Ok(result) => Ok(result),
+            Err(error)
+                if error.requires_settlement()
+                    || matches!(
+                        error,
+                        JobStoreError::Storage {
+                            outcome: JobWriteOutcome::Committed,
+                            ..
+                        }
+                    ) =>
+            {
+                self.job_store
+                    .settle_job_operations()
+                    .await
+                    .map_err(|settlement| {
+                        error.clone().with_message(format!(
+                            "{error}; creation settlement failed: {settlement}"
+                        ))
+                    })?;
+                let job = self
+                    .job_store
+                    .get_runtime_job(&req.job.job_id)
+                    .await
+                    .map_err(|read| {
+                        error.clone().with_message(format!(
+                            "{error}; Job reconciliation read failed: {read}"
+                        ))
+                    })?;
+                let object = self
+                    .job_store
+                    .load_external_context_object(&req.object.object_id)
+                    .await
+                    .map_err(|read| {
+                        error.clone().with_message(format!(
+                            "{error}; WorkPacket reconciliation read failed: {read}"
+                        ))
+                    })?;
+                match (job, object) {
+                    (Some(job), Some(object))
+                        if job.job_id == req.job.job_id
+                            && job.job_kind == req.job.job_kind
+                            && job.idempotency_key == req.job.idempotency_key
+                            && job.session_id == req.job.session_id
+                            && job.branch_id == req.job.branch_id
+                            && job.payload_ref == req.job.payload_ref
+                            && object == req.object =>
+                    {
+                        Ok(crate::session::reliability::ScheduleRuntimeJobResult {
+                            disposition:
+                                crate::session::reliability::ScheduleRuntimeJobDisposition::Existing,
+                            job,
+                        })
+                    }
+                    _ => {
+                        let message = format!("{error}; creation could not be reconciled from authoritative Job and WorkPacket");
+                        Err(error.with_message(message))
+                    }
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) async fn execute_task_runtime_tool_call(
         &self,
         session_id: &str,
         call: &ToolCallEnvelope,
@@ -2528,6 +2611,7 @@ impl<
         let output: Result<(String, Value), String> = match tool_name {
             "task_output" => self
                 .validate_agent_task_output_ref(session_id, &output_ref)
+                .await
                 .map(|()| {
                     (
                         "Waiting for the Agent result.".to_string(),
@@ -2573,15 +2657,17 @@ impl<
         }
     }
 
-    fn validate_agent_task_output_ref(
+    async fn validate_agent_task_output_ref(
         &self,
         session_id: &str,
         output_ref: &AgentTaskOutputRefV1,
     ) -> Result<(), String> {
         output_ref.validate()?;
         let job = self
-            .runtime_store
-            .get_runtime_job(output_ref.runtime_job_id.as_str())?
+            .job_store
+            .get_runtime_job(output_ref.runtime_job_id.as_str())
+            .await
+            .map_err(|error| error.diagnostic_message())?
             .ok_or_else(|| {
                 format!(
                     "TaskOutput runtime job not found: {}",
@@ -2605,8 +2691,10 @@ impl<
             .as_deref()
             .ok_or_else(|| format!("TaskOutput runtime job payloadRef missing: {}", job.job_id))?;
         let object = self
-            .runtime_store
-            .load_external_context_object(work_packet_ref)?
+            .job_store
+            .load_external_context_object(work_packet_ref)
+            .await
+            .map_err(|error| error.diagnostic_message())?
             .ok_or_else(|| format!("TaskOutput work packet missing: {work_packet_ref}"))?;
         if object.object_kind != "subagent_work_packet"
             || object.source_provider_id != "centaeris.core"

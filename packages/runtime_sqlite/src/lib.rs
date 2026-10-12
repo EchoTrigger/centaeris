@@ -41,6 +41,12 @@ pub struct SqliteRuntimeStore {
 }
 
 impl SqliteRuntimeStore {
+    pub fn job_store(
+        &self,
+        limit: usize,
+    ) -> Result<job_store::SqliteJobStore, centaeris_core::session::store::job::JobStoreError> {
+        job_store::SqliteJobStore::new(self.db_path.clone(), limit)
+    }
     pub fn new<P: AsRef<Path>>(db_path: P) -> Result<Self, String> {
         let path = db_path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
