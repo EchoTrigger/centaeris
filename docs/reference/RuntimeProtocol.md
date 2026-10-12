@@ -57,9 +57,12 @@ parsing. Up to 32 connections are accepted; excess connections close without
 stopping the listener.
 
 Request admission happens before spawning: at most eight ordinary requests per
-connection and 32 across the server. Initialization, reads and the existing drain-allowed
-cancel/detach/exit/shutdown commands have separate headroom of four per connection
-and eight globally. These are stability defaults, not measured throughput optima.
+connection and 32 across the server. Only initialization, AgentRun cancel/detach/
+detach-viewer, app exit, Runtime shutdown and sidecar stop use separate lifecycle
+control headroom of four per connection and eight globally. Reads use ordinary
+capacity, even though they remain allowed during shutdown drain. This keeps slow
+reads from occupying cancellation headroom. Control requests can still exhaust
+their own finite lane. These are stability defaults, not measured throughput optima.
 There is no extra queue of spawned tasks waiting for permits. Exhaustion closes
 the offending connection; an admitted action continues and retains its capacity
 until its handler and response enqueue finish. Reconnect to observe/reconcile
