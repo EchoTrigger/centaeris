@@ -14,18 +14,70 @@ enum GenerateStep<T> {
     Cancelled(String),
 }
 
+pub(super) struct WorkerJobCancellation<'a> {
+    job_id: &'a str,
+    jobs: &'a dyn crate::session::store::AsyncJobStorePort,
+    storage_error: Mutex<Option<crate::session::store::job::JobStoreError>>,
+}
+
+async fn poll_loop_cancellation_async(
+    cancellation_probe: Option<&(dyn Fn() -> Result<Option<String>, String> + Sync)>,
+    worker: Option<&WorkerJobCancellation<'_>>,
+) -> Result<Option<String>, String> {
+    let Some(worker) = worker else {
+        return poll_loop_cancellation(cancellation_probe);
+    };
+    let observed = worker
+        .jobs
+        .get_runtime_job(worker.job_id)
+        .await
+        .and_then(|job| {
+            job.ok_or_else(|| {
+                crate::session::store::job::JobStoreError::not_executed(
+                    crate::session::store::job::JobStoreOperation::Read,
+                    "subagent Job disappeared during cancellation polling".into(),
+                )
+            })
+            .map(|job| cancelled_job_reason(&job))
+        });
+    observed.map_err(|error| {
+        let message = error.diagnostic_message();
+        worker
+            .storage_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get_or_insert(error);
+        message
+    })
+}
+
 async fn wait_for_loop_cancellation(
     cancellation_probe: Option<&(dyn Fn() -> Result<Option<String>, String> + Sync)>,
+    worker: Option<&WorkerJobCancellation<'_>>,
 ) -> Result<String, String> {
-    let Some(cancellation_probe) = cancellation_probe else {
+    if cancellation_probe.is_none() && worker.is_none() {
         return std::future::pending().await;
-    };
+    }
     loop {
         tokio::time::sleep(Duration::from_millis(CANCELLATION_POLL_INTERVAL_MS)).await;
-        if let Some(reason) = poll_loop_cancellation(Some(cancellation_probe))? {
+        if let Some(reason) = poll_loop_cancellation_async(cancellation_probe, worker).await? {
             return Ok(reason);
         }
     }
+}
+
+fn cancelled_job_reason(job: &RuntimeJobRecord) -> Option<String> {
+    if job.status != RuntimeJobStatus::Cancelled {
+        return None;
+    }
+    Some(
+        job.last_error
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("subagent_cancelled")
+            .to_string(),
+    )
 }
 
 struct TurnControlCloseGuard {
@@ -671,8 +723,10 @@ impl<
                 ));
             }
             let job = self
-                .runtime_store
-                .get_runtime_job(wait.job_id.as_str())?
+                .job_store
+                .get_runtime_job(wait.job_id.as_str())
+                .await
+                .map_err(|error| error.diagnostic_message())?
                 .ok_or_else(|| format!("runtime_job_wait_job_missing: jobId={}", wait.job_id))?;
             if job.job_kind != wait.job_kind
                 || !runtime_job_session_scope_matches(
@@ -1272,7 +1326,7 @@ impl<
     ) -> Result<AgentRunResult, String> {
         let driver = ModelClientGenerateDriver::new(model_client, session_config_store);
         self.process_turn_loop_with_async_driver_and_sink_cancellable(
-            req, &driver, None, None, None, None,
+            req, &driver, None, None, None, None, None,
         )
         .await
     }
@@ -1295,6 +1349,7 @@ impl<
             &driver,
             Some(stream_sink),
             Some(cancellation_probe),
+            None,
             None,
             None,
         )
@@ -1330,6 +1385,7 @@ impl<
             Some(cancellation_probe),
             None,
             Some(&tool_safe_point),
+            None,
         )
         .await
     }
@@ -1379,6 +1435,7 @@ impl<
             Some(stream_sink),
             Some(cancellation_probe),
             Some(turn_control),
+            None,
             None,
         )
         .await
@@ -1463,6 +1520,7 @@ impl<
             Some(cancellation_probe),
             Some(turn_control),
             Some(&tool_safe_point),
+            None,
         )
         .await
     }
@@ -1483,8 +1541,11 @@ impl<
             Ok(request) => request,
             Err(error) => return SubagentWorkerRunOutcome::Failed { error, retry: None },
         };
-        let job_id = req.job.job_id.clone();
-        let cancellation_probe = || self.subagent_worker_cancellation_reason(job_id.as_str());
+        let worker_cancellation = WorkerJobCancellation {
+            job_id: req.job.job_id.as_str(),
+            jobs: self.job_store.as_ref(),
+            storage_error: Mutex::new(None),
+        };
         let result = if let Some(tool_safe_point) = tool_safe_point {
             let tool_safe_point = ToolSafePointDispatcher {
                 sink: Mutex::new(tool_safe_point),
@@ -1503,9 +1564,10 @@ impl<
                 request,
                 &driver,
                 stream_sink,
-                Some(&cancellation_probe),
+                None,
                 None,
                 Some(&tool_safe_point),
+                Some(&worker_cancellation),
             )
             .await
         } else {
@@ -1514,36 +1576,25 @@ impl<
                 request,
                 &driver,
                 stream_sink,
-                Some(&cancellation_probe),
                 None,
                 None,
+                None,
+                Some(&worker_cancellation),
             )
             .await
         };
+        let storage_error = worker_cancellation
+            .storage_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(error) = storage_error {
+            return SubagentWorkerRunOutcome::StorageError { error };
+        }
         match result {
             Ok(response) => subagent_worker_outcome_from_query_loop_response(response),
             Err(error) => SubagentWorkerRunOutcome::Failed { error, retry: None },
         }
-    }
-
-    pub(super) fn subagent_worker_cancellation_reason(
-        &self,
-        job_id: &str,
-    ) -> Result<Option<String>, String> {
-        let Some(job) = self.runtime_store.get_runtime_job(job_id)? else {
-            return Ok(None);
-        };
-        if job.status != RuntimeJobStatus::Cancelled {
-            return Ok(None);
-        }
-        Ok(Some(
-            job.last_error
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or("subagent_cancelled")
-                .to_string(),
-        ))
     }
 
     async fn process_turn_request_with_stream_tracking_and_tool_safe_point_async(
@@ -1672,6 +1723,10 @@ impl<
         Ok(vec![requested_event, current_event])
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "query loop keeps optional Worker cancellation capability private and explicit"
+    )]
     pub(super) async fn process_turn_loop_with_async_driver_and_sink_cancellable<
         D: AsyncGenerateDriver,
     >(
@@ -1682,6 +1737,7 @@ impl<
         cancellation_probe: Option<&(dyn Fn() -> Result<Option<String>, String> + Sync)>,
         turn_control: Option<&TurnControl>,
         tool_safe_point: Option<&ToolSafePointDispatcher<'_>>,
+        worker_cancellation: Option<&WorkerJobCancellation<'_>>,
     ) -> Result<AgentRunResult, String> {
         let AgentRunRequest {
             session_id,
@@ -1736,7 +1792,8 @@ impl<
         let auto_continue_after_resume_wait =
             auto_continue_after_resume_wait.unwrap_or(self.config.auto_continue_after_resume_wait);
 
-        let initial_cancellation_reason = poll_loop_cancellation(cancellation_probe)?;
+        let initial_cancellation_reason =
+            poll_loop_cancellation_async(cancellation_probe, worker_cancellation).await?;
 
         let resume_session = self
             .session_manager
@@ -1940,7 +1997,9 @@ impl<
         let mut pending_output_token_recovery = None::<PendingOutputTokenRecovery>;
         let mut output_token_recovery_attempts = 0_u8;
         loop {
-            if let Some(reason) = poll_loop_cancellation(cancellation_probe)? {
+            if let Some(reason) =
+                poll_loop_cancellation_async(cancellation_probe, worker_cancellation).await?
+            {
                 return Ok(AgentRunResult::new(
                     responses,
                     AgentRunStop::Cancelled(reason),
@@ -2195,7 +2254,7 @@ impl<
                     result = drive_prepared_turn_with_sink_async(driver, prepared_turn, sink) => {
                         GenerateStep::Completed(result)
                     }
-                    reason = wait_for_loop_cancellation(cancellation_probe) => {
+                    reason = wait_for_loop_cancellation(cancellation_probe, worker_cancellation) => {
                         GenerateStep::Cancelled(reason?)
                     }
                 }
@@ -2204,7 +2263,7 @@ impl<
                     result = drive_prepared_turn_async(driver, prepared_turn) => {
                         GenerateStep::Completed(result)
                     }
-                    reason = wait_for_loop_cancellation(cancellation_probe) => {
+                    reason = wait_for_loop_cancellation(cancellation_probe, worker_cancellation) => {
                         GenerateStep::Cancelled(reason?)
                     }
                 }
@@ -2312,7 +2371,9 @@ impl<
                     recorded_at_ms: crate::runtime::contracts::current_timestamp_ms(),
                 })?;
             }
-            if let Some(reason) = poll_loop_cancellation(cancellation_probe)? {
+            if let Some(reason) =
+                poll_loop_cancellation_async(cancellation_probe, worker_cancellation).await?
+            {
                 return Ok(AgentRunResult::new(
                     responses,
                     AgentRunStop::Cancelled(reason),
@@ -2451,7 +2512,10 @@ impl<
                     continuation,
                     QueryContinuation::AwaitQuestion | QueryContinuation::AwaitRuntimeJob
                 ) {
-                    if let Some(reason) = poll_loop_cancellation(cancellation_probe)? {
+                    if let Some(reason) =
+                        poll_loop_cancellation_async(cancellation_probe, worker_cancellation)
+                            .await?
+                    {
                         if reason == "agent_run_cancel_requested" {
                             let wait_checkpoint = responses
                                 .last()

@@ -12,6 +12,11 @@ default-run = "centaeris-runtime"
 [lints]
 workspace = true
 
+[features]
+# Native local Job operations have passed complete call-chain acceptance.
+default = ["native-job-store"]
+native-job-store = []
+
 [[bin]]
 name = "centaeris-runtime"
 path = "src/main.rs"
@@ -45,6 +50,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "sync"] }
+tokio-util = { version = "=0.7.18", features = ["rt"] }
 toml.workspace = true
 zstd.workspace = true
 chrono-tz = "=0.10.4"

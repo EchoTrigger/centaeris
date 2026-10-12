@@ -466,6 +466,10 @@ fn run_message_runtime_contract(revocation_window: bool) {
         .register_dynamic_tool_provider(Arc::new(ProbeProvider))
         .unwrap();
     let engine = AgentRuntime::new(
+        std::sync::Arc::new(
+            centaeris_core::session::store::RuntimeStoreActor::start(store.clone())
+                .expect("test Job Actor"),
+        ),
         store.clone(),
         tools,
         AgentRuntimeConfig {

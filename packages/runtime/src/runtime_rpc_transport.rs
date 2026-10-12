@@ -110,7 +110,10 @@ impl RuntimeServerClientHub {
             .agent_runs
             .active_agent_run_count()
             .map_err(RuntimeHostError::transport)?;
-        Ok(has_clients || active_agent_run_count > 0 || self.active_action_count() > 0)
+        Ok(has_clients
+            || active_agent_run_count > 0
+            || self.active_action_count() > 0
+            || self.agent_runs.background_work_count() > 0)
     }
 
     pub(crate) fn activity_generation(&self) -> u64 {
@@ -128,6 +131,7 @@ impl RuntimeServerClientHub {
         if self.activity_generation() != expected_activity_generation
             || !clients.is_empty()
             || self.active_action_count() > 0
+            || self.agent_runs.background_work_count() > 0
             || self
                 .agent_runs
                 .active_agent_run_count()
@@ -318,7 +322,7 @@ impl RuntimeServerClientHub {
         Ok(lease)
     }
 
-    fn request_service_shutdown(&self) -> Result<(), RuntimeHostError> {
+    pub(crate) fn request_service_shutdown(&self) -> Result<(), RuntimeHostError> {
         let _clients = self
             .clients
             .lock()
@@ -367,6 +371,19 @@ impl RuntimeServerClientHub {
 
     pub(crate) fn is_draining(&self) -> bool {
         self.draining.load(Ordering::Acquire)
+    }
+
+    #[cfg(feature = "native-job-store")]
+    pub(crate) async fn drain_background_work(&self) -> Result<(), RuntimeHostError> {
+        if !self.is_draining() {
+            return Err(RuntimeHostError::transport(
+                "background drain requires stopped service admission",
+            ));
+        }
+        self.agent_runs
+            .drain_background_work()
+            .await
+            .map_err(RuntimeHostError::transport)
     }
 
     pub(crate) fn active_agent_runs(&self) -> Result<Vec<ActiveAgentRun>, RuntimeHostError> {
@@ -479,6 +496,35 @@ impl EventWriter {
         self.hub
             .agent_runs
             .with_session_deletion(session_ids, delete)
+    }
+
+    #[cfg(feature = "native-job-store")]
+    pub(crate) fn begin_session_deletion(
+        &self,
+        sessions: &[String],
+    ) -> Result<crate::runtime_server::SessionDeletionRegistration, String> {
+        self.hub.agent_runs.begin_session_deletion(sessions)
+    }
+
+    #[cfg(feature = "native-job-store")]
+    pub(crate) fn begin_background_work(
+        &self,
+        session: &str,
+    ) -> Result<tokio_util::task::task_tracker::TaskTrackerToken, String> {
+        let _clients = self
+            .hub
+            .clients
+            .lock()
+            .map_err(|_| "runtime server client hub lock poisoned")?;
+        if self.hub.is_draining() {
+            return Err("runtime_server_draining".into());
+        }
+        self.hub.agent_runs.begin_background_work(session)
+    }
+
+    #[cfg(feature = "native-job-store")]
+    pub(crate) async fn wait_for_background_work(&self, sessions: &[String]) -> Result<(), String> {
+        self.hub.agent_runs.wait_for_background_work(sessions).await
     }
 
     pub(crate) fn wait_until_sessions_inactive(

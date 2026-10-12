@@ -259,6 +259,9 @@ pub enum SubagentWorkerRunOutcome {
     Cancelled {
         reason: String,
     },
+    StorageError {
+        error: JobStoreError,
+    },
 }
 
 pub type SubagentWorkerRunFuture<'a> =
@@ -1236,6 +1239,7 @@ where
     }
 
     let final_event = match outcome {
+        SubagentWorkerRunOutcome::StorageError { error } => return Err(error),
         SubagentWorkerRunOutcome::Succeeded { summary, .. } => {
             let result_ref =
                 runtime_external_context_keys::subagent_result_ref(running_job.job_id.as_str());
@@ -1937,6 +1941,36 @@ fn stable_hash(value: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("{hash:016x}")
+}
+
+pub fn terminal_subagent_event_from_job(
+    job: &RuntimeJobRecord,
+    packet: Option<&SubagentWorkPacketEnvelope>,
+) -> Result<SubagentSchedulerEvent, String> {
+    let (kind, summary) = match job.status {
+        RuntimeJobStatus::Succeeded => (
+            SubagentSchedulerEventKind::Succeeded,
+            "Subagent job completed.",
+        ),
+        RuntimeJobStatus::Failed | RuntimeJobStatus::DeadLettered => {
+            (SubagentSchedulerEventKind::Failed, "Subagent job failed.")
+        }
+        RuntimeJobStatus::Cancelled => (
+            SubagentSchedulerEventKind::Cancelled,
+            "Subagent job cancelled.",
+        ),
+        _ => return Err("subagent terminal delivery requires a terminal Job".into()),
+    };
+    let mut event = scheduler_event_from_job(
+        job,
+        kind,
+        SubagentLifecycleStatus::from(job.status.clone()),
+        None,
+        summary,
+        job.updated_at_ms,
+    )?;
+    event.description = packet.and_then(subagent_work_packet_description);
+    Ok(event)
 }
 
 pub(super) fn scheduler_event_from_job(

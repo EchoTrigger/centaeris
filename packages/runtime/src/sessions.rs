@@ -308,6 +308,14 @@ pub(crate) fn delete(
     event_writer: &EventWriter,
     request: SessionDeleteRequest,
 ) -> Result<SessionDeleteResponse, String> {
+    delete_with_session_gates(event_writer, request, false)
+}
+
+fn delete_with_session_gates(
+    event_writer: &EventWriter,
+    request: SessionDeleteRequest,
+    gates_already_held: bool,
+) -> Result<SessionDeleteResponse, String> {
     let session_id = request.session_id.trim();
     if session_id.is_empty() {
         return Err("sessionId is required".to_string());
@@ -325,13 +333,27 @@ pub(crate) fn delete(
     process_manager.ensure_deletable(&process_scope)?;
     session_files()?.get(session_id)?;
     let requested_session_ids = vec![session_id.to_string()];
-    let result = event_writer.with_session_deletion(requested_session_ids.as_slice(), || {
+    let delete_parent = || {
+        #[cfg(feature = "native-job-store")]
+        if gates_already_held {
+            agent_runtime::cancel_session_execution_for_deletion(event_writer, session_id)?;
+        } else {
+            agent_runtime::cancel_agent_run(
+                event_writer.clone(),
+                agent_runs::AgentRunCancelRequest {
+                    agent_run_id: None,
+                    session_id: Some(session_id.to_string()),
+                    reason: Some("session_deleted".to_string()),
+                },
+            )?;
+        }
+        #[cfg(not(feature = "native-job-store"))]
         agent_runtime::cancel_agent_run(
             event_writer.clone(),
             agent_runs::AgentRunCancelRequest {
                 agent_run_id: None,
-                session_id: Some(session_id.to_string()),
-                reason: Some("session_deleted".to_string()),
+                session_id: Some(session_id.into()),
+                reason: Some("session_deleted".into()),
             },
         )?;
         event_writer.wait_until_sessions_inactive(requested_session_ids.as_slice())?;
@@ -343,6 +365,14 @@ pub(crate) fn delete(
             .collect::<Vec<_>>();
         let delete_items = || {
             for child_session_id in &child_session_ids {
+                #[cfg(feature = "native-job-store")]
+                if gates_already_held {
+                    agent_runtime::cancel_session_execution_for_deletion(
+                        event_writer,
+                        child_session_id,
+                    )?;
+                    continue;
+                }
                 agent_runtime::cancel_agent_run(
                     event_writer.clone(),
                     agent_runs::AgentRunCancelRequest {
@@ -378,17 +408,134 @@ pub(crate) fn delete(
                 deleted_session_ids: deleted.iter().map(|i| i.id.clone()).collect(),
             })
         };
-        if child_session_ids.is_empty() {
+        if child_session_ids.is_empty() || gates_already_held {
             delete_items()
         } else {
             event_writer.with_session_deletion(child_session_ids.as_slice(), delete_items)
         }
-    });
+    };
+    let result = if gates_already_held {
+        delete_parent()
+    } else {
+        event_writer.with_session_deletion(requested_session_ids.as_slice(), delete_parent)
+    };
     drop(_process_deletion);
     if result.is_ok() {
         crate::process_agent::forget_sessions(&process_scope)?;
     }
     result
+}
+
+/// The two database paths share no queue ordering. Close Session business
+/// admission, finish complete host sequences, then fence actual native work
+/// before the existing synchronous deletion transaction removes its records.
+#[cfg(feature = "native-job-store")]
+pub(crate) async fn delete_async(
+    writer: EventWriter,
+    request: SessionDeleteRequest,
+) -> Result<SessionDeleteResponse, String> {
+    use centaeris_core::session::reliability::{ListRuntimeJobsRequest, RuntimeJobStatus};
+    use centaeris_core::session::store::AsyncJobStorePort;
+    let root = request.session_id.trim().to_string();
+    let bound_job = agent_runtime_binding(&root)?;
+    let parent = writer.begin_session_deletion(std::slice::from_ref(&root))?;
+    let initial_writer = writer.clone();
+    let initial_root = root.clone();
+    tokio::task::spawn_blocking(move || {
+        session_files()?.get(&initial_root)?;
+        agent_runtime::cancel_session_execution_for_deletion(&initial_writer, &initial_root)?;
+        initial_writer.wait_until_sessions_inactive(&[initial_root])
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    let jobs = agent_runtime::native_job_store_handle()?;
+    if let Some((_, id)) = &bound_job {
+        if let Some(job) = jobs
+            .get_runtime_job(id)
+            .await
+            .map_err(|error| error.diagnostic_message())?
+        {
+            if !job.status.is_terminal() {
+                crate::subagent_scheduler::stop_job(&jobs, &job, "session_deleted").await?;
+            }
+        } else {
+            return Err(format!("Session deletion bound Job missing: {id}"));
+        }
+    }
+    let mut guarded = vec![root.clone()];
+    let mut guards = vec![parent];
+    loop {
+        let ids = session_files()?
+            .deletion_items(&root)?
+            .into_iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        let added = ids
+            .iter()
+            .filter(|id| !guarded.contains(id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !added.is_empty() {
+            guards.push(writer.begin_session_deletion(&added)?);
+            guarded.extend(added);
+        }
+        for id in &ids {
+            loop {
+                let pending = jobs
+                    .list_runtime_jobs(ListRuntimeJobsRequest {
+                        session_id: Some(id.clone()),
+                        statuses: vec![
+                            RuntimeJobStatus::Queued,
+                            RuntimeJobStatus::Leased,
+                            RuntimeJobStatus::Running,
+                        ],
+                        limit: 64,
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(|error| error.diagnostic_message())?;
+                if pending.is_empty() {
+                    break;
+                }
+                for job in pending {
+                    crate::subagent_scheduler::stop_job(&jobs, &job, "session_deleted").await?;
+                }
+            }
+        }
+        let wait_writer = writer.clone();
+        let wait_ids = ids.clone();
+        tokio::task::spawn_blocking(move || {
+            for id in &wait_ids {
+                agent_runtime::cancel_session_execution_for_deletion(&wait_writer, id)?;
+            }
+            wait_writer.wait_until_sessions_inactive(&wait_ids)
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+        writer.wait_for_background_work(&ids).await?;
+        jobs.settle_job_operations()
+            .await
+            .map_err(|error| error.diagnostic_message())?;
+        let after = session_files()?
+            .deletion_items(&root)?
+            .into_iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        if after.iter().all(|id| guarded.contains(id)) {
+            break;
+        }
+    }
+    if let Some((_, id)) = bound_job {
+        crate::subagent_delivery::finish_child_delivery_before_deletion(&writer, &id, &root)
+            .await?;
+    }
+    tokio::task::spawn_blocking(move || {
+        // Gates belong to the deletion owner, even if its RPC waiter disappears.
+        let _guards = guards;
+        delete_with_session_gates(&writer, request, true)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 pub(crate) fn update(request: SessionUpdateRequest) -> Result<SessionItemResponse, String> {
@@ -1045,7 +1192,7 @@ mod tests {
         let _runtime_guard = runtime.enter();
         agent_runtime::agent_runtime_store_actor().expect("runtime store actor");
         let result = runtime.block_on(async {
-            (|| {
+            (async {
                 let created = create(SessionCreateRequest {
                     title: Some("delete fixture".to_string()),
                     cwd: workspace.to_string_lossy().to_string(),
@@ -1116,12 +1263,13 @@ mod tests {
                         .expect("finish deleted Session AgentRun lease");
                 });
 
-                let deleted = delete(
-                    &event_writer,
-                    SessionDeleteRequest {
-                        session_id: session_id.clone(),
-                    },
-                )?;
+                let request = SessionDeleteRequest {
+                    session_id: session_id.clone(),
+                };
+                #[cfg(feature = "native-job-store")]
+                let deleted = delete_async(event_writer.clone(), request).await?;
+                #[cfg(not(feature = "native-job-store"))]
+                let deleted = delete(&event_writer, request)?;
                 if deleted.deleted_session_id != session_id {
                     return Err("delete response identity mismatch".to_string());
                 }
@@ -1162,7 +1310,8 @@ mod tests {
                     return Err("real workspace was deleted".to_string());
                 }
                 Ok::<(), String>(())
-            })()
+            })
+            .await
         });
         match previous_data_dir {
             Some(value) => std::env::set_var("CENTAERIS_DESKTOP_DATA_DIR", value),

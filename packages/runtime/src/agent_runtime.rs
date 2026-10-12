@@ -38,8 +38,9 @@ use centaeris_core::runtime::subagent::{
 };
 use centaeris_core::runtime::{
     build_subagent_scheduler_runtime_event, completed_turn_projection_from_result,
-    persist_answer_now_requested_fact, persist_subagent_result_projection_from_scheduler_events,
-    AgentRunRequest, AgentRunResumeIntent, AgentRunStop, AgentRuntime, AgentRuntimeConfig,
+    persist_answer_now_requested_fact,
+    persist_subagent_result_projection_from_scheduler_events_async, AgentRunRequest,
+    AgentRunResumeIntent, AgentRunStop, AgentRuntime, AgentRuntimeConfig,
     AnswerNowEnqueueDisposition, ModelRequestPurposeV1, QueryLifecycleHookRuntime,
     ToolConcurrencyCoordinator, ToolSafePoint, TurnControl, TurnStepResult, TurnUpdate,
 };
@@ -61,6 +62,10 @@ use std::time::Instant;
 static AGENT_RUN_COUNTER: AtomicU64 = AtomicU64::new(1);
 static AGENT_RUNTIME_STORE_ACTOR: OnceLock<Mutex<Option<AgentRuntimeStoreActorState>>> =
     OnceLock::new();
+#[cfg(feature = "native-job-store")]
+static AGENT_RUNTIME_JOB_STORE: OnceLock<
+    Mutex<Option<(PathBuf, centaeris_runtime_sqlite::job_store::SqliteJobStore)>>,
+> = OnceLock::new();
 static SESSION_PROMPT_OPERATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 const SESSION_PROMPT_METHOD: &str = "session/prompt";
 const RUNTIME_JOB_WAIT_POLL_MS: u64 = 500;
@@ -70,6 +75,92 @@ const LIVE_TEXT_FLUSH_INTERVAL_MS: u64 = 75;
 struct AgentRuntimeStoreActorState {
     db_path: PathBuf,
     actor: RuntimeStoreActor,
+}
+
+pub(crate) type LocalJobStore = Arc<dyn centaeris_core::session::store::AsyncJobStorePort>;
+
+pub(crate) fn agent_runtime_job_store() -> Result<LocalJobStore, String> {
+    #[cfg(feature = "native-job-store")]
+    {
+        Ok(Arc::new(native_job_store_handle()?))
+    }
+    #[cfg(not(feature = "native-job-store"))]
+    {
+        Ok(Arc::new(agent_runtime_store_actor()?))
+    }
+}
+
+#[cfg(feature = "native-job-store")]
+pub(crate) fn native_job_store_handle(
+) -> Result<centaeris_runtime_sqlite::job_store::SqliteJobStore, String> {
+    let path = agent_runtime_store_db_path();
+    let cache = AGENT_RUNTIME_JOB_STORE.get_or_init(|| Mutex::new(None));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| "local Job store owner lock poisoned")?;
+    if let Some((current, jobs)) = cache.as_ref() {
+        if current == &path {
+            return Ok(jobs.clone());
+        }
+    }
+    let snapshots = SqliteRuntimeStore::new(&path)?;
+    let jobs = snapshots
+        .job_store(129)
+        .map_err(|error| error.diagnostic_message())?;
+    *cache = Some((path, jobs.clone()));
+    Ok(jobs)
+}
+
+#[cfg(feature = "native-job-store")]
+pub(crate) async fn close_storage_owners() -> Result<(), String> {
+    let path = agent_runtime_store_db_path();
+    let jobs = AGENT_RUNTIME_JOB_STORE
+        .get()
+        .map(|cache| {
+            cache
+                .lock()
+                .map_err(|_| "local Job store owner lock poisoned")
+                .map(|owner| {
+                    owner
+                        .as_ref()
+                        .filter(|(p, _)| p == &path)
+                        .map(|(_, jobs)| jobs.clone())
+                })
+        })
+        .transpose()?
+        .flatten();
+    let snapshots = AGENT_RUNTIME_STORE_ACTOR
+        .get()
+        .map(|cache| {
+            cache
+                .lock()
+                .map_err(|_| "runtime store actor owner lock poisoned")
+                .map(|owner| {
+                    owner
+                        .as_ref()
+                        .filter(|state| state.db_path == path)
+                        .map(|state| state.actor.clone())
+                })
+        })
+        .transpose()?
+        .flatten();
+    // Starting both standard close mechanisms does not depend on one caller
+    // remaining alive. Their actual-work owners report completion independently.
+    let (native, old) = futures::join!(
+        async {
+            match jobs {
+                Some(jobs) => jobs.close().await,
+                None => Ok(()),
+            }
+        },
+        async {
+            match snapshots {
+                Some(actor) => actor.close().await.map_err(|error| error.to_string()),
+                None => Ok(()),
+            }
+        }
+    );
+    native.and(old)
 }
 
 struct ActiveAgentRunRegistration {
@@ -353,6 +444,14 @@ pub(crate) fn cancel_agent_run(
     event_writer: EventWriter,
     request: agent_runs::AgentRunCancelRequest,
 ) -> Result<agent_runs::AgentRunCancelResponse, String> {
+    cancel_agent_run_with_children(event_writer, request, true)
+}
+
+fn cancel_agent_run_with_children(
+    event_writer: EventWriter,
+    request: agent_runs::AgentRunCancelRequest,
+    cancel_children: bool,
+) -> Result<agent_runs::AgentRunCancelResponse, String> {
     let active = active_agent_run_for_cancel(&event_writer, &request)?;
     let session_id = active
         .as_ref()
@@ -381,11 +480,28 @@ pub(crate) fn cancel_agent_run(
                 .ok_or_else(|| "cancelled agent run is missing its terminal summary".to_string())?;
             emit_agent_run_terminal_payload(&event_writer, agent_run)?;
         }
-        if let Some(session_id) = session_id {
+        if let Some(session_id) = session_id.filter(|_| cancel_children) {
             schedule_child_job_cancellation(event_writer, session_id, reason)?;
         }
     }
     Ok(response)
+}
+
+#[cfg(feature = "native-job-store")]
+pub(crate) fn cancel_session_execution_for_deletion(
+    event_writer: &EventWriter,
+    session: &str,
+) -> Result<(), String> {
+    cancel_agent_run_with_children(
+        event_writer.clone(),
+        agent_runs::AgentRunCancelRequest {
+            agent_run_id: None,
+            session_id: Some(session.into()),
+            reason: Some("session_deleted".into()),
+        },
+        false,
+    )
+    .map(|_| ())
 }
 
 fn cancel_agent_run_after_tool_closure(
@@ -513,15 +629,25 @@ fn schedule_child_job_cancellation(
     reason: String,
 ) -> Result<(), String> {
     let binding = sessions::agent_runtime_binding(session_id.as_str())?;
-    let store = agent_runtime_store_actor()?;
+    let store = agent_runtime_job_store()?;
+    let snapshots = agent_runtime_store_actor()?;
+    #[cfg(feature = "native-job-store")]
+    let _work = event_writer.begin_background_work(
+        binding
+            .as_ref()
+            .map(|(parent, _)| parent.as_str())
+            .unwrap_or(&session_id),
+    )?;
     tokio::runtime::Handle::try_current()
         .map_err(|error| format!("Agent cancellation requires Tokio runtime: {error}"))?
         .spawn(async move {
+            #[cfg(feature = "native-job-store")]
+            let _work = _work;
             let cancellation = async {
                 let (parent_session_id, events) =
                     if let Some((parent_session_id, runtime_job_id)) = binding {
                         let event = cancel_subagent_run_job_async(
-                            &store,
+                            store.as_ref(),
                             CancelSubagentRunJobRequest {
                                 job_id: runtime_job_id,
                                 reason,
@@ -533,7 +659,7 @@ fn schedule_child_job_cancellation(
                         (parent_session_id, vec![event])
                     } else {
                         let result = cancel_subagent_run_jobs_async(
-                            &store,
+                            store.as_ref(),
                             CancelSubagentRunJobsRequest {
                                 session_id: Some(session_id.clone()),
                                 parent_turn_id: None,
@@ -548,19 +674,23 @@ fn schedule_child_job_cancellation(
                         .map_err(|error| error.diagnostic_message())?;
                         (session_id.clone(), result.events)
                     };
-                persist_subagent_result_projection_from_scheduler_events(
-                    &store,
+                persist_subagent_result_projection_from_scheduler_events_async(
+                    &snapshots,
+                    store.as_ref(),
                     parent_session_id.as_str(),
                     events.as_slice(),
-                )?;
+                )
+                .await
+                .map_err(|error| error.diagnostic_message())?;
                 for event in events {
                     let job = store
                         .get_runtime_job(event.job_id.as_str())
-                        .await?
+                        .await
+                        .map_err(|error| error.diagnostic_message())?
                         .ok_or_else(|| {
                             format!("cancelled Agent runtime job missing: {}", event.job_id)
                         })?;
-                    let packet = load_subagent_work_packet_async(&store, &job)
+                    let packet = load_subagent_work_packet_async(store.as_ref(), &job)
                         .await
                         .map_err(|error| error.diagnostic_message())?;
                     let binding = subagent_work_packet_runtime_binding(&packet, &job)?;
@@ -1806,13 +1936,17 @@ pub(crate) fn build_agent_runtime(
         format!("session:{concurrency_scope_id}"),
         runtime_config.tool_parallelism,
     )?;
-    Ok(
-        AgentRuntime::new(store, tool_layer, runtime_config, tool_concurrency)
-            .with_lifecycle_hooks(lifecycle_hooks)
-            .with_model_input_image_resolver(Arc::new(
-                crate::local_attachments::LocalModelInputImageResolver,
-            )),
+    Ok(AgentRuntime::new(
+        agent_runtime_job_store()?,
+        store,
+        tool_layer,
+        runtime_config,
+        tool_concurrency,
     )
+    .with_lifecycle_hooks(lifecycle_hooks)
+    .with_model_input_image_resolver(Arc::new(
+        crate::local_attachments::LocalModelInputImageResolver,
+    )))
 }
 
 pub(crate) fn native_agent_run_identity(
@@ -2952,32 +3086,51 @@ fn materialize_spawned_agent_session_blocking(
         ));
     }
     let cwd = sessions::cwd_for_session_id(parent_session_id)?;
+    materialize_agent_session_blocking(
+        parent_session_id,
+        &readiness.child_session_id,
+        &readiness.child_turn_id,
+        &readiness.runtime_job_id,
+        &readiness.title,
+        &cwd,
+        readiness.at_ms,
+    )
+}
+
+pub(crate) fn materialize_agent_session_blocking(
+    parent_session_id: &str,
+    child_session_id: &str,
+    child_turn_id: &str,
+    runtime_job_id: &str,
+    title: &str,
+    cwd: &str,
+    at_ms: i64,
+) -> Result<(), String> {
     run_message_log_blocking("materialize spawned Agent session", || {
         sessions::ensure_agent_session(
-            readiness.child_session_id.as_str(),
+            child_session_id,
             parent_session_id,
-            readiness.runtime_job_id.as_str(),
-            readiness.title.as_str(),
-            cwd.as_str(),
-            readiness.at_ms,
+            runtime_job_id,
+            title,
+            cwd,
+            at_ms,
         )?;
-        let agent_runs =
-            message_log::project_session_agent_runs(readiness.child_session_id.as_str())?;
+        let agent_runs = message_log::project_session_agent_runs(child_session_id)?;
         if let Some(agent_run) = agent_runs.first() {
-            if agent_run.agent_run_id == readiness.runtime_job_id {
+            if agent_run.agent_run_id == runtime_job_id && agent_run.turn_id == child_turn_id {
                 return Ok(());
             }
             return Err(format!(
                 "AgentRun session mismatch: sessionId={} expected={} actual={}",
-                readiness.child_session_id, readiness.runtime_job_id, agent_run.agent_run_id
+                child_session_id, runtime_job_id, agent_run.agent_run_id
             ));
         }
         message_log::append_agent_turn_queued(
-            readiness.child_session_id.as_str(),
-            readiness.child_turn_id.as_str(),
-            readiness.runtime_job_id.as_str(),
-            readiness.title.as_str(),
-            readiness.at_ms,
+            child_session_id,
+            child_turn_id,
+            runtime_job_id,
+            title,
+            at_ms,
         )
     })
 }

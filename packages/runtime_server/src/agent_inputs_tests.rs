@@ -428,6 +428,10 @@ fn hosted_attachment_vision(
     let tools = centaeris_core::tool::layer::ToolLayer::try_new_with_skill_catalog_config_and_execution_host_binding(
         centaeris_core::extension::skills::SkillCatalogLoadConfig::default(), host).unwrap();
     let engine = AgentRuntime::new(
+        std::sync::Arc::new(
+            centaeris_core::session::store::RuntimeStoreActor::start((*backend).clone())
+                .expect("test Job Actor"),
+        ),
         (*backend).clone(),
         tools,
         AgentRuntimeConfig {
@@ -660,6 +664,10 @@ fn native_main_intake(
     let tools = centaeris_core::tool::layer::ToolLayer::try_new_with_skill_catalog_config_and_execution_host_binding(
         centaeris_core::extension::skills::SkillCatalogLoadConfig::default(), host).unwrap();
     let engine = AgentRuntime::new(
+        std::sync::Arc::new(
+            centaeris_core::session::store::RuntimeStoreActor::start((*backend).clone())
+                .expect("test Job Actor"),
+        ),
         (*backend).clone(),
         tools,
         AgentRuntimeConfig {
@@ -1212,6 +1220,10 @@ fn run_hosted_input_recovery(inject_failed_commit: bool, replace_execution: bool
         let tools = centaeris_core::tool::layer::ToolLayer::try_new_with_skill_catalog_config_and_execution_host_binding(
             centaeris_core::extension::skills::SkillCatalogLoadConfig::default(), host).unwrap();
         let engine = AgentRuntime::new(
+            std::sync::Arc::new(
+                centaeris_core::session::store::RuntimeStoreActor::start(backend.clone())
+                    .expect("test Job Actor"),
+            ),
             backend.clone(),
             tools,
             AgentRuntimeConfig {

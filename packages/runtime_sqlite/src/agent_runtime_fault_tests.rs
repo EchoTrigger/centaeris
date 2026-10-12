@@ -212,6 +212,7 @@ fn runtime(
     registry: Arc<DynamicToolRegistry>,
 ) -> AgentRuntime<SqliteRuntimeStore> {
     AgentRuntime::new(
+        std::sync::Arc::new(store.job_store(129).expect("native Job store")),
         store,
         tool_layer(workspace_root, registry),
         AgentRuntimeConfig::default(),
@@ -392,6 +393,7 @@ async fn terminal_snapshot_failure_retry_repairs_transcript_without_replaying_si
         }))
         .expect("register snapshot failing provider");
     let runtime = AgentRuntime::new(
+        std::sync::Arc::new(store.job_store(129).expect("native Job store")),
         store.clone(),
         tool_layer,
         AgentRuntimeConfig::default(),

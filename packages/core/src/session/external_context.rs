@@ -38,7 +38,7 @@ impl ExternalToolResult {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalContextObject {
     #[serde(default = "default_external_context_schema_version")]

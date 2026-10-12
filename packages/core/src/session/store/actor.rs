@@ -1,9 +1,12 @@
 use super::{RuntimeJobWaiter, RuntimeJobWaiterCursor};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc};
 use std::time::{Duration, Instant};
 
+use futures::FutureExt;
+use tokio::sync::watch;
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 use super::{
     AgentRuntimeSnapshotStorePort, ConsumeWaitCheckpointRequest, CreateDeadLetterAndFailJobRequest,
@@ -79,6 +82,7 @@ impl<T> RuntimeStoreActorBackend for T where
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RuntimeStoreActorOperationMeta {
+    waiting_since: Instant,
     enqueued_at_ms: TimestampMs,
     deadline_after_ms: Option<u64>,
 }
@@ -92,6 +96,49 @@ struct RuntimeStoreActorEnvelope {
 pub struct RuntimeStoreActor {
     sender: mpsc::Sender<RuntimeStoreActorEnvelope>,
     next_operation_id: Arc<AtomicU64>,
+    metrics: Arc<ActorMetrics>,
+    lifecycle: Arc<ActorLifecycle>,
+}
+
+struct ActorLifecycle {
+    stop: CancellationToken,
+    closed: watch::Receiver<Option<Result<(), String>>>,
+}
+
+#[cfg(test)]
+impl Default for ActorLifecycle {
+    fn default() -> Self {
+        Self {
+            stop: CancellationToken::new(),
+            closed: watch::channel(None).1,
+        }
+    }
+}
+
+#[derive(Default)]
+struct ActorMetrics {
+    executing: AtomicUsize,
+    started: AtomicU64,
+    wait_ns: AtomicU64,
+}
+
+/// Accepted work: the bounded channel and its single executing operation.
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimeStoreActorResourceMetrics {
+    pub accepting: bool,
+    pub queue_capacity: usize,
+    pub queued: usize,
+    pub executing: usize,
+    pub started: u64,
+    /// Cumulative admission plus queue wait for started operations (monotonic ns).
+    pub wait_ns: u64,
+}
+
+struct ActorExecuting(Arc<ActorMetrics>);
+impl Drop for ActorExecuting {
+    fn drop(&mut self) {
+        self.0.executing.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 enum RuntimeStoreActorReply<T, E = String> {
@@ -218,11 +265,62 @@ impl RuntimeStoreActor {
             }
         })?;
         let (sender, receiver) = mpsc::channel(RUNTIME_STORE_ACTOR_CHANNEL_CAPACITY);
-        handle.spawn(run_runtime_store_actor(store, receiver));
+        let metrics = Arc::new(ActorMetrics::default());
+        let (closed, completion) = watch::channel(None);
+        let lifecycle = Arc::new(ActorLifecycle {
+            stop: CancellationToken::new(),
+            closed: completion,
+        });
+        let actor_stop = lifecycle.stop.clone();
+        let actor_metrics = metrics.clone();
+        handle.spawn(async move {
+            let result = std::panic::AssertUnwindSafe(run_runtime_store_actor(
+                store,
+                receiver,
+                actor_metrics,
+                actor_stop,
+            ))
+            .catch_unwind()
+            .await
+            .map_err(|_| "runtime store actor panicked while draining".to_string());
+            closed.send_replace(Some(result));
+        });
         Ok(Self {
             sender,
             next_operation_id: Arc::new(AtomicU64::new(1)),
+            metrics,
+            lifecycle,
         })
+    }
+
+    pub fn resource_metrics(&self) -> RuntimeStoreActorResourceMetrics {
+        RuntimeStoreActorResourceMetrics {
+            accepting: !self.sender.is_closed(),
+            queue_capacity: self.sender.max_capacity(),
+            queued: self.sender.max_capacity() - self.sender.capacity(),
+            executing: self.metrics.executing.load(Ordering::Relaxed),
+            started: self.metrics.started.load(Ordering::Relaxed),
+            wait_ns: self.metrics.wait_ns.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Stop admission at receiver.close, then drain accepted SQL without cancelling it.
+    /// The actor task and completion survive cancellation of any close waiter.
+    pub async fn close(&self) -> Result<(), RuntimeStoreError> {
+        self.lifecycle.stop.cancel();
+        let mut closed = self.lifecycle.closed.clone();
+        loop {
+            if let Some(result) = closed.borrow().clone() {
+                return result
+                    .map_err(|message| RuntimeStoreError::ActorOperationJoinFailed { message });
+            }
+            closed
+                .changed()
+                .await
+                .map_err(|_| RuntimeStoreError::ActorOperationJoinFailed {
+                    message: "runtime store actor close completion unavailable".into(),
+                })?;
+        }
     }
 
     pub async fn save_checkpoint(
@@ -560,6 +658,7 @@ impl RuntimeStoreActor {
         let operation_id = self.next_operation_id.fetch_add(1, Ordering::Relaxed);
         let operation_kind = command.operation_kind();
         let meta = RuntimeStoreActorOperationMeta {
+            waiting_since: Instant::now(),
             enqueued_at_ms: crate::runtime::contracts::current_timestamp_ms(),
             deadline_after_ms: None,
         };
@@ -597,6 +696,7 @@ impl RuntimeStoreActor {
         let operation_id = self.next_operation_id.fetch_add(1, Ordering::Relaxed);
         let operation_kind = command.operation_kind();
         let meta = RuntimeStoreActorOperationMeta {
+            waiting_since: Instant::now(),
             enqueued_at_ms: crate::runtime::contracts::current_timestamp_ms(),
             deadline_after_ms: Some(RUNTIME_STORE_ACTOR_SYNC_TIMEOUT_MS),
         };
@@ -1846,539 +1946,597 @@ impl RuntimeStoreActorCommand {
 async fn run_runtime_store_actor<S>(
     store: S,
     mut receiver: mpsc::Receiver<RuntimeStoreActorEnvelope>,
+    metrics: Arc<ActorMetrics>,
+    stop: CancellationToken,
 ) where
     S: RuntimeStoreActorBackend,
 {
-    while let Some(envelope) = receiver.recv().await {
+    let mut draining = false;
+    loop {
+        let envelope = tokio::select! {
+            biased;
+            _ = stop.cancelled(), if !draining => {
+                receiver.close();
+                draining = true;
+                continue;
+            }
+            envelope = receiver.recv() => match envelope {
+                Some(envelope) => envelope,
+                None => break,
+            }
+        };
         let RuntimeStoreActorEnvelope { meta, command } = envelope;
         let started_at_ms = crate::runtime::contracts::current_timestamp_ms();
         if operation_deadline_expired(&meta, started_at_ms) {
             continue;
         }
-        match command {
-            RuntimeStoreActorCommand::SaveWaitCheckpoint { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.save_wait_checkpoint(req)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::ConsumeWaitCheckpoint { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.consume_wait_checkpoint(req)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::SaveCheckpoint { checkpoint, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.save_checkpoint(checkpoint)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::LoadLatestCheckpoint { session_id, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.load_latest_checkpoint(session_id.as_str())
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::LoadCheckpointByTurn {
-                session_id,
-                turn_id,
-                reply,
-            } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.load_checkpoint_by_turn(session_id.as_str(), turn_id.as_str())
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::ListCheckpoints {
-                session_id,
-                limit,
-                offset,
-                reply,
-            } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.list_checkpoints(session_id.as_str(), limit, offset)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::ListWaitingRuntimeJobCheckpoints {
-                after,
-                limit,
-                reply,
-            } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.list_waiting_runtime_job_checkpoints(after.as_ref(), limit)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::AppendEvent { event, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| store.append_event(event))
+        metrics.wait_ns.fetch_add(
+            u64::try_from(meta.waiting_since.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        metrics.started.fetch_add(1, Ordering::Relaxed);
+        metrics.executing.fetch_add(1, Ordering::Relaxed);
+        let _executing = ActorExecuting(metrics.clone());
+        let operation = async {
+            match command {
+                RuntimeStoreActorCommand::SaveWaitCheckpoint { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.save_wait_checkpoint(req)
+                        })
                         .await,
-                );
-            }
-            RuntimeStoreActorCommand::ListRuntimeJobWaiters {
-                source_job_id,
-                after,
-                limit,
-                reply,
-            } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.list_runtime_job_waiters(
-                            source_job_id.as_deref(),
-                            after.as_ref(),
-                            limit,
-                        )
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::ListEvents {
-                session_id,
-                limit,
-                offset,
-                reply,
-            } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.list_events(session_id.as_str(), limit, offset)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::ScheduleRuntimeJob { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.schedule_runtime_job(req)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::GetRuntimeJob { job_id, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.get_runtime_job(job_id.as_str())
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::ListRuntimeJobs { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| store.list_runtime_jobs(req))
+                    );
+                }
+                RuntimeStoreActorCommand::ConsumeWaitCheckpoint { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.consume_wait_checkpoint(req)
+                        })
                         .await,
-                );
-            }
-            RuntimeStoreActorCommand::ClaimDueRuntimeJobs { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.claim_due_runtime_jobs(req)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::StartRuntimeJob { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| store.start_runtime_job(req))
+                    );
+                }
+                RuntimeStoreActorCommand::SaveCheckpoint { checkpoint, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.save_checkpoint(checkpoint)
+                        })
                         .await,
-                );
-            }
-            RuntimeStoreActorCommand::RenewRuntimeJobLease { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.renew_runtime_job_lease(req)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::YieldRuntimeJob { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| store.yield_runtime_job(req))
+                    );
+                }
+                RuntimeStoreActorCommand::LoadLatestCheckpoint { session_id, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.load_latest_checkpoint(session_id.as_str())
+                        })
                         .await,
-                );
-            }
-            RuntimeStoreActorCommand::WakeRuntimeJob { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| store.wake_runtime_job(req))
+                    );
+                }
+                RuntimeStoreActorCommand::LoadCheckpointByTurn {
+                    session_id,
+                    turn_id,
+                    reply,
+                } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.load_checkpoint_by_turn(session_id.as_str(), turn_id.as_str())
+                        })
                         .await,
-                );
-            }
-            RuntimeStoreActorCommand::CompleteRuntimeJob { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.complete_runtime_job(req)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::FailRuntimeJob { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| store.fail_runtime_job(req))
+                    );
+                }
+                RuntimeStoreActorCommand::ListCheckpoints {
+                    session_id,
+                    limit,
+                    offset,
+                    reply,
+                } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.list_checkpoints(session_id.as_str(), limit, offset)
+                        })
                         .await,
-                );
-            }
-            RuntimeStoreActorCommand::CancelRuntimeJob { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| store.cancel_runtime_job(req))
+                    );
+                }
+                RuntimeStoreActorCommand::ListWaitingRuntimeJobCheckpoints {
+                    after,
+                    limit,
+                    reply,
+                } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.list_waiting_runtime_job_checkpoints(after.as_ref(), limit)
+                        })
                         .await,
-                );
-            }
-            RuntimeStoreActorCommand::ReclaimExpiredRuntimeJobLeases { now_ms, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.reclaim_expired_runtime_job_leases(now_ms)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::CreateDeadLetter { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| store.create_dead_letter(req))
+                    );
+                }
+                RuntimeStoreActorCommand::AppendEvent { event, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| store.append_event(event))
+                            .await,
+                    );
+                }
+                RuntimeStoreActorCommand::ListRuntimeJobWaiters {
+                    source_job_id,
+                    after,
+                    limit,
+                    reply,
+                } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.list_runtime_job_waiters(
+                                source_job_id.as_deref(),
+                                after.as_ref(),
+                                limit,
+                            )
+                        })
                         .await,
-                );
-            }
-            RuntimeStoreActorCommand::GetDeadLetter {
-                dead_letter_id,
-                reply,
-            } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.get_dead_letter(dead_letter_id.as_str())
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::ListDeadLetters { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| store.list_dead_letters(req))
+                    );
+                }
+                RuntimeStoreActorCommand::ListEvents {
+                    session_id,
+                    limit,
+                    offset,
+                    reply,
+                } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.list_events(session_id.as_str(), limit, offset)
+                        })
                         .await,
-                );
-            }
-            RuntimeStoreActorCommand::MarkDeadLetterReplaying { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.mark_dead_letter_replaying(req)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::MarkDeadLetterReplayed { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.mark_dead_letter_replayed(req)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::ReplayDeadLetter { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| store.replay_dead_letter(req))
+                    );
+                }
+                RuntimeStoreActorCommand::ScheduleRuntimeJob { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.schedule_runtime_job(req)
+                        })
                         .await,
-                );
-            }
-            RuntimeStoreActorCommand::DismissDeadLetter { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| store.dismiss_dead_letter(req))
+                    );
+                }
+                RuntimeStoreActorCommand::GetRuntimeJob { job_id, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.get_runtime_job(job_id.as_str())
+                        })
                         .await,
-                );
+                    );
+                }
+                RuntimeStoreActorCommand::ListRuntimeJobs { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.list_runtime_jobs(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::ClaimDueRuntimeJobs { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.claim_due_runtime_jobs(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::StartRuntimeJob { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.start_runtime_job(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::RenewRuntimeJobLease { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.renew_runtime_job_lease(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::YieldRuntimeJob { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.yield_runtime_job(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::WakeRuntimeJob { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.wake_runtime_job(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::CompleteRuntimeJob { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.complete_runtime_job(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::FailRuntimeJob { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.fail_runtime_job(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::CancelRuntimeJob { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.cancel_runtime_job(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::ReclaimExpiredRuntimeJobLeases { now_ms, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.reclaim_expired_runtime_job_leases(now_ms)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::CreateDeadLetter { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.create_dead_letter(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::GetDeadLetter {
+                    dead_letter_id,
+                    reply,
+                } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.get_dead_letter(dead_letter_id.as_str())
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::ListDeadLetters { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.list_dead_letters(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::MarkDeadLetterReplaying { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.mark_dead_letter_replaying(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::MarkDeadLetterReplayed { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.mark_dead_letter_replayed(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::ReplayDeadLetter { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.replay_dead_letter(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::DismissDeadLetter { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.dismiss_dead_letter(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::UpsertExternalContextObject { object, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.upsert_external_context_object(object)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::LoadExternalContextObject { object_id, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.load_external_context_object_for_job(object_id.as_str())
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::LinkExternalContextObject { link, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.link_external_context_object(link)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::LoadExternalContextObjectLink {
+                    session_id,
+                    object_id,
+                    turn_id,
+                    tool_call_id,
+                    reply,
+                } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.load_external_context_object_link(
+                                session_id.as_str(),
+                                object_id.as_str(),
+                                turn_id.as_str(),
+                                tool_call_id.as_str(),
+                            )
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::ListExternalContextObjects { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.list_external_context_objects(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::AcquireResourceClaim { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.acquire_resource_claim(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::GetResourceClaim {
+                    resource_kind,
+                    resource_key,
+                    reply,
+                } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.get_resource_claim(resource_kind.as_str(), resource_key.as_str())
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::ReleaseResourceClaim { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.release_resource_claim(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::ReclaimExpiredResourceClaims { now_ms, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.reclaim_expired_resource_claims(now_ms)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::UpsertExternalContextAndScheduleJob { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.upsert_external_context_and_schedule_job(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::UpsertExternalContextLinkAndCompleteJob {
+                    req,
+                    reply,
+                } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.upsert_external_context_link_and_complete_job(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::CreateDeadLetterAndFailJob { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.create_dead_letter_and_fail_job(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::LoadAgentRuntimeSnapshot { session_id, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.load_agent_runtime_snapshot(session_id.as_str())
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::CompareAndSaveAgentRuntimeSnapshot {
+                    session_id,
+                    expected_snapshot,
+                    snapshot_json,
+                    updated_at_ms,
+                    reply,
+                } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.compare_and_save_agent_runtime_snapshot(
+                                &session_id,
+                                expected_snapshot.as_deref(),
+                                &snapshot_json,
+                                updated_at_ms,
+                            )
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::SaveAgentRuntimeSnapshot {
+                    session_id,
+                    snapshot_json,
+                    updated_at_ms,
+                    reply,
+                } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.save_agent_runtime_snapshot(
+                                session_id.as_str(),
+                                snapshot_json.as_str(),
+                                updated_at_ms,
+                            )
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::AppendEventIdempotent { event, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.append_event_idempotent(event)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::DeleteSessionData { session_id, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.delete_session_data(session_id.as_str())
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::CommitTranscriptProjection { commit, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.commit_transcript_projection(commit)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::LoadTranscriptProjectionHead {
+                    session_id,
+                    projection_generation,
+                    reply,
+                } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.load_transcript_projection_head(
+                                session_id.as_str(),
+                                projection_generation.as_str(),
+                            )
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::LoadCurrentTranscriptProjectionGeneration {
+                    session_id,
+                    reply,
+                } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.load_current_transcript_projection_generation(session_id.as_str())
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::RotateCurrentTranscriptProjectionGeneration {
+                    rotation,
+                    reply,
+                } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.rotate_current_transcript_projection_generation(rotation)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::LoadTranscriptPage { request, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.load_transcript_page(request)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::LoadLatestTranscriptCheckpoint {
+                    session_id,
+                    projection_generation,
+                    at_or_before_source_high_water,
+                    reply,
+                } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.load_latest_transcript_checkpoint(
+                                session_id.as_str(),
+                                projection_generation.as_str(),
+                                at_or_before_source_high_water,
+                            )
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::LoadLatestTranscriptRecovery {
+                    session_id,
+                    projection_generation,
+                    at_or_before_source_high_water,
+                    reply,
+                } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.load_latest_transcript_recovery(
+                                session_id.as_str(),
+                                projection_generation.as_str(),
+                                at_or_before_source_high_water,
+                            )
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::LoadTranscriptPatches { request, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.load_transcript_patches(request)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::LoadTranscriptResumeCursors {
+                    session_id,
+                    projection_generation,
+                    at_or_before_source_high_water,
+                    reply,
+                } => {
+                    reply.send(
+                        run_store_operation(store.clone(), move |store| {
+                            store.load_transcript_resume_cursors(
+                                session_id.as_str(),
+                                projection_generation.as_str(),
+                                at_or_before_source_high_water,
+                            )
+                        })
+                        .await,
+                    );
+                }
             }
-            RuntimeStoreActorCommand::UpsertExternalContextObject { object, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.upsert_external_context_object(object)
-                    })
-                    .await,
-                );
+        };
+        tokio::pin!(operation);
+        tokio::select! {
+            biased;
+            _ = stop.cancelled(), if !draining => {
+                receiver.close();
+                draining = true;
+                // Keep the same future and its real blocking work alive.
+                operation.await;
             }
-            RuntimeStoreActorCommand::LoadExternalContextObject { object_id, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.load_external_context_object_for_job(object_id.as_str())
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::LinkExternalContextObject { link, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.link_external_context_object(link)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::LoadExternalContextObjectLink {
-                session_id,
-                object_id,
-                turn_id,
-                tool_call_id,
-                reply,
-            } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.load_external_context_object_link(
-                            session_id.as_str(),
-                            object_id.as_str(),
-                            turn_id.as_str(),
-                            tool_call_id.as_str(),
-                        )
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::ListExternalContextObjects { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.list_external_context_objects(req)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::AcquireResourceClaim { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.acquire_resource_claim(req)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::GetResourceClaim {
-                resource_kind,
-                resource_key,
-                reply,
-            } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.get_resource_claim(resource_kind.as_str(), resource_key.as_str())
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::ReleaseResourceClaim { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.release_resource_claim(req)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::ReclaimExpiredResourceClaims { now_ms, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.reclaim_expired_resource_claims(now_ms)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::UpsertExternalContextAndScheduleJob { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.upsert_external_context_and_schedule_job(req)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::UpsertExternalContextLinkAndCompleteJob { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.upsert_external_context_link_and_complete_job(req)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::CreateDeadLetterAndFailJob { req, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.create_dead_letter_and_fail_job(req)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::LoadAgentRuntimeSnapshot { session_id, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.load_agent_runtime_snapshot(session_id.as_str())
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::CompareAndSaveAgentRuntimeSnapshot {
-                session_id,
-                expected_snapshot,
-                snapshot_json,
-                updated_at_ms,
-                reply,
-            } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.compare_and_save_agent_runtime_snapshot(
-                            &session_id,
-                            expected_snapshot.as_deref(),
-                            &snapshot_json,
-                            updated_at_ms,
-                        )
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::SaveAgentRuntimeSnapshot {
-                session_id,
-                snapshot_json,
-                updated_at_ms,
-                reply,
-            } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.save_agent_runtime_snapshot(
-                            session_id.as_str(),
-                            snapshot_json.as_str(),
-                            updated_at_ms,
-                        )
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::AppendEventIdempotent { event, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.append_event_idempotent(event)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::DeleteSessionData { session_id, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.delete_session_data(session_id.as_str())
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::CommitTranscriptProjection { commit, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.commit_transcript_projection(commit)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::LoadTranscriptProjectionHead {
-                session_id,
-                projection_generation,
-                reply,
-            } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.load_transcript_projection_head(
-                            session_id.as_str(),
-                            projection_generation.as_str(),
-                        )
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::LoadCurrentTranscriptProjectionGeneration {
-                session_id,
-                reply,
-            } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.load_current_transcript_projection_generation(session_id.as_str())
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::RotateCurrentTranscriptProjectionGeneration {
-                rotation,
-                reply,
-            } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.rotate_current_transcript_projection_generation(rotation)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::LoadTranscriptPage { request, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.load_transcript_page(request)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::LoadLatestTranscriptCheckpoint {
-                session_id,
-                projection_generation,
-                at_or_before_source_high_water,
-                reply,
-            } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.load_latest_transcript_checkpoint(
-                            session_id.as_str(),
-                            projection_generation.as_str(),
-                            at_or_before_source_high_water,
-                        )
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::LoadLatestTranscriptRecovery {
-                session_id,
-                projection_generation,
-                at_or_before_source_high_water,
-                reply,
-            } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.load_latest_transcript_recovery(
-                            session_id.as_str(),
-                            projection_generation.as_str(),
-                            at_or_before_source_high_water,
-                        )
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::LoadTranscriptPatches { request, reply } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.load_transcript_patches(request)
-                    })
-                    .await,
-                );
-            }
-            RuntimeStoreActorCommand::LoadTranscriptResumeCursors {
-                session_id,
-                projection_generation,
-                at_or_before_source_high_water,
-                reply,
-            } => {
-                reply.send(
-                    run_store_operation(store.clone(), move |store| {
-                        store.load_transcript_resume_cursors(
-                            session_id.as_str(),
-                            projection_generation.as_str(),
-                            at_or_before_source_high_water,
-                        )
-                    })
-                    .await,
-                );
-            }
+            _ = &mut operation => {}
         }
     }
 }
@@ -2580,6 +2738,7 @@ mod tests {
     #[test]
     fn runtime_store_actor_deadline_gate_rejects_expired_operation_before_start() {
         let meta = RuntimeStoreActorOperationMeta {
+            waiting_since: Instant::now(),
             enqueued_at_ms: 1_000,
             deadline_after_ms: Some(30_000),
         };
@@ -2603,6 +2762,8 @@ mod tests {
         let actor = RuntimeStoreActor {
             sender,
             next_operation_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            metrics: Default::default(),
+            lifecycle: Default::default(),
         };
         let request = TranscriptPatchReadRequestV1 {
             session_id: "chat-patches".to_string(),
@@ -2645,6 +2806,8 @@ mod tests {
         let actor = RuntimeStoreActor {
             sender,
             next_operation_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            metrics: Default::default(),
+            lifecycle: Default::default(),
         };
         let load = tokio::spawn({
             let actor = actor.clone();
@@ -2728,6 +2891,8 @@ mod tests {
         let actor = RuntimeStoreActor {
             sender,
             next_operation_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            metrics: Default::default(),
+            lifecycle: Default::default(),
         };
         let task = tokio::spawn(async move {
             actor
@@ -2764,11 +2929,14 @@ mod tests {
         let actor = RuntimeStoreActor {
             sender: sender.clone(),
             next_operation_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            metrics: Default::default(),
+            lifecycle: Default::default(),
         };
         let (prefill_reply, _prefill_receiver) = std::sync::mpsc::sync_channel(1);
         sender
             .try_send(RuntimeStoreActorEnvelope {
                 meta: RuntimeStoreActorOperationMeta {
+                    waiting_since: Instant::now(),
                     enqueued_at_ms: 0,
                     deadline_after_ms: None,
                 },

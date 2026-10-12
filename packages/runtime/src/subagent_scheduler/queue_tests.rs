@@ -7,13 +7,13 @@ use centaeris_core::session::external_context::{
 use centaeris_core::session::reliability::{RuntimeJobOutboxPort, ScheduleRuntimeJobRequest};
 use std::ffi::OsString;
 
-struct Profile {
-    root: PathBuf,
+pub(crate) struct Profile {
+    pub(crate) root: PathBuf,
     previous: Vec<(&'static str, Option<OsString>)>,
 }
 
 impl Profile {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
             "centaeris-packet-progress-{}-{}",
             std::process::id(),
@@ -51,7 +51,12 @@ impl Drop for Profile {
     }
 }
 
-fn packet(parent: &str, child: &str, job: &RuntimeJobRecord, cwd: &str) -> serde_json::Value {
+pub(crate) fn packet(
+    parent: &str,
+    child: &str,
+    job: &RuntimeJobRecord,
+    cwd: &str,
+) -> serde_json::Value {
     let read = centaeris_core::tool::list_tool_contracts()
         .into_iter()
         .find(|contract| contract.name == "read")
@@ -80,7 +85,7 @@ fn packet(parent: &str, child: &str, job: &RuntimeJobRecord, cwd: &str) -> serde
     }})
 }
 
-fn object(id: &str, content: String) -> ExternalContextObject {
+pub(crate) fn object(id: &str, content: String) -> ExternalContextObject {
     ExternalContextObject {
         schema_version: EXTERNAL_CONTEXT_SCHEMA_VERSION.into(),
         object_id: id.into(),
@@ -94,7 +99,7 @@ fn object(id: &str, content: String) -> ExternalContextObject {
     }
 }
 
-fn job(parent: &str, name: &str, at: i64) -> RuntimeJobRecord {
+pub(crate) fn job(parent: &str, name: &str, at: i64) -> RuntimeJobRecord {
     build_subagent_run_job(SubagentRunJobRequest {
         session_id: parent.into(),
         parent_turn_id: "parent-turn".into(),

@@ -156,12 +156,22 @@ impl RuntimeStoreTransactionPort for SqliteRuntimeStore {
 /// The ordinary Store path passes a no-op observer.
 #[derive(Debug, Clone)]
 pub(super) enum TransactionEvent {
+    SqliteError(rusqlite::ErrorCode),
     Began,
     BeforeCommit,
     CommitAttempted,
     Committed,
     RolledBack,
     RollbackFailed,
+}
+
+pub(super) fn observe_sqlite_error(
+    observe: &mut dyn FnMut(TransactionEvent),
+    error: &rusqlite::Error,
+) {
+    if let rusqlite::Error::SqliteFailure(error, _) = error {
+        observe(TransactionEvent::SqliteError(error.code));
+    }
 }
 
 /// Observe the actual SQLite transaction result, without owning connections,
@@ -185,8 +195,10 @@ pub(super) fn commit_job_write<T>(
     };
     observe(TransactionEvent::BeforeCommit);
     observe(TransactionEvent::CommitAttempted);
-    tx.commit()
-        .map_err(|error| format!("{commit_error}: {error}"))?;
+    tx.commit().map_err(|error| {
+        observe_sqlite_error(observe, &error);
+        format!("{commit_error}: {error}")
+    })?;
     observe(TransactionEvent::Committed);
     Ok(result)
 }
@@ -197,6 +209,7 @@ pub(super) fn upsert_external_context_link_and_complete_job_conn(
     observe: &mut dyn FnMut(TransactionEvent),
 ) -> Result<(), String> {
     let tx = conn.transaction().map_err(|err| {
+        observe_sqlite_error(observe, &err);
         format!("begin upsert_external_context_link_and_complete_job transaction failed: {err}")
     })?;
     commit_job_write(
@@ -227,6 +240,7 @@ pub(super) fn upsert_external_context_and_schedule_job_conn(
     observe: &mut dyn FnMut(TransactionEvent),
 ) -> Result<ScheduleRuntimeJobResult, String> {
     let tx = conn.transaction().map_err(|err| {
+        observe_sqlite_error(observe, &err);
         format!("begin upsert_external_context_and_schedule_job transaction failed: {err}")
     })?;
     commit_job_write(

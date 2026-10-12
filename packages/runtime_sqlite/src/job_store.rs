@@ -10,12 +10,16 @@ use centaeris_core::session::store::{
     UpsertExternalContextLinkAndCompleteJobRequest,
 };
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use tokio::sync::{watch, Mutex};
+
+pub use crate::sqlite_job_connection::JobConnectionMetrics;
 
 struct Owner {
     driver: Driver,
-    stopped: bool,
 }
 
 #[derive(Clone)]
@@ -23,9 +27,141 @@ pub struct SqliteJobStore {
     path: PathBuf,
     limit: usize,
     owner: Arc<Mutex<Owner>>,
+    closing: Arc<AtomicBool>,
+    closed: watch::Sender<Option<Result<(), String>>>,
 }
 
 impl SqliteJobStore {
+    /// Trusted host service control. The marker and fenced cancellation commit
+    /// together; an arbitrary user-supplied cancellation reason cannot create it.
+    pub async fn cancel_for_service_shutdown(
+        &self,
+        req: CancelRuntimeJobRequest,
+    ) -> Result<(), JobStoreError> {
+        self.execute(JobStoreOperation::Cancel, move |conn, observe| {
+            let tx = conn.transaction().map_err(|error| {
+                sqlite_transactions::observe_sqlite_error(observe, &error);
+                format!("begin service Job cancellation failed: {error}")
+            })?;
+            sqlite_transactions::commit_job_write(
+                tx,
+                "commit service Job cancellation failed",
+                observe,
+                |conn| {
+                    sqlite_reliability::cancel_runtime_job_conn(conn, &req)?;
+                    let job = sqlite_reliability::load_runtime_job_by_id(conn, &req.job_id)?
+                        .ok_or("service Job cancellation lost Job")?;
+                    let session = job
+                        .session_id
+                        .ok_or("service Job cancellation parent missing")?;
+                    crate::sqlite_runtime::append_event_conn_idempotent(
+                        conn,
+                        &centaeris_core::runtime::contracts::RuntimeEvent {
+                            event_id: format!("local_service_stop:{}", req.job_id),
+                            session_id: session,
+                            task_id: job.branch_id,
+                            event_type: "local_runtime.service_stop.v1".into(),
+                            at_ms: req.cancelled_at_ms,
+                            visibility:
+                                centaeris_core::runtime::contracts::EventVisibility::Internal,
+                            payload_json:
+                                serde_json::json!({"runtimeJobId": req.job_id, "source": "service"})
+                                    .to_string(),
+                        },
+                    )?;
+                    sqlite_reliability::upsert_runtime_job_outbox_event(
+                        conn,
+                        &req.job_id,
+                        RUNTIME_JOB_TERMINAL_EVENT,
+                    )
+                },
+            )
+        })
+        .await
+    }
+
+    pub async fn was_service_stopped(&self, id: &str) -> Result<bool, JobStoreError> {
+        let event = format!("local_service_stop:{id}");
+        self.execute(JobStoreOperation::Read, move |conn, _| {
+            conn.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events WHERE event_id=?1 AND event_type='local_runtime.service_stop.v1')",
+                [event], |row| row.get::<_, bool>(0)).map_err(|error| format!("read service Job stop provenance failed: {error}"))
+        }).await
+    }
+    pub async fn pending_terminal_deliveries(
+        &self,
+        limit: usize,
+        job_kind: Option<String>,
+    ) -> Result<Vec<RuntimeJobOutboxRecord>, JobStoreError> {
+        self.execute(JobStoreOperation::Read, move |conn, _| {
+            sqlite_reliability::list_pending_runtime_job_outbox_conn(
+                conn,
+                limit,
+                job_kind.as_deref(),
+                None,
+            )
+        })
+        .await
+    }
+
+    pub async fn pending_terminal_delivery(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<RuntimeJobOutboxRecord>, JobStoreError> {
+        let id = job_id.to_string();
+        self.execute(JobStoreOperation::Read, move |conn, _| {
+            sqlite_reliability::list_pending_runtime_job_outbox_conn(conn, 1, None, Some(&id))
+                .map(|records| records.into_iter().next())
+        })
+        .await
+    }
+
+    pub async fn acknowledge_terminal_delivery(
+        &self,
+        record: RuntimeJobOutboxRecord,
+        at_ms: i64,
+    ) -> Result<RuntimeJobOutboxPublishDisposition, JobStoreError> {
+        self.execute(JobStoreOperation::Acknowledge, move |conn, observe| {
+            let tx = conn.transaction().map_err(|error| {
+                sqlite_transactions::observe_sqlite_error(observe, &error);
+                format!("begin terminal delivery acknowledgement failed: {error}")
+            })?;
+            sqlite_transactions::commit_job_write(
+                tx,
+                "commit terminal delivery acknowledgement failed",
+                observe,
+                |conn| {
+                    sqlite_reliability::mark_runtime_job_outbox_published_conn(
+                        conn,
+                        &record.job_id,
+                        &record.event_type,
+                        record.generation,
+                        at_ms,
+                    )
+                },
+            )
+        })
+        .await
+    }
+    /// Synchronous assembly only. The library takes ownership of the configured
+    /// connection; all Job operations subsequently use its asynchronous queue.
+    pub fn new(path: PathBuf, limit: usize) -> Result<Self, JobStoreError> {
+        if limit == 0 {
+            return Err(JobStoreError::Rejected(
+                "SQLite Job capacity must be positive".into(),
+            ));
+        }
+        let conn = rusqlite::Connection::open(&path).map_err(|error| {
+            JobStoreError::not_executed(JobStoreOperation::Read, error.to_string())
+        })?;
+        crate::sqlite_schema::ensure_schema(&conn)
+            .and_then(|()| crate::configure_conn(&conn))
+            .map_err(|error| JobStoreError::not_executed(JobStoreOperation::Read, error))?;
+        Ok(Self::from_driver(
+            path,
+            limit,
+            Driver::from_connection(conn, limit),
+        ))
+    }
     pub async fn open(path: PathBuf, limit: usize) -> Result<Self, JobStoreError> {
         if limit == 0 {
             return Err(JobStoreError::Rejected(
@@ -35,53 +171,84 @@ impl SqliteJobStore {
         let driver = Driver::open(path.clone(), limit)
             .await
             .map_err(|error| JobStoreError::not_executed(JobStoreOperation::Read, error))?;
-        Ok(Self {
+        Ok(Self::from_driver(path, limit, driver))
+    }
+
+    fn from_driver(path: PathBuf, limit: usize, driver: Driver) -> Self {
+        let (closed, _) = watch::channel(None);
+        Self {
             path,
             limit,
-            owner: Arc::new(Mutex::new(Owner {
-                driver,
-                stopped: false,
-            })),
-        })
+            owner: Arc::new(Mutex::new(Owner { driver })),
+            closing: Arc::new(AtomicBool::new(false)),
+            closed,
+        }
+    }
+
+    fn require_admission(&self, operation: JobStoreOperation) -> Result<(), JobStoreError> {
+        if self.closing.load(Ordering::Acquire) {
+            Err(JobStoreError::not_executed(
+                operation,
+                "SQLite Job admission stopped".into(),
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     /// The owner drains the retired epoch before opening its replacement.
     /// This never retries the previous operation. A new read cannot race the
     /// previous epoch's transaction and mistake temporary absence for rollback.
     async fn connection(&self, operation: JobStoreOperation) -> Result<Driver, JobStoreError> {
+        self.require_admission(operation)?;
         let mut owner = self.owner.lock().await;
-        if owner.stopped {
-            return Err(JobStoreError::Storage {
-                operation,
-                outcome: JobWriteOutcome::NotExecuted,
-                message: "SQLite Job admission stopped".into(),
-            });
-        }
+        self.require_admission(operation)?;
         if !owner.driver.is_healthy() {
             owner
                 .driver
                 .close()
                 .await
                 .map_err(|error| JobStoreError::not_executed(operation, error))?;
+            self.require_admission(operation)?;
             owner.driver = Driver::open(self.path.clone(), self.limit)
                 .await
                 .map_err(|error| JobStoreError::not_executed(operation, error))?;
         }
+        self.require_admission(operation)?;
         Ok(owner.driver.clone())
     }
 
     pub async fn close(&self) -> Result<(), String> {
-        let driver = {
-            let mut owner = self.owner.lock().await;
-            owner.stopped = true;
-            owner.driver.begin_close();
-            owner.driver.clone()
-        };
-        driver.close().await
+        if !self.closing.swap(true, Ordering::AcqRel) {
+            let owner = self.owner.clone();
+            let closed = self.closed.clone();
+            // Even a waiter cancelled behind epoch replacement has requested
+            // shutdown. This fixed lifecycle task owns the actual completion.
+            tokio::spawn(async move {
+                let driver = {
+                    let owner = owner.lock().await;
+                    owner.driver.begin_close();
+                    owner.driver.clone()
+                };
+                closed.send_replace(Some(driver.close().await));
+            });
+        }
+        let mut closed = self.closed.subscribe();
+        loop {
+            if let Some(result) = closed.borrow().clone() {
+                return result;
+            }
+            closed.changed().await.map_err(|error| error.to_string())?;
+        }
     }
 
     pub async fn capacity(&self) -> (usize, usize) {
         self.owner.lock().await.driver.capacity()
+    }
+
+    /// Snapshot of the current connection epoch; a replacement starts new counters.
+    pub async fn resource_metrics(&self) -> JobConnectionMetrics {
+        self.owner.lock().await.driver.metrics()
     }
 
     async fn execute<T: Send + 'static>(
@@ -163,9 +330,10 @@ impl AsyncJobStorePort for SqliteJobStore {
     }
     async fn start_runtime_job(&self, req: StartRuntimeJobRequest) -> Result<(), JobStoreError> {
         self.execute(JobStoreOperation::Start, move |conn, observe| {
-            let tx = conn
-                .transaction()
-                .map_err(|error| format!("begin start_runtime_job transaction failed: {error}"))?;
+            let tx = conn.transaction().map_err(|error| {
+                sqlite_transactions::observe_sqlite_error(observe, &error);
+                format!("begin start_runtime_job transaction failed: {error}")
+            })?;
             sqlite_transactions::commit_job_write(
                 tx,
                 "commit start_runtime_job transaction failed",
@@ -184,6 +352,7 @@ impl AsyncJobStorePort for SqliteJobStore {
         let expires = req.heartbeat_at_ms.saturating_add(lease_ms);
         self.execute(JobStoreOperation::Renew, move |conn, observe| {
             let tx = conn.transaction().map_err(|error| {
+                sqlite_transactions::observe_sqlite_error(observe, &error);
                 format!("begin renew_runtime_job_lease transaction failed: {error}")
             })?;
             sqlite_transactions::commit_job_write(

@@ -76,6 +76,7 @@ async fn assert_runtime_context_recovery(conflicting_context: bool) {
         .unwrap();
         let tools = ToolLayer::new().with_cwd(workspace_root.clone()).unwrap();
         let engine = AgentRuntime::new(
+            std::sync::Arc::new(store.clone()),
             store.clone(),
             tools,
             AgentRuntimeConfig {

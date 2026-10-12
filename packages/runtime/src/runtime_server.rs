@@ -8,6 +8,8 @@ mod lease;
 #[path = "runtime_server/live_text.rs"]
 mod live_text;
 
+#[cfg(feature = "native-job-store")]
+pub use lease::SessionDeletionRegistration;
 pub use lease::{
     ActiveAgentRun, AgentRunLease, AgentRunRegistry, RuntimeClientKind, StartAgentRunError,
 };

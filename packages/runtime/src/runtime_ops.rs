@@ -203,7 +203,7 @@ pub(crate) fn agent_context_usage_get(
 pub(crate) async fn runtime_job_list(
     request: AgentRuntimeJobListRequest,
 ) -> Result<AgentRuntimeJobListResponse, String> {
-    let store = agent_runtime::agent_runtime_store_actor()?;
+    let store = agent_runtime::agent_runtime_job_store()?;
     let statuses = parse_runtime_job_statuses(request.statuses)?;
     let session_id = normalize_optional_string(request.session_id.as_deref());
     let branch_id = normalize_optional_string(request.branch_id.as_deref());
@@ -225,14 +225,17 @@ pub(crate) async fn runtime_job_list(
     };
     let jobs = if has_provider_filter {
         filter_runtime_jobs_by_provider_poll_payload(
-            &store,
+            store.as_ref(),
             list_request,
             provider_id,
             provider_tool_name,
         )
         .await?
     } else {
-        store.list_runtime_jobs(list_request).await?
+        store
+            .list_runtime_jobs(list_request)
+            .await
+            .map_err(|error| error.diagnostic_message())?
     };
     Ok(AgentRuntimeJobListResponse { jobs })
 }
@@ -241,9 +244,12 @@ pub(crate) async fn runtime_job_get(
     request: AgentRuntimeJobGetRequest,
 ) -> Result<AgentRuntimeJobGetResponse, String> {
     let job_id = required_string(request.job_id.as_str(), "jobId")?;
-    let store = agent_runtime::agent_runtime_store_actor()?;
+    let store = agent_runtime::agent_runtime_job_store()?;
     Ok(AgentRuntimeJobGetResponse {
-        job: store.get_runtime_job(job_id.as_str()).await?,
+        job: store
+            .get_runtime_job(job_id.as_str())
+            .await
+            .map_err(|error| error.diagnostic_message())?,
     })
 }
 
@@ -525,8 +531,10 @@ fn parse_wait_checkpoint(
     Ok((value, question_id))
 }
 
-async fn filter_runtime_jobs_by_provider_poll_payload(
-    store: &RuntimeStoreActor,
+async fn filter_runtime_jobs_by_provider_poll_payload<
+    S: centaeris_core::session::store::AsyncJobStorePort + ?Sized,
+>(
+    store: &S,
     request: ListRuntimeJobsRequest,
     provider_id: Option<String>,
     provider_tool_name: Option<String>,
@@ -544,7 +552,8 @@ async fn filter_runtime_jobs_by_provider_poll_payload(
                 limit: page_limit,
                 offset: scan_offset,
             })
-            .await?;
+            .await
+            .map_err(|error| error.diagnostic_message())?;
         if page.is_empty() {
             break;
         }

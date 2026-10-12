@@ -257,46 +257,90 @@ where
         let job = store
             .get_runtime_job(&event.job_id)?
             .ok_or_else(|| format!("subagent projection job missing: {}", event.job_id))?;
-        let canonical = super::subagent::scheduler_event_from_job(
-            &job,
-            event.kind.clone(),
-            SubagentLifecycleStatus::from(job.status.clone()),
-            event.worker_id.clone(),
-            &event.summary,
-            job.updated_at_ms,
-        )?;
-        // Scheduler notifications are hints. Recheck authoritative durable facts
-        // before they can populate a Session's result projection.
-        if job.job_kind != super::subagent::SUBAGENT_RUN_JOB_KIND
-            || job.session_id.as_deref() != Some(parent_session_id)
-            || canonical.subagent_id != event.subagent_id
-            || canonical.child_session_id != event.child_session_id
-            || job.branch_id.as_deref() != Some(event.parent_turn_id.as_str())
-            || !job.status.is_terminal()
-            || SubagentLifecycleStatus::from(job.status.clone()) != event.status
-            || job.output_refs.first() != event.result_ref.as_ref()
-            || job.payload_ref != event.work_packet_ref
-            || !matches!(
-                (&event.kind, &event.status),
-                (
-                    SubagentSchedulerEventKind::Succeeded,
-                    SubagentLifecycleStatus::Succeeded
-                ) | (
-                    SubagentSchedulerEventKind::Failed,
-                    SubagentLifecycleStatus::Failed
-                ) | (
-                    SubagentSchedulerEventKind::Cancelled,
-                    SubagentLifecycleStatus::Cancelled
-                )
-            )
-        {
-            return Err(format!(
-                "subagent projection ownership or terminal mismatch: {}",
-                event.job_id
-            ));
-        }
+        validate_terminal_event(parent_session_id, event, &job)?;
         terminal_items.push(item);
     }
+    persist_projection_items(store, parent_session_id, terminal_items)
+}
+
+fn validate_terminal_event(
+    parent_session_id: &str,
+    event: &SubagentSchedulerEvent,
+    job: &RuntimeJobRecord,
+) -> Result<(), String> {
+    let canonical = super::subagent::scheduler_event_from_job(
+        job,
+        event.kind.clone(),
+        SubagentLifecycleStatus::from(job.status.clone()),
+        event.worker_id.clone(),
+        &event.summary,
+        job.updated_at_ms,
+    )?;
+    // Scheduler notifications are hints. Recheck authoritative durable facts
+    // before they can populate a Session's result projection.
+    if job.job_kind != super::subagent::SUBAGENT_RUN_JOB_KIND
+        || job.session_id.as_deref() != Some(parent_session_id)
+        || canonical.subagent_id != event.subagent_id
+        || canonical.child_session_id != event.child_session_id
+        || job.branch_id.as_deref() != Some(event.parent_turn_id.as_str())
+        || !job.status.is_terminal()
+        || SubagentLifecycleStatus::from(job.status.clone()) != event.status
+        || job.output_refs.first() != event.result_ref.as_ref()
+        || job.payload_ref != event.work_packet_ref
+        || !matches!(
+            (&event.kind, &event.status),
+            (
+                SubagentSchedulerEventKind::Succeeded,
+                SubagentLifecycleStatus::Succeeded
+            ) | (
+                SubagentSchedulerEventKind::Failed,
+                SubagentLifecycleStatus::Failed
+            ) | (
+                SubagentSchedulerEventKind::Cancelled,
+                SubagentLifecycleStatus::Cancelled
+            )
+        )
+    {
+        return Err(format!(
+            "subagent projection ownership or terminal mismatch: {}",
+            event.job_id
+        ));
+    }
+    Ok(())
+}
+
+pub async fn persist_subagent_result_projection_from_scheduler_events_async<S, J>(
+    snapshots: &S,
+    jobs: &J,
+    parent_session_id: &str,
+    events: &[SubagentSchedulerEvent],
+) -> Result<usize, crate::session::store::job::JobStoreError>
+where
+    S: AgentRuntimeSnapshotStorePort,
+    J: crate::session::store::AsyncJobStorePort + ?Sized,
+{
+    let mut items = Vec::new();
+    for event in events {
+        let Some(item) = build_projection_item(parent_session_id, event) else {
+            continue;
+        };
+        let job = jobs.get_runtime_job(&event.job_id).await?.ok_or_else(|| {
+            crate::session::store::job::JobStoreError::Rejected(format!(
+                "subagent projection job missing: {}",
+                event.job_id
+            ))
+        })?;
+        validate_terminal_event(parent_session_id, event, &job)?;
+        items.push(item);
+    }
+    persist_projection_items(snapshots, parent_session_id, items).map_err(Into::into)
+}
+
+fn persist_projection_items<S: AgentRuntimeSnapshotStorePort>(
+    store: &S,
+    parent_session_id: &str,
+    terminal_items: Vec<SubagentResultProjectionItemV1>,
+) -> Result<usize, String> {
     if terminal_items.is_empty() {
         return Ok(0);
     }

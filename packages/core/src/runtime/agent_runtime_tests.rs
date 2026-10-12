@@ -42,12 +42,47 @@ mod completion_delivery_tests;
 mod host_event_tests;
 mod wait_recovery_tests;
 
+#[tokio::test]
+async fn query_loop_agent_creation_reconciles_lost_reply_without_repeating_the_write() {
+    let store = AgentRuntimeTestStore::new();
+    store.state().unwrap().lose_creation_reply = true;
+    let tools = ToolLayer::new().with_cwd(std::env::temp_dir()).unwrap();
+    let engine =
+        AgentRuntime::new_for_test_with_tools(store.clone(), tools, AgentRuntimeConfig::default());
+    let identity = RuntimeAgentRunIdentityV1 {
+        agent_run_id: "parent-run".into(),
+        execution_id: "parent-execution".into(),
+        authorization_digest: format!("sha256:{}", "a".repeat(64)),
+    };
+    let report = engine
+        .execute_agent_tool_call(
+            "parent",
+            "parent-turn",
+            Some(&identity),
+            &ToolCallEnvelope {
+                id: "agent-call".into(),
+                name: "agent".into(),
+                args_json: json!({ "prompt": "Read the file", "description": "File inspection" })
+                    .to_string(),
+            },
+        )
+        .await;
+    assert_eq!(report.status, "ok", "{report:?}");
+    let state = store.state().unwrap();
+    assert_eq!(state.jobs.len(), 1);
+    assert_eq!(state.external_objects.len(), 1);
+    let row = state.jobs.values().next().unwrap();
+    assert_eq!(report.details["runtimeJobId"], row.job_id);
+    assert_eq!(row.status, RuntimeJobStatus::Queued);
+}
+
 #[derive(Clone, Debug, Default)]
 struct AgentRuntimeTestState {
     checkpoints: Vec<CheckpointRecord>,
     events: Vec<RuntimeEvent>,
     snapshots: HashMap<String, String>,
     fail_after_input_snapshot: Option<String>,
+    lose_creation_reply: bool,
     snapshot_cas_conflict: Option<(String, String, RuntimeJobRecord)>,
     external_objects: HashMap<String, ExternalContextObject>,
     external_links: Vec<ExternalContextObjectLink>,
@@ -58,6 +93,167 @@ struct AgentRuntimeTestState {
 #[derive(Clone, Debug)]
 struct AgentRuntimeTestStore {
     state: Arc<Mutex<AgentRuntimeTestState>>,
+}
+
+#[async_trait::async_trait]
+impl crate::session::store::AsyncJobStorePort for AgentRuntimeTestStore {
+    async fn settle_job_operations(&self) -> Result<(), crate::session::store::job::JobStoreError> {
+        Ok(())
+    }
+    async fn get_runtime_job(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<RuntimeJobRecord>, crate::session::store::job::JobStoreError> {
+        crate::session::reliability::RuntimeJobStorePort::get_runtime_job(self, job_id).map_err(
+            |error| {
+                crate::session::store::job::JobStoreError::unconfirmed(
+                    crate::session::store::job::JobStoreOperation::Read,
+                    error,
+                )
+            },
+        )
+    }
+    async fn list_runtime_jobs(
+        &self,
+        req: crate::session::reliability::ListRuntimeJobsRequest,
+    ) -> Result<Vec<RuntimeJobRecord>, crate::session::store::job::JobStoreError> {
+        crate::session::reliability::RuntimeJobStorePort::list_runtime_jobs(self, req).map_err(
+            |error| {
+                crate::session::store::job::JobStoreError::unconfirmed(
+                    crate::session::store::job::JobStoreOperation::Read,
+                    error,
+                )
+            },
+        )
+    }
+    async fn claim_due_runtime_jobs(
+        &self,
+        req: crate::session::reliability::ClaimDueRuntimeJobsRequest,
+    ) -> Result<Vec<RuntimeJobRecord>, crate::session::store::job::JobStoreError> {
+        crate::session::reliability::RuntimeJobStorePort::claim_due_runtime_jobs(self, req).map_err(
+            |error| {
+                crate::session::store::job::JobStoreError::unconfirmed(
+                    crate::session::store::job::JobStoreOperation::Claim,
+                    error,
+                )
+            },
+        )
+    }
+    async fn start_runtime_job(
+        &self,
+        req: crate::session::reliability::StartRuntimeJobRequest,
+    ) -> Result<(), crate::session::store::job::JobStoreError> {
+        crate::session::reliability::RuntimeJobStorePort::start_runtime_job(self, req).map_err(
+            |error| {
+                crate::session::store::job::JobStoreError::unconfirmed(
+                    crate::session::store::job::JobStoreOperation::Start,
+                    error,
+                )
+            },
+        )
+    }
+    async fn renew_runtime_job_lease(
+        &self,
+        req: crate::session::reliability::RenewRuntimeJobLeaseRequest,
+    ) -> Result<(), crate::session::store::job::JobStoreError> {
+        crate::session::reliability::RuntimeJobStorePort::renew_runtime_job_lease(self, req)
+            .map_err(|error| {
+                crate::session::store::job::JobStoreError::unconfirmed(
+                    crate::session::store::job::JobStoreOperation::Renew,
+                    error,
+                )
+            })
+    }
+    async fn complete_runtime_job(
+        &self,
+        req: crate::session::reliability::CompleteRuntimeJobRequest,
+    ) -> Result<(), crate::session::store::job::JobStoreError> {
+        crate::session::reliability::RuntimeJobStorePort::complete_runtime_job(self, req).map_err(
+            |error| {
+                crate::session::store::job::JobStoreError::unconfirmed(
+                    crate::session::store::job::JobStoreOperation::Complete,
+                    error,
+                )
+            },
+        )
+    }
+    async fn fail_runtime_job(
+        &self,
+        req: crate::session::reliability::FailRuntimeJobRequest,
+    ) -> Result<(), crate::session::store::job::JobStoreError> {
+        crate::session::reliability::RuntimeJobStorePort::fail_runtime_job(self, req).map_err(
+            |error| {
+                crate::session::store::job::JobStoreError::unconfirmed(
+                    crate::session::store::job::JobStoreOperation::Fail,
+                    error,
+                )
+            },
+        )
+    }
+    async fn cancel_runtime_job(
+        &self,
+        req: crate::session::reliability::CancelRuntimeJobRequest,
+    ) -> Result<(), crate::session::store::job::JobStoreError> {
+        crate::session::reliability::RuntimeJobStorePort::cancel_runtime_job(self, req).map_err(
+            |error| {
+                crate::session::store::job::JobStoreError::unconfirmed(
+                    crate::session::store::job::JobStoreOperation::Cancel,
+                    error,
+                )
+            },
+        )
+    }
+    async fn reclaim_expired_runtime_job_leases(
+        &self,
+        now: i64,
+    ) -> Result<usize, crate::session::store::job::JobStoreError> {
+        crate::session::reliability::RuntimeJobStorePort::reclaim_expired_runtime_job_leases(
+            self, now,
+        )
+        .map_err(|error| {
+            crate::session::store::job::JobStoreError::unconfirmed(
+                crate::session::store::job::JobStoreOperation::Reclaim,
+                error,
+            )
+        })
+    }
+    async fn load_external_context_object(
+        &self,
+        id: &str,
+    ) -> Result<Option<ExternalContextObject>, crate::session::store::job::JobStoreError> {
+        crate::session::external_context::ExternalContextStorePort::load_external_context_object(
+            self, id,
+        )
+        .map_err(|error| {
+            crate::session::store::job::JobStoreError::unconfirmed(
+                crate::session::store::job::JobStoreOperation::Read,
+                error,
+            )
+        })
+    }
+    async fn upsert_external_context_and_schedule_job(
+        &self,
+        req: UpsertExternalContextAndScheduleJobRequest,
+    ) -> Result<
+        crate::session::reliability::ScheduleRuntimeJobResult,
+        crate::session::store::job::JobStoreError,
+    > {
+        let result = crate::session::store::RuntimeStoreTransactionPort::upsert_external_context_and_schedule_job(self, req).map_err(|error| crate::session::store::job::JobStoreError::unconfirmed(crate::session::store::job::JobStoreOperation::Create, error))?;
+        if self.state().unwrap().lose_creation_reply {
+            Err(crate::session::store::job::JobStoreError::unconfirmed(
+                crate::session::store::job::JobStoreOperation::Create,
+                "creation reply lost".into(),
+            ))
+        } else {
+            Ok(result)
+        }
+    }
+    async fn upsert_external_context_link_and_complete_job(
+        &self,
+        req: UpsertExternalContextLinkAndCompleteJobRequest,
+    ) -> Result<(), crate::session::store::job::JobStoreError> {
+        crate::session::store::RuntimeStoreTransactionPort::upsert_external_context_link_and_complete_job(self, req).map_err(|error| crate::session::store::job::JobStoreError::unconfirmed(crate::session::store::job::JobStoreOperation::Complete, error))
+    }
 }
 
 impl AgentRuntimeTestStore {
@@ -4432,8 +4628,8 @@ fn prompt_compaction_default_user_replay_is_comfort_bounded() {
     assert_eq!(config.prompt_compaction_user_replay_tokens, 20_000);
 }
 
-#[test]
-fn agent_tool_schedules_subagent_run_job_with_frozen_tool_contracts() {
+#[tokio::test]
+async fn agent_tool_schedules_subagent_run_job_with_frozen_tool_contracts() {
     let workspace_root = std::env::temp_dir().join(format!(
         "centaeris_agent_tool_workspace_{}_{}",
         std::process::id(),
@@ -4468,21 +4664,23 @@ fn agent_tool_schedules_subagent_run_job_with_frozen_tool_contracts() {
         execution_id: "execution-agent-tool-schedule".to_string(),
         authorization_digest: format!("sha256:{}", "a".repeat(64)),
     };
-    let report = engine.execute_agent_tool_call(
-        session_id,
-        turn_id,
-        Some(&agent_run_identity),
-        &ToolCallEnvelope {
-            id: "call-agent-1".to_string(),
-            name: "agent".to_string(),
-            args_json: json!({
-                "prompt": "Inspect the docs and return a one paragraph finding.",
-                "description": "Docs inspection",
-                "budget": { "max_summary_chars": 1200 }
-            })
-            .to_string(),
-        },
-    );
+    let report = engine
+        .execute_agent_tool_call(
+            session_id,
+            turn_id,
+            Some(&agent_run_identity),
+            &ToolCallEnvelope {
+                id: "call-agent-1".to_string(),
+                name: "agent".to_string(),
+                args_json: json!({
+                    "prompt": "Inspect the docs and return a one paragraph finding.",
+                    "description": "Docs inspection",
+                    "budget": { "max_summary_chars": 1200 }
+                })
+                .to_string(),
+            },
+        )
+        .await;
 
     assert_eq!(report.status, "ok");
     assert_eq!(
@@ -4570,8 +4768,8 @@ fn agent_tool_schedules_subagent_run_job_with_frozen_tool_contracts() {
     let _ = std::fs::remove_dir_all(workspace_root);
 }
 
-#[test]
-fn task_output_validates_agent_ref_and_returns_runtime_wait_marker() {
+#[tokio::test]
+async fn task_output_validates_agent_ref_and_returns_runtime_wait_marker() {
     let store = AgentRuntimeTestStore::new();
     let engine = AgentRuntime::new_for_test(store.clone(), AgentRuntimeConfig::default());
     let session_id = "chat-task-output-ref";
@@ -4612,23 +4810,25 @@ fn task_output_validates_agent_ref_and_returns_runtime_wait_marker() {
         })
         .expect("schedule Agent runtime job");
 
-    let report = engine.execute_task_runtime_tool_call(
-        session_id,
-        &ToolCallEnvelope {
-            id: "call-task-output-ref".to_string(),
-            name: "task_output".to_string(),
-            args_json: json!({
-                "output_ref": {
-                    "schema": "task_output_ref_v1",
-                    "kind": "agent",
-                    "runtime_job_id": job.job_id,
-                    "child_session_id": child_session_id,
-                    "result_ref": result_ref,
-                }
-            })
-            .to_string(),
-        },
-    );
+    let report = engine
+        .execute_task_runtime_tool_call(
+            session_id,
+            &ToolCallEnvelope {
+                id: "call-task-output-ref".to_string(),
+                name: "task_output".to_string(),
+                args_json: json!({
+                    "output_ref": {
+                        "schema": "task_output_ref_v1",
+                        "kind": "agent",
+                        "runtime_job_id": job.job_id,
+                        "child_session_id": child_session_id,
+                        "result_ref": result_ref,
+                    }
+                })
+                .to_string(),
+            },
+        )
+        .await;
 
     assert_eq!(report.status, "ok");
     let output = &report.details;
@@ -4799,25 +4999,27 @@ fn task_output_terminal_join_returns_only_the_bound_agent_result() {
     );
 }
 
-#[test]
-fn task_output_validates_canonical_output_ref_shape() {
+#[tokio::test]
+async fn task_output_validates_canonical_output_ref_shape() {
     let store = AgentRuntimeTestStore::new();
     let engine = AgentRuntime::new_for_test(store.clone(), AgentRuntimeConfig::default());
-    let report = engine.execute_task_runtime_tool_call(
-        "chat-parent",
-        &ToolCallEnvelope {
-            id: "call-task-output-checkpoint".to_string(),
-            name: "task_output".to_string(),
-            args_json: json!({
-                "output_ref": {
-                    "kind": "agent",
-                    "banana": "unknown-value",
-                    "child_session_id": "chat-parent:subagent:agent-test"
-                }
-            })
-            .to_string(),
-        },
-    );
+    let report = engine
+        .execute_task_runtime_tool_call(
+            "chat-parent",
+            &ToolCallEnvelope {
+                id: "call-task-output-checkpoint".to_string(),
+                name: "task_output".to_string(),
+                args_json: json!({
+                    "output_ref": {
+                        "kind": "agent",
+                        "banana": "unknown-value",
+                        "child_session_id": "chat-parent:subagent:agent-test"
+                    }
+                })
+                .to_string(),
+            },
+        )
+        .await;
 
     assert_eq!(report.status, "error");
     assert!(report.content.contains("unknown field"));
@@ -5150,18 +5352,20 @@ fn provider_prompt_cache_key_changes_when_skill_catalog_changes() {
     assert_ne!(base, changed);
 }
 
-#[test]
-fn task_output_rejects_invalid_args_json() {
+#[tokio::test]
+async fn task_output_rejects_invalid_args_json() {
     let store = AgentRuntimeTestStore::new();
     let engine = AgentRuntime::new_for_test(store, AgentRuntimeConfig::default());
-    let report = engine.execute_task_runtime_tool_call(
-        "chat-task-runtime-invalid-args",
-        &ToolCallEnvelope {
-            id: "call-invalid-task-runtime-args".to_string(),
-            name: "task_output".to_string(),
-            args_json: "{".to_string(),
-        },
-    );
+    let report = engine
+        .execute_task_runtime_tool_call(
+            "chat-task-runtime-invalid-args",
+            &ToolCallEnvelope {
+                id: "call-invalid-task-runtime-args".to_string(),
+                name: "task_output".to_string(),
+                args_json: "{".to_string(),
+            },
+        )
+        .await;
 
     assert_eq!(report.status, "error");
     assert_eq!(
@@ -10637,8 +10841,13 @@ async fn subagent_tool_call_uses_the_durable_commit_port_once() {
         allowed_tools: Some(vec!["read".to_string()]),
         ..AgentRuntimeConfig::default()
     };
-    let engine = AgentRuntime::new_for_test_with_tools(store, tool_layer, runtime_config);
     let req = sample_subagent_worker_run_request();
+    store
+        .state()
+        .unwrap()
+        .jobs
+        .insert(req.job.job_id.clone(), req.job.clone());
+    let engine = AgentRuntime::new_for_test_with_tools(store, tool_layer, runtime_config);
     let agent_run_id = req.job.job_id.clone();
     let model_client = SubagentReadModelClient {
         request_count: AtomicUsize::new(0),
@@ -10709,6 +10918,106 @@ async fn subagent_tool_call_uses_the_durable_commit_port_once() {
     );
 
     let _ = std::fs::remove_dir_all(workspace_root);
+}
+
+#[tokio::test(start_paused = true)]
+async fn query_loop_subagent_cancel_ack_prevents_immediate_late_tool_dispatch() {
+    struct CancelBeforeReply {
+        store: AgentRuntimeTestStore,
+        job_id: String,
+        model: SubagentReadModelClient,
+    }
+    impl ModelClient for CancelBeforeReply {
+        fn generate<'a>(
+            &'a self,
+            request: &'a ModelClientRequest,
+        ) -> ModelClientFuture<'a, ModelClientResponse> {
+            Box::pin(async move {
+                RuntimeJobStorePort::cancel_runtime_job(
+                    &self.store,
+                    crate::session::reliability::CancelRuntimeJobRequest {
+                        job_id: self.job_id.clone(),
+                        expected_lease_owner: None,
+                        expected_status: None,
+                        reason: "cancel-before-late-reply".into(),
+                        cancelled_at_ms: 4,
+                    },
+                )
+                .map_err(|error| {
+                    ModelClientError::new(ModelClientErrorKind::Network, error, false)
+                })?;
+                self.model.generate(request).await
+            })
+        }
+    }
+    let workspace = temp_dir_path("subagent_cancel_before_late_reply");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("fixture.txt"), "must not be dispatched").unwrap();
+    let store = AgentRuntimeTestStore::new();
+    let request = sample_subagent_worker_run_request();
+    let job_id = request.job.job_id.clone();
+    store
+        .state()
+        .unwrap()
+        .jobs
+        .insert(job_id.clone(), request.job.clone());
+    let engine = AgentRuntime::new_for_test_with_tools(
+        store.clone(),
+        ToolLayer::new().with_cwd(workspace.clone()).unwrap(),
+        AgentRuntimeConfig {
+            allowed_tools: Some(vec!["read".into()]),
+            ..AgentRuntimeConfig::default()
+        },
+    );
+    let model = CancelBeforeReply {
+        store,
+        job_id: job_id.clone(),
+        model: SubagentReadModelClient {
+            request_count: AtomicUsize::new(0),
+        },
+    };
+    let config_store = StaticModelSessionConfigStore {
+        config: Some(ModelSessionConfig::default()),
+    };
+    let runner_config = AgentRuntimeSubagentRunnerConfig {
+        auto_continue_after_resume_wait: Some(false),
+        agent_run_identity: Some(RuntimeAgentRunIdentityV1 {
+            agent_run_id: job_id,
+            execution_id: "execution-cancel-late-reply".into(),
+            authorization_digest: format!("sha256:{}", "3".repeat(64)),
+        }),
+    };
+    let mut durable_tools = 0;
+    let mut durable_receipts = 0;
+    let outcome = engine
+        .run_subagent_worker_with_model_client_async(
+            request,
+            &model,
+            &config_store,
+            &runner_config,
+            None,
+            Some(&mut |point| {
+                match point {
+                    ToolSafePoint::DurableToolCall { .. } => durable_tools += 1,
+                    ToolSafePoint::DurableReceipt { .. } => durable_receipts += 1,
+                    _ => {}
+                }
+                Ok(())
+            }),
+        )
+        .await;
+    assert!(
+        matches!(outcome, SubagentWorkerRunOutcome::Cancelled { ref reason }
+        if reason == "cancel-before-late-reply"),
+        "{outcome:?}"
+    );
+    assert_eq!(model.model.request_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        durable_tools, 0,
+        "acknowledged cancellation fences tool dispatch"
+    );
+    assert_eq!(durable_receipts, 0);
+    let _ = std::fs::remove_dir_all(workspace);
 }
 
 fn sample_subagent_worker_run_request() -> SubagentWorkerRunRequest {

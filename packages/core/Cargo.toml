@@ -40,6 +40,7 @@ unicode-normalization.workspace = true
 url.workspace = true
 futures.workspace = true
 thiserror = "=2.0.18"
+tokio-util = { version = "=0.7.18", features = ["rt"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 tree-sitter.workspace = true
 tree-sitter-bash.workspace = true
