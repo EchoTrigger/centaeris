@@ -7,13 +7,14 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.core.files.storage import default_storage
 from django.core.management import call_command
-from django.test import TestCase, override_settings
+from django.test import TransactionTestCase, override_settings
 
 from .assets import store_bytes
 from .models import LibraryNoteRevision, UserLibraryObject
 
 
-class NoteMigrationTests(TestCase):
+class NoteMigrationTests(TransactionTestCase):
+    serialized_rollback = True
     def setUp(self):
         directory = tempfile.TemporaryDirectory(prefix="note-backfill-")
         self.addCleanup(directory.cleanup)
@@ -59,6 +60,13 @@ class NoteMigrationTests(TestCase):
             migrate_note(self.note.id)
         self.assertFalse(LibraryNoteRevision.objects.exists())
 
+    def test_oversized_body_is_rejected_before_publication(self):
+        from .note_migration import migrate_note
+        with override_settings(NOTE_MAX_BYTES=len(self.body) - 1):
+            with self.assertRaisesRegex(ValueError, "note_body_too_large"):
+                migrate_note(self.note.id)
+        self.assertFalse(LibraryNoteRevision.objects.exists())
+
     def test_concurrent_metadata_change_does_not_install_old_capture(self):
         from .note_migration import migrate_note
         original_open = default_storage.open
@@ -69,6 +77,24 @@ class NoteMigrationTests(TestCase):
             with self.assertRaisesRegex(ValueError, "note_migration_source_changed"):
                 migrate_note(self.note.id)
         self.assertFalse(LibraryNoteRevision.objects.exists())
+
+    def test_failed_backfill_publication_can_retry_without_partial_revision(self):
+        from django.db import DatabaseError
+        from .note_migration import migrate_note, verify_note
+        original_key = self.note.storageKey
+        with patch.object(UserLibraryObject, "save", side_effect=DatabaseError("injected publication failure")):
+            with self.assertRaisesRegex(DatabaseError, "injected publication failure"):
+                migrate_note(self.note.id)
+        self.note.refresh_from_db()
+        self.assertIsNone(self.note.noteHead_id)
+        self.assertEqual(self.note.storageKey, original_key)
+        self.assertFalse(LibraryNoteRevision.objects.exists())
+        with default_storage.open(original_key, "rb") as source:
+            self.assertEqual(source.read(), self.body)
+        self.assertEqual(migrate_note(self.note.id), "migrated")
+        self.assertEqual(verify_note(self.note.id), "verified")
+        self.assertEqual(migrate_note(self.note.id), "already_migrated")
+        self.assertEqual(LibraryNoteRevision.objects.count(), 1)
 
     def test_rollback_export_uses_latest_revision_not_original_file(self):
         from .library_notes import save_note
@@ -83,3 +109,45 @@ class NoteMigrationTests(TestCase):
             self.assertEqual(content.read(), "最新正文".encode("utf-8"))
         self.assertIsNone(self.note.noteHead_id)
         self.assertEqual(self.note.contentGeneration, 10)
+
+    def test_populated_revision_schema_refuses_lossy_reversal(self):
+        from django.db.migrations.executor import MigrationExecutor
+        from django.db.migrations.exceptions import IrreversibleError
+        from .migration_testing import isolated_migration_database
+        target = [("app_core", "0015_note_revision_immutability")]
+        with isolated_migration_database(target) as isolated:
+            executor = MigrationExecutor(isolated)
+            historical = executor.loader.project_state(target).apps
+            user = historical.get_model("auth", "User").objects.using(isolated.alias).create(username="schema-note-owner")
+            note = historical.get_model("app_core", "UserLibraryObject").objects.using(isolated.alias).create(
+                owner_id=user.pk, objectKind="note", displayName="note", status="ready",
+            )
+            revision_model = historical.get_model("app_core", "LibraryNoteRevision")
+            revision_model.objects.using(isolated.alias).create(
+                note_id=note.pk, generation=1, displayName="note", markdown="retained",
+                sha256="sha256:" + "0" * 64, sizeBytes=8, createdBy_id=user.pk,
+            )
+            with self.assertRaisesRegex(IrreversibleError, "note_history_requires_export"):
+                executor.migrate([("app_core", "0013_remove_model_quota_domain")])
+            self.assertEqual(revision_model.objects.using(isolated.alias).count(), 1)
+
+    def test_migrated_note_restore_does_not_depend_on_retained_file_availability(self):
+        from .note_migration import migrate_note
+        migrate_note(self.note.id)
+        self.client.force_login(self.user)
+        self.client.delete(f"/api/library/{self.note.id}")
+        default_storage.delete(self.note.storageKey)
+        restored = self.client.post(f"/api/library/{self.note.id}/restore")
+        self.assertEqual(restored.status_code, 200, restored.content)
+        opened = self.client.get(f"/api/library/{self.note.id}/note")
+        self.assertEqual(opened.json()["markdown"].encode("utf-8"), self.body)
+
+    def test_mixed_legacy_writer_is_detected_and_cannot_receive_false_save_confirmation(self):
+        from .library_notes import NoteSaveError, save_note
+        from .note_migration import migrate_note
+        from uuid import uuid4
+        migrate_note(self.note.id)
+        UserLibraryObject.objects.filter(pk=self.note.id).update(contentGeneration=10)
+        with self.assertRaisesRegex(NoteSaveError, "note_migration_required"):
+            save_note(self.user, self.note.id, save_id=uuid4().hex, base_generation=10,
+                      display_name=self.note.displayName, markdown=self.body.decode("utf-8"))

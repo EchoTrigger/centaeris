@@ -147,3 +147,10 @@ class LibraryNoteVersionTests(TransactionTestCase):
         self.client.force_login(other)
         self.assertEqual(self.client.get(f"/api/library/{note_id}/note/revisions").status_code, 404)
         self.assertEqual(self.request("post", f"/api/library/{note_id}/note/restore", payload).status_code, 404)
+
+    def test_nul_text_is_rejected_as_a_request_error(self):
+        response = self.request("post", "/api/library/notes", {
+            "saveId": uuid4().hex, "displayName": "note", "markdown": "body\u0000tail",
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(LibraryNoteRevision.objects.exists())

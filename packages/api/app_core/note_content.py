@@ -1,11 +1,12 @@
 """Read an already-authorized immutable body; never grant access here."""
 
 from dataclasses import dataclass
+import hashlib
 from io import BytesIO
 
 from django.core.files.storage import default_storage
 
-from .models import LibraryNoteRevision, UserLibraryObject
+from .models import UserLibraryObject
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,8 @@ def content_source(owner) -> ContentSource:
                 or revision.sizeBytes != owner.sizeBytes or revision.displayName != owner.displayName):
             raise ValueError("note_head_identity_mismatch")
         body = revision.markdown.encode("utf-8")
+        if len(body) != revision.sizeBytes or "sha256:" + hashlib.sha256(body).hexdigest() != revision.sha256:
+            raise ValueError("note_revision_identity_mismatch")
         # Capture the bytes before returning: later history GC cannot truncate a read.
         return NoteRevision(revision.id, body)
     if not owner.storageKey or not default_storage.exists(owner.storageKey):

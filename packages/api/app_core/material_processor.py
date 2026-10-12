@@ -12,7 +12,6 @@ import time
 import uuid
 
 import docker
-from django.core.files.storage import default_storage
 from django.db import close_old_connections, transaction
 from django.db.models import Q
 from django.db.models.functions import Now

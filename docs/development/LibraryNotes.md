@@ -28,6 +28,8 @@ not bypass captured-input generation checks.
 Editor reads, downloads, deferred Agent inputs and platform material processing
 share this content selection. `test_note_content` checks exact bytes including
 CRLF and Unicode, owner isolation, immutable reads and stale-generation rejection.
+Citation, public Chat file reads and accepted/draft Agent attachment previews also use these sources;
+their authorization is rechecked immediately before opening the stream.
 
 ## Conditional saves
 
@@ -46,12 +48,28 @@ content generation. PUT responses confirm the operation without echoing the body
 
 ## Deployment and rollback
 
+The empty-database migration and model-drift gates use SQLite for structural
+checks only. The immutability migration installs and removes its trigger only on
+PostgreSQL; unknown database backends fail explicitly. SQLite success does not
+verify production immutability or concurrency. `test_note_schema_migration`,
+`test_note_content` and `test_note_migration` cover PostgreSQL schema upgrade,
+ORM/bulk/raw SQL rewrite rejection, allowed protection changes, populated reverse
+refusal, failed backfill retry and export of the latest body. Each old-schema
+fixture owns a separate disposable database.
+
 Apply the new schema first, then run `migrate_library_notes --dry-run`, followed
 by bounded `--limit` batches until `remaining=0`. Missing, corrupt, oversized or
 invalid UTF-8 bodies fail closed. The backfill reads storage before entering a
 short transaction and verifies the captured key, generation, hash, size, title,
 status and head before publication. Files are retained. Do not enable the new
-writer until all live notes are verified and history capacity policy is installed.
+writer until all non-purged notes, including recoverable trash, are verified and
+history capacity policy is installed.
+Freeze legacy note writes throughout final backfill, verification and writer
+activation. An old writer does not maintain the head after backfill. Run
+`migrate_library_notes --verify` over all notes; use the returned `lastId` with
+`--after-id` to traverse verification batches. Inconsistent heads fail reads and
+new writes rather than acknowledging the wrong body. Restore from trash uses the
+database head even if the retained rollback file is unavailable.
 
 Coordinate API/Web deployment and refresh old clients: requests lacking operation
 identity are rejected rather than interpreted under the new contract. Unmigrated
@@ -63,6 +81,8 @@ Rollback requires a write maintenance window and
 that file reference and clears the head. Verify hashes before rolling back code;
 old original files cannot represent edits made after migration. Keep the added
 schema and migration history. Interrupted exports retain orphan-scan recovery.
+Schema reversal is allowed only when both version and receipt tables are empty;
+populated reversal fails before dropping the immutability trigger or body rows.
 
 ## History capacity and reclamation
 
@@ -93,3 +113,39 @@ run `migrate_library_notes --release-files --dry-run`, then release batches: thi
 only clears old references and records retryable GC resources. Actual deletion
 uses the existing `gc_deleted_resources` collector, with its grace period and
 backoff. Exporting for rollback remains possible from the database afterwards.
+The existing GC entrypoint also runs note-history collection after trash
+expiration, so permanently purged database bodies do not require a new scheduler.
+
+## Browser drafts and synchronization
+
+IndexedDB (via `idb`) stores a versioned owner/note/edit-instance record. New drafts
+have a stable URL `draft` identity. Different edit instances retain separate
+records and are offered as recovery choices. Unsupported draft schemas/fields
+fail visibly; page unload does not delete drafts. Only a confirmed sequence is
+removed, and recovered source records are removed only after the recovered work
+is confirmed. Browser quota/write failures cannot claim local durability.
+
+Both network saves and local full-body writes allow one in flight and one latest
+pending snapshot. Local persistence attempts are throttled to 100 ms; autosave
+uses 2 s idle debounce, 5 s minimum interval and a 10 s pending-attempt target.
+Network outages or an in-flight request can exceed that target. Explicit save
+bypasses timing. Persist the operation ID and exact request before network I/O;
+unknown outcomes retain that ID across reload. Confirm the old operation before
+sending later content. Same acknowledged content is skipped.
+Navigation persists the latest local draft before proceeding. Quota failures
+retain the editor and offer an explicit stay/leave choice; `beforeunload` warns
+only while newer text is not yet durable. Each creation entrypoint assigns a new
+stable draft URL identity. Responses with the wrong note ID/generation are rejected.
+
+The editor preserves literal Markdown separately from its title, retries saves
+without reloading over drafts, ignores old-route responses and pauses on conflict.
+Conflict choices compare titles/bodies, create a copy, or explicitly submit against
+the viewed server generation. No automatic merge or blind overwrite is performed.
+
+Run `pnpm --filter web test:notes` for controller and rendered callback behavior.
+With `CHROME_BIN` set, run `node --test tests/browser/library-notes.test.mjs` from
+`packages/web`: real Chromium/IndexedDB tests edit offline, reload, recover the
+same operation ID, reconnect and confirm the visible save control stays usable
+when narrow. The fixture owns its profile and API responses; no deployment is used.
+Real browser quota injection also checks blocked navigation and successful
+continuation after persistence becomes available again.

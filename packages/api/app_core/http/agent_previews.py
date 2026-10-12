@@ -235,10 +235,13 @@ async def _content(request, source_version, sha256, lang, **identity):
             current = select()
             if current != selected:
                 raise StoredObjectUnavailable()
-            return default_storage.open(current[0], 'rb')
+            from app_core.note_content import NoteRevision, StoredObject
+            source = current[0]
+            return source.open() if isinstance(source, (NoteRevision, StoredObject)) else default_storage.open(source, 'rb')
         except (PreviewRejected, DelegationRejected, FileNotFoundError) as error:
             raise StoredObjectUnavailable() from error
-    response = await stored_file_response(selected[0], selected[1], selected[2], content_length=selected[3],
+    storage_key = selected[0] if isinstance(selected[0], str) else ""
+    response = await stored_file_response(storage_key, selected[1], selected[2], content_length=selected[3],
         as_attachment=identity.get('download', False), authorized_open=lambda: sync_to_async(open_current, thread_sensitive=True)())
     response['Cache-Control'] = 'no-store'
     response['X-Content-Type-Options'] = 'nosniff'

@@ -15,6 +15,13 @@ gate and inspection of its final artifacts.
 
 ## Test quality
 
+Library note conditional commits, immutable content reads, migration/rollback,
+history capacity and browser draft recovery are covered in
+[LibraryNotes.md](LibraryNotes.md). PostgreSQL tests observe real commit and
+independent-connection contention; Chromium acceptance exercises actual IndexedDB
+across reload. Failure injection must preserve previously acknowledged content
+and must not let an old response claim newer edits are saved.
+
 Storage contract consolidation and the file-backed asynchronous SQLite driver
 validation are described in [StorageExecution.md](StorageExecution.md). The narrow
 Job result and recovery contract is in [JobStorage.md](JobStorage.md). Its driver

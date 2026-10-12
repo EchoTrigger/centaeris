@@ -69,3 +69,23 @@ class NoteHistoryTests(TestCase):
         self.assertEqual(self.note.storageKey, "")
         self.assertTrue(default_storage.exists(metadata["storageKey"]))
         self.assertEqual(DerivedResource.objects.get(resourceKey=metadata["storageKey"]).state, "pending")
+
+    def test_existing_gc_entrypoint_reclaims_purged_database_notes_without_losing_receipts(self):
+        from django.core.management import call_command
+        from django.utils import timezone
+        from .assets import tombstone_stored_object
+        from io import StringIO
+        from unittest.mock import patch
+        from .deleted_resource_gc import DeletedResourceGcReport
+        from .workspace_snapshot_gc import WorkspaceSnapshotGcReport
+        tombstone_stored_object(self.note)
+        self.note.purgedAt = timezone.now()
+        self.note.save(update_fields=["purgedAt"])
+        output = StringIO()
+        with patch("app_core.management.commands.gc_deleted_resources.collect_deleted_resource_gc", return_value=DeletedResourceGcReport([], [], [], [])), \
+             patch("app_core.management.commands.gc_deleted_resources.collect_workspace_snapshot_gc", return_value=WorkspaceSnapshotGcReport([], [], [], [])):
+            call_command("gc_deleted_resources", dry_run=True, stdout=output)
+            self.assertTrue(LibraryNoteRevision.objects.exists())
+            call_command("gc_deleted_resources", stdout=output)
+        self.assertFalse(LibraryNoteRevision.objects.exists())
+        self.assertEqual(LibraryNoteSaveReceipt.objects.count(), 1)

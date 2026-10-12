@@ -54,7 +54,7 @@ def delivered_attachments(run):
 
 
 def resolve_agent_attachment(user, agent_id, input_ref, input_id=None):
-    from django.core.files.storage import default_storage
+    from .note_content import content_source
     from .agent_inputs import AgentInputError, owned_input_binding
     from .models import AgentInput, WorkspaceMembership
     binding = owned_input_binding(user, agent_id)
@@ -70,10 +70,12 @@ def resolve_agent_attachment(user, agent_id, input_ref, input_id=None):
     current = capture_attachments(user, binding.session, [input_ref])[0]
     if capture is not None and capture != current:
         raise DeferredInputResolutionError("stale_generation")
-    link = SessionAssetLink.objects.select_related("sourceObject__source", "userLibraryObject", "artifact").get(pk=input_ref)
+    link = SessionAssetLink.objects.select_related("sourceObject__source", "userLibraryObject__noteHead", "artifact").get(pk=input_ref)
     resolved = resolved_input_for_link(SimpleNamespace(user=user, user_id=user.pk, session_id=binding.session_id),
         link, f"/mnt/data/inputs/{input_ref}")
     owner = link.sourceObject or link.userLibraryObject or link.artifact
-    if not owner.storageKey or not default_storage.exists(owner.storageKey):
+    try:
+        source = content_source(owner)
+    except FileNotFoundError:
         raise DeferredInputResolutionError("asset_unavailable")
-    return resolved, owner.storageKey
+    return resolved, source

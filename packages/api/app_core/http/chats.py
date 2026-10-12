@@ -5,7 +5,6 @@ from functools import wraps
 from typing import Literal
 
 from asgiref.sync import async_to_sync, sync_to_async
-from django.core.files.storage import default_storage
 from ninja import Header, Router, Status
 from pydantic import Field, field_validator
 
@@ -243,10 +242,10 @@ def chat_file(request, chat_id: str, file_id: str):
             current, current_key = service.resolve_file(request, chat_id, file_id)
             if (current, current_key) != (resolved, key):
                 raise StoredObjectUnavailable()
-            return default_storage.open(key, "rb")
+            return current_key.open()
         except (AgentInputError, DelegationRejected, PreviewRejected, DeferredInputResolutionError, FileNotFoundError) as error:
             raise StoredObjectUnavailable() from error
-    response = async_to_sync(stored_file_response)(key, resolved["contentType"], resolved["displayName"],
+    response = async_to_sync(stored_file_response)("", resolved["contentType"], resolved["displayName"],
         as_attachment=True, content_length=resolved["sizeBytes"], authorized_open=sync_to_async(authorized_open))
     response["Cache-Control"] = "no-store"
     response["X-Content-Type-Options"] = "nosniff"

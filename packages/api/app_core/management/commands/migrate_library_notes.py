@@ -1,7 +1,7 @@
 from django.core.management.base import BaseCommand, CommandError
 
 from app_core.models import UserLibraryObject
-from app_core.note_migration import export_note, migrate_note, release_migration_file
+from app_core.note_migration import export_note, migrate_note, release_migration_file, verify_note
 
 
 class Command(BaseCommand):
@@ -12,20 +12,26 @@ class Command(BaseCommand):
         parser.add_argument("--limit", type=int, default=100)
         parser.add_argument("--export-for-rollback", action="store_true")
         parser.add_argument("--release-files", action="store_true")
+        parser.add_argument("--verify", action="store_true")
+        parser.add_argument("--after-id", default="")
 
     def handle(self, *args, **options):
         if options["limit"] <= 0:
             raise CommandError("--limit must be positive")
         export = options["export_for_rollback"]
         release = options["release_files"]
-        if export and release:
-            raise CommandError("Choose export or release, not both")
-        query = UserLibraryObject.objects.filter(objectKind="note", purgedAt__isnull=True,
-                                                 noteHead__isnull=not (export or release)).order_by("id")
+        verify = options["verify"]
+        if sum([export, release, verify]) > 1:
+            raise CommandError("Choose one migration operation")
+        query = UserLibraryObject.objects.filter(objectKind="note", purgedAt__isnull=True).order_by("id")
+        if not verify:
+            query = query.filter(noteHead__isnull=not (export or release))
+        if options["after_id"]:
+            query = query.filter(id__gt=options["after_id"])
         if release:
             query = query.exclude(storageKey="")
         ids = list(query.values_list("id", flat=True)[:options["limit"]])
-        operation = release_migration_file if release else export_note if export else migrate_note
+        operation = verify_note if verify else release_migration_file if release else export_note if export else migrate_note
         failures = []
         for note_id in ids:
             try:
@@ -34,7 +40,8 @@ class Command(BaseCommand):
             except (OSError, ValueError) as error:
                 failures.append(note_id)
                 self.stderr.write(f"{note_id}: {type(error).__name__}")
-        remaining = query.count()
-        self.stdout.write(f"processed={len(ids)} failed={len(failures)} remaining={remaining}")
+        remaining = query.count() - len(ids) if verify else query.count()
+        last_id = ids[-1] if ids else ""
+        self.stdout.write(f"processed={len(ids)} failed={len(failures)} remaining={remaining} lastId={last_id}")
         if failures:
             raise CommandError("note_migration_failed")

@@ -17,10 +17,7 @@ from app_core.assets import (
     delete_stored_object_for_gc,
     safe_filename,
     source_object_is_granted,
-    store_bytes,
     store_upload,
-    register_derived_resource,
-    tombstone_superseded_derived_resources,
     tombstone_stored_object,
 )
 from app_core.app_delegations import DelegationRejected, require_request_delegation
@@ -444,7 +441,7 @@ def permanently_delete_library_object(request, library_object_id: str):
 )
 def get_library_note(request, library_object_id: str):
     try:
-        item = _library_object(request.user, library_object_id)
+        item = _library_object(request.user, library_object_id, with_note_head=True)
         if item.objectKind != "note" or item.status != "ready":
             raise UserLibraryObject.DoesNotExist
         try:
@@ -486,7 +483,7 @@ def list_note_revisions(request, library_object_id: str):
     return {"currentGeneration": note.contentGeneration, "revisions": [
         {"generation": item.generation, "displayName": item.displayName, "sha256": item.sha256,
          "sizeBytes": item.sizeBytes, "protected": item.protected, "createdAt": item.createdAt.isoformat()}
-        for item in note.noteRevisions.order_by("-generation")
+        for item in note.noteRevisions.only("generation", "displayName", "sha256", "sizeBytes", "protected", "createdAt").order_by("-generation")
     ]}
 
 
@@ -855,6 +852,9 @@ def _available_numbered_library_name(
 
 
 def _prepare_library_storage_restore(item: UserLibraryObject) -> str:
+    if item.objectKind == "note" and item.noteHead_id:
+        content_source(item)
+        return ""
     if not item.storageKey:
         return ""
     resources = list(
@@ -907,12 +907,12 @@ def _library_parent(user, parent_folder_id: str, moving_object_id: str = ""):
     )
 
 
-def _library_object(user, library_object_id: str, *, locked: bool = False):
+def _library_object(user, library_object_id: str, *, locked: bool = False, with_note_head: bool = False):
     query = UserLibraryObject.objects
     if locked:
         query = query.select_for_update()
     else:
-        query = query.select_related("parentFolder", "noteHead")
+        query = query.select_related("parentFolder", "noteHead") if with_note_head else query.select_related("parentFolder")
     return query.get(id=library_object_id, owner=user)
 
 

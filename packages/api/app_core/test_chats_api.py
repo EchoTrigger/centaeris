@@ -133,6 +133,26 @@ class ChatApiTests(BusinessBranchFixture, TransactionTestCase):
         other = self.create("other").json()["data"]["id"]
         self.assertEqual(self.api("get", f"/api/v1/chats/{other}/files/{file['id']}").status_code, 404)
 
+    def test_existing_database_note_attachment_reads_through_scoped_chat_file(self):
+        from .library_notes import create_note
+        from .assets import captured_input_fields
+        from .chats import opaque
+        from .tests import streaming_response_bytes
+        from uuid import uuid4
+        cid = self.create().json()["data"]["id"]
+        branch = models.BusinessAgentBranch.objects.get(root_agent=self.root)
+        saved = create_note(self.member, save_id=uuid4().hex, display_name="note", markdown="正文\r\n🌱")
+        note = models.UserLibraryObject.objects.get(pk=saved["object"]["id"])
+        link = models.SessionAssetLink.objects.create(
+            workspace=self.workspace, session=branch.session, attachedBy=self.member,
+            userLibraryObject=note, capturedDisplayName=note.displayName,
+            capturedContentType=note.contentType, **captured_input_fields(note),
+        )
+        file_id = opaque("file", cid, ["upload", None, link.pk])
+        response = self.api("get", f"/api/v1/chats/{cid}/files/{file_id}")
+        self.assertEqual(response.status_code, 200, response.content if not response.streaming else "")
+        self.assertEqual(streaming_response_bytes(response), "正文\r\n🌱".encode("utf-8"))
+
     def test_read_update_after_disconnect_and_agent_output_use_one_message_shape(self):
         from .test_agent_messages import AgentMessageTests
         from .test_agent_input_delivery import AgentInputDeliveryTests

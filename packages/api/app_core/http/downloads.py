@@ -276,7 +276,7 @@ def _select_citation_preview(user_id: int, citation_id: str):
             )
     elif citation.ownerKind == "userLibraryObject":
         try:
-            item = UserLibraryObject.objects.get(
+            item = UserLibraryObject.objects.select_related("noteHead").get(
                 id=citation.ownerRef,
                 owner_id=user_id,
                 status="ready",
@@ -347,10 +347,15 @@ def _select_citation_preview(user_id: int, citation_id: str):
                 representation.canonicalTextSizeBytes,
             )
     content_type = item.contentType.partition(";")[0].strip().lower()
+    from app_core.note_content import content_source
+    try:
+        source = content_source(item)
+    except FileNotFoundError:
+        return JsonResponse({"error": "citation_source_not_available"}, status=404)
     if content_type in CITATION_PREVIEW_CONTENT_TYPES:
-        return item.storageKey, content_type, item.displayName, False, item.sizeBytes
+        return source, content_type, item.displayName, False, item.sizeBytes
     if _is_code_preview(item.displayName, content_type):
-        return item.storageKey, "text/plain", item.displayName, False, item.sizeBytes
+        return source, "text/plain", item.displayName, False, item.sizeBytes
     return JsonResponse({"error": "citation_preview_unsupported"}, status=415)
 
 

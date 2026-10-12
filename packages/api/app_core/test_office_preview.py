@@ -108,7 +108,7 @@ class OfficePreviewTests(TestCase):
             self.assertEqual(response["Content-Length"], "10")
             self.assertTrue(response["Content-Disposition"].startswith("inline;"))
 
-    @patch("app_core.material_task_source.default_storage.exists", return_value=True)
+    @patch("app_core.note_content.default_storage.exists", return_value=True)
     def test_missing_preview_enqueues_exact_file_version_and_returns_local_loading_page(self, _exists):
         response = self.client.get(self.url)
         self.assertEqual(response.status_code, 202)
@@ -154,7 +154,7 @@ class OfficePreviewTests(TestCase):
             self.assertEqual(async_to_sync(read)(), b"%PDF-1.7")
         self.assertFalse(MaterialProcessingTask.objects.exists())
 
-    @patch("app_core.material_task_source.default_storage.exists", return_value=True)
+    @patch("app_core.note_content.default_storage.exists", return_value=True)
     def test_changed_generation_never_reuses_a_stale_preview(self, _exists):
         self.publish_preview()
         UserLibraryObject.objects.filter(pk=self.item.pk).update(
@@ -166,7 +166,7 @@ class OfficePreviewTests(TestCase):
         self.assertEqual(response.status_code, 202)
         self.assertTrue(MaterialProcessingTask.objects.filter(pk=self.representation()).exists())
 
-    @patch("app_core.material_task_source.default_storage.exists", return_value=True)
+    @patch("app_core.note_content.default_storage.exists", return_value=True)
     def test_completed_task_without_a_published_preview_fails_loudly(self, _exists):
         response = self.client.get(self.url)
         self.assertEqual(response.status_code, 202)
@@ -189,7 +189,7 @@ class OfficePreviewTests(TestCase):
         UserLibraryObject.objects.filter(pk=self.item.pk).update(displayName="script.html", contentType="text/html")
         self.assertEqual(self.client.get(self.url).status_code, 415)
 
-    @patch("app_core.material_task_source.default_storage.exists", return_value=True)
+    @patch("app_core.note_content.default_storage.exists", return_value=True)
     def test_source_preview_rechecks_workspace_membership(self, _exists):
         workspace = Workspace.objects.create(name="Office", createdBy=self.user)
         membership = WorkspaceMembership.objects.create(workspace=workspace, user=self.user, role="owner")

@@ -1,4 +1,10 @@
-from django.db import migrations
+from importlib import import_module
+
+from django.db import NotSupportedError, migrations
+
+guard_note_schema_reversal = import_module(
+    "app_core.migrations.0014_library_note_revisions"
+).guard_note_schema_reversal
 
 
 FORWARD = """
@@ -23,6 +29,29 @@ DROP FUNCTION prevent_note_revision_rewrite();
 """
 
 
+def _run_postgresql_sql(schema_editor, sql):
+    vendor = schema_editor.connection.vendor
+    if vendor == "postgresql":
+        schema_editor.execute(sql, params=None)
+    elif vendor != "sqlite":
+        raise NotSupportedError(f"note_revision_immutability_backend_unsupported: {vendor}")
+    # SQLite is used only by the structural migration gate. Production note
+    # immutability is enforced and tested with PostgreSQL.
+
+
+def install_immutability(apps, schema_editor):
+    _run_postgresql_sql(schema_editor, FORWARD)
+
+
+def remove_immutability(apps, schema_editor):
+    _run_postgresql_sql(schema_editor, REVERSE)
+
+
 class Migration(migrations.Migration):
     dependencies = [("app_core", "0014_library_note_revisions")]
-    operations = [migrations.RunSQL(FORWARD, REVERSE)]
+    operations = [
+        migrations.RunPython(install_immutability, remove_immutability),
+        # Reversal runs in reverse order: refuse populated schemas before the
+        # trigger can be removed, including when reversing only this migration.
+        migrations.RunPython(migrations.RunPython.noop, guard_note_schema_reversal),
+    ]

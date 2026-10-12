@@ -2,6 +2,7 @@
 
 import hashlib
 import tempfile
+from datetime import timedelta
 from types import SimpleNamespace
 
 from asgiref.sync import async_to_sync
@@ -94,6 +95,53 @@ class NoteContentTests(TestCase):
         with self.assertRaisesRegex(IntegrityError, "note_revision_immutable"), transaction.atomic():
             LibraryNoteRevision.objects.filter(pk=revision.pk).update(markdown="rewritten")
 
+    def test_database_rejects_bulk_update_of_committed_body(self):
+        from django.db import IntegrityError, transaction
+        revision = self.install_revision()
+        revision.markdown = "rewritten through bulk_update"
+        with self.assertRaisesRegex(IntegrityError, "note_revision_immutable"), transaction.atomic():
+            LibraryNoteRevision.objects.bulk_update([revision], ["markdown"])
+        revision.refresh_from_db()
+        self.assertEqual(revision.markdown.encode("utf-8"), self.body)
+
+    def test_database_rejects_raw_sql_rewrite_of_each_revision_identity_field(self):
+        from django.db import IntegrityError, connection, transaction
+        revision = self.install_revision()
+        other_user = get_user_model().objects.create_user(username="different-author")
+        other_note = UserLibraryObject.objects.create(
+            owner=self.user, objectKind="note", displayName="different note", status="ready",
+        )
+        original = LibraryNoteRevision.objects.values().get(pk=revision.pk)
+        changes = {
+            "note_id": other_note.pk,
+            "generation": revision.generation + 1,
+            "displayName": "rewritten title",
+            "markdown": "rewritten body",
+            "sha256": "sha256:" + "0" * 64,
+            "sizeBytes": revision.sizeBytes + 1,
+            "createdAt": revision.createdAt + timedelta(seconds=1),
+            "createdBy_id": other_user.pk,
+        }
+        for column, value in changes.items():
+            with self.subTest(column=column):
+                with self.assertRaisesRegex(IntegrityError, "note_revision_immutable"), transaction.atomic():
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            f"UPDATE app_core_librarynoterevision SET {connection.ops.quote_name(column)} = %s WHERE id = %s",
+                            [value, revision.pk],
+                        )
+                self.assertEqual(LibraryNoteRevision.objects.values().get(pk=revision.pk), original)
+
+    def test_database_allows_protection_updates_without_rewriting_revision(self):
+        from django.db import connection
+        revision = self.install_revision()
+        original = LibraryNoteRevision.objects.values().get(pk=revision.pk)
+        LibraryNoteRevision.objects.filter(pk=revision.pk).update(protected=True)
+        self.assertEqual(LibraryNoteRevision.objects.values().get(pk=revision.pk), {**original, "protected": True})
+        with connection.cursor() as cursor:
+            cursor.execute("UPDATE app_core_librarynoterevision SET protected = %s WHERE id = %s", [False, revision.pk])
+        self.assertEqual(LibraryNoteRevision.objects.values().get(pk=revision.pk), original)
+
     def test_database_note_processing_reads_body_and_rejects_stale_generation(self):
         from .material_contract import KnowledgeError
         from .material_identity import processing_spec_digest, representation_id
@@ -113,3 +161,24 @@ class NoteContentTests(TestCase):
         UserLibraryObject.objects.filter(pk=self.note.id).update(contentGeneration=8)
         with self.assertRaisesRegex(KnowledgeError, "material_source_identity_changed"):
             resolve_task_source(task)
+
+    def test_database_note_citation_preview_reads_current_exact_body(self):
+        from .models import AgentRun, ModelConfig, SessionCitationProjection, Workspace, WorkspaceMembership
+        from .testing import create_session
+        from .tests import streaming_response_bytes
+        self.install_revision()
+        workspace = Workspace.objects.create(name="note citations", createdBy=self.user)
+        WorkspaceMembership.objects.create(workspace=workspace, user=self.user, role="owner")
+        session = create_session(workspace=workspace, owner=self.user)
+        model = ModelConfig.objects.create(id="note-citation-model", displayName="Fake")
+        run = AgentRun.objects.create(workspace=workspace, session=session, user=self.user, modelConfig=model, prompt="cite")
+        citation = SessionCitationProjection.objects.create(
+            citationId="citation:database-note", workspace=workspace, session=session, agent_run=run,
+            sequence=1, inputRef="note-input", ownerRef=self.note.id, ownerKind="userLibraryObject",
+            ownerGeneration=7, displayName=self.note.displayName, evidenceKind="userProvided",
+            ownerSha256=self.note.sha256, sourceToolCallId="cite-call", locator={"startLine": 1, "endLine": 1},
+        )
+        self.client.force_login(self.user)
+        response = self.client.get(f"/api/citations/{citation.citationId}/preview")
+        self.assertEqual(response.status_code, 200, response.content if not response.streaming else "")
+        self.assertEqual(streaming_response_bytes(response), self.body)
