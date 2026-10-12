@@ -84,7 +84,7 @@ class AuthorizationFlowTests(SimpleTestCase):
 
     def test_batch_rechecks_membership_and_current_resource(self):
         read = self.prepare_storage()
-        self.assertEqual(read("input_1")[1], "private/test")
+        self.assertEqual(read("input_1")[1].storage_key, "private/test")
         self.resolved["sourceVersion"] = "2"
         with self.assertRaisesRegex(inputs.DeferredInputBindingError, "identity changed"):
             read("input_1")

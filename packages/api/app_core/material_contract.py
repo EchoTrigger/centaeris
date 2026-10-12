@@ -19,7 +19,7 @@ class KnowledgeError(RuntimeError):
 @dataclass(frozen=True)
 class BoundInput:
     resolved: dict
-    storage_key: str
+    content_source: object
     owner: object
     input_identity: dict
     representation_id: str
