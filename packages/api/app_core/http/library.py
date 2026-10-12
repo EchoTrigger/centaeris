@@ -18,6 +18,7 @@ from app_core.assets import (
     source_object_is_granted,
     store_bytes,
     store_upload,
+    register_derived_resource,
     tombstone_superseded_derived_resources,
     tombstone_stored_object,
 )
@@ -489,7 +490,10 @@ def update_library_note(
                     ),
                     "text/markdown",
                 )
-                old_storage_key = item.storageKey
+                # Persist reclamation with the reference switch. Physical deletion
+                # belongs to the retryable collector, after this commit succeeds.
+                if item.storageKey:
+                    register_derived_resource(item, "storageObject", item.storageKey)
                 item.displayName = display_name
                 item.contentType = metadata["contentType"]
                 item.sizeBytes = metadata["sizeBytes"]
@@ -508,7 +512,6 @@ def update_library_note(
                     ]
                 )
                 tombstone_superseded_derived_resources(item)
-                delete_stored_object(old_storage_key)
         except Exception:
             if metadata is not None:
                 delete_stored_object(metadata["storageKey"])
