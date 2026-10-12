@@ -41,6 +41,7 @@ from .response_schema import (
     COMMON_ERROR_RESPONSES,
     DeletedResponse,
     LibraryNoteEnvelope,
+    LibraryNoteSaveEnvelope,
     LibraryObjectEnvelope,
     LibraryObjectsEnvelope,
     SessionAssetEnvelope,
@@ -66,17 +67,22 @@ class CreateLibraryFolderRequest(StrictSchema):
 
 
 class CreateLibraryNoteRequest(StrictSchema):
+    save_id: str
     display_name: str
     markdown: str
     parent_folder_id: str = Field(default='')
 
 
 class UpdateLibraryObjectRequest(StrictSchema):
+    save_id: str | None = None
+    base_generation: int | None = None
     display_name: str | None = Field(default=None)
     parent_folder_id: str | None = Field(default=None)
 
 
 class UpdateLibraryNoteRequest(StrictSchema):
+    save_id: str
+    base_generation: int = Field(ge=0, strict=True)
     display_name: str
     markdown: str
 
@@ -193,52 +199,20 @@ def create_library_folder(request, payload: CreateLibraryFolderRequest):
 @router.post(
     "/library/notes",
     auth=session_auth,
-    response={201: LibraryObjectEnvelope} | COMMON_ERROR_RESPONSES,
+    response={201: LibraryNoteSaveEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def create_library_note(request, payload: CreateLibraryNoteRequest):
+    from app_core.library_notes import NoteSaveError, create_note
     try:
-        display_name = _require_library_display_name(payload.display_name)
-        markdown = payload.markdown
-        parent = _library_parent(request.user, payload.parent_folder_id)
-        metadata = store_bytes(
-            markdown.encode("utf-8"),
-            f"users/{request.user.id}/library",
-            (
-                f"{display_name}.md"
-                if not display_name.lower().endswith(".md")
-                else display_name
-            ),
-            "text/markdown",
-        )
+        result = create_note(request.user, save_id=payload.save_id, display_name=payload.display_name,
+                             markdown=payload.markdown, parent_folder_id=payload.parent_folder_id)
+    except NoteSaveError as error:
+        return Status(error.status, {"error": error.code})
+    except LibraryNameConflict:
+        return Status(409, {"error": "library_name_conflict"})
     except (ValueError, UserLibraryObject.DoesNotExist):
         return Status(400, {"error": "library_note_request_invalid"})
-    try:
-        with transaction.atomic():
-            _lock_library_owner(request.user)
-            _require_library_name_available(request.user, parent, display_name)
-            note = UserLibraryObject.objects.create(
-                owner=request.user,
-                displayName=display_name,
-                objectKind="note",
-                contentType=metadata["contentType"],
-                sizeBytes=metadata["sizeBytes"],
-                sha256=metadata["sha256"],
-                storageKey=metadata["storageKey"],
-                status="ready",
-                contentGeneration=1,
-                parentFolder=parent,
-            )
-            UserLibraryLink.objects.create(
-                libraryObject=note,
-                sourceKind="manual",
-            )
-    except LibraryNameConflict:
-        delete_stored_object(metadata["storageKey"])
-        return Status(409, {"error": "library_name_conflict"})
-    except Exception:
-        delete_stored_object(metadata["storageKey"])
-        raise
-    return Status(201, {"object": serialize_library_object(note)})
+    return Status(201, result)
 
 
 @router.get(
@@ -279,6 +253,21 @@ def update_library_object(
             )
             if item.status == "deleted":
                 raise UserLibraryObject.DoesNotExist
+            if item.objectKind == "note" and "display_name" in changed_fields:
+                from app_core.library_notes import NoteSaveError, rename_note
+                if payload.save_id is None or payload.base_generation is None:
+                    return Status(400, {"error": "note_save_identity_required"})
+                try:
+                    result = rename_note(
+                        request.user, item.id, save_id=payload.save_id, base_generation=payload.base_generation,
+                        display_name=payload.display_name, parent_folder_id=payload.parent_folder_id,
+                        move="parent_folder_id" in changed_fields,
+                    )
+                except NoteSaveError as error:
+                    return Status(error.status, {"error": error.code})
+                return {"object": result["object"]}
+            if "save_id" in changed_fields or "base_generation" in changed_fields:
+                return Status(400, {"error": "library_update_request_invalid"})
             display_name = (
                 _require_library_display_name(payload.display_name)
                 if "display_name" in changed_fields
@@ -382,7 +371,13 @@ def restore_library_object(request, library_object_id: str):
             item.deletedBy = None
             item.purgedAt = None
             item.deletedFromStatus = ""
-            item.contentGeneration += 1
+            if item.objectKind == "note" and item.noteHead_id:
+                from app_core.library_notes import _revision
+                markdown = item.noteHead.markdown
+                _revision(item, display_name, markdown, markdown.encode("utf-8"), request.user,
+                          item.contentGeneration + 1)
+            else:
+                item.contentGeneration += 1
             item.save(
                 update_fields=[
                     "displayName",
@@ -455,78 +450,18 @@ def get_library_note(request, library_object_id: str):
 @router.put(
     "/library/{library_object_id}/note",
     auth=session_auth,
-    response={200: LibraryNoteEnvelope} | COMMON_ERROR_RESPONSES,
+    response={200: LibraryNoteSaveEnvelope} | COMMON_ERROR_RESPONSES,
 )
-def update_library_note(
-    request,
-    library_object_id: str,
-    payload: UpdateLibraryNoteRequest,
-):
-    metadata = None
+def update_library_note(request, library_object_id: str, payload: UpdateLibraryNoteRequest):
+    from app_core.library_notes import NoteSaveError, save_note
     try:
-        display_name = _require_library_display_name(payload.display_name)
-        try:
-            with transaction.atomic():
-                _lock_library_owner(request.user)
-                item = _library_object(
-                    request.user,
-                    library_object_id,
-                    locked=True,
-                )
-                if item.objectKind != "note" or item.status != "ready":
-                    raise UserLibraryObject.DoesNotExist
-                _require_library_name_available(
-                    request.user,
-                    item.parentFolder,
-                    display_name,
-                    exclude_id=item.id,
-                )
-                metadata = store_bytes(
-                    payload.markdown.encode("utf-8"),
-                    f"users/{request.user.id}/library",
-                    (
-                        f"{display_name}.md"
-                        if not display_name.lower().endswith(".md")
-                        else display_name
-                    ),
-                    "text/markdown",
-                )
-                # Persist reclamation with the reference switch. Physical deletion
-                # belongs to the retryable collector, after this commit succeeds.
-                if item.storageKey:
-                    register_derived_resource(item, "storageObject", item.storageKey)
-                item.displayName = display_name
-                item.contentType = metadata["contentType"]
-                item.sizeBytes = metadata["sizeBytes"]
-                item.sha256 = metadata["sha256"]
-                item.storageKey = metadata["storageKey"]
-                item.contentGeneration += 1
-                item.save(
-                    update_fields=[
-                        "displayName",
-                        "contentType",
-                        "sizeBytes",
-                        "sha256",
-                        "storageKey",
-                        "contentGeneration",
-                        "updatedAt",
-                    ]
-                )
-                tombstone_superseded_derived_resources(item)
-        except Exception:
-            if metadata is not None:
-                delete_stored_object(metadata["storageKey"])
-            raise
-    except UserLibraryObject.DoesNotExist:
-        return Status(404, {"error": "library_note_not_found"})
+        return save_note(request.user, library_object_id, save_id=payload.save_id,
+                         base_generation=payload.base_generation, display_name=payload.display_name,
+                         markdown=payload.markdown)
+    except NoteSaveError as error:
+        return Status(error.status, {"error": error.code})
     except LibraryNameConflict:
         return Status(409, {"error": "library_name_conflict"})
-    except (ValueError, TypeError):
-        return Status(400, {"error": "library_note_request_invalid"})
-    return {
-        "object": serialize_library_object(item),
-        "markdown": payload.markdown,
-    }
 
 
 @router.post(

@@ -189,6 +189,7 @@ def serialize_library_object(item: UserLibraryObject) -> dict:
         "parentFolderId": item.parentFolder_id,
         "deletedAt": item.deletedAt.isoformat() if item.deletedAt else None,
         "deletionGeneration": item.deletionGeneration,
+        "contentGeneration": item.contentGeneration,
         "updatedAt": item.updatedAt.isoformat(),
     }
 
