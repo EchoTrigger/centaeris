@@ -99,6 +99,7 @@ struct ConnectedClient {
 }
 
 pub(crate) struct RuntimeServerClientHub {
+    model_http: Mutex<Option<reqwest::Client>>,
     clients: Mutex<HashMap<u64, ConnectedClient>>,
     next_client_id: AtomicU64,
     activity_generation: AtomicU64,
@@ -114,6 +115,7 @@ pub(crate) struct RuntimeServerClientHub {
 impl Default for RuntimeServerClientHub {
     fn default() -> Self {
         Self {
+            model_http: Mutex::new(None),
             clients: Mutex::new(HashMap::new()),
             next_client_id: AtomicU64::new(0),
             activity_generation: AtomicU64::new(0),
@@ -129,6 +131,25 @@ impl Default for RuntimeServerClientHub {
 }
 
 impl RuntimeServerClientHub {
+    pub(crate) fn model_http_client(&self) -> Result<reqwest::Client, String> {
+        self.model_http_client_with(crate::http_transport::build_model_http_client)
+    }
+
+    fn model_http_client_with(
+        &self,
+        build: impl FnOnce() -> Result<reqwest::Client, String>,
+    ) -> Result<reqwest::Client, String> {
+        let mut cached = self
+            .model_http
+            .lock()
+            .map_err(|_| "runtime model HTTP client lock poisoned".to_string())?;
+        if let Some(client) = cached.as_ref() {
+            return Ok(client.clone());
+        }
+        let client = build()?;
+        *cached = Some(client.clone());
+        Ok(client)
+    }
     pub(crate) fn connect(
         self: &Arc<Self>,
     ) -> Result<Option<(EventWriter, mpsc::Receiver<OutboundFrame>)>, RuntimeHostError> {
@@ -571,6 +592,9 @@ pub(crate) struct EventWriter {
 }
 
 impl EventWriter {
+    pub(crate) fn model_http_client(&self) -> Result<reqwest::Client, String> {
+        self.hub.model_http_client()
+    }
     fn new(hub: Arc<RuntimeServerClientHub>, client_id: u64) -> Self {
         Self {
             hub,
@@ -1636,3 +1660,6 @@ mod tests {
         });
     }
 }
+
+#[cfg(test)]
+mod model_client_tests;

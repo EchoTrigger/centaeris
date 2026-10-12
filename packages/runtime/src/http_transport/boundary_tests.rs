@@ -74,6 +74,7 @@ async fn redirects_never_reach_another_server_with_model_credentials() {
                 "redirect-test".into(),
                 "test-session",
                 "opencode-go.default",
+                build_model_http_client,
             )
             .unwrap();
             let req = request(url);

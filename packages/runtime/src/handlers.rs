@@ -694,7 +694,7 @@ pub(crate) async fn handle_request_async(
         }
         RuntimeHostCommand::AgentRuntimeModelTest => {
             let payload = runtime_bridge::deserialize_request(request.payload)?;
-            let response = agent_runtime::test_model(payload)
+            let response = agent_runtime::test_model(&event_writer, payload)
                 .await
                 .map_err(|error| RuntimeHostError::new("model_test_failed", error))?;
             serde_json::to_value(response).map_err(|error| {

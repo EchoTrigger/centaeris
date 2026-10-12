@@ -1130,6 +1130,7 @@ pub(crate) async fn compact_context(
         _ => Err("manual context compaction emitted an unsupported safe point".to_string()),
     };
     let compacted = run_manual_context_compaction(
+        &event_writer,
         &runtime,
         &runtime_config,
         session_id.as_str(),
@@ -1678,7 +1679,10 @@ fn persist_agent_turn_setup_error(
     }
 }
 
+// Keep the service owner explicit alongside the existing query-loop callbacks.
+#[allow(clippy::too_many_arguments)]
 async fn run_agent_query_loop(
+    event_writer: &EventWriter,
     runtime: &AgentRuntime<RuntimeStoreActor>,
     runtime_config: &runtime_config::AgentRuntimeConfigResponse,
     request: AgentRunRequest,
@@ -1702,6 +1706,7 @@ async fn run_agent_query_loop(
         run_id,
         &request.session_id,
         &model_config.provider_id,
+        || event_writer.model_http_client(),
     )?;
     match model_config_wire_api(&registry, &model_config)? {
         WireApi::AnthropicMessages => {
@@ -1756,6 +1761,7 @@ async fn run_agent_query_loop(
 }
 
 async fn run_manual_context_compaction(
+    event_writer: &EventWriter,
     runtime: &AgentRuntime<RuntimeStoreActor>,
     runtime_config: &runtime_config::AgentRuntimeConfigResponse,
     session_id: &str,
@@ -1771,6 +1777,7 @@ async fn run_manual_context_compaction(
         format!("compact:{session_id}:{turn_id}"),
         session_id,
         &model_config.provider_id,
+        || event_writer.model_http_client(),
     )?;
     match model_config_wire_api(&registry, &model_config)? {
         WireApi::AnthropicMessages => {
@@ -2473,6 +2480,7 @@ async fn run_session_agent_run(
                     }
                 };
                 run_agent_query_loop(
+                    &event_writer,
                     &runtime,
                     &runtime_config,
                     request,
@@ -3400,7 +3408,10 @@ pub(crate) struct ModelTestResponse {
     pub(crate) error_keyword: Option<String>,
 }
 
-pub(crate) async fn test_model(request: ModelTestRequest) -> Result<ModelTestResponse, String> {
+pub(crate) async fn test_model(
+    event_writer: &EventWriter,
+    request: ModelTestRequest,
+) -> Result<ModelTestResponse, String> {
     let started_at = Instant::now();
     let runtime_config = runtime_config::get(runtime_config::AgentRuntimeConfigGetRequest {})?;
     let available_model = runtime_config
@@ -3466,6 +3477,7 @@ pub(crate) async fn test_model(request: ModelTestRequest) -> Result<ModelTestRes
         "model-test".to_string(),
         &request.session_id,
         &config.provider_id,
+        || event_writer.model_http_client(),
     )?);
     let http_status = transport.http_status.clone();
     let result = match model_config_wire_api(&registry, &config)? {

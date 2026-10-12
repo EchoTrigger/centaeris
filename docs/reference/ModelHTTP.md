@@ -7,6 +7,48 @@ Non-success SSE responses retain their status, headers and bounded body for the
 existing protocol adapters. Successful SSE responses must have the
 `text/event-stream` media type (parameters are accepted).
 
+## Runtime-owned connection pool
+
+Each Runtime Server owns one lazy model HTTP Client, shared by main AgentRuns,
+manual compaction, model connectivity checks and background subagent requests.
+It is built on the first valid model transport construction and only successful
+construction is cached. Failures remain model-operation errors and a later
+operation can retry construction. A new Runtime Server owner gets a new pool;
+there is no process-global Client singleton or network configuration registry.
+Dropping the hub releases its cached Client clone; existing transport/in-flight
+clones retain their own lifetime. It does not forcibly terminate HTTP operations.
+Service drain and caller cancellation retain their existing responsibilities.
+
+The Client is header-neutral except for the product User-Agent. Credentials and
+OpenCode session headers are request-local. OpenCode session validation still
+runs before obtaining/building the shared Client; other providers do not gain
+that validation. Raw session header values are preserved. Explicit session or
+User-Agent request headers override defaults case-insensitively, and multiple
+explicit case variants are not collapsed. Sharing a connection pool does not
+share a transport's Retry-After cooldown: each transport keeps its own cooldown
+and the existing shared local request-capacity admission.
+
+The current locked Local Runtime uses environment-derived proxies, including
+HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY and their lowercase variants; reqwest's
+CGI-related environment handling is unchanged. Windows/macOS system proxy lookup
+is not enabled in this dependency feature graph. Proxy settings are sampled on
+the first successful Client construction and remain fixed for that Runtime
+Server. Updating its inherited environment requires a new Runtime Server;
+reconnecting a Desktop/TUI client to an already running service does not refresh
+that service's environment. Model/config reset does not reset network settings.
+There is currently no in-process proxy update API. TLS validation, SOCKS support,
+redirect rejection and request-specific timeouts remain unchanged.
+
+Keepalive tests count actual accepted TCP connections across different session
+transports and mixed JSON/SSE exchanges, using finite Content-Length bodies while
+the server keeps TCP open. Additional tests cover concurrent fake-credential and
+session isolation, duplicate explicit headers, lazy validation/error ordering,
+success-only caching and independent pools for different Runtime owners. These
+establish connection reuse and behavior, not a measured latency/throughput gain.
+The model test `latencyMs` remains elapsed diagnostic wall time from the operation
+entry, including configuration, admission and request processing. It may now use
+a warm connection pool; it is not an isolated cold-connection or inference metric.
+
 ## Response memory budgets
 
 JSON bodies and non-success SSE bodies have a 16 MiB wire-byte ceiling. SSE has
