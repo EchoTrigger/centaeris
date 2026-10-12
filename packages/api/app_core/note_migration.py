@@ -69,3 +69,26 @@ def export_note(note_id, *, dry_run=False):
         note.storageKey, note.noteHead = metadata["storageKey"], None
         note.save(update_fields=["storageKey", "noteHead"])
     return "exported"
+
+
+def release_migration_file(note_id, *, dry_run=False):
+    from .assets import register_derived_resource
+    from .note_content import content_source
+    from django.utils import timezone
+    captured = UserLibraryObject.objects.get(pk=note_id, objectKind="note", purgedAt__isnull=True)
+    with transaction.atomic():
+        get_user_model().objects.select_for_update().get(pk=captured.owner_id)
+        note = UserLibraryObject.objects.select_for_update().get(pk=note_id)
+        if not note.noteHead_id:
+            raise ValueError("note_migration_required")
+        content_source(note)
+        if not note.storageKey:
+            return "already_released"
+        if dry_run:
+            return "would_release"
+        resource = register_derived_resource(note, "storageObject", note.storageKey)
+        resource.state, resource.tombstonedAt = "pending", timezone.now()
+        resource.save(update_fields=["state", "tombstonedAt", "updatedAt"])
+        note.storageKey = ""
+        note.save(update_fields=["storageKey"])
+    return "released"

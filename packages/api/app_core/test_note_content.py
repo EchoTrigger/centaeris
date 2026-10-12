@@ -88,6 +88,12 @@ class NoteContentTests(TestCase):
         with self.assertRaisesRegex(ValueError, "note_revision_immutable"):
             revision.save()
 
+    def test_database_rejects_bulk_rewrite_of_committed_body(self):
+        from django.db import IntegrityError, transaction
+        revision = self.install_revision()
+        with self.assertRaisesRegex(IntegrityError, "note_revision_immutable"), transaction.atomic():
+            LibraryNoteRevision.objects.filter(pk=revision.pk).update(markdown="rewritten")
+
     def test_database_note_processing_reads_body_and_rejects_stale_generation(self):
         from .material_contract import KnowledgeError
         from .material_identity import processing_spec_digest, representation_id

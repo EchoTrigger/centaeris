@@ -115,6 +115,15 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 MEDIA_ROOT = required_env("STORAGE_ROOT")
+NOTE_MAX_BYTES = int(os.environ.get("NOTE_MAX_BYTES", 1024 * 1024))
+NOTE_HISTORY_MAX_BYTES = int(os.environ.get("NOTE_HISTORY_MAX_BYTES", 16 * 1024 * 1024))
+NOTE_HISTORY_MAX_VERSIONS = positive_capacity_env("NOTE_HISTORY_MAX_VERSIONS", 128)
+NOTE_HISTORY_RECENT = positive_capacity_env("NOTE_HISTORY_RECENT", 20)
+NOTE_HISTORY_DAYS = positive_capacity_env("NOTE_HISTORY_DAYS", 30)
+if not 1 <= NOTE_MAX_BYTES <= NOTE_HISTORY_MAX_BYTES <= 1024 * 1024 * 1024:
+    raise RuntimeError("Note byte budgets must satisfy 1 <= body <= history <= 1 GiB")
+if NOTE_HISTORY_RECENT > NOTE_HISTORY_MAX_VERSIONS:
+    raise RuntimeError("NOTE_HISTORY_RECENT must fit NOTE_HISTORY_MAX_VERSIONS")
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 AUTH_PASSWORD_VALIDATORS = [

@@ -49,6 +49,16 @@ class NoteMigrationTests(TestCase):
         self.note.refresh_from_db()
         self.assertIsNone(self.note.noteHead_id)
 
+    def test_invalid_utf8_is_not_silently_replaced(self):
+        from .note_migration import migrate_note
+        metadata = store_bytes(b"\xff", f"users/{self.user.id}/library", "invalid.md", "text/markdown")
+        UserLibraryObject.objects.filter(pk=self.note.id).update(
+            storageKey=metadata["storageKey"], sha256=metadata["sha256"], sizeBytes=1,
+        )
+        with self.assertRaises(UnicodeDecodeError):
+            migrate_note(self.note.id)
+        self.assertFalse(LibraryNoteRevision.objects.exists())
+
     def test_concurrent_metadata_change_does_not_install_old_capture(self):
         from .note_migration import migrate_note
         original_open = default_storage.open

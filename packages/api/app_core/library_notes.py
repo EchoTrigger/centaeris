@@ -69,6 +69,8 @@ def _revision(note, display_name, markdown, body, actor, generation):
     note.sha256, note.sizeBytes = revision.sha256, revision.sizeBytes
     note.save(update_fields=["noteHead", "displayName", "contentGeneration", "sha256", "sizeBytes", "updatedAt"])
     tombstone_superseded_derived_resources(note)
+    from .note_history import prune_history
+    prune_history(note)
 
 
 def create_note(owner, *, save_id, display_name, markdown, parent_folder_id=""):

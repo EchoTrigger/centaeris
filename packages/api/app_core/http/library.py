@@ -42,6 +42,7 @@ from .response_schema import (
     DeletedResponse,
     LibraryNoteEnvelope,
     LibraryNoteSaveEnvelope,
+    LibraryNoteHistoryEnvelope,
     LibraryObjectEnvelope,
     LibraryObjectsEnvelope,
     SessionAssetEnvelope,
@@ -85,6 +86,17 @@ class UpdateLibraryNoteRequest(StrictSchema):
     base_generation: int = Field(ge=0, strict=True)
     display_name: str
     markdown: str
+
+
+class RestoreNoteRevisionRequest(StrictSchema):
+    save_id: str
+    base_generation: int = Field(ge=1, strict=True)
+    revision_generation: int = Field(ge=1, strict=True)
+
+
+class ProtectNoteRevisionRequest(StrictSchema):
+    generation: int = Field(ge=1, strict=True)
+    protected: bool
 
 
 class AttachSessionAssetRequest(StrictSchema):
@@ -462,6 +474,52 @@ def update_library_note(request, library_object_id: str, payload: UpdateLibraryN
         return Status(error.status, {"error": error.code})
     except LibraryNameConflict:
         return Status(409, {"error": "library_name_conflict"})
+
+
+@router.get("/library/{library_object_id}/note/revisions", auth=session_auth,
+            response={200: LibraryNoteHistoryEnvelope} | COMMON_ERROR_RESPONSES)
+def list_note_revisions(request, library_object_id: str):
+    try:
+        note = UserLibraryObject.objects.get(pk=library_object_id, owner=request.user, objectKind="note", status="ready")
+    except UserLibraryObject.DoesNotExist:
+        return Status(404, {"error": "library_note_not_found"})
+    return {"currentGeneration": note.contentGeneration, "revisions": [
+        {"generation": item.generation, "displayName": item.displayName, "sha256": item.sha256,
+         "sizeBytes": item.sizeBytes, "protected": item.protected, "createdAt": item.createdAt.isoformat()}
+        for item in note.noteRevisions.order_by("-generation")
+    ]}
+
+
+@router.post("/library/{library_object_id}/note/restore", auth=session_auth,
+             response={200: LibraryNoteSaveEnvelope} | COMMON_ERROR_RESPONSES)
+def restore_note_revision(request, library_object_id: str, payload: RestoreNoteRevisionRequest):
+    from app_core.note_history import restore_revision
+    from app_core.library_notes import NoteSaveError
+    from app_core.models import LibraryNoteRevision
+    try:
+        return restore_revision(request.user, library_object_id, save_id=payload.save_id,
+                                base_generation=payload.base_generation, revision_generation=payload.revision_generation)
+    except NoteSaveError as error:
+        return Status(error.status, {"error": error.code})
+    except (UserLibraryObject.DoesNotExist, LibraryNoteRevision.DoesNotExist):
+        return Status(404, {"error": "library_note_not_found"})
+    except LibraryNameConflict:
+        return Status(409, {"error": "library_name_conflict"})
+
+
+@router.patch("/library/{library_object_id}/note/protection", auth=session_auth,
+              response={200: LibraryNoteHistoryEnvelope} | COMMON_ERROR_RESPONSES)
+def protect_note_revision(request, library_object_id: str, payload: ProtectNoteRevisionRequest):
+    from app_core.note_history import protect_revision
+    from app_core.library_notes import NoteSaveError
+    from app_core.models import LibraryNoteRevision
+    try:
+        protect_revision(request.user, library_object_id, payload.generation, payload.protected)
+    except NoteSaveError as error:
+        return Status(error.status, {"error": error.code})
+    except (UserLibraryObject.DoesNotExist, LibraryNoteRevision.DoesNotExist):
+        return Status(404, {"error": "library_note_not_found"})
+    return list_note_revisions(request, library_object_id)
 
 
 @router.post(
