@@ -317,11 +317,13 @@ fn confirm_native_return_fenced_commit() {
         fixture["internalToken"].as_str().unwrap(),
     )
     .unwrap();
+    let executor = tokio::runtime::Runtime::new().unwrap();
     let engine = AgentRuntime::new(
-        std::sync::Arc::new(
+        std::sync::Arc::new({
+            let _guard = executor.enter();
             centaeris_core::session::store::RuntimeStoreActor::start(store.clone())
-                .expect("test Job Actor"),
-        ),
+                .expect("test Job Actor")
+        }),
         store,
         tools,
         AgentRuntimeConfig {
@@ -346,7 +348,6 @@ fn confirm_native_return_fenced_commit() {
         }
         .into(),
     };
-    let executor = tokio::runtime::Runtime::new().unwrap();
     let http = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
@@ -596,10 +597,11 @@ fn django_production_registration_model_tools() {
         let store =
             centaeris_runtime_sqlite::SqliteRuntimeStore::new(root.join("runtime.sqlite")).unwrap();
         let engine = AgentRuntime::new(
-            std::sync::Arc::new(
+            std::sync::Arc::new({
+                let _guard = executor.enter();
                 centaeris_core::session::store::RuntimeStoreActor::start(store.clone())
-                    .expect("test Job Actor"),
-            ),
+                    .expect("test Job Actor")
+            }),
             store,
             tools,
             AgentRuntimeConfig {
@@ -777,11 +779,13 @@ fn django_work_commit_boundary() {
         &fixture.internal_token,
     )
     .unwrap();
+    let executor = tokio::runtime::Runtime::new().unwrap();
     let engine = AgentRuntime::new(
-        std::sync::Arc::new(
+        std::sync::Arc::new({
+            let _guard = executor.enter();
             centaeris_core::session::store::RuntimeStoreActor::start(store.clone())
-                .expect("test Job Actor"),
-        ),
+                .expect("test Job Actor")
+        }),
         store.clone(),
         tools,
         AgentRuntimeConfig {
@@ -794,7 +798,6 @@ fn django_work_commit_boundary() {
         count: AtomicUsize::new(0),
         source_run_id: run.clone(),
     };
-    let executor = tokio::runtime::Runtime::new().unwrap();
     let slots = Arc::new(tokio::sync::Semaphore::new(1));
     let probe = fixture.fast_trigger_case.as_ref().map(|case| {
         Arc::new(TriggerProbe {

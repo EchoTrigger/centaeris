@@ -391,7 +391,7 @@ fn hosted_attachment_vision(
     fixture: &Value,
 ) -> Vec<DurableTurnInput> {
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let _actor = {
+    let actor = {
         let _guard = runtime.enter();
         RuntimeStoreActor::start((*backend).clone()).unwrap()
     };
@@ -428,10 +428,7 @@ fn hosted_attachment_vision(
     let tools = centaeris_core::tool::layer::ToolLayer::try_new_with_skill_catalog_config_and_execution_host_binding(
         centaeris_core::extension::skills::SkillCatalogLoadConfig::default(), host).unwrap();
     let engine = AgentRuntime::new(
-        std::sync::Arc::new(
-            centaeris_core::session::store::RuntimeStoreActor::start((*backend).clone())
-                .expect("test Job Actor"),
-        ),
+        Arc::new(actor.clone()),
         (*backend).clone(),
         tools,
         AgentRuntimeConfig {
@@ -570,7 +567,7 @@ fn native_main_intake(
         .enable_all()
         .build()
         .unwrap();
-    let _actor = {
+    let actor = {
         let _guard = runtime.enter();
         RuntimeStoreActor::start((*backend).clone()).unwrap()
     };
@@ -664,10 +661,7 @@ fn native_main_intake(
     let tools = centaeris_core::tool::layer::ToolLayer::try_new_with_skill_catalog_config_and_execution_host_binding(
         centaeris_core::extension::skills::SkillCatalogLoadConfig::default(), host).unwrap();
     let engine = AgentRuntime::new(
-        std::sync::Arc::new(
-            centaeris_core::session::store::RuntimeStoreActor::start((*backend).clone())
-                .expect("test Job Actor"),
-        ),
+        Arc::new(actor.clone()),
         (*backend).clone(),
         tools,
         AgentRuntimeConfig {
@@ -1220,10 +1214,7 @@ fn run_hosted_input_recovery(inject_failed_commit: bool, replace_execution: bool
         let tools = centaeris_core::tool::layer::ToolLayer::try_new_with_skill_catalog_config_and_execution_host_binding(
             centaeris_core::extension::skills::SkillCatalogLoadConfig::default(), host).unwrap();
         let engine = AgentRuntime::new(
-            std::sync::Arc::new(
-                centaeris_core::session::store::RuntimeStoreActor::start(backend.clone())
-                    .expect("test Job Actor"),
-            ),
+            Arc::new(actor.clone()),
             backend.clone(),
             tools,
             AgentRuntimeConfig {
