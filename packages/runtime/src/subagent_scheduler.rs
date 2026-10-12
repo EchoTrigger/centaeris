@@ -777,6 +777,7 @@ impl ElectronSubagentRunner {
             req.job.job_id.clone(),
             &binding.child_session_id,
             &config_store.config.provider_id,
+            || self.event_writer.model_http_client(),
         )?;
         let stream_sink = {
             let event_writer = self.event_writer.clone();

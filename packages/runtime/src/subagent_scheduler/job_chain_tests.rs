@@ -304,6 +304,7 @@ async fn join_result(parent: &str, row: &RuntimeJobRecord) {
         "parent-result-join".into(),
         parent,
         &config_store.config.provider_id,
+        crate::http_transport::build_model_http_client,
     )
     .unwrap();
     let client = OpenAiCompatibleModelClient::new(registry, transport);

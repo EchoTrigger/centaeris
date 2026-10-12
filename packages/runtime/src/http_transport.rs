@@ -35,26 +35,28 @@ impl ReqwestJsonHttpTransport {
         run_id: String,
         session_id: &str,
         provider_id: &str,
+        client: impl FnOnce() -> Result<reqwest::Client, String>,
     ) -> Result<Self, String> {
-        let mut headers = reqwest::header::HeaderMap::new();
-        if provider_id == "opencode-go.default" {
+        let session_header = if provider_id == "opencode-go.default" {
             if session_id.trim().is_empty() {
                 return Err("OpenCode requests require a conversation session ID".into());
             }
-            headers.insert(
-                "x-opencode-session",
-                reqwest::header::HeaderValue::from_str(session_id)
-                    .map_err(|_| "invalid conversation session ID for OpenCode".to_string())?,
-            );
-        }
-        let client = reqwest::Client::builder()
-            .default_headers(headers)
-            .redirect(reqwest::redirect::Policy::none())
-            .user_agent(concat!("centaeris/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|error| format!("build reqwest client failed: {error}"))?;
+            reqwest::header::HeaderValue::from_str(session_id)
+                .map_err(|_| "invalid conversation session ID for OpenCode".to_string())?;
+            Some(session_id.to_owned())
+        } else {
+            None
+        };
+        // Preserve provider/session validation before lazy Client construction.
+        let client = client()?;
         Ok(Self {
-            inner: admit_runtime_transport(ReqwestHttpClient { client }, run_id),
+            inner: admit_runtime_transport(
+                ReqwestHttpClient {
+                    client,
+                    session_header,
+                },
+                run_id,
+            ),
         })
     }
 }
@@ -72,12 +74,44 @@ impl JsonHttpTransport for ReqwestJsonHttpTransport {
     }
 }
 
+pub(crate) fn build_model_http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(concat!("centaeris/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| format!("build reqwest client failed: {error}"))
+}
+
 struct ReqwestHttpClient {
     client: reqwest::Client,
+    session_header: Option<String>,
+}
+
+impl ReqwestHttpClient {
+    fn request(&self, request: &JsonHttpRequest) -> JsonHttpRequest {
+        let mut request = request.clone();
+        if let Some(session) = &self.session_header {
+            // Client defaults previously filled only absent fields. Preserve all
+            // explicitly supplied case variants, including multiple values.
+            if !request
+                .headers
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("x-opencode-session"))
+            {
+                request
+                    .headers
+                    .insert("x-opencode-session".into(), session.clone());
+            }
+        }
+        request
+    }
 }
 impl JsonHttpTransport for ReqwestHttpClient {
     fn execute_json<'a>(&'a self, request: &'a JsonHttpRequest) -> JsonHttpFuture<'a> {
-        Box::pin(execute_json_async(self.client.clone(), request.clone()))
+        Box::pin(execute_json_async(
+            self.client.clone(),
+            self.request(request),
+        ))
     }
     fn execute_sse<'a>(
         &'a self,
@@ -86,7 +120,7 @@ impl JsonHttpTransport for ReqwestHttpClient {
     ) -> JsonHttpFuture<'a> {
         Box::pin(execute_sse_async(
             self.client.clone(),
-            request.clone(),
+            self.request(request),
             on_data,
         ))
     }
@@ -469,8 +503,13 @@ mod tests {
                     retry_backoff_ms: 0,
                     body_json: "{}".into(),
                 };
-                let client =
-                    ReqwestJsonHttpTransport::for_session(run.into(), session, provider).unwrap();
+                let client = ReqwestJsonHttpTransport::for_session(
+                    run.into(),
+                    session,
+                    provider,
+                    build_model_http_client,
+                )
+                .unwrap();
                 let response = if streaming {
                     client.execute_sse(&request, &mut |_| {}).await
                 } else {
@@ -771,3 +810,6 @@ mod admission_tests;
 
 #[cfg(test)]
 mod boundary_tests;
+
+#[cfg(test)]
+mod client_tests;

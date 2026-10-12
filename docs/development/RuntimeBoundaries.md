@@ -30,6 +30,13 @@ those reads remain active. The test isolates business handlers to avoid store-lo
 interference; framing, command classification, admission and writing are real.
 Existing shutdown and active-action rules remain unchanged.
 
+## Model HTTP Client ownership
+
+The Runtime Server hub owns the lazy model HTTP connection pool across runs;
+request transports retain their own session headers and cooldown. A new Runtime
+owner creates an independent pool. See [Model HTTP Client lifecycle](../reference/ModelHTTP.md#runtime-owned-connection-pool)
+for proxy sampling, validation order and failure/retry behavior.
+
 ## Atomic file publication
 
 Temporary files are created exclusively in the target's directory using tempfile.
