@@ -114,6 +114,8 @@ class AgentWorkConsumptionTests(TransactionTestCase):
         self.assertEqual(self.counts(), tuple(count + 1 for count in baseline))
         attempt = self.attempts().select_related("coordinator_run__authorization", "operation").get()
         run = attempt.coordinator_run
+        self.assertEqual(run.environment_id, self.source.current_environment_id)
+        self.assertEqual(run.environment_id, self.run.environment_id)
         self.assertEqual(attempt.notice_id, notice["noticeId"])
         self.assertEqual((run.workspace_id, run.session_id, run.user_id, run.membership_ref),
                          (self.workspace.pk, self.source.pk, self.user.pk, self.membership.pk))

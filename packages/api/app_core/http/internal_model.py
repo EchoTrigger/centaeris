@@ -145,6 +145,7 @@ def _validate_model_run(body):
         "agent_run",
         "agent_run__modelConfig",
         "agent_run__session",
+        "agent_run__environment",
     ).filter(
         id=authorization_ref,
         agent_run_id=str(body.get("agentRunId", "")),

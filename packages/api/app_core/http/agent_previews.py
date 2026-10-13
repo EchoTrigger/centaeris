@@ -140,7 +140,7 @@ def _message(user, agent_id, message_id):
         agent__status='active').first()
     if binding is None or not session_authority_is_current(user.id, binding.session_id):
         raise PreviewRejected()
-    event = SessionEvent.objects.select_related('agent_run__authorization').filter(eventId=message_id,
+    event = SessionEvent.objects.select_related('agent_run__authorization', 'agent_run__environment').filter(eventId=message_id,
         session_id=binding.session_id, workspace_id=binding.agent.workspace_id, projects_to_agent_run_stream=True,
         payload__type='tool_result', payload__payload__toolName='send_message',
         payload__payload__resultState='successWithOutput').first()

@@ -65,7 +65,7 @@ def query_work_request(body):
     with connection.cursor() as cursor:
         cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
     try:
-        caller = AgentRun.objects.select_related("session__agent", "authorization", "user").get(id=body["agentRunId"])
+        caller = AgentRun.objects.select_related("session__agent", "authorization", "user", "environment").get(id=body["agentRunId"])
         digest = _signed_native_run(caller)
         agent = caller.session.agent
         if (digest != body["authorizationDigest"] or not agent_run_membership_is_current(caller)
@@ -76,7 +76,7 @@ def query_work_request(body):
                 or not AgentCoordinationSession.objects.filter(agent=agent, session_id=caller.session_id).exists()
                 or not session_authority_is_current(caller.user_id, caller.session_id, scope="sessions:read")):
             raise WorkQueryError(403, "agent_work_authority_rejected")
-        source_run = AgentRun.objects.select_related("session__agent", "authorization").get(id=body["sourceAgentRunId"])
+        source_run = AgentRun.objects.select_related("session__agent", "authorization", "environment").get(id=body["sourceAgentRunId"])
         _signed_native_run(source_run)
         if (source_run.session_id != caller.session_id or source_run.workspace_id != caller.workspace_id
                 or source_run.user_id != caller.user_id

@@ -73,6 +73,8 @@ class BusinessAgentBranchTests(BusinessBranchFixture, TestCase):
         self.assertNotEqual(branch["agentId"], self.root.pk)
         agent = models.Agent.objects.get(pk=branch["agentId"])
         session = models.Session.objects.get(pk=branch["sessionId"])
+        self.assertEqual(session.current_environment.session_id, session.pk)
+        self.assertNotEqual(session.current_environment_id, self.root_session.current_environment_id)
         self.assertEqual((agent.owner_id, agent.workspace_id, agent.definition_id), (self.member.pk, self.workspace.pk, None))
         for field in ("name", "description", "instructions", "avatar_kind", "model_config_id", "thinking_mode"):
             self.assertEqual(getattr(agent, field), getattr(self.root, field))

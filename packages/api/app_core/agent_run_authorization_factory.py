@@ -8,6 +8,7 @@ from .runtime_contract import (
     authorization_signature,
 )
 from .workspace_access import agent_run_membership_is_current
+from .session_environments import agent_run_environment_matches
 
 
 def create_agent_run_authorization(
@@ -20,6 +21,8 @@ def create_agent_run_authorization(
     with plugin_lifecycle_lock():
         if not agent_run_membership_is_current(agent_run):
             raise ValueError("AgentRun WorkspaceMembership is no longer current")
+        if not agent_run_environment_matches(agent_run):
+            raise ValueError("AgentRun environment binding mismatch")
         authorization_id = new_agent_run_authorization_id()
         payload = build_agent_run_authorization_payload(
             agent_run,

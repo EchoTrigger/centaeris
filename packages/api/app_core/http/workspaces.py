@@ -88,6 +88,7 @@ from .response_schema import (
     TranscriptTurnMetadataResponse,
     HostedOperationResponse,
     AgentRunCancellationResponse,
+    AgentRunEnvironmentResponse,
     AgentRunSupplementResponse,
     SessionsEnvelope,
     WorkspacesEnvelope,
@@ -600,6 +601,31 @@ def get_session(request, session_id: str):
     if session is None:
         return Status(404, {"error": "session_not_found"})
     return {"session": serialize_session(session)}
+
+
+@router.get(
+    "/sessions/{session_id}/agent-runs/{agent_run_id}/environment",
+    auth=usage_auth("sessions:read"),
+    response={200: AgentRunEnvironmentResponse} | COMMON_ERROR_RESPONSES,
+)
+def get_agent_run_environment(request, response: HttpResponse, session_id: str, agent_run_id: str):
+    response["Cache-Control"] = "no-store"
+    if request.GET:
+        return Status(400, {"error": "request_invalid"})
+    session = _session_for_update(request.user, session_id, lock=False)
+    if session is None:
+        return Status(404, {"error": "session_not_found"})
+    require_request_delegation(request, "sessions:read", session_id=session_id)
+    run = AgentRun.objects.select_related("environment").filter(
+        pk=agent_run_id, session=session, user=request.user, workspace_id=session.workspace_id,
+    ).first()
+    if run is None:
+        return Status(404, {"error": "agent_run_not_found"})
+    from app_core.session_environments import agent_run_environment_matches
+    if not agent_run_environment_matches(run, session=session):
+        return Status(409, {"error": "agent_run_environment_binding_invalid"})
+    return {"sessionId": session.id, "agentRunId": run.id,
+            "environmentId": run.environment_id, "executionMode": "perRun"}
 
 
 @router.patch(

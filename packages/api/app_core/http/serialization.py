@@ -76,6 +76,8 @@ def serialize_session(session: Session, has_active_agent_run: bool | None = None
         "workspaceId": session.workspace_id,
         "agentId": session.agent_id,
         "projectId": session.project_id,
+        "currentEnvironmentId": session.current_environment_id,
+        "executionMode": "perRun",
         "title": session.title,
         "origin": session.origin,
         "initialInputOrigin": initial_input_origin(session),

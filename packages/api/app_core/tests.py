@@ -2130,6 +2130,8 @@ class ApiVerticalSliceTests(TransactionTestCase):
                 "workspaceId": workspace.id,
                 "agentId": "centaeris",
                 "projectId": None,
+                "currentEnvironmentId": pinned.current_environment_id,
+                "executionMode": "perRun",
                 "title": "Renamed",
                 "origin": "user",
                 "initialInputOrigin": None,

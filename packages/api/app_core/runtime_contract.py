@@ -175,6 +175,7 @@ def _verify_authorization_digest_signature(digest: str, signing_key: str, signat
 
 
 def agent_run_binding_matches(payload: dict, agent_run, *, session=None) -> bool:
+    from .session_environments import agent_run_environment_matches
     return (
         payload["agentRunId"] == agent_run.id
         and payload["workspaceId"] == agent_run.workspace_id
@@ -182,6 +183,7 @@ def agent_run_binding_matches(payload: dict, agent_run, *, session=None) -> bool
         and payload["userId"] == str(agent_run.user_id)
         and payload["agentId"] == (agent_run.session if session is None else session).agent_id
         and payload["modelConfigRef"] == agent_run.modelConfig_id
+        and agent_run_environment_matches(agent_run, session=session)
     )
 
 

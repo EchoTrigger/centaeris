@@ -367,6 +367,8 @@ class SessionResponse(StrictSchema):
     workspace_id: str
     agent_id: str
     project_id: str | None
+    current_environment_id: str
+    execution_mode: Literal["perRun"]
     title: str
     origin: str
     initial_input_origin: InitialInputOriginResponse | None
@@ -380,6 +382,13 @@ class SessionResponse(StrictSchema):
 
 class SessionEnvelope(StrictSchema):
     session: SessionResponse
+
+
+class AgentRunEnvironmentResponse(StrictSchema):
+    session_id: str
+    agent_run_id: str
+    environment_id: str
+    execution_mode: Literal["perRun"]
 
 
 class SessionsEnvelope(StrictSchema):

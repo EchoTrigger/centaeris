@@ -43,7 +43,7 @@ def work_operation_id(run_id, turn_id, call_id):
 
 def _source_request(event_id):
     try:
-        result = SessionEvent.objects.select_related("agent_run__authorization", "agent_run__user",
+        result = SessionEvent.objects.select_related("agent_run__authorization", "agent_run__user", "agent_run__environment",
             "agent_run__session__agent").get(eventId=event_id)
     except SessionEvent.DoesNotExist as error:
         raise WorkMaterializationError(404, "agent_work_request_not_found") from error

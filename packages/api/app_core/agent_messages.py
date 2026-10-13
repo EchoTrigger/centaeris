@@ -65,7 +65,7 @@ def validate_agent_message(body):
     args = validate_message_args({"body": body["body"], "session_refs": body["sessionRefs"],
                                   "file_refs": body["fileRefs"]})
     try:
-        run = AgentRun.objects.select_related("session__agent", "authorization", "user").get(id=body["agentRunId"])
+        run = AgentRun.objects.select_related("session__agent", "authorization", "user", "environment").get(id=body["agentRunId"])
         authorization = run.authorization
         digest = authorization_digest(authorization.payload)
         _verify_authorization_digest_signature(digest, settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY,
