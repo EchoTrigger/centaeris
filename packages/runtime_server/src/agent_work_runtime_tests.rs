@@ -56,17 +56,17 @@ async fn run_trigger_probe(
     let check = probe.clone();
     let executor = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
-        // Blocking work outlives HTTP cancellation. Hold it until the client
-        // times out so the regression does not depend on database timing.
-        if check.case == "timeout" {
-            executor.block_on(async {
-                tokio::time::timeout(Duration::from_secs(30), check.lock_check_release.acquire())
-                    .await
-                    .expect("test must release the server lock probe")
-                    .unwrap()
-                    .forget();
-            });
-        }
+        // Core can commit later records to the same rows after this trigger.
+        // Probe standalone NOWAIT locks only once those legitimate writes end.
+        // Blocking work still outlives HTTP cancellation; timeout cases release
+        // this gate only after the client permit has been returned.
+        executor.block_on(async {
+            tokio::time::timeout(Duration::from_secs(30), check.lock_check_release.acquire())
+                .await
+                .expect("test must release the server lock probe")
+                .unwrap()
+                .forget();
+        });
         // A real replay takes the same append mutex and fenced transaction.
         check
             .log
@@ -954,6 +954,16 @@ fn django_work_commit_boundary() {
             probe.forwarded.lock().unwrap().is_empty(),
             "Core reaches Final while admission HTTP is held"
         );
+        assert_eq!(
+            probe.locks_checked.load(Ordering::SeqCst),
+            0,
+            "standalone NOWAIT lock assertions must wait until Core source writes finish"
+        );
+        if probe.case != "timeout" {
+            // Duplicate wakeups run after Final as well and each must perform
+            // its own real replay and independent NOWAIT transaction.
+            probe.lock_check_release.add_permits(2);
+        }
         probe.released.store(true, Ordering::SeqCst);
         probe.release.notify_waiters();
         drop(full_capacity);
