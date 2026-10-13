@@ -1231,17 +1231,21 @@ impl DockerExecutionHostRunner {
             return Ok(SessionWorkspaceCommitOutcome::Unchanged);
         }
         self.with_terminal_collection(|capture| {
-            let artifact =
-                match self.capture_snapshot(capture, &WorkspaceSnapshotDescriptor::from(frozen))? {
-                    SnapshotCaptureResult::Snapshot(artifact) => artifact,
-                    SnapshotCaptureResult::Unchanged => {
-                        self.require_workspace_capacity(
-                            frozen.expanded_size_bytes,
-                            input_upper_bound_bytes,
-                        )?;
-                        return Ok(SessionWorkspaceCommitOutcome::Unchanged);
-                    }
-                };
+            let artifact = match self.capture_snapshot(
+                capture,
+                &WorkspaceSnapshotDescriptor::from(frozen),
+                ProtectionTrigger::TerminalCommit,
+                &lease.job_id,
+            )? {
+                SnapshotCaptureResult::Snapshot(artifact) => artifact,
+                SnapshotCaptureResult::Unchanged => {
+                    self.require_workspace_capacity(
+                        frozen.expanded_size_bytes,
+                        input_upper_bound_bytes,
+                    )?;
+                    return Ok(SessionWorkspaceCommitOutcome::Unchanged);
+                }
+            };
             let descriptor = &artifact.descriptor;
             self.require_workspace_capacity(
                 descriptor.expanded_size_bytes,
@@ -1392,7 +1396,12 @@ impl DockerExecutionHostRunner {
             |capture| {
                 let capture_result =
                     crate::observations::timed("workspaceSnapshotInspect", || {
-                        self.capture_snapshot(capture, &WorkspaceSnapshotDescriptor::from(previous))
+                        self.capture_snapshot(
+                            capture,
+                            &WorkspaceSnapshotDescriptor::from(previous),
+                            ProtectionTrigger::RecoveryCheckpoint,
+                            &lease.job_id,
+                        )
                     })?;
                 let artifact = match capture_result {
                     SnapshotCaptureResult::Snapshot(artifact) => artifact,
@@ -4137,6 +4146,8 @@ mod tests {
             .capture_snapshot(
                 &capture,
                 &WorkspaceSnapshotDescriptor::from(&empty_recovery_snapshot()),
+                ProtectionTrigger::RecoveryCheckpoint,
+                &job,
             )
             .unwrap()
         else {

@@ -32,6 +32,16 @@ Changed and cold captures still transfer a full frame. API upload/publication
 already skipped equal descriptors, so this change does not claim a new saving
 there or a reduction in source reads. No latency claim follows from byte counts.
 
+Opt-in workspace protection observations cover this command too. The helper
+emits actual `scannedEntries` and `sourceReadBytes` counters on success and
+failure, including zero source reads for early rejection. Both content passes
+use the same measured read loop as forced-full capture. Runtime supplies one
+operation ID, validates forwarded helper records, and associates them with the
+Run, job and recovery/final trigger. A verified unchanged result records zero
+spool writes; full results retain measured spool and later upload observations.
+Logical bytes are content size, not transferred bytes. Missing helper evidence
+remains missing rather than becoming a zero estimate.
+
 ## Capture contract
 
 The root helper receives bounded JSON on stdin and requires EOF:
