@@ -115,6 +115,17 @@ exercise the Linux process observer against a real UID 10001 child. Busy final
 publication returns Pending rather than blocking indefinitely. Helper failure
 diagnostics retain the exit status even when stderr is empty.
 
+[Conditional workspace capture](../architecture/ConditionalWorkspaceCapture.md)
+must retain both content reads while suppressing unchanged file-body transfer
+and Runtime spooling. Verify full descriptor and invocation binding, second-pass
+equal-size mutation rejection, before/after idle checks, malformed or stale
+receipts, unchanged v1 persistence bytes, and cold capture after restore or
+runner replacement. A valid-looking response followed by helper failure cannot
+seed a cache. The one-runner repeated-capture test replaces only Docker transport;
+Linux process/ownership checks and actual transferred-byte evidence remain a
+separate isolated acceptance. Existing generation-witness skips must not be
+counted as new capture savings.
+
 Immutable snapshot upload acceptance must verify that one collected frame is
 validated and uploaded unchanged even after the live workspace changes. Corrupt
 frames and spool capacity overflow must be rejected. A blocked recovery upload

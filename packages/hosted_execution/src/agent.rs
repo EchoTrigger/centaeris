@@ -18,6 +18,8 @@ use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
+mod snapshot_capture;
+
 use crate::memory::{is_memory_uri, run_memory_file_system_operation};
 #[cfg(any(target_os = "linux", test))]
 use crate::protocol::SANDBOX_WORKSPACE_GENERATION_SCHEMA;
@@ -345,6 +347,10 @@ pub fn run_snapshot_collect_once() -> Result<(), String> {
     result
 }
 
+pub fn run_snapshot_capture_once() -> Result<(), String> {
+    snapshot_capture::run()
+}
+
 pub fn run_snapshot_restore_once() -> Result<(), String> {
     require_root()?;
     secure_roots()?;
@@ -620,7 +626,7 @@ fn write_snapshot_frame(
 #[cfg(target_os = "linux")]
 fn copy_snapshot_file(
     expected: &SandboxWorkspaceSnapshotFile,
-    output: &mut impl Write,
+    output: &mut (impl Write + ?Sized),
     observation: &mut SnapshotObservation,
 ) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
@@ -633,14 +639,25 @@ fn copy_snapshot_file(
     if before.size() != expected.size_bytes || (before.mode() & 0o111 != 0) != expected.executable {
         return Err("workspace snapshot source changed".to_string());
     }
-    let (size_bytes, sha256) = copy_snapshot_contents(&mut file, output, observation)?;
+    copy_snapshot_content(&mut file, expected, output, observation)?;
     let after = file
         .metadata()
         .map_err(|_| "workspace snapshot source changed".to_string())?;
-    if file_version(&before) != file_version(&after)
-        || size_bytes != expected.size_bytes
-        || sha256 != expected.sha256
-    {
+    if file_version(&before) != file_version(&after) {
+        return Err("workspace snapshot source changed".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn copy_snapshot_content(
+    source: &mut impl Read,
+    expected: &SandboxWorkspaceSnapshotFile,
+    output: &mut (impl Write + ?Sized),
+    observation: &mut SnapshotObservation,
+) -> Result<(), String> {
+    let (size_bytes, sha256) = copy_snapshot_contents(source, output, observation)?;
+    if size_bytes != expected.size_bytes || sha256 != expected.sha256 {
         return Err("workspace snapshot source changed".to_string());
     }
     Ok(())
@@ -649,7 +666,7 @@ fn copy_snapshot_file(
 #[cfg(any(target_os = "linux", test))]
 fn copy_snapshot_contents(
     file: &mut impl Read,
-    output: &mut impl Write,
+    output: &mut (impl Write + ?Sized),
     observation: &mut SnapshotObservation,
 ) -> Result<(u64, String), String> {
     let mut digest = Sha256::new();
@@ -677,7 +694,7 @@ fn copy_snapshot_contents(
 #[cfg(not(target_os = "linux"))]
 fn copy_snapshot_file(
     _expected: &SandboxWorkspaceSnapshotFile,
-    _output: &mut impl Write,
+    _output: &mut (impl Write + ?Sized),
     _observation: &mut SnapshotObservation,
 ) -> Result<(), String> {
     Err("sandbox helper requires Linux".to_string())
