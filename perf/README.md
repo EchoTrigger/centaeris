@@ -208,6 +208,11 @@ records complete reads and frame output for six paired scenarios. Automatic
 Runtime triggers and API/GC deployment costs require their own isolated run;
 missing measurements are not filled with zeros.
 
+The paired conditional-capture probe in the same guide checks unchanged receipts,
+changed full frames, real restore, active-writer rejection and protected-input
+exclusion. It requires the matching instrumented helper. Its source-read and
+stdout-byte measurements do not estimate physical disk or complete API cost.
+
 ## Harness repair (2026-09-20)
 
 - Smoke consumes the current replayable run SSE endpoint. Its child process has a
