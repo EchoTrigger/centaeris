@@ -107,6 +107,61 @@ def csv_text(rows):
     return output.getvalue()
 
 
+def process_evidence(directory):
+    lifecycle = read(directory / "source-exit-evidence.json")
+    running, stopped = lifecycle["sourceRunning"], lifecycle["sourceStopped"]
+    require(running["id"] == stopped["id"] and running["status"] == "running" and running["pid"] > 0
+            and running["hostStartTicks"].isdigit() and stopped["status"] == "stopped" and stopped["pid"] == -1,
+            "source exit identity or state differs")
+    steps = lifecycle["steps"]
+    require(all(type(item["exitCode"]) is int and item["exitCode"] == 0 for item in steps), "source exit command failed")
+    checkpoint = next(item for item in steps if item["operation"] == "checkpoint")
+    deletion = next(item for item in steps if item["operation"] == "delete" and item["instanceId"] == running["id"])
+    restoration = next(item for item in steps if item["operation"] == "restore")
+    require(checkpoint["commandIndex"] < deletion["commandIndex"] < restoration["commandIndex"]
+            and restoration["instanceId"] != running["id"], "source exit must precede distinct-instance restore")
+    integer_fields = {"counter", "fileCounter", "fdOffset", "unlinkedOffset", "pipeBytes", "childPid", "threadTicks"}
+    fields = integer_fields | {"nonce", "mmapNonce", "paused"}
+    oracles = [read(directory / f"oracle-{stage}.json") for stage in ("before", "after", "resumed")]
+    for oracle in oracles:
+        require(set(oracle) == fields, "oracle fields differ")
+        require(oracle["paused"] is True, "oracle was not paused at observation")
+        require(all(type(oracle[key]) is int and oracle[key] >= 0 for key in integer_fields), "oracle integer type differs")
+        require(all(type(oracle[key]) is str and len(oracle[key]) == 16 and
+                    all(char in "0123456789abcdef" for char in oracle[key]) for key in ("nonce", "mmapNonce")),
+                "oracle nonce type differs")
+    before, after, resumed = oracles
+    require(before == after, "restored process oracle differs")
+    require(all(resumed[key] == before[key] for key in ("nonce", "mmapNonce", "childPid")), "resumed oracle identity differs")
+    require(all(resumed[key] > before[key] for key in ("counter", "fileCounter", "threadTicks", "fdOffset", "unlinkedOffset"))
+            and resumed["pipeBytes"] == 0, "restored process made no verified progress")
+    descriptors = read(directory / "restored-fd-verification.json")
+    require(set(descriptors) == {"pipeVerified", "fileVerified", "unlinkedVerified", "linksVerified"}
+            and all(value is True for value in descriptors.values()), "restored descriptor checks incomplete or invalid")
+    comparison = read(directory / "oracle-comparison.json")
+    require(comparison == {"passed": True, "sourceStopped": True, "missingFields": [], "mismatchedFields": []}
+            and comparison["passed"] is True and comparison["sourceStopped"] is True, "oracle comparison differs")
+    outcome = read(directory / "outcome.json")
+    require(outcome["status"] == "supported" and outcome["failure"] is None, "process outcome differs")
+    cleanup = outcome["cleanup"]
+    require(len(cleanup) == 4, "cleanup records missing")
+    for record in cleanup:
+        codes = [value for key, value in record.items() if key.endswith("ExitCode") or key == "exitCode"]
+        require(len(codes) == 1 and type(codes[0]) is int and codes[0] == 0, "cleanup failed or malformed")
+    matrix = read(directory / "capability-matrix.json")
+    supported = {"memoryState", "processTreeAndPipe", "openFileCursor", "unlinkedOpenFile", "threadAndMmap",
+                 "renameLinksPermissions", "quiescedBackgroundWrites", "controllerReconnect",
+                 "truncatedCheckpoint", "wrongDigest", "runtimeMismatch"}
+    unmeasured = {"unquiescedCapture", "crossHostRecovery", "externalConnections"}
+    require(set(matrix) == supported | unmeasured, "capability fields differ")
+    require(all(matrix[key]["status"] == "supported" for key in supported)
+            and all(matrix[key]["status"] == "not-tested" for key in unmeasured), "capability exceeds recorded evidence")
+    faults = [json.loads(line) for line in (directory / "fault-results.jsonl").read_text().splitlines()]
+    require({item["case"] for item in faults} == {"truncatedCheckpoint", "wrongDigest", "runtimeMismatch"}
+            and len(faults) == 3 and all(item["layer"] == "probe admission" and item["result"] == "rejected before restore"
+                                       for item in faults), "capability fault layer differs")
+
+
 def verify(root, write_table=False):
     provenance = read(root / "provenance.json")
     for entry in provenance["files"]:
@@ -122,17 +177,17 @@ def verify(root, write_table=False):
         require(target.read_text(encoding="utf-8") == table, "CSV differs from raw observations")
     for suffix in ("", "guarded"):
         directory = root / "data/runsc-process" / suffix
-        require(read(directory / "oracle-before.json") == read(directory / "oracle-after.json"),
-                "restored process oracle differs")
-        require(all(read(directory / "restored-fd-verification.json").values()), "restored descriptor check failed")
-        require(read(directory / "oracle-comparison.json")["sourceStopped"], "source was not stopped")
+        process_evidence(directory)
         retained = sum(item["sizeBytes"] for item in read(directory / "checkpoint-identity.json")["files"].values())
         with (directory / "io-and-transfer.csv").open(newline="") as file:
             actual = next(row for row in csv.DictReader(file) if row["measurement"] == "retainedLogicalBytes")
         require(int(actual["value"]) == retained, "checkpoint file sizes differ from retained bytes")
     if not write_table:
         inventory = read(root / "inventory.json")
+        require(len({item["path"] for item in inventory["files"]}) == len(inventory["files"]), "duplicate inventory entry")
         for entry in inventory["files"]:
+            require(type(entry["sizeBytes"]) is int and (root / entry["path"]).stat().st_size == entry["sizeBytes"],
+                    f"inventory size mismatch: {entry['path']}")
             require(hashlib.sha256((root / entry["path"]).read_bytes()).hexdigest() == entry["sha256"],
                     f"bundle digest mismatch: {entry['path']}")
         files = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file() and "__pycache__" not in p.parts}

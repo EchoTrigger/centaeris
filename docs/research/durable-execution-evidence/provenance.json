@@ -784,6 +784,24 @@
       "transformations": [
         "LF normalization; text logs trim trailing whitespace and empty EOF lines"
       ]
+    },
+    {
+      "path": "data/runsc-process/source-exit-evidence.json",
+      "sourceArtifact": "durable-probe-evidence/final-051f74a3/commands.json",
+      "originalSha256": "d40aa4e21b9d9fe531ac0e2fb42c18b60317073ee83ba9badf4afbf60a64fbbd",
+      "exportSha256": "18c32e46bc80341e30268564dd3edb9ee64996e4dc56596bf5909b7e54ccb3e0",
+      "transformations": [
+        "project sequential lifecycle command names/indexes/exit codes and source state fields; omit host paths; retain separate hashes for each original input"
+      ]
+    },
+    {
+      "path": "data/runsc-process/guarded/source-exit-evidence.json",
+      "sourceArtifact": "durable-probe-evidence/mount-guard-71f32a0b/commands.json",
+      "originalSha256": "b73d15011b90980467c7866a88eaf51d131e40067c7d36511a0c2005d834935f",
+      "exportSha256": "d43675d872b14d35faddb16a5b5b2f3baf0be18becfb774b6375dc35a8dbcba1",
+      "transformations": [
+        "project sequential lifecycle command names/indexes/exit codes and source state fields; omit host paths; retain separate hashes for each original input"
+      ]
     }
   ],
   "omitted": [

@@ -1,0 +1,94 @@
+{
+  "schema": "centaeris.processExitEvidence.v1",
+  "sourceRunning": {
+    "id": "centaeris-durable-probe-mount-guard-71f32a0b-source",
+    "status": "running",
+    "pid": 1230214,
+    "hostStartTicks": "8975176"
+  },
+  "sourceStopped": {
+    "id": "centaeris-durable-probe-mount-guard-71f32a0b-source",
+    "status": "stopped",
+    "pid": -1
+  },
+  "steps": [
+    {
+      "commandIndex": 8,
+      "operation": "run",
+      "instanceId": "centaeris-durable-probe-mount-guard-71f32a0b-source",
+      "exitCode": 0,
+      "elapsedMs": 323.57118400977924
+    },
+    {
+      "commandIndex": 9,
+      "operation": "state",
+      "instanceId": "centaeris-durable-probe-mount-guard-71f32a0b-source",
+      "exitCode": 0,
+      "elapsedMs": 26.88242400472518
+    },
+    {
+      "commandIndex": 13,
+      "operation": "checkpoint",
+      "instanceId": "centaeris-durable-probe-mount-guard-71f32a0b-source",
+      "exitCode": 0,
+      "elapsedMs": 309.3866290000733
+    },
+    {
+      "commandIndex": 14,
+      "operation": "state",
+      "instanceId": "centaeris-durable-probe-mount-guard-71f32a0b-source",
+      "exitCode": 0,
+      "elapsedMs": 20.146493989159353
+    },
+    {
+      "commandIndex": 15,
+      "operation": "delete",
+      "instanceId": "centaeris-durable-probe-mount-guard-71f32a0b-source",
+      "exitCode": 0,
+      "elapsedMs": 15.701639000326395
+    },
+    {
+      "commandIndex": 16,
+      "operation": "restore",
+      "instanceId": "centaeris-durable-probe-mount-guard-71f32a0b-restored",
+      "exitCode": 0,
+      "elapsedMs": 675.4241769958753
+    },
+    {
+      "commandIndex": 23,
+      "operation": "delete",
+      "instanceId": "centaeris-durable-probe-mount-guard-71f32a0b-source",
+      "exitCode": 0,
+      "elapsedMs": 25.647636997746304
+    },
+    {
+      "commandIndex": 24,
+      "operation": "delete",
+      "instanceId": "centaeris-durable-probe-mount-guard-71f32a0b-restored",
+      "exitCode": 0,
+      "elapsedMs": 26.977622997947037
+    }
+  ],
+  "buildCommandBasenames": [
+    [
+      "gcc",
+      "-std=c11",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-static",
+      "-pthread",
+      "probe_main.c",
+      "-o",
+      "probe"
+    ]
+  ],
+  "absoluteTimestamps": "notRecorded",
+  "ordering": "zero-based indexes in original sequential commands.json; not wall-clock timestamps",
+  "sourceSha256": {
+    "source-running.json": "354f6b16a88da4d06f1013dd85c643cd488fce3c5cbc990eb20b17ad97307877",
+    "source-stopped.json": "0e4a219af3e6209d55e6c0c9a573636370e23590471f69580a3c9697a9135f7a",
+    "commands.json": "b73d15011b90980467c7866a88eaf51d131e40067c7d36511a0c2005d834935f"
+  }
+}

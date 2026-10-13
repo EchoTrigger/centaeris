@@ -16,6 +16,86 @@ class EvidenceVerifierTests(unittest.TestCase):
         self.root = Path(temporary.name) / "bundle"
         shutil.copytree(Path(__file__).resolve().parent, self.root,
                         ignore=shutil.ignore_patterns("__pycache__"))
+        self.reseal()
+
+    def reseal(self):
+        provenance = self.root / "provenance.json"
+        data = json.loads(provenance.read_text(encoding="utf-8"))
+        for entry in data["files"]:
+            entry["exportSha256"] = hashlib.sha256((self.root / entry["path"]).read_bytes()).hexdigest()
+        provenance.write_text(json.dumps(data), encoding="utf-8")
+        inventory = self.root / "inventory.json"
+        data = {"files": []}
+        for path in sorted(self.root.rglob("*")):
+            if path.is_file() and path != inventory:
+                payload = path.read_bytes()
+                data["files"].append({"path": path.relative_to(self.root).as_posix(),
+                                      "sha256": hashlib.sha256(payload).hexdigest(), "sizeBytes": len(payload)})
+        inventory.write_text(json.dumps(data), encoding="utf-8")
+
+    def replace_json(self, name, data):
+        (self.root / name).write_text(json.dumps(data), encoding="utf-8")
+        self.reseal()
+
+    def test_fd_checks_require_exact_fields_and_boolean_true(self):
+        name = "data/runsc-process/guarded/restored-fd-verification.json"
+        correct = json.loads((self.root / name).read_text())
+        for value in ({}, {key: "true" for key in correct}, {**correct, "pipeVerified": 1}):
+            with self.subTest(value=value):
+                self.replace_json(name, value)
+                with self.assertRaisesRegex(ValueError, "descriptor"):
+                    verify(self.root)
+
+    def test_restored_process_must_make_progress(self):
+        name = "data/runsc-process/guarded/oracle-resumed.json"
+        before = json.loads((self.root / "data/runsc-process/guarded/oracle-before.json").read_text())
+        self.replace_json(name, before)
+        with self.assertRaisesRegex(ValueError, "progress"):
+            verify(self.root)
+
+    def test_oracles_require_paused_state_and_exact_types(self):
+        prefix = "data/runsc-process/guarded/"
+        before = json.loads((self.root / (prefix + "oracle-before.json")).read_text())
+        for changed in ({**before, "paused": False}, {**before, "counter": True}):
+            with self.subTest(changed=changed):
+                self.replace_json(prefix + "oracle-before.json", changed)
+                self.replace_json(prefix + "oracle-after.json", changed)
+                with self.assertRaisesRegex(ValueError, "oracle"):
+                    verify(self.root)
+
+    def test_supported_outcome_cannot_hide_cleanup_failure(self):
+        name = "data/runsc-process/guarded/outcome.json"
+        data = json.loads((self.root / name).read_text())
+        data["cleanup"][0]["exitCode"] = 1
+        self.replace_json(name, data)
+        with self.assertRaisesRegex(ValueError, "cleanup"):
+            verify(self.root)
+
+    def test_restore_cannot_precede_source_deletion(self):
+        name = "data/runsc-process/guarded/source-exit-evidence.json"
+        data = json.loads((self.root / name).read_text())
+        next(step for step in data["steps"] if step["operation"] == "restore")["commandIndex"] = 0
+        self.replace_json(name, data)
+        with self.assertRaisesRegex(ValueError, "source exit"):
+            verify(self.root)
+
+    def test_unmeasured_capability_cannot_be_promoted(self):
+        name = "data/runsc-process/guarded/capability-matrix.json"
+        data = json.loads((self.root / name).read_text())
+        data["crossHostRecovery"]["status"] = "supported"
+        self.replace_json(name, data)
+        with self.assertRaisesRegex(ValueError, "capability"):
+            verify(self.root)
+
+    def test_inventory_rejects_duplicate_entries_and_wrong_size(self):
+        name = self.root / "inventory.json"
+        original = json.loads(name.read_text())
+        for data in ({**original, "files": original["files"] + original["files"][:1]},
+                     {**original, "files": [{**original["files"][0], "sizeBytes": 0}] + original["files"][1:]}):
+            with self.subTest(first=data["files"][0]):
+                name.write_text(json.dumps(data))
+                with self.assertRaisesRegex(ValueError, "inventory"):
+                    verify(self.root)
 
     def change_observation(self, *, remove=False, update_export_hash=False):
         relative = "data/conditional-snapshot/observations.jsonl"
