@@ -77,6 +77,9 @@ application cannot insert a valid Run after the non-null binding constraint is
 installed. This is a coordinated upgrade, not a rolling mixed-writer deployment.
 Back up the database and verify migration duration on representative data first;
 the current metadata backfill is atomic and performs per-Session updates.
+Ship the matching Web build with this API: the work-session reader validates
+the complete Session field set, so an older open client must reload after the
+coordinated upgrade.
 
 The migration refuses reversal when any environment exists, before removing its
 protection. A code rollback must keep these fields and the creation/authorization

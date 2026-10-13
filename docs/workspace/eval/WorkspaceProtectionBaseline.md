@@ -203,6 +203,36 @@ stdout bytes; Runtime tests separately verify that an accepted unchanged receipt
 does not create a full-body spool. Source reads, transport protocol overhead,
 device I/O and end-to-end API costs are separate quantities.
 
+The completed `resumed-full-7c61d925` run used 256 MiB of cold fixture data,
+the same 4 KiB hot file and nine-byte log. All seven scenarios passed, with
+22 capture operations, 44 counter observations and six verified restorations.
+No owned containers remained. The helper SHA-256 was
+`343ba110792e4907cb2483ec6078ec101f6497964220b76c6659092eaca80e9b`;
+its source was `10fd8d9aa2ec1d6a5f51d7f54ffd376d9b3aeecc`, whose helper and
+Runtime trees match integrated commit `37babc1705788de2fc589b9de1ab097e3753f6f7`.
+The harness digest was
+`1394db6ed0c3bf514a3f33cefc11d95058ebc128e6b5942a1c7cc6559f7ba2f1`.
+
+| Workload | Conditional stdout bytes | Forced full frame bytes | Conditional source reads | Result |
+|---|---:|---:|---:|---|
+| Unchanged | 290 | 268,440,053 | 536,879,122 | Baseline restored |
+| 4 KiB hot-file replacement | 268,440,273 | 268,440,053 | 536,879,122 | New frame restored |
+| 4 KiB overwrite inside large file | 268,440,273 | 268,440,053 | 536,879,122 | New frame restored |
+| Append 3,584 bytes | 268,443,860 | 268,443,640 | 536,886,290 | New frame restored |
+| Rename, delete and recreate identical content | 290 | 268,440,053 | 536,879,122 | Baseline restored |
+| Active background writer | 0 | Not captured | 0 | Rejected before scanning |
+
+The protected-input scenario deliberately retains an 8 KiB cold fixture. Both
+materialization and revocation returned unchanged receipts (306 and 301 bytes);
+the forced full frame remained 12,784 bytes and restoration excluded the input.
+The earlier 8 KiB seven-scenario run also passed. The interrupted full-size run
+remains a failed experiment and is not included in these acceptance counts.
+
+Changed snapshots add a 220-byte response envelope in this experiment. The
+unchanged cases retain both full source reads; this is not incremental file
+storage. These paired, warm/uncontrolled-cache observations establish byte
+accounting and recovery correctness, not latency percentiles or production cost.
+
 ## Decisions supported by this evidence
 
 The complete-frame path has measurable work even when its final bytes are
