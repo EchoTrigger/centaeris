@@ -93,3 +93,9 @@ state, and preservation of signed historical records during migration. Existing
 signed v1 fixtures remain the wire-compatibility check. Query-count coverage checks
 Session list growth and the platform credential path; environment joins avoid
 adding an authorization round trip on those paths.
+
+Creation has an explicit cost: each new Session inserts an environment and updates
+its pointer in the same transaction; each new Run locks and reads its Session with
+the selected environment. PostgreSQL also executes the binding checks. The query
+budget tests cover existing title/status updates and platform credential reads;
+they do not establish zero added SQL for all operations.

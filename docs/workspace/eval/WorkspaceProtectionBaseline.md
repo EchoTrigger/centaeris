@@ -166,16 +166,51 @@ Automatic Runtime triggers, activity-based reuse, HTTP transfer, API publication
 GC and cold-cache behavior remain unmeasured in this helper experiment. Product
 instrumentation and tests cover those accounting boundaries, but they are not
 deployment-cost observations. Runtime events carry the existing Run/Job identity
-and fixed trigger where available; a stable Environment identity does not yet
-exist and is not fabricated for the experiment.
+and fixed trigger where available. The new logical Session environment binding
+is not yet an observation dimension; it must not be reported as measured physical
+environment reuse.
+
+## Conditional capture acceptance
+
+`perf/harness/conditional_snapshot_probe.py` compares the real conditional helper
+with a forced full capture of the same quiescent files:
+
+```sh
+python3 perf/harness/conditional_snapshot_probe.py \
+  --evidence-parent <owned-loop-mount-root> --experiment-id <unique-id> \
+  --image-id sha256:<exact-image-id> --agent <exact-execution-agent> \
+  --cold-bytes 268435456
+```
+
+It uses the same bounded containers and ownership checks as the full baseline.
+The unchanged and write/revert cases must bind the baseline and emit only a
+receipt. Changed files must still produce a verified complete snapshot. Each
+accepted result is compared with the forced full capture and restored into
+another isolated container. A background writer acknowledges its first completed
+write before capture; capture must reject it. This checks process exclusion,
+not a write injected into the middle of the helper's second read.
+
+A seventh case materializes and revokes a protected input through the actual
+helper commands. Neither operation may put that input into the user workspace
+snapshot or invalidate an otherwise identical manifest.
+
+The evidence includes exact binary, image and harness hashes, command outcomes,
+source-read observations, receipt/frame bytes, restoration and owned-resource
+cleanup. Completed large synthetic payloads are removed only after their hashes
+and results are saved, keeping the experiment inside its disk budget. Interrupted
+or incomplete cleanup remains a failed outcome. This experiment measures helper
+stdout bytes; Runtime tests separately verify that an accepted unchanged receipt
+does not create a full-body spool. Source reads, transport protocol overhead,
+device I/O and end-to-end API costs are separate quantities.
 
 ## Decisions supported by this evidence
 
 The complete-frame path has measurable work even when its final bytes are
-unchanged. The next optimization candidate is reuse of an already sealed snapshot
-when activity/generation evidence, authorization, leases and retention all permit
-it. Measure the actual Runtime trigger path before estimating how frequently
-that cost occurs or claiming a saving.
+unchanged. Conditional capture reuses a verified baseline only when the Runtime
+has its bounded manifest cache and the helper revalidates the complete input.
+It retains both source reads. Existing activity/generation skipping is a separate
+optimization. Measure actual Runtime trigger frequency before extrapolating the
+conditional helper result to an application-wide saving.
 
 The safe rejection of an active writer supports retaining capture exclusion and
 quiescence checks. Persistent background tasks require a separately verified
