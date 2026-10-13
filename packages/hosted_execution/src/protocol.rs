@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub const SANDBOX_INPUT_INVENTORY_SCHEMA: &str = "sandbox.input_inventory.v1";
 pub const SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA: &str = "workspace.snapshot.v1";
+pub const SANDBOX_SNAPSHOT_CAPTURE_SCHEMA: &str = "workspace.snapshot.capture.v1";
 pub const SANDBOX_WORKSPACE_GENERATION_SCHEMA: &str = "workspace.generation.v1";
 pub const SANDBOX_WORKSPACE_GENERATION_QUERY_LINE: &[u8] =
     b"{\"schema\":\"workspace.generation.query.v1\"}\n";
@@ -138,4 +139,36 @@ pub struct SandboxWorkspaceSnapshotFile {
     pub size_bytes: u64,
     pub sha256: String,
     pub executable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SandboxSnapshotCaptureRequest {
+    pub schema: String,
+    pub capture_id: String,
+    pub baseline: Option<SandboxSnapshotBaseline>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SandboxSnapshotBaseline {
+    pub snapshot_sha256: String,
+    pub manifest: SandboxWorkspaceSnapshotManifest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SandboxSnapshotCaptureResponse {
+    pub schema: String,
+    pub capture_id: String,
+    pub disposition: SnapshotCaptureDisposition,
+    pub baseline_snapshot_sha256: Option<String>,
+    pub manifest_sha256: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SnapshotCaptureDisposition {
+    Snapshot,
+    Unchanged,
 }

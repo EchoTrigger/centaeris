@@ -1,3 +1,5 @@
+mod snapshot_capture;
+
 use crate::docker_engine::{ExecChild, ExecRequest};
 use crate::execution_recovery_coordinator::OwnedExecutionContinuity;
 use crate::execution_recovery_policy::{
@@ -7,6 +9,7 @@ use crate::execution_recovery_policy::{
 use crate::observations::{
     MeasuredWriter, ProtectionMetric, ProtectionTrigger, WorkspaceProtection,
 };
+use snapshot_capture::{SnapshotCaptureCache, SnapshotCaptureResult};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
@@ -279,6 +282,7 @@ pub struct DockerExecutionHostRunner {
     pub(crate) transcript_publisher: Arc<crate::transcript_capture::CapturePublisher>,
     recovery_activity: ExecutionActivityWitness,
     recovery_snapshot: Mutex<Option<WorkspaceReuseEvidence>>,
+    snapshot_capture_cache: Mutex<Option<SnapshotCaptureCache>>,
     pre_dispatch_loss: AtomicBool,
     deferred_extension_dispatch: AtomicBool,
     container_name: String,
@@ -653,6 +657,7 @@ impl DockerExecutionHostRunner {
                 &container_name,
             )?,
             recovery_snapshot: Mutex::new(None),
+            snapshot_capture_cache: Mutex::new(None),
             pre_dispatch_loss: AtomicBool::new(false),
             deferred_extension_dispatch: AtomicBool::new(false),
             container_name,
@@ -1226,11 +1231,17 @@ impl DockerExecutionHostRunner {
             return Ok(SessionWorkspaceCommitOutcome::Unchanged);
         }
         self.with_terminal_collection(|capture| {
-            let artifact = self.capture_snapshot_collect(
-                capture,
-                ProtectionTrigger::TerminalCommit,
-                &lease.job_id,
-            )?;
+            let artifact =
+                match self.capture_snapshot(capture, &WorkspaceSnapshotDescriptor::from(frozen))? {
+                    SnapshotCaptureResult::Snapshot(artifact) => artifact,
+                    SnapshotCaptureResult::Unchanged => {
+                        self.require_workspace_capacity(
+                            frozen.expanded_size_bytes,
+                            input_upper_bound_bytes,
+                        )?;
+                        return Ok(SessionWorkspaceCommitOutcome::Unchanged);
+                    }
+                };
             let descriptor = &artifact.descriptor;
             self.require_workspace_capacity(
                 descriptor.expanded_size_bytes,
@@ -1379,13 +1390,20 @@ impl DockerExecutionHostRunner {
         self.capture_prepared_recovery_workspace_with_observer(
             |capture| self.agent_process_count(capture),
             |capture| {
-                let artifact = crate::observations::timed("workspaceSnapshotInspect", || {
-                    self.capture_snapshot_collect(
-                        capture,
-                        ProtectionTrigger::RecoveryCheckpoint,
-                        &lease.job_id,
-                    )
-                })?;
+                let capture_result =
+                    crate::observations::timed("workspaceSnapshotInspect", || {
+                        self.capture_snapshot(capture, &WorkspaceSnapshotDescriptor::from(previous))
+                    })?;
+                let artifact = match capture_result {
+                    SnapshotCaptureResult::Snapshot(artifact) => artifact,
+                    SnapshotCaptureResult::Unchanged => {
+                        self.require_workspace_capacity(
+                            previous.expanded_size_bytes,
+                            input_upper_bound_bytes,
+                        )?;
+                        return Ok(PreparedRecoveryContent::Unchanged(previous.clone()));
+                    }
+                };
                 self.require_workspace_capacity(
                     artifact.descriptor.expanded_size_bytes,
                     input_upper_bound_bytes,
@@ -1775,81 +1793,6 @@ impl DockerExecutionHostRunner {
         )
     }
 
-    fn snapshot_collect_command(
-        &self,
-        capture: &SnapshotActivityGuard,
-        observation: &WorkspaceProtection,
-    ) -> Result<ExecChild, String> {
-        let _ = capture;
-        let mut request = self.exec_request(vec![AGENT_BINARY.into(), "snapshot-collect".into()]);
-        request.cwd = Some(WORKSPACE_DATA_ROOT.into());
-        observation.helper_environment(&mut request.env);
-        let mut child = request.spawn()?;
-        child.stdin.take();
-        Ok(child)
-    }
-
-    fn capture_snapshot_collect(
-        &self,
-        capture: &SnapshotActivityGuard,
-        trigger: ProtectionTrigger,
-        job_id: &str,
-    ) -> Result<ImmutableWorkspaceSnapshot, String> {
-        let observation =
-            WorkspaceProtection::new().with_context(trigger, &self.agent_run_id, Some(job_id));
-        observation.timed(ProtectionMetric::CaptureElapsedMs, || {
-            let mut child = self.snapshot_collect_command(capture, &observation)?;
-            let stderr = child
-                .stderr
-                .take()
-                .ok_or_else(|| "snapshot collect helper stderr is unavailable".to_string())?;
-            let stderr_reader =
-                thread::spawn(move || read_bounded(stderr, DOCKER_DIAGNOSTIC_LIMIT));
-            let mut stdout = child
-                .stdout
-                .take()
-                .ok_or_else(|| "snapshot collect helper stdout is unavailable".to_string())?;
-            let result = match capture_snapshot_artifact_observed(
-                &mut stdout,
-                self.resources
-                    .data_tmpfs_bytes
-                    .saturating_add(SESSION_WORKSPACE_MANIFEST_LIMIT as u64 + 4),
-                observation.clone(),
-            ) {
-                Ok(result) => result,
-                Err(error) => {
-                    drop(stdout);
-                    child.disconnect();
-                    let _ = child.wait();
-                    if let Ok(Ok(stderr)) = stderr_reader.join() {
-                        observation.forward_sandbox(&stderr.bytes);
-                    }
-                    return Err(error);
-                }
-            };
-            let status = child
-                .wait()
-                .map_err(|error| format!("wait for snapshot collect helper failed: {error}"))?;
-            let stderr = stderr_reader
-                .join()
-                .map_err(|_| "snapshot collect helper stderr reader panicked".to_string())?
-                .map_err(|error| format!("read snapshot collect helper stderr failed: {error}"))?;
-            observation.forward_sandbox(&stderr.bytes);
-            if !status.success() {
-                return Err(format!(
-                    "snapshot collect helper failed: {}",
-                    bounded_diagnostic(stderr.bytes.as_slice())
-                ));
-            }
-            observation.count(
-                ProtectionMetric::SnapshotLogicalBytes,
-                result.descriptor.expanded_size_bytes,
-                true,
-            );
-            Ok(result)
-        })
-    }
-
     fn restore_snapshot_stream(
         &self,
         source: &mut impl Read,
@@ -1859,7 +1802,7 @@ impl DockerExecutionHostRunner {
         observation: &WorkspaceProtection,
     ) -> Result<(), String> {
         observation.timed(ProtectionMetric::RestoreApplyElapsedMs, || {
-            self.recovery_activity.invalidate_before_dispatch()?;
+            self.begin_snapshot_restore()?;
             let _ = capture;
             let mut request =
                 self.exec_request(vec![AGENT_BINARY.into(), "snapshot-restore".into()]);
@@ -3395,7 +3338,7 @@ struct SessionWorkspaceCommitResponse {
     session_workspace: SessionWorkspace,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct WorkspaceSnapshotDescriptor {
     sha256: String,
     size_bytes: u64,
@@ -3407,6 +3350,7 @@ struct ImmutableWorkspaceSnapshot {
     file: fs::File,
     descriptor: WorkspaceSnapshotDescriptor,
     observation: WorkspaceProtection,
+    manifest: Option<SandboxWorkspaceSnapshotManifest>,
 }
 
 pub(crate) struct PreparedRecoveryWorkspaceRestore {
@@ -3668,7 +3612,7 @@ fn capture_snapshot_artifact_observed(
         inner: &mut file,
         written: 0,
     };
-    let descriptor = inspect_workspace_snapshot(&mut SnapshotSpoolReader {
+    let descriptor = inspect_workspace_snapshot_with_manifest(&mut SnapshotSpoolReader {
         source,
         file: &mut measured,
         remaining: limit,
@@ -3678,13 +3622,14 @@ fn capture_snapshot_artifact_observed(
         measured.written,
         descriptor.is_ok(),
     );
-    let descriptor = descriptor?;
+    let (descriptor, manifest) = descriptor?;
     file.rewind()
         .map_err(|error| format!("rewind snapshot spool failed: {error}"))?;
     Ok(ImmutableWorkspaceSnapshot {
         file,
         descriptor,
         observation,
+        manifest,
     })
 }
 
@@ -3736,20 +3681,36 @@ impl Read for SessionWorkspaceUploadBody {
     }
 }
 
+#[cfg(test)]
 fn inspect_workspace_snapshot(
     source: &mut impl Read,
 ) -> Result<WorkspaceSnapshotDescriptor, String> {
+    inspect_workspace_snapshot_with_manifest(source).map(|(descriptor, _)| descriptor)
+}
+
+fn inspect_workspace_snapshot_with_manifest(
+    source: &mut impl Read,
+) -> Result<
+    (
+        WorkspaceSnapshotDescriptor,
+        Option<SandboxWorkspaceSnapshotManifest>,
+    ),
+    String,
+> {
     let mut header = [0_u8; 4];
     let first = source
         .read(&mut header)
         .map_err(|error| format!("read snapshot collect frame failed: {error}"))?;
     if first == 0 {
-        return Ok(WorkspaceSnapshotDescriptor {
-            sha256: String::new(),
-            size_bytes: 0,
-            expanded_size_bytes: 0,
-            file_count: 0,
-        });
+        return Ok((
+            WorkspaceSnapshotDescriptor {
+                sha256: String::new(),
+                size_bytes: 0,
+                expanded_size_bytes: 0,
+                file_count: 0,
+            },
+            None,
+        ));
     }
     let mut digest = Sha256::new();
     digest.update(&header[..first]);
@@ -3797,13 +3758,16 @@ fn inspect_workspace_snapshot(
         .checked_add(manifest_length as u64)
         .and_then(|value| value.checked_add(expanded_size_bytes))
         .ok_or_else(|| "snapshot size overflow".to_string())?;
-    Ok(WorkspaceSnapshotDescriptor {
-        sha256: format!("sha256:{:x}", digest.finalize()),
-        size_bytes,
-        expanded_size_bytes,
-        file_count: u32::try_from(manifest.files.len())
-            .map_err(|_| "snapshot file count overflow".to_string())?,
-    })
+    Ok((
+        WorkspaceSnapshotDescriptor {
+            sha256: format!("sha256:{:x}", digest.finalize()),
+            size_bytes,
+            expanded_size_bytes,
+            file_count: u32::try_from(manifest.files.len())
+                .map_err(|_| "snapshot file count overflow".to_string())?,
+        },
+        Some(manifest),
+    ))
 }
 
 fn snapshot_matches_frozen_workspace(
@@ -4169,9 +4133,15 @@ mod tests {
         let written = exec_with_input(&write_request, &[], 1024).unwrap();
         assert!(written.status.success());
         let capture = old.recovery_activity.wait_snapshot_activity().unwrap();
-        let mut artifact = old
-            .capture_snapshot_collect(&capture, ProtectionTrigger::RecoveryCheckpoint, &job)
-            .unwrap();
+        let SnapshotCaptureResult::Snapshot(mut artifact) = old
+            .capture_snapshot(
+                &capture,
+                &WorkspaceSnapshotDescriptor::from(&empty_recovery_snapshot()),
+            )
+            .unwrap()
+        else {
+            panic!("a fresh runner must capture a complete snapshot");
+        };
         drop(capture);
         let snapshot = RecoveryWorkspaceSnapshotV1 {
             object_ref: Some("centaeris-recovery-test-checkpoint-object".into()),
@@ -6184,6 +6154,7 @@ mod tests {
                 NEXT_EXECUTION_HOST_INSTANCE.fetch_add(1, Ordering::Relaxed),
             ),
             recovery_snapshot: Mutex::new(None),
+            snapshot_capture_cache: Mutex::new(None),
             pre_dispatch_loss: AtomicBool::new(false),
             deferred_extension_dispatch: AtomicBool::new(false),
             container_name: "centaeris-agent-run-test".to_string(),
