@@ -87,6 +87,11 @@ must remain visible; cancellation must not count as successful draining.
 
 ## Tests
 
+For the separate bounded native runsc process-recovery experiment, see
+[Durable execution probe](../docs/workspace/eval/DurableExecutionProbe.md).
+It uses a unique fixed-size filesystem and external oracle, and does not change
+the existing Docker deployment or claim support from unit-test substitutes.
+
 ### Hosted transcript capture acceptance
 
 After the normal isolated build and startup, run one bounded synthetic capture
