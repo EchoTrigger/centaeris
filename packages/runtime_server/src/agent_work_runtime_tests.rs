@@ -25,6 +25,9 @@ struct TriggerProbe {
     case: String,
     calls: AtomicUsize,
     locks_checked: AtomicUsize,
+    lock_check_release: tokio::sync::Semaphore,
+    lock_checks_finished: tokio::sync::Semaphore,
+    admissions_finished: tokio::sync::Semaphore,
     released: AtomicBool,
     release: tokio::sync::Notify,
     forwarded: Mutex<Vec<(u16, Value)>>,
@@ -41,9 +44,29 @@ async fn trigger_proxy(
     axum::extract::State(probe): axum::extract::State<Arc<TriggerProbe>>,
     body: axum::body::Bytes,
 ) -> (axum::http::StatusCode, String) {
+    // A lost caller response must not cancel the server-side admission probe.
+    tokio::spawn(run_trigger_probe(probe, body)).await.unwrap()
+}
+
+async fn run_trigger_probe(
+    probe: Arc<TriggerProbe>,
+    body: axum::body::Bytes,
+) -> (axum::http::StatusCode, String) {
     probe.calls.fetch_add(1, Ordering::SeqCst);
     let check = probe.clone();
+    let executor = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
+        // Blocking work outlives HTTP cancellation. Hold it until the client
+        // times out so the regression does not depend on database timing.
+        if check.case == "timeout" {
+            executor.block_on(async {
+                tokio::time::timeout(Duration::from_secs(30), check.lock_check_release.acquire())
+                    .await
+                    .expect("test must release the server lock probe")
+                    .unwrap()
+                    .forget();
+            });
+        }
         // A real replay takes the same append mutex and fenced transaction.
         check
             .log
@@ -67,6 +90,7 @@ async fn trigger_proxy(
         .unwrap();
         tx.commit().unwrap();
         check.locks_checked.fetch_add(1, Ordering::SeqCst);
+        check.lock_checks_finished.add_permits(1);
     })
     .await
     .unwrap();
@@ -101,6 +125,7 @@ async fn trigger_proxy(
         .lock()
         .unwrap()
         .push((status.as_u16(), value.clone()));
+    probe.admissions_finished.add_permits(1);
     if probe.case == "response_lost" {
         // Admission is durable but the caller receives no response before its timeout.
         return std::future::pending().await;
@@ -804,6 +829,9 @@ fn django_work_commit_boundary() {
             case: case.clone(),
             calls: AtomicUsize::new(0),
             locks_checked: AtomicUsize::new(0),
+            lock_check_release: tokio::sync::Semaphore::new(0),
+            lock_checks_finished: tokio::sync::Semaphore::new(0),
+            admissions_finished: tokio::sync::Semaphore::new(0),
             released: AtomicBool::new(false),
             release: tokio::sync::Notify::new(),
             forwarded: Mutex::new(vec![]),
@@ -930,6 +958,21 @@ fn django_work_commit_boundary() {
         probe.release.notify_waiters();
         drop(full_capacity);
         executor.block_on(drain_trigger(&slots));
+        let wait_for_lost_response_admission = || {
+            if probe.case == "response_lost" {
+                executor.block_on(async {
+                    tokio::time::timeout(
+                        Duration::from_secs(10),
+                        probe.admissions_finished.acquire(),
+                    )
+                    .await
+                    .expect("API admission must finish despite the lost client response")
+                    .unwrap()
+                    .forget();
+                });
+            }
+        };
+        wait_for_lost_response_admission();
         let duplicate = matches!(probe.case.as_str(), "duplicate" | "response_lost");
         if duplicate {
             trigger
@@ -937,6 +980,7 @@ fn django_work_commit_boundary() {
                 .unwrap()
                 .after_commit(start, dispatch_commit.as_ref().unwrap());
             executor.block_on(drain_trigger(&slots));
+            wait_for_lost_response_admission();
         }
         let expected = if source_failure || probe.case == "capacity" {
             0
@@ -945,6 +989,22 @@ fn django_work_commit_boundary() {
         } else {
             1
         };
+        if probe.case == "timeout" {
+            assert_eq!(probe.locks_checked.load(Ordering::SeqCst), 0);
+            probe.lock_check_release.add_permits(1);
+        }
+        // Draining the client only proves its request ended. The server's
+        // blocking database work may still be running after that timeout.
+        executor.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                probe.lock_checks_finished.acquire_many(expected as u32),
+            )
+            .await
+            .expect("server lock checks must finish after the client request ends")
+            .unwrap()
+            .forget();
+        });
         assert_eq!(probe.calls.load(Ordering::SeqCst), expected);
         assert_eq!(probe.locks_checked.load(Ordering::SeqCst), expected);
         let forwarded = probe.forwarded.lock().unwrap();
