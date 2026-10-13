@@ -599,7 +599,7 @@ fn postgres_completion_delivery_upgrade_preserves_records_and_accepts_core_obser
     append(&mut f).unwrap();
     f.store.with_client(|db| db.batch_execute(
         "DELETE FROM runtime.schema_migrations WHERE version>=5;
-         DROP TABLE runtime.resident_sandboxes;
+         DROP TABLE runtime.execution_instances; DROP TABLE runtime.resident_sandboxes;
          ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_count;
          ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_not_before_ms;
          ALTER TABLE runtime.model_observation_contents DROP CONSTRAINT model_observation_contents_kind_check;
@@ -607,7 +607,7 @@ fn postgres_completion_delivery_upgrade_preserves_records_and_accepts_core_obser
     ).map_err(|error| error.to_string())).unwrap();
     let before = legacy_retained_rows(&f);
     let upgraded = PostgresRuntimeStore::new(&test_url()).unwrap();
-    assert_eq!(observation_versions(&f), [1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(observation_versions(&f), [1, 2, 3, 4, 5, 6, 7, 8]);
     assert_eq!(legacy_retained_rows(&f), before);
     upgraded.with_client(|db| db.execute(
         "INSERT INTO runtime.model_observation_contents VALUES($1,$2,'required_completion_delivery','{}',2,1)",
@@ -625,7 +625,7 @@ fn postgres_completion_delivery_upgrade_rejects_unknown_legacy_constraint_withou
     let f = fixture();
     f.store.with_client(|db| db.batch_execute(
         "DELETE FROM runtime.schema_migrations WHERE version>=5;
-         DROP TABLE runtime.resident_sandboxes;
+         DROP TABLE runtime.execution_instances; DROP TABLE runtime.resident_sandboxes;
          ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_count;
          ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_not_before_ms;
          ALTER TABLE runtime.model_observation_contents DROP CONSTRAINT model_observation_contents_kind_check;
@@ -645,7 +645,7 @@ fn postgres_current_schema_reopen_retains_sealed_wait_handoff() {
     append(&mut f).unwrap();
     let before = retained_rows(&f);
     let reopened = PostgresRuntimeStore::new(&test_url()).unwrap();
-    assert_eq!(observation_versions(&f), [1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(observation_versions(&f), [1, 2, 3, 4, 5, 6, 7, 8]);
     assert_eq!(retained_rows(&f), before);
     assert_eq!(
         reopened
@@ -671,6 +671,12 @@ fn retained_rows(f: &Fixture) -> std::collections::BTreeMap<String, String> {
 
 fn legacy_retained_rows(f: &Fixture) -> std::collections::BTreeMap<String, String> {
     let mut rows = retained_rows(f);
+    if let Some(instances) = rows.remove("runtime.execution_instances") {
+        assert_eq!(
+            instances, "[]",
+            "forward migration must not invent physical allocations"
+        );
+    }
     if let Some(residents) = rows.remove("runtime.resident_sandboxes") {
         assert_eq!(
             residents, "[]",

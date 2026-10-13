@@ -59,9 +59,44 @@ requires current Session access and delegated scope, rejects mismatched Run/Sess
 identities, and uses `Cache-Control: no-store`. It performs no writes. Hosted
 operation receipts and transcript stream protocols are unchanged.
 
-Physical environment reuse will need an explicit cross-language authorization
-contract before Runtime can use an environment identifier for resource selection.
-Adding an unversioned field to v1 or rewriting old signatures is not that migration.
+The internal `workspace.agent_run.start.v3` envelope requires an independent
+`environmentAuthorization` containing `payload` and `signature`. Its strict
+`workspace.environment_authorization.v1` payload contains `environmentId`,
+`sessionId`, `agentRunId`, `agentRunAuthorizationDigest`, and `executionMode:
+"perRun"`. The API derives it from the immutable Run association after checking
+the existing authorization. Signing canonical JSON uses the independent
+`workspace:environment-authorization:v1\0` domain followed by the `sha256:`
+prefixed payload digest. Runtime verifies both signatures, Run/Session/digest
+agreement, exact fields, and supported mode before admission. Old start versions
+fail closed; the original v1 grant is never extended or re-signed.
+
+## Physical allocation
+
+Core continues to select execution IDs and own Run/recovery semantics. The hosted
+adapter binds an execution to a distinct `instanceId`, its logical environment,
+Session, Run, host, immutable image digest, original authorization digest and
+environment binding digest in `runtime.execution_instances`. The instance ID is
+the domain-separated SHA-256 of the execution ID. This is an allocation record;
+it does not establish that a container was created, is running, or was released.
+Successive executions, including Core recovery replacements and different Runs
+in one environment, receive different instance IDs.
+
+The existing resident budget reservation and live admission callback run first.
+Before any container create/adoption, the adapter checks authoritative stored Run
+environment/Session and original grant digest, inserts the allocation, compares
+every stored binding field on retry, and commits with synchronous durability.
+Concurrent retries converge on the same allocation; a different environment,
+Run, Session, host, grant or image fails without a second create. Mapping records
+survive resident release so an old execution cannot be reinterpreted. They have
+no lease, heartbeat, resource totals or lifecycle state.
+
+`resident_sandboxes` remains the sole physical resource/liveness authority and
+retains reservations on unknown creation outcomes. Docker receives environment,
+instance and binding-digest labels alongside existing Run/execution/grant labels.
+Create/adoption verifies all requested labels and security configuration; missing
+or foreign labels fail closed. Backend container IDs remain in resident rows.
+Host and physical-instance IDs are internal and never become browser/model
+capabilities. Teardown remains per Run; no cross-Run reuse or supervisor is added.
 
 ## Upgrade and rollback
 
@@ -103,6 +138,17 @@ upgrade. An operator must establish that no old-helper instance will be adopted
 by the replacement Runtime. This operational gate is separate from the database
 migration test and requires the deployment's actual instance inventory.
 
+API and Runtime must switch together to start v3. Queued starts are reconstructed
+from authoritative API records using their unchanged original grants. Runtime
+schema v8 adds the allocation table through a forward migration; it preserves all
+v7 resident reservations and migration history and does not fabricate allocations
+for old containers. Old live/waiting containers lack the required labels and
+cannot be adopted by this Runtime. Complete them under their matching old stack
+or postpone the switch; this code does not automatically terminate them.
+Rollback to a v7 Runtime fails schema validation. Preserve allocation identities
+and upgrade history with a compatible forward repair or restore an operator-owned
+pre-upgrade backup after draining; do not drop mapping rows to permit adoption.
+
 ## Verification
 
 Focused tests cover HTTP creation and replay, successive Runs, distinct child
@@ -118,3 +164,12 @@ its pointer in the same transaction; each new Run locks and reads its Session wi
 the selected environment. PostgreSQL also executes the binding checks. The query
 budget tests cover existing title/status updates and platform credential reads;
 they do not establish zero added SQL for all operations.
+
+Environment authorization projection writes no database records. Allocation uses
+one indexed Run/grant lookup, one insert-on-conflict and one primary-key lookup
+per physical prepare, with bounded immutable comparison; it scans no tool calls.
+The table grows with executions and has no automatic history deletion policy.
+Shared Python/Rust signature vectors, strict start rejection, real PostgreSQL
+independent-connection/concurrent replay, unknown-create budget retention and
+forward migration/drift tests protect this boundary. Docker request/adoption
+fixtures verify label behavior; they do not certify real isolation or deployment.

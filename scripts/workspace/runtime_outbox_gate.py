@@ -51,7 +51,9 @@ def main():
                  'postgres_store::resource_commit::tests::critical_resource_transaction_overrides_asynchronous_session_without_changing_default',
                  '--', '--exact'],
                 ['cargo', 'test', '--locked', '-p', 'runtime_server',
-                 'postgres_store::integration_tests::residency_tests', '--']]
+                 'postgres_store::integration_tests::residency_tests', '--'],
+                ['cargo', 'test', '--locked', '-p', 'runtime_server',
+                 'postgres_store::integration_tests::execution_instance_tests', '--']]
     exact_tests = [
         'checkpoint_requests::postgres_direct_store_validates_checkpoint_requests_before_transactions',
         'snapshot_cas_tests::postgres_snapshot_cas_rejects_stale_writers_and_preserves_concurrent_results',

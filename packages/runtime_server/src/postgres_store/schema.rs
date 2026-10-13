@@ -2,13 +2,14 @@ use std::collections::BTreeSet;
 
 use postgres::{Client, GenericClient};
 
-const STORE_SCHEMA_VERSION: i64 = 7;
+const STORE_SCHEMA_VERSION: i64 = 8;
 const LEASE_RECLAIM_COLUMNS: &str =
     ",lease_reclaim_count:bigint:NO,lease_reclaim_not_before_ms:bigint:YES";
 const PREVIOUS_OBSERVATION_KINDS: &str = "'system_prompt'::text, 'message'::text, 'input_image'::text, 'tool_catalog'::text, 'compaction_prompt'::text, 'input_uptake'::text";
 const CURRENT_OBSERVATION_KINDS: &str = "'system_prompt'::text, 'message'::text, 'input_image'::text, 'tool_catalog'::text, 'compaction_prompt'::text, 'input_uptake'::text, 'required_completion_delivery'::text";
 
 pub(super) const RUNTIME_TABLES: &[&str] = &[
+    "execution_instances",
     "execution_job_tenants",
     "checkpoints",
     "dead_letters",
@@ -59,6 +60,7 @@ const RUNTIME_INDEXES: &[&str] = &[
 ];
 
 const TABLE_SHAPES: &[(&str, &str)] = &[
+    ("execution_instances", "execution_id:text:NO,instance_id:text:NO,environment_id:text:NO,session_id:text:NO,agent_run_id:text:NO,host_id:text:NO,authorization_digest:text:NO,binding_digest:text:NO,image_digest:text:NO"),
     (
         "resident_sandboxes",
         "host_id:text:NO,execution_id:text:NO,agent_run_id:text:NO,workspace_id:text:NO,container_id:text:YES,state:text:NO,memory_bytes:bigint:NO,cpu_milli:bigint:NO,pids:bigint:NO,workspace_bytes:bigint:NO,created_at_ms:bigint:NO,updated_at_ms:bigint:NO",
@@ -254,6 +256,7 @@ pub(super) fn ensure_schema(client: &mut Client) -> Result<(), String> {
         upgrade_completion_delivery_observations(client)?;
         upgrade_lease_reclaim_budget(client)?;
         upgrade_resident_budget(client)?;
+        upgrade_execution_instances(client)?;
     }
     validate_schema_version(client)?;
     validate_schema(client, CURRENT_OBSERVATION_KINDS)
@@ -335,8 +338,31 @@ fn upgrade_resident_budget(client: &mut Client) -> Result<(), String> {
         &[&now_ms()?],
     )
     .map_err(|error| error.to_string())?;
-    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    validate_schema_with_resource_budgets(&mut tx, CURRENT_OBSERVATION_KINDS, true, true, false)?;
     tx.commit().map_err(|error| error.to_string())
+}
+
+const INSTANCE_DDL: &str = "CREATE TABLE runtime.execution_instances(execution_id text PRIMARY KEY,instance_id text NOT NULL UNIQUE,environment_id text NOT NULL,session_id text NOT NULL,agent_run_id text NOT NULL,host_id text NOT NULL,authorization_digest text NOT NULL,binding_digest text NOT NULL,image_digest text NOT NULL);";
+
+fn upgrade_execution_instances(client: &mut Client) -> Result<(), String> {
+    if schema_versions(client)? != [1, 2, 3, 4, 5, 6, 7] {
+        return Ok(());
+    }
+    let mut tx = client.transaction().map_err(|e| e.to_string())?;
+    tx.batch_execute("LOCK TABLE runtime.schema_migrations IN ACCESS EXCLUSIVE MODE")
+        .map_err(|e| e.to_string())?;
+    if schema_versions(&mut tx)? != [1, 2, 3, 4, 5, 6, 7] {
+        return Ok(());
+    }
+    validate_schema_with_resource_budgets(&mut tx, CURRENT_OBSERVATION_KINDS, true, true, false)?;
+    tx.batch_execute(INSTANCE_DDL).map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO runtime.schema_migrations(version,applied_at_ms) VALUES(8,$1)",
+        &[&now_ms()?],
+    )
+    .map_err(|e| e.to_string())?;
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.commit().map_err(|e| e.to_string())
 }
 
 fn schema_versions(client: &mut impl GenericClient) -> Result<Vec<i64>, String> {
@@ -378,6 +404,8 @@ fn create_schema(client: &mut Client) -> Result<(), String> {
         .map_err(|error| format!("create Postgres transcript schema failed: {error:?}"))?;
     tx.batch_execute(RESIDENT_DDL)
         .map_err(|error| format!("create Postgres resident budget failed: {error:?}"))?;
+    tx.batch_execute(INSTANCE_DDL)
+        .map_err(|e| format!("create execution instances failed: {e}"))?;
     for version in 1..=STORE_SCHEMA_VERSION {
         tx.execute(
             "INSERT INTO runtime.schema_migrations(version, applied_at_ms) VALUES($1, $2)",
@@ -390,7 +418,7 @@ fn create_schema(client: &mut Client) -> Result<(), String> {
 }
 
 fn validate_schema(client: &mut impl GenericClient, kinds: &str) -> Result<(), String> {
-    validate_schema_with_resource_budgets(client, kinds, true, true)
+    validate_schema_with_resource_budgets(client, kinds, true, true, true)
 }
 
 fn validate_schema_with_reclaim_budget(
@@ -398,7 +426,7 @@ fn validate_schema_with_reclaim_budget(
     kinds: &str,
     reclaim_budget: bool,
 ) -> Result<(), String> {
-    validate_schema_with_resource_budgets(client, kinds, reclaim_budget, false)
+    validate_schema_with_resource_budgets(client, kinds, reclaim_budget, false, false)
 }
 
 fn validate_schema_with_resource_budgets(
@@ -406,19 +434,25 @@ fn validate_schema_with_resource_budgets(
     kinds: &str,
     reclaim_budget: bool,
     resident_budget: bool,
+    instance_binding: bool,
 ) -> Result<(), String> {
     let tables = object_names(client, "BASE TABLE")?;
     let expected_tables = RUNTIME_TABLES
         .iter()
         .copied()
-        .filter(|table| resident_budget || *table != "resident_sandboxes")
+        .filter(|table| {
+            (resident_budget || *table != "resident_sandboxes")
+                && (instance_binding || *table != "execution_instances")
+        })
         .map(str::to_string)
         .collect();
     if tables != expected_tables {
         return Err(format!("Postgres runtime table set mismatch: {tables:?}"));
     }
     for (table, expected) in TABLE_SHAPES {
-        if *table == "resident_sandboxes" && !resident_budget {
+        if (*table == "resident_sandboxes" && !resident_budget)
+            || (*table == "execution_instances" && !instance_binding)
+        {
             continue;
         }
         let expected = if *table == "runtime_jobs" && !reclaim_budget {
@@ -436,6 +470,12 @@ fn validate_schema_with_resource_budgets(
             return Err(format!(
                 "Postgres runtime table definition mismatch: {table}"
             ));
+        }
+    }
+    if instance_binding {
+        let keys = client.query_one("SELECT COUNT(*) FILTER (WHERE contype='p' AND conkey=ARRAY[1]::smallint[]),COUNT(*) FILTER (WHERE contype='u' AND conkey=ARRAY[2]::smallint[]),COUNT(*) FILTER (WHERE contype='f') FROM pg_constraint WHERE conrelid='runtime.execution_instances'::regclass", &[]).map_err(|e| e.to_string())?;
+        if keys.get::<_, i64>(0) != 1 || keys.get::<_, i64>(1) != 1 || keys.get::<_, i64>(2) != 0 {
+            return Err("Postgres instance identity constraints mismatch".into());
         }
     }
     if resident_budget {
@@ -710,7 +750,7 @@ mod tests {
 
     #[test]
     fn transcript_read_model_and_wait_handoff_have_explicit_store_schema() {
-        assert_eq!(STORE_SCHEMA_VERSION, 7);
+        assert_eq!(STORE_SCHEMA_VERSION, 8);
         for table in [
             "transcript_projection_heads",
             "transcript_projection_current_generations",

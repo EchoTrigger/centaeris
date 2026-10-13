@@ -11,6 +11,7 @@ mod contract;
 mod deferred_input_resolver;
 mod docker_engine;
 mod docker_execution_host;
+mod environment_authorization;
 mod execution_capacity;
 mod execution_recovery_coordinator;
 mod execution_recovery_policy;
@@ -2056,6 +2057,7 @@ fn execute_agent_run(
                     user_id: agent_run_start.authorization.user_id.clone(),
                     agent_id: agent_run_start.authorization.agent_id.clone(),
                     authorization_digest: agent_run_start.authorization_digest.clone(),
+                    environment_binding: agent_run_start.environment_authorization.payload.clone(),
                     image_digest: agent_run_start.authorization.image_digest.clone(),
                     resources: agent_run_start.authorization.resources,
                     has_execution_fact,
@@ -6550,7 +6552,7 @@ mod tests {
         .digest()
         .expect("authorization digest");
         serde_json::from_value::<AgentRunStart>(serde_json::json!({
-            "schema": "workspace.agent_run.start.v2",
+            "schema": "workspace.agent_run.start.v3",
             "initialInput": {"type":"userMessage"},
             "agentRunId": "agent_run_1",
             "turnId": "turn_1",
@@ -6560,6 +6562,7 @@ mod tests {
             "modelMaxOutputTokens": 32768,
             "authorizationDigest": digest,
             "authorizationSignature": "hmac-sha256:test-only-not-validated",
+            "environmentAuthorization": crate::environment_authorization::EnvironmentAuthorization::for_test(&serde_json::from_value(authorization.clone()).unwrap(), b"test-run-authorization-signing-key"),
             "authorization": authorization,
             "tailAction": {"type": "append"}
         }))

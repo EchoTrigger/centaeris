@@ -1,5 +1,17 @@
 # Workspace release gate
 
+Environment execution binding acceptance requires the unchanged signed v1 grant
+parity vectors, shared environment-authorization signature vector and strict v3
+start rejection tests. Run the focused API authorization, Session environment and
+forward migration tests against disposable PostgreSQL. The Runtime outbox gate
+includes execution-instance and resident behavior tests: independent-connection
+durability, concurrent replay, authoritative Run/Session/grant checks, host/image
+reassignment rejection, creation uncertainty retaining budgets and schema-v8
+forward migration with prior reservations/history preserved. Actual Docker
+request/adoption fixtures must reject absent or mismatched environment/instance
+labels. Local fixtures do not establish a deployment or real isolation pass; the
+coordinated upgrade still requires the operator's old live/waiting inventory.
+
 The prepared Agent input ledger is not an execution-intake or Read gate pass.
 Before integrating this capability, require the following behavioral evidence
 against the frozen Core contract:
@@ -708,7 +720,7 @@ execution. The descriptor is not registered as a model tool for ordinary or
 managed Sessions, and no automatic wake, general retry/progress policy, stop
 cascade or cross-Session waiter change is certified. Accepted is not processed.
 
-Explicit first-consumption acceptance additionally requires strict start v2,
+Explicit first-consumption acceptance additionally requires strict start v3,
 single-notice first-root uniqueness, operation replay/conflict, busy retention,
 original membership and current child read authority, and atomic Run/input/
 authorization/receipt rollback. Use Core's native input factory and real fenced

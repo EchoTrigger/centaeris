@@ -78,6 +78,7 @@ impl Default for PostgresConnectionLimits {
 }
 
 mod execution_capacity;
+pub(crate) mod execution_instances;
 mod external_context;
 mod reliability;
 mod residency;

@@ -316,7 +316,7 @@ fn validate_sha256(name: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn canonical_json(value: Value) -> Result<String, String> {
+pub(crate) fn canonical_json(value: Value) -> Result<String, String> {
     fn sort_value(value: Value) -> Value {
         match value {
             Value::Array(items) => Value::Array(items.into_iter().map(sort_value).collect()),

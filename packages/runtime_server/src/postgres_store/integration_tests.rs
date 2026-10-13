@@ -36,6 +36,7 @@ use centaeris_runtime_sqlite::SqliteRuntimeStore;
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 mod checkpoint_requests;
+mod execution_instance_tests;
 mod residency_tests;
 mod snapshot_cas_tests;
 mod tool_result_storage_tests;
@@ -1184,7 +1185,7 @@ fn postgres_lease_budget_forward_migration_preserves_published_job_facts() {
         .unwrap();
     drop(store);
     let mut db = Client::connect(&url, NoTls).unwrap();
-    db.batch_execute("DELETE FROM runtime.schema_migrations WHERE version>=6; DROP TABLE runtime.resident_sandboxes; ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_count; ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_not_before_ms;").unwrap();
+    db.batch_execute("DELETE FROM runtime.schema_migrations WHERE version>=6; DROP TABLE runtime.execution_instances; DROP TABLE runtime.resident_sandboxes; ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_count; ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_not_before_ms;").unwrap();
     let history = db
         .query(
             "SELECT version,applied_at_ms FROM runtime.schema_migrations ORDER BY version",
@@ -2923,6 +2924,11 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
         authorization_signature: authorization
             .signature(b"test-run-authorization-signing-key")
             .unwrap(),
+        environment_authorization:
+            crate::environment_authorization::EnvironmentAuthorization::for_test(
+                &authorization,
+                b"test-run-authorization-signing-key",
+            ),
         authorization,
         tail_action: crate::contract::AgentRunTailAction::Append,
         coordination_session_id: None,

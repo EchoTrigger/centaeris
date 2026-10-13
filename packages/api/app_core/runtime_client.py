@@ -111,6 +111,7 @@ def _validate_agent_run_binding(agent_run):
 
 def build_agent_run_start(agent_run) -> dict:
     from .models import AgentCoordinationSession, AgentInputQueue
+    from .environment_authorization import build_environment_authorization
     authorization = _validate_agent_run_binding(agent_run)
     start = {
         "schema": AGENT_RUN_START_SCHEMA,
@@ -124,6 +125,7 @@ def build_agent_run_start(agent_run) -> dict:
         "authorizationDigest": authorization.digest,
         "authorizationSignature": authorization.signature,
         "authorization": authorization.payload,
+        "environmentAuthorization": build_environment_authorization(agent_run, authorization),
         "tailAction": (
             {"type": "append"}
             if agent_run.tailPolicy == "append"

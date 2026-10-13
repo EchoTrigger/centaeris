@@ -4,7 +4,7 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::agent_run_authorization::WorkspaceAgentRunAuthorization;
 
-pub const AGENT_RUN_START_SCHEMA: &str = "workspace.agent_run.start.v2";
+pub const AGENT_RUN_START_SCHEMA: &str = "workspace.agent_run.start.v3";
 pub const AGENT_RUN_STEP_SCHEMA: &str = "runtime.agent_run.step.v1";
 pub const AGENT_RUN_CANCEL_SCHEMA: &str = "runtime.agent_run.cancel.v1";
 pub const AGENT_RUN_SUPPLEMENT_SCHEMA: &str = "runtime.agent_run.supplement.v1";
@@ -24,6 +24,7 @@ pub struct AgentRunStart {
     pub authorization_digest: String,
     pub authorization_signature: String,
     pub authorization: WorkspaceAgentRunAuthorization,
+    pub environment_authorization: crate::environment_authorization::EnvironmentAuthorization,
     pub tail_action: AgentRunTailAction,
     pub coordination_session_id: Option<String>,
     pub native_coordination_session_id: Option<String>,
@@ -115,6 +116,11 @@ impl AgentRunStart {
             &self.authorization_digest,
             signing_key,
             &self.authorization_signature,
+        )?;
+        self.environment_authorization.verify(
+            &self.authorization,
+            &self.authorization_digest,
+            signing_key,
         )?;
         if self
             .coordination_session_id
@@ -408,6 +414,7 @@ mod tests {
             "modelMaxOutputTokens": 32768,
             "authorizationDigest": digest,
             "authorizationSignature": signature,
+            "environmentAuthorization": crate::environment_authorization::EnvironmentAuthorization::for_test(&authorization, b"test-run-authorization-signing-key"),
             "authorization": authorization,
             "tailAction": {"type": "append"}
         })
@@ -429,12 +436,45 @@ mod tests {
         )
         .unwrap();
         let mut value = valid_agent_run_start_value();
-        value["schema"] = serde_json::json!("workspace.agent_run.start.v2");
+        value["schema"] = serde_json::json!("workspace.agent_run.start.v3");
         value["coordinationSessionId"] = serde_json::json!("sess_1");
         value["nativeCoordinationSessionId"] = serde_json::json!("sess_1");
         value["initialInput"] = serde_json::json!({"type":"hostEvent", "attemptId":"consume-attempt-one",
             "noticeId":"notice-one", "input":input});
         (value, input)
+    }
+
+    #[test]
+    fn start_requires_current_environment_authorization_without_legacy_aliases() {
+        let valid = valid_agent_run_start_value();
+        let mut cases = Vec::new();
+        for schema in [
+            "workspace.agent_run.start.v1",
+            "workspace.agent_run.start.v2",
+        ] {
+            let mut changed = valid.clone();
+            changed["schema"] = schema.into();
+            cases.push(changed);
+        }
+        let mut missing = valid.clone();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("environmentAuthorization");
+        cases.push(missing);
+        let mut unknown = valid.clone();
+        unknown["environmentAuthorization"]["controlEpoch"] = 1.into();
+        cases.push(unknown);
+        let mut tampered = valid;
+        tampered["environmentAuthorization"]["payload"]["environmentId"] = "foreign".into();
+        cases.push(tampered);
+        for value in cases {
+            assert!(serde_json::from_value::<AgentRunStart>(value)
+                .map(|start| start
+                    .validate(b"test-run-authorization-signing-key")
+                    .is_err())
+                .unwrap_or(true));
+        }
     }
 
     #[test]
@@ -447,7 +487,7 @@ mod tests {
                 .is_err())
             .unwrap_or(true));
         let mut value = valid_agent_run_start_value();
-        value["schema"] = serde_json::json!("workspace.agent_run.start.v2");
+        value["schema"] = serde_json::json!("workspace.agent_run.start.v3");
         value["initialInput"] = serde_json::json!({"type":"userMessage"});
         serde_json::from_value::<AgentRunStart>(value.clone())
             .unwrap()

@@ -289,6 +289,9 @@ pub struct DockerExecutionHostRunner {
     agent_run_id: String,
     execution_id: String,
     authorization_digest: String,
+    environment_id: String,
+    instance_id: String,
+    binding_digest: String,
     image_digest: String,
     oci_runtime: OciRuntime,
     resources: SandboxResources,
@@ -491,6 +494,7 @@ pub struct DockerExecutionHostRequest<'a> {
     pub user_id: String,
     pub agent_id: String,
     pub authorization_digest: String,
+    pub environment_binding: crate::environment_authorization::EnvironmentBinding,
     pub image_digest: String,
     pub resources: SandboxResources,
     pub has_execution_fact: bool,
@@ -504,6 +508,9 @@ struct ContainerExpectation<'a> {
     agent_run_id: &'a str,
     execution_id: &'a str,
     authorization_digest: &'a str,
+    environment_id: &'a str,
+    instance_id: &'a str,
+    binding_digest: &'a str,
     image_digest: &'a str,
     oci_runtime: OciRuntime,
     resources: SandboxResources,
@@ -554,6 +561,12 @@ impl DockerExecutionHostRunner {
         request: DockerExecutionHostRequest<'_>,
         before_create: &mut (dyn FnMut(&mut postgres::Client) -> Result<(), String> + Send),
     ) -> Result<Self, String> {
+        if request.environment_binding.agent_run_id != request.agent_run_id
+            || request.environment_binding.agent_run_authorization_digest
+                != request.authorization_digest
+        {
+            return Err("Docker environment binding is invalid".into());
+        }
         #[cfg(test)]
         if crate::native_consumption_tests::owns_identity(&request.user_id, &request.agent_id) {
             assert!(
@@ -567,6 +580,10 @@ impl DockerExecutionHostRunner {
             runner.container_name = format!("native-consume-test:{}", request.execution_id);
             runner.agent_run_id = request.agent_run_id;
             runner.execution_id = request.execution_id;
+            runner.environment_id = request.environment_binding.environment_id.clone();
+            runner.binding_digest = request.environment_binding.digest()?;
+            runner.instance_id =
+                crate::postgres_store::execution_instances::instance_id(&runner.execution_id);
             runner.authorization_digest = request.authorization_digest;
             runner.image_digest = request.image_digest;
             runner.resources = request.resources;
@@ -586,6 +603,7 @@ impl DockerExecutionHostRunner {
             user_id,
             agent_id,
             authorization_digest,
+            environment_binding,
             image_digest,
             resources,
             has_execution_fact,
@@ -603,6 +621,9 @@ impl DockerExecutionHostRunner {
         {
             return Err("Docker sandbox binding is invalid".to_string());
         }
+        let environment_id = environment_binding.environment_id.clone();
+        let binding_digest = environment_binding.digest()?;
+        let instance_id = crate::postgres_store::execution_instances::instance_id(&execution_id);
         validate_plugin_activation_snapshot(plugin_activation)?;
         let plugin_volume_name = docker_volume_name_from_environment(PLUGIN_VOLUME_NAME_ENV)?;
         let plugin_mounts = plugin_mounts(plugin_activation);
@@ -620,6 +641,9 @@ impl DockerExecutionHostRunner {
             agent_run_id: agent_run_id.as_str(),
             execution_id: execution_id.as_str(),
             authorization_digest: authorization_digest.as_str(),
+            environment_id: &environment_id,
+            instance_id: &instance_id,
+            binding_digest: &binding_digest,
             image_digest: image_digest.as_str(),
             oci_runtime,
             resources,
@@ -643,6 +667,16 @@ impl DockerExecutionHostRunner {
             observed_resident_sandboxes,
             |client| {
                 before_create(client)?;
+                let committed = crate::postgres_store::execution_instances::bind(
+                    client,
+                    &environment_binding,
+                    &execution_id,
+                    &resident_host_id,
+                    &image_digest,
+                )?;
+                if committed != instance_id {
+                    return Err("execution instance allocation mismatch".into());
+                }
                 ensure_container(&expected, has_execution_fact)?;
                 Ok(inspect_container(&container_name)?
                     .ok_or("prepared resident sandbox disappeared")?
@@ -664,6 +698,9 @@ impl DockerExecutionHostRunner {
             agent_run_id,
             execution_id,
             authorization_digest,
+            environment_id,
+            instance_id,
+            binding_digest,
             image_digest,
             oci_runtime,
             resources,
@@ -712,6 +749,9 @@ impl DockerExecutionHostRunner {
             agent_run_id: self.agent_run_id.as_str(),
             execution_id: self.execution_id.as_str(),
             authorization_digest: self.authorization_digest.as_str(),
+            environment_id: &self.environment_id,
+            instance_id: &self.instance_id,
+            binding_digest: &self.binding_digest,
             image_digest: self.image_digest.as_str(),
             oci_runtime: self.oci_runtime,
             resources: self.resources,
@@ -2694,6 +2734,8 @@ fn container_create_body(expected: &ContainerExpectation<'_>) -> Result<serde_js
     Ok(json!({
         "Image":expected.image_digest,
         "Labels":{"centaeris.managed":"true", "centaeris.agent_run_id":expected.agent_run_id,
+            "centaeris.environment_id":expected.environment_id,"centaeris.instance_id":expected.instance_id,
+            "centaeris.environment_authorization_digest":expected.binding_digest,
             "centaeris.execution_id":expected.execution_id},
         "HostConfig":{
             "Runtime":expected.oci_runtime.docker_runtime_name(), "NetworkMode":SANDBOX_NETWORK_MODE,
@@ -4032,7 +4074,9 @@ mod tests {
             );
         }
         let observed = observed_resident_sandboxes().unwrap();
-        db.batch_execute("DROP SCHEMA IF EXISTS runtime CASCADE; CREATE TABLE IF NOT EXISTS public.app_core_agentrun(id text PRIMARY KEY,session_id text NOT NULL,workspace_id text NOT NULL,status text NOT NULL); DELETE FROM public.app_core_agentrun WHERE id='centaeris-recovery-test-run'; INSERT INTO public.app_core_agentrun VALUES('centaeris-recovery-test-run','centaeris-recovery-test-session','centaeris-recovery-test-tenant','running');").unwrap();
+        db.batch_execute("DROP SCHEMA IF EXISTS runtime CASCADE; CREATE TABLE IF NOT EXISTS public.app_core_agentrun(id text PRIMARY KEY,session_id text NOT NULL,workspace_id text NOT NULL,status text NOT NULL); DELETE FROM public.app_core_agentrun WHERE id='centaeris-recovery-test-run'; INSERT INTO public.app_core_agentrun(id,session_id,workspace_id,status) VALUES('centaeris-recovery-test-run','centaeris-recovery-test-session','centaeris-recovery-test-tenant','running');").unwrap();
+        db.batch_execute("ALTER TABLE public.app_core_agentrun ADD COLUMN IF NOT EXISTS environment_id text; UPDATE public.app_core_agentrun SET environment_id='environment_test' WHERE id='centaeris-recovery-test-run'; CREATE TABLE IF NOT EXISTS public.app_core_agentrunauthorization(agent_run_id text PRIMARY KEY,digest text NOT NULL);").unwrap();
+        db.execute("INSERT INTO public.app_core_agentrunauthorization VALUES($1,$2) ON CONFLICT(agent_run_id) DO UPDATE SET digest=EXCLUDED.digest", &[&run,&digest]).unwrap();
         let store = Arc::new(PostgresRuntimeStore::new(&url).unwrap());
         let owner = "centaeris-recovery-test-owner";
         let job = centaeris_core::session::reliability::agent_run_lifecycle_job_id(run).unwrap();
@@ -4105,6 +4149,14 @@ mod tests {
                         user_id: "centaeris-recovery-test-user".into(),
                         agent_id: "centaeris-recovery-test-agent".into(),
                         authorization_digest: digest.clone(),
+                        environment_binding: crate::environment_authorization::EnvironmentBinding {
+                            schema: "workspace.environment_authorization.v1".into(),
+                            environment_id: "environment_test".into(),
+                            session_id: "centaeris-recovery-test-session".into(),
+                            agent_run_id: run.into(),
+                            agent_run_authorization_digest: digest.clone(),
+                            execution_mode: "perRun".into(),
+                        },
                         image_digest: image.clone(),
                         resources,
                         has_execution_fact: false,
@@ -5688,6 +5740,39 @@ mod tests {
     }
 
     #[test]
+    fn adoption_rejects_missing_or_foreign_environment_instance_and_grant_labels() {
+        let runner = test_docker_execution_host_runner();
+        let request = container_create_body(&runner.container_expectation()).unwrap();
+        let mut config = request.clone();
+        config.as_object_mut().unwrap().remove("Image");
+        config.as_object_mut().unwrap().remove("HostConfig");
+        let facts = serde_json::json!({"Id":"test", "Image": request["Image"], "Config": config,
+            "HostConfig":request["HostConfig"]});
+        assert!(crate::docker_engine::verify_created(&facts, &request).is_ok());
+        for label in [
+            "centaeris.environment_id",
+            "centaeris.instance_id",
+            "centaeris.environment_authorization_digest",
+        ] {
+            let mut missing = facts.clone();
+            missing["Config"]["Labels"]
+                .as_object_mut()
+                .unwrap()
+                .remove(label);
+            assert!(
+                crate::docker_engine::verify_created(&missing, &request).is_err(),
+                "{label}"
+            );
+            let mut foreign = facts.clone();
+            foreign["Config"]["Labels"][label] = "foreign".into();
+            assert!(
+                crate::docker_engine::verify_created(&foreign, &request).is_err(),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
     fn engine_creation_preserves_sandbox_limits_and_mount_isolation() {
         let mut runner = test_docker_execution_host_runner();
         runner.resources.cpu_milli = 4000;
@@ -5698,6 +5783,15 @@ mod tests {
             body["Labels"]["centaeris.execution_id"],
             runner.execution_id
         );
+        assert_eq!(
+            body["Labels"]["centaeris.environment_id"],
+            "environment_test"
+        );
+        let instance = body["Labels"]["centaeris.instance_id"]
+            .as_str()
+            .expect("physical instance identity");
+        assert!(instance.starts_with("instance_"));
+        assert_ne!(instance, runner.execution_id);
         let host = &body["HostConfig"];
         assert_eq!(host["CpuPeriod"], 100000);
         assert_eq!(host["CpuQuota"], 400000);
@@ -6171,6 +6265,9 @@ mod tests {
             container_name: "centaeris-agent-run-test".to_string(),
             agent_run_id: "agent_run_test".to_string(),
             execution_id: "execution_test".to_string(),
+            environment_id: "environment_test".into(),
+            instance_id: crate::postgres_store::execution_instances::instance_id("execution_test"),
+            binding_digest: format!("sha256:{}", "c".repeat(64)),
             authorization_digest: format!("sha256:{}", "a".repeat(64)),
             image_digest: format!("sha256:{}", "b".repeat(64)),
             oci_runtime: OciRuntime::Runc,
