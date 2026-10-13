@@ -1,0 +1,37 @@
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5808030Z FAIL: test_materializer_timeout_does_not_block_core_final (app_core.test_agent_work_runtime.AgentWorkRuntimeTests.test_materializer_timeout_does_not_block_core_final)
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5809032Z ----------------------------------------------------------------------
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5809659Z Traceback (most recent call last):
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5810829Z   File "/home/runner/work/centaeris/centaeris/packages/api/app_core/test_agent_work_runtime.py", line 166, in test_materializer_timeout_does_not_block_core_final
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5811553Z     self.invoke(False, "timeout")
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5812148Z   File "/home/runner/work/centaeris/centaeris/packages/api/app_core/test_agent_work_runtime.py", line 133, in invoke
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5812765Z     self.assertEqual(result.returncode, 0, diagnostic)
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5813124Z AssertionError: 101 != 0 :
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5813392Z running 1 test
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5813646Z fast-trigger-case: timeout
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5814103Z test agent_work::tests::runtime::django_work_commit_boundary ... FAILED
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5814393Z
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5814490Z failures:
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5814609Z
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5814699Z failures:
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5815002Z     agent_work::tests::runtime::django_work_commit_boundary
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5815250Z
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5815787Z test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 407 filtered out; finished in 0.85s
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5816353Z
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5816686Z     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5817457Z      Running unittests src/main.rs (target/debug/deps/runtime_server-41187e564a7c3082)
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5819037Z agent_work_trigger_deferred eventId=evt_v1_tool_result:sha256:668e88089b04352eeadd88dee9a64f4ce62ef74c6f193031cf2332cd2ebc6613 reason=http
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5819856Z
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5820977Z thread 'agent_work::tests::runtime::django_work_commit_boundary' (44263) panicked at packages/runtime_server/src/agent_work_runtime_tests.rs:949:9:
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5822076Z assertion `left == right` failed
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5822354Z   left: 0
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5822552Z  right: 1
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5822961Z note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5823579Z error: test failed, to rerun pass `-p runtime_server --bin runtime_server`
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5823872Z
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5823880Z
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5824116Z ----------------------------------------------------------------------
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5824476Z Ran 1272 tests in 875.298s
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5824709Z
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5824880Z FAILED (failures=1)
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5825537Z Gate: discovered=1272, executed=1272, skipped=0, expectedFailures=0, passed=False
+workspace-python	Run python scripts/workspace/ci.py --stage Python	2026-10-13T05:44:59.5826443Z Destroying test database for alias 'default' ('test_centaeris_ci_433bed699621')...

@@ -1,0 +1,15 @@
+{
+  "kernel": "6.12.111+deb13-amd64",
+  "machine": "x86_64",
+  "python": "3.13.5",
+  "runscVersion": {
+    "exitCode": 0,
+    "stdout": "runsc version release-20261005.0\nspec: 1.2.1\n",
+    "stderr": ""
+  },
+  "dockerVersion": {
+    "exitCode": 0,
+    "stdout": "{\"Platform\":{\"Name\":\"Docker Engine - Community\"},\"Version\":\"29.9.0\",\"ApiVersion\":\"1.56\",\"MinAPIVersion\":\"1.40\",\"Os\":\"linux\",\"Arch\":\"amd64\",\"Components\":[{\"Name\":\"Engine\",\"Version\":\"29.9.0\",\"Details\":{\"ApiVersion\":\"1.56\",\"Arch\":\"amd64\",\"BuildTime\":\"Thu Oct  8 20:38:33 2026\",\"Experimental\":\"false\",\"GitCommit\":\"a5b58c9\",\"GoVersion\":\"go1.26.9\",\"KernelVersion\":\"6.12.111+deb13-amd64\",\"MinAPIVersion\":\"1.40\",\"Module\":\"github.com/moby/moby/v2\",\"ModuleVersion\":\"v2.0.0+unknown\",\"Os\":\"linux\"}},{\"Name\":\"containerd\",\"Version\":\"v2.4.1\",\"Details\":{\"GitCommit\":\"f2551031d7276a770f65f98c9b52e57e7dad07e8\"}},{\"Name\":\"runc\",\"Version\":\"1.5.2\",\"Details\":{\"GitCommit\":\"v1.5.2-0-g29dd3dc2\"}},{\"Name\":\"docker-init\",\"Version\":\"0.19.0\",\"Details\":{\"GitCommit\":\"de40ad0\"}}],\"GitCommit\":\"a5b58c9\",\"GoVersion\":\"go1.26.9\",\"KernelVersion\":\"6.12.111+deb13-amd64\",\"BuildTime\":\"2026-10-08T20:38:33.000000000+00:00\"}\n",
+    "stderr": ""
+  }
+}

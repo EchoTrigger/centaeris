@@ -1,0 +1,21 @@
+{
+  "status": "supported",
+  "failure": null,
+  "scope": "single-host correctness smoke",
+  "cleanup": [
+    {
+      "containerId": "centaeris-durable-probe-smoke-final-051f74a3-source",
+      "exitCode": 0
+    },
+    {
+      "containerId": "centaeris-durable-probe-smoke-final-051f74a3-restored",
+      "exitCode": 0
+    },
+    {
+      "networkUnmountExitCode": 0
+    },
+    {
+      "unmountExitCode": 0
+    }
+  ]
+}

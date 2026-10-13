@@ -1,0 +1,2 @@
+{"metric":"scannedEntries","operationId":"protected-baseline","outcome":"ok","phase":"workspaceProtection","schema":"workspace.perf.v1","source":"sandbox","value":4}
+{"metric":"sourceReadBytes","operationId":"protected-baseline","outcome":"ok","phase":"workspaceProtection","schema":"workspace.perf.v1","source":"sandbox","value":24594}

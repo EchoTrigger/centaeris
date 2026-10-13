@@ -1,0 +1,124 @@
+{
+  "workload": "append-log",
+  "baseline": {
+    "operationId": "3-baseline",
+    "exitCode": 0,
+    "externalCaptureElapsedMs": 6549.642113997834,
+    "captureFrameBytes": 268440053,
+    "publishable": true,
+    "inspection": {
+      "files": [
+        {
+          "name": "append.log",
+          "sizeBytes": 9,
+          "sha256": "4b654bd1437066b13498661f3ca14774daf1066d072036beffaf06f0c014250e"
+        },
+        {
+          "name": "cold.bin",
+          "sizeBytes": 268435456,
+          "sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0"
+        },
+        {
+          "name": "hot.bin",
+          "sizeBytes": 4096,
+          "sha256": "7bcf29418f5200f1539d158a17f72a48e328ade71b0f60e6a707cc2e5e74dcb1"
+        }
+      ],
+      "frameSha256": "5e739e22b16caec6e5b8e2ae30d6a234a36dd82d8086ce48a45ae83e57b949fd",
+      "frameBytes": 268440053,
+      "expandedSizeBytes": 268439561
+    },
+    "safeConcurrentRejection": false
+  },
+  "conditional": {
+    "exitCode": 0,
+    "helperOutputBytes": 268443860,
+    "externalCaptureElapsedMs": 6128.693755992572,
+    "disposition": "snapshot",
+    "bodyOffset": 220,
+    "snapshotFrameBytes": 268443640,
+    "inspection": {
+      "files": [
+        {
+          "name": "append.log",
+          "sizeBytes": 3593,
+          "sha256": "907f31aa99151081baadfbe53928817426bfac68562c6f50f04019aff40408bf"
+        },
+        {
+          "name": "cold.bin",
+          "sizeBytes": 268435456,
+          "sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0"
+        },
+        {
+          "name": "hot.bin",
+          "sizeBytes": 4096,
+          "sha256": "7bcf29418f5200f1539d158a17f72a48e328ade71b0f60e6a707cc2e5e74dcb1"
+        }
+      ],
+      "frameSha256": "744ef21b88fe33452dd20920ba5cb5a06c2230dd7e26dbd3de50822cea00e5c7",
+      "frameBytes": 268443640,
+      "expandedSizeBytes": 268443145
+    },
+    "receipt": {
+      "schema": "workspace.snapshot.capture.v1",
+      "captureId": "3-conditional",
+      "disposition": "snapshot",
+      "baselineSnapshotSha256": null,
+      "manifestSha256": "sha256:74deda62d256e226979c2b46fce38a73c81ab877305af24c6091065bd307d7f2"
+    }
+  },
+  "cacheState": "warm/uncontrolled; forced full verification follows conditional capture",
+  "forcedFull": {
+    "operationId": "3-forced",
+    "exitCode": 0,
+    "externalCaptureElapsedMs": 6140.239347994793,
+    "captureFrameBytes": 268443640,
+    "publishable": true,
+    "inspection": {
+      "files": [
+        {
+          "name": "append.log",
+          "sizeBytes": 3593,
+          "sha256": "907f31aa99151081baadfbe53928817426bfac68562c6f50f04019aff40408bf"
+        },
+        {
+          "name": "cold.bin",
+          "sizeBytes": 268435456,
+          "sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0"
+        },
+        {
+          "name": "hot.bin",
+          "sizeBytes": 4096,
+          "sha256": "7bcf29418f5200f1539d158a17f72a48e328ade71b0f60e6a707cc2e5e74dcb1"
+        }
+      ],
+      "frameSha256": "744ef21b88fe33452dd20920ba5cb5a06c2230dd7e26dbd3de50822cea00e5c7",
+      "frameBytes": 268443640,
+      "expandedSizeBytes": 268443145
+    },
+    "safeConcurrentRejection": false
+  },
+  "restore": {
+    "status": "passed",
+    "tree": {
+      "files": [
+        {
+          "name": "append.log",
+          "sizeBytes": 3593,
+          "sha256": "907f31aa99151081baadfbe53928817426bfac68562c6f50f04019aff40408bf"
+        },
+        {
+          "name": "cold.bin",
+          "sizeBytes": 268435456,
+          "sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0"
+        },
+        {
+          "name": "hot.bin",
+          "sizeBytes": 4096,
+          "sha256": "7bcf29418f5200f1539d158a17f72a48e328ade71b0f60e6a707cc2e5e74dcb1"
+        }
+      ],
+      "treeSha256": "1b044139a6c70ab2f078412a5a5b64fa5ed98bb46cdaa6948070541cd772e3b9"
+    }
+  }
+}

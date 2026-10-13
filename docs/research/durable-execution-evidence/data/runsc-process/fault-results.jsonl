@@ -1,0 +1,3 @@
+{"case": "runtimeMismatch", "status": "supported", "layer": "probe admission", "result": "rejected before restore"}
+{"case": "wrongDigest", "status": "supported", "layer": "probe admission", "result": "rejected before restore"}
+{"case": "truncatedCheckpoint", "status": "supported", "layer": "probe admission", "result": "rejected before restore"}

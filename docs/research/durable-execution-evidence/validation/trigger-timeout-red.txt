@@ -1,0 +1,44 @@
+Creating test database for alias 'default'...
+
+F
+======================================================================
+FAIL: test_materializer_timeout_does_not_block_core_final (app_core.test_agent_work_runtime.AgentWorkRuntimeTests.test_materializer_timeout_does_not_block_core_final)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<checkout>\packages\api\app_core\test_agent_work_runtime.py", line 166, in test_materializer_timeout_does_not_block_core_final
+    self.invoke(False, "timeout")
+  File "<checkout>\packages\api\app_core\test_agent_work_runtime.py", line 133, in invoke
+    self.assertEqual(result.returncode, 0, diagnostic)
+AssertionError: 101 != 0 :
+running 1 test
+fast-trigger-case: timeout
+test agent_work::tests::runtime::django_work_commit_boundary ... FAILED
+
+failures:
+
+failures:
+    agent_work::tests::runtime::django_work_commit_boundary
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 406 filtered out; finished in 15.85s
+
+   Compiling runtime_server v0.1.0 (<checkout>\packages\runtime_server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 27s
+     Running unittests src\main.rs (target\debug\deps\runtime_server-329d02beb423a02e.exe)
+agent_work_trigger_deferred eventId=evt_v1_tool_result:sha256:8f488af8427815ce253896c42271c113abd4eada77fa1bada1bb5f1bb9a8b3c2 reason=http
+
+thread 'agent_work::tests::runtime::django_work_commit_boundary' (52260) panicked at packages\runtime_server\src\agent_work_runtime_tests.rs:954:9:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: test failed, to rerun pass `-p runtime_server --bin runtime_server`
+
+
+----------------------------------------------------------------------
+Ran 1 test in 118.582s
+
+FAILED (failures=1)
+Destroying test database for alias 'default'...
+
+Found 1 test(s).
+System check identified no issues (0 silenced).

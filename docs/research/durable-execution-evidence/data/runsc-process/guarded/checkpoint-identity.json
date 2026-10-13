@@ -1,0 +1,17 @@
+{
+  "runtimeSha256": "210b437a9cfae51e8f8c9074ed19b8b5e59477178e2e391a18117d8d6b924f7a",
+  "files": {
+    "checkpoint.img": {
+      "sizeBytes": 171594,
+      "sha256": "450fe6d2f6f03dd5bbbf9d0949280311418f8087221574b5abc024bcedf14d9c"
+    },
+    "pages.img": {
+      "sizeBytes": 217088,
+      "sha256": "c17f073f7431f48e67df9c01e6818e436f3eb906d964b4d62bd46f193aac29b5"
+    },
+    "pages_meta.img": {
+      "sizeBytes": 714,
+      "sha256": "9bad44117ed6df6010ac18c626f7437f521ba0d1dfeba594853a020deb36acc2"
+    }
+  }
+}

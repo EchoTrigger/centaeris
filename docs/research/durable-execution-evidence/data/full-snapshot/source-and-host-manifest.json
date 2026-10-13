@@ -1,0 +1,24 @@
+{
+  "schema": "centaeris.workspaceSnapshotProbe.v1",
+  "experimentId": "full-a1726e90",
+  "imageId": "sha256:4fef0e0307687f5827e9994e98ded3ba96dbaab9b8d0973fe80bd7de990b9c85",
+  "agentSha256": "cc9ea664ff17288e1cf7bb2456abb94a6c067563c56c9433f49d01cf1a473357",
+  "harnessSha256": "2d766a806bc86bd819f05bdafb3a652bff1f134185e06770854069b83122e5ff",
+  "fixtureSha256": "f3b25e12f4ad9903d173aa047eff4668004b57410b9e486bb22c815c4f99d493",
+  "coldBytes": 268435456,
+  "outputMount": {
+    "target": "<snapshotExperimentMount>",
+    "source": "/dev/loop0",
+    "fstype": "ext4"
+  },
+  "scope": "direct execution_agent collect/restore in isolated runsc containers",
+  "notMeasured": [
+    "automaticTriggers",
+    "runtimeSpoolWrittenBytes",
+    "runtimeUploads",
+    "apiCommit",
+    "apiGc",
+    "actualTransportBytes",
+    "coldCache"
+  ]
+}

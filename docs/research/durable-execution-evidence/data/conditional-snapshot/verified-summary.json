@@ -1,0 +1,139 @@
+{
+  "status": "passed",
+  "manifest": {
+    "schema": "centaeris.conditionalSnapshotProbe.v1",
+    "imageId": "sha256:08d56b7cc3b5124b4618febe3f47e55e384c02725fbfc637c6696d49063b2d9d",
+    "agentSha256": "343ba110792e4907cb2483ec6078ec101f6497964220b76c6659092eaca80e9b",
+    "coldBytes": 268435456,
+    "harnessSha256": "1394db6ed0c3bf514a3f33cefc11d95058ebc128e6b5942a1c7cc6559f7ba2f1",
+    "baseHarnessSha256": "43aa047027d91a1c5ebf24171d6dc0cc8663fcfd65326dc9d36eed6c3d3b4438",
+    "fixtureSha256": "167f8741666e701c42bdb8b5feac1567cfcfa044795afcdffc00396a15f450dd",
+    "mount": {
+      "target": "<snapshotExperimentMount>",
+      "source": "/dev/loop0",
+      "fstype": "ext4"
+    },
+    "scope": "actual helper stdout and isolated restores; Runtime spool covered separately by Runtime tests",
+    "notMeasured": [
+      "physicalDeviceIo",
+      "runtimeUploads",
+      "apiCommit",
+      "apiGc",
+      "coldCache",
+      "transportProtocolOverhead"
+    ]
+  },
+  "completedWorkloads": 7,
+  "captureOperations": 22,
+  "observationCount": 44,
+  "restoresPassed": 6,
+  "rows": [
+    {
+      "workload": "unchanged",
+      "conditionalExitCode": 0,
+      "conditionalDisposition": "unchanged",
+      "conditionalStdoutBytes": 290,
+      "conditionalSourceReadBytes": 536879122,
+      "conditionalScannedEntries": 4,
+      "conditionalCounterOutcome": "ok",
+      "restoreStatus": "passed",
+      "forcedFullFrameBytes": 268440053,
+      "forcedFullSourceReadBytes": 536879122,
+      "selectedExpandedBytes": 268439561,
+      "sameSelectedBytesAsForcedFull": true
+    },
+    {
+      "workload": "hot-file",
+      "conditionalExitCode": 0,
+      "conditionalDisposition": "snapshot",
+      "conditionalStdoutBytes": 268440273,
+      "conditionalSourceReadBytes": 536879122,
+      "conditionalScannedEntries": 4,
+      "conditionalCounterOutcome": "ok",
+      "restoreStatus": "passed",
+      "forcedFullFrameBytes": 268440053,
+      "forcedFullSourceReadBytes": 536879122,
+      "selectedExpandedBytes": 268439561,
+      "sameSelectedBytesAsForcedFull": true
+    },
+    {
+      "workload": "large-overwrite",
+      "conditionalExitCode": 0,
+      "conditionalDisposition": "snapshot",
+      "conditionalStdoutBytes": 268440273,
+      "conditionalSourceReadBytes": 536879122,
+      "conditionalScannedEntries": 4,
+      "conditionalCounterOutcome": "ok",
+      "restoreStatus": "passed",
+      "forcedFullFrameBytes": 268440053,
+      "forcedFullSourceReadBytes": 536879122,
+      "selectedExpandedBytes": 268439561,
+      "sameSelectedBytesAsForcedFull": true
+    },
+    {
+      "workload": "append-log",
+      "conditionalExitCode": 0,
+      "conditionalDisposition": "snapshot",
+      "conditionalStdoutBytes": 268443860,
+      "conditionalSourceReadBytes": 536886290,
+      "conditionalScannedEntries": 4,
+      "conditionalCounterOutcome": "ok",
+      "restoreStatus": "passed",
+      "forcedFullFrameBytes": 268443640,
+      "forcedFullSourceReadBytes": 536886290,
+      "selectedExpandedBytes": 268443145,
+      "sameSelectedBytesAsForcedFull": true
+    },
+    {
+      "workload": "rename-delete-revert",
+      "conditionalExitCode": 0,
+      "conditionalDisposition": "unchanged",
+      "conditionalStdoutBytes": 290,
+      "conditionalSourceReadBytes": 536879122,
+      "conditionalScannedEntries": 4,
+      "conditionalCounterOutcome": "ok",
+      "restoreStatus": "passed",
+      "forcedFullFrameBytes": 268440053,
+      "forcedFullSourceReadBytes": 536879122,
+      "selectedExpandedBytes": 268439561,
+      "sameSelectedBytesAsForcedFull": true
+    },
+    {
+      "workload": "background-write",
+      "conditionalExitCode": 1,
+      "conditionalDisposition": "rejected",
+      "conditionalStdoutBytes": 0,
+      "conditionalSourceReadBytes": 0,
+      "conditionalScannedEntries": 0,
+      "conditionalCounterOutcome": "error",
+      "restoreStatus": "not-tested",
+      "writerCompletedWrites": 866
+    },
+    {
+      "workload": "protected-inputs",
+      "fixtureColdBytes": 8192,
+      "restoreStatus": "passed",
+      "checks": [
+        {
+          "operation": "materialize-input",
+          "conditionalDisposition": "unchanged",
+          "conditionalStdoutBytes": 306,
+          "forcedFullFrameBytes": 12784
+        },
+        {
+          "operation": "revoke-input",
+          "conditionalDisposition": "unchanged",
+          "conditionalStdoutBytes": 301,
+          "forcedFullFrameBytes": 12784
+        }
+      ]
+    }
+  ],
+  "boundaries": [
+    "helper stdout bytes, not transport wire bytes",
+    "sourceReadBytes counts application read results across hash and copy passes, not physical device IO",
+    "background writer verifies the idle-process guard, not a mid-copy mutation race",
+    "runtime spool is separately behavior-tested, not measured by this helper probe",
+    "warm/uncontrolled cache; elapsed values are not benchmark comparisons"
+  ]
+}

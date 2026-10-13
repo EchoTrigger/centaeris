@@ -1,0 +1,139 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.33s
+     Running unittests src\lib.rs (target\debug\deps\centaeris_core-2a05ad432f2eb8b4.exe)
+
+running 91 tests
+test runtime::query_loop::tests::decide_tools_path ... ok
+test runtime::query_loop::tests::decide_finalize_without_tools ... ok
+test runtime::query_loop::tests::should_continue_matches_python_semantics ... ok
+test runtime::query_loop::tests::decide_loop_step_exposes_next_hop_and_route ... ok
+test runtime::query_loop::tests::agent_run_resource_usage_accumulates_provider_cache_and_tool_observations ... ok
+test runtime::query_loop::tests::route_tools_executes_declared_tools ... ok
+test runtime::context_window::tests::query_loop_reliable_tool_chain_anchor_semantics_are_exact ... ok
+test runtime::generate_request::tests::query_loop_repair_tombstone_diagnostics_match_trigger ... ok
+test runtime::context_window::tests::query_loop_compaction_summary_and_replay_prefix_stay_byte_stable_until_next_compaction ... ok
+test runtime::tests::active_input_tests::query_loop_native_user_input_record_retains_exact_body ... ok
+test runtime::tests::active_input_tests::attachment_tests::query_loop_supplement_attachment_wire_restores_actual_image_input_metadata ... ok
+test runtime::context_window::tests::query_loop_unbounded_projection_preserves_early_tool_groups_and_rejects_malformed_input ... ok
+test runtime::tests::active_input_tests::query_loop_pending_user_batch_enters_first_request_without_an_extra_reply ... ok
+test runtime::tests::active_input_tests::query_loop_initial_user_identity_and_active_batch_are_read_once_without_repeating_the_initial_body ... ok
+test runtime::tests::active_input_tests::attachment_tests::query_loop_file_attachment_limit_accepts_nine_and_fifty_without_host_specific_tools ... ok
+test runtime::tests::host_event_tests::query_loop_host_event_contract_rejects_unknown_fields_and_invalid_identity ... ok
+test runtime::tests::host_event_tests::query_loop_host_event_compaction_keeps_live_anchor_and_never_replays_host_data_as_user ... ok
+test runtime::tests::completion_delivery_tests::query_loop_provider_ignoring_required_delivery_fails_explicitly ... ok
+test runtime::tests::host_event_tests::query_loop_host_event_ledger_restores_committed_input_after_lost_acknowledgement ... ok
+test runtime::tests::host_event_tests::query_loop_host_event_record_restores_non_user_input_without_a_user_bubble ... ok
+test runtime::tests::active_input_tests::query_loop_plain_and_native_inputs_do_not_release_an_active_runtime_job_wait ... ok
+test runtime::tests::completion_delivery_tests::query_loop_required_delivery_bounds_private_draft_and_checks_the_actual_repair_budget ... ok
+test runtime::tests::completion_delivery_tests::query_loop_internal_worker_and_background_wakeup_can_finish_silently ... ok
+test runtime::tests::active_input_tests::query_loop_main_request_commit_identifies_every_uptaken_user_input ... ok
+test runtime::tests::host_event_tests::query_loop_host_event_initial_input_keeps_goal_and_skips_user_hooks ... ok
+test runtime::tests::active_input_tests::query_loop_failed_main_commit_does_not_ack_or_start_provider_and_recovery_retains_input_identity ... ok
+test runtime::tests::completion_delivery_tests::query_loop_required_delivery_deduplicates_attached_input_after_prepared_restore ... ok
+test runtime::tests::host_event_tests::query_loop_session_record_catalog_matches_wire_and_documentation ... ok
+test runtime::tests::active_input_tests::query_loop_active_native_returns_share_the_run_preserve_the_objective_and_follow_user_priority ... ok
+test runtime::tests::host_event_tests::query_loop_host_event_rejected_repair_observation_commit_prevents_provider_call ... ok
+test runtime::tests::host_event_tests::query_loop_unpaired_tool_repair_diagnostic_distinguishes_host_and_user_turns ... ok
+test runtime::tests::completion_delivery_tests::query_loop_delivery_recovers_a_lost_commit_ack_without_reexecuting_tool ... ok
+test runtime::tests::host_event_tests::query_loop_user_input_preserves_identity_payload_and_snapshot_contract ... ok
+test runtime::tests::query_loop_agent_creation_reconciles_lost_reply_without_repeating_the_write ... ok
+test runtime::tests::host_event_tests::query_loop_host_event_repairs_interrupted_tool_before_first_generation ... ok
+test runtime::tests::active_input_tests::attachment_tests::query_loop_initial_and_running_attachment_reach_actual_main_vision_payload_and_uptake ... ok
+test runtime::tests::completion_delivery_tests::query_loop_required_delivery_survives_canonical_checkpoint_reconstruction ... ok
+test runtime::tests::host_event_tests::query_loop_host_event_does_not_resume_another_input_and_recovers_original_wait ... ok
+test runtime::tests::completion_delivery_tests::query_loop_required_delivery_cannot_be_bypassed_by_a_different_terminal_tool ... ok
+test runtime::tests::query_loop_answer_now_closes_question_wait_before_toolless_convergence ... ok
+test runtime::tests::completion_delivery_tests::query_loop_requires_real_committed_delivery_before_final ... ok
+test runtime::tests::active_input_tests::query_loop_input_arriving_during_compaction_enters_the_main_request_and_only_its_commit_establishes_uptake ... ok
+test runtime::tests::query_loop_cancellation_removes_queued_model_attempt_before_provider_call ... ok
+test runtime::tests::active_input_tests::recovery_tests::query_loop_committed_input_uptake_survives_ack_failure_and_same_run_recovery ... ok
+test runtime::tests::active_input_tests::attachment_tests::query_loop_prepared_attachment_recovery_retains_initial_and_supplement_vision_once ... ok
+test runtime::tests::query_loop_persistence_failure_prevents_provider_call ... ok
+test runtime::tests::active_input_tests::recovery_tests::runtime_context_tests::query_loop_record_recovery_rejects_conflicting_execution_context_identity ... ok
+test runtime::tests::query_loop_preserves_dynamic_description_at_durable_model_request_boundary ... ok
+test runtime::tests::host_event_tests::query_loop_host_event_rejects_old_run_input_for_automatic_runtime_job_resume ... ok
+test runtime::tests::query_loop_reasoning_commits_before_return_and_persistence_failure_stops_continuation ... ok
+test runtime::tests::host_event_tests::query_loop_host_event_rejects_old_run_input_for_explicit_resume ... ok
+test runtime::tests::query_loop_formatted_receipt_replay_preserves_the_original_facts_and_tool_side_effect ... ok
+test runtime::tests::query_loop_readmission_recovers_formatted_receipts_without_reexecution_or_digest_rewrite ... ok
+test runtime::tests::query_loop_hook_rewritten_receipt_requires_the_original_model_arguments ... ok
+test runtime::tests::host_event_tests::query_loop_host_event_tool_continuation_uses_current_event_anchor ... ok
+test runtime::tests::query_loop_tool_continuation_loud_fails_without_reliable_user_anchor ... ok
+test runtime::tests::completion_delivery_tests::query_loop_required_delivery_recovers_a_prepared_repair_without_a_fake_user_message ... ok
+test runtime::tests::completion_delivery_tests::query_loop_user_input_arriving_during_background_wakeup_requires_delivery ... ok
+test runtime::tests::active_input_tests::recovery_tests::query_loop_lost_prepared_snapshot_response_preserves_batch_before_new_input ... ok
+test runtime::tests::subagent_query_loop_request_marks_agent_compaction_scope ... ok
+test runtime::tool_execution::model_argument_recovery_tests::query_loop_argument_reconstruction_rejects_hook_rewrites_and_invalid_json ... ok
+test runtime::tests::completion_delivery_tests::query_loop_later_user_input_requires_a_new_delivery_after_the_first_reply ... ok
+test runtime::tests::active_input_tests::recovery_tests::query_loop_failed_main_commit_recovery_preserves_prepared_batch_before_new_input ... ok
+test runtime::tests::host_event_tests::query_loop_host_event_restores_origin_from_main_observations_and_snapshot ... ok
+test runtime::tests::query_loop_tool_continuation_anchor_covers_supplement_compaction_and_lifecycle_tail ... ok
+test runtime::tests::query_loop_unavailable_attached_image_keeps_request_available_but_rejects_invalid_refs ... ok
+test runtime::tests::query_loop_live_reasoning_seals_failure_cancel_and_retry_without_mixing_attempts ... ok
+test runtime::tests::host_event_tests::query_loop_host_event_actual_compaction_authority_rebuild_recovers_runtime_wait ... ok
+test runtime::tests::active_input_tests::query_loop_pending_native_returns_prevent_run_final_after_plain_or_completed_tool_turn ... ok
+test runtime::tests::host_event_tests::query_loop_host_event_rejected_fence_and_lost_commit_response_reuse_input_identity ... ok
+test runtime::tests::query_loop_over_budget_continuation_preserves_history_when_compaction_cannot_run ... ok
+test runtime::tests::query_loop_runtime_job_wait_resumes_once_with_one_terminal_tool_result ... ok
+test runtime::tests::query_loop_recovery_surfaces_one_terminal_error_after_five_attempts ... ok
+test runtime::tests::active_input_tests::recovery_tests::runtime_context_tests::query_loop_record_recovery_reuses_execution_context_without_duplicate_ids ... ok
+test runtime::tests::wait_recovery_tests::query_loop_wait_recovery_two_runtime_results_progress_once_after_both_complete ... ok
+test runtime::tests::query_loop_subagent_cancel_ack_prevents_immediate_late_tool_dispatch ... ok
+test runtime::tests::query_loop_failed_compaction_preserves_history_at_token_budget_boundary ... ok
+test runtime::tests::query_loop_changed_image_history_does_not_send_different_pixels ... ok
+test runtime::tests::query_loop_deleted_image_history_keeps_continuation_available ... ok
+test runtime::tests::query_loop_tool_continuation_anchors_ephemeral_context_before_user_and_keeps_parallel_tool_tail ... ok
+test runtime::tests::query_loop_image_tool_continuation_keeps_required_observation_after_tool_result ... ok
+test runtime::tests::active_input_tests::recovery_tests::tool_context_tests::query_loop_current_tool_context_with_empty_uptake_recovers_without_reexecution ... ok
+test runtime::tests::query_loop_tool_continuation_twenty_round_deterministic_eval ... ok
+test runtime::tests::query_loop_tool_executes_only_after_model_response_completes ... ok
+test runtime::tests::active_input_tests::recovery_tests::compacted_context_tests::query_loop_compacted_context_commit_failure_preserves_uncommitted_batch_before_deferred_input ... ok
+test runtime::tests::active_input_tests::recovery_tests::compacted_context_tests::query_loop_same_run_recovery_uses_committed_compacted_context_before_new_input ... ok
+test runtime::tests::active_input_tests::recovery_tests::compacted_context_tests::query_loop_compacted_context_ack_failure_reconciles_before_deferred_input ... ok
+test runtime::tests::active_input_tests::recovery_tests::compacted_context_tests::query_loop_repeated_compacted_context_recovery_preserves_membership_with_empty_uptake ... ok
+test runtime::tests::query_loop_external_cancel_stops_before_another_provider_request ... ok
+test runtime::tests::query_loop_cache_prefix_stays_reusable_across_legacy_80_message_threshold ... ok
+test runtime::tests::query_loop_continues_until_natural_final_while_usage_remains_observational ... ok
+
+test result: ok. 91 passed; 0 failed; 0 ignored; 0 measured; 579 filtered out; finished in 2.02s
+
+     Running tests\transcript_page_contract.rs (target\debug\deps\transcript_page_contract-6912c56f32604c1d.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+     Running tests\transcript_patch_read_contract.rs (target\debug\deps\transcript_patch_read_contract-6a9e669175ab49b5.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests\transcript_projection.rs (target\debug\deps\transcript_projection-3efc5756df18d2ba.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.00s
+
+     Running tests\transcript_rebuild_contract.rs (target\debug\deps\transcript_rebuild_contract-7c71bb2a331ff094.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests\transcript_resume_cursor_contract.rs (target\debug\deps\transcript_resume_cursor_contract-77ffa615788654fb.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests\transcript_view_state.rs (target\debug\deps\transcript_view_state-c09c3de3849c3cc5.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running unittests examples\model_image_contract.rs (target\debug\examples\model_image_contract-2c862318af618a27.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s

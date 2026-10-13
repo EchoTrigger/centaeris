@@ -1,0 +1,146 @@
+[
+  {
+    "workload": "unchanged",
+    "baseline": {
+      "sourceReadBytes": 536879122,
+      "scannedEntries": 4,
+      "frameBytes": 268440053,
+      "captureMs": 6749.56,
+      "restoreMs": 5933.937,
+      "restoreStatus": "passed",
+      "publishable": true,
+      "safeConcurrentRejection": false
+    },
+    "after": {
+      "sourceReadBytes": 536879122,
+      "scannedEntries": 4,
+      "frameBytes": 268440053,
+      "captureMs": 6803.497,
+      "restoreMs": 6406.309,
+      "restoreStatus": "passed",
+      "publishable": true,
+      "safeConcurrentRejection": false
+    },
+    "sameFrameAsBaseline": true
+  },
+  {
+    "workload": "hot-file",
+    "baseline": {
+      "sourceReadBytes": 536879122,
+      "scannedEntries": 4,
+      "frameBytes": 268440053,
+      "captureMs": 6827.728,
+      "restoreMs": 6981.421,
+      "restoreStatus": "passed",
+      "publishable": true,
+      "safeConcurrentRejection": false
+    },
+    "after": {
+      "sourceReadBytes": 536879122,
+      "scannedEntries": 4,
+      "frameBytes": 268440053,
+      "captureMs": 6736.729,
+      "restoreMs": 6640.233,
+      "restoreStatus": "passed",
+      "publishable": true,
+      "safeConcurrentRejection": false
+    },
+    "sameFrameAsBaseline": false
+  },
+  {
+    "workload": "large-overwrite",
+    "baseline": {
+      "sourceReadBytes": 536879122,
+      "scannedEntries": 4,
+      "frameBytes": 268440053,
+      "captureMs": 6501.027,
+      "restoreMs": 6653.314,
+      "restoreStatus": "passed",
+      "publishable": true,
+      "safeConcurrentRejection": false
+    },
+    "after": {
+      "sourceReadBytes": 536879122,
+      "scannedEntries": 4,
+      "frameBytes": 268440053,
+      "captureMs": 6619.335,
+      "restoreMs": 6920.619,
+      "restoreStatus": "passed",
+      "publishable": true,
+      "safeConcurrentRejection": false
+    },
+    "sameFrameAsBaseline": false
+  },
+  {
+    "workload": "append-log",
+    "baseline": {
+      "sourceReadBytes": 536879122,
+      "scannedEntries": 4,
+      "frameBytes": 268440053,
+      "captureMs": 7282.134,
+      "restoreMs": 7478.154,
+      "restoreStatus": "passed",
+      "publishable": true,
+      "safeConcurrentRejection": false
+    },
+    "after": {
+      "sourceReadBytes": 536886290,
+      "scannedEntries": 4,
+      "frameBytes": 268443640,
+      "captureMs": 6963.738,
+      "restoreMs": 6893.027,
+      "restoreStatus": "passed",
+      "publishable": true,
+      "safeConcurrentRejection": false
+    },
+    "sameFrameAsBaseline": false
+  },
+  {
+    "workload": "rename-delete-revert",
+    "baseline": {
+      "sourceReadBytes": 536879122,
+      "scannedEntries": 4,
+      "frameBytes": 268440053,
+      "captureMs": 6788.798,
+      "restoreMs": 6732.127,
+      "restoreStatus": "passed",
+      "publishable": true,
+      "safeConcurrentRejection": false
+    },
+    "after": {
+      "sourceReadBytes": 536879122,
+      "scannedEntries": 4,
+      "frameBytes": 268440053,
+      "captureMs": 6193.975,
+      "restoreMs": 6966.323,
+      "restoreStatus": "passed",
+      "publishable": true,
+      "safeConcurrentRejection": false
+    },
+    "sameFrameAsBaseline": true
+  },
+  {
+    "workload": "background-write",
+    "baseline": {
+      "sourceReadBytes": 536879122,
+      "scannedEntries": 4,
+      "frameBytes": 268440053,
+      "captureMs": 6396.977,
+      "restoreMs": 6690.176,
+      "restoreStatus": "passed",
+      "publishable": true,
+      "safeConcurrentRejection": false
+    },
+    "after": {
+      "sourceReadBytes": 268439561,
+      "scannedEntries": 4,
+      "frameBytes": 492,
+      "captureMs": 2629.968,
+      "restoreMs": null,
+      "restoreStatus": "not-tested",
+      "publishable": false,
+      "safeConcurrentRejection": true
+    },
+    "sameFrameAsBaseline": null
+  }
+]

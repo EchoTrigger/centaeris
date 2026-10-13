@@ -1,0 +1,3 @@
+{"metric":"scannedEntries","operationId":"5-conditional","outcome":"error","phase":"workspaceProtection","schema":"workspace.perf.v1","source":"sandbox","value":0}
+{"metric":"sourceReadBytes","operationId":"5-conditional","outcome":"error","phase":"workspaceProtection","schema":"workspace.perf.v1","source":"sandbox","value":0}
+execution_agent failed: snapshot capture requires no agent processes

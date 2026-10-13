@@ -1,0 +1,13 @@
+{
+  "imageId": "sha256:08d56b7cc3b5124b4618febe3f47e55e384c02725fbfc637c6696d49063b2d9d",
+  "runtime": "runsc",
+  "memoryBytes": 1073741824,
+  "pidsLimit": 128,
+  "nanoCpus": 1000000000,
+  "network": "none",
+  "kernelLimits": {
+    "cpu.max": "100000 100000",
+    "memory.max": "1073741824",
+    "pids.max": "128"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "status": "supported",
+  "failure": null,
+  "scope": "single-host correctness smoke",
+  "cleanup": [
+    {
+      "containerId": "centaeris-durable-probe-mount-guard-71f32a0b-source",
+      "exitCode": 0
+    },
+    {
+      "containerId": "centaeris-durable-probe-mount-guard-71f32a0b-restored",
+      "exitCode": 0
+    },
+    {
+      "networkUnmountExitCode": 0
+    },
+    {
+      "unmountExitCode": 0
+    }
+  ]
+}

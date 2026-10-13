@@ -1,0 +1,3 @@
+{"metric":"scannedEntries","operationId":"5-after","outcome":"error","phase":"workspaceProtection","schema":"workspace.perf.v1","source":"sandbox","value":4}
+{"metric":"sourceReadBytes","operationId":"5-after","outcome":"error","phase":"workspaceProtection","schema":"workspace.perf.v1","source":"sandbox","value":268439561}
+execution_agent failed: workspace snapshot source changed

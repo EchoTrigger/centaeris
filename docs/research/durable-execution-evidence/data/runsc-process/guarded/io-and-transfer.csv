@@ -1,0 +1,4 @@
+operation,measurement,kind,value,status
+checkpoint,retainedLogicalBytes,gauge,389396,measured
+checkpoint,retainedAllocatedBytes,gauge,390144,measured
+restore,crossHostTransferBytes,counter,,not-tested

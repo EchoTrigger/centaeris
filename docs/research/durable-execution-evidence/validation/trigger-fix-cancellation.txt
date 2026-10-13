@@ -1,0 +1,50 @@
+Creating test database for alias 'default' ('test_centaeris')...
+
+Found 2 test(s).
+Operations to perform:
+  Synchronize unmigrated apps: corsheaders, messages, staticfiles
+  Apply all migrations: app_core, auth, contenttypes, sessions
+Synchronizing apps without migrations:
+  Creating tables...
+    Running deferred SQL...
+Running migrations:
+  Applying contenttypes.0001_initial... OK
+  Applying auth.0001_initial... OK
+  Applying sessions.0001_initial... OK
+  Applying app_core.0001_initial... OK
+  Applying app_core.0002_persistent_app_delegations... OK
+  Applying app_core.0003_persistent_browser_login... OK
+  Applying app_core.0004_business_agent_branches... OK
+  Applying app_core.0005_agent_input_attachments... OK
+  Applying app_core.0006_session_event_payload_storage... OK
+  Applying app_core.0007_business_definition_instances... OK
+  Applying app_core.0009_storage_gc_backoff... OK
+  Applying app_core.0010_active_run_admission... OK
+  Applying app_core.0011_upload_capacity... OK
+  Applying app_core.0012_work_return_audit... OK
+  Applying app_core.0013_remove_model_quota_domain... OK
+  Applying app_core.0014_library_note_revisions... OK
+  Applying app_core.0015_note_revision_immutability... OK
+  Applying app_core.0016_session_environments... OK
+  Applying contenttypes.0002_remove_content_type_name... OK
+  Applying auth.0002_alter_permission_name_max_length... OK
+  Applying auth.0003_alter_user_email_max_length... OK
+  Applying auth.0004_alter_user_username_opts... OK
+  Applying auth.0005_alter_user_last_login_null... OK
+  Applying auth.0006_require_contenttypes_0002... OK
+  Applying auth.0007_alter_validators_add_error_messages... OK
+  Applying auth.0008_alter_user_username_max_length... OK
+  Applying auth.0009_alter_user_last_name_max_length... OK
+  Applying auth.0010_alter_group_name_max_length... OK
+  Applying auth.0011_update_proxy_permissions... OK
+test_lost_response_and_replayed_commit_reuse_one_real_admission (app_core.test_agent_work_runtime.AgentWorkRuntimeTests.test_lost_response_and_replayed_commit_reuse_one_real_admission) ... ok
+test_materializer_timeout_does_not_block_core_final (app_core.test_agent_work_runtime.AgentWorkRuntimeTests.test_materializer_timeout_does_not_block_core_final) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 111.135s
+
+OK
+Destroying test database for alias 'default' ('test_centaeris')...
+
+  Applying auth.0012_alter_user_first_name_max_length... OK
+System check identified no issues (0 silenced).

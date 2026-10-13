@@ -1,0 +1,107 @@
+{
+  "recordCount": 24,
+  "counters": {
+    "scannedEntries": 48,
+    "sourceReadBytes": 6174117071,
+    "snapshotLogicalBytes": null,
+    "runtimeSpoolWrittenBytes": null,
+    "apiReceivedBytes": null,
+    "apiWrittenBytes": null,
+    "apiVerificationReadBytes": null,
+    "uploadAttempts": null,
+    "uploadedBytes": null,
+    "publishedLinks": null,
+    "committedSnapshots": null,
+    "gcReclaimedBytes": null
+  },
+  "counterCoverage": {
+    "scannedEntries": {
+      "observedOperations": [
+        "sandbox:0-after",
+        "sandbox:0-baseline",
+        "sandbox:1-after",
+        "sandbox:1-baseline",
+        "sandbox:2-after",
+        "sandbox:2-baseline",
+        "sandbox:3-after",
+        "sandbox:3-baseline",
+        "sandbox:4-after",
+        "sandbox:4-baseline",
+        "sandbox:5-after",
+        "sandbox:5-baseline"
+      ],
+      "unmeasuredOperations": []
+    },
+    "sourceReadBytes": {
+      "observedOperations": [
+        "sandbox:0-after",
+        "sandbox:0-baseline",
+        "sandbox:1-after",
+        "sandbox:1-baseline",
+        "sandbox:2-after",
+        "sandbox:2-baseline",
+        "sandbox:3-after",
+        "sandbox:3-baseline",
+        "sandbox:4-after",
+        "sandbox:4-baseline",
+        "sandbox:5-after",
+        "sandbox:5-baseline"
+      ],
+      "unmeasuredOperations": []
+    },
+    "snapshotLogicalBytes": {
+      "observedOperations": [],
+      "unmeasuredOperations": []
+    },
+    "runtimeSpoolWrittenBytes": {
+      "observedOperations": [],
+      "unmeasuredOperations": []
+    },
+    "apiReceivedBytes": {
+      "observedOperations": [],
+      "unmeasuredOperations": []
+    },
+    "apiWrittenBytes": {
+      "observedOperations": [],
+      "unmeasuredOperations": []
+    },
+    "apiVerificationReadBytes": {
+      "observedOperations": [],
+      "unmeasuredOperations": []
+    },
+    "uploadAttempts": {
+      "observedOperations": [],
+      "unmeasuredOperations": []
+    },
+    "uploadedBytes": {
+      "observedOperations": [],
+      "unmeasuredOperations": []
+    },
+    "publishedLinks": {
+      "observedOperations": [],
+      "unmeasuredOperations": []
+    },
+    "committedSnapshots": {
+      "observedOperations": [],
+      "unmeasuredOperations": []
+    },
+    "gcReclaimedBytes": {
+      "observedOperations": [],
+      "unmeasuredOperations": []
+    }
+  },
+  "gauges": {},
+  "timings": [],
+  "missingCounters": [
+    "snapshotLogicalBytes",
+    "runtimeSpoolWrittenBytes",
+    "apiReceivedBytes",
+    "apiWrittenBytes",
+    "apiVerificationReadBytes",
+    "uploadAttempts",
+    "uploadedBytes",
+    "publishedLinks",
+    "committedSnapshots",
+    "gcReclaimedBytes"
+  ]
+}

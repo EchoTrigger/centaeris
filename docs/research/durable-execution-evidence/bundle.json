@@ -1,0 +1,99 @@
+{
+  "schema": "centaeris.researchEvidenceBundle.v1",
+  "codePullRequest": "https://github.com/EchoTrigger/centaeris/pull/34",
+  "codeRevision": "d9459a29ee77dcca9ad9a21f93699c49e401c496",
+  "publicationIntent": "draft research review; do not merge",
+  "baseRevision": "4c8e59f76ab4ecafa677a00b638bc3ff283ca4bd",
+  "evidenceDate": "2026-10-13",
+  "experiments": [
+    {
+      "id": "full-a1726e90",
+      "directory": "data/full-snapshot",
+      "kind": "fileCaptureBaseline",
+      "workloads": 6,
+      "captureOperations": 12,
+      "observationCount": 24,
+      "cacheState": "warm/uncontrolled"
+    },
+    {
+      "id": "resumed-full-7c61d925",
+      "directory": "data/conditional-snapshot",
+      "kind": "pairedConditionalAndFullCapture",
+      "workloads": 7,
+      "captureOperations": 22,
+      "observationCount": 44,
+      "restoresPassed": 6,
+      "cacheState": "warm/uncontrolled"
+    },
+    {
+      "id": "smoke-final-051f74a3",
+      "directory": "data/runsc-process",
+      "kind": "singleHostProcessRecovery",
+      "repetitions": 1,
+      "cacheState": "uncontrolled"
+    },
+    {
+      "id": "mount-guard-71f32a0b",
+      "directory": "data/runsc-process/guarded",
+      "kind": "singleHostProcessRecovery",
+      "repetitions": 1,
+      "cacheState": "uncontrolled"
+    }
+  ],
+  "sourceHashChecks": [
+    {
+      "path": "perf/harness/conditional_snapshot_probe.py",
+      "sha256": "1394db6ed0c3bf514a3f33cefc11d95058ebc128e6b5942a1c7cc6559f7ba2f1",
+      "manifest": "data/conditional-snapshot/manifest.json",
+      "field": "harnessSha256"
+    },
+    {
+      "path": "perf/harness/workspace_snapshot_probe.py",
+      "sha256": "43aa047027d91a1c5ebf24171d6dc0cc8663fcfd65326dc9d36eed6c3d3b4438",
+      "manifest": "data/conditional-snapshot/manifest.json",
+      "field": "baseHarnessSha256"
+    },
+    {
+      "path": "perf/harness/workspace_protection.py",
+      "sha256": "167f8741666e701c42bdb8b5feac1567cfcfa044795afcdffc00396a15f450dd",
+      "manifest": "data/conditional-snapshot/manifest.json",
+      "field": "fixtureSha256"
+    },
+    {
+      "path": "perf/harness/durable_execution_probe.py",
+      "sha256": "19121b8b0805f9c1c22e5078920125b441695cc19361f4832a92f8f6d75dd1ee",
+      "manifest": "data/runsc-process/guarded/manifest.json",
+      "field": "harnessSha256"
+    },
+    {
+      "path": "perf/workloads/durable_execution/probe_main.c",
+      "sha256": "58a0b9eb1b0e821012399c1d47bb11816c1d4e0d8bd28b511b665293107f008c",
+      "manifest": "data/runsc-process/guarded/manifest.json",
+      "field": "sourceSha256"
+    }
+  ],
+  "excludedFromPassClaims": [
+    "interrupted local full API runs",
+    "interrupted full conditional capture run",
+    "intermediate failing test fixes",
+    "latest GitHub CI outcome not read"
+  ],
+  "validation": {
+    "finalRevision": "d9459a29ee77dcca9ad9a21f93699c49e401c496",
+    "focusedApiTestsPassed": 2,
+    "coreQueryLoopPassed": 91,
+    "runtimePassed": 312,
+    "runtimeIgnored": 95,
+    "clippy": "passed",
+    "fullLocalApi": "interrupted; no final result",
+    "initialGithubApi": {
+      "revision": "db3428bcadb4e325c4c25d2cbc7b06869103e5df",
+      "executed": 1272,
+      "failures": 1,
+      "skipped": 0,
+      "runUrl": "https://github.com/EchoTrigger/centaeris/actions/runs/38351261692"
+    },
+    "newGithubRunUrl": "https://github.com/EchoTrigger/centaeris/actions/runs/38367434641",
+    "newGithubConclusion": "notCollected"
+  }
+}

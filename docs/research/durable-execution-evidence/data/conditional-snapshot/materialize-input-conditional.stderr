@@ -1,0 +1,2 @@
+{"metric":"scannedEntries","operationId":"materialize-input-conditional","outcome":"ok","phase":"workspaceProtection","schema":"workspace.perf.v1","source":"sandbox","value":5}
+{"metric":"sourceReadBytes","operationId":"materialize-input-conditional","outcome":"ok","phase":"workspaceProtection","schema":"workspace.perf.v1","source":"sandbox","value":24594}

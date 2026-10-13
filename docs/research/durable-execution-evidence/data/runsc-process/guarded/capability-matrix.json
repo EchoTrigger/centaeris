@@ -1,0 +1,58 @@
+{
+  "memoryState": {
+    "status": "supported",
+    "reason": "source deleted; new sandbox matched external oracle and actual restored descriptor reads"
+  },
+  "processTreeAndPipe": {
+    "status": "supported",
+    "reason": "source deleted; new sandbox matched external oracle and actual restored descriptor reads"
+  },
+  "openFileCursor": {
+    "status": "supported",
+    "reason": "source deleted; new sandbox matched external oracle and actual restored descriptor reads"
+  },
+  "unlinkedOpenFile": {
+    "status": "supported",
+    "reason": "source deleted; new sandbox matched external oracle and actual restored descriptor reads"
+  },
+  "threadAndMmap": {
+    "status": "supported",
+    "reason": "source deleted; new sandbox matched external oracle and actual restored descriptor reads"
+  },
+  "renameLinksPermissions": {
+    "status": "supported",
+    "reason": "source deleted; new sandbox matched external oracle and actual restored descriptor reads"
+  },
+  "quiescedBackgroundWrites": {
+    "status": "supported",
+    "reason": "source deleted; new sandbox matched external oracle and actual restored descriptor reads"
+  },
+  "controllerReconnect": {
+    "status": "supported",
+    "reason": "independent runsc exec reconnected to the live application socket"
+  },
+  "unquiescedCapture": {
+    "status": "not-tested",
+    "reason": "experiment has not established this capability"
+  },
+  "crossHostRecovery": {
+    "status": "not-tested",
+    "reason": "experiment has not established this capability"
+  },
+  "externalConnections": {
+    "status": "not-tested",
+    "reason": "experiment has not established this capability"
+  },
+  "truncatedCheckpoint": {
+    "status": "supported",
+    "reason": "actual truncated image rejected by admission; backend behavior not tested"
+  },
+  "wrongDigest": {
+    "status": "supported",
+    "reason": "probe admission rejected incompatible identity; backend behavior not tested"
+  },
+  "runtimeMismatch": {
+    "status": "supported",
+    "reason": "probe admission rejected incompatible identity; backend behavior not tested"
+  }
+}

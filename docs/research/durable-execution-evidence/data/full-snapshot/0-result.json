@@ -1,0 +1,133 @@
+{
+  "workload": "unchanged",
+  "initial": {
+    "files": [
+      {
+        "name": "append.log",
+        "sizeBytes": 9,
+        "sha256": "4b654bd1437066b13498661f3ca14774daf1066d072036beffaf06f0c014250e"
+      },
+      {
+        "name": "cold.bin",
+        "sizeBytes": 268435456,
+        "sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0"
+      },
+      {
+        "name": "hot.bin",
+        "sizeBytes": 4096,
+        "sha256": "7bcf29418f5200f1539d158a17f72a48e328ade71b0f60e6a707cc2e5e74dcb1"
+      }
+    ],
+    "treeSha256": "f6498464571f74f2f0a45871ef8b74c8adabeb36b0ec56c22e563d607616a251"
+  },
+  "baseline": {
+    "operationId": "0-baseline",
+    "exitCode": 0,
+    "externalCaptureElapsedMs": 6749.559973002761,
+    "captureFrameBytes": 268440053,
+    "publishable": true,
+    "inspection": {
+      "files": [
+        {
+          "name": "append.log",
+          "sizeBytes": 9,
+          "sha256": "4b654bd1437066b13498661f3ca14774daf1066d072036beffaf06f0c014250e"
+        },
+        {
+          "name": "cold.bin",
+          "sizeBytes": 268435456,
+          "sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0"
+        },
+        {
+          "name": "hot.bin",
+          "sizeBytes": 4096,
+          "sha256": "7bcf29418f5200f1539d158a17f72a48e328ade71b0f60e6a707cc2e5e74dcb1"
+        }
+      ],
+      "frameSha256": "5e739e22b16caec6e5b8e2ae30d6a234a36dd82d8086ce48a45ae83e57b949fd",
+      "frameBytes": 268440053,
+      "expandedSizeBytes": 268439561
+    },
+    "safeConcurrentRejection": false,
+    "restore": {
+      "status": "passed",
+      "externalRestoreElapsedMs": 5933.937338006217,
+      "tree": {
+        "files": [
+          {
+            "name": "append.log",
+            "sizeBytes": 9,
+            "sha256": "4b654bd1437066b13498661f3ca14774daf1066d072036beffaf06f0c014250e"
+          },
+          {
+            "name": "cold.bin",
+            "sizeBytes": 268435456,
+            "sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0"
+          },
+          {
+            "name": "hot.bin",
+            "sizeBytes": 4096,
+            "sha256": "7bcf29418f5200f1539d158a17f72a48e328ade71b0f60e6a707cc2e5e74dcb1"
+          }
+        ],
+        "treeSha256": "f6498464571f74f2f0a45871ef8b74c8adabeb36b0ec56c22e563d607616a251"
+      }
+    }
+  },
+  "after": {
+    "operationId": "0-after",
+    "exitCode": 0,
+    "externalCaptureElapsedMs": 6803.497060987866,
+    "captureFrameBytes": 268440053,
+    "publishable": true,
+    "inspection": {
+      "files": [
+        {
+          "name": "append.log",
+          "sizeBytes": 9,
+          "sha256": "4b654bd1437066b13498661f3ca14774daf1066d072036beffaf06f0c014250e"
+        },
+        {
+          "name": "cold.bin",
+          "sizeBytes": 268435456,
+          "sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0"
+        },
+        {
+          "name": "hot.bin",
+          "sizeBytes": 4096,
+          "sha256": "7bcf29418f5200f1539d158a17f72a48e328ade71b0f60e6a707cc2e5e74dcb1"
+        }
+      ],
+      "frameSha256": "5e739e22b16caec6e5b8e2ae30d6a234a36dd82d8086ce48a45ae83e57b949fd",
+      "frameBytes": 268440053,
+      "expandedSizeBytes": 268439561
+    },
+    "safeConcurrentRejection": false,
+    "restore": {
+      "status": "passed",
+      "externalRestoreElapsedMs": 6406.308677003835,
+      "tree": {
+        "files": [
+          {
+            "name": "append.log",
+            "sizeBytes": 9,
+            "sha256": "4b654bd1437066b13498661f3ca14774daf1066d072036beffaf06f0c014250e"
+          },
+          {
+            "name": "cold.bin",
+            "sizeBytes": 268435456,
+            "sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0"
+          },
+          {
+            "name": "hot.bin",
+            "sizeBytes": 4096,
+            "sha256": "7bcf29418f5200f1539d158a17f72a48e328ade71b0f60e6a707cc2e5e74dcb1"
+          }
+        ],
+        "treeSha256": "f6498464571f74f2f0a45871ef8b74c8adabeb36b0ec56c22e563d607616a251"
+      }
+    }
+  },
+  "cacheState": "uncontrolled/warm from preparation and baseline verification",
+  "sameFrameAsBaseline": true
+}

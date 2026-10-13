@@ -1,0 +1,133 @@
+{
+  "schema": "centaeris.durableProbeManifest.v1",
+  "experimentId": "mount-guard-71f32a0b",
+  "sourceRevision": "370fa139f3bd29e4309a38087e2f85357166e542",
+  "sourceSha256": "58a0b9eb1b0e821012399c1d47bb11816c1d4e0d8bd28b511b665293107f008c",
+  "harnessSha256": "19121b8b0805f9c1c22e5078920125b441695cc19361f4832a92f8f6d75dd1ee",
+  "probeSha256": "ded94e20a7078846188986d19b7384148e2ec80d7a6bbfc0b1a85f960078c3e8",
+  "rootfsIdentity": {
+    "kind": "singleStaticBinary",
+    "sha256": "ded94e20a7078846188986d19b7384148e2ec80d7a6bbfc0b1a85f960078c3e8"
+  },
+  "runscSha256": "210b437a9cfae51e8f8c9074ed19b8b5e59477178e2e391a18117d8d6b924f7a",
+  "runscVersion": "runsc version release-20261005.0\nspec: 1.2.1\n",
+  "kernel": "6.12.111+deb13-amd64",
+  "architecture": "x86_64",
+  "ociSpec": {
+    "ociVersion": "1.2.0",
+    "process": {
+      "terminal": false,
+      "user": {
+        "uid": 1000,
+        "gid": 1000
+      },
+      "args": [
+        "/probe",
+        "serve"
+      ],
+      "cwd": "/work",
+      "env": [
+        "PATH=/"
+      ],
+      "noNewPrivileges": true,
+      "capabilities": {
+        "bounding": [],
+        "effective": [],
+        "inheritable": [],
+        "permitted": [],
+        "ambient": []
+      },
+      "rlimits": [
+        {
+          "type": "RLIMIT_NOFILE",
+          "hard": 128,
+          "soft": 128
+        },
+        {
+          "type": "RLIMIT_FSIZE",
+          "hard": 16777216,
+          "soft": 16777216
+        }
+      ]
+    },
+    "root": {
+      "path": "rootfs",
+      "readonly": true
+    },
+    "hostname": "durable-probe",
+    "mounts": [
+      {
+        "destination": "/proc",
+        "type": "proc",
+        "source": "proc",
+        "options": [
+          "nosuid",
+          "noexec",
+          "nodev"
+        ]
+      },
+      {
+        "destination": "/work",
+        "type": "tmpfs",
+        "source": "tmpfs",
+        "options": [
+          "nosuid",
+          "nodev",
+          "size=16777216",
+          "mode=0700",
+          "uid=1000",
+          "gid=1000"
+        ]
+      }
+    ],
+    "linux": {
+      "namespaces": [
+        {
+          "type": "pid"
+        },
+        {
+          "type": "mount"
+        },
+        {
+          "type": "ipc"
+        },
+        {
+          "type": "uts"
+        },
+        {
+          "type": "network"
+        }
+      ],
+      "cgroupsPath": "/centaeris-durable-probe-mount-guard-71f32a0b",
+      "resources": {
+        "memory": {
+          "limit": 536870912
+        },
+        "pids": {
+          "limit": 96
+        },
+        "cpu": {
+          "quota": 100000,
+          "period": 100000
+        }
+      }
+    }
+  },
+  "network": "none",
+  "diskLimitBytes": 268435456,
+  "mount": {
+    "target": "<processExperimentMount>",
+    "source": "/dev/loop1",
+    "fstype": "ext4",
+    "options": "rw,nosuid,nodev,relatime"
+  },
+  "captureProtocol": "application freeze acknowledgement then one runsc memory checkpoint; memory-backed tmpfs; no resume",
+  "failureDomain": "single host",
+  "cacheState": "uncontrolled correctness smoke",
+  "cpuSummary": {
+    "Architecture": "x86_64",
+    "CPU(s)": "8",
+    "Model name": "AMD Ryzen 9 7945HX with Radeon Graphics",
+    "Hypervisor vendor": "VMware"
+  }
+}

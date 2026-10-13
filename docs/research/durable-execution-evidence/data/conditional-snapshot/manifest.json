@@ -1,0 +1,23 @@
+{
+  "schema": "centaeris.conditionalSnapshotProbe.v1",
+  "imageId": "sha256:08d56b7cc3b5124b4618febe3f47e55e384c02725fbfc637c6696d49063b2d9d",
+  "agentSha256": "343ba110792e4907cb2483ec6078ec101f6497964220b76c6659092eaca80e9b",
+  "coldBytes": 268435456,
+  "harnessSha256": "1394db6ed0c3bf514a3f33cefc11d95058ebc128e6b5942a1c7cc6559f7ba2f1",
+  "baseHarnessSha256": "43aa047027d91a1c5ebf24171d6dc0cc8663fcfd65326dc9d36eed6c3d3b4438",
+  "fixtureSha256": "167f8741666e701c42bdb8b5feac1567cfcfa044795afcdffc00396a15f450dd",
+  "mount": {
+    "target": "<snapshotExperimentMount>",
+    "source": "/dev/loop0",
+    "fstype": "ext4"
+  },
+  "scope": "actual helper stdout and isolated restores; Runtime spool covered separately by Runtime tests",
+  "notMeasured": [
+    "physicalDeviceIo",
+    "runtimeUploads",
+    "apiCommit",
+    "apiGc",
+    "coldCache",
+    "transportProtocolOverhead"
+  ]
+}

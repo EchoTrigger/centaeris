@@ -1,0 +1,86 @@
+Creating test database for alias 'default' ('test_centaeris')...
+
+Found 8 test(s).
+Operations to perform:
+  Synchronize unmigrated apps: corsheaders, messages, staticfiles
+  Apply all migrations: app_core, auth, contenttypes, sessions
+Synchronizing apps without migrations:
+  Creating tables...
+    Running deferred SQL...
+Running migrations:
+  Applying contenttypes.0001_initial... OK
+  Applying auth.0001_initial... OK
+  Applying sessions.0001_initial... OK
+  Applying app_core.0001_initial... OK
+  Applying app_core.0002_persistent_app_delegations... OK
+  Applying app_core.0003_persistent_browser_login... OK
+  Applying app_core.0004_business_agent_branches... OK
+  Applying app_core.0005_agent_input_attachments... OK
+  Applying app_core.0006_session_event_payload_storage... OK
+  Applying app_core.0007_business_definition_instances... OK
+  Applying app_core.0009_storage_gc_backoff... OK
+  Applying app_core.0010_active_run_admission... OK
+  Applying app_core.0011_upload_capacity... OK
+  Applying app_core.0012_work_return_audit... OK
+  Applying app_core.0013_remove_model_quota_domain... OK
+  Applying app_core.0014_library_note_revisions... OK
+  Applying app_core.0015_note_revision_immutability... OK
+  Applying app_core.0016_session_environments... OK
+  Applying contenttypes.0002_remove_content_type_name... OK
+  Applying auth.0002_alter_permission_name_max_length... OK
+  Applying auth.0003_alter_user_email_max_length... OK
+  Applying auth.0004_alter_user_username_opts... OK
+  Applying auth.0005_alter_user_last_login_null... OK
+  Applying auth.0006_require_contenttypes_0002... OK
+  Applying auth.0007_alter_validators_add_error_messages... OK
+  Applying auth.0008_alter_user_username_max_length... OK
+  Applying auth.0009_alter_user_last_name_max_length... OK
+  Applying auth.0010_alter_group_name_max_length... OK
+  Applying auth.0011_update_proxy_permissions... OK
+test_committed_source_triggers_one_real_admission_after_core_continues (app_core.test_agent_work_runtime.AgentWorkRuntimeTests.test_committed_source_triggers_one_real_admission_after_core_continues) ... ok
+test_duplicate_commit_wake_reuses_one_real_admission (app_core.test_agent_work_runtime.AgentWorkRuntimeTests.test_duplicate_commit_wake_reuses_one_real_admission) ... ok
+test_lost_response_and_replayed_commit_reuse_one_real_admission (app_core.test_agent_work_runtime.AgentWorkRuntimeTests.test_lost_response_and_replayed_commit_reuse_one_real_admission) ... FAIL
+test_materializer_error_does_not_block_core_final (app_core.test_agent_work_runtime.AgentWorkRuntimeTests.test_materializer_error_does_not_block_core_final) ... ok
+test_materializer_timeout_does_not_block_core_final (app_core.test_agent_work_runtime.AgentWorkRuntimeTests.test_materializer_timeout_does_not_block_core_final) ... ok
+test_full_trigger_capacity_does_not_block_core_final (app_core.test_agent_work_runtime.AgentWorkRuntimeTests.test_full_trigger_capacity_does_not_block_core_final) ... ok
+test_failed_source_commit_never_triggers_materialization (app_core.test_agent_work_runtime.AgentWorkRuntimeTests.test_failed_source_commit_never_triggers_materialization) ... ok
+test_rejected_source_lease_fence_never_triggers_materialization (app_core.test_agent_work_runtime.AgentWorkRuntimeTests.test_rejected_source_lease_fence_never_triggers_materialization) ... ok
+
+======================================================================
+FAIL: test_lost_response_and_replayed_commit_reuse_one_real_admission (app_core.test_agent_work_runtime.AgentWorkRuntimeTests.test_lost_response_and_replayed_commit_reuse_one_real_admission)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<checkout>\packages\api\app_core\test_agent_work_runtime.py", line 160, in test_lost_response_and_replayed_commit_reuse_one_real_admission
+    self.invoke(False, "response_lost")
+  File "<checkout>\packages\api\app_core\test_agent_work_runtime.py", line 133, in invoke
+    self.assertEqual(result.returncode, 0, diagnostic)
+AssertionError: 101 != 0 :
+running 1 test
+fast-trigger-case: response_lost
+test agent_work::tests::runtime::django_work_commit_boundary ... FAILED
+
+failures:
+
+failures:
+    agent_work::tests::runtime::django_work_commit_boundary
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 406 filtered out; finished in 25.99s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.58s
+     Running unittests src\main.rs (target\debug\deps\runtime_server-329d02beb423a02e.exe)
+agent_work_trigger_deferred eventId=evt_v1_tool_result:sha256:2688c907c7397c5633cda8261f57ef9ad2b7d47cbad018ca1ec7eed08c611fdf reason=http
+
+thread 'agent_work::tests::runtime::django_work_commit_boundary' (57936) panicked at packages\runtime_server\src\agent_work_runtime_tests.rs:970:22:
+API admission must finish despite the lost client response: Elapsed(())
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: test failed, to rerun pass `-p runtime_server --bin runtime_server`
+
+
+----------------------------------------------------------------------
+Ran 8 tests in 339.587s
+
+FAILED (failures=1)
+Destroying test database for alias 'default' ('test_centaeris')...
+
+  Applying auth.0012_alter_user_first_name_max_length... OK
+System check identified no issues (0 silenced).

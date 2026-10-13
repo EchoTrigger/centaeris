@@ -1,0 +1,12 @@
+{
+  "nonce": "7afa2b7793e9f915",
+  "counter": 7,
+  "mmapNonce": "dedc89b4f6c9098b",
+  "fileCounter": 7,
+  "fdOffset": 6,
+  "unlinkedOffset": 7,
+  "pipeBytes": 10,
+  "childPid": 2,
+  "paused": true,
+  "threadTicks": 7
+}
