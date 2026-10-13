@@ -194,6 +194,15 @@ python -m unittest discover -s perf/tests -v
 These regressions also run in `scripts/workspace/ci.ps1`. Docker Compose rendering tests use
 synthetic configuration; live smoke runs require the isolated deployment.
 
+## Workspace protection costs
+
+See [workspace protection measurements](../docs/workspace/eval/WorkspaceProtectionBaseline.md)
+for opt-in Runtime/API/helper observations, accounting rules, synthetic workloads
+and the real helper collect/restore experiment. The full-size helper baseline
+records complete reads and frame output for six paired scenarios. Automatic
+Runtime triggers and API/GC deployment costs require their own isolated run;
+missing measurements are not filled with zeros.
+
 ## Harness repair (2026-09-20)
 
 - Smoke consumes the current replayable run SSE endpoint. Its child process has a
