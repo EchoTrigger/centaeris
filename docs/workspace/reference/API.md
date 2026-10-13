@@ -82,6 +82,16 @@ conflicts and the original receipt is recovered. A receipt lookup alone does
 not prove which input version was accepted; the user must inspect that Session.
 Receipt recovery does not cancel execution or repeat external tool effects.
 
+## Session environment reads
+
+Session responses include `currentEnvironmentId` and `executionMode: "perRun"`.
+`GET /api/sessions/{sessionId}/agent-runs/{agentRunId}/environment` reads the Run's
+immutable logical environment binding under current Session access and delegated
+scope. It rejects query fields, performs no repair or admission, and returns
+`Cache-Control: no-store`. An environment ID is not a capability or evidence of
+physical process persistence. See [Session environments](../../development/SessionEnvironments.md)
+for identity, authorization and migration boundaries.
+
 ## Private Agent message transport
 
 Browser-authenticated `POST /api/agents/{agentId}/coordination-session` accepts

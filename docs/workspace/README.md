@@ -7,6 +7,12 @@ boundaries, and release verification.
 
 - [Architecture](architecture/Architecture.md): component ownership and request
   flow.
+- [Session environments](../development/SessionEnvironments.md): stable logical
+  identity, immutable Run bindings and coordinated migration; execution remains
+  per Run.
+- [Conditional workspace capture](architecture/ConditionalWorkspaceCapture.md):
+  verified unchanged receipts, bounded manifest caching and retained consistency
+  checks.
 - [Artifact object storage](architecture/ArtifactObjectStorage.md): storage coupling,
   proposed fixed-content contract and isolated RustFS validation.
 - [Pre-admission cancellation](architecture/PreAdmissionCancellation.md): durable
@@ -49,6 +55,10 @@ boundaries, and release verification.
 - [Release gate](eval/ReleaseGate.md): required source and deployment checks.
 - [Performance evaluation](eval/PerformanceEvaluation.md): reproducible measurement
   definitions without local run receipts.
+- [Workspace protection costs](eval/WorkspaceProtectionBaseline.md): source reads,
+  frame output, conditional capture measurements and recovery checks.
+- [Durable execution probe](eval/DurableExecutionProbe.md): bounded native runsc
+  process-recovery research and its unverified production boundaries.
 - [Isolated performance harness](../../perf/README.md): synthetic test deployment,
   TLS preflight, worker slot control, and external evidence collection.
 - [Short-window observations](../../perf/Observations.md): worker, request-lane and
