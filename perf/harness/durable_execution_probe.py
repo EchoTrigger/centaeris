@@ -159,9 +159,26 @@ class Experiment:
         return self.command([self.runsc, "--root=" + str(self.disk / "state"),
                              "--platform=systrap", "--network=none", "--overlay2=none", *args], **kwargs)
 
-    def observe(self, container_id, action="observe"):
-        result = self.runtime("exec", "--user=1000:1000", container_id, "/probe", action)
+    def observe(self, container_id, action="observe", *, timeout=30):
+        result = self.runtime("exec", "--user=1000:1000", container_id, "/probe", action, timeout=timeout)
         return json.loads(result.stdout)
+
+    def wait_observation(self, container_id, predicate, *, timeout=10):
+        # Only read-only observations may be retried. Freeze/resume/verify can
+        # have effects even when their response is lost.
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("application observation deadline exceeded")
+            try:
+                value = self.observe(container_id, timeout=remaining)
+            except (RuntimeError, subprocess.TimeoutExpired):
+                pass
+            else:
+                if predicate(value):
+                    return value
+            time.sleep(min(0.05, remaining))
 
     def phase(self, name, operation):
         started = time.monotonic()
@@ -240,8 +257,8 @@ class Experiment:
         source_start = source_process.read_text().rsplit(")", 1)[1].split()[19]
         running_state["hostStartTicks"] = source_start
         write_json(self.root / "source-running.json", running_state)
-        first = self.observe(source_id)
-        time.sleep(0.25)
+        first = self.wait_observation(source_id, lambda value: value["counter"] > 0)
+        self.wait_observation(source_id, lambda value: value["counter"] > first["counter"])
         before = self.observe(source_id, "freeze")
         if before["counter"] <= first["counter"]:
             raise ValueError("background writer did not run before freezing")
@@ -304,7 +321,7 @@ class Experiment:
                                                    "--image-path=" + str(checkpoint), restored_id, timeout=60,
                                                    detached_output="restored-process"))
         self.check_limits("restored-enforced-limits.json")
-        after = self.observe(restored_id)
+        after = self.wait_observation(restored_id, lambda value: value["paused"] is True)
         write_json(self.root / "oracle-after.json", after)
         comparison = compare_recovery(before, after, source_stopped=True)
         write_json(self.root / "oracle-comparison.json", comparison)
@@ -315,7 +332,8 @@ class Experiment:
         if not all(verified.get(key) is True for key in ("pipeVerified", "fileVerified", "unlinkedVerified", "linksVerified")):
             raise ValueError("restored descriptors or child process failed actual read verification")
         self.observe(restored_id, "resume")
-        time.sleep(0.15)
+        self.wait_observation(restored_id, lambda value: value["threadTicks"] > before["threadTicks"]
+                              and value["counter"] > before["counter"])
         resumed = self.observe(restored_id, "freeze")
         if resumed["threadTicks"] <= before["threadTicks"] or resumed["counter"] != resumed["fileCounter"]:
             raise ValueError("restored background thread did not continue coherently")

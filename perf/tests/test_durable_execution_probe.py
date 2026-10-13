@@ -9,6 +9,28 @@ from perf.harness import durable_execution_probe as probe
 
 
 class DurableExecutionProbeTests(unittest.TestCase):
+    def test_readiness_waits_for_application_and_progress_without_replaying_mutations(self):
+        experiment = probe.Experiment(Path("unused"), "case-ready", "runsc")
+        observations = [RuntimeError("socket not ready"), {"counter": 0, "threadTicks": 0},
+                        {"counter": 1, "threadTicks": 1}]
+        with patch.object(experiment, "observe", side_effect=observations) as observe, \
+                patch.object(probe.time, "sleep"):
+            result = experiment.wait_observation("source", lambda value: value["counter"] > 0)
+        self.assertEqual(result["counter"], 1)
+        self.assertEqual(observe.call_count, 3)
+        self.assertTrue(all(call.args == ("source",) for call in observe.call_args_list))
+
+    def test_readiness_has_a_deadline_and_does_not_hide_invalid_json(self):
+        experiment = probe.Experiment(Path("unused"), "case-ready", "runsc")
+        with patch.object(experiment, "observe", side_effect=RuntimeError("unavailable")), \
+                patch.object(probe.time, "monotonic", side_effect=[0, 0, 11]), \
+                patch.object(probe.time, "sleep"):
+            with self.assertRaisesRegex(TimeoutError, "observation"):
+                experiment.wait_observation("source", lambda value: True, timeout=10)
+        with patch.object(experiment, "observe", side_effect=ValueError("invalid response")):
+            with self.assertRaisesRegex(ValueError, "invalid response"):
+                experiment.wait_observation("source", lambda value: True)
+
     def test_experiment_directory_is_unique_owned_and_never_a_link(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary).resolve()
