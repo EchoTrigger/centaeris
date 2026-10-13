@@ -87,6 +87,22 @@ binding behavior or use a tested identity-preserving forward repair. Dropping th
 schema would destroy already exposed identities and is not a safe rollback.
 Empty-schema reversal remains supported for structural validation.
 
+For the coordinated upgrade rehearsal, retain queued and running Runs, including
+one with `waiting_for_durable_input`, in an isolated database at migration 0015.
+Apply 0016 and compare their status, start time, transition reason, signed payload,
+digest and signature byte-for-byte. Every Run must receive its Session's binding;
+an insert through the old model must fail instead of creating an unbound Run.
+`test_session_environment_migration` exercises these conditions and repeat upgrade
+and refused reversal. It does not measure production migration duration.
+
+Inventory live and waiting executions before switching Runtime/tool images.
+Waiting is not drained: leave such executions on their matching Runtime/image
+until existing resume/terminal policy completes them, or postpone the switch.
+There is no automatic conversion or destruction of waiting sandboxes in this
+upgrade. An operator must establish that no old-helper instance will be adopted
+by the replacement Runtime. This operational gate is separate from the database
+migration test and requires the deployment's actual instance inventory.
+
 ## Verification
 
 Focused tests cover HTTP creation and replay, successive Runs, distinct child
