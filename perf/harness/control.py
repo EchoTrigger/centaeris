@@ -14,7 +14,7 @@ import time
 
 PROJECT = 'centaeris-perf'
 ROOT = Path(__file__).resolve().parents[2]
-SERVICES = ('api', 'runtime', 'worker', 'postgres', 'redis')
+SERVICES = ('api', 'runtime', 'worker', 'gc', 'postgres', 'redis')
 
 
 def read_env(path):

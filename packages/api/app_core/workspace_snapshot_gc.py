@@ -9,6 +9,7 @@ Active Sessions and restorable trash under retained Agents never enter this coll
 """
 
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 import os
 import re
@@ -21,6 +22,7 @@ from django.db.models import Q
 from .assets import delete_stored_object_for_gc
 from .models import Agent, AgentRun, Session
 from .storage_gc_retry import claim_storage_key, clean_storage_key
+from . import workspace_observations as protection_observations
 
 
 _GENERATION = re.compile(r"[1-9][0-9]*\Z")
@@ -112,7 +114,8 @@ def collect_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSnapshotGcR
                     if dry_run:
                         report.planned.append(key)
                     else:
-                        result = clean_storage_key(key, "workspaceSnapshot", delete_stored_object_for_gc, claim=claim)
+                        delete = partial(_delete_observed_snapshot, session_id=str(session.id))
+                        result = clean_storage_key(key, "workspaceSnapshot", delete, claim=claim)
                         if result.state == "cleaned":
                             report.cleaned.append(key)
                         elif result.state == "blocked":
@@ -126,6 +129,42 @@ def collect_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSnapshotGcR
             except Exception as error:
                 report.failures.append(f"{key}: {error}")
     return report
+
+
+def _delete_observed_snapshot(key, *, session_id):
+    with protection_observations.operation("snapshotGc"):
+        protection_observations.bind(sessionId=session_id)
+        measured = False
+        metadata = None
+        if protection_observations.active():
+            if _TEMPORARY_FILE.fullmatch(key.rsplit("/", 1)[-1]):
+                # The uploader can still write its open FD or unlink its name
+                # outside the owner lock. A stat cannot attribute reclaimed
+                # bytes to this attempt; preserve that missing measurement.
+                protection_observations.unavailable("gcReclaimedBytes")
+            else:
+                try:
+                    metadata = os.stat(default_storage.path(key))
+                    measured = True
+                except FileNotFoundError:
+                    measured = True
+                except Exception:
+                    protection_observations.unavailable("gcReclaimedBytes")
+        with protection_observations.elapsed("gcElapsedMs"):
+            try:
+                delete_stored_object_for_gc(key)
+            finally:
+                if measured:
+                    try:
+                        remains = default_storage.exists(key)
+                    except Exception:
+                        protection_observations.unavailable("gcReclaimedBytes")
+                    else:
+                        # Count logical last-link bytes only. An open reader,
+                        # sparse allocation or backend durability is not measured.
+                        reclaimed = (metadata.st_size if metadata is not None
+                                     and metadata.st_nlink == 1 and not remains else 0)
+                        protection_observations.increment("gcReclaimedBytes", reclaimed)
 
 
 def _owner_reclaimable(agent, owner, session, cutoff):
