@@ -20,7 +20,6 @@ API = os.environ.get("API_BASE", "http://localhost:18000")
 EMAIL = os.environ.get("PERF_ADMIN_EMAIL", "perf-admin@localhost.invalid")
 PASSWORD = os.environ.get("PERF_ADMIN_PASSWORD")
 MOCK_API_BASE = "https://mock-model:9999/v1"
-PERF_API_CONTAINER = "centaeris-perf-api-1"
 
 # 手动 cookie 管理：Django 下发的 Secure cookie，urllib 的 cookiejar
 # 拒绝在 http 上回发（浏览器对 localhost 有豁免，cookiejar 没有）。
@@ -77,16 +76,6 @@ def run_bounded_smoke():
     return subprocess.run([sys.executable, __file__, "--smoke-child"], timeout=180).returncode
 
 
-def bind_mock_quota(provider_id: str) -> None:
-    # Hosted model attempts require an explicit credential-to-quota binding.
-    subprocess.run(
-        ["docker", "exec", PERF_API_CONTAINER, "python", "manage.py",
-         "configure_model_quota", "--domain-id", f"perf-smoke-{provider_id}",
-         "--max-concurrent", "1", "--provider-id", provider_id, "--enable"],
-        check=True, timeout=15, capture_output=True, text=True,
-    )
-
-
 def main():
     if not PASSWORD:
         print("需要 PERF_ADMIN_PASSWORD（与 .env 的 BOOTSTRAP_SUPERADMIN_PASSWORD 一致）")
@@ -116,7 +105,6 @@ def main():
     )
     body = step("provider", status, body, ok=(200, 201))
     provider_id = body["provider"]["id"]
-    bind_mock_quota(provider_id)
 
     status, body = call(
         "POST",

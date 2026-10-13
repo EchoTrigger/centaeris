@@ -161,9 +161,6 @@ def setup(stack, client):
         "displayName": "pool-validation-" + uuid.uuid4().hex,
         "api": "openai-responses", "apiBase": "https://mock-model:9999/v1",
         "secret": "sk-perf-dummy"}, expected=(200, 201))["provider"]["id"]
-    stack.compose(["exec", "-T", "api", "python", "manage.py", "configure_model_quota",
-                   "--domain-id", "pool-" + provider, "--max-concurrent", "2",
-                   "--provider-id", provider, "--enable"], timeout=15)
     model = client.call("POST", "/api/admin/models", {
         "providerId": provider, "modelName": "perf-paced", "displayName": "Pool Paced",
         "contextTokens": 200000, "maxOutputTokens": 8192, "enabled": True}, expected=(200, 201))

@@ -92,9 +92,6 @@ def main(output):
             "displayName": "capture-" + uuid.uuid4().hex,
             "api": "openai-responses", "apiBase": "https://mock-model:9999/v1",
             "secret": "synthetic-capture"}, expected=(200, 201))["provider"]["id"]
-        stack.compose(["exec", "-T", "api", "python", "manage.py", "configure_model_quota",
-                       "--domain-id", "capture-" + provider, "--max-concurrent", "1",
-                       "--provider-id", provider, "--enable"], timeout=20)
         model = client.call("POST", "/api/admin/models", {
             "providerId": provider, "modelName": "perf-transcript-capture",
             "displayName": "Transcript capture validation", "contextTokens": 200000,
