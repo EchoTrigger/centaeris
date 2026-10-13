@@ -4,6 +4,9 @@ use crate::execution_recovery_policy::{
     ExecutionActivityWitness, HostFailureEvidence, SnapshotActivityGuard, SnapshotCaptureError,
     WorkspaceReuseEvidence,
 };
+use crate::observations::{
+    MeasuredWriter, ProtectionMetric, ProtectionTrigger, WorkspaceProtection,
+};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
@@ -1035,6 +1038,7 @@ impl DockerExecutionHostRunner {
                             artifact.descriptor.size_bytes,
                             &artifact.descriptor.sha256,
                             &capture,
+                            &artifact.observation,
                         )
                         .map_err(SessionWorkspaceApiError::Rejected)
                     },
@@ -1192,13 +1196,22 @@ impl DockerExecutionHostRunner {
                 "session workspace download binding mismatch".to_string(),
             ));
         }
-        self.restore_snapshot_stream(
-            &mut response,
-            frozen.snapshot_size_bytes,
-            frozen.snapshot_sha256.as_str(),
-            &capture,
-        )
-        .map_err(SessionWorkspaceApiError::Rejected)?;
+        let observation = WorkspaceProtection::new().with_context(
+            ProtectionTrigger::SessionRestore,
+            &self.agent_run_id,
+            Some(&lease.job_id),
+        );
+        observation
+            .download(&mut response, |source| {
+                self.restore_snapshot_stream(
+                    source,
+                    frozen.snapshot_size_bytes,
+                    frozen.snapshot_sha256.as_str(),
+                    &capture,
+                    &observation,
+                )
+            })
+            .map_err(SessionWorkspaceApiError::Rejected)?;
         Ok(resolution)
     }
 
@@ -1213,13 +1226,23 @@ impl DockerExecutionHostRunner {
             return Ok(SessionWorkspaceCommitOutcome::Unchanged);
         }
         self.with_terminal_collection(|capture| {
-            let artifact = self.capture_snapshot_collect(capture)?;
+            let artifact = self.capture_snapshot_collect(
+                capture,
+                ProtectionTrigger::TerminalCommit,
+                &lease.job_id,
+            )?;
             let descriptor = &artifact.descriptor;
             self.require_workspace_capacity(
                 descriptor.expanded_size_bytes,
                 input_upper_bound_bytes,
             )?;
             if snapshot_matches_frozen_workspace(descriptor, frozen) {
+                artifact
+                    .observation
+                    .count(ProtectionMetric::UploadAttempts, 0, true);
+                artifact
+                    .observation
+                    .count(ProtectionMetric::UploadedBytes, 0, true);
                 return Ok(SessionWorkspaceCommitOutcome::Unchanged);
             }
             let candidate = SessionWorkspace {
@@ -1251,40 +1274,50 @@ impl DockerExecutionHostRunner {
             let mut prefix = Vec::with_capacity(4 + metadata.len());
             prefix.extend_from_slice(&metadata_length.to_be_bytes());
             prefix.extend_from_slice(metadata.as_slice());
-            let response = if descriptor.size_bytes == 0 {
-                self.api_client
-                    .post(format!(
-                        "{}/internal/agent-runs/session-workspace/commit",
-                        self.api_url
-                    ))
-                    .header("X-Internal-Token", self.api_token.as_str())
-                    .header("Content-Length", prefix.len().to_string())
-                    .header("Content-Type", "application/octet-stream")
-                    .body(prefix)
-                    .timeout(Duration::from_secs(30))
-                    .send()
-            } else {
-                let snapshot = artifact.file;
-                let length = u64::try_from(prefix.len())
-                    .map_err(|_| "session workspace commit length overflow".to_string())?
-                    .checked_add(descriptor.size_bytes)
-                    .ok_or_else(|| "session workspace commit length overflow".to_string())?;
-                let body = SessionWorkspaceUploadBody {
-                    prefix: Cursor::new(prefix),
-                    snapshot,
-                };
-                self.api_client
-                    .post(format!(
-                        "{}/internal/agent-runs/session-workspace/commit",
-                        self.api_url
-                    ))
-                    .header("X-Internal-Token", self.api_token.as_str())
-                    .header("Content-Length", length.to_string())
-                    .header("Content-Type", "application/octet-stream")
-                    .body(reqwest::blocking::Body::sized(body, length))
-                    .timeout(Duration::from_secs(300))
-                    .send()
-            };
+            let observation = &artifact.observation;
+            let length = u64::try_from(prefix.len())
+                .map_err(|_| "session workspace commit length overflow".to_string())?
+                .checked_add(descriptor.size_bytes)
+                .ok_or_else(|| "session workspace commit length overflow".to_string())?;
+            let response = observation.timed(ProtectionMetric::UploadElapsedMs, || {
+                observation.count(ProtectionMetric::UploadAttempts, 1, true);
+                if descriptor.size_bytes == 0 {
+                    self.api_client
+                        .post(format!(
+                            "{}/internal/agent-runs/session-workspace/commit",
+                            self.api_url
+                        ))
+                        .header("X-Internal-Token", self.api_token.as_str())
+                        .header("Content-Length", prefix.len().to_string())
+                        .header("Content-Type", "application/octet-stream")
+                        .body(reqwest::blocking::Body::sized(
+                            observation.upload_reader(Cursor::new(prefix), length),
+                            length,
+                        ))
+                        .timeout(Duration::from_secs(30))
+                        .send()
+                } else {
+                    let snapshot = artifact.file;
+                    let body = SessionWorkspaceUploadBody {
+                        prefix: Cursor::new(prefix),
+                        snapshot,
+                    };
+                    self.api_client
+                        .post(format!(
+                            "{}/internal/agent-runs/session-workspace/commit",
+                            self.api_url
+                        ))
+                        .header("X-Internal-Token", self.api_token.as_str())
+                        .header("Content-Length", length.to_string())
+                        .header("Content-Type", "application/octet-stream")
+                        .body(reqwest::blocking::Body::sized(
+                            observation.upload_reader(body, length),
+                            length,
+                        ))
+                        .timeout(Duration::from_secs(300))
+                        .send()
+                }
+            });
             match response {
                 Ok(response) if response.status().is_success() => {
                     let committed =
@@ -1347,13 +1380,23 @@ impl DockerExecutionHostRunner {
             |capture| self.agent_process_count(capture),
             |capture| {
                 let artifact = crate::observations::timed("workspaceSnapshotInspect", || {
-                    self.capture_snapshot_collect(capture)
+                    self.capture_snapshot_collect(
+                        capture,
+                        ProtectionTrigger::RecoveryCheckpoint,
+                        &lease.job_id,
+                    )
                 })?;
                 self.require_workspace_capacity(
                     artifact.descriptor.expanded_size_bytes,
                     input_upper_bound_bytes,
                 )?;
                 if snapshot_matches_recovery_workspace(&artifact.descriptor, previous) {
+                    artifact
+                        .observation
+                        .count(ProtectionMetric::UploadAttempts, 0, true);
+                    artifact
+                        .observation
+                        .count(ProtectionMetric::UploadedBytes, 0, true);
                     return Ok(PreparedRecoveryContent::Unchanged(previous.clone()));
                 }
                 Ok(PreparedRecoveryContent::Upload {
@@ -1523,89 +1566,104 @@ impl DockerExecutionHostRunner {
             return Ok(snapshot);
         };
         let descriptor = &artifact.descriptor;
-        crate::observations::timed("workspaceSnapshotUpload", || {
-            let metadata = ExecutionWorkspaceStageRequest {
-                schema: EXECUTION_WORKSPACE_STAGE_SCHEMA,
-                job_id: lease.job_id.as_str(),
-                lease_owner: lease.lease_owner.as_str(),
-                agent_run_id: self.agent_run_id.as_str(),
-                authorization_digest: self.authorization_digest.as_str(),
-                checkpoint_id: checkpoint_id.as_str(),
-                snapshot_sha256: descriptor.sha256.as_str(),
-                snapshot_size_bytes: descriptor.size_bytes,
-                expanded_size_bytes: descriptor.expanded_size_bytes,
-                file_count: descriptor.file_count,
-            };
-            let metadata = serde_json::to_vec(&metadata)
-                .map_err(|error| format!("encode execution workspace stage failed: {error}"))?;
-            let metadata_length = u32::try_from(metadata.len())
-                .map_err(|_| "execution workspace stage metadata is too large".to_string())?;
-            let mut prefix = Vec::with_capacity(4 + metadata.len());
-            prefix.extend_from_slice(&metadata_length.to_be_bytes());
-            prefix.extend_from_slice(metadata.as_slice());
-            let response = if descriptor.size_bytes == 0 {
-                self.api_client
-                    .post(format!(
-                        "{}/internal/agent-runs/execution-workspace/stage",
-                        self.api_url
-                    ))
-                    .header("X-Internal-Token", self.api_token.as_str())
-                    .header("Content-Length", prefix.len().to_string())
-                    .header("Content-Type", "application/octet-stream")
-                    .body(prefix)
-                    .timeout(Duration::from_secs(30))
-                    .send()
-            } else {
-                let snapshot = artifact.file;
-                let length = u64::try_from(prefix.len())
-                    .map_err(|_| "execution workspace stage length overflow".to_string())?
-                    .checked_add(descriptor.size_bytes)
-                    .ok_or_else(|| "execution workspace stage length overflow".to_string())?;
-                self.api_client
-                    .post(format!(
-                        "{}/internal/agent-runs/execution-workspace/stage",
-                        self.api_url
-                    ))
-                    .header("X-Internal-Token", self.api_token.as_str())
-                    .header("Content-Length", length.to_string())
-                    .header("Content-Type", "application/octet-stream")
-                    .body(reqwest::blocking::Body::sized(
-                        SessionWorkspaceUploadBody {
-                            prefix: Cursor::new(prefix),
-                            snapshot,
-                        },
-                        length,
-                    ))
-                    .timeout(Duration::from_secs(300))
-                    .send()
-            }
-            .map_err(|error| format!("stage execution workspace failed: {error}"))?;
-            if !response.status().is_success() {
-                return Err(format!(
-                    "stage execution workspace returned {}",
-                    response.status().as_u16()
-                ));
-            }
-            let staged = response
-                .json::<ExecutionWorkspaceStageResponse>()
-                .map_err(|error| format!("decode execution workspace stage failed: {error}"))?;
-            let result = RecoveryWorkspaceSnapshotV1 {
-                object_ref: staged.object_ref,
-                snapshot_sha256: staged.snapshot_sha256,
-                snapshot_size_bytes: staged.snapshot_size_bytes,
-                expanded_size_bytes: staged.expanded_size_bytes,
-                file_count: staged.file_count,
-            };
-            if staged.schema != EXECUTION_WORKSPACE_STAGE_RESULT_SCHEMA
-                || result.snapshot_sha256 != descriptor.sha256
-                || result.snapshot_size_bytes != descriptor.size_bytes
-                || result.expanded_size_bytes != descriptor.expanded_size_bytes
-                || result.file_count != descriptor.file_count
-            {
-                return Err("execution workspace stage response binding mismatch".to_string());
-            }
-            result.validate()?;
-            Ok(result)
+        let observation = artifact.observation.clone().with_context(
+            ProtectionTrigger::RecoveryCheckpoint,
+            &self.agent_run_id,
+            Some(&lease.job_id),
+        );
+        observation.timed(ProtectionMetric::UploadElapsedMs, || {
+            crate::observations::timed("workspaceSnapshotUpload", || {
+                let metadata = ExecutionWorkspaceStageRequest {
+                    schema: EXECUTION_WORKSPACE_STAGE_SCHEMA,
+                    job_id: lease.job_id.as_str(),
+                    lease_owner: lease.lease_owner.as_str(),
+                    agent_run_id: self.agent_run_id.as_str(),
+                    authorization_digest: self.authorization_digest.as_str(),
+                    checkpoint_id: checkpoint_id.as_str(),
+                    snapshot_sha256: descriptor.sha256.as_str(),
+                    snapshot_size_bytes: descriptor.size_bytes,
+                    expanded_size_bytes: descriptor.expanded_size_bytes,
+                    file_count: descriptor.file_count,
+                };
+                let metadata = serde_json::to_vec(&metadata)
+                    .map_err(|error| format!("encode execution workspace stage failed: {error}"))?;
+                let metadata_length = u32::try_from(metadata.len())
+                    .map_err(|_| "execution workspace stage metadata is too large".to_string())?;
+                let mut prefix = Vec::with_capacity(4 + metadata.len());
+                prefix.extend_from_slice(&metadata_length.to_be_bytes());
+                prefix.extend_from_slice(metadata.as_slice());
+                observation.count(ProtectionMetric::UploadAttempts, 1, true);
+                let response = if descriptor.size_bytes == 0 {
+                    let length = prefix.len() as u64;
+                    self.api_client
+                        .post(format!(
+                            "{}/internal/agent-runs/execution-workspace/stage",
+                            self.api_url
+                        ))
+                        .header("X-Internal-Token", self.api_token.as_str())
+                        .header("Content-Length", prefix.len().to_string())
+                        .header("Content-Type", "application/octet-stream")
+                        .body(reqwest::blocking::Body::sized(
+                            observation.upload_reader(Cursor::new(prefix), length),
+                            length,
+                        ))
+                        .timeout(Duration::from_secs(30))
+                        .send()
+                } else {
+                    let snapshot = artifact.file;
+                    let length = u64::try_from(prefix.len())
+                        .map_err(|_| "execution workspace stage length overflow".to_string())?
+                        .checked_add(descriptor.size_bytes)
+                        .ok_or_else(|| "execution workspace stage length overflow".to_string())?;
+                    self.api_client
+                        .post(format!(
+                            "{}/internal/agent-runs/execution-workspace/stage",
+                            self.api_url
+                        ))
+                        .header("X-Internal-Token", self.api_token.as_str())
+                        .header("Content-Length", length.to_string())
+                        .header("Content-Type", "application/octet-stream")
+                        .body(reqwest::blocking::Body::sized(
+                            observation.upload_reader(
+                                SessionWorkspaceUploadBody {
+                                    prefix: Cursor::new(prefix),
+                                    snapshot,
+                                },
+                                length,
+                            ),
+                            length,
+                        ))
+                        .timeout(Duration::from_secs(300))
+                        .send()
+                }
+                .map_err(|error| format!("stage execution workspace failed: {error}"))?;
+                if !response.status().is_success() {
+                    return Err(format!(
+                        "stage execution workspace returned {}",
+                        response.status().as_u16()
+                    ));
+                }
+                let staged = response
+                    .json::<ExecutionWorkspaceStageResponse>()
+                    .map_err(|error| format!("decode execution workspace stage failed: {error}"))?;
+                let result = RecoveryWorkspaceSnapshotV1 {
+                    object_ref: staged.object_ref,
+                    snapshot_sha256: staged.snapshot_sha256,
+                    snapshot_size_bytes: staged.snapshot_size_bytes,
+                    expanded_size_bytes: staged.expanded_size_bytes,
+                    file_count: staged.file_count,
+                };
+                if staged.schema != EXECUTION_WORKSPACE_STAGE_RESULT_SCHEMA
+                    || result.snapshot_sha256 != descriptor.sha256
+                    || result.snapshot_size_bytes != descriptor.size_bytes
+                    || result.expanded_size_bytes != descriptor.expanded_size_bytes
+                    || result.file_count != descriptor.file_count
+                {
+                    return Err("execution workspace stage response binding mismatch".to_string());
+                }
+                result.validate()?;
+                Ok(result)
+            })
         })
     }
 
@@ -1666,13 +1724,22 @@ impl DockerExecutionHostRunner {
                 "execution workspace download binding mismatch".to_string(),
             ));
         }
-        self.restore_snapshot_stream(
-            &mut response,
-            snapshot.snapshot_size_bytes,
-            snapshot.snapshot_sha256.as_str(),
-            &capture,
-        )
-        .map_err(SessionWorkspaceApiError::Rejected)
+        let observation = WorkspaceProtection::new().with_context(
+            ProtectionTrigger::RecoveryRestore,
+            &self.agent_run_id,
+            Some(&lease.job_id),
+        );
+        observation
+            .download(&mut response, |source| {
+                self.restore_snapshot_stream(
+                    source,
+                    snapshot.snapshot_size_bytes,
+                    snapshot.snapshot_sha256.as_str(),
+                    &capture,
+                    &observation,
+                )
+            })
+            .map_err(SessionWorkspaceApiError::Rejected)
     }
 
     fn reconcile_session_workspace_commit(
@@ -1711,10 +1778,12 @@ impl DockerExecutionHostRunner {
     fn snapshot_collect_command(
         &self,
         capture: &SnapshotActivityGuard,
+        observation: &WorkspaceProtection,
     ) -> Result<ExecChild, String> {
         let _ = capture;
         let mut request = self.exec_request(vec![AGENT_BINARY.into(), "snapshot-collect".into()]);
         request.cwd = Some(WORKSPACE_DATA_ROOT.into());
+        observation.helper_environment(&mut request.env);
         let mut child = request.spawn()?;
         child.stdin.take();
         Ok(child)
@@ -1723,46 +1792,62 @@ impl DockerExecutionHostRunner {
     fn capture_snapshot_collect(
         &self,
         capture: &SnapshotActivityGuard,
+        trigger: ProtectionTrigger,
+        job_id: &str,
     ) -> Result<ImmutableWorkspaceSnapshot, String> {
-        let mut child = self.snapshot_collect_command(capture)?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| "snapshot collect helper stderr is unavailable".to_string())?;
-        let stderr_reader = thread::spawn(move || read_bounded(stderr, DOCKER_DIAGNOSTIC_LIMIT));
-        let mut stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "snapshot collect helper stdout is unavailable".to_string())?;
-        let result = match capture_snapshot_artifact(
-            &mut stdout,
-            self.resources
-                .data_tmpfs_bytes
-                .saturating_add(SESSION_WORKSPACE_MANIFEST_LIMIT as u64 + 4),
-        ) {
-            Ok(result) => result,
-            Err(error) => {
-                drop(stdout);
-                child.disconnect();
-                let _ = child.wait();
-                let _ = stderr_reader.join();
-                return Err(error);
+        let observation =
+            WorkspaceProtection::new().with_context(trigger, &self.agent_run_id, Some(job_id));
+        observation.timed(ProtectionMetric::CaptureElapsedMs, || {
+            let mut child = self.snapshot_collect_command(capture, &observation)?;
+            let stderr = child
+                .stderr
+                .take()
+                .ok_or_else(|| "snapshot collect helper stderr is unavailable".to_string())?;
+            let stderr_reader =
+                thread::spawn(move || read_bounded(stderr, DOCKER_DIAGNOSTIC_LIMIT));
+            let mut stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| "snapshot collect helper stdout is unavailable".to_string())?;
+            let result = match capture_snapshot_artifact_observed(
+                &mut stdout,
+                self.resources
+                    .data_tmpfs_bytes
+                    .saturating_add(SESSION_WORKSPACE_MANIFEST_LIMIT as u64 + 4),
+                observation.clone(),
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    drop(stdout);
+                    child.disconnect();
+                    let _ = child.wait();
+                    if let Ok(Ok(stderr)) = stderr_reader.join() {
+                        observation.forward_sandbox(&stderr.bytes);
+                    }
+                    return Err(error);
+                }
+            };
+            let status = child
+                .wait()
+                .map_err(|error| format!("wait for snapshot collect helper failed: {error}"))?;
+            let stderr = stderr_reader
+                .join()
+                .map_err(|_| "snapshot collect helper stderr reader panicked".to_string())?
+                .map_err(|error| format!("read snapshot collect helper stderr failed: {error}"))?;
+            observation.forward_sandbox(&stderr.bytes);
+            if !status.success() {
+                return Err(format!(
+                    "snapshot collect helper failed: {}",
+                    bounded_diagnostic(stderr.bytes.as_slice())
+                ));
             }
-        };
-        let status = child
-            .wait()
-            .map_err(|error| format!("wait for snapshot collect helper failed: {error}"))?;
-        let stderr = stderr_reader
-            .join()
-            .map_err(|_| "snapshot collect helper stderr reader panicked".to_string())?
-            .map_err(|error| format!("read snapshot collect helper stderr failed: {error}"))?;
-        if !status.success() {
-            return Err(format!(
-                "snapshot collect helper failed: {}",
-                bounded_diagnostic(stderr.bytes.as_slice())
-            ));
-        }
-        Ok(result)
+            observation.count(
+                ProtectionMetric::SnapshotLogicalBytes,
+                result.descriptor.expanded_size_bytes,
+                true,
+            );
+            Ok(result)
+        })
     }
 
     fn restore_snapshot_stream(
@@ -1771,47 +1856,53 @@ impl DockerExecutionHostRunner {
         expected_size_bytes: u64,
         expected_sha256: &str,
         capture: &SnapshotActivityGuard,
+        observation: &WorkspaceProtection,
     ) -> Result<(), String> {
-        self.recovery_activity.invalidate_before_dispatch()?;
-        let _ = capture;
-        let mut request = self.exec_request(vec![AGENT_BINARY.into(), "snapshot-restore".into()]);
-        request.cwd = Some(WORKSPACE_DATA_ROOT.into());
-        let mut child = request.spawn()?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or("snapshot restore stdout missing")?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or("snapshot restore stderr missing")?;
-        let stdout_reader = thread::spawn(move || read_bounded(stdout, DOCKER_DIAGNOSTIC_LIMIT));
-        let stderr_reader = thread::spawn(move || read_bounded(stderr, DOCKER_DIAGNOSTIC_LIMIT));
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "snapshot restore helper stdin is unavailable".to_string())?;
-        let copy = copy_exact(source, &mut stdin, expected_size_bytes, expected_sha256);
-        drop(stdin);
-        if let Err(error) = copy {
-            child.disconnect();
-            let _ = child.wait();
-            return Err(error);
-        }
-        let status = child.wait()?;
-        let _stdout = stdout_reader
-            .join()
-            .map_err(|_| "snapshot restore stdout reader panicked")??;
-        let stderr = stderr_reader
-            .join()
-            .map_err(|_| "snapshot restore stderr reader panicked")??;
-        if !status.success() {
-            return Err(format!(
-                "snapshot restore helper failed: {}",
-                bounded_diagnostic(&stderr.bytes)
-            ));
-        }
-        Ok(())
+        observation.timed(ProtectionMetric::RestoreApplyElapsedMs, || {
+            self.recovery_activity.invalidate_before_dispatch()?;
+            let _ = capture;
+            let mut request =
+                self.exec_request(vec![AGENT_BINARY.into(), "snapshot-restore".into()]);
+            request.cwd = Some(WORKSPACE_DATA_ROOT.into());
+            let mut child = request.spawn()?;
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or("snapshot restore stdout missing")?;
+            let stderr = child
+                .stderr
+                .take()
+                .ok_or("snapshot restore stderr missing")?;
+            let stdout_reader =
+                thread::spawn(move || read_bounded(stdout, DOCKER_DIAGNOSTIC_LIMIT));
+            let stderr_reader =
+                thread::spawn(move || read_bounded(stderr, DOCKER_DIAGNOSTIC_LIMIT));
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| "snapshot restore helper stdin is unavailable".to_string())?;
+            let copy = copy_exact(source, &mut stdin, expected_size_bytes, expected_sha256);
+            drop(stdin);
+            if let Err(error) = copy {
+                child.disconnect();
+                let _ = child.wait();
+                return Err(error);
+            }
+            let status = child.wait()?;
+            let _stdout = stdout_reader
+                .join()
+                .map_err(|_| "snapshot restore stdout reader panicked")??;
+            let stderr = stderr_reader
+                .join()
+                .map_err(|_| "snapshot restore stderr reader panicked")??;
+            if !status.success() {
+                return Err(format!(
+                    "snapshot restore helper failed: {}",
+                    bounded_diagnostic(&stderr.bytes)
+                ));
+            }
+            Ok(())
+        })
     }
 
     fn restore_activity(&self) -> Result<SnapshotActivityGuard, SessionWorkspaceApiError> {
@@ -3315,6 +3406,7 @@ struct WorkspaceSnapshotDescriptor {
 struct ImmutableWorkspaceSnapshot {
     file: fs::File,
     descriptor: WorkspaceSnapshotDescriptor,
+    observation: WorkspaceProtection,
 }
 
 pub(crate) struct PreparedRecoveryWorkspaceRestore {
@@ -3442,7 +3534,12 @@ pub(crate) fn prepare_recovery_workspace_restore(
             "recovery workspace download binding mismatch".into(),
         ));
     }
-    let artifact = prepare_recovery_restore_artifact(&mut response, snapshot)?;
+    let observation = WorkspaceProtection::new().with_context(
+        ProtectionTrigger::RecoveryRestore,
+        binding.agent_run_id,
+        Some(&binding.lease.job_id),
+    );
+    let artifact = prepare_recovery_restore_artifact(&mut response, snapshot, observation)?;
     Ok(PreparedRecoveryWorkspaceRestore {
         artifact: Some(artifact),
         resolution: SessionWorkspaceResolution::Download,
@@ -3452,8 +3549,16 @@ pub(crate) fn prepare_recovery_workspace_restore(
 fn prepare_recovery_restore_artifact(
     source: &mut impl Read,
     snapshot: &RecoveryWorkspaceSnapshotV1,
+    observation: WorkspaceProtection,
 ) -> Result<ImmutableWorkspaceSnapshot, SessionWorkspaceApiError> {
-    let artifact = capture_snapshot_artifact(source, snapshot.snapshot_size_bytes)
+    let artifact = observation
+        .download(source, |source| {
+            capture_snapshot_artifact_observed(
+                source,
+                snapshot.snapshot_size_bytes,
+                observation.clone(),
+            )
+        })
         .map_err(SessionWorkspaceApiError::Unavailable)?;
     if !snapshot_matches_recovery_workspace(&artifact.descriptor, snapshot) {
         return Err(SessionWorkspaceApiError::Rejected(
@@ -3526,13 +3631,13 @@ enum PreparedRecoveryContent {
     },
 }
 
-struct SnapshotSpoolReader<'a, R> {
+struct SnapshotSpoolReader<'a, R, W> {
     source: &'a mut R,
-    file: &'a mut fs::File,
+    file: &'a mut W,
     remaining: u64,
 }
 
-impl<R: Read> Read for SnapshotSpoolReader<'_, R> {
+impl<R: Read, W: Write> Read for SnapshotSpoolReader<'_, R, W> {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
         let count = self.source.read(bytes)?;
         if count as u64 > self.remaining {
@@ -3544,20 +3649,43 @@ impl<R: Read> Read for SnapshotSpoolReader<'_, R> {
     }
 }
 
+#[cfg(test)]
 fn capture_snapshot_artifact(
     source: &mut impl Read,
     limit: u64,
 ) -> Result<ImmutableWorkspaceSnapshot, String> {
+    capture_snapshot_artifact_observed(source, limit, WorkspaceProtection::new())
+}
+
+fn capture_snapshot_artifact_observed(
+    source: &mut impl Read,
+    limit: u64,
+    observation: WorkspaceProtection,
+) -> Result<ImmutableWorkspaceSnapshot, String> {
     let mut file =
         tempfile::tempfile().map_err(|error| format!("create snapshot spool failed: {error}"))?;
+    let mut measured = MeasuredWriter {
+        inner: &mut file,
+        written: 0,
+    };
     let descriptor = inspect_workspace_snapshot(&mut SnapshotSpoolReader {
         source,
-        file: &mut file,
+        file: &mut measured,
         remaining: limit,
-    })?;
+    });
+    observation.count(
+        ProtectionMetric::SpoolWrittenBytes,
+        measured.written,
+        descriptor.is_ok(),
+    );
+    let descriptor = descriptor?;
     file.rewind()
         .map_err(|error| format!("rewind snapshot spool failed: {error}"))?;
-    Ok(ImmutableWorkspaceSnapshot { file, descriptor })
+    Ok(ImmutableWorkspaceSnapshot {
+        file,
+        descriptor,
+        observation,
+    })
 }
 
 pub(crate) fn resolve_workspace_image_digest() -> Result<String, String> {
@@ -4041,7 +4169,9 @@ mod tests {
         let written = exec_with_input(&write_request, &[], 1024).unwrap();
         assert!(written.status.success());
         let capture = old.recovery_activity.wait_snapshot_activity().unwrap();
-        let mut artifact = old.capture_snapshot_collect(&capture).unwrap();
+        let mut artifact = old
+            .capture_snapshot_collect(&capture, ProtectionTrigger::RecoveryCheckpoint, &job)
+            .unwrap();
         drop(capture);
         let snapshot = RecoveryWorkspaceSnapshotV1 {
             object_ref: Some("centaeris-recovery-test-checkpoint-object".into()),
@@ -4997,6 +5127,37 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_protection_observations_count_actual_spool_bytes_on_success_and_failure() {
+        let frame = snapshot_test_frame(b"protected payload");
+        let (result, events) = crate::observations::capture_protection(|| {
+            capture_snapshot_artifact(&mut Cursor::new(frame.clone()), frame.len() as u64)
+        });
+        assert!(result.is_ok());
+        let bytes = events
+            .iter()
+            .find(|event| event["metric"] == "runtimeSpoolWrittenBytes")
+            .expect("actual spool write observation");
+        assert_eq!(bytes["value"], frame.len() as u64);
+        assert_eq!(bytes["outcome"], "ok");
+
+        let mut corrupted = frame.clone();
+        *corrupted.last_mut().unwrap() = b'!';
+        let (result, events) = crate::observations::capture_protection(|| {
+            capture_snapshot_artifact(&mut Cursor::new(corrupted), frame.len() as u64)
+        });
+        assert!(result.is_err());
+        let bytes = events
+            .iter()
+            .find(|event| event["metric"] == "runtimeSpoolWrittenBytes")
+            .expect("failed captures still account for their writes");
+        assert_eq!(bytes["value"], frame.len() as u64);
+        assert_eq!(bytes["outcome"], "error");
+        assert!(!serde_json::to_string(&events)
+            .unwrap()
+            .contains("protected payload"));
+    }
+
+    #[test]
     fn prepared_snapshot_releases_gate_and_requires_original_epoch_on_acceptance() {
         let runner = test_docker_execution_host_runner();
         let frame = snapshot_test_frame(b"original");
@@ -5038,102 +5199,128 @@ mod tests {
 
     #[test]
     fn slow_snapshot_upload_does_not_hold_workspace_dispatch_gate() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut runner = test_docker_execution_host_runner();
-        runner.api_url = format!("http://{}", listener.local_addr().unwrap());
-        runner.api_client = reqwest::blocking::Client::builder()
-            .no_proxy()
-            .build()
-            .unwrap();
-        let runner = Arc::new(runner);
-        let frame = snapshot_test_frame(b"original");
-        let prepared = runner
-            .capture_prepared_recovery_workspace_with_observer(
-                |_| Ok(0),
-                |_| {
-                    Ok(PreparedRecoveryContent::Upload {
-                        artifact: capture_snapshot_artifact(
-                            &mut Cursor::new(frame.clone()),
-                            frame.len() as u64,
-                        )?,
-                        lease: SessionWorkspaceLease {
-                            job_id: "job".into(),
-                            lease_owner: "owner".into(),
-                        },
-                        checkpoint_id: "checkpoint".into(),
-                    })
-                },
-            )
-            .unwrap()
-            .unwrap();
-        let (started, observed) = mpsc::channel();
-        let (release, wait) = mpsc::channel();
-        let server = thread::spawn(move || {
-            let (mut socket, _) = listener.accept().unwrap();
-            socket
-                .set_read_timeout(Some(Duration::from_secs(5)))
+        let (expected_bytes, events) = crate::observations::capture_protection(|| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut runner = test_docker_execution_host_runner();
+            runner.api_url = format!("http://{}", listener.local_addr().unwrap());
+            runner.api_client = reqwest::blocking::Client::builder()
+                .no_proxy()
+                .build()
                 .unwrap();
-            let mut header = Vec::new();
-            while !header.ends_with(b"\r\n\r\n") {
-                let mut byte = [0];
-                socket.read_exact(&mut byte).unwrap();
-                header.push(byte[0]);
-            }
-            let header = String::from_utf8(header).unwrap();
-            let length: usize = header
-                .lines()
-                .find_map(|line| {
-                    line.to_ascii_lowercase()
-                        .strip_prefix("content-length: ")
-                        .map(str::to_string)
-                })
+            let runner = Arc::new(runner);
+            let frame = snapshot_test_frame(b"original");
+            let prepared = runner
+                .capture_prepared_recovery_workspace_with_observer(
+                    |_| Ok(0),
+                    |_| {
+                        Ok(PreparedRecoveryContent::Upload {
+                            artifact: capture_snapshot_artifact(
+                                &mut Cursor::new(frame.clone()),
+                                frame.len() as u64,
+                            )?,
+                            lease: SessionWorkspaceLease {
+                                job_id: "job".into(),
+                                lease_owner: "owner".into(),
+                            },
+                            checkpoint_id: "checkpoint".into(),
+                        })
+                    },
+                )
                 .unwrap()
-                .parse()
                 .unwrap();
-            let mut body = vec![0; length];
-            socket.read_exact(&mut body).unwrap();
-            let metadata_length = u32::from_be_bytes(body[..4].try_into().unwrap()) as usize;
-            let metadata: serde_json::Value =
-                serde_json::from_slice(&body[4..4 + metadata_length]).unwrap();
-            assert_eq!(&body[4 + metadata_length..], frame.as_slice());
-            started.send(()).unwrap();
-            wait.recv_timeout(Duration::from_secs(5)).unwrap();
-            let response = serde_json::json!({
+            let (started, observed) = mpsc::channel();
+            let (release, wait) = mpsc::channel();
+            let server = thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut header = Vec::new();
+                while !header.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    socket.read_exact(&mut byte).unwrap();
+                    header.push(byte[0]);
+                }
+                let header = String::from_utf8(header).unwrap();
+                let length: usize = header
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .map(str::to_string)
+                    })
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                let mut body = vec![0; length];
+                socket.read_exact(&mut body).unwrap();
+                let metadata_length = u32::from_be_bytes(body[..4].try_into().unwrap()) as usize;
+                let metadata: serde_json::Value =
+                    serde_json::from_slice(&body[4..4 + metadata_length]).unwrap();
+                assert_eq!(&body[4 + metadata_length..], frame.as_slice());
+                started.send(length).unwrap();
+                wait.recv_timeout(Duration::from_secs(5)).unwrap();
+                let response = serde_json::json!({
                 "schema": EXECUTION_WORKSPACE_STAGE_RESULT_SCHEMA, "objectRef": "object-1",
                 "snapshotSha256": metadata["snapshotSha256"], "snapshotSizeBytes": metadata["snapshotSizeBytes"],
                 "expandedSizeBytes": metadata["expandedSizeBytes"], "fileCount": metadata["fileCount"],
             }).to_string();
-            write!(
-                socket,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                response.len(),
-                response
-            )
-            .unwrap();
-        });
-        let worker = {
-            let runner = runner.clone();
-            thread::spawn(move || runner.upload_recovery_workspace(prepared))
-        };
-        observed.recv_timeout(Duration::from_secs(5)).unwrap();
-        let (dispatched, dispatch_observed) = mpsc::channel();
-        let dispatcher = {
-            let runner = runner.clone();
-            thread::spawn(move || {
-                runner.with_helper_dispatch("filesystem-once", || {
-                    dispatched.send(()).unwrap();
-                    Ok(())
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response.len(),
+                    response
+                )
+                .unwrap();
+            });
+            let worker = {
+                let runner = runner.clone();
+                thread::spawn(move || runner.upload_recovery_workspace(prepared))
+            };
+            let expected_bytes = observed.recv_timeout(Duration::from_secs(5)).unwrap();
+            let (dispatched, dispatch_observed) = mpsc::channel();
+            let dispatcher = {
+                let runner = runner.clone();
+                thread::spawn(move || {
+                    runner.with_helper_dispatch("filesystem-once", || {
+                        dispatched.send(()).unwrap();
+                        Ok(())
+                    })
                 })
-            })
-        };
-        let admitted = dispatch_observed.recv_timeout(Duration::from_secs(1));
-        release.send(()).unwrap();
-        worker.join().unwrap().unwrap();
-        dispatcher.join().unwrap().unwrap();
-        server.join().unwrap();
+            };
+            let admitted = dispatch_observed.recv_timeout(Duration::from_secs(1));
+            release.send(()).unwrap();
+            worker.join().unwrap().unwrap();
+            dispatcher.join().unwrap().unwrap();
+            server.join().unwrap();
+            assert!(
+                admitted.is_ok(),
+                "network upload must not delay workspace dispatch"
+            );
+            expected_bytes
+        });
+        let attempt = events
+            .iter()
+            .find(|event| event["metric"] == "uploadAttempts")
+            .expect("actual HTTP upload attempt");
+        let bytes = events
+            .iter()
+            .find(|event| event["metric"] == "uploadedBytes")
+            .expect("consumed request body bytes");
+        assert_eq!(attempt["value"], 1);
+        assert_eq!(bytes["value"], expected_bytes);
+        assert_eq!(bytes["outcome"], "ok");
+        assert_eq!(attempt["operationId"], bytes["operationId"]);
+        for event in [attempt, bytes] {
+            assert_eq!(event["runId"], "agent_run_test");
+            assert_eq!(event["jobId"], "job");
+            assert_eq!(event["trigger"], "recoveryCheckpoint");
+        }
         assert!(
-            admitted.is_ok(),
-            "network upload must not delay workspace dispatch"
+            !events
+                .iter()
+                .any(|event| event["metric"] == "scannedEntries"),
+            "no sandbox scan was observed by this HTTP-only fixture"
         );
     }
 
@@ -5201,17 +5388,43 @@ mod tests {
             file_count: 1,
         };
         let mut source = Cursor::new(frame.clone());
-        let mut artifact = prepare_recovery_restore_artifact(&mut source, &snapshot).unwrap();
+        let (result, events) = crate::observations::capture_protection(|| {
+            prepare_recovery_restore_artifact(
+                &mut source,
+                &snapshot,
+                WorkspaceProtection::new().with_context(
+                    ProtectionTrigger::RecoveryRestore,
+                    "run-restored",
+                    Some("job-restored"),
+                ),
+            )
+        });
+        let mut artifact = result.unwrap();
+        assert_eq!(events.len(), 2);
+        for event in &events {
+            assert_eq!(event["runId"], "run-restored");
+            assert_eq!(event["jobId"], "job-restored");
+            assert_eq!(event["trigger"], "recoveryRestore");
+            assert_eq!(event["operationId"], events[0]["operationId"]);
+        }
         source.get_mut().fill(0);
         let mut held = Vec::new();
         artifact.file.read_to_end(&mut held).unwrap();
         assert_eq!(held, frame);
-        assert!(prepare_recovery_restore_artifact(&mut source, &snapshot).is_err());
+        assert!(prepare_recovery_restore_artifact(
+            &mut source,
+            &snapshot,
+            WorkspaceProtection::new()
+        )
+        .is_err());
         let mut wrong_binding = snapshot.clone();
         wrong_binding.file_count = 2;
-        assert!(
-            prepare_recovery_restore_artifact(&mut Cursor::new(frame), &wrong_binding).is_err()
-        );
+        assert!(prepare_recovery_restore_artifact(
+            &mut Cursor::new(frame),
+            &wrong_binding,
+            WorkspaceProtection::new()
+        )
+        .is_err());
     }
 
     #[test]

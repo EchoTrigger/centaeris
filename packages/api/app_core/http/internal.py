@@ -54,6 +54,7 @@ from app_core.session_event import (
     project_committed_agent_run,
 )
 from app_core.workspace_access import agent_run_membership_is_current
+from app_core import workspace_observations as protection_observations
 
 from .json_body import decode_json_object
 from .security import internal_token_auth
@@ -193,6 +194,7 @@ def _read_workspace_bytes(request, size: int) -> bytes:
     remaining = size
     while remaining:
         chunk = request.read(remaining)
+        protection_observations.increment("apiReceivedBytes", len(chunk))
         if not chunk:
             raise SessionWorkspaceError("session_workspace_commit_invalid", 400)
         chunks.append(chunk)
@@ -219,6 +221,7 @@ class _WorkspaceSnapshotReader:
             return b""
         requested = self.remaining if size is None or size < 0 else min(size, self.remaining)
         chunk = self.source.read(requested)
+        protection_observations.increment("apiReceivedBytes", len(chunk))
         if not chunk:
             raise SessionWorkspaceError("session_workspace_snapshot_invalid", 400)
         self.remaining -= len(chunk)
@@ -281,9 +284,14 @@ class _WorkspaceSnapshotReader:
             or self.files is None
             or self.fileIndex != len(self.files)
             or f"sha256:{self.digest.hexdigest()}" != self.candidate["snapshotSha256"]
-            or self.source.read(1)
+            or self._extra_byte()
         ):
             raise SessionWorkspaceError("session_workspace_snapshot_invalid", 400)
+
+    def _extra_byte(self):
+        chunk = self.source.read(1)
+        protection_observations.increment("apiReceivedBytes", len(chunk))
+        return chunk
 
 
 @dataclass
@@ -316,12 +324,14 @@ def _workspace_snapshot_upload(storage_key: str):
         except FileNotFoundError:
             # GC may unlink a purged owner's open temporary on POSIX.
             pass
+        protection_observations.gauge("temporaryBytes", 0)
 
 
 def _store_workspace_snapshot(
     request, candidate: dict, storage_key: str, upload: _WorkspaceSnapshotUpload | None,
     body: dict,
 ) -> None:
+    protection_observations.increment("apiWrittenBytes", 0)
     if not candidate["snapshotSizeBytes"]:
         _require_workspace_eof(request)
         return
@@ -337,12 +347,23 @@ def _store_workspace_snapshot(
 
     descriptor = upload.descriptor
     upload.descriptor = -1
-    with os.fdopen(descriptor, "wb") as temporary:
-        while chunk := reader.read(64 * 1024):
-            temporary.write(chunk)
-        reader.require_complete()
-        temporary.flush()
-        os.fsync(temporary.fileno())
+    try:
+        with os.fdopen(descriptor, "wb") as temporary:
+            while chunk := reader.read(64 * 1024):
+                temporary.write(chunk)
+            reader.require_complete()
+            temporary.flush()
+            os.fsync(temporary.fileno())
+    finally:
+        if protection_observations.active():
+            try:
+                size = os.stat(upload.temporary_path).st_size
+            except Exception:
+                protection_observations.unavailable("apiWrittenBytes")
+                protection_observations.unavailable("temporaryBytes")
+            else:
+                protection_observations.increment("apiWrittenBytes", size)
+                protection_observations.gauge("temporaryBytes", size)
     upload.validated = True
 
 
@@ -359,6 +380,7 @@ def _link_workspace_snapshot(storage_key: str, upload: _WorkspaceSnapshotUpload 
         os.link(upload.temporary_path, final_path)
     except FileExistsError:
         return False
+    protection_observations.increment("publishedLinks", 1)
     _sync_directory(os.path.dirname(final_path))
     return True
 
@@ -367,7 +389,10 @@ def _publish_workspace_snapshot(
     body: dict, candidate: dict, storage_key: str, upload: _WorkspaceSnapshotUpload | None,
     *, advance_session: bool,
 ) -> str:
+    commit_pending = False
+
     def publish():
+        nonlocal commit_pending
         with transaction.atomic():
             agent_run, session, frozen = _locked_session_workspace_agent_run(body)
             replay = advance_session and _is_workspace_commit_replay(
@@ -393,15 +418,30 @@ def _publish_workspace_snapshot(
                 "workspaceSnapshotSizeBytes", "workspaceExpandedSizeBytes", "workspaceFileCount",
                 "workspaceLastAdvancedAgentRun", "updatedAt",
             ])
+            commit_pending = True
             return "committed"
 
-    disposition = publish()
-    if disposition is None:
-        # A concurrent immutable writer won the same key. Full verification
-        # happens without row locks; publication then rechecks all owner facts.
-        _verify_owned_workspace_snapshot(body, candidate, storage_key)
-        upload.existing_verified = True
-        disposition = publish()
+    protection_observations.increment("committedSnapshots", 0)
+    protection_observations.increment("publishedLinks", 0)
+    with protection_observations.elapsed("commitElapsedMs"):
+        try:
+            disposition = publish()
+            if disposition is None:
+                # A concurrent immutable writer won the same key. Full verification
+                # happens without row locks; publication then rechecks all owner facts.
+                _verify_owned_workspace_snapshot(body, candidate, storage_key)
+                upload.existing_verified = True
+                disposition = publish()
+        except BaseException:
+            if commit_pending:
+                # COMMIT may have reached the database before its acknowledgement
+                # failed, or a post-commit callback may have raised. Neither proves
+                # zero committed snapshots; retain the other measured work.
+                protection_observations.unavailable("committedSnapshots")
+            raise
+    if disposition == "committed":
+        protection_observations.increment("committedSnapshots", 1)
+    protection_observations.gauge("retainedBytes", candidate["snapshotSizeBytes"])
     return disposition
 
 
@@ -419,8 +459,10 @@ def _verify_owned_workspace_snapshot(body: dict, candidate: dict, storage_key: s
 def _verify_workspace_snapshot(candidate: dict, storage_key: str) -> None:
     digest = hashlib.sha256()
     size = 0
+    protection_observations.increment("apiVerificationReadBytes", 0)
     with default_storage.open(storage_key, "rb") as source:
         while chunk := source.read(64 * 1024):
+            protection_observations.increment("apiVerificationReadBytes", len(chunk))
             size += len(chunk)
             if size > candidate["snapshotSizeBytes"]:
                 raise SessionWorkspaceError("session_workspace_snapshot_invalid")
@@ -489,7 +531,9 @@ def _workspace_snapshot_manifest(manifest_bytes: bytes, candidate: dict) -> list
 
 
 def _require_workspace_eof(request) -> None:
-    if request.read(1):
+    extra = request.read(1)
+    protection_observations.increment("apiReceivedBytes", len(extra))
+    if extra:
         raise SessionWorkspaceError("session_workspace_commit_invalid", 400)
 
 
@@ -738,12 +782,14 @@ def _open_workspace_snapshot_handle(storage_key):
 
 
 @_internal_post("/agent-runs/session-workspace/commit")
+@protection_observations.observe_request("sessionCommit")
 def commit_session_workspace(request):
     try:
         body = _workspace_commit_request(request)
         with ExitStack() as uploads:
             with transaction.atomic():
                 agent_run, session, frozen = _locked_session_workspace_agent_run(body)
+                protection_observations.bind(sessionId=str(session.id), runId=str(agent_run.id), jobId=body["jobId"])
                 max_bytes = agent_run.authorization.payload["resources"]["dataTmpfsBytes"]
                 if (
                     body["snapshotSizeBytes"] > max_bytes
@@ -794,6 +840,7 @@ def commit_session_workspace(request):
 
 
 @_internal_post("/agent-runs/execution-workspace/stage")
+@protection_observations.observe_request("executionStage")
 def stage_execution_workspace(request):
     try:
         body = _workspace_snapshot_upload_request(
@@ -813,6 +860,7 @@ def stage_execution_workspace(request):
         with ExitStack() as uploads:
             with transaction.atomic():
                 agent_run, _session, _frozen = _locked_session_workspace_agent_run(body)
+                protection_observations.bind(sessionId=str(_session.id), runId=str(agent_run.id), jobId=body["jobId"])
                 if not _workspace_tmpfs_fits(agent_run, body["expandedSizeBytes"]):
                     raise SessionWorkspaceError("execution_workspace_stage_invalid", 400)
                 storage_key = ""

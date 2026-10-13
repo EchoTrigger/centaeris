@@ -38,7 +38,7 @@ const PLUGIN_ROOT: &str = "/opt/centaeris/plugins";
 const SYSTEM_SKILL_ROOT: &str = "/opt/centaeris/system-skills";
 const SNAPSHOT_PATH_MAX_BYTES: usize = 4 * 1024;
 const SNAPSHOT_PATH_MAX_DEPTH: usize = 64;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 const SNAPSHOT_IO_BUFFER_BYTES: usize = 64 * 1024;
 #[cfg(target_os = "linux")]
 const AGENT_UID: u32 = 10_001;
@@ -278,14 +278,71 @@ pub fn run_read_artifact_once() -> Result<(), String> {
     write_frame(&metadata, bytes.as_slice())
 }
 
-pub fn run_snapshot_collect_once() -> Result<(), String> {
-    require_root()?;
-    secure_roots()?;
-    let manifest = collect_snapshot_manifest(&load_inventory()?)?;
-    if manifest.files.is_empty() {
-        return Ok(());
+#[derive(Default)]
+struct SnapshotObservation {
+    operation_id: Option<String>,
+    scanned_entries: u64,
+    source_read_bytes: u64,
+}
+impl SnapshotObservation {
+    fn from_environment() -> Self {
+        let operation_id = (std::env::var("WORKSPACE_PERF_OBSERVATIONS").as_deref() == Ok("1"))
+            .then(|| std::env::var("WORKSPACE_PERF_OPERATION_ID").ok())
+            .flatten()
+            .filter(|id| {
+                !id.is_empty()
+                    && id.len() <= 160
+                    && id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"_.:-".contains(&byte))
+            });
+        Self {
+            operation_id,
+            ..Self::default()
+        }
     }
-    write_snapshot_frame(&manifest)
+
+    fn emit(&self, ok: bool) {
+        let Some(operation_id) = &self.operation_id else {
+            return;
+        };
+        for (metric, value) in [
+            ("scannedEntries", self.scanned_entries),
+            ("sourceReadBytes", self.source_read_bytes),
+        ] {
+            let event = serde_json::json!({"schema":"workspace.perf.v1", "source":"sandbox", "phase":"workspaceProtection",
+                "operationId":operation_id, "metric":metric, "value":value, "outcome":if ok {"ok"} else {"error"}});
+            let _ = writeln!(std::io::stderr().lock(), "{event}");
+        }
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn source_read(&mut self, count: usize) {
+        if self.operation_id.is_some() {
+            self.source_read_bytes = self.source_read_bytes.saturating_add(count as u64);
+        }
+    }
+
+    fn scanned_entry(&mut self) {
+        if self.operation_id.is_some() {
+            self.scanned_entries = self.scanned_entries.saturating_add(1);
+        }
+    }
+}
+
+pub fn run_snapshot_collect_once() -> Result<(), String> {
+    let mut observation = SnapshotObservation::from_environment();
+    let result = (|| {
+        require_root()?;
+        secure_roots()?;
+        let manifest = collect_snapshot_manifest(&load_inventory()?, &mut observation)?;
+        if manifest.files.is_empty() {
+            return Ok(());
+        }
+        write_snapshot_frame(&manifest, &mut observation)
+    })();
+    observation.emit(result.is_ok());
+    result
 }
 
 pub fn run_snapshot_restore_once() -> Result<(), String> {
@@ -394,6 +451,7 @@ pub fn run_quiesce_agent_processes_once() -> Result<(), String> {
 
 fn collect_snapshot_manifest(
     inventory: &SandboxInputInventory,
+    observation: &mut SnapshotObservation,
 ) -> Result<SandboxWorkspaceSnapshotManifest, String> {
     let protected_paths = inventory
         .inputs
@@ -406,11 +464,12 @@ fn collect_snapshot_manifest(
         "",
         &protected_paths,
         &mut paths,
+        observation,
     )?;
     paths.sort_unstable();
     let files = paths
         .iter()
-        .map(|path| snapshot_file_metadata(path.as_str()))
+        .map(|path| snapshot_file_metadata(path.as_str(), observation))
         .collect::<Result<Vec<_>, _>>()?;
     collected_snapshot_manifest(files)
 }
@@ -434,11 +493,13 @@ fn collect_snapshot_paths(
     prefix: &str,
     protected_paths: &BTreeSet<&str>,
     paths: &mut Vec<String>,
+    observation: &mut SnapshotObservation,
 ) -> Result<(), String> {
     for entry in fs::read_dir(directory)
         .map_err(|error| format!("read workspace directory failed: {error}"))?
     {
         let entry = entry.map_err(|error| format!("read workspace entry failed: {error}"))?;
+        observation.scanned_entry();
         let name = entry
             .file_name()
             .into_string()
@@ -461,6 +522,7 @@ fn collect_snapshot_paths(
                 relative.as_str(),
                 protected_paths,
                 paths,
+                observation,
             )?;
             continue;
         }
@@ -477,7 +539,10 @@ fn collect_snapshot_paths(
 }
 
 #[cfg(target_os = "linux")]
-fn snapshot_file_metadata(relative_path: &str) -> Result<SandboxWorkspaceSnapshotFile, String> {
+fn snapshot_file_metadata(
+    relative_path: &str,
+    observation: &mut SnapshotObservation,
+) -> Result<SandboxWorkspaceSnapshotFile, String> {
     use std::os::unix::fs::MetadataExt;
 
     let mut file = open_artifact_beneath(relative_path)?;
@@ -485,7 +550,7 @@ fn snapshot_file_metadata(relative_path: &str) -> Result<SandboxWorkspaceSnapsho
         .metadata()
         .map_err(|_| "workspace snapshot source is unavailable".to_string())?;
     validate_snapshot_file_metadata(&before)?;
-    let (size_bytes, sha256) = hash_snapshot_file(&mut file)?;
+    let (size_bytes, sha256) = hash_snapshot_file(&mut file, observation)?;
     let after = file
         .metadata()
         .map_err(|_| "workspace snapshot source changed".to_string())?;
@@ -501,12 +566,18 @@ fn snapshot_file_metadata(relative_path: &str) -> Result<SandboxWorkspaceSnapsho
 }
 
 #[cfg(not(target_os = "linux"))]
-fn snapshot_file_metadata(_relative_path: &str) -> Result<SandboxWorkspaceSnapshotFile, String> {
+fn snapshot_file_metadata(
+    _relative_path: &str,
+    _observation: &mut SnapshotObservation,
+) -> Result<SandboxWorkspaceSnapshotFile, String> {
     Err("sandbox helper requires Linux".to_string())
 }
 
-#[cfg(target_os = "linux")]
-fn hash_snapshot_file(file: &mut File) -> Result<(u64, String), String> {
+#[cfg(any(target_os = "linux", test))]
+fn hash_snapshot_file(
+    file: &mut impl Read,
+    observation: &mut SnapshotObservation,
+) -> Result<(u64, String), String> {
     let mut digest = Sha256::new();
     let mut size_bytes = 0_u64;
     let mut buffer = [0_u8; SNAPSHOT_IO_BUFFER_BYTES];
@@ -514,6 +585,7 @@ fn hash_snapshot_file(file: &mut File) -> Result<(u64, String), String> {
         let count = file
             .read(&mut buffer)
             .map_err(|error| format!("read workspace snapshot source failed: {error}"))?;
+        observation.source_read(count);
         if count == 0 {
             break;
         }
@@ -525,7 +597,10 @@ fn hash_snapshot_file(file: &mut File) -> Result<(u64, String), String> {
     Ok((size_bytes, format!("sha256:{:x}", digest.finalize())))
 }
 
-fn write_snapshot_frame(manifest: &SandboxWorkspaceSnapshotManifest) -> Result<(), String> {
+fn write_snapshot_frame(
+    manifest: &SandboxWorkspaceSnapshotManifest,
+    observation: &mut SnapshotObservation,
+) -> Result<(), String> {
     let manifest_bytes = canonical_snapshot_manifest_bytes(manifest)?;
     let manifest_length = u32::try_from(manifest_bytes.len())
         .map_err(|_| "snapshot manifest is too large".to_string())?;
@@ -535,7 +610,7 @@ fn write_snapshot_frame(manifest: &SandboxWorkspaceSnapshotManifest) -> Result<(
         .and_then(|_| stdout.write_all(manifest_bytes.as_slice()))
         .map_err(|error| format!("write snapshot manifest failed: {error}"))?;
     for expected in &manifest.files {
-        copy_snapshot_file(expected, &mut stdout)?;
+        copy_snapshot_file(expected, &mut stdout, observation)?;
     }
     stdout
         .flush()
@@ -546,6 +621,7 @@ fn write_snapshot_frame(manifest: &SandboxWorkspaceSnapshotManifest) -> Result<(
 fn copy_snapshot_file(
     expected: &SandboxWorkspaceSnapshotFile,
     output: &mut impl Write,
+    observation: &mut SnapshotObservation,
 ) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
 
@@ -557,6 +633,25 @@ fn copy_snapshot_file(
     if before.size() != expected.size_bytes || (before.mode() & 0o111 != 0) != expected.executable {
         return Err("workspace snapshot source changed".to_string());
     }
+    let (size_bytes, sha256) = copy_snapshot_contents(&mut file, output, observation)?;
+    let after = file
+        .metadata()
+        .map_err(|_| "workspace snapshot source changed".to_string())?;
+    if file_version(&before) != file_version(&after)
+        || size_bytes != expected.size_bytes
+        || sha256 != expected.sha256
+    {
+        return Err("workspace snapshot source changed".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn copy_snapshot_contents(
+    file: &mut impl Read,
+    output: &mut impl Write,
+    observation: &mut SnapshotObservation,
+) -> Result<(u64, String), String> {
     let mut digest = Sha256::new();
     let mut size_bytes = 0_u64;
     let mut buffer = [0_u8; SNAPSHOT_IO_BUFFER_BYTES];
@@ -564,6 +659,7 @@ fn copy_snapshot_file(
         let count = file
             .read(&mut buffer)
             .map_err(|error| format!("read workspace snapshot source failed: {error}"))?;
+        observation.source_read(count);
         if count == 0 {
             break;
         }
@@ -575,22 +671,14 @@ fn copy_snapshot_file(
             .ok_or_else(|| "workspace snapshot size overflow".to_string())?;
         digest.update(&buffer[..count]);
     }
-    let after = file
-        .metadata()
-        .map_err(|_| "workspace snapshot source changed".to_string())?;
-    if file_version(&before) != file_version(&after)
-        || size_bytes != expected.size_bytes
-        || format!("sha256:{:x}", digest.finalize()) != expected.sha256
-    {
-        return Err("workspace snapshot source changed".to_string());
-    }
-    Ok(())
+    Ok((size_bytes, format!("sha256:{:x}", digest.finalize())))
 }
 
 #[cfg(not(target_os = "linux"))]
 fn copy_snapshot_file(
     _expected: &SandboxWorkspaceSnapshotFile,
     _output: &mut impl Write,
+    _observation: &mut SnapshotObservation,
 ) -> Result<(), String> {
     Err("sandbox helper requires Linux".to_string())
 }
@@ -1934,6 +2022,104 @@ mod tests {
 
         assert!(manifest.files.is_empty());
         assert!(canonical_snapshot_manifest_bytes(&manifest).is_err());
+    }
+
+    #[test]
+    fn snapshot_content_copy_preserves_hash_and_reports_partial_write_failure() {
+        let bytes = b"synthetic checkpoint body";
+        let expected = (
+            bytes.len() as u64,
+            format!("sha256:{:x}", Sha256::digest(bytes)),
+        );
+        let mut observation = SnapshotObservation::default();
+        assert_eq!(
+            hash_snapshot_file(&mut &bytes[..], &mut observation).unwrap(),
+            expected
+        );
+        let mut output = Vec::new();
+        assert_eq!(
+            copy_snapshot_contents(&mut &bytes[..], &mut output, &mut observation).unwrap(),
+            expected
+        );
+        assert_eq!(output, bytes);
+        struct Partial {
+            bytes: Vec<u8>,
+        }
+        impl Write for Partial {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if !self.bytes.is_empty() {
+                    return Err(std::io::Error::other("fixture write failure"));
+                }
+                self.bytes.extend_from_slice(&bytes[..3]);
+                Ok(3)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut partial = Partial { bytes: Vec::new() };
+        assert!(copy_snapshot_contents(&mut &bytes[..], &mut partial, &mut observation).is_err());
+        assert_eq!(partial.bytes, &bytes[..3]);
+    }
+
+    #[test]
+    fn snapshot_observations_measure_both_source_passes_and_failed_copy_reads() {
+        let bytes = b"synthetic checkpoint body";
+        let mut observation = SnapshotObservation {
+            operation_id: Some("synthetic-observation".into()),
+            ..Default::default()
+        };
+        hash_snapshot_file(&mut &bytes[..], &mut observation).unwrap();
+        let mut output = Vec::new();
+        copy_snapshot_contents(&mut &bytes[..], &mut output, &mut observation).unwrap();
+        assert_eq!(observation.source_read_bytes, 2 * bytes.len() as u64);
+        assert_eq!(output, bytes);
+        let mut broken = std::io::Error::other("fixture write failure");
+        struct Broken<'a>(&'a mut std::io::Error);
+        impl Write for Broken<'_> {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(self.0.kind(), "fixture write failure"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        assert!(copy_snapshot_contents(
+            &mut &bytes[..],
+            &mut Broken(&mut broken),
+            &mut observation
+        )
+        .is_err());
+        assert_eq!(observation.source_read_bytes, 3 * bytes.len() as u64);
+    }
+
+    #[test]
+    fn snapshot_observations_count_visited_directories_and_files_without_changing_selection() {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-snapshot-observation-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(root.join("nested")).unwrap();
+        fs::write(root.join("first"), b"one").unwrap();
+        fs::write(root.join("nested/second"), b"two").unwrap();
+        let mut observation = SnapshotObservation {
+            operation_id: Some("synthetic-observation".into()),
+            ..Default::default()
+        };
+        let mut paths = Vec::new();
+        let result =
+            collect_snapshot_paths(&root, "", &BTreeSet::new(), &mut paths, &mut observation);
+        fs::remove_file(root.join("nested/second")).unwrap();
+        fs::remove_file(root.join("first")).unwrap();
+        fs::remove_dir(root.join("nested")).unwrap();
+        fs::remove_dir(root).unwrap();
+        result.unwrap();
+        paths.sort();
+        assert_eq!(paths, ["first", "nested/second"]);
+        assert_eq!(observation.scanned_entries, 3);
     }
 
     #[test]

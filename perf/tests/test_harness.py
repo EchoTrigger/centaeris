@@ -14,6 +14,18 @@ spec.loader.exec_module(control)
 
 
 class IsolationTests(unittest.TestCase):
+    def test_manifest_records_gc_identity_for_attributed_reclamation_samples(self):
+        stack = object.__new__(control.Stack)
+        def container(service):
+            return {'Id': service + '-owned-id', 'Image': service + '-image',
+                    'State': {'StartedAt': '2026-01-01T00:00:00Z'}}
+        with patch.object(stack, 'container', side_effect=container), \
+                patch.object(stack, 'compose', return_value='2'), \
+                patch.object(control, 'run', return_value='a' * 40):
+            manifest = stack.manifest()
+        self.assertEqual(manifest['containers']['gc'], {
+            'id': 'gc-owned-id', 'image': 'gc-image', 'startedAt': '2026-01-01T00:00:00Z'})
+
     def test_isolated_fixture_contains_finite_upload_capacity_without_inheriting_host_inputs(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

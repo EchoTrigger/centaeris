@@ -8,8 +8,10 @@ import time
 
 if __package__:
     from .control import ROOT, Stack
+    from .workspace_protection import validate_event
 else:
     from control import ROOT, Stack
+    from workspace_protection import validate_event
 
 DB_SAMPLE = """SELECT json_build_object(
  'activity',(SELECT COALESCE(json_agg(s),'[]') FROM (
@@ -24,12 +26,35 @@ DB_SAMPLE = """SELECT json_build_object(
 
 def records(text):
     for line in text.splitlines():
+        line = line.strip()
+        # API/GC use Python's message-only lastResort handler. Accept the
+        # standard basicConfig prefix too; do not inspect arbitrary log prose.
+        if re.match(r'^(?:WARNING:app_core\.workspace_observations:)?'
+                    r'Workspace protection observation unavailable:', line):
+            raise ValueError('workspace protection observations are incomplete')
         try:
             value = json.loads(line)
         except ValueError:
+            # Emitters write bare JSON objects. A broken object carrying an
+            # observation identity is evidence loss, even if other rows succeed.
+            if line.startswith('{') and re.search(
+                    r'"schema"\s*:\s*"workspace\.perf\.v1"|'
+                    r'"phase"\s*:\s*"workspaceProtection"', line):
+                raise ValueError('malformed workspace protection observation') from None
             continue
-        if isinstance(value, dict) and value.get('schema') == 'workspace.perf.v1':
-            yield value
+        if isinstance(value, dict):
+            if value.get('phase') == 'workspaceProtection':
+                validate_event(value)
+            if value.get('schema') == 'workspace.perf.v1':
+                yield value
+
+
+def observation_services(manifest):
+    for service in ('worker', 'runtime', 'api', 'gc'):
+        identity = manifest.get('containers', {}).get(service, {}).get('id')
+        if not isinstance(identity, str) or not re.fullmatch(r'[0-9a-f]{64}', identity):
+            raise ValueError(f'{service}: missing or invalid container identity')
+        yield service, identity
 
 
 def main():
@@ -60,19 +85,15 @@ def main():
     if not args.since or not args.until:
         parser.error('log collection requires --since and --until UTC timestamps')
     manifest = json.loads((output / 'manifest.json').read_text(encoding='utf-8'))
-    for service in ('worker', 'runtime'):
-        identity = manifest['containers'][service]['id']
-        if not re.fullmatch(r'[0-9a-f]{64}', identity):
-            parser.error('invalid container identity')
+    for service, identity in list(observation_services(manifest)):
         result = subprocess.run(['docker', 'logs', '--since', args.since, '--until', args.until, identity],
                                 capture_output=True, encoding='utf-8', check=True, timeout=60)
-        with (output / f'{service}-observations.jsonl').open('x', encoding='utf-8') as handle:
-            count = 0
-            for record in records(result.stdout + '\n' + result.stderr):
-                handle.write(json.dumps(record) + '\n')
-                count += 1
-        if not count:
+        samples = list(records(result.stdout + '\n' + result.stderr))
+        if not samples:
             raise SystemExit(f'{service}: no observations; do not treat the experiment as instrumented')
+        with (output / f'{service}-observations.jsonl').open('x', encoding='utf-8') as handle:
+            for record in samples:
+                handle.write(json.dumps(record) + '\n')
 
 
 if __name__ == '__main__':
