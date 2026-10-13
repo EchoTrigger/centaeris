@@ -562,7 +562,7 @@ def _locked_session_workspace_agent_run(body: dict) -> tuple[AgentRun, Session, 
     try:
         agent_run = (
             AgentRun.objects.select_for_update(of=("self",))
-            .select_related("authorization")
+            .select_related("authorization", "environment")
             .get(id=body["agentRunId"])
         )
     except AgentRun.DoesNotExist:
@@ -1077,7 +1077,7 @@ def resolve_deferred_input(request):
         with transaction.atomic():
             agent_run = (
                 AgentRun.objects.select_for_update(of=("self",))
-                .select_related("authorization")
+                .select_related("authorization", "environment")
                 .get(id=agent_run_id)
             )
             resolved_input = resolve_deferred_input_operation(agent_run, input_ref, digest)
@@ -1141,7 +1141,7 @@ def _prepare_deferred_input_read(request):
         with transaction.atomic():
             agent_run = (
                 AgentRun.objects.select_for_update(of=("self",))
-                .select_related("authorization")
+                .select_related("authorization", "environment")
                 .get(id=str(body["agentRunId"]))
             )
             resolved_input, storage_key = resolved_input_storage(
@@ -1206,7 +1206,7 @@ def validate_projected_inputs(request):
         with transaction.atomic():
             agent_run = (
                 AgentRun.objects.select_for_update(of=("self",))
-                .select_related("authorization")
+                .select_related("authorization", "environment")
                 .get(id=str(body["agentRunId"]))
             )
             states = []
@@ -1531,7 +1531,7 @@ def resolve_agent_run_lifecycle(request):
         with transaction.atomic():
             agent_run = (
                 AgentRun.objects.select_for_update(of=("self",))
-                .select_related("authorization", "modelConfig", "session")
+                .select_related("authorization", "modelConfig", "session", "environment")
                 .get(id=agent_run_id)
             )
             if agent_run.authorization.digest != digest:
@@ -1640,7 +1640,7 @@ def reconcile_agent_run_lifecycle(request):
     input_handoff_agents = set()
     active_agent_runs, active_next = _lifecycle_scan_page(
         AgentRun.objects.filter(status__in={"queued", "running"})
-        .select_related("authorization", "modelConfig", "session"),
+        .select_related("authorization", "modelConfig", "session", "environment"),
         active_after, limit,
     )
     dead_letter_agent_runs, dead_letter_next = _lifecycle_scan_page(
@@ -1653,7 +1653,7 @@ def reconcile_agent_run_lifecycle(request):
                 "agent_run_interrupted",
             },
         )
-        .select_related("authorization", "modelConfig", "session")
+        .select_related("authorization", "modelConfig", "session", "environment")
         .distinct(),
         dead_letter_after, limit,
     )
@@ -1687,7 +1687,7 @@ def reconcile_agent_run_lifecycle(request):
             if agent_run.status == "queued":
                 with transaction.atomic():
                     current = (AgentRun.objects.select_for_update(of=("self",))
-                               .select_related("authorization", "modelConfig", "session")
+                               .select_related("authorization", "modelConfig", "session", "environment")
                                .get(id=agent_run.id))
                     _expire_queued_run_locked(current)
             scheduled += 1

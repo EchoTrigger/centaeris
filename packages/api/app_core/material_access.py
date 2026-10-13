@@ -36,7 +36,7 @@ class MaterialAccess:
 
 def authorize_material_access(context: MaterialAccessContext) -> MaterialAccess:
     try:
-        agent_run = AgentRun.objects.select_related("authorization", "user").get(id=context.agent_run_id)
+        agent_run = AgentRun.objects.select_related("authorization", "user", "environment").get(id=context.agent_run_id)
     except (KeyError, AgentRun.DoesNotExist) as error:
         raise KnowledgeError("knowledge_agent_run_not_found", 404) from error
     if not agent_run_membership_is_current(agent_run):

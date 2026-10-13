@@ -66,6 +66,8 @@ class AgentInputDeliveryTests(TransactionTestCase):
         self.assertEqual(models.AgentRun.objects.count(), 1)
         delivered = self.delivery("initial-one")
         run = delivered.queue.agent_run
+        self.assertEqual(run.environment_id, self.session.current_environment_id)
+        self.assertEqual(run.environment.session_id, self.session.pk)
         self.assertEqual((run.session_id, run.modelConfig_id, run.thinkingMode),
             (self.session.pk, self.selected.pk, "low"))
         self.assertEqual(run.authorization.payload["thinkingMode"], "low")

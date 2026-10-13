@@ -93,6 +93,8 @@ class AgentWorkTests(TransactionTestCase):
         self.assertEqual(response.status_code, 201, response.content)
         receipt = HostedOperationReceipt.objects.get()
         child = AgentRun.objects.get(pk=receipt.agentRunId)
+        self.assertEqual(child.environment_id, child.session.current_environment_id)
+        self.assertNotEqual(child.environment_id, self.run.environment_id)
         binding = AgentWorkSession.objects.get()
         self.assertEqual(binding.session_id, child.session_id)
         self.assertEqual(binding.coordination_session_id, self.source.id)

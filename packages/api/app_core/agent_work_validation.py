@@ -43,7 +43,7 @@ def validate_agent_work(body):
     args = validate_work_args({"objective": body["objective"], "session_refs": body["sessionRefs"],
                               "file_refs": body["fileRefs"]})
     try:
-        run = AgentRun.objects.select_related("session__agent", "authorization", "user").get(id=body["agentRunId"])
+        run = AgentRun.objects.select_related("session__agent", "authorization", "user", "environment").get(id=body["agentRunId"])
         agent = run.session.agent
         authorization = run.authorization
         digest = authorization_digest(authorization.payload)

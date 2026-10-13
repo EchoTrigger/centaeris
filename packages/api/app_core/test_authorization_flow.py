@@ -13,7 +13,8 @@ class AuthorizationFlowTests(SimpleTestCase):
         payload = fixture()
         self.run = SimpleNamespace(id=payload["agentRunId"], workspace_id=payload["workspaceId"],
             session_id=payload["sessionId"], user_id=payload["userId"], modelConfig_id=payload["modelConfigRef"],
-            thinkingMode=payload["thinkingMode"], session=SimpleNamespace(agent_id=payload["agentId"]))
+            thinkingMode=payload["thinkingMode"], session=SimpleNamespace(id=payload["sessionId"], agent_id=payload["agentId"]),
+            environment_id="environment-test", environment=SimpleNamespace(id="environment-test", session_id=payload["sessionId"]))
         self.run.authorization = SimpleNamespace(payload=payload, digest=authorization_digest(payload),
             signature=authorization_signature(payload, KEY))
         self.digest = self.run.authorization.digest
@@ -66,6 +67,22 @@ class AuthorizationFlowTests(SimpleTestCase):
             _validate_agent_run_binding(self.run)
         # Input authority does not depend on the current reasoning selection.
         self.test_valid_authorization_reaches_resource_scope_check()
+
+    def test_environment_must_belong_to_the_signed_session_before_startup_or_input_access(self):
+        for attribute, value in (("environment_id", None), ("environment_id", "different-environment")):
+            with self.subTest(attribute=attribute, value=value):
+                original = getattr(self.run, attribute)
+                setattr(self.run, attribute, value)
+                with self.assertRaisesRegex(RuntimeError, "binding mismatch"):
+                    _validate_agent_run_binding(self.run)
+                with self.assertRaisesRegex(inputs.DeferredInputBindingError, "binding mismatch"):
+                    self.resolve()
+                setattr(self.run, attribute, original)
+        self.run.environment.session_id = "another-session"
+        with self.assertRaisesRegex(RuntimeError, "binding mismatch"):
+            _validate_agent_run_binding(self.run)
+        with self.assertRaisesRegex(inputs.DeferredInputBindingError, "binding mismatch"):
+            self.resolve()
 
     def prepare_storage(self):
         declared = self.run.authorization.payload["assetRefs"][0]

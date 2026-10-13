@@ -7,7 +7,7 @@ from django.conf import settings
 from django.contrib.sessions.base_session import AbstractBaseSession
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
-from django.db import IntegrityError, models, transaction
+from django.db import IntegrityError, models, router, transaction
 from .session_payload import SessionPayloadField
 
 from .agent_identity import (
@@ -77,6 +77,10 @@ def new_mcp_credential_audit_id() -> str:
 
 def new_session_id() -> str:
     return f"session_{secrets.token_urlsafe(12)}"
+
+
+def new_session_environment_id() -> str:
+    return new_id("environment")
 
 
 def new_session_project_id() -> str:
@@ -1216,6 +1220,12 @@ class Session(models.Model):
         null=True,
         blank=True,
     )
+    # Nullable only while this Session and its initial Environment are inserted
+    # in one transaction. PostgreSQL checks the completed binding at commit.
+    current_environment = models.ForeignKey(
+        "SessionEnvironment", on_delete=models.PROTECT, related_name="+",
+        null=True, blank=True, editable=False,
+    )
     title = models.CharField(max_length=200, default="New chat")
     origin = models.CharField(max_length=32, default="user")
     status = models.CharField(max_length=32, default="active")
@@ -1341,10 +1351,12 @@ class Session(models.Model):
                 "agent_id",
                 "workspace_id",
                 "owner_id",
+                "current_environment_id",
+                "current_environment__session_id",
             ).get(pk=self.pk)
             if stored_scope[0] != self.agent_id:
                 raise ValueError("Session agent_id is immutable")
-            if stored_scope[1:] != (self.workspace_id, self.owner_id):
+            if stored_scope[1:3] != (self.workspace_id, self.owner_id):
                 raise ValueError("Session ownership is immutable")
         require_enum(
             "Session.origin",
@@ -1365,6 +1377,48 @@ class Session(models.Model):
             agent_run = self.workspaceLastAdvancedAgentRun
             if agent_run.session_id != self.id or agent_run.workspace_id != self.workspace_id:
                 raise ValueError("Session workspace last advanced agent run mismatch")
+        using = kwargs.get("using") or router.db_for_write(type(self), instance=self)
+        if self._state.adding:
+            if self.current_environment_id is not None:
+                raise ValueError("new_session_requires_new_environment")
+            previous_database = self._state.db
+            try:
+                with transaction.atomic(using=using):
+                    kwargs["force_insert"] = True
+                    result = super().save(*args, **kwargs)
+                    environment = SessionEnvironment.objects.using(using).create(session=self)
+                    type(self).objects.using(using).filter(pk=self.pk).update(current_environment=environment)
+                    self.current_environment = environment
+                return result
+            except BaseException:
+                # save() mutates the instance before the transaction commits.
+                # Retain its identity so an uncommitted creation can be retried.
+                # An uncertain commit still hits the primary-key constraint.
+                self._state.adding, self._state.db = True, previous_database
+                self.current_environment = None
+                raise
+        if not self.current_environment_id:
+            raise ValueError("session_environment_binding_invalid")
+        if self.current_environment_id == stored_scope[3]:
+            if stored_scope[4] != self.pk:
+                raise ValueError("session_environment_binding_invalid")
+        elif not SessionEnvironment.objects.using(using).filter(pk=self.current_environment_id, session_id=self.pk).exists():
+            raise ValueError("session_environment_binding_invalid")
+        return super().save(*args, **kwargs)
+
+
+class SessionEnvironment(models.Model):
+    """A Session's durable business identity; physical execution remains per Run."""
+
+    id = models.CharField(primary_key=True, max_length=64, default=new_session_environment_id)
+    session = models.ForeignKey(Session, on_delete=models.PROTECT, related_name="environments")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            using = kwargs.get("using") or router.db_for_write(type(self), instance=self)
+            if type(self).objects.using(using).values_list("session_id", flat=True).get(pk=self.pk) != self.session_id:
+                raise ValueError("session_environment_identity_immutable")
         return super().save(*args, **kwargs)
 
 
@@ -1558,6 +1612,9 @@ class AgentRun(models.Model):
     session = models.ForeignKey(
         Session, on_delete=models.PROTECT, related_name="agent_runs"
     )
+    environment = models.ForeignKey(
+        SessionEnvironment, on_delete=models.PROTECT, related_name="agent_runs", editable=False,
+    )
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
     acting_app = models.ForeignKey(BusinessApplication, on_delete=models.PROTECT, related_name="agent_runs", null=True, blank=True)
     app_delegation = models.ForeignKey(UserAppDelegation, on_delete=models.PROTECT, related_name="agent_runs", null=True, blank=True)
@@ -1619,8 +1676,10 @@ class AgentRun(models.Model):
             elif definition_id:
                 raise ValueError("Managed AgentRun requires a published definition version")
         else:
-            stored_snapshot = type(self).objects.values_list("definition_version_id", "agent_instructions").get(pk=self.pk)
-            if stored_snapshot != (self.definition_version_id, self.agent_instructions):
+            stored_snapshot = type(self).objects.values_list(
+                "definition_version_id", "agent_instructions", "session_id", "environment_id",
+            ).get(pk=self.pk)
+            if stored_snapshot[:2] != (self.definition_version_id, self.agent_instructions):
                 raise ValueError("AgentRun configuration snapshot is immutable")
         if self.thinkingMode:
             validate_thinking_mode(self.thinkingMode)
@@ -1656,6 +1715,20 @@ class AgentRun(models.Model):
             raise ValueError("AgentRun membership binding is missing")
         if not self.turn_id.strip() or self.turn_id == self.id:
             raise ValueError("AgentRun initial Turn identity is invalid")
+        using = kwargs.get("using") or router.db_for_write(type(self), instance=self)
+        if self._state.adding:
+            with transaction.atomic(using=using):
+                session = Session.objects.using(using).select_for_update(of=("self",)).select_related(
+                    "current_environment",
+                ).get(pk=self.session_id)
+                if not session.current_environment_id:
+                    raise ValueError("session_environment_binding_missing")
+                if self.environment_id is not None and self.environment_id != session.current_environment_id:
+                    raise ValueError("agent_run_environment_binding_invalid")
+                self.environment = session.current_environment
+                return super().save(*args, **kwargs)
+        if stored_snapshot[2:] != (self.session_id, self.environment_id):
+            raise ValueError("agent_run_environment_binding_immutable")
         return super().save(*args, **kwargs)
 
 
