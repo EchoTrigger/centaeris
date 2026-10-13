@@ -26,7 +26,7 @@ class SessionEnvironmentMigrationTests(TransactionTestCase):
             membership = model("WorkspaceMembership").create(workspace_id=workspace.pk, user_id=user.pk, role="owner")
             agent = model("Agent").create(workspace_id=workspace.pk, owner_id=user.pk, name="Retained")
             config = model("ModelConfig").create(displayName="Retained")
-            sessions, grants = [], {}
+            sessions, grants, run_facts = [], {}, {}
             now = timezone.now()
             for status in ("active", "deleted", "purged"):
                 session = model("Session").create(workspace_id=workspace.pk, owner_id=user.pk, agent_id=agent.pk,
@@ -35,7 +35,10 @@ class SessionEnvironmentMigrationTests(TransactionTestCase):
                 sessions.append(session.pk)
                 for run_status in ("queued", "running", "completed", "failed", "cancelled"):
                     run = model("AgentRun").create(workspace_id=workspace.pk, user_id=user.pk, session_id=session.pk,
-                        membership_ref=membership.pk, modelConfig_id=config.pk, prompt="retained", status=run_status)
+                        membership_ref=membership.pk, modelConfig_id=config.pk, prompt="retained", status=run_status,
+                        startedAt=now if run_status == "running" else None,
+                        transitionReason="waiting_for_durable_input" if run_status == "running" else "agent_run_created")
+                    run_facts[run.pk] = (run.status, run.startedAt, run.transitionReason)
                     payload = fixture() | {"id": "authorization-" + run.pk, "workspaceId": workspace.pk,
                         "userId": str(user.pk), "sessionId": session.pk, "agentId": agent.pk,
                         "agentRunId": run.pk, "modelConfigRef": config.pk}
@@ -58,9 +61,15 @@ class SessionEnvironmentMigrationTests(TransactionTestCase):
                 self.assertEqual(session.current_environment_id, bindings[session.pk])
             for run in Run.objects.using(alias).all():
                 self.assertEqual(run.environment_id, bindings[run.session_id])
+                self.assertEqual((run.status, run.startedAt, run.transitionReason), run_facts[run.pk])
                 authorization = model("AgentRunAuthorization").get(agent_run_id=run.pk)
                 self.assertEqual((json.dumps(authorization.payload, sort_keys=True), authorization.digest,
                                   authorization.signature), grants[run.pk])
+            # A still-running old admission writer cannot silently create an
+            # unbound Run after the coordinated schema upgrade.
+            with self.assertRaises(IntegrityError), transaction.atomic(using=alias):
+                model("AgentRun").create(workspace_id=workspace.pk, user_id=user.pk, session_id=empty.pk,
+                    membership_ref=membership.pk, modelConfig_id=config.pk, prompt="old writer", status="queued")
             MigrationExecutor(database).migrate(self.current)
             self.assertEqual(dict(Environment.objects.using(alias).values_list("session_id", "id")), bindings)
             with self.assertRaisesRegex(RuntimeError, "reversal_requires_empty_environments"):
