@@ -305,6 +305,10 @@ impl SnapshotObservation {
     }
 
     fn emit(&self, ok: bool) {
+        self.emit_to(ok, &mut std::io::stderr().lock());
+    }
+
+    fn emit_to(&self, ok: bool, output: &mut impl Write) {
         let Some(operation_id) = &self.operation_id else {
             return;
         };
@@ -314,7 +318,7 @@ impl SnapshotObservation {
         ] {
             let event = serde_json::json!({"schema":"workspace.perf.v1", "source":"sandbox", "phase":"workspaceProtection",
                 "operationId":operation_id, "metric":metric, "value":value, "outcome":if ok {"ok"} else {"error"}});
-            let _ = writeln!(std::io::stderr().lock(), "{event}");
+            let _ = writeln!(output, "{event}");
         }
     }
 

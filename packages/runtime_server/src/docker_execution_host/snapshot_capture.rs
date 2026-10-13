@@ -77,9 +77,13 @@ impl DockerExecutionHostRunner {
         &self,
         capture: &SnapshotActivityGuard,
         expected: &WorkspaceSnapshotDescriptor,
+        trigger: ProtectionTrigger,
+        job_id: &str,
     ) -> Result<SnapshotCaptureResult, String> {
-        self.capture_snapshot_using(capture, expected, |request| {
-            self.capture_snapshot_command(request)
+        let observation =
+            WorkspaceProtection::new().with_context(trigger, &self.agent_run_id, Some(job_id));
+        self.capture_snapshot_using(capture, expected, &observation, |request| {
+            self.capture_snapshot_command(request, &observation)
         })
     }
 
@@ -87,9 +91,24 @@ impl DockerExecutionHostRunner {
         &self,
         _capture: &SnapshotActivityGuard,
         expected: &WorkspaceSnapshotDescriptor,
+        observation: &WorkspaceProtection,
         command: impl FnOnce(&SandboxSnapshotCaptureRequest) -> Result<SnapshotCaptureResult, String>,
     ) -> Result<SnapshotCaptureResult, String> {
-        capture_and_cache(&self.snapshot_capture_cache, expected, command)
+        observation.timed(ProtectionMetric::CaptureElapsedMs, || {
+            let result = capture_and_cache(&self.snapshot_capture_cache, expected, command)?;
+            let logical_bytes = match &result {
+                SnapshotCaptureResult::Snapshot(artifact) => {
+                    artifact.descriptor.expanded_size_bytes
+                }
+                SnapshotCaptureResult::Unchanged => {
+                    // A verified receipt never invokes the spool factory.
+                    observation.count(ProtectionMetric::SpoolWrittenBytes, 0, true);
+                    expected.expanded_size_bytes
+                }
+            };
+            observation.count(ProtectionMetric::SnapshotLogicalBytes, logical_bytes, true);
+            Ok(result)
+        })
     }
 
     pub(super) fn begin_snapshot_restore(&self) -> Result<(), String> {
@@ -104,9 +123,9 @@ impl DockerExecutionHostRunner {
     fn capture_snapshot_command(
         &self,
         capture_request: &SandboxSnapshotCaptureRequest,
+        observation: &WorkspaceProtection,
     ) -> Result<SnapshotCaptureResult, String> {
-        let mut command = self.exec_request(vec![AGENT_BINARY.into(), "snapshot-capture".into()]);
-        command.cwd = Some(WORKSPACE_DATA_ROOT.into());
+        let command = self.snapshot_capture_request(observation);
         let mut child = command.spawn()?;
         let stderr = child
             .stderr
@@ -125,11 +144,12 @@ impl DockerExecutionHostRunner {
                 .take()
                 .ok_or("snapshot capture helper stdout is unavailable")?;
             read_capture(&mut stdout, capture_request, |source| {
-                capture_snapshot_artifact(
+                capture_snapshot_artifact_observed(
                     source,
                     self.resources
                         .data_tmpfs_bytes
                         .saturating_add(SESSION_WORKSPACE_MANIFEST_LIMIT as u64 + 4),
+                    observation.clone(),
                 )
             })
         })();
@@ -138,13 +158,37 @@ impl DockerExecutionHostRunner {
         }
         let status = child.wait();
         let stderr = stderr_reader.join();
-        let status =
-            status.map_err(|error| format!("wait for snapshot capture helper failed: {error}"))?;
         let stderr = stderr
             .map_err(|_| "snapshot capture stderr reader panicked")?
             .map_err(|error| format!("read snapshot capture stderr failed: {error}"))?;
-        finish_capture(result, status.code(), stderr.bytes.as_slice())
+        finish_observed_capture(
+            result,
+            status.map(|status| status.code()),
+            stderr.bytes.as_slice(),
+            observation,
+        )
     }
+
+    fn snapshot_capture_request(&self, observation: &WorkspaceProtection) -> ExecRequest {
+        let mut command = self.exec_request(vec![AGENT_BINARY.into(), "snapshot-capture".into()]);
+        command.cwd = Some(WORKSPACE_DATA_ROOT.into());
+        observation.helper_environment(&mut command.env);
+        command
+    }
+}
+
+fn finish_observed_capture(
+    result: Result<SnapshotCaptureResult, String>,
+    exit_code: Result<Option<i32>, String>,
+    stderr: &[u8],
+    observation: &WorkspaceProtection,
+) -> Result<SnapshotCaptureResult, String> {
+    // Preserve valid measurements even if parsing, validation or helper exit
+    // fails. The existing forwarder rejects unrelated IDs and private text.
+    observation.forward_sandbox(stderr);
+    let exit_code =
+        exit_code.map_err(|error| format!("wait for snapshot capture helper failed: {error}"))?;
+    finish_capture(result, exit_code, stderr)
 }
 
 fn finish_capture(
@@ -523,8 +567,11 @@ mod tests {
                 .capture_prepared_recovery_workspace_with_observer(
                     |_| Ok(0),
                     |guard| {
-                        let result =
-                            runner.capture_snapshot_using(guard, &descriptor, |request| {
+                        let result = runner.capture_snapshot_using(
+                            guard,
+                            &descriptor,
+                            &WorkspaceProtection::new(),
+                            |request| {
                                 assert_eq!(request.baseline.is_some(), expect_baseline);
                                 let response = if expect_baseline {
                                     receipt(request)
@@ -542,7 +589,8 @@ mod tests {
                                     );
                                     capture_snapshot_artifact(source, 4096)
                                 })
-                            })?;
+                            },
+                        )?;
                         assert_eq!(
                             matches!(result, SnapshotCaptureResult::Unchanged),
                             expect_baseline
@@ -572,6 +620,114 @@ mod tests {
         run_capture(true);
         let replacement = super::super::tests::test_docker_execution_host_runner();
         assert!(replacement.snapshot_capture_cache.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn conditional_capture_observation_reaches_helper_and_forwards_bound_counters_on_failure() {
+        let (_, events) = crate::observations::capture_protection(|| {
+            let runner = super::super::tests::test_docker_execution_host_runner();
+            let observation = WorkspaceProtection::new().with_context(
+                ProtectionTrigger::RecoveryCheckpoint,
+                "run-metrics",
+                Some("job-metrics"),
+            );
+            let command = runner.snapshot_capture_request(&observation);
+            let mut expected_environment = vec![];
+            observation.helper_environment(&mut expected_environment);
+            assert!(
+                expected_environment
+                    .iter()
+                    .all(|value| command.env.contains(value)),
+                "capture helper must inherit the observation operation"
+            );
+            let operation_id = expected_environment
+                .iter()
+                .find_map(|value| value.strip_prefix("WORKSPACE_PERF_OPERATION_ID="))
+                .unwrap();
+            let event = serde_json::json!({"schema":"workspace.perf.v1","source":"sandbox","phase":"workspaceProtection","operationId":operation_id,"metric":"sourceReadBytes","value":17,"outcome":"error"});
+            let mut bytes = serde_json::to_vec(&event).unwrap();
+            bytes.extend_from_slice(b"\nprivate diagnostic must not become metrics\n");
+            let mut foreign = event.clone();
+            foreign["operationId"] = "other-operation".into();
+            bytes.extend(serde_json::to_vec(&foreign).unwrap());
+            bytes.push(b'\n');
+            assert!(finish_observed_capture(
+                Err("invalid response".into()),
+                Ok(Some(7)),
+                &bytes,
+                &observation
+            )
+            .is_err());
+        });
+        assert_eq!(events.len(), 1, "only the valid bound counter is forwarded");
+        assert_eq!(events[0]["value"], 17);
+        assert_eq!(events[0]["outcome"], "error");
+        assert_eq!(events[0]["trigger"], "recoveryCheckpoint");
+        assert_eq!(events[0]["runId"], "run-metrics");
+        assert_eq!(events[0]["jobId"], "job-metrics");
+    }
+
+    #[test]
+    fn conditional_capture_observes_zero_spool_for_warm_runner_and_preserves_operation_identity() {
+        let (frame_bytes, events) = crate::observations::capture_protection(|| {
+            let runner = super::super::tests::test_docker_execution_host_runner();
+            let expected = artifact().descriptor;
+            for warm in [false, true] {
+                let observation = WorkspaceProtection::new().with_context(
+                    ProtectionTrigger::TerminalCommit,
+                    "run-same",
+                    Some("job-same"),
+                );
+                let guard = runner.recovery_activity.wait_snapshot_activity().unwrap();
+                runner
+                    .capture_snapshot_using(&guard, &expected, &observation, |request| {
+                        let response = if warm {
+                            receipt(request)
+                        } else {
+                            full_response(request, &manifest())
+                        };
+                        let mut bytes = encoded(&response);
+                        if !warm {
+                            bytes.extend(frame(&manifest(), b"abc"));
+                        }
+                        read_capture(&mut Cursor::new(bytes), request, |source| {
+                            capture_snapshot_artifact_observed(source, 4096, observation.clone())
+                        })
+                    })
+                    .unwrap();
+            }
+            expected.size_bytes
+        });
+        let spool = events
+            .iter()
+            .filter(|event| {
+                event["metric"] == "runtimeSpoolWrittenBytes"
+                    && event["trigger"] == "terminalCommit"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(spool.len(), 2);
+        assert_eq!(spool[0]["value"], frame_bytes);
+        assert_eq!(spool[1]["value"], 0);
+        for event in spool {
+            let operation_id = &event["operationId"];
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| &event["operationId"] == operation_id
+                        && event["metric"] == "snapshotLogicalBytes"
+                        && event["value"] == 3)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| &event["operationId"] == operation_id
+                        && event["metric"] == "captureElapsedMs")
+                    .count(),
+                1
+            );
+        }
     }
 
     #[test]

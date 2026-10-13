@@ -5,6 +5,24 @@ use crate::protocol::{
 };
 
 pub(super) fn run() -> Result<(), String> {
+    observed_capture(
+        &mut SnapshotObservation::from_environment(),
+        &mut std::io::stderr().lock(),
+        run_inner,
+    )
+}
+
+fn observed_capture(
+    observation: &mut SnapshotObservation,
+    diagnostics: &mut impl Write,
+    operation: impl FnOnce(&mut SnapshotObservation) -> Result<(), String>,
+) -> Result<(), String> {
+    let result = operation(observation);
+    observation.emit_to(result.is_ok(), diagnostics);
+    result
+}
+
+fn run_inner(observation: &mut SnapshotObservation) -> Result<(), String> {
     require_root()?;
     secure_roots()?;
     let request: SandboxSnapshotCaptureRequest = read_json(MAX_JSON_BYTES + 1024)?;
@@ -12,11 +30,12 @@ pub(super) fn run() -> Result<(), String> {
     capture_idle(
         &request,
         &mut output,
+        observation,
         require_idle,
-        || collect_snapshot_manifest(&load_inventory()?, &mut SnapshotObservation::default()),
-        |manifest, sink| {
+        |observation| collect_snapshot_manifest(&load_inventory()?, observation),
+        |manifest, sink, observation| {
             for expected in &manifest.files {
-                copy_snapshot_file(expected, sink, &mut SnapshotObservation::default())?;
+                copy_snapshot_file(expected, sink, observation)?;
             }
             Ok(())
         },
@@ -29,15 +48,20 @@ pub(super) fn run() -> Result<(), String> {
 fn capture_idle(
     request: &SandboxSnapshotCaptureRequest,
     output: &mut impl Write,
+    observation: &mut SnapshotObservation,
     mut idle: impl FnMut() -> Result<(), String>,
-    collect: impl FnOnce() -> Result<SandboxWorkspaceSnapshotManifest, String>,
-    verify: impl FnOnce(&SandboxWorkspaceSnapshotManifest, &mut dyn Write) -> Result<(), String>,
+    collect: impl FnOnce(&mut SnapshotObservation) -> Result<SandboxWorkspaceSnapshotManifest, String>,
+    verify: impl FnOnce(
+        &SandboxWorkspaceSnapshotManifest,
+        &mut dyn Write,
+        &mut SnapshotObservation,
+    ) -> Result<(), String>,
 ) -> Result<(), String> {
     validate_request(request)?;
     idle()?;
-    let manifest = collect()?;
+    let manifest = collect(observation)?;
     write_capture(request, &manifest, output, |sink| {
-        verify(&manifest, sink)?;
+        verify(&manifest, sink, observation)?;
         // The caller excludes dispatch; independently reject live agent
         // processes before scanning and after validating all file content.
         idle()
@@ -263,6 +287,7 @@ mod tests {
             let result = capture_idle(
                 &request(manifest.clone()),
                 &mut output,
+                &mut SnapshotObservation::default(),
                 || {
                     checks += 1;
                     if checks == busy_check {
@@ -271,8 +296,8 @@ mod tests {
                         Ok(())
                     }
                 },
-                || Ok(manifest),
-                |_, _| Ok(()),
+                |_| Ok(manifest),
+                |_, _, _| Ok(()),
             );
             assert!(result.is_err());
             assert!(output.is_empty());
@@ -331,5 +356,103 @@ mod tests {
         request.schema = "workspace.snapshot.capture.unsupported".into();
         assert!(validate_request(&request).is_err());
         assert!(serde_json::from_str::<SandboxSnapshotCaptureRequest>(r#"{"schema":"workspace.snapshot.capture.v1","captureId":"1","baseline":null,"unknown":1}"#).is_err());
+    }
+
+    #[test]
+    fn conditional_capture_observes_both_actual_reads_including_unchanged_and_failure() {
+        for (unchanged, fail_second) in [(true, false), (false, false), (true, true)] {
+            let body = b"measured content";
+            let manifest = test_manifest(body);
+            let mut request = request(manifest.clone());
+            if !unchanged {
+                request.baseline = None;
+            }
+            let mut observation = SnapshotObservation {
+                operation_id: Some("capture-read-test".into()),
+                ..Default::default()
+            };
+            let mut diagnostics = vec![];
+            let mut output = vec![];
+            let result = observed_capture(&mut observation, &mut diagnostics, |observation| {
+                capture_idle(
+                    &request,
+                    &mut output,
+                    observation,
+                    || Ok(()),
+                    |observation| {
+                        hash_snapshot_file(&mut Cursor::new(body), observation)?;
+                        observation.scanned_entry();
+                        Ok(manifest)
+                    },
+                    |manifest, sink, observation| {
+                        let content: &[u8] = if fail_second {
+                            b"replaced content"
+                        } else {
+                            body
+                        };
+                        copy_snapshot_content(
+                            &mut Cursor::new(content),
+                            &manifest.files[0],
+                            sink,
+                            observation,
+                        )
+                    },
+                )
+            });
+            assert_eq!(result.is_err(), fail_second);
+            if unchanged && !fail_second {
+                assert!(decode(&output).1.is_empty());
+            }
+            if unchanged && fail_second {
+                assert!(output.is_empty());
+            }
+            let events = diagnostics
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .map(|line| serde_json::from_slice::<serde_json::Value>(line).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                events.len(),
+                2,
+                "both counters must be reported even when the helper fails"
+            );
+            assert_eq!(events[0]["metric"], "scannedEntries");
+            assert_eq!(events[0]["value"], 1);
+            assert_eq!(events[1]["metric"], "sourceReadBytes");
+            assert_eq!(events[1]["value"], 2 * body.len() as u64);
+            assert_eq!(events[1]["operationId"], "capture-read-test");
+            assert_eq!(
+                events[1]["outcome"],
+                if fail_second { "error" } else { "ok" }
+            );
+        }
+    }
+
+    #[test]
+    fn conditional_capture_reports_zero_reads_for_early_rejection_and_disabled_is_quiet() {
+        for enabled in [true, false] {
+            let mut observation = SnapshotObservation {
+                operation_id: enabled.then(|| "early-rejection".into()),
+                ..Default::default()
+            };
+            let mut diagnostics = vec![];
+            let result = observed_capture(&mut observation, &mut diagnostics, |_| {
+                Err("agent process present".into())
+            });
+            assert!(result.is_err());
+            if enabled {
+                let events = String::from_utf8(diagnostics)
+                    .unwrap()
+                    .lines()
+                    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(events.len(), 2);
+                assert!(events
+                    .iter()
+                    .all(|event| event["value"] == 0 && event["outcome"] == "error"));
+            } else {
+                assert!(diagnostics.is_empty());
+            }
+        }
     }
 }
