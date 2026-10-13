@@ -1,7 +1,7 @@
 import { parseReferencedSession, type ReferencedSession } from "./agentOutputFeed";
 import type { TranscriptInitialInputOrigin } from "../chat/TranscriptBlockContent";
 
-const SESSION_KEYS = "id|workspaceId|agentId|projectId|title|origin|status|deletedAt|isPinned|isUnread|hasActiveAgentRun|updatedAt|initialInputOrigin";
+const SESSION_KEYS = "id|workspaceId|agentId|projectId|title|origin|status|deletedAt|isPinned|isUnread|hasActiveAgentRun|updatedAt|initialInputOrigin|currentEnvironmentId|executionMode";
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("agent_work_sessions_invalid");
   return value as Record<string, unknown>;
@@ -38,6 +38,7 @@ export function parseAgentWorkSessionsPage(value: unknown, agentId: string, work
   const sessions = page.sessions.map(value => {
     const session = record(value); exact(session, SESSION_KEYS);
     if (!opaque(session.id) || ids.has(session.id) || session.id === afterSessionId || typeof session.origin !== "string"
+      || !opaque(session.currentEnvironmentId) || session.executionMode !== "perRun"
       || session.deletedAt !== null || typeof session.isPinned !== "boolean" || typeof session.isUnread !== "boolean"
       || (session.projectId !== null && !opaque(session.projectId)) || typeof session.updatedAt !== "string" || !Number.isFinite(Date.parse(session.updatedAt))) throw new Error("agent_work_sessions_invalid");
     ids.add(session.id); inputOrigin(session.initialInputOrigin);

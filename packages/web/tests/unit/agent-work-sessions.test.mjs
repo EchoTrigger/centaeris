@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { ApiError, button, environment, nodes, renderer, subjectLoader } from "./componentHarness.mjs";
 const { AgentChatPageContent } = await import(await subjectLoader()(fileURLToPath(new URL("../../src/routes/AgentChatRoute.tsx", import.meta.url))));
 const history = { schema: "agent.history.v1", agentId: "agent", sessionId: "coord", items: [], nextCursor: "tail", newestCursor: "tail", hasMore: false };
-const session = (id = "unreferenced-work") => ({ id, workspaceId: "workspace", agentId: "agent", projectId: null, title: `Work ${id}`, origin: "automation", status: "active", deletedAt: null, isPinned: false, isUnread: false, hasActiveAgentRun: false, updatedAt: "2026-10-05T00:00:00Z", initialInputOrigin: { messageId: `initial-${id}`, agentId: "agent", agentName: "Synthetic Agent" } });
+const session = (id = "unreferenced-work") => ({ id, currentEnvironmentId: `environment-${id}`, executionMode: "perRun", workspaceId: "workspace", agentId: "agent", projectId: null, title: `Work ${id}`, origin: "automation", status: "active", deletedAt: null, isPinned: false, isUnread: false, hasActiveAgentRun: false, updatedAt: "2026-10-05T00:00:00Z", initialInputOrigin: { messageId: `initial-${id}`, agentId: "agent", agentName: "Synthetic Agent" } });
 const page = (sessions = [session()], hasMore = false) => ({ schema: "agent.work_sessions.v1", agentId: "agent", workspaceId: "workspace", sessions, nextAfterSessionId: hasMore ? sessions.at(-1).id : null, hasMore });
 const { useAgentWorkSessions } = await import(await subjectLoader()(fileURLToPath(new URL("../../src/agent-chat/useAgentWorkSessions.ts", import.meta.url))));
 
@@ -30,6 +30,17 @@ test("background work-list polling preserves loaded rows and does not become vis
 });
 const component = (tree, name) => nodes(tree, n => n.type.name === name)[0];
 const { agentWorkSessionsPath, parseAgentWorkSessionsPage, parseSessionInputOrigin } = await import(await subjectLoader()(fileURLToPath(new URL("../../src/agent-chat/agentWorkSessions.ts", import.meta.url))));
+
+test("work pages accept the stable environment binding and reject unsupported execution modes", () => {
+  const bound = { ...session(), currentEnvironmentId: "environment-work", executionMode: "perRun" };
+  assert.equal(parseAgentWorkSessionsPage(page([bound]), "agent", "workspace", null).sessions[0].sessionId, bound.id);
+  for (const invalid of [
+    { ...bound, currentEnvironmentId: "" }, { ...bound, currentEnvironmentId: null },
+    { ...bound, currentEnvironmentId: " environment-work" },
+    { ...bound, executionMode: "persistent" }, { ...bound, executionMode: undefined },
+    Object.fromEntries(Object.entries(bound).filter(([key]) => key !== "currentEnvironmentId")),
+  ]) assert.throws(() => parseAgentWorkSessionsPage(page([invalid]), "agent", "workspace", null));
+});
 
 test("work pages preserve authoritative nonlexical order and reject malformed scope, rows and cursors", () => {
   const value = page([session("work-z"), session("work-99"), session("work-100")], true);
