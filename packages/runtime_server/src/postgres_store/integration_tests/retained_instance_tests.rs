@@ -18,6 +18,7 @@ const KEY: &[u8] = b"retained-test-key";
 mod allocation_mode_tests;
 mod cleanup_authority_tests;
 mod cleanup_receipt_tests;
+mod retirement_tests;
 fn controller_lease_digest(owner: &str) -> String {
     let mut hash = Sha256::new();
     hash.update(b"workspace:environment-controller-lease:v1\0");
@@ -678,7 +679,10 @@ pub(super) fn downgrade_to_eight(db: &mut Client) {
         .query_one("SELECT max(version) FROM runtime.schema_migrations", &[])
         .unwrap()
         .get::<_, i64>(0);
-    if version == 10 {
+    if version >= 11 {
+        db.batch_execute("DROP TABLE runtime.environment_retirements; DROP FUNCTION runtime.protect_environment_retirement(); DELETE FROM runtime.schema_migrations WHERE version=11;").unwrap();
+    }
+    if version >= 10 {
         db.batch_execute(
             "DROP TABLE runtime.agent_run_cleanup_receipts;
             DELETE FROM runtime.schema_migrations WHERE version=10;",

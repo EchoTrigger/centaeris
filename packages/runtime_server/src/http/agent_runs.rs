@@ -345,7 +345,7 @@ fn teardown_retained(
         },
         crate::docker_execution_host::observed_resident_sandboxes,
         |target, verified| match target {
-            CleanupTarget::NeverAllocated => Ok(()),
+            CleanupTarget::NeverAllocated | CleanupTarget::Destroyed { .. } => Ok(()),
             CleanupTarget::Instance {
                 allocation,
                 resources,

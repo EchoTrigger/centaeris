@@ -96,6 +96,18 @@ pub(crate) fn verify_controller_authority(
         return Err("retained controller fence rejected".into());
     }
     let run=tx.query_opt("SELECT session_id,environment_id,workspace_id,user_id::text,membership_ref,status,\"modelConfig_id\",\"thinkingMode\",\"preAdmissionCancelledAt\" IS NULL FROM public.app_core_agentrun WHERE id=$1 FOR SHARE", &[&b.agent_run_id]).map_err(|e|e.to_string())?.ok_or("retained Run missing")?;
+    if let Some(retirement) = tx
+        .query_opt(
+            "SELECT state FROM runtime.environment_retirements WHERE environment_id=$1",
+            &[&b.environment_id],
+        )
+        .map_err(|e| e.to_string())?
+    {
+        if r.purpose == ControllerPurpose::Execute || retirement.get::<_, String>(0) != "destroyed"
+        {
+            return Err("retained environment retiring; controller operation rejected".into());
+        }
+    }
     if run.get::<_, String>(0) != b.session_id
         || run.get::<_, Option<String>>(1).as_deref() != Some(&b.environment_id)
         || run.get::<_, String>(2) != tenant

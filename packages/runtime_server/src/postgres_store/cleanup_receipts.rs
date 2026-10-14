@@ -21,6 +21,9 @@ pub(crate) struct CleanupAuthorityRequest<'a> {
 
 #[derive(Debug)]
 pub(crate) enum CleanupTarget {
+    Destroyed {
+        instance_id: String,
+    },
     Instance {
         allocation: Box<RetainedInstanceAllocation>,
         resources: ResidentResourceUsage,
@@ -147,6 +150,7 @@ impl PostgresRuntimeStore {
                 verify_controller_authority(&mut tx,&authority)?;
                 let allocation=match &target {
                     CleanupTarget::Instance {allocation,..} => CleanupAllocation::Instance {instance_id:allocation.instance_id.clone()},
+                    CleanupTarget::Destroyed {instance_id} => CleanupAllocation::Instance {instance_id:instance_id.clone()},
                     CleanupTarget::NeverAllocated => CleanupAllocation::NeverAllocated {},
                 };
                 let mut hash=Sha256::new();
@@ -224,7 +228,7 @@ fn resolve_target(
 ) -> Result<CleanupTarget, String> {
     let b = &r.cleanup.environment_authorization.payload;
     // Unknown reservations cannot be silently treated as absent allocations.
-    let unknown=db.query_one("SELECT EXISTS(SELECT 1 FROM runtime.resident_sandboxes WHERE host_id=$1 AND (allocation_mode='unbound' OR state<>'resident' OR container_id IS NULL OR instance_id IS NULL))", &[&r.host_id]).map_err(|e|e.to_string())?.get::<_,bool>(0);
+    let unknown=db.query_one("SELECT EXISTS(SELECT 1 FROM runtime.resident_sandboxes WHERE host_id=$1 AND (allocation_mode='unbound' OR environment_id IS NULL OR (environment_id=$2 AND (state<>'resident' OR container_id IS NULL OR instance_id IS NULL))))", &[&r.host_id,&b.environment_id]).map_err(|e|e.to_string())?.get::<_,bool>(0);
     if unknown {
         return Err("cleanup inventory has unresolved reservation".into());
     }
@@ -251,6 +255,16 @@ fn resolve_target(
         }
     }
     let holdings=db.query("SELECT execution_id,instance_id,allocation_mode,host_id FROM runtime.resident_sandboxes WHERE environment_id=$1", &[&b.environment_id]).map_err(|e|e.to_string())?;
+    if let Some(retirement) = db.query_opt("SELECT instance_id,allocation_execution_id,container_id,host_id,state FROM runtime.environment_retirements WHERE environment_id=$1", &[&b.environment_id]).map_err(|e| e.to_string())? {
+        let origin: String = retirement.get(1);
+        let container: String = retirement.get(2);
+        if retirement.get::<_,String>(3) != r.host_id || retirement.get::<_,String>(4) != "destroyed"
+            || !holdings.is_empty() || (!anchors.is_empty() && !anchors.contains(&origin))
+            || physical.iter().any(|p| p.container_id==container || p.execution_id==origin) {
+            return Err("cleanup maintenance destruction unconfirmed".into());
+        }
+        return Ok(CleanupTarget::Destroyed {instance_id:retirement.get(0)});
+    }
     if holdings.is_empty() {
         if associations.is_empty() {
             return Ok(CleanupTarget::NeverAllocated);

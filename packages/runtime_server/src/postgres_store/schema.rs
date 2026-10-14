@@ -2,13 +2,14 @@ use std::collections::BTreeSet;
 
 use postgres::{Client, GenericClient};
 
-const STORE_SCHEMA_VERSION: i64 = 10;
+const STORE_SCHEMA_VERSION: i64 = 11;
 const LEASE_RECLAIM_COLUMNS: &str =
     ",lease_reclaim_count:bigint:NO,lease_reclaim_not_before_ms:bigint:YES";
 const PREVIOUS_OBSERVATION_KINDS: &str = "'system_prompt'::text, 'message'::text, 'input_image'::text, 'tool_catalog'::text, 'compaction_prompt'::text, 'input_uptake'::text";
 const CURRENT_OBSERVATION_KINDS: &str = "'system_prompt'::text, 'message'::text, 'input_image'::text, 'tool_catalog'::text, 'compaction_prompt'::text, 'input_uptake'::text, 'required_completion_delivery'::text";
 
 pub(super) const RUNTIME_TABLES: &[&str] = &[
+    "environment_retirements",
     "agent_run_cleanup_receipts",
     "execution_instances",
     "execution_job_tenants",
@@ -61,6 +62,7 @@ const RUNTIME_INDEXES: &[&str] = &[
 ];
 
 const TABLE_SHAPES: &[(&str, &str)] = &[
+    ("environment_retirements", "operation_id:text:NO,environment_id:text:NO,instance_id:text:NO,host_id:text:NO,allocation_execution_id:text:NO,container_id:text:NO,request_json:text:NO,state:text:NO,recorded_at_ms:bigint:NO"),
     ("agent_run_cleanup_receipts", "receipt_id:text:NO,agent_run_id:text:NO,environment_id:text:NO,authorization_digest:text:NO,controller_epoch:bigint:NO,allocation_kind:text:NO,instance_id:text:YES,cleanup_complete:boolean:NO,file_protection:text:NO,recorded_at_ms:bigint:NO"),
     ("execution_instances", "execution_id:text:NO,instance_id:text:NO,environment_id:text:NO,session_id:text:NO,agent_run_id:text:NO,host_id:text:NO,authorization_digest:text:NO,binding_digest:text:NO,image_digest:text:NO"),
     (
@@ -261,6 +263,7 @@ pub(super) fn ensure_schema(client: &mut Client) -> Result<(), String> {
         upgrade_execution_instances(client)?;
         upgrade_retained_accounting(client)?;
         upgrade_cleanup_receipts(client)?;
+        upgrade_environment_retirements(client)?;
     }
     validate_schema_version(client)?;
     validate_schema(client, CURRENT_OBSERVATION_KINDS)
@@ -427,6 +430,29 @@ fn upgrade_retained_accounting(client: &mut Client) -> Result<(), String> {
     tx.commit().map_err(|e| e.to_string())
 }
 
+fn upgrade_environment_retirements(client: &mut Client) -> Result<(), String> {
+    if schema_versions(client)? != (1..=10).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    let mut tx = client.transaction().map_err(|e| e.to_string())?;
+    super::resource_commit::require_durable_resource_commit(&mut tx)?;
+    tx.batch_execute("LOCK TABLE runtime.schema_migrations IN ACCESS EXCLUSIVE MODE")
+        .map_err(|e| e.to_string())?;
+    if schema_versions(&mut tx)? != (1..=10).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.batch_execute(super::residency::retirement::DDL)
+        .map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO runtime.schema_migrations(version,applied_at_ms) VALUES(11,$1)",
+        &[&now_ms()?],
+    )
+    .map_err(|e| e.to_string())?;
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
 fn upgrade_cleanup_receipts(client: &mut Client) -> Result<(), String> {
     if schema_versions(client)? != (1..=9).collect::<Vec<_>>() {
         return Ok(());
@@ -516,6 +542,8 @@ fn create_schema(client: &mut Client) -> Result<(), String> {
         .map_err(|e| format!("create retained accounting failed: {e}"))?;
     tx.batch_execute(super::cleanup_receipts::DDL)
         .map_err(|e| format!("create cleanup receipts failed: {e}"))?;
+    tx.batch_execute(super::residency::retirement::DDL)
+        .map_err(|e| e.to_string())?;
     for version in 1..=STORE_SCHEMA_VERSION {
         tx.execute(
             "INSERT INTO runtime.schema_migrations(version, applied_at_ms) VALUES($1, $2)",
@@ -548,6 +576,7 @@ fn validate_schema_with_resource_budgets(
 ) -> Result<(), String> {
     let retained_accounting = instance_binding && schema_versions(client)?.contains(&9);
     let cleanup_receipts = retained_accounting && schema_versions(client)?.contains(&10);
+    let retirements = cleanup_receipts && schema_versions(client)?.contains(&11);
     let tables = object_names(client, "BASE TABLE")?;
     let expected_tables = RUNTIME_TABLES
         .iter()
@@ -556,6 +585,7 @@ fn validate_schema_with_resource_budgets(
             (resident_budget || *table != "resident_sandboxes")
                 && (instance_binding || *table != "execution_instances")
                 && (cleanup_receipts || *table != "agent_run_cleanup_receipts")
+                && (retirements || *table != "environment_retirements")
         })
         .map(str::to_string)
         .collect();
@@ -566,6 +596,7 @@ fn validate_schema_with_resource_budgets(
         if (*table == "resident_sandboxes" && !resident_budget)
             || (*table == "execution_instances" && !instance_binding)
             || (*table == "agent_run_cleanup_receipts" && !cleanup_receipts)
+            || (*table == "environment_retirements" && !retirements)
         {
             continue;
         }
@@ -598,6 +629,22 @@ fn validate_schema_with_resource_budgets(
             || keys.get::<_, i64>(2) != i64::from(retained_accounting)
         {
             return Err("Postgres instance identity constraints mismatch".into());
+        }
+    }
+    if retirements {
+        let keys = client.query_one("SELECT COUNT(*) FILTER (WHERE contype='p' AND conkey=ARRAY[1]::smallint[]),COUNT(*) FILTER (WHERE contype='u' AND conkey=ARRAY[2]::smallint[]),COUNT(*) FILTER (WHERE contype='u' AND conkey=ARRAY[3]::smallint[]),COUNT(*) FILTER (WHERE contype='f' AND conkey=ARRAY[5]::smallint[] AND confrelid='runtime.execution_instances'::regclass AND confkey=ARRAY[1]::smallint[] AND convalidated AND NOT condeferrable AND confupdtype='a' AND confdeltype='a') FROM pg_constraint WHERE conrelid='runtime.environment_retirements'::regclass", &[]).map_err(|e| e.to_string())?;
+        if (0..4).any(|i| keys.get::<_, i64>(i) != 1) {
+            return Err("Postgres retirement identity constraints mismatch".into());
+        }
+        let trigger = client.query_one("SELECT count(*) FROM pg_trigger WHERE tgrelid='runtime.environment_retirements'::regclass AND tgname='environment_retirement_facts' AND tgenabled='O' AND NOT tgisinternal AND tgtype=27 AND tgfoid='runtime.protect_environment_retirement()'::regprocedure AND tgqual IS NULL AND tgnargs=0", &[]).map_err(|e| e.to_string())?.get::<_,i64>(0);
+        if trigger != 1 {
+            return Err("Postgres immutable retirement trigger missing".into());
+        }
+        let state = client.query_opt("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='runtime.environment_retirements'::regclass AND conname='environment_retirements_state_check' AND contype='c' AND convalidated", &[]).map_err(|e| e.to_string())?.map(|r| r.get::<_,String>(0));
+        if state.as_deref()
+            != Some("CHECK ((state = ANY (ARRAY['pending'::text, 'destroyed'::text])))")
+        {
+            return Err("Postgres retirement state constraint mismatch".into());
         }
     }
     if cleanup_receipts {
@@ -783,6 +830,14 @@ fn validate_schema_with_resource_budgets(
         .map(|row| row.get::<_, String>(0))
         .collect::<BTreeSet<_>>();
     let mut expected_functions = BTreeSet::from(["notify_runtime_job_ready_v1".to_string()]);
+    if retirements {
+        expected_functions.insert("protect_environment_retirement".into());
+        let expected = super::residency::retirement::DDL.split_once("CREATE FUNCTION runtime.protect_environment_retirement() RETURNS trigger LANGUAGE plpgsql AS $$").ok_or("retirement function declaration missing")?.1.split_once("$$;").ok_or("retirement function body missing")?.0;
+        let actual = client.query_one("SELECT prosrc FROM pg_proc WHERE oid='runtime.protect_environment_retirement()'::regprocedure", &[]).map_err(|e| e.to_string())?.get::<_,String>(0);
+        if actual != expected {
+            return Err("Postgres immutable retirement function mismatch".into());
+        }
+    }
     if retained_accounting {
         for name in ["verify_execution_allocation", "verify_resident_allocation"] {
             expected_functions.insert(name.to_string());
@@ -822,6 +877,9 @@ fn validate_schema_with_resource_budgets(
         .map(|row| row.get::<_, String>(0))
         .collect::<BTreeSet<_>>();
     let mut expected_triggers = BTreeSet::from(["runtime_jobs_ready_notify_v1".to_string()]);
+    if retirements {
+        expected_triggers.insert("environment_retirement_facts".into());
+    }
     if retained_accounting {
         expected_triggers.extend([
             "execution_allocation_facts".into(),
@@ -973,7 +1031,7 @@ mod tests {
 
     #[test]
     fn transcript_read_model_and_wait_handoff_have_explicit_store_schema() {
-        assert_eq!(STORE_SCHEMA_VERSION, 10);
+        assert_eq!(STORE_SCHEMA_VERSION, 11);
         for table in [
             "transcript_projection_heads",
             "transcript_projection_current_generations",

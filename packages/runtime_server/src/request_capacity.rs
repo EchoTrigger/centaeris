@@ -48,7 +48,10 @@ impl RequestCapacity {
 
     pub(crate) fn lane(&self, method: &str, path: &str) -> RequestLane {
         let control = (method == "POST"
-            && matches!(path, "/agent-runs/cancel" | "/internal/jobs/heartbeat"))
+            && matches!(
+                path,
+                "/agent-runs/cancel" | "/internal/jobs/heartbeat" | "/internal/environments/retire"
+            ))
             || (method == "GET" && path.starts_with("/internal/jobs/"));
         let listener = method == "POST" && path == "/internal/jobs/wait";
         // A step can contain long tools and provider streams. Its lifetime is
@@ -109,6 +112,7 @@ mod tests {
             .try_acquire_owned()
             .is_err());
         for (method, path) in [
+            ("POST", "/internal/environments/retire"),
             ("POST", "/agent-runs/cancel"),
             ("POST", "/internal/jobs/heartbeat"),
             ("GET", "/internal/jobs/job_1"),

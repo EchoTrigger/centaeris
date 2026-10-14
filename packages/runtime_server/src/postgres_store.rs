@@ -83,7 +83,7 @@ mod execution_capacity;
 pub(crate) mod execution_instances;
 mod external_context;
 mod reliability;
-mod residency;
+pub(crate) mod residency;
 mod resource_commit;
 mod runtime;
 pub(crate) use runtime::validate_hosted_native_input;

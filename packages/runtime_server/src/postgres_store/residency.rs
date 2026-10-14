@@ -5,6 +5,7 @@ use postgres::{Client, GenericClient};
 
 use super::PostgresRuntimeStore;
 mod retained;
+pub(crate) mod retirement;
 use crate::resident_capacity::{
     ObservedResidentSandbox, ResidentCapacity, ResidentSandboxRequest, RESIDENT_CAPACITY_WAIT,
 };
