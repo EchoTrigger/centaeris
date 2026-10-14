@@ -158,7 +158,7 @@ fn cgroup_kill(path: &Path) -> Result<bool, String> {
     Ok(events.lines().any(|line| line == "populated 0"))
 }
 fn valid_operation(s: &str) -> Result<(), String> {
-    if s.is_empty() || s.len() > 128 || s.chars().any(char::is_control) {
+    if s.is_empty() || s.len() > 160 || s.chars().any(char::is_control) {
         Err("task_invalid_operation_id".into())
     } else {
         Ok(())
@@ -259,28 +259,48 @@ impl Manager {
         }
     }
     fn receipt(&mut self, key: &str, d: &str) -> Result<Option<EnvironmentTaskResult>, String> {
-        if let Some(receipt) = self.journal.receipts.get(key) {
-            if receipt.digest != d {
-                return Err("task_operation_conflict".into());
-            }
-            return receipt
-                .result
-                .clone()
-                .map(Some)
-                .ok_or_else(|| "task_operation_unknown".into());
+        if let Some(result) = self.journal.reserve_receipt(key, d)? {
+            return Ok(Some(result));
         }
-        if self.journal.receipts.len() >= 256 {
-            return Err("task_receipt_capacity".into());
-        }
-        self.journal.receipts.insert(
-            key.into(),
-            Receipt {
-                digest: d.into(),
-                result: None,
-            },
-        );
         self.persist()?;
         Ok(None)
+    }
+    fn retire_history(&mut self, epoch: u64) -> Result<(), String> {
+        let retired: Vec<_> = self
+            .journal
+            .tasks
+            .iter()
+            .filter(|(id, r)| {
+                self.journal.fence.as_ref().is_some_and(|f| {
+                    r.can_retire(epoch, &f.controller_id, self.live.contains_key(*id))
+                }) && (r.snapshot.output_complete
+                    || self
+                        .logs
+                        .get(*id)
+                        .is_none_or(|log| Arc::strong_count(log) == 1))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in retired {
+            let domain = self.cgroups.join(&id);
+            if domain.exists() {
+                // Confirm the exact owned tree again before dropping its observable domain.
+                let events = fs::read_to_string(domain.join("cgroup.events"))
+                    .map_err(|_| "task_tree_observation_failed")?;
+                if !events.lines().any(|line| line == "populated 0") {
+                    continue;
+                }
+                fs::remove_dir(&domain).map_err(|_| "task_history_retirement_pending")?;
+            }
+            self.logs.remove(&id);
+            match fs::remove_file(self.storage.output_root.join(format!("{id}.output"))) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err("task_history_retirement_pending".into()),
+            }
+            self.journal.retire_task(&id, epoch, false);
+        }
+        self.persist()
     }
     fn finish(
         &mut self,
@@ -320,7 +340,7 @@ impl Manager {
                     controller_purpose,
                 };
                 m.journal.takeover(fence.clone())?;
-                let previous_run_tasks: Vec<_> = m.journal.tasks.iter().filter(|(_, r)| matches!(&r.snapshot.scope, EnvironmentTaskScope::Run { run_id } if run_id != &fence.controller_id)).map(|(id, _)| id.clone()).collect();
+                let previous_run_tasks: Vec<_> = m.journal.tasks.iter().filter(|(_, r)| !r.snapshot.cleanup_complete && matches!(&r.snapshot.scope, EnvironmentTaskScope::Run { run_id } if run_id != &fence.controller_id)).map(|(id, _)| id.clone()).collect();
                 m.journal.takeover_pending = !previous_run_tasks.is_empty();
                 m.persist()?;
                 let mut clean = true;
@@ -340,6 +360,7 @@ impl Manager {
                 }
                 m.journal.takeover_pending = false;
                 m.persist()?;
+                m.retire_history(fence.controller_epoch)?;
                 Ok(EnvironmentTaskResult::TakenOver { fence })
             }
             EnvironmentTaskRequest::Query {
@@ -391,8 +412,21 @@ impl Manager {
                         return Err("task_run_scope_denied".into());
                     }
                 }
-                let d = digest(&(&operation_id, &scope, &program, &args, &cwd, timeout_ms))?;
-                let id = format!("task-{}", digest(&(&m.journal.instance, &operation_id))?);
+                let (_, opaque) = operation_id
+                    .split_once(':')
+                    .ok_or("task_invalid_operation_id")?;
+                let d = digest(&(
+                    &fence.environment_instance_id,
+                    &fence.controller_id,
+                    &fence.controller_purpose,
+                    opaque,
+                    &scope,
+                    &program,
+                    &args,
+                    &cwd,
+                    timeout_ms,
+                ))?;
+                let id = task_identity(&fence, &operation_id)?;
                 if m.journal.existing(&id, &d)?.is_some() {
                     return m.query(&id, 0, ENVIRONMENT_TASK_READ_BYTES);
                 }
@@ -400,16 +434,26 @@ impl Manager {
                 if !cwd.starts_with("/mnt/data") && !cwd.starts_with("/home/agent") {
                     return Err("task_invalid_cwd".into());
                 }
-                if m.journal.tasks.len() >= ENVIRONMENT_TASK_MAX_RECORDS
-                    || m.journal
-                        .tasks
-                        .values()
-                        .filter(|r| !r.snapshot.cleanup_complete)
-                        .count()
-                        >= ENVIRONMENT_TASK_MAX_ACTIVE
-                {
-                    return Err("task_capacity".into());
-                }
+                m.retire_history(fence.controller_epoch)?;
+                m.journal.check_admission()?;
+                let snapshot = EnvironmentTaskSnapshot {
+                    task_id: id.clone(),
+                    operation_id,
+                    scope,
+                    state: EnvironmentTaskState::Accepted,
+                    exit_code: None,
+                    cleanup_complete: false,
+                    output_complete: false,
+                };
+                let record = Record {
+                    digest: d,
+                    creator_controller_id: fence.controller_id.clone(),
+                    creator_epoch: fence.controller_epoch,
+                    snapshot,
+                };
+                let mut candidate = m.journal.clone();
+                candidate.tasks.insert(id.clone(), record.clone());
+                candidate.preflight(4096)?;
                 // A rejected reservation has no record or user process. The same operation
                 // may be tried again; an accepted/unknown record never starts twice.
                 #[cfg(test)]
@@ -440,22 +484,7 @@ impl Manager {
                     }
                 };
                 m.logs.insert(id.clone(), log.clone());
-                let snapshot = EnvironmentTaskSnapshot {
-                    task_id: id.clone(),
-                    operation_id,
-                    scope,
-                    state: EnvironmentTaskState::Accepted,
-                    exit_code: None,
-                    cleanup_complete: false,
-                    output_complete: false,
-                };
-                m.journal.tasks.insert(
-                    id.clone(),
-                    Record {
-                        digest: d,
-                        snapshot,
-                    },
-                );
+                m.journal.tasks.insert(id.clone(), record);
                 m.persist()?;
                 // Establish supervision before spawning. The supervisor waits on this
                 // manager lock until the child (or a failed-spawn record) is installed.
@@ -614,7 +643,10 @@ impl Manager {
                 if data.len() > CHUNK {
                     return Err("task_input_too_large".into());
                 }
-                let key = format!("input:{task_id}:{operation_id}");
+                if m.journal.closed_run.as_ref() == Some(&fence.controller_id) {
+                    return Err("task_run_closed".into());
+                }
+                let key = input_identity(&fence, &task_id, &operation_id)?;
                 let d = digest(&(&data, close))?;
                 if let Some(r) = m.receipt(&key, &d)? {
                     return Ok(r);
@@ -642,12 +674,16 @@ impl Manager {
                     return Err("task_not_found".into());
                 }
                 fence.authorize_termination(&m.journal.tasks[&task_id].snapshot.scope)?;
-                let key = format!("terminate:{task_id}:{operation_id}");
+                // Termination is intrinsically idempotent for this never-reused task identity.
+                // One control slot per bounded task cannot be consumed by ordinary input.
+                let key = format!("terminate:{task_id}");
                 let d = digest(&task_id)?;
                 if let Some(r) = m.receipt(&key, &d)? {
                     return Ok(r);
                 }
-                cgroup_kill(&m.cgroups.join(&task_id))?;
+                if !m.journal.tasks[&task_id].snapshot.cleanup_complete {
+                    cgroup_kill(&m.cgroups.join(&task_id))?;
+                }
                 let result = m.mutation(&task_id)?;
                 m.finish(key, result)
             }
@@ -662,11 +698,13 @@ impl Manager {
                 if run_id != fence.controller_id {
                     return Err("task_run_scope_denied".into());
                 }
-                let key = format!("endRun:{run_id}:{operation_id}");
+                let key = format!("endRun:{run_id}");
                 let d = digest(&run_id)?;
                 if let Some(r) = m.receipt(&key, &d)? {
                     return Ok(r);
                 }
+                m.journal.closed_run = Some(run_id.clone());
+                m.persist()?;
                 let task_ids: Vec<_> = m
                     .journal
                     .tasks
@@ -681,7 +719,8 @@ impl Manager {
                     .collect();
                 let mut cleanup_complete = true;
                 for id in &task_ids {
-                    let clean = cgroup_kill(&m.cgroups.join(id))?;
+                    let clean = m.journal.tasks[id].snapshot.cleanup_complete
+                        || cgroup_kill(&m.cgroups.join(id))?;
                     m.journal
                         .tasks
                         .get_mut(id)

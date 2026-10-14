@@ -101,6 +101,8 @@ fn seeded_running_journal(root: &Path) -> Vec<u8> {
         "task".into(),
         Record {
             digest: "digest".into(),
+            creator_controller_id: "r".into(),
+            creator_epoch: 3,
             snapshot: EnvironmentTaskSnapshot {
                 task_id: "task".into(),
                 operation_id: "operation".into(),
@@ -321,6 +323,8 @@ fn corrupt_or_removed_output_does_not_prevent_control_restart_and_queries() {
         "task".into(),
         Record {
             digest: "digest".into(),
+            creator_controller_id: "r".into(),
+            creator_epoch: 1,
             snapshot: snapshot.clone(),
         },
     );
@@ -465,7 +469,7 @@ impl Fixture {
     ) -> EnvironmentTaskRequest {
         EnvironmentTaskRequest::Start {
             fence: self.fence.clone(),
-            operation_id: operation.into(),
+            operation_id: self.fence.operation_id(operation),
             scope,
             program: "/bin/sh".into(),
             args: vec!["-c".into(), script.into()],
@@ -477,7 +481,14 @@ impl Fixture {
         let end = Instant::now() + Duration::from_secs(5);
         loop {
             let m = self.manager.lock().unwrap();
-            let task = &m.journal.tasks[id].snapshot;
+            let Some(record) = m.journal.tasks.get(id) else {
+                assert!(
+                    !self.cgroups.join(id).exists(),
+                    "retired task domain must be absent"
+                );
+                break;
+            };
+            let task = &record.snapshot;
             if task.cleanup_complete && task.output_complete && !m.live.contains_key(id) {
                 break;
             }
@@ -489,10 +500,11 @@ impl Fixture {
             thread::sleep(Duration::from_millis(20));
         }
         assert!(
-            fs::read_to_string(self.cgroups.join(id).join("cgroup.events"))
-                .unwrap()
-                .lines()
-                .any(|line| line == "populated 0")
+            !self.cgroups.join(id).exists()
+                || fs::read_to_string(self.cgroups.join(id).join("cgroup.events"))
+                    .unwrap()
+                    .lines()
+                    .any(|line| line == "populated 0")
         );
     }
 }
@@ -524,6 +536,319 @@ fn id(result: &EnvironmentTaskResult) -> String {
         EnvironmentTaskResult::Task { task, .. } => task.task_id.clone(),
         _ => panic!("expected task"),
     }
+}
+
+#[test]
+#[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
+fn one_hundred_runs_release_history_without_stopping_environment_task() {
+    let mut f = Fixture::new();
+    let mut resident = f.start("resident", EnvironmentTaskScope::Environment, "cat");
+    if let EnvironmentTaskRequest::Start { timeout_ms, .. } = &mut resident {
+        *timeout_ms = 0;
+    }
+    let background = id(&Manager::handle(&f.manager, resident).unwrap());
+    let mut old_request = None;
+    for epoch in 2..=101 {
+        f.fence.controller_epoch = epoch;
+        f.fence.controller_id = format!("run-{epoch}");
+        Manager::handle(
+            &f.manager,
+            EnvironmentTaskRequest::Takeover {
+                environment_instance_id: f.fence.environment_instance_id.clone(),
+                controller_id: f.fence.controller_id.clone(),
+                controller_epoch: epoch,
+                controller_purpose: EnvironmentTaskControllerPurpose::Execute,
+            },
+        )
+        .unwrap();
+        let request = f.start(
+            "foreground",
+            EnvironmentTaskScope::Run {
+                run_id: f.fence.controller_id.clone(),
+            },
+            "printf completed",
+        );
+        let task = id(&Manager::handle(&f.manager, request.clone()).unwrap());
+        f.await_cleanup(&task);
+        Manager::handle(
+            &f.manager,
+            EnvironmentTaskRequest::EndRun {
+                fence: f.fence.clone(),
+                run_id: f.fence.controller_id.clone(),
+                operation_id: f.fence.operation_id("end"),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            Manager::handle(
+                &f.manager,
+                f.start("late", EnvironmentTaskScope::Environment, "true")
+            )
+            .unwrap_err(),
+            "task_run_closed"
+        );
+        if let Some(mut stale) = old_request {
+            if let EnvironmentTaskRequest::Start { fence, .. } = &mut stale {
+                *fence = f.fence.clone();
+            }
+            assert_eq!(
+                Manager::handle(&f.manager, stale).unwrap_err(),
+                "task_operation_replay_expired"
+            );
+        }
+        old_request = Some(request);
+        let m = f.manager.lock().unwrap();
+        assert!(m.live.contains_key(&background));
+        assert!(m.journal.tasks.len() <= 2);
+        assert!(m.logs.len() <= 2);
+        assert!(
+            fs::read_dir(&m.cgroups)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_type().unwrap().is_dir())
+                .count()
+                <= 2
+        );
+    }
+    Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Terminate {
+            fence: f.fence.clone(),
+            task_id: background.clone(),
+            operation_id: f.fence.operation_id("stop"),
+        },
+    )
+    .unwrap();
+    f.await_cleanup(&background);
+}
+
+#[test]
+#[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
+fn same_run_history_limit_recovers_after_confirmed_close_and_new_run() {
+    let mut f = Fixture::new();
+    let background = id(&Manager::handle(
+        &f.manager,
+        f.start("resident", EnvironmentTaskScope::Environment, "cat"),
+    )
+    .unwrap());
+    for index in 0..ENVIRONMENT_TASK_MAX_RECORDS - 1 {
+        let task = id(&Manager::handle(
+            &f.manager,
+            f.start(
+                &format!("short-{index}"),
+                EnvironmentTaskScope::Run {
+                    run_id: f.fence.controller_id.clone(),
+                },
+                "true",
+            ),
+        )
+        .unwrap());
+        f.await_cleanup(&task);
+    }
+    let overflow = f.start(
+        "overflow",
+        EnvironmentTaskScope::Run {
+            run_id: f.fence.controller_id.clone(),
+        },
+        "false",
+    );
+    assert_eq!(
+        Manager::handle(&f.manager, overflow).unwrap_err(),
+        "task_history_capacity"
+    );
+    assert!(!f.manager.lock().unwrap().journal.poisoned);
+    Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::EndRun {
+            fence: f.fence.clone(),
+            run_id: f.fence.controller_id.clone(),
+            operation_id: f.fence.operation_id("end"),
+        },
+    )
+    .unwrap();
+    f.fence.controller_id = "next-run".into();
+    f.fence.controller_epoch = 2;
+    Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Takeover {
+            environment_instance_id: f.fence.environment_instance_id.clone(),
+            controller_id: f.fence.controller_id.clone(),
+            controller_epoch: 2,
+            controller_purpose: EnvironmentTaskControllerPurpose::Execute,
+        },
+    )
+    .unwrap();
+    let task = id(&Manager::handle(
+        &f.manager,
+        f.start(
+            "after",
+            EnvironmentTaskScope::Run {
+                run_id: f.fence.controller_id.clone(),
+            },
+            "true",
+        ),
+    )
+    .unwrap());
+    f.await_cleanup(&task);
+    assert!(f.manager.lock().unwrap().live.contains_key(&background));
+    assert_eq!(f.manager.lock().unwrap().journal.tasks.len(), 2);
+}
+
+#[test]
+#[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
+fn same_run_reconstructed_controller_does_not_repeat_spawn_or_acknowledged_input() {
+    let mut f = Fixture::new();
+    let mut start = f.start(
+        "cat",
+        EnvironmentTaskScope::Run {
+            run_id: f.fence.controller_id.clone(),
+        },
+        "cat",
+    );
+    let task = id(&Manager::handle(&f.manager, start.clone()).unwrap());
+    let mut input = EnvironmentTaskRequest::Input {
+        fence: f.fence.clone(),
+        task_id: task.clone(),
+        operation_id: f.fence.operation_id("input"),
+        data: b"once".to_vec(),
+        close: false,
+    };
+    let acknowledged = Manager::handle(&f.manager, input.clone()).unwrap();
+    f.fence.controller_epoch = 2;
+    Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Takeover {
+            environment_instance_id: f.fence.environment_instance_id.clone(),
+            controller_id: f.fence.controller_id.clone(),
+            controller_epoch: 2,
+            controller_purpose: EnvironmentTaskControllerPurpose::Execute,
+        },
+    )
+    .unwrap();
+    if let EnvironmentTaskRequest::Start {
+        fence,
+        operation_id,
+        ..
+    } = &mut start
+    {
+        *fence = f.fence.clone();
+        *operation_id = f.fence.operation_id("cat");
+    }
+    assert_eq!(id(&Manager::handle(&f.manager, start).unwrap()), task);
+    if let EnvironmentTaskRequest::Input {
+        fence,
+        operation_id,
+        ..
+    } = &mut input
+    {
+        *fence = f.fence.clone();
+        *operation_id = f.fence.operation_id("input");
+    }
+    assert_eq!(Manager::handle(&f.manager, input).unwrap(), acknowledged);
+    Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Input {
+            fence: f.fence.clone(),
+            task_id: task.clone(),
+            operation_id: f.fence.operation_id("close"),
+            data: vec![],
+            close: true,
+        },
+    )
+    .unwrap();
+    f.await_cleanup(&task);
+    let m = f.manager.lock().unwrap();
+    assert_eq!(m.journal.tasks.len(), 1);
+    assert_eq!(m.journal.tasks[&task].creator_epoch, 1);
+    assert_eq!(
+        m.journal.tasks[&task].creator_controller_id,
+        f.fence.controller_id
+    );
+    let (chunks, _, _, _, _) = m.logs[&task]
+        .lock()
+        .unwrap()
+        .read(0, ENVIRONMENT_TASK_READ_BYTES)
+        .unwrap();
+    assert_eq!(
+        chunks.into_iter().flat_map(|c| c.data).collect::<Vec<_>>(),
+        b"once"
+    );
+}
+
+#[test]
+#[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
+fn input_history_pressure_leaves_termination_and_end_run_reconcilable() {
+    let f = Fixture::new();
+    let task = id(&Manager::handle(
+        &f.manager,
+        f.start(
+            "cat",
+            EnvironmentTaskScope::Run {
+                run_id: f.fence.controller_id.clone(),
+            },
+            "cat",
+        ),
+    )
+    .unwrap());
+    let first = EnvironmentTaskRequest::Input {
+        fence: f.fence.clone(),
+        task_id: task.clone(),
+        operation_id: f.fence.operation_id("input-0"),
+        data: b"x".to_vec(),
+        close: false,
+    };
+    let receipt = Manager::handle(&f.manager, first.clone()).unwrap();
+    for index in 1..256 {
+        Manager::handle(
+            &f.manager,
+            EnvironmentTaskRequest::Input {
+                fence: f.fence.clone(),
+                task_id: task.clone(),
+                operation_id: f.fence.operation_id(&format!("input-{index}")),
+                data: b"x".to_vec(),
+                close: false,
+            },
+        )
+        .unwrap();
+    }
+    assert_eq!(Manager::handle(&f.manager, first).unwrap(), receipt);
+    assert_eq!(
+        Manager::handle(
+            &f.manager,
+            EnvironmentTaskRequest::Input {
+                fence: f.fence.clone(),
+                task_id: task.clone(),
+                operation_id: f.fence.operation_id("overflow"),
+                data: b"unexpected".to_vec(),
+                close: false,
+            }
+        )
+        .unwrap_err(),
+        "task_input_receipt_capacity"
+    );
+    Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Terminate {
+            fence: f.fence.clone(),
+            task_id: task.clone(),
+            operation_id: f.fence.operation_id("stop"),
+        },
+    )
+    .unwrap();
+    f.await_cleanup(&task);
+    let end = EnvironmentTaskRequest::EndRun {
+        fence: f.fence.clone(),
+        run_id: f.fence.controller_id.clone(),
+        operation_id: f.fence.operation_id("end"),
+    };
+    assert!(matches!(
+        Manager::handle(&f.manager, end.clone()).unwrap(),
+        EnvironmentTaskResult::RunEnded {
+            cleanup_complete: true,
+            ..
+        }
+    ));
+    assert!(Manager::handle(&f.manager, end).is_ok());
 }
 
 #[test]
@@ -819,13 +1144,16 @@ fn real_background_tree_survives_controller_takeover_and_drains_both_streams() {
         },
     )
     .unwrap();
-    assert_eq!(id(&Manager::handle(&f.manager, updated).unwrap()), task_id);
+    assert_eq!(
+        Manager::handle(&f.manager, updated).unwrap_err(),
+        "task_operation_replay_expired"
+    );
     assert!(Manager::handle(
         &f.manager,
         EnvironmentTaskRequest::Terminate {
             fence: f.fence.clone(),
             task_id: task_id.clone(),
-            operation_id: "stale".into()
+            operation_id: f.fence.operation_id("stale")
         }
     )
     .is_err());
@@ -852,7 +1180,7 @@ fn real_background_tree_survives_controller_takeover_and_drains_both_streams() {
         EnvironmentTaskRequest::Terminate {
             fence,
             task_id: task_id.clone(),
-            operation_id: "stop".into(),
+            operation_id: "2:stop".into(),
         },
     )
     .unwrap();
@@ -871,7 +1199,7 @@ fn successful_input_receipt_replays_after_child_exit_without_writing_twice() {
     let input = EnvironmentTaskRequest::Input {
         fence: f.fence.clone(),
         task_id: task_id.clone(),
-        operation_id: "input".into(),
+        operation_id: f.fence.operation_id("input"),
         data: b"one-input\n".to_vec(),
         close: true,
     };
@@ -931,7 +1259,7 @@ fn lost_input_receipt_never_rewrites_stdin() {
     let input = EnvironmentTaskRequest::Input {
         fence: f.fence.clone(),
         task_id: task_id.clone(),
-        operation_id: "input".into(),
+        operation_id: f.fence.operation_id("input"),
         data: b"one-input\n".to_vec(),
         close: false,
     };
@@ -1004,7 +1332,7 @@ fn cross_run_takeover_cleans_only_old_run_tasks_and_is_retryable() {
         EnvironmentTaskRequest::Terminate {
             fence,
             task_id: environment_id.clone(),
-            operation_id: "stop".into(),
+            operation_id: "2:stop".into(),
         },
     )
     .unwrap();
@@ -1060,7 +1388,7 @@ fn terminal_cleanup_controller_cannot_resume_execution_or_kill_environment_scope
         EnvironmentTaskRequest::Input {
             fence: fence.clone(),
             task_id: environment_id.clone(),
-            operation_id: "denied".into(),
+            operation_id: f.fence.operation_id("denied"),
             data: vec![],
             close: true
         }
@@ -1071,7 +1399,7 @@ fn terminal_cleanup_controller_cannot_resume_execution_or_kill_environment_scope
         EnvironmentTaskRequest::Terminate {
             fence: fence.clone(),
             task_id: environment_id.clone(),
-            operation_id: "denied".into()
+            operation_id: f.fence.operation_id("denied")
         }
     )
     .is_err());
@@ -1081,7 +1409,7 @@ fn terminal_cleanup_controller_cannot_resume_execution_or_kill_environment_scope
         EnvironmentTaskRequest::EndRun {
             fence,
             run_id: f.fence.controller_id.clone(),
-            operation_id: "end".into(),
+            operation_id: "2:end".into(),
         },
     )
     .unwrap();
@@ -1156,7 +1484,7 @@ fn output_capacity_failure_preserves_existing_process_control_and_allows_cleanup
         EnvironmentTaskRequest::Terminate {
             fence,
             task_id: task_id.clone(),
-            operation_id: "cleanup".into(),
+            operation_id: "2:cleanup".into(),
         },
     )
     .unwrap();
@@ -1226,9 +1554,93 @@ fn kill_only_domain_cleans_setsid_descendants_without_per_task_controllers() {
         EnvironmentTaskRequest::Terminate {
             fence: f.fence.clone(),
             task_id: task_id.clone(),
-            operation_id: "stop".into(),
+            operation_id: f.fence.operation_id("stop"),
         },
     )
     .unwrap();
     f.await_cleanup(&task_id);
+}
+
+#[test]
+#[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree and python3"]
+fn double_fork_setsid_cleanup_preserves_another_task() {
+    let f = Fixture::new();
+    let marker = f.root.join("orphan-pid");
+    fs::write(&marker, b"").unwrap();
+    fs::set_permissions(&marker, fs::Permissions::from_mode(0o666)).unwrap();
+    let other = id(&Manager::handle(
+        &f.manager,
+        f.start("unrelated", EnvironmentTaskScope::Environment, "cat"),
+    )
+    .unwrap());
+    let script = format!(
+        r#"python3 - <<'PY'
+import os, time
+if os.fork() == 0:
+    os.setsid()
+    if os.fork() == 0:
+        with open({marker}, 'w') as output:
+            output.write(str(os.getpid()))
+        time.sleep(30)
+    os._exit(0)
+PY
+sleep 30
+"#,
+        marker = serde_json::to_string(marker.to_str().unwrap()).unwrap()
+    );
+    let escaped = id(&Manager::handle(
+        &f.manager,
+        f.start("escaped", EnvironmentTaskScope::Environment, &script),
+    )
+    .unwrap());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let members: Vec<i32> = fs::read_to_string(f.cgroups.join(&escaped).join("cgroup.procs"))
+            .unwrap()
+            .lines()
+            .filter_map(|pid| pid.parse().ok())
+            .collect();
+        let direct = f.manager.lock().unwrap().live[&escaped].child.id() as i32;
+        if let Ok(pid) = fs::read_to_string(&marker).unwrap().parse::<i32>() {
+            let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+            let parent = stat
+                .rsplit_once(')')
+                .unwrap()
+                .1
+                .split_whitespace()
+                .nth(1)
+                .unwrap()
+                .parse::<u32>()
+                .unwrap();
+            if members.contains(&pid)
+                && pid != direct
+                && unsafe { libc::getsid(pid) } != unsafe { libc::getsid(direct) }
+                && parent == std::process::id()
+            {
+                break;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "double-fork descendant must remain in the owned task domain"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Terminate {
+            fence: f.fence.clone(),
+            task_id: escaped.clone(),
+            operation_id: f.fence.operation_id("stop-escaped"),
+        },
+    )
+    .unwrap();
+    f.await_cleanup(&escaped);
+    assert!(f.manager.lock().unwrap().live.contains_key(&other));
+    assert!(
+        fs::read_to_string(f.cgroups.join(&other).join("cgroup.events"))
+            .unwrap()
+            .lines()
+            .any(|line| line == "populated 1")
+    );
 }

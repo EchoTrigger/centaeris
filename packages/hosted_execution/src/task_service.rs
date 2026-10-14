@@ -13,6 +13,11 @@ use std::{
 mod instance;
 
 const CONTROL_JOURNAL_BYTES: usize = 2 * 1024 * 1024;
+// Ordinary admission cannot consume space needed for bounded task completion and controls.
+#[cfg(any(target_os = "linux", test))]
+const CONTROL_COMPLETION_RESERVE_BYTES: usize = 256 * 1024;
+#[cfg(any(target_os = "linux", test))]
+const INPUT_RECEIPT_LIMIT: usize = 256;
 struct TaskStorage {
     control_root: PathBuf,
     output_root: PathBuf,
@@ -88,26 +93,67 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{relay_once, serve, serve_instance};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn digest(value: &impl Serialize) -> Result<String, String> {
     Ok(format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(value).map_err(|_| "task_encoding_failed")?)
     ))
 }
-#[derive(Serialize, Deserialize)]
+#[cfg(any(target_os = "linux", test))]
+fn task_identity(fence: &EnvironmentTaskFence, operation_id: &str) -> Result<String, String> {
+    fence.validate_operation_id(operation_id)?;
+    let (_, opaque) = operation_id
+        .split_once(':')
+        .ok_or("task_invalid_operation_id")?;
+    Ok(format!(
+        "task-{}",
+        digest(&(&fence.environment_instance_id, &fence.controller_id, opaque))?
+    ))
+}
+#[cfg(any(target_os = "linux", test))]
+fn input_identity(
+    fence: &EnvironmentTaskFence,
+    task_id: &str,
+    operation_id: &str,
+) -> Result<String, String> {
+    fence.validate_operation_id(operation_id)?;
+    let (_, opaque) = operation_id
+        .split_once(':')
+        .ok_or("task_invalid_operation_id")?;
+    Ok(format!(
+        "input:{task_id}:{}",
+        digest(&(&fence.environment_instance_id, &fence.controller_id, opaque))?
+    ))
+}
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Record {
     digest: String,
+    creator_controller_id: String,
+    creator_epoch: u64,
     snapshot: EnvironmentTaskSnapshot,
 }
-#[derive(Serialize, Deserialize)]
+#[cfg(any(target_os = "linux", test))]
+impl Record {
+    fn can_retire(&self, epoch: u64, controller_id: &str, owned_live: bool) -> bool {
+        !owned_live
+            && self.snapshot.cleanup_complete
+            && matches!(
+                self.snapshot.state,
+                EnvironmentTaskState::Exited | EnvironmentTaskState::Unknown
+            )
+            && self.creator_epoch < epoch
+            && self.creator_controller_id != controller_id
+    }
+}
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Receipt {
     digest: String,
     result: Option<EnvironmentTaskResult>,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Journal {
     #[serde(skip)]
@@ -116,6 +162,7 @@ struct Journal {
     instance: String,
     fence: Option<EnvironmentTaskFence>,
     takeover_pending: bool,
+    closed_run: Option<String>,
     tasks: BTreeMap<String, Record>,
     receipts: BTreeMap<String, Receipt>,
 }
@@ -148,6 +195,7 @@ impl Journal {
                 instance: instance.into(),
                 fence: None,
                 takeover_pending: false,
+                closed_run: None,
                 tasks: BTreeMap::new(),
                 receipts: BTreeMap::new(),
             }
@@ -190,7 +238,10 @@ impl Journal {
             return Err("task_journal_unavailable".into());
         }
         let result = self.save(root);
-        if result.is_err() {
+        if result
+            .as_ref()
+            .is_err_and(|error| error != "task_journal_too_large")
+        {
             self.poisoned = true;
         }
         result
@@ -214,8 +265,119 @@ impl Journal {
                 return Err("task_controller_fenced".into());
             }
         }
+        if self
+            .fence
+            .as_ref()
+            .is_none_or(|old| old.controller_id != f.controller_id)
+        {
+            self.receipts.clear();
+            if self.closed_run.as_ref() != Some(&f.controller_id) {
+                self.closed_run = None;
+            }
+        }
         self.fence = Some(f);
         Ok(())
+    }
+    #[cfg(any(target_os = "linux", test))]
+    fn preflight(&self, extra: usize) -> Result<(), String> {
+        let size = serde_json::to_vec(self)
+            .map_err(|_| "task_encoding_failed")?
+            .len();
+        if size.saturating_add(extra) > CONTROL_JOURNAL_BYTES - CONTROL_COMPLETION_RESERVE_BYTES {
+            Err("task_journal_capacity".into())
+        } else {
+            Ok(())
+        }
+    }
+    #[cfg(any(target_os = "linux", test))]
+    fn check_admission(&self) -> Result<(), String> {
+        if self
+            .fence
+            .as_ref()
+            .is_some_and(|f| self.closed_run.as_ref() == Some(&f.controller_id))
+        {
+            return Err("task_run_closed".into());
+        }
+        if self
+            .tasks
+            .values()
+            .filter(|r| !r.snapshot.cleanup_complete)
+            .count()
+            >= ENVIRONMENT_TASK_MAX_ACTIVE
+        {
+            return Err("task_capacity".into());
+        }
+        if self.tasks.len() >= ENVIRONMENT_TASK_MAX_RECORDS {
+            return Err("task_history_capacity".into());
+        }
+        Ok(())
+    }
+    #[cfg(any(target_os = "linux", test))]
+    fn reserve_receipt(
+        &mut self,
+        key: &str,
+        d: &str,
+    ) -> Result<Option<EnvironmentTaskResult>, String> {
+        if let Some(receipt) = self.receipts.get(key) {
+            if receipt.digest != d {
+                return Err("task_operation_conflict".into());
+            }
+            if let Some(result) = &receipt.result {
+                return Ok(Some(result.clone()));
+            }
+            // Only exact-tree stop/Run closure may retry an indeterminate action: both
+            // are idempotent and never spawn or deliver input.
+            if key.starts_with("terminate:") || key.starts_with("endRun:") {
+                return Ok(None);
+            }
+            return Err("task_operation_unknown".into());
+        }
+        if key.starts_with("input:")
+            && self
+                .receipts
+                .keys()
+                .filter(|key| key.starts_with("input:"))
+                .count()
+                >= INPUT_RECEIPT_LIMIT
+        {
+            return Err("task_input_receipt_capacity".into());
+        }
+        let mut candidate = self.clone();
+        candidate.receipts.insert(
+            key.into(),
+            Receipt {
+                digest: d.into(),
+                result: None,
+            },
+        );
+        if key.starts_with("input:") {
+            candidate.preflight(4096)?;
+        } else if serde_json::to_vec(&candidate)
+            .map_err(|_| "task_encoding_failed")?
+            .len()
+            .saturating_add(if key.starts_with("endRun:") {
+                ENVIRONMENT_TASK_MAX_RECORDS * 132 + 1024
+            } else {
+                4096
+            })
+            > CONTROL_JOURNAL_BYTES
+        {
+            return Err("task_journal_capacity".into());
+        }
+        self.receipts = candidate.receipts;
+        Ok(None)
+    }
+    #[cfg(any(target_os = "linux", test))]
+    fn retire_task(&mut self, id: &str, epoch: u64, owned_live: bool) -> bool {
+        let eligible = self.fence.as_ref().is_some_and(|f| {
+            self.tasks
+                .get(id)
+                .is_some_and(|r| r.can_retire(epoch, &f.controller_id, owned_live))
+        });
+        if eligible {
+            self.tasks.remove(id);
+        }
+        eligible
     }
     fn check(&self, f: &EnvironmentTaskFence) -> Result<(), String> {
         if self.poisoned {

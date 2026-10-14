@@ -215,7 +215,7 @@ fn operation_id(request: &DynamicToolProviderRequest, fence: &EnvironmentTaskFen
         ))
         .expect("string tuple"),
     );
-    format!("tool-{:x}", hash.finalize())
+    fence.operation_id(&format!("tool-{:x}", hash.finalize()))
 }
 fn execute_task(
     request: DynamicToolProviderRequest,
@@ -290,9 +290,13 @@ fn host_failure(error: &str, mutation: bool) -> DynamicToolProviderResponse {
         | "task_cleanup_scope_denied"
         | "task_cleanup_execute_denied" => "background_task_forbidden",
         "task_not_found" => "background_task_not_found",
-        "task_capacity" | "task_thread_capacity" | "task_receipt_capacity" => {
-            "background_task_capacity"
-        }
+        "task_history_capacity" => "background_task_history_capacity",
+        "task_operation_replay_expired" => "background_task_replay_expired",
+        "task_run_closed" => "background_task_run_closed",
+        "task_capacity"
+        | "task_thread_capacity"
+        | "task_input_receipt_capacity"
+        | "task_journal_capacity" => "background_task_capacity",
         "task_operation_conflict" => "background_task_conflict",
         "task_invalid_start" | "task_invalid_cwd" => "background_task_invalid",
         _ if mutation => "background_task_unknown",
@@ -305,6 +309,9 @@ fn failure(code: &str) -> DynamicToolProviderResponse {
         "background_task_forbidden"=>"Current authority does not permit this background task operation.",
         "background_task_not_found"=>"Background task was not found.",
         "background_task_capacity"=>"Background task capacity is unavailable.",
+        "background_task_history_capacity"=>"This Run's task history window is full. Finish this Run; the next Run can retire completed history while preserving active environment tasks.",
+        "background_task_replay_expired"=>"This operation is outside its original controller replay window and was rejected. Inspect existing task status; do not retry it with another identity.",
+        "background_task_run_closed"=>"This Run is closed and cannot admit new tasks or input.",
         "background_task_conflict"=>"This operation identity already describes a different request.",
         "background_task_unknown"=>"The task operation outcome is unknown. Check existing task status before starting another task.",
         _=>"Background task service is unavailable.",

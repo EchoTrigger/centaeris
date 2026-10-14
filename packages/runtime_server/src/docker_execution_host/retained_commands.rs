@@ -14,7 +14,7 @@ fn operation(fence: &EnvironmentTaskFence, id: &str, action: &str) -> String {
         hash.update((part.len() as u64).to_be_bytes());
         hash.update(part.as_bytes());
     }
-    format!("command_{:x}", hash.finalize())
+    fence.operation_id(&format!("command_{:x}", hash.finalize()))
 }
 
 pub(super) fn run_file_helper(
@@ -134,7 +134,8 @@ fn run_command_with_input(
     .map_err(unknown)?;
     let (id, running) = match &first {
         EnvironmentTaskResult::Task { task, .. }
-            if task.scope == scope && task.operation_id == start_id =>
+            if task.scope == scope
+                && fence.matches_original_operation_id(&task.operation_id, &start_id) =>
         {
             (
                 task.task_id.clone(),
@@ -154,7 +155,7 @@ fn run_command_with_input(
             })
             .map_err(unknown)?;
             if !matches!(response, EnvironmentTaskResult::Mutated { ref task }
-                if task.task_id == id && task.scope == scope && task.operation_id == start_id)
+                if task.task_id == id && task.scope == scope && fence.matches_original_operation_id(&task.operation_id, &start_id))
             {
                 return Err(unknown("command_input_unconfirmed"));
             }
@@ -219,7 +220,10 @@ fn run_command_with_input(
         else {
             return Err(unknown("command_query_unconfirmed"));
         };
-        if task.task_id != id || task.scope != scope || task.operation_id != start_id {
+        if task.task_id != id
+            || task.scope != scope
+            || !fence.matches_original_operation_id(&task.operation_id, &start_id)
+        {
             return Err(unknown("command_task_identity_changed"));
         }
         if gap || earliest_cursor > cursor {
@@ -499,6 +503,27 @@ mod tests {
     }
 
     #[test]
+    fn same_run_controller_reconstruction_reads_original_task_without_repeating_input() {
+        let current = EnvironmentTaskFence {
+            controller_epoch: 2,
+            ..fence()
+        };
+        let mut replies = VecDeque::from([
+            started(),
+            EnvironmentTaskResult::Mutated {
+                task: snapshot(false),
+            },
+            finished(false),
+        ]);
+        let out = run_command(&current, "tool-1", command(), None, "/bin", |_| {
+            replies.pop_front().ok_or("unexpected request".into())
+        })
+        .unwrap();
+        assert_eq!(out.process.stdout, "hello");
+        assert!(replies.is_empty());
+    }
+
+    #[test]
     fn cancellation_targets_only_the_registered_run_task_and_waits_for_confirmation() {
         let mut replies = VecDeque::from([
             started(),
@@ -581,8 +606,16 @@ mod tests {
             })
             .unwrap();
         }
-        assert_eq!(identities[0], identities[1]);
-        assert_ne!(identities[0], identities[2]);
+        assert!(EnvironmentTaskFence {
+            controller_epoch: 3,
+            ..fence()
+        }
+        .matches_original_operation_id(&identities[0], &identities[1]));
+        assert!(!EnvironmentTaskFence {
+            controller_epoch: 4,
+            ..fence()
+        }
+        .matches_original_operation_id(&identities[0], &identities[2]));
     }
 
     #[test]

@@ -4,6 +4,7 @@ use centaeris_core::execution::{
     EnvironmentTaskRequest, EnvironmentTaskResult, EnvironmentTaskScope,
     ENVIRONMENT_TASK_MAX_RECORDS, ENVIRONMENT_TASK_READ_BYTES, ENVIRONMENT_TASK_SCHEMA,
 };
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 pub(crate) trait RetainedCleanupHost {
@@ -52,7 +53,10 @@ pub(crate) fn confirm_run_cleanup(
     let ids = match rpc(EnvironmentTaskRequest::EndRun {
         fence: fence.clone(),
         run_id: fence.controller_id.clone(),
-        operation_id: format!("run_terminal_cleanup:{}", fence.controller_id),
+        operation_id: fence.operation_id(&format!(
+            "run_terminal_cleanup:{:x}",
+            Sha256::digest(fence.controller_id.as_bytes())
+        )),
     })? {
         EnvironmentTaskResult::RunEnded { task_ids, .. }
             if task_ids.len() <= ENVIRONMENT_TASK_MAX_RECORDS =>
@@ -202,7 +206,7 @@ mod tests {
         let requests = h.requests.borrow();
         assert!(
             matches!(&requests[1],EnvironmentTaskRequest::EndRun {operation_id,run_id,..}
-            if operation_id=="run_terminal_cleanup:run-1" && run_id=="run-1")
+            if operation_id.starts_with("2:run_terminal_cleanup:") && run_id=="run-1")
         );
         assert_eq!(requests.len(), 4);
         assert!(
@@ -257,5 +261,25 @@ mod tests {
         );
         assert!(confirm_run_cleanup(&h, &fence()).is_ok());
         assert_eq!(h.requests.borrow().len(), 3);
+    }
+
+    #[test]
+    fn maximum_controller_identity_still_has_a_bounded_cleanup_operation() {
+        let f = EnvironmentTaskFence {
+            controller_id: "x".repeat(160),
+            ..fence()
+        };
+        let h = Host {
+            replies: RefCell::new(VecDeque::from([
+                EnvironmentTaskResult::TakenOver { fence: f.clone() },
+                EnvironmentTaskResult::RunEnded {
+                    task_ids: vec![],
+                    cleanup_complete: true,
+                },
+                EnvironmentTaskResult::Listed { tasks: vec![] },
+            ])),
+            requests: RefCell::new(vec![]),
+        };
+        assert!(confirm_run_cleanup(&h, &f).is_ok());
     }
 }

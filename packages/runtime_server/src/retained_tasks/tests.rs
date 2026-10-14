@@ -542,3 +542,35 @@ fn start_defaults_are_bounded_and_wrong_reply_cannot_leak_control_identity() {
     assert!(wrong.is_error);
     assert!(wrong.details.get("output").is_none());
 }
+
+#[test]
+fn retired_operation_and_history_refusals_are_actionable_without_becoming_unknown() {
+    for (error, code, phrase) in [
+        (
+            "task_history_capacity",
+            "background_task_history_capacity",
+            "Finish this Run",
+        ),
+        (
+            "task_operation_replay_expired",
+            "background_task_replay_expired",
+            "do not retry",
+        ),
+        (
+            "task_run_closed",
+            "background_task_run_closed",
+            "cannot admit",
+        ),
+        (
+            "task_journal_capacity",
+            "background_task_capacity",
+            "capacity",
+        ),
+    ] {
+        let response = host_failure(error, true);
+        assert_eq!(response.details["errorCode"], code);
+        assert!(response.is_error);
+        assert_ne!(response.details["state"], "unknown");
+        assert!(response.content.contains(phrase));
+    }
+}
