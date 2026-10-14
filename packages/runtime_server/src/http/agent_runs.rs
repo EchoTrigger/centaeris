@@ -1,4 +1,39 @@
 use super::*;
+pub(crate) mod retained_cleanup;
+
+pub(super) fn cleanup_receipt(
+    state: HttpServerState,
+    request: Request<Bytes>,
+) -> Result<Response<Body>, String> {
+    cleanup_receipt_response(request.into_body().as_ref(), |query| {
+        state.job_store.get_cleanup_receipt(query)
+    })
+}
+
+fn cleanup_receipt_response(
+    body: &[u8],
+    read: impl FnOnce(
+        &crate::postgres_store::cleanup_receipts::CleanupReceiptQuery,
+    )
+        -> Result<Option<crate::postgres_store::cleanup_receipts::CleanupReceipt>, String>,
+) -> Result<Response<Body>, String> {
+    let query = match serde_json::from_slice::<
+        crate::postgres_store::cleanup_receipts::CleanupReceiptQuery,
+    >(body)
+    {
+        Ok(query) if query.validate().is_ok() => query,
+        _ => return json_error_response(400, "cleanup_receipt_query_invalid"),
+    };
+    match read(&query) {
+        Ok(Some(receipt)) => Ok(http_response(
+            200,
+            "application/json",
+            serde_json::to_vec(&receipt).map_err(|_| "cleanup receipt response encoding failed")?,
+        )),
+        Ok(None) => json_error_response(404, "cleanup_receipt_not_found"),
+        Err(_) => json_error_response(503, "cleanup_receipt_unavailable"),
+    }
+}
 
 pub(super) fn cancel(
     state: HttpServerState,
@@ -123,6 +158,37 @@ pub(super) fn teardown(
     request: Request<Bytes>,
 ) -> Result<Response<Body>, String> {
     let body = request.into_body();
+    let envelope =
+        match serde_json::from_slice::<crate::contract::AgentRunTeardownEnvelope>(body.as_ref()) {
+            Ok(envelope) => envelope,
+            Err(_) => return json_error_response(400, "agent_run_teardown_request_invalid"),
+        };
+    match envelope {
+        crate::contract::AgentRunTeardownEnvelope::PerRun {
+            job_id,
+            lease_owner,
+            agent_run_start,
+        } => teardown_per_run(
+            state,
+            AgentRunTeardownRequest {
+                schema: crate::contract::AGENT_RUN_TEARDOWN_SCHEMA.into(),
+                job_id,
+                lease_owner,
+                agent_run_start: *agent_run_start,
+            },
+        ),
+        crate::contract::AgentRunTeardownEnvelope::Retained {
+            job_id,
+            lease_owner,
+            agent_run_cleanup,
+        } => teardown_retained(state, job_id, lease_owner, *agent_run_cleanup),
+    }
+}
+
+fn teardown_per_run(
+    state: HttpServerState,
+    teardown: AgentRunTeardownRequest,
+) -> Result<Response<Body>, String> {
     let HttpServerState {
         runtime,
         store,
@@ -130,13 +196,11 @@ pub(super) fn teardown(
         tool_layers,
         ..
     } = state;
-    let teardown = match serde_json::from_slice::<AgentRunTeardownRequest>(body.as_ref())
-        .map_err(|error| format!("invalid json: {error}"))
-        .and_then(|request| {
-            let signing_key = env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY")
-                .map_err(|_| "AGENT_RUN_AUTHORIZATION_SIGNING_KEY is required".to_string())?;
-            request.validate(signing_key.as_bytes())
-        }) {
+    let teardown = match Ok::<_, String>(teardown).and_then(|request| {
+        let signing_key = env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY")
+            .map_err(|_| "AGENT_RUN_AUTHORIZATION_SIGNING_KEY is required".to_string())?;
+        request.validate(signing_key.as_bytes())
+    }) {
         Ok(value) => value,
         Err(error) => {
             return json_error_response(400, error.as_str());
@@ -211,6 +275,129 @@ pub(super) fn teardown(
     Ok(http_response(200, "application/json", response))
 }
 
+fn teardown_retained(
+    state: HttpServerState,
+    job_id: String,
+    lease_owner: String,
+    cleanup: crate::contract::AgentRunCleanup,
+) -> Result<Response<Body>, String> {
+    use crate::postgres_store::cleanup_receipts::{CleanupAuthorityRequest, CleanupTarget};
+    use centaeris_core::execution::{EnvironmentTaskControllerPurpose, EnvironmentTaskFence};
+    let signing_key = match env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY") {
+        Ok(key) => key,
+        Err(_) => return json_error_response(503, "retained_cleanup_unavailable"),
+    };
+    let cleanup = match cleanup.validate(signing_key.as_bytes()) {
+        Ok(cleanup) => cleanup,
+        Err(_) => return json_error_response(400, "agent_run_cleanup_authority_invalid"),
+    };
+    let lease = RuntimeJobLeaseFence {
+        job_id,
+        job_kind: AGENT_RUN_LIFECYCLE_JOB_KIND.into(),
+        lease_owner,
+    };
+    if state
+        .job_store
+        .check_cleanup_authority(&cleanup, signing_key.as_bytes(), &lease)
+        .is_err()
+    {
+        return json_error_response(409, "agent_run_cleanup_authority_rejected");
+    }
+    // The short pin above has ended: these operations use separate connections.
+    // Physical cleanup below pins and rechecks the current lease and epoch.
+    if state
+        .job_store
+        .close_turn_supplement_queue(CloseTurnSupplementQueueRequest {
+            agent_run_id: cleanup.agent_run_id.clone(),
+            lifecycle_job_id: lease.job_id.clone(),
+            session_id: cleanup.authorization.session_id.clone(),
+            authorization_digest: cleanup.authorization_digest.clone(),
+            lease_owner: Some(lease.lease_owner.clone()),
+            reason: "agent_run_terminal".into(),
+            closed_at_ms: now_ms()?,
+        })
+        .is_err()
+    {
+        return json_error_response(503, "agent_run_supplement_cleanup_failed");
+    }
+    if state
+        .runtime
+        .block_on(terminal_subagents::settle_terminal_parent_subagent_jobs(
+            state.store.as_ref(),
+            &cleanup.authorization.session_id,
+            &cleanup.agent_run_id,
+            now_ms()?,
+        ))
+        .is_err()
+    {
+        return json_error_response(503, "terminal_subagent_cleanup_unavailable");
+    }
+    let host_id = match crate::docker_execution_host::resident_host_context() {
+        Ok((host_id, _)) => host_id,
+        Err(_) => return json_error_response(503, "retained_cleanup_unavailable"),
+    };
+    let receipt = match state.job_store.with_cleanup_authority(
+        &CleanupAuthorityRequest {
+            cleanup: &cleanup,
+            signing_key: signing_key.as_bytes(),
+            lease: &lease,
+            host_id: &host_id,
+        },
+        crate::docker_execution_host::observed_resident_sandboxes,
+        |target, verified| match target {
+            CleanupTarget::NeverAllocated => Ok(()),
+            CleanupTarget::Instance {
+                allocation,
+                resources,
+                origin_authorization,
+            } => {
+                let fence = EnvironmentTaskFence {
+                    environment_instance_id: allocation.instance_id.clone(),
+                    controller_id: cleanup.agent_run_id.clone(),
+                    controller_epoch: verified
+                        .controller_epoch
+                        .try_into()
+                        .map_err(|_| "cleanup epoch invalid")?,
+                    controller_purpose: EnvironmentTaskControllerPurpose::Cleanup,
+                };
+                retained_cleanup::confirm_run_cleanup(
+                    &retained_cleanup::DockerCleanupHost {
+                        cleanup: &cleanup,
+                        lease: &lease,
+                        allocation,
+                        resources: *resources,
+                        origin_authorization: origin_authorization.as_ref(),
+                    },
+                    &fence,
+                )
+            }
+        },
+    ) {
+        Ok(receipt) => receipt,
+        Err(_) => return json_error_response(503, "retained_cleanup_unconfirmed"),
+    };
+    let mut contexts = state
+        .tool_layers
+        .lock()
+        .map_err(|_| "provider poll tool layer registry lock poisoned".to_string())?;
+    let session_id = cleanup.authorization.session_id.as_str();
+    if contexts
+        .get(session_id)
+        .is_some_and(|context| context.agent_run_id == cleanup.agent_run_id)
+    {
+        contexts.remove(session_id);
+    }
+    Ok(http_response(
+        200,
+        "application/json",
+        serde_json::to_vec(&json!({
+            "schema":"runtime.agent_run.teardown.result.v2", "agentRunId":cleanup.agent_run_id,
+            "status":"retained", "cleanupReceiptId":receipt.receipt_id,
+        }))
+        .map_err(|_| "cleanup response encoding failed")?,
+    ))
+}
+
 pub(super) fn step(
     state: HttpServerState,
     request: Request<Bytes>,
@@ -243,6 +430,7 @@ pub(super) fn step(
     ) {
         return json_error_response(409, error.as_str());
     }
+    let retained = agent_run_step.schema == "runtime.agent_run.step.v2";
     let agent_run_id = agent_run_step.agent_run_start.agent_run_id.clone();
     let failure_agent_run_start = agent_run_step.agent_run_start.clone();
     let failure_job_id = agent_run_step.job_id.clone();
@@ -347,9 +535,17 @@ pub(super) fn step(
             }
         }
     };
+    step_response(&agent_run_id, outcome, retained)
+}
+
+fn step_response(
+    agent_run_id: &str,
+    outcome: AgentRunStepOutcome,
+    retained: bool,
+) -> Result<Response<Body>, String> {
     outcome.validate()?;
     let mut response = json!({
-        "schema": "runtime.agent_run.step.result.v1",
+        "schema": if retained { "runtime.agent_run.step.result.v2" } else { "runtime.agent_run.step.result.v1" },
         "agentRunId": agent_run_id,
         "disposition": outcome.disposition,
         "terminalState": outcome.terminal_state,
@@ -361,4 +557,52 @@ pub(super) fn step(
     let response = serde_json::to_vec(&response)
         .map_err(|error| format!("encode AgentRun step response failed: {error}"))?;
     Ok(http_response(200, "application/json", response))
+}
+
+#[cfg(test)]
+mod cleanup_receipt_http_tests {
+    use super::*;
+    #[test]
+    fn retained_step_response_matches_the_worker_version() {
+        let response = step_response(
+            "run-a",
+            AgentRunStepOutcome {
+                disposition: "terminal",
+                terminal_state: Some("completed"),
+                transition_reason: "runtime_session_terminal_committed".into(),
+                retry_at_ms: None,
+            },
+            true,
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let bytes = runtime
+            .block_on(axum::body::to_bytes(response.into_body(), 4096))
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["schema"], "runtime.agent_run.step.result.v2");
+        assert_eq!(value["terminalState"], "completed");
+    }
+    #[test]
+    fn receipt_query_rejects_unsupported_schema_and_unknown_fields_before_storage() {
+        let good = json!({"schema":"runtime.agent_run.cleanup_receipt.get.v1","agentRunId":"run-1",
+            "authorizationDigest":format!("sha256:{}","a".repeat(64)),"cleanupReceiptId":"receipt-1"});
+        for mutate in ["schema", "extra"] {
+            let mut request = good.clone();
+            request[mutate] = json!("unsupported");
+            let response = cleanup_receipt_response(&serde_json::to_vec(&request).unwrap(), |_| {
+                panic!("invalid request read storage")
+            })
+            .unwrap();
+            assert_eq!(response.status(), 400);
+        }
+        let missing =
+            cleanup_receipt_response(&serde_json::to_vec(&good).unwrap(), |_| Ok(None)).unwrap();
+        assert_eq!(missing.status(), 404);
+        let unknown = cleanup_receipt_response(&serde_json::to_vec(&good).unwrap(), |_| {
+            Err("storage offline".into())
+        })
+        .unwrap();
+        assert_eq!(unknown.status(), 503);
+    }
 }

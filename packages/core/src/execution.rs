@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+mod environment_tasks;
 mod filesystem;
+pub use environment_tasks::*;
 mod policy;
 mod process;
 mod residency;

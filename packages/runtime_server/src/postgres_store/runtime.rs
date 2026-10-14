@@ -1554,6 +1554,11 @@ impl PostgresSessionLog {
         run_postgres_blocking(|| {
             self.connections.with_client(|client| {
             let mut tx = client.transaction().map_err(|e| e.to_string())?;
+            // Admission and environment control acquire Session before Run.
+            // A cancellation waiting for Session must not pin the Run row.
+            tx.query_opt("SELECT id FROM app_core_session WHERE id=$1 AND workspace_id=$2 FOR UPDATE",
+                &[&self.session_id, &self.workspace_id]).map_err(|e| e.to_string())?
+                .ok_or("pre-admission session missing")?;
             let run = tx.query_opt(
                 "SELECT session_id FROM app_core_agentrun WHERE id=$1 FOR UPDATE",
                 &[&agent_run_id],
@@ -1561,9 +1566,6 @@ impl PostgresSessionLog {
             if run.get::<_, String>(0) != self.session_id {
                 return Err("pre-admission session mismatch".into());
             }
-            tx.query_opt("SELECT id FROM app_core_session WHERE id=$1 AND workspace_id=$2 FOR UPDATE",
-                &[&self.session_id, &self.workspace_id]).map_err(|e| e.to_string())?
-                .ok_or("pre-admission session missing")?;
             let expected_job = format!("agent_run.lifecycle:{agent_run_id}");
             if fence.job_id != expected_job || fence.job_kind != AGENT_RUN_LIFECYCLE_JOB_KIND {
                 return Err(RUNTIME_JOB_LEASE_FENCE_REJECTED.into());

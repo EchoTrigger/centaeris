@@ -17,7 +17,7 @@ fn postgres_execution_instance_binding_is_durable_and_rejects_reassignment() {
     db.batch_execute("ALTER TABLE public.app_core_agentrun ADD COLUMN IF NOT EXISTS environment_id text;
         INSERT INTO public.app_core_agentrun(id,session_id,environment_id) VALUES('agent_run_1','sess_1','environment_1');
         CREATE TABLE IF NOT EXISTS public.app_core_agentrunauthorization(agent_run_id text PRIMARY KEY,digest text NOT NULL);").unwrap();
-    db.execute("INSERT INTO public.app_core_agentrunauthorization VALUES('agent_run_1',$1) ON CONFLICT(agent_run_id) DO UPDATE SET digest=EXCLUDED.digest", &[&grant.payload.agent_run_authorization_digest]).unwrap();
+    db.execute("INSERT INTO public.app_core_agentrunauthorization(agent_run_id,digest) VALUES('agent_run_1',$1) ON CONFLICT(agent_run_id) DO UPDATE SET digest=EXCLUDED.digest", &[&grant.payload.agent_run_authorization_digest]).unwrap();
     let image = format!("sha256:{}", "a".repeat(64));
     let bind = |client: &mut Client,
                 host: &str,
@@ -130,7 +130,7 @@ fn postgres_execution_instance_binding_is_durable_and_rejects_reassignment() {
         ],
     )
     .unwrap();
-    db.execute("INSERT INTO public.app_core_agentrunauthorization VALUES($1,$2) ON CONFLICT(agent_run_id) DO UPDATE SET digest=EXCLUDED.digest", &[&next_run.agent_run_id,&next_run.agent_run_authorization_digest]).unwrap();
+    db.execute("INSERT INTO public.app_core_agentrunauthorization(agent_run_id,digest) VALUES($1,$2) ON CONFLICT(agent_run_id) DO UPDATE SET digest=EXCLUDED.digest", &[&next_run.agent_run_id,&next_run.agent_run_authorization_digest]).unwrap();
     assert!(
         super::super::execution_instances::bind(
             &mut db,
@@ -181,7 +181,7 @@ fn postgres_execution_instance_binding_is_durable_and_rejects_reassignment() {
     // A stored secondary identity collision is never a successful replay of a
     // different execution, even though both uniqueness conflicts are handled.
     let collision = super::super::execution_instances::instance_id("collision-candidate");
-    db.execute("INSERT INTO runtime.execution_instances SELECT 'collision-owner',$1,environment_id,session_id,agent_run_id,host_id,authorization_digest,binding_digest,image_digest FROM runtime.execution_instances WHERE execution_id='execution-one'", &[&collision]).unwrap();
+    db.execute("INSERT INTO runtime.execution_instances SELECT 'collision-owner',$1,environment_id,session_id,agent_run_id,host_id,authorization_digest,binding_digest,image_digest,'collision-owner',allocation_mode,profile_digest FROM runtime.execution_instances WHERE execution_id='execution-one'", &[&collision]).unwrap();
     assert_eq!(
         super::super::execution_instances::bind(
             &mut db,
@@ -204,6 +204,7 @@ fn postgres_instance_forward_migration_preserves_reservations_and_rejects_bad_co
     reset_store(&url);
     let _store = PostgresRuntimeStore::new(&url).unwrap();
     let mut db = Client::connect(&url, NoTls).unwrap();
+    super::retained_instance_tests::downgrade_to_eight(&mut db);
     db.batch_execute("INSERT INTO runtime.resident_sandboxes VALUES('host','execution','run','tenant',NULL,'reserved',1,1,1,1,1,1);
         DROP TABLE runtime.execution_instances; DELETE FROM runtime.schema_migrations WHERE version=8;").unwrap();
     let history = db
@@ -232,8 +233,9 @@ fn postgres_instance_forward_migration_preserves_reservations_and_rejects_bad_co
             .get::<_, i64>(0),
         0
     );
-    db.batch_execute("ALTER TABLE runtime.execution_instances DROP CONSTRAINT execution_instances_instance_id_key").unwrap();
+    db.batch_execute("DROP INDEX runtime.execution_instances_anchor_instance_key")
+        .unwrap();
     assert!(PostgresRuntimeStore::new(&url)
         .unwrap_err()
-        .contains("instance identity constraints mismatch"));
+        .contains("allocation uniqueness index missing"));
 }

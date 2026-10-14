@@ -1,0 +1,1234 @@
+//! These tests require an explicitly delegated, disposable cgroup subtree.
+use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+static SEQ: AtomicU64 = AtomicU64::new(0);
+
+struct LockProcess {
+    child: Child,
+    root: PathBuf,
+}
+impl LockProcess {
+    fn spawn(root: &Path, role: &str) -> Self {
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "task_service::linux::tests::control_lock_process_fixture",
+                "--nocapture",
+            ])
+            .env("CENTAERIS_LOCK_FIXTURE_ROOT", root)
+            .env("CENTAERIS_LOCK_FIXTURE_ROLE", role)
+            .spawn()
+            .unwrap();
+        let mut process = Self {
+            child,
+            root: root.into(),
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !root.join("ready").exists() {
+            assert!(
+                process.child.try_wait().unwrap().is_none(),
+                "lock fixture child exited early"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "lock fixture child did not become ready"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        process
+    }
+}
+impl Drop for LockProcess {
+    fn drop(&mut self) {
+        let _ = fs::write(self.root.join("release"), b"release");
+        let _ = self.child.wait();
+    }
+}
+#[test]
+fn control_lock_process_fixture() {
+    let Ok(root) = std::env::var("CENTAERIS_LOCK_FIXTURE_ROOT") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let role = std::env::var("CENTAERIS_LOCK_FIXTURE_ROLE").unwrap();
+    let file = if role == "holder" {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(root.join("service.lock"))
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        Some(file)
+    } else {
+        None
+    };
+    fs::write(root.join("ready"), b"ready").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !root.join("release").exists() {
+        assert!(Instant::now() < deadline, "lock fixture release timed out");
+        thread::sleep(Duration::from_millis(10));
+    }
+    drop(file);
+}
+fn lock_root() -> PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "task-lock-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&root).unwrap();
+    root
+}
+fn seeded_running_journal(root: &Path) -> Vec<u8> {
+    let mut journal = Journal::open(root, "i").unwrap();
+    journal
+        .takeover_persist(
+            EnvironmentTaskFence {
+                environment_instance_id: "i".into(),
+                controller_id: "r".into(),
+                controller_epoch: 3,
+                controller_purpose: EnvironmentTaskControllerPurpose::Execute,
+            },
+            root,
+        )
+        .unwrap();
+    journal.tasks.insert(
+        "task".into(),
+        Record {
+            digest: "digest".into(),
+            snapshot: EnvironmentTaskSnapshot {
+                task_id: "task".into(),
+                operation_id: "operation".into(),
+                scope: EnvironmentTaskScope::Environment,
+                state: EnvironmentTaskState::Running,
+                exit_code: None,
+                cleanup_complete: false,
+                output_complete: false,
+            },
+        },
+    );
+    journal.persist(root).unwrap();
+    fs::read(root.join("journal.json")).unwrap()
+}
+fn assert_control_unchanged(root: &Path, before: &[u8]) {
+    let after = fs::read(root.join("journal.json")).unwrap();
+    assert!(
+        after.as_slice() == before,
+        "control journal changed: before={:x}, after={:x}",
+        Sha256::digest(before),
+        Sha256::digest(&after)
+    );
+}
+#[test]
+fn startup_refuses_other_process_lock_before_reading_or_rewriting_control() {
+    let root = lock_root();
+    let before = seeded_running_journal(&root);
+    let socket = root.join("service.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let holder = LockProcess::spawn(&root, "holder");
+    assert!(prepare_control(&root, &socket, "i").is_err());
+    assert_control_unchanged(&root, &before);
+    drop(holder);
+    drop(listener);
+    fs::remove_dir_all(root).unwrap();
+}
+#[test]
+fn startup_refuses_stale_socket_before_rewriting_control_and_keeps_socket() {
+    let root = lock_root();
+    let before = seeded_running_journal(&root);
+    let socket = root.join("service.sock");
+    drop(UnixListener::bind(&socket).unwrap());
+    assert!(prepare_control(&root, &socket, "i").is_err());
+    assert_control_unchanged(&root, &before);
+    assert!(socket.exists());
+    fs::remove_dir_all(root).unwrap();
+}
+#[test]
+fn startup_lease_survives_manager_lifetime_but_not_exec_child() {
+    let root = lock_root();
+    let control_root = root.join("control");
+    let output_root = root.join("output");
+    fs::create_dir(&control_root).unwrap();
+    fs::create_dir(&output_root).unwrap();
+    let socket = root.join("service.sock");
+    let control = prepare_control(&control_root, &socket, "i").unwrap();
+    let manager = Manager::from_journal(
+        TaskStorage::new(control_root.clone(), output_root, OUTPUT_BUDGET_BYTES).unwrap(),
+        root.join("unused-cgroups"),
+        control.journal,
+        control.lease,
+    )
+    .unwrap();
+    let contender = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(control_root.join("service.lock"))
+        .unwrap();
+    assert_ne!(
+        unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0,
+        "startup must retain the exclusive lock"
+    );
+    let child = LockProcess::spawn(&root, "wait");
+    drop(control.listener);
+    assert_ne!(
+        unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0,
+        "closing listener must not release a live manager's control lock"
+    );
+    drop(manager);
+    assert_eq!(
+        unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0,
+        "exec child must not inherit supervisor lock"
+    );
+    drop(contender);
+    drop(child);
+    fs::remove_dir_all(root).unwrap();
+}
+
+fn relay_response(response: Vec<u8>) -> Result<Vec<u8>, String> {
+    let (mut client, server) = UnixStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    client
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let writer = thread::spawn(move || {
+        let mut server = BufReader::new(server);
+        let mut request = Vec::new();
+        server.read_until(b'\n', &mut request).unwrap();
+        assert_eq!(request, b"{}\n");
+        let _ = server.get_mut().write_all(&response);
+    });
+    let result = relay_exchange(&mut client, b"{}");
+    drop(client);
+    writer.join().unwrap();
+    result
+}
+fn valid_relay_response() -> Vec<u8> {
+    let mut bytes = serde_json::to_vec(&EnvironmentTaskResponse::from_result(Ok(
+        EnvironmentTaskResult::Listed { tasks: vec![] },
+    )))
+    .unwrap();
+    bytes.push(b'\n');
+    bytes
+}
+#[test]
+fn relay_preserves_complete_valid_response() {
+    let response = valid_relay_response();
+    assert_eq!(relay_response(response.clone()).unwrap(), response);
+}
+#[test]
+fn relay_preserves_complete_semantic_error_response() {
+    let mut response = serde_json::to_vec(&EnvironmentTaskResponse::from_result(Err(
+        "task_controller_fenced".into(),
+    )))
+    .unwrap();
+    response.push(b'\n');
+    assert_eq!(relay_response(response.clone()).unwrap(), response);
+}
+#[test]
+fn relay_marks_invalid_response_shape_unknown() {
+    for response in [b"not-json\n".as_slice(), b"{}\n".as_slice(), br#"{"status":"error","schema":"environment.task.v1","error":"denied","result":{"kind":"listed","tasks":[]}}
+"#.as_slice()] {
+        assert_eq!(relay_response(response.to_vec()).unwrap_err(), "task_relay_response_unknown");
+    }
+}
+#[test]
+fn relay_marks_lost_response_unknown() {
+    assert_eq!(
+        relay_response(vec![]).unwrap_err(),
+        "task_relay_response_unknown"
+    );
+}
+#[test]
+fn relay_marks_truncated_response_unknown() {
+    let mut response = valid_relay_response();
+    response.pop();
+    assert_eq!(
+        relay_response(response).unwrap_err(),
+        "task_relay_response_unknown"
+    );
+}
+#[test]
+fn relay_marks_oversized_response_unknown() {
+    let response = EnvironmentTaskResponse::from_result(Err("x".repeat(512 * 1024)));
+    let mut bytes = serde_json::to_vec(&response).unwrap();
+    bytes.push(b'\n');
+    assert!(matches!(relay_response(bytes), Err(error) if error == "task_relay_response_unknown"));
+}
+
+#[test]
+fn relay_preserves_response_at_exact_frame_limit() {
+    let empty = EnvironmentTaskResponse::from_result(Err(String::new()));
+    let overhead = serde_json::to_vec(&empty).unwrap().len() + 1;
+    let response = EnvironmentTaskResponse::from_result(Err("x".repeat(MAX_RESPONSE - overhead)));
+    let mut bytes = serde_json::to_vec(&response).unwrap();
+    bytes.push(b'\n');
+    assert_eq!(bytes.len(), MAX_RESPONSE);
+    assert!(matches!(relay_response(bytes.clone()), Ok(output) if output == bytes));
+}
+#[test]
+fn relay_marks_unsupported_response_schema_unknown() {
+    let response = EnvironmentTaskResponse::Success {
+        schema: "unsupported".into(),
+        result: EnvironmentTaskResult::Listed { tasks: vec![] },
+    };
+    let mut bytes = serde_json::to_vec(&response).unwrap();
+    bytes.push(b'\n');
+    assert_eq!(
+        relay_response(bytes).unwrap_err(),
+        "task_relay_response_unknown"
+    );
+}
+
+#[test]
+fn corrupt_or_removed_output_does_not_prevent_control_restart_and_queries() {
+    let root = std::env::temp_dir().join(format!(
+        "task-storage-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let control = root.join("control");
+    let output = root.join("output");
+    fs::create_dir_all(&control).unwrap();
+    fs::create_dir(&output).unwrap();
+    let fence = EnvironmentTaskFence {
+        environment_instance_id: "i".into(),
+        controller_id: "r".into(),
+        controller_epoch: 1,
+        controller_purpose: EnvironmentTaskControllerPurpose::Execute,
+    };
+    let mut journal = Journal::open(&control, "i").unwrap();
+    journal.takeover_persist(fence.clone(), &control).unwrap();
+    let snapshot = EnvironmentTaskSnapshot {
+        task_id: "task".into(),
+        operation_id: "operation".into(),
+        scope: EnvironmentTaskScope::Environment,
+        state: EnvironmentTaskState::Exited,
+        exit_code: Some(7),
+        cleanup_complete: true,
+        output_complete: true,
+    };
+    journal.tasks.insert(
+        "task".into(),
+        Record {
+            digest: "digest".into(),
+            snapshot: snapshot.clone(),
+        },
+    );
+    journal.persist(&control).unwrap();
+    drop(journal);
+    let original = fs::read(control.join("journal.json")).unwrap();
+    File::create(output.join("task.output"))
+        .unwrap()
+        .set_len((ENVIRONMENT_TASK_OUTPUT_BYTES / CHUNK * (HEADER + CHUNK) + 1) as u64)
+        .unwrap();
+    for remove_output in [false, true] {
+        if remove_output {
+            fs::remove_dir_all(&output).unwrap();
+        }
+        let manager = Arc::new(Mutex::new(
+            Manager::open(
+                TaskStorage::new(control.clone(), output.clone(), OUTPUT_BUDGET_BYTES).unwrap(),
+                root.join("unused-cgroups"),
+                "i",
+            )
+            .unwrap(),
+        ));
+        let result = Manager::handle(
+            &manager,
+            EnvironmentTaskRequest::Query {
+                fence: fence.clone(),
+                task_id: "task".into(),
+                cursor: 0,
+                max_bytes: ENVIRONMENT_TASK_READ_BYTES as u32,
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(result, EnvironmentTaskResult::Task { task, gap: true, output, .. } if task == snapshot && output.is_empty())
+        );
+        assert_control_unchanged(&control, &original);
+        drop(manager);
+    }
+    let manager = Arc::new(Mutex::new(
+        Manager::open(
+            TaskStorage::new(control.clone(), output, OUTPUT_BUDGET_BYTES).unwrap(),
+            root.join("unused-cgroups"),
+            "i",
+        )
+        .unwrap(),
+    ));
+    Manager::handle(
+        &manager,
+        EnvironmentTaskRequest::Takeover {
+            environment_instance_id: "i".into(),
+            controller_id: "r".into(),
+            controller_epoch: 2,
+            controller_purpose: EnvironmentTaskControllerPurpose::Execute,
+        },
+    )
+    .unwrap();
+    drop(manager);
+    assert_eq!(
+        Journal::open(&control, "i")
+            .unwrap()
+            .fence
+            .unwrap()
+            .controller_epoch,
+        2
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+struct Fixture {
+    manager: Arc<Mutex<Manager>>,
+    cgroups: PathBuf,
+    root: PathBuf,
+    fence: EnvironmentTaskFence,
+}
+impl Fixture {
+    fn new() -> Self {
+        Self::with_controllers(false)
+    }
+    fn with_controllers(enabled: bool) -> Self {
+        assert_eq!(
+            unsafe { libc::geteuid() },
+            0,
+            "fixture must run as root inside an isolated test environment"
+        );
+        let parent = PathBuf::from(
+            std::env::var("CENTAERIS_TASK_TEST_CGROUP_ROOT")
+                .expect("explicit disposable delegated cgroup root required"),
+        );
+        let suffix = format!(
+            "fixture-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        );
+        let cgroups = parent.join(&suffix);
+        fs::create_dir(&cgroups).unwrap();
+        if enabled {
+            fs::write(cgroups.join("cgroup.subtree_control"), b"+pids +memory").unwrap();
+        }
+        let root = std::env::temp_dir().join(&suffix);
+        fs::create_dir(&root).unwrap();
+        let control_root = root.join("control");
+        let output_root = root.join("output");
+        fs::create_dir(&control_root).unwrap();
+        fs::create_dir(&output_root).unwrap();
+        fs::create_dir_all("/mnt/data").unwrap();
+        let fence = EnvironmentTaskFence {
+            environment_instance_id: suffix.clone(),
+            controller_id: "run-one".into(),
+            controller_epoch: 1,
+            controller_purpose: EnvironmentTaskControllerPurpose::Execute,
+        };
+        let manager = Arc::new(Mutex::new(
+            Manager::open(
+                TaskStorage::new(control_root, output_root, OUTPUT_BUDGET_BYTES).unwrap(),
+                cgroups.clone(),
+                &suffix,
+            )
+            .unwrap(),
+        ));
+        start_reaper(&manager).unwrap();
+        Manager::handle(
+            &manager,
+            EnvironmentTaskRequest::Takeover {
+                environment_instance_id: suffix,
+                controller_id: fence.controller_id.clone(),
+                controller_epoch: 1,
+                controller_purpose: EnvironmentTaskControllerPurpose::Execute,
+            },
+        )
+        .unwrap();
+        Self {
+            manager,
+            cgroups,
+            root,
+            fence,
+        }
+    }
+    fn start(
+        &self,
+        operation: &str,
+        scope: EnvironmentTaskScope,
+        script: &str,
+    ) -> EnvironmentTaskRequest {
+        EnvironmentTaskRequest::Start {
+            fence: self.fence.clone(),
+            operation_id: operation.into(),
+            scope,
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), script.into()],
+            cwd: "/mnt/data".into(),
+            timeout_ms: 10_000,
+        }
+    }
+    fn await_cleanup(&self, id: &str) {
+        let end = Instant::now() + Duration::from_secs(5);
+        loop {
+            let m = self.manager.lock().unwrap();
+            let task = &m.journal.tasks[id].snapshot;
+            if task.cleanup_complete && task.output_complete && !m.live.contains_key(id) {
+                break;
+            }
+            drop(m);
+            assert!(
+                Instant::now() < end,
+                "task did not fully drain and clean up"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            fs::read_to_string(self.cgroups.join(id).join("cgroup.events"))
+                .unwrap()
+                .lines()
+                .any(|line| line == "populated 0")
+        );
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        self.manager.lock().unwrap().defer_failed_child_reap = false;
+        for entry in fs::read_dir(&self.cgroups).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                let _ = cgroup_kill(&entry.path());
+            }
+        }
+        let end = Instant::now() + Duration::from_secs(5);
+        while !self.manager.lock().unwrap().live.is_empty() && Instant::now() < end {
+            thread::sleep(Duration::from_millis(20));
+        }
+        for entry in fs::read_dir(&self.cgroups).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                fs::remove_dir(entry.path()).unwrap();
+            }
+        }
+        fs::remove_dir(&self.cgroups).unwrap();
+        fs::remove_dir_all(&self.root).unwrap();
+    }
+}
+fn id(result: &EnvironmentTaskResult) -> String {
+    match result {
+        EnvironmentTaskResult::Task { task, .. } => task.task_id.clone(),
+        _ => panic!("expected task"),
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
+fn unavailable_worker_threads_reject_before_exec_without_poisoning_resident_tasks() {
+    let f = Fixture::new();
+    let resident = id(&Manager::handle(
+        &f.manager,
+        f.start(
+            "resident",
+            EnvironmentTaskScope::Environment,
+            "exec sleep 30",
+        ),
+    )
+    .unwrap());
+    let marker = format!("/mnt/data/thread-capacity-{}", std::process::id());
+    let attempt = f.start(
+        "capacity",
+        EnvironmentTaskScope::Environment,
+        &format!("printf executed >> {marker}; exec sleep 30"),
+    );
+    let before = fs::read(
+        f.manager
+            .lock()
+            .unwrap()
+            .storage
+            .control_root
+            .join("journal.json"),
+    )
+    .unwrap();
+    for failed_thread in 1..=3 {
+        f.manager.lock().unwrap().fail_worker_reservation = Some(failed_thread);
+        assert_eq!(
+            Manager::handle(&f.manager, attempt.clone()).unwrap_err(),
+            "task_thread_capacity"
+        );
+        assert!(
+            !Path::new(&marker).exists(),
+            "rejected start executed user code"
+        );
+        let mut manager = f.manager.lock().unwrap();
+        assert!(!manager.journal.poisoned);
+        assert_eq!(manager.journal.tasks.len(), 1);
+        assert!(manager
+            .live
+            .get_mut(&resident)
+            .unwrap()
+            .child
+            .try_wait()
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            fs::read(manager.storage.control_root.join("journal.json")).unwrap(),
+            before
+        );
+    }
+    f.manager.lock().unwrap().fail_worker_reservation = None;
+    let accepted = id(&Manager::handle(&f.manager, attempt.clone()).unwrap());
+    assert_eq!(id(&Manager::handle(&f.manager, attempt).unwrap()), accepted);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !Path::new(&marker).exists() {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(fs::read(&marker).unwrap(), b"executed");
+    fs::remove_file(marker).unwrap();
+}
+
+#[test]
+#[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
+fn panicking_supervisor_is_unknown_until_owned_tree_is_empty_and_child_reaped() {
+    let f = Fixture::new();
+    let resident = id(&Manager::handle(
+        &f.manager,
+        f.start(
+            "resident",
+            EnvironmentTaskScope::Environment,
+            "exec sleep 30",
+        ),
+    )
+    .unwrap());
+    f.manager.lock().unwrap().fail_worker_reservation = Some(4);
+    f.manager.lock().unwrap().defer_failed_child_reap = true;
+    let attempt = f.start(
+        "lost-supervisor",
+        EnvironmentTaskScope::Environment,
+        "exec sleep 30",
+    );
+    let failed = id(&Manager::handle(&f.manager, attempt.clone()).unwrap());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let empty = fs::read_to_string(f.cgroups.join(&failed).join("cgroup.events"))
+            .unwrap()
+            .lines()
+            .any(|line| line == "populated 0");
+        let manager = f.manager.lock().unwrap();
+        if empty && manager.journal.tasks[&failed].snapshot.state == EnvironmentTaskState::Unknown {
+            assert!(
+                manager.live.contains_key(&failed),
+                "unreaped child ownership was discarded"
+            );
+            drop(manager);
+            let query = Manager::handle(
+                &f.manager,
+                EnvironmentTaskRequest::Query {
+                    fence: f.fence.clone(),
+                    task_id: failed.clone(),
+                    cursor: 0,
+                    max_bytes: 65536,
+                },
+            )
+            .unwrap();
+            assert!(
+                matches!(query, EnvironmentTaskResult::Task { task, .. } if !task.cleanup_complete),
+                "empty cgroup does not confirm the failed supervisor's direct child was reaped"
+            );
+            break;
+        }
+        drop(manager);
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    f.manager.lock().unwrap().defer_failed_child_reap = false;
+    loop {
+        let mut manager = f.manager.lock().unwrap();
+        assert!(!manager.journal.poisoned);
+        assert!(manager
+            .live
+            .get_mut(&resident)
+            .unwrap()
+            .child
+            .try_wait()
+            .unwrap()
+            .is_none());
+        let task = &manager.journal.tasks[&failed].snapshot;
+        if task.cleanup_complete && !manager.live.contains_key(&failed) {
+            assert_eq!(task.state, EnvironmentTaskState::Unknown);
+            assert!(!task.output_complete);
+            break;
+        }
+        drop(manager);
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    f.manager.lock().unwrap().fail_worker_reservation = None;
+    let replay = Manager::handle(&f.manager, attempt).unwrap();
+    assert!(matches!(replay, EnvironmentTaskResult::Task { task, .. }
+        if task.task_id == failed && task.state == EnvironmentTaskState::Unknown && task.cleanup_complete));
+    assert!(
+        fs::read_to_string(f.cgroups.join(failed).join("cgroup.events"))
+            .unwrap()
+            .lines()
+            .any(|line| line == "populated 0")
+    );
+}
+
+#[test]
+#[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
+fn worker_delivery_failure_retains_supervision_and_does_not_respawn_unknown_start() {
+    let f = Fixture::new();
+    let resident = id(&Manager::handle(
+        &f.manager,
+        f.start(
+            "resident",
+            EnvironmentTaskScope::Environment,
+            "exec sleep 30",
+        ),
+    )
+    .unwrap());
+    f.manager.lock().unwrap().fail_worker_delivery = true;
+    let attempt = f.start(
+        "failed-delivery",
+        EnvironmentTaskScope::Environment,
+        "exec sleep 30",
+    );
+    assert_eq!(
+        Manager::handle(&f.manager, attempt.clone()).unwrap_err(),
+        "task_worker_delivery_failed"
+    );
+    let failed = f
+        .manager
+        .lock()
+        .unwrap()
+        .journal
+        .tasks
+        .iter()
+        .find(|(_, record)| record.snapshot.operation_id == "failed-delivery")
+        .map(|(id, _)| id.clone())
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut manager = f.manager.lock().unwrap();
+        assert!(!manager.journal.poisoned);
+        assert!(manager
+            .live
+            .get_mut(&resident)
+            .unwrap()
+            .child
+            .try_wait()
+            .unwrap()
+            .is_none());
+        let snapshot = &manager.journal.tasks[&failed].snapshot;
+        if snapshot.cleanup_complete && !manager.live.contains_key(&failed) {
+            assert_eq!(snapshot.state, EnvironmentTaskState::Unknown);
+            assert!(!snapshot.output_complete);
+            break;
+        }
+        drop(manager);
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    f.manager.lock().unwrap().fail_worker_delivery = false;
+    assert!(
+        matches!(Manager::handle(&f.manager, attempt).unwrap(), EnvironmentTaskResult::Task { task, .. }
+        if task.task_id == failed && task.state == EnvironmentTaskState::Unknown && task.cleanup_complete)
+    );
+}
+
+#[test]
+#[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
+fn exec_failure_after_worker_reservation_remains_queryable_without_deadlock_or_retry_spawn() {
+    let f = Fixture::new();
+    let mut request = f.start(
+        "missing-program",
+        EnvironmentTaskScope::Environment,
+        "unused",
+    );
+    if let EnvironmentTaskRequest::Start { program, .. } = &mut request {
+        *program = "/centaeris-nonexistent-task-program".into();
+    }
+    let result = Manager::handle(&f.manager, request.clone()).unwrap();
+    let failed = id(&result);
+    assert!(matches!(result, EnvironmentTaskResult::Task { task, .. }
+        if task.state == EnvironmentTaskState::Unknown && task.cleanup_complete));
+    assert_eq!(id(&Manager::handle(&f.manager, request).unwrap()), failed);
+    let resident = id(&Manager::handle(
+        &f.manager,
+        f.start(
+            "after-failure",
+            EnvironmentTaskScope::Environment,
+            "exec sleep 30",
+        ),
+    )
+    .unwrap());
+    let mut manager = f.manager.lock().unwrap();
+    assert!(!manager.journal.poisoned);
+    assert!(!manager.live.contains_key(&failed));
+    assert!(manager
+        .live
+        .get_mut(&resident)
+        .unwrap()
+        .child
+        .try_wait()
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+#[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
+fn real_background_tree_survives_controller_takeover_and_drains_both_streams() {
+    let f = Fixture::new();
+    let request = f.start("start", EnvironmentTaskScope::Environment, "(head -c 2097152 /dev/zero) & (head -c 2097152 /dev/zero >&2) & wait; printf stdout-done; printf stderr-done >&2; sleep 30 & wait");
+    let task_id = id(&Manager::handle(&f.manager, request.clone()).unwrap());
+    let end = Instant::now() + Duration::from_secs(5);
+    loop {
+        let m = f.manager.lock().unwrap();
+        let mut log = m.logs[&task_id].lock().unwrap();
+        let cursor = log.next.saturating_sub(2);
+        let (chunks, _, _, gap, _) = log.read(cursor, ENVIRONMENT_TASK_READ_BYTES).unwrap();
+        if gap
+            || chunks
+                .iter()
+                .any(|c| c.data.windows(11).any(|s| s == b"stderr-done"))
+        {
+            break;
+        }
+        drop(log);
+        drop(m);
+        assert!(Instant::now() < end);
+        thread::sleep(Duration::from_millis(20));
+    }
+    let mut updated = request;
+    if let EnvironmentTaskRequest::Start { fence, .. } = &mut updated {
+        fence.controller_epoch = 2;
+    }
+    Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Takeover {
+            environment_instance_id: f.fence.environment_instance_id.clone(),
+            controller_id: f.fence.controller_id.clone(),
+            controller_epoch: 2,
+            controller_purpose: EnvironmentTaskControllerPurpose::Execute,
+        },
+    )
+    .unwrap();
+    assert_eq!(id(&Manager::handle(&f.manager, updated).unwrap()), task_id);
+    assert!(Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Terminate {
+            fence: f.fence.clone(),
+            task_id: task_id.clone(),
+            operation_id: "stale".into()
+        }
+    )
+    .is_err());
+    let fence = EnvironmentTaskFence {
+        controller_epoch: 2,
+        ..f.fence.clone()
+    };
+    let response = Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Query {
+            fence: fence.clone(),
+            task_id: task_id.clone(),
+            cursor: 0,
+            max_bytes: ENVIRONMENT_TASK_READ_BYTES as u32,
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        response,
+        EnvironmentTaskResult::Task { gap: true, .. }
+    ));
+    Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Terminate {
+            fence,
+            task_id: task_id.clone(),
+            operation_id: "stop".into(),
+        },
+    )
+    .unwrap();
+    f.await_cleanup(&task_id);
+}
+
+#[test]
+#[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
+fn successful_input_receipt_replays_after_child_exit_without_writing_twice() {
+    let f = Fixture::new();
+    let task_id = id(&Manager::handle(
+        &f.manager,
+        f.start("cat", EnvironmentTaskScope::Environment, "cat"),
+    )
+    .unwrap());
+    let input = EnvironmentTaskRequest::Input {
+        fence: f.fence.clone(),
+        task_id: task_id.clone(),
+        operation_id: "input".into(),
+        data: b"one-input\n".to_vec(),
+        close: true,
+    };
+    let receipt = Manager::handle(&f.manager, input.clone()).unwrap();
+    f.await_cleanup(&task_id);
+    assert_eq!(Manager::handle(&f.manager, input).unwrap(), receipt);
+    let m = f.manager.lock().unwrap();
+    let (chunks, _, _, _, _) = m.logs[&task_id]
+        .lock()
+        .unwrap()
+        .read(0, ENVIRONMENT_TASK_READ_BYTES)
+        .unwrap();
+    assert_eq!(
+        chunks.into_iter().flat_map(|c| c.data).collect::<Vec<_>>(),
+        b"one-input\n"
+    );
+}
+
+#[test]
+#[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
+fn running_journal_failure_keeps_supervision_and_drain_ownership() {
+    let f = Fixture::new();
+    f.manager.lock().unwrap().fail_running_commit = true;
+    assert!(Manager::handle(
+        &f.manager,
+        f.start(
+            "fail",
+            EnvironmentTaskScope::Environment,
+            "head -c 2097152 /dev/zero; sleep 30 & wait"
+        )
+    )
+    .is_err());
+    let task_id = f
+        .manager
+        .lock()
+        .unwrap()
+        .journal
+        .tasks
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    f.await_cleanup(&task_id);
+    assert!(f.manager.lock().unwrap().journal.poisoned);
+}
+
+#[test]
+#[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
+fn lost_input_receipt_never_rewrites_stdin() {
+    let f = Fixture::new();
+    let task_id = id(&Manager::handle(
+        &f.manager,
+        f.start("cat", EnvironmentTaskScope::Environment, "cat"),
+    )
+    .unwrap());
+    f.manager.lock().unwrap().fail_mutation_commit = true;
+    let input = EnvironmentTaskRequest::Input {
+        fence: f.fence.clone(),
+        task_id: task_id.clone(),
+        operation_id: "input".into(),
+        data: b"one-input\n".to_vec(),
+        close: false,
+    };
+    assert!(Manager::handle(&f.manager, input.clone()).is_err());
+    assert!(Manager::handle(&f.manager, input).is_err());
+    f.await_cleanup(&task_id);
+    let m = f.manager.lock().unwrap();
+    let (chunks, _, _, _, _) = m.logs[&task_id]
+        .lock()
+        .unwrap()
+        .read(0, ENVIRONMENT_TASK_READ_BYTES)
+        .unwrap();
+    assert!(
+        chunks
+            .into_iter()
+            .flat_map(|c| c.data)
+            .collect::<Vec<_>>()
+            .len()
+            <= b"one-input\n".len()
+    );
+}
+
+#[test]
+#[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
+fn cross_run_takeover_cleans_only_old_run_tasks_and_is_retryable() {
+    let f = Fixture::new();
+    let run_id = id(&Manager::handle(
+        &f.manager,
+        f.start(
+            "run",
+            EnvironmentTaskScope::Run {
+                run_id: f.fence.controller_id.clone(),
+            },
+            "sleep 30 & wait",
+        ),
+    )
+    .unwrap());
+    let environment_id = id(&Manager::handle(
+        &f.manager,
+        f.start(
+            "environment",
+            EnvironmentTaskScope::Environment,
+            "sleep 30 & wait",
+        ),
+    )
+    .unwrap());
+    let takeover = EnvironmentTaskRequest::Takeover {
+        environment_instance_id: f.fence.environment_instance_id.clone(),
+        controller_id: "run-two".into(),
+        controller_epoch: 2,
+        controller_purpose: EnvironmentTaskControllerPurpose::Execute,
+    };
+    let end = Instant::now() + Duration::from_secs(5);
+    loop {
+        if Manager::handle(&f.manager, takeover.clone()).is_ok() {
+            break;
+        }
+        assert!(Instant::now() < end);
+        thread::sleep(Duration::from_millis(20));
+    }
+    f.await_cleanup(&run_id);
+    assert!(f.manager.lock().unwrap().live.contains_key(&environment_id));
+    let fence = EnvironmentTaskFence {
+        controller_id: "run-two".into(),
+        controller_epoch: 2,
+        ..f.fence.clone()
+    };
+    Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Terminate {
+            fence,
+            task_id: environment_id.clone(),
+            operation_id: "stop".into(),
+        },
+    )
+    .unwrap();
+    f.await_cleanup(&environment_id);
+}
+
+#[test]
+#[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
+fn terminal_cleanup_controller_cannot_resume_execution_or_kill_environment_scope() {
+    let f = Fixture::new();
+    let run_id = id(&Manager::handle(
+        &f.manager,
+        f.start(
+            "run",
+            EnvironmentTaskScope::Run {
+                run_id: f.fence.controller_id.clone(),
+            },
+            "sleep 30 & wait",
+        ),
+    )
+    .unwrap());
+    let environment_id = id(&Manager::handle(
+        &f.manager,
+        f.start(
+            "environment",
+            EnvironmentTaskScope::Environment,
+            "sleep 30 & wait",
+        ),
+    )
+    .unwrap());
+    let fence = EnvironmentTaskFence {
+        controller_epoch: 2,
+        controller_purpose: EnvironmentTaskControllerPurpose::Cleanup,
+        ..f.fence.clone()
+    };
+    Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Takeover {
+            environment_instance_id: fence.environment_instance_id.clone(),
+            controller_id: fence.controller_id.clone(),
+            controller_epoch: 2,
+            controller_purpose: EnvironmentTaskControllerPurpose::Cleanup,
+        },
+    )
+    .unwrap();
+    let mut start = f.start("denied", EnvironmentTaskScope::Environment, "sleep 30");
+    if let EnvironmentTaskRequest::Start { fence: target, .. } = &mut start {
+        *target = fence.clone();
+    }
+    assert!(Manager::handle(&f.manager, start).is_err());
+    assert!(Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Input {
+            fence: fence.clone(),
+            task_id: environment_id.clone(),
+            operation_id: "denied".into(),
+            data: vec![],
+            close: true
+        }
+    )
+    .is_err());
+    assert!(Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Terminate {
+            fence: fence.clone(),
+            task_id: environment_id.clone(),
+            operation_id: "denied".into()
+        }
+    )
+    .is_err());
+    assert!(f.manager.lock().unwrap().live.contains_key(&environment_id));
+    Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::EndRun {
+            fence,
+            run_id: f.fence.controller_id.clone(),
+            operation_id: "end".into(),
+        },
+    )
+    .unwrap();
+    f.await_cleanup(&run_id);
+    assert!(f.manager.lock().unwrap().live.contains_key(&environment_id));
+}
+
+#[test]
+#[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
+fn output_capacity_failure_preserves_existing_process_control_and_allows_cleanup() {
+    let f = Fixture::new();
+    let task_id = id(&Manager::handle(
+        &f.manager,
+        f.start(
+            "existing",
+            EnvironmentTaskScope::Environment,
+            "sleep 30 & wait",
+        ),
+    )
+    .unwrap());
+    let control = f.manager.lock().unwrap().storage.control_root.clone();
+    let before = fs::read(control.join("journal.json")).unwrap();
+    f.manager.lock().unwrap().storage.output_budget_bytes =
+        (ENVIRONMENT_TASK_OUTPUT_BYTES / CHUNK * (HEADER + CHUNK)) as u64;
+    assert_eq!(
+        Manager::handle(
+            &f.manager,
+            f.start("capacity", EnvironmentTaskScope::Environment, "sleep 30")
+        )
+        .unwrap_err(),
+        "task_output_capacity"
+    );
+    assert_eq!(fs::read(control.join("journal.json")).unwrap(), before);
+    assert_eq!(f.manager.lock().unwrap().live.len(), 1);
+    assert_eq!(
+        fs::read_dir(&f.cgroups)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().unwrap().is_dir())
+            .count(),
+        1
+    );
+    let fence = EnvironmentTaskFence {
+        controller_epoch: 2,
+        ..f.fence.clone()
+    };
+    Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Takeover {
+            environment_instance_id: fence.environment_instance_id.clone(),
+            controller_id: fence.controller_id.clone(),
+            controller_epoch: fence.controller_epoch,
+            controller_purpose: fence.controller_purpose.clone(),
+        },
+    )
+    .unwrap();
+    let result = Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Query {
+            fence: fence.clone(),
+            task_id: task_id.clone(),
+            cursor: 0,
+            max_bytes: ENVIRONMENT_TASK_READ_BYTES as u32,
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(result, EnvironmentTaskResult::Task { task, .. } if task.state == EnvironmentTaskState::Running)
+    );
+    Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Terminate {
+            fence,
+            task_id: task_id.clone(),
+            operation_id: "cleanup".into(),
+        },
+    )
+    .unwrap();
+    f.await_cleanup(&task_id);
+}
+
+#[test]
+#[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
+fn kill_only_domain_cleans_setsid_descendants_without_per_task_controllers() {
+    let f = Fixture::with_controllers(false);
+    assert_eq!(
+        fs::read_to_string(f.cgroups.join("cgroup.type"))
+            .unwrap()
+            .trim(),
+        "domain"
+    );
+    assert!(fs::read_to_string(f.cgroups.join("cgroup.subtree_control"))
+        .unwrap()
+        .trim()
+        .is_empty());
+    let task_id = id(&Manager::handle(
+        &f.manager,
+        f.start(
+            "kill-only",
+            EnvironmentTaskScope::Environment,
+            "setsid /bin/sh -c 'sleep 30 & wait' & sleep 30 & wait",
+        ),
+    )
+    .expect("kill-only domain must accept task without per-task controllers"));
+    let task_group = f.cgroups.join(&task_id);
+    assert!(!task_group.join("pids.max").exists());
+    assert!(!task_group.join("memory.max").exists());
+    assert_eq!(
+        fs::read_to_string(task_group.join("cgroup.type"))
+            .unwrap()
+            .trim(),
+        "domain"
+    );
+    let parent_sid = unsafe { libc::getsid(0) };
+    let end = Instant::now() + Duration::from_secs(3);
+    loop {
+        let members: Vec<i32> = fs::read_to_string(task_group.join("cgroup.procs"))
+            .unwrap()
+            .lines()
+            .filter_map(|pid| pid.parse().ok())
+            .collect();
+        let leader = f.manager.lock().unwrap().live[&task_id].child.id() as i32;
+        assert!(
+            members.contains(&leader),
+            "actual direct child must belong to task cgroup"
+        );
+        if members.len() >= 4
+            && members
+                .iter()
+                .any(|pid| unsafe { libc::getsid(*pid) } != parent_sid)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < end,
+            "setsid descendant did not appear in task cgroup"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Terminate {
+            fence: f.fence.clone(),
+            task_id: task_id.clone(),
+            operation_id: "stop".into(),
+        },
+    )
+    .unwrap();
+    f.await_cleanup(&task_id);
+}

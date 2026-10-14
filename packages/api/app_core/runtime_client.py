@@ -12,6 +12,7 @@ from .runtime_contract import (
     AGENT_RUN_START_SCHEMA,
     agent_run_binding_matches,
     authorization_digest,
+    require_opaque_ref,
 )
 from .runtime_job_client import schedule_runtime_job
 from .workspace_access import agent_run_membership_is_current
@@ -109,12 +110,14 @@ def _validate_agent_run_binding(agent_run):
     return authorization
 
 
-def build_agent_run_start(agent_run) -> dict:
+def build_agent_run_start(agent_run, *, controller_authority=None) -> dict:
     from .models import AgentCoordinationSession, AgentInputQueue
-    from .environment_authorization import build_environment_authorization
+    from .environment_authorization import build_environment_authorization, build_environment_controller_authorization
+    if controller_authority is not None and controller_authority.get("controllerPurpose") != "execute":
+        raise ValueError("agent_run_start_controller_purpose_invalid")
     authorization = _validate_agent_run_binding(agent_run)
     start = {
-        "schema": AGENT_RUN_START_SCHEMA,
+        "schema": AGENT_RUN_START_SCHEMA if controller_authority is None else "workspace.agent_run.start.v4",
         "agentRunId": agent_run.id,
         "turnId": agent_run.turn_id,
         "prompt": agent_run.prompt,
@@ -125,7 +128,8 @@ def build_agent_run_start(agent_run) -> dict:
         "authorizationDigest": authorization.digest,
         "authorizationSignature": authorization.signature,
         "authorization": authorization.payload,
-        "environmentAuthorization": build_environment_authorization(agent_run, authorization),
+        "environmentAuthorization": (build_environment_authorization(agent_run, authorization)
+            if controller_authority is None else build_environment_controller_authorization(agent_run, authorization, controller_authority)),
         "tailAction": (
             {"type": "append"}
             if agent_run.tailPolicy == "append"
@@ -154,6 +158,45 @@ def build_agent_run_start(agent_run) -> dict:
             raise ValueError("agent_run_initial_input_owner_conflict")
         start["initialInput"] = initial
     return start
+
+
+def build_agent_run_cleanup(agent_run, controller_authority):
+    """Original signed grant plus restricted authority; never load execution input."""
+    from .environment_authorization import build_environment_controller_authorization
+    authorization = agent_run.authorization
+    if (authorization_digest(authorization.payload) != authorization.digest
+            or not agent_run_binding_matches(authorization.payload, agent_run)
+            or controller_authority.get("controllerPurpose") != "cleanup"):
+        raise ValueError("agent_run_cleanup_binding_invalid")
+    return {"schema": "workspace.agent_run.cleanup.v1", "agentRunId": agent_run.pk,
+        "authorizationDigest": authorization.digest, "authorizationSignature": authorization.signature,
+        "authorization": authorization.payload,
+        "environmentAuthorization": build_environment_controller_authorization(agent_run, authorization, controller_authority)}
+
+
+def get_agent_run_cleanup_receipt(agent_run_id, digest, receipt_id):
+    result = request_json('/internal/agent-runs/cleanup-receipt', {
+        'schema': 'runtime.agent_run.cleanup_receipt.get.v1', 'agentRunId': agent_run_id,
+        'authorizationDigest': digest, 'cleanupReceiptId': receipt_id}, timeout=10)
+    if (not isinstance(result, dict) or set(result) != {'schema', 'receiptId', 'agentRunId',
+            'environmentId', 'allocation', 'authorizationDigest', 'controllerEpoch', 'cleanupComplete'}
+            or result['schema'] != 'runtime.agent_run.cleanup_receipt.v1'
+            or result['receiptId'] != receipt_id or result['agentRunId'] != agent_run_id
+            or result['authorizationDigest'] != digest or result['cleanupComplete'] is not True
+            or type(result['controllerEpoch']) is not int or not 1 <= result['controllerEpoch'] <= 2**63 - 1):
+        raise ValueError('agent_run_cleanup_receipt_invalid')
+    try:
+        require_opaque_ref('environmentId', result['environmentId'])
+        allocation = result['allocation']
+        if not isinstance(allocation, dict):
+            raise ValueError
+        if allocation.get('kind') == 'instance' and set(allocation) == {'kind', 'instanceId'}:
+            require_opaque_ref('allocation.instanceId', allocation['instanceId'])
+        elif allocation != {'kind': 'neverAllocated'}:
+            raise ValueError
+    except (ValueError, TypeError):
+        raise ValueError('agent_run_cleanup_receipt_invalid') from None
+    return result
 
 
 def request_host_event_input(session_id, input_id, source, content):

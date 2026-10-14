@@ -30,6 +30,7 @@ mod postgres_store;
 mod recovery_upload;
 mod request_capacity;
 mod resident_capacity;
+mod retained_tasks;
 #[cfg(test)]
 mod runtime_http_tests;
 mod session_delivery;
@@ -39,6 +40,7 @@ mod transcript_capture;
 mod transcript_protocol;
 mod transient_stream;
 mod wait_recovery;
+pub mod workspace_archive;
 mod workspace_tools;
 
 use std::collections::{HashMap, HashSet};
@@ -1359,6 +1361,17 @@ fn requires_session_workspace_restore(has_started_fact: bool, completing_recover
     !has_started_fact && !completing_recovery
 }
 
+fn resolve_instance_workspace(
+    hot_reuse: bool,
+    restore: impl FnOnce() -> Result<SessionWorkspaceResolution, SessionWorkspaceApiError>,
+) -> Result<SessionWorkspaceResolution, SessionWorkspaceApiError> {
+    if hot_reuse {
+        Ok(SessionWorkspaceResolution::RetainedLive)
+    } else {
+        restore()
+    }
+}
+
 fn retry_completed_workspace_commit(
     resolution: SessionWorkspaceResolution,
     validate: impl FnOnce() -> Result<(), String>,
@@ -2057,7 +2070,7 @@ fn execute_agent_run(
                     user_id: agent_run_start.authorization.user_id.clone(),
                     agent_id: agent_run_start.authorization.agent_id.clone(),
                     authorization_digest: agent_run_start.authorization_digest.clone(),
-                    environment_binding: agent_run_start.environment_authorization.payload.clone(),
+                    environment_authorization: agent_run_start.environment_authorization.clone(),
                     image_digest: agent_run_start.authorization.image_digest.clone(),
                     resources: agent_run_start.authorization.resources,
                     has_execution_fact,
@@ -2327,6 +2340,9 @@ fn execute_agent_run(
         }
     };
     let mut dynamic_tool_contracts = workspace_agent_tool_contracts(&agent_run_start);
+    if docker_execution.is_retained() {
+        dynamic_tool_contracts.extend(retained_tasks::retained_task_contracts());
+    }
     if let Some(provider) = &platform_materials {
         dynamic_tool_contracts.extend(provider.contracts.clone());
     }
@@ -2363,6 +2379,11 @@ fn execute_agent_run(
         artifact_publication,
     )))?;
     register_workspace_agent_tool_providers(&mut tool_layer, &agent_run_start, &api_url, &token)?;
+    if docker_execution.is_retained() {
+        tool_layer.register_dynamic_tool_provider(Arc::new(
+            retained_tasks::RetainedTaskToolProvider::new(docker_execution.clone()),
+        ))?;
+    }
     for provider in mcp_bindings.providers {
         tool_layer.register_dynamic_tool_provider(provider)?;
     }
@@ -2443,7 +2464,9 @@ fn execute_agent_run(
     )?;
     let completing_recovery = completed_projection.is_some();
     let workspace_restore_started = Instant::now();
-    let workspace_resolution = match if let Some(prepared) = prepared_recovery_restore.as_mut() {
+    let workspace_resolution = match if docker_execution.is_hot_reuse() {
+        resolve_instance_workspace(true, || unreachable!("hot reuse cannot restore old files"))
+    } else if let Some(prepared) = prepared_recovery_restore.as_mut() {
         docker_execution
             .restore_prepared_recovery_workspace(prepared, workspace_input_upper_bound_bytes)
     } else if let Some((_, checkpoint)) = recovery_checkpoint.as_ref() {
@@ -2533,7 +2556,8 @@ fn execute_agent_run(
             match workspace_commit {
                 Ok(
                     SessionWorkspaceCommitOutcome::Accepted
-                    | SessionWorkspaceCommitOutcome::Unchanged,
+                    | SessionWorkspaceCommitOutcome::Unchanged
+                    | SessionWorkspaceCommitOutcome::ProtectionDeferred,
                 ) => {}
                 Ok(SessionWorkspaceCommitOutcome::Pending) => {
                     return Ok(AgentRunStepOutcome {
@@ -3016,6 +3040,11 @@ fn execute_agent_run(
                         return Err(
                             "recovery checkpoint requires an empty in-flight tool set".to_string()
                         );
+                    }
+                    if docker_execution.is_retained() {
+                        // Live tasks may still write. Preserve the model fact without
+                        // claiming an uncoordinated file image is a recovery checkpoint.
+                        break 'checkpoint events;
                     }
                     let model_request = events
                         .iter()
@@ -3841,7 +3870,8 @@ fn execute_agent_run(
                 ) {
                     Ok(
                         SessionWorkspaceCommitOutcome::Accepted
-                        | SessionWorkspaceCommitOutcome::Unchanged,
+                        | SessionWorkspaceCommitOutcome::Unchanged
+                        | SessionWorkspaceCommitOutcome::ProtectionDeferred,
                     ) => {}
                     Ok(SessionWorkspaceCommitOutcome::Pending) => {
                         let mut pending_sequence =
@@ -6488,6 +6518,39 @@ mod tests {
         assert!(!requires_session_workspace_restore(true, false));
         assert!(!requires_session_workspace_restore(false, true));
         assert!(!requires_session_workspace_restore(true, true));
+    }
+
+    #[test]
+    fn live_instance_attachment_does_not_replace_files_from_an_older_checkpoint() {
+        let workspace = tempfile::tempdir().unwrap();
+        let file = workspace.path().join("result.txt");
+        std::fs::write(&file, b"new live contents").unwrap();
+        let resolution = resolve_instance_workspace(true, || {
+            std::fs::write(&file, b"old checkpoint contents").unwrap();
+            Ok(SessionWorkspaceResolution::Download)
+        })
+        .unwrap();
+        assert_eq!(resolution, SessionWorkspaceResolution::RetainedLive);
+        assert_eq!(std::fs::read(&file).unwrap(), b"new live contents");
+    }
+
+    #[test]
+    fn cold_instance_restore_keeps_resolution_and_failure_results() {
+        for resolution in [
+            SessionWorkspaceResolution::Empty,
+            SessionWorkspaceResolution::Download,
+            SessionWorkspaceResolution::Advanced,
+        ] {
+            assert_eq!(
+                resolve_instance_workspace(false, || Ok(resolution)),
+                Ok(resolution)
+            );
+        }
+        let error = SessionWorkspaceApiError::Unavailable("download failed".into());
+        assert_eq!(
+            resolve_instance_workspace(false, || Err(error.clone())),
+            Err(error)
+        );
     }
 
     #[test]

@@ -11,6 +11,68 @@ pub const AGENT_RUN_SUPPLEMENT_SCHEMA: &str = "runtime.agent_run.supplement.v1";
 pub const AGENT_RUN_TEARDOWN_SCHEMA: &str = "runtime.agent_run.teardown.v1";
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "schema", deny_unknown_fields)]
+pub(crate) enum AgentRunTeardownEnvelope {
+    #[serde(rename = "runtime.agent_run.teardown.v1")]
+    PerRun {
+        #[serde(rename = "jobId")]
+        job_id: String,
+        #[serde(rename = "leaseOwner")]
+        lease_owner: String,
+        #[serde(rename = "agentRunStart")]
+        agent_run_start: Box<AgentRunStart>,
+    },
+    #[serde(rename = "runtime.agent_run.teardown.v2")]
+    Retained {
+        #[serde(rename = "jobId")]
+        job_id: String,
+        #[serde(rename = "leaseOwner")]
+        lease_owner: String,
+        #[serde(rename = "agentRunCleanup")]
+        agent_run_cleanup: Box<AgentRunCleanup>,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentRunCleanup {
+    pub schema: String,
+    pub agent_run_id: String,
+    pub authorization_digest: String,
+    pub authorization_signature: String,
+    pub authorization: WorkspaceAgentRunAuthorization,
+    pub environment_authorization: crate::environment_authorization::EnvironmentAuthorization,
+}
+
+impl AgentRunCleanup {
+    pub fn validate(self, key: &[u8]) -> Result<Self, String> {
+        if self.schema != "workspace.agent_run.cleanup.v1"
+            || self
+                .environment_authorization
+                .payload
+                .controller
+                .as_ref()
+                .is_none_or(|controller| controller.controller_purpose != "cleanup")
+        {
+            return Err("agent_run_cleanup_authority_invalid".into());
+        }
+        self.authorization
+            .checked_binding(&self.agent_run_id)?
+            .verify(
+                &self.authorization_digest,
+                key,
+                &self.authorization_signature,
+            )?;
+        self.environment_authorization.verify(
+            &self.authorization,
+            &self.authorization_digest,
+            key,
+        )?;
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentRunStart {
     pub schema: String,
@@ -83,8 +145,17 @@ pub enum AgentRunTailAction {
 
 impl AgentRunStart {
     pub fn validate(self, signing_key: &[u8]) -> Result<Self, String> {
-        if self.schema != AGENT_RUN_START_SCHEMA {
-            return Err("schema_mismatch".to_string());
+        match (
+            self.schema.as_str(),
+            &self.environment_authorization.payload.controller,
+        ) {
+            (AGENT_RUN_START_SCHEMA, None) => {}
+            (AGENT_RUN_START_SCHEMA, Some(_)) => {
+                return Err("retained execution requires controller admission".into());
+            }
+            ("workspace.agent_run.start.v4", Some(controller))
+                if controller.controller_purpose == "execute" => {}
+            _ => return Err("schema_mismatch".into()),
         }
         for (name, value) in [
             ("agentRunId", self.agent_run_id.as_str()),
@@ -255,7 +326,12 @@ pub struct AgentRunStepRequest {
 
 impl AgentRunStepRequest {
     pub fn validate(self, signing_key: &[u8]) -> Result<Self, String> {
-        if self.schema != AGENT_RUN_STEP_SCHEMA {
+        let expected_schema = if self.agent_run_start.schema == "workspace.agent_run.start.v4" {
+            "runtime.agent_run.step.v2"
+        } else {
+            AGENT_RUN_STEP_SCHEMA
+        };
+        if self.schema != expected_schema {
             return Err("agent_run_step_schema_mismatch".to_string());
         }
         if self.job_id.trim().is_empty()
@@ -330,6 +406,16 @@ impl AgentRunTeardownRequest {
     pub fn validate(self, signing_key: &[u8]) -> Result<Self, String> {
         if self.schema != AGENT_RUN_TEARDOWN_SCHEMA {
             return Err("agent_run_teardown_schema_mismatch".to_string());
+        }
+        if self.agent_run_start.schema != AGENT_RUN_START_SCHEMA
+            || self
+                .agent_run_start
+                .environment_authorization
+                .payload
+                .controller
+                .is_some()
+        {
+            return Err("agent_run_teardown_requires_per_run".into());
         }
         if self.job_id.trim().is_empty()
             || self.lease_owner.len() < 16
@@ -424,6 +510,141 @@ mod tests {
         serde_json::from_value(valid_agent_run_start_value()).expect("run start")
     }
 
+    fn retained_start(purpose: &str) -> AgentRunStart {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let mut start = valid_agent_run_start();
+        start.schema = "workspace.agent_run.start.v4".into();
+        let binding = &mut start.environment_authorization.payload;
+        binding.schema = "workspace.environment_authorization.v2".into();
+        binding.execution_mode = "retained".into();
+        binding.controller = Some(crate::environment_authorization::ControllerBinding {
+            controller_id: start.agent_run_id.clone(),
+            controller_epoch: 1,
+            controller_lease_digest: format!("sha256:{}", "a".repeat(64)),
+            controller_purpose: purpose.into(),
+        });
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(b"test-run-authorization-signing-key").unwrap();
+        mac.update(b"workspace:environment-authorization:v2\0");
+        mac.update(binding.digest().unwrap().as_bytes());
+        start.environment_authorization.signature =
+            format!("hmac-sha256:{:x}", mac.finalize().into_bytes());
+        start
+    }
+
+    #[test]
+    fn cleanup_uses_only_original_grant_and_cleanup_authority() {
+        let key = b"test-run-authorization-signing-key";
+        let start = retained_start("cleanup");
+        let mut value = serde_json::json!({
+            "schema": "workspace.agent_run.cleanup.v1",
+            "agentRunId": start.agent_run_id,
+            "authorization": start.authorization,
+            "authorizationDigest": start.authorization_digest,
+            "authorizationSignature": start.authorization_signature,
+            "environmentAuthorization": start.environment_authorization,
+        });
+        let cleanup: AgentRunCleanup = serde_json::from_value(value.clone()).unwrap();
+        assert!(cleanup.validate(key).is_ok());
+        value["prompt"] = serde_json::json!("must not rebuild model input to clean up");
+        assert!(serde_json::from_value::<AgentRunCleanup>(value.clone()).is_err());
+        value.as_object_mut().unwrap().remove("prompt");
+        value["environmentAuthorization"] =
+            serde_json::to_value(retained_start("execute").environment_authorization).unwrap();
+        assert!(serde_json::from_value::<AgentRunCleanup>(value.clone())
+            .unwrap()
+            .validate(key)
+            .is_err());
+        value["environmentAuthorization"] =
+            serde_json::to_value(retained_start("cleanup").environment_authorization).unwrap();
+        value["authorizationSignature"] =
+            serde_json::json!(format!("hmac-sha256:{}", "0".repeat(64)));
+        assert!(serde_json::from_value::<AgentRunCleanup>(value)
+            .unwrap()
+            .validate(key)
+            .is_err());
+    }
+
+    #[test]
+    fn retained_teardown_accepts_only_cleanup_envelope_and_preserves_explicit_per_run() {
+        let retained = retained_start("cleanup");
+        let cleanup = serde_json::json!({"schema":"workspace.agent_run.cleanup.v1",
+            "agentRunId":retained.agent_run_id,"authorizationDigest":retained.authorization_digest,
+            "authorizationSignature":retained.authorization_signature,"authorization":retained.authorization,
+            "environmentAuthorization":retained.environment_authorization});
+        let request = serde_json::json!({"schema":"runtime.agent_run.teardown.v2",
+            "jobId":"agent_run.lifecycle:agent_run_1","leaseOwner":"worker:test-owner","agentRunCleanup":cleanup});
+        assert!(serde_json::from_value::<AgentRunTeardownEnvelope>(request.clone()).is_ok());
+        let mut unknown = request.clone();
+        unknown["agentRunStart"] = serde_json::json!({});
+        assert!(serde_json::from_value::<AgentRunTeardownEnvelope>(unknown).is_err());
+        let mut unsupported = request;
+        unsupported["schema"] = serde_json::json!("runtime.agent_run.teardown.v3");
+        assert!(serde_json::from_value::<AgentRunTeardownEnvelope>(unsupported).is_err());
+        let ordinary = valid_agent_run_start_value();
+        assert!(
+            serde_json::from_value::<AgentRunTeardownEnvelope>(serde_json::json!({
+            "schema":"runtime.agent_run.teardown.v1","jobId":"agent_run.lifecycle:agent_run_1",
+            "leaseOwner":"worker:test-owner","agentRunStart":ordinary}))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn retained_start_requires_execute_authority_and_explicit_protocol_version() {
+        let key = b"test-run-authorization-signing-key";
+        assert!(retained_start("execute").validate(key).is_ok());
+        assert!(retained_start("cleanup").validate(key).is_err());
+        let mut wrong_version = retained_start("execute");
+        wrong_version.schema = AGENT_RUN_START_SCHEMA.into();
+        assert!(wrong_version.validate(key).is_err());
+        let mut missing_controller = valid_agent_run_start();
+        missing_controller.schema = "workspace.agent_run.start.v4".into();
+        assert!(missing_controller.validate(key).is_err());
+    }
+
+    #[test]
+    fn legacy_teardown_refuses_retained_execute_envelopes_before_container_removal() {
+        let request = |start| AgentRunTeardownRequest {
+            schema: AGENT_RUN_TEARDOWN_SCHEMA.into(),
+            job_id: "agent_run.lifecycle:agent_run_1".into(),
+            lease_owner: "test-worker-lease-owner".into(),
+            agent_run_start: start,
+        };
+        let key = b"test-run-authorization-signing-key";
+        assert!(request(valid_agent_run_start()).validate(key).is_ok());
+        assert!(request(retained_start("execute")).validate(key).is_err());
+    }
+
+    #[test]
+    fn step_version_cannot_change_execution_lifecycle_mode() {
+        let key = b"test-run-authorization-signing-key";
+        for (schema, retained, accepted) in [
+            ("runtime.agent_run.step.v1", false, true),
+            ("runtime.agent_run.step.v1", true, false),
+            ("runtime.agent_run.step.v2", false, false),
+            ("runtime.agent_run.step.v2", true, true),
+        ] {
+            let start = if retained {
+                retained_start("execute")
+            } else {
+                valid_agent_run_start()
+            };
+            let request = AgentRunStepRequest {
+                schema: schema.into(),
+                job_id: "job-one".into(),
+                lease_owner: "lease-owner-000001".into(),
+                agent_run_start: start,
+            };
+            assert_eq!(
+                request.validate(key).is_ok(),
+                accepted,
+                "{schema}, retained={retained}"
+            );
+        }
+    }
+
     fn typed_host_event_start_value() -> (
         serde_json::Value,
         centaeris_core::session::host_event_input::HostEventInput,
@@ -442,6 +663,22 @@ mod tests {
         value["initialInput"] = serde_json::json!({"type":"hostEvent", "attemptId":"consume-attempt-one",
             "noticeId":"notice-one", "input":input});
         (value, input)
+    }
+
+    #[test]
+    fn per_run_start_cannot_admit_a_retained_controller() {
+        let mut value = valid_agent_run_start_value();
+        value["environmentAuthorization"] = serde_json::from_str(include_str!(
+            "../../../tests/workspace/fixtures/environment_authorization/v2/valid.json"
+        ))
+        .unwrap();
+        let start: AgentRunStart = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            start
+                .validate(b"test-run-authorization-signing-key")
+                .unwrap_err(),
+            "retained execution requires controller admission"
+        );
     }
 
     #[test]

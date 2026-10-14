@@ -5,7 +5,7 @@ use axum::extract::State;
 use axum::routing::{any, MethodFilter, MethodRouter};
 use axum::Router;
 
-mod agent_runs;
+pub(crate) mod agent_runs;
 mod catalogs;
 
 type Operation = fn(HttpServerState, Request<Bytes>) -> Result<Response<Body>, String>;
@@ -27,6 +27,10 @@ pub(super) fn router(state: HttpServerState) -> Router {
         .route(
             "/agent-runs/teardown",
             on_blocking(MethodFilter::POST, agent_runs::teardown),
+        )
+        .route(
+            "/internal/agent-runs/cleanup-receipt",
+            on_blocking(MethodFilter::POST, agent_runs::cleanup_receipt),
         )
         .route(
             "/internal/model-catalog",

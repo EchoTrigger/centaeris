@@ -2,13 +2,14 @@ use std::collections::BTreeSet;
 
 use postgres::{Client, GenericClient};
 
-const STORE_SCHEMA_VERSION: i64 = 8;
+const STORE_SCHEMA_VERSION: i64 = 10;
 const LEASE_RECLAIM_COLUMNS: &str =
     ",lease_reclaim_count:bigint:NO,lease_reclaim_not_before_ms:bigint:YES";
 const PREVIOUS_OBSERVATION_KINDS: &str = "'system_prompt'::text, 'message'::text, 'input_image'::text, 'tool_catalog'::text, 'compaction_prompt'::text, 'input_uptake'::text";
 const CURRENT_OBSERVATION_KINDS: &str = "'system_prompt'::text, 'message'::text, 'input_image'::text, 'tool_catalog'::text, 'compaction_prompt'::text, 'input_uptake'::text, 'required_completion_delivery'::text";
 
 pub(super) const RUNTIME_TABLES: &[&str] = &[
+    "agent_run_cleanup_receipts",
     "execution_instances",
     "execution_job_tenants",
     "checkpoints",
@@ -60,6 +61,7 @@ const RUNTIME_INDEXES: &[&str] = &[
 ];
 
 const TABLE_SHAPES: &[(&str, &str)] = &[
+    ("agent_run_cleanup_receipts", "receipt_id:text:NO,agent_run_id:text:NO,environment_id:text:NO,authorization_digest:text:NO,controller_epoch:bigint:NO,allocation_kind:text:NO,instance_id:text:YES,cleanup_complete:boolean:NO,file_protection:text:NO,recorded_at_ms:bigint:NO"),
     ("execution_instances", "execution_id:text:NO,instance_id:text:NO,environment_id:text:NO,session_id:text:NO,agent_run_id:text:NO,host_id:text:NO,authorization_digest:text:NO,binding_digest:text:NO,image_digest:text:NO"),
     (
         "resident_sandboxes",
@@ -257,6 +259,8 @@ pub(super) fn ensure_schema(client: &mut Client) -> Result<(), String> {
         upgrade_lease_reclaim_budget(client)?;
         upgrade_resident_budget(client)?;
         upgrade_execution_instances(client)?;
+        upgrade_retained_accounting(client)?;
+        upgrade_cleanup_receipts(client)?;
     }
     validate_schema_version(client)?;
     validate_schema(client, CURRENT_OBSERVATION_KINDS)
@@ -344,6 +348,108 @@ fn upgrade_resident_budget(client: &mut Client) -> Result<(), String> {
 
 const INSTANCE_DDL: &str = "CREATE TABLE runtime.execution_instances(execution_id text PRIMARY KEY,instance_id text NOT NULL UNIQUE,environment_id text NOT NULL,session_id text NOT NULL,agent_run_id text NOT NULL,host_id text NOT NULL,authorization_digest text NOT NULL,binding_digest text NOT NULL,image_digest text NOT NULL);";
 
+// An anchor records immutable allocation provenance, never liveness. The
+// resident row remains the only live resource holding, including uncertainty.
+const RETAINED_ACCOUNTING_DDL: &str = r#"
+ALTER TABLE runtime.execution_instances ADD COLUMN allocation_execution_id text;
+UPDATE runtime.execution_instances SET allocation_execution_id=execution_id;
+ALTER TABLE runtime.execution_instances ALTER COLUMN allocation_execution_id SET NOT NULL;
+ALTER TABLE runtime.execution_instances ADD COLUMN allocation_mode text NOT NULL DEFAULT 'perRun' CHECK(allocation_mode IN('perRun','retained'));
+ALTER TABLE runtime.execution_instances ADD COLUMN profile_digest text CHECK((allocation_mode='perRun' AND profile_digest IS NULL) OR (allocation_mode='retained' AND profile_digest IS NOT NULL AND profile_digest ~ '^sha256:[0-9a-f]{64}$'));
+ALTER TABLE runtime.execution_instances DROP CONSTRAINT execution_instances_instance_id_key;
+ALTER TABLE runtime.execution_instances ADD CONSTRAINT execution_instances_execution_instance_key UNIQUE(execution_id,instance_id);
+CREATE UNIQUE INDEX execution_instances_anchor_instance_key ON runtime.execution_instances(instance_id) WHERE allocation_execution_id=execution_id;
+ALTER TABLE runtime.execution_instances ADD CONSTRAINT execution_instances_allocation_fkey FOREIGN KEY(allocation_execution_id,instance_id) REFERENCES runtime.execution_instances(execution_id,instance_id);
+CREATE FUNCTION runtime.verify_execution_allocation() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE anchor runtime.execution_instances;
+BEGIN
+ IF TG_OP='UPDATE' AND NEW IS DISTINCT FROM OLD THEN RAISE EXCEPTION 'execution allocation facts are immutable'; END IF;
+ IF NEW.allocation_execution_id<>NEW.execution_id THEN
+  SELECT * INTO anchor FROM runtime.execution_instances WHERE execution_id=NEW.allocation_execution_id FOR KEY SHARE;
+  IF NOT FOUND OR anchor.allocation_execution_id<>anchor.execution_id OR anchor.allocation_mode<>'retained'
+   OR ROW(NEW.instance_id,NEW.environment_id,NEW.session_id,NEW.host_id,NEW.image_digest,NEW.allocation_mode,NEW.profile_digest)
+    IS DISTINCT FROM ROW(anchor.instance_id,anchor.environment_id,anchor.session_id,anchor.host_id,anchor.image_digest,anchor.allocation_mode,anchor.profile_digest)
+  THEN RAISE EXCEPTION 'execution allocation anchor mismatch'; END IF;
+ END IF;
+ RETURN NEW;
+END $$;
+CREATE TRIGGER execution_allocation_facts BEFORE INSERT OR UPDATE ON runtime.execution_instances FOR EACH ROW EXECUTE FUNCTION runtime.verify_execution_allocation();
+ALTER TABLE runtime.resident_sandboxes ADD COLUMN instance_id text;
+ALTER TABLE runtime.resident_sandboxes ADD COLUMN environment_id text;
+ALTER TABLE runtime.resident_sandboxes ADD COLUMN allocation_mode text NOT NULL DEFAULT 'unbound' CHECK(allocation_mode IN('unbound','perRun','retained'));
+DO $$ BEGIN
+ IF EXISTS(SELECT 1 FROM runtime.resident_sandboxes s JOIN runtime.execution_instances i ON i.execution_id=s.execution_id WHERE s.host_id<>i.host_id OR s.agent_run_id<>i.agent_run_id)
+ THEN RAISE EXCEPTION 'resident allocation provenance mismatch'; END IF;
+END $$;
+UPDATE runtime.resident_sandboxes s SET instance_id=i.instance_id,environment_id=i.environment_id,allocation_mode=i.allocation_mode FROM runtime.execution_instances i WHERE i.execution_id=s.execution_id;
+ALTER TABLE runtime.resident_sandboxes ADD CONSTRAINT resident_sandboxes_allocation_complete CHECK((allocation_mode='unbound' AND instance_id IS NULL AND environment_id IS NULL) OR (allocation_mode<>'unbound' AND instance_id IS NOT NULL AND environment_id IS NOT NULL));
+ALTER TABLE runtime.resident_sandboxes ADD CONSTRAINT resident_sandboxes_allocation_fkey FOREIGN KEY(execution_id,instance_id) REFERENCES runtime.execution_instances(execution_id,instance_id);
+CREATE UNIQUE INDEX resident_sandboxes_instance_key ON runtime.resident_sandboxes(instance_id) WHERE instance_id IS NOT NULL;
+CREATE UNIQUE INDEX resident_sandboxes_environment_key ON runtime.resident_sandboxes(environment_id) WHERE allocation_mode='retained';
+CREATE FUNCTION runtime.verify_resident_allocation() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE anchor runtime.execution_instances;
+BEGIN
+ IF NEW.allocation_mode<>'unbound' THEN
+  SELECT * INTO anchor FROM runtime.execution_instances WHERE execution_id=NEW.execution_id FOR KEY SHARE;
+  IF NOT FOUND OR anchor.allocation_execution_id<>anchor.execution_id
+   OR ROW(NEW.instance_id,NEW.environment_id,NEW.host_id,NEW.agent_run_id,NEW.allocation_mode)
+    IS DISTINCT FROM ROW(anchor.instance_id,anchor.environment_id,anchor.host_id,anchor.agent_run_id,anchor.allocation_mode)
+  THEN RAISE EXCEPTION 'resident allocation anchor mismatch'; END IF;
+ END IF;
+ IF TG_OP='UPDATE' AND ROW(NEW.host_id,NEW.execution_id,NEW.agent_run_id,NEW.workspace_id,NEW.memory_bytes,NEW.cpu_milli,NEW.pids,NEW.workspace_bytes,NEW.instance_id,NEW.environment_id,NEW.allocation_mode)
+  IS DISTINCT FROM ROW(OLD.host_id,OLD.execution_id,OLD.agent_run_id,OLD.workspace_id,OLD.memory_bytes,OLD.cpu_milli,OLD.pids,OLD.workspace_bytes,OLD.instance_id,OLD.environment_id,OLD.allocation_mode)
+ THEN RAISE EXCEPTION 'resident allocation declaration is immutable'; END IF;
+ RETURN NEW;
+END $$;
+CREATE TRIGGER resident_allocation_facts BEFORE INSERT OR UPDATE ON runtime.resident_sandboxes FOR EACH ROW EXECUTE FUNCTION runtime.verify_resident_allocation();
+"#;
+
+fn upgrade_retained_accounting(client: &mut Client) -> Result<(), String> {
+    if schema_versions(client)? != (1..=8).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    let mut tx = client.transaction().map_err(|e| e.to_string())?;
+    super::resource_commit::require_durable_resource_commit(&mut tx)?;
+    tx.batch_execute("LOCK TABLE runtime.schema_migrations IN ACCESS EXCLUSIVE MODE")
+        .map_err(|e| e.to_string())?;
+    if schema_versions(&mut tx)? != (1..=8).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    validate_schema_with_resource_budgets(&mut tx, CURRENT_OBSERVATION_KINDS, true, true, true)?;
+    tx.batch_execute(RETAINED_ACCOUNTING_DDL)
+        .map_err(|e| format!("upgrade retained accounting failed: {e:?}"))?;
+    tx.execute(
+        "INSERT INTO runtime.schema_migrations(version,applied_at_ms) VALUES(9,$1)",
+        &[&now_ms()?],
+    )
+    .map_err(|e| e.to_string())?;
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+fn upgrade_cleanup_receipts(client: &mut Client) -> Result<(), String> {
+    if schema_versions(client)? != (1..=9).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    let mut tx = client.transaction().map_err(|e| e.to_string())?;
+    super::resource_commit::require_durable_resource_commit(&mut tx)?;
+    tx.batch_execute("LOCK TABLE runtime.schema_migrations IN ACCESS EXCLUSIVE MODE")
+        .map_err(|e| e.to_string())?;
+    if schema_versions(&mut tx)? != (1..=9).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.batch_execute(super::cleanup_receipts::DDL)
+        .map_err(|e| format!("upgrade cleanup receipts failed: {e}"))?;
+    tx.execute(
+        "INSERT INTO runtime.schema_migrations(version,applied_at_ms) VALUES(10,$1)",
+        &[&now_ms()?],
+    )
+    .map_err(|e| e.to_string())?;
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
 fn upgrade_execution_instances(client: &mut Client) -> Result<(), String> {
     if schema_versions(client)? != [1, 2, 3, 4, 5, 6, 7] {
         return Ok(());
@@ -361,7 +467,7 @@ fn upgrade_execution_instances(client: &mut Client) -> Result<(), String> {
         &[&now_ms()?],
     )
     .map_err(|e| e.to_string())?;
-    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    validate_schema_with_resource_budgets(&mut tx, CURRENT_OBSERVATION_KINDS, true, true, true)?;
     tx.commit().map_err(|e| e.to_string())
 }
 
@@ -406,6 +512,10 @@ fn create_schema(client: &mut Client) -> Result<(), String> {
         .map_err(|error| format!("create Postgres resident budget failed: {error:?}"))?;
     tx.batch_execute(INSTANCE_DDL)
         .map_err(|e| format!("create execution instances failed: {e}"))?;
+    tx.batch_execute(RETAINED_ACCOUNTING_DDL)
+        .map_err(|e| format!("create retained accounting failed: {e}"))?;
+    tx.batch_execute(super::cleanup_receipts::DDL)
+        .map_err(|e| format!("create cleanup receipts failed: {e}"))?;
     for version in 1..=STORE_SCHEMA_VERSION {
         tx.execute(
             "INSERT INTO runtime.schema_migrations(version, applied_at_ms) VALUES($1, $2)",
@@ -436,6 +546,8 @@ fn validate_schema_with_resource_budgets(
     resident_budget: bool,
     instance_binding: bool,
 ) -> Result<(), String> {
+    let retained_accounting = instance_binding && schema_versions(client)?.contains(&9);
+    let cleanup_receipts = retained_accounting && schema_versions(client)?.contains(&10);
     let tables = object_names(client, "BASE TABLE")?;
     let expected_tables = RUNTIME_TABLES
         .iter()
@@ -443,6 +555,7 @@ fn validate_schema_with_resource_budgets(
         .filter(|table| {
             (resident_budget || *table != "resident_sandboxes")
                 && (instance_binding || *table != "execution_instances")
+                && (cleanup_receipts || *table != "agent_run_cleanup_receipts")
         })
         .map(str::to_string)
         .collect();
@@ -452,6 +565,7 @@ fn validate_schema_with_resource_budgets(
     for (table, expected) in TABLE_SHAPES {
         if (*table == "resident_sandboxes" && !resident_budget)
             || (*table == "execution_instances" && !instance_binding)
+            || (*table == "agent_run_cleanup_receipts" && !cleanup_receipts)
         {
             continue;
         }
@@ -461,6 +575,11 @@ fn validate_schema_with_resource_budgets(
                 .ok_or("previous runtime job shape missing")?
         } else {
             expected
+        };
+        let expected = match (*table, retained_accounting) {
+            ("execution_instances", true) => format!("{expected},allocation_execution_id:text:NO,allocation_mode:text:NO,profile_digest:text:YES"),
+            ("resident_sandboxes", true) => format!("{expected},instance_id:text:YES,environment_id:text:YES,allocation_mode:text:NO"),
+            _ => expected.to_string(),
         };
         let actual = client.query(
             "SELECT column_name,data_type,is_nullable FROM information_schema.columns WHERE table_schema='runtime' AND table_name=$1 ORDER BY ordinal_position",
@@ -474,13 +593,48 @@ fn validate_schema_with_resource_budgets(
     }
     if instance_binding {
         let keys = client.query_one("SELECT COUNT(*) FILTER (WHERE contype='p' AND conkey=ARRAY[1]::smallint[]),COUNT(*) FILTER (WHERE contype='u' AND conkey=ARRAY[2]::smallint[]),COUNT(*) FILTER (WHERE contype='f') FROM pg_constraint WHERE conrelid='runtime.execution_instances'::regclass", &[]).map_err(|e| e.to_string())?;
-        if keys.get::<_, i64>(0) != 1 || keys.get::<_, i64>(1) != 1 || keys.get::<_, i64>(2) != 0 {
+        if keys.get::<_, i64>(0) != 1
+            || keys.get::<_, i64>(1) != i64::from(!retained_accounting)
+            || keys.get::<_, i64>(2) != i64::from(retained_accounting)
+        {
             return Err("Postgres instance identity constraints mismatch".into());
+        }
+    }
+    if cleanup_receipts {
+        let keys = client.query_one("SELECT COUNT(*) FILTER (WHERE contype='p' AND conkey=ARRAY[1]::smallint[]),COUNT(*) FILTER (WHERE contype='u' AND conkey=ARRAY[2]::smallint[]) FROM pg_constraint WHERE conrelid='runtime.agent_run_cleanup_receipts'::regclass", &[]).map_err(|e|e.to_string())?;
+        if keys.get::<_, i64>(0) != 1 || keys.get::<_, i64>(1) != 1 {
+            return Err("Postgres cleanup receipt identity constraints mismatch".into());
+        }
+        for (name, expected) in [
+            ("controller_epoch", "CHECK ((controller_epoch > 0))"),
+            (
+                "allocation_kind",
+                "CHECK ((allocation_kind = ANY (ARRAY['instance'::text, 'neverAllocated'::text])))",
+            ),
+            ("cleanup_complete", "CHECK (cleanup_complete)"),
+            (
+                "file_protection",
+                "CHECK ((file_protection = 'deferred'::text))",
+            ),
+        ] {
+            let actual = client.query_opt("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='runtime.agent_run_cleanup_receipts'::regclass AND conname=$1 AND contype='c' AND convalidated", &[&format!("agent_run_cleanup_receipts_{name}_check")]).map_err(|e|e.to_string())?.map(|row|row.get::<_,String>(0));
+            if actual.as_deref() != Some(expected) {
+                return Err(format!(
+                    "Postgres cleanup receipt {name} constraint mismatch"
+                ));
+            }
+        }
+        let identity = client.query_opt("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='runtime.agent_run_cleanup_receipts'::regclass AND conname='agent_run_cleanup_receipts_check' AND contype='c' AND convalidated", &[]).map_err(|e|e.to_string())?.map(|row|row.get::<_,String>(0));
+        if identity.as_deref() != Some("CHECK ((((allocation_kind = 'instance'::text) AND (instance_id IS NOT NULL) AND (length(instance_id) > 0)) OR ((allocation_kind = 'neverAllocated'::text) AND (instance_id IS NULL))))") {
+            return Err("Postgres cleanup receipt allocation constraint mismatch".into());
         }
     }
     if resident_budget {
         let keys = client.query_one("SELECT COUNT(*) FILTER (WHERE contype='p' AND conkey=ARRAY[1,2]::smallint[]),COUNT(*) FILTER (WHERE contype='u' AND conkey=ARRAY[1,5]::smallint[]),COUNT(*) FILTER (WHERE contype='f') FROM pg_constraint WHERE conrelid='runtime.resident_sandboxes'::regclass", &[]).map_err(|error| error.to_string())?;
-        if keys.get::<_, i64>(0) != 1 || keys.get::<_, i64>(1) != 1 || keys.get::<_, i64>(2) != 0 {
+        if keys.get::<_, i64>(0) != 1
+            || keys.get::<_, i64>(1) != 1
+            || keys.get::<_, i64>(2) != i64::from(retained_accounting)
+        {
             return Err("Postgres resident budget identity constraints mismatch".into());
         }
         for (name, expected) in [
@@ -492,6 +646,43 @@ fn validate_schema_with_resource_budgets(
         ] {
             let constraint = client.query_opt("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='runtime.resident_sandboxes'::regclass AND conname=$1 AND contype='c'", &[&format!("resident_sandboxes_{name}_check")]).map_err(|error| error.to_string())?.map(|row| row.get::<_, String>(0));
             if constraint.as_deref() != Some(expected) { return Err(format!("Postgres resident budget {name} constraint mismatch")); }
+        }
+    }
+    if retained_accounting {
+        for (table, name) in [
+            ("execution_instances", "execution_allocation_facts"),
+            ("resident_sandboxes", "resident_allocation_facts"),
+        ] {
+            let present = client.query_one("SELECT count(*) FROM pg_trigger WHERE tgrelid=('runtime.'||$1)::regclass AND tgname=$2 AND tgenabled='O' AND NOT tgisinternal", &[&table,&name]).map_err(|e|e.to_string())?.get::<_,i64>(0);
+            if present != 1 {
+                return Err("Postgres immutable allocation trigger missing".into());
+            }
+        }
+        for (name, columns, predicate) in [
+            (
+                "execution_instances_anchor_instance_key",
+                "(instance_id)",
+                "(allocation_execution_id = execution_id)",
+            ),
+            (
+                "resident_sandboxes_instance_key",
+                "(instance_id)",
+                "(instance_id IS NOT NULL)",
+            ),
+            (
+                "resident_sandboxes_environment_key",
+                "(environment_id)",
+                "(allocation_mode = 'retained'::text)",
+            ),
+        ] {
+            let index = client.query_opt("SELECT pg_get_indexdef(indexrelid),pg_get_expr(indpred,indrelid),indisunique,indisvalid FROM pg_index WHERE indexrelid=to_regclass('runtime.'||$1)", &[&name]).map_err(|e|e.to_string())?.ok_or("Postgres allocation uniqueness index missing")?;
+            if !index.get::<_, String>(0).contains(columns)
+                || index.get::<_, Option<String>>(1).as_deref() != Some(predicate)
+                || !index.get::<_, bool>(2)
+                || !index.get::<_, bool>(3)
+            {
+                return Err("Postgres allocation uniqueness index mismatch".into());
+            }
         }
     }
     if reclaim_budget {
@@ -591,7 +782,32 @@ fn validate_schema_with_resource_budgets(
         .into_iter()
         .map(|row| row.get::<_, String>(0))
         .collect::<BTreeSet<_>>();
-    if functions != BTreeSet::from(["notify_runtime_job_ready_v1".to_string()]) {
+    let mut expected_functions = BTreeSet::from(["notify_runtime_job_ready_v1".to_string()]);
+    if retained_accounting {
+        for name in ["verify_execution_allocation", "verify_resident_allocation"] {
+            expected_functions.insert(name.to_string());
+            let prefix =
+                format!("CREATE FUNCTION runtime.{name}() RETURNS trigger LANGUAGE plpgsql AS $$");
+            let expected_body = RETAINED_ACCOUNTING_DDL
+                .split_once(&prefix)
+                .ok_or("allocation function declaration missing")?
+                .1
+                .split_once("$$;")
+                .ok_or("allocation function body missing")?
+                .0;
+            let actual = client
+                .query_one(
+                    "SELECT prosrc FROM pg_proc WHERE oid=('runtime.'||$1||'()')::regprocedure",
+                    &[&name],
+                )
+                .map_err(|e| e.to_string())?
+                .get::<_, String>(0);
+            if actual != expected_body {
+                return Err("Postgres immutable allocation function mismatch".into());
+            }
+        }
+    }
+    if functions != expected_functions {
         return Err(format!(
             "Postgres runtime function set mismatch: {functions:?}"
         ));
@@ -605,7 +821,14 @@ fn validate_schema_with_resource_budgets(
         .into_iter()
         .map(|row| row.get::<_, String>(0))
         .collect::<BTreeSet<_>>();
-    if triggers != BTreeSet::from(["runtime_jobs_ready_notify_v1".to_string()]) {
+    let mut expected_triggers = BTreeSet::from(["runtime_jobs_ready_notify_v1".to_string()]);
+    if retained_accounting {
+        expected_triggers.extend([
+            "execution_allocation_facts".into(),
+            "resident_allocation_facts".into(),
+        ]);
+    }
+    if triggers != expected_triggers {
         return Err(format!(
             "Postgres runtime trigger set mismatch: {triggers:?}"
         ));
@@ -750,7 +973,7 @@ mod tests {
 
     #[test]
     fn transcript_read_model_and_wait_handoff_have_explicit_store_schema() {
-        assert_eq!(STORE_SCHEMA_VERSION, 8);
+        assert_eq!(STORE_SCHEMA_VERSION, 10);
         for table in [
             "transcript_projection_heads",
             "transcript_projection_current_generations",

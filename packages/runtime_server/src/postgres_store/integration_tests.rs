@@ -36,8 +36,10 @@ use centaeris_runtime_sqlite::SqliteRuntimeStore;
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 mod checkpoint_requests;
+mod cleanup_migration_tests;
 mod execution_instance_tests;
 mod residency_tests;
+mod retained_instance_tests;
 mod snapshot_cas_tests;
 mod tool_result_storage_tests;
 mod wait_handoff_tests;
@@ -439,6 +441,51 @@ fn postgres_pre_admission_cancellation_is_durable_fenced_and_history_free() {
             .get::<_, i64>(0),
         0
     );
+    // A controller acquiring Session then Run must not deadlock with cancellation.
+    // Observe cancellation blocked on our Session row before checking Run access.
+    let holder_pid: i32 = db.query_one("SELECT pg_backend_pid()", &[]).unwrap().get(0);
+    let mut held = db.transaction().unwrap();
+    held.query_one(
+        "SELECT id FROM public.app_core_session WHERE id='cancel-session' FOR UPDATE",
+        &[],
+    )
+    .unwrap();
+    let competing = store.clone();
+    let competing_fence = fence.clone();
+    let cancellation = std::thread::spawn(move || {
+        competing
+            .session_log(
+                "cancel-workspace".into(),
+                "cancel-session".into(),
+                "never admitted".into(),
+            )
+            .commit_pre_admission_cancellation("cancel-run", "digest", &competing_fence)
+    });
+    let mut observer = Client::connect(&url, NoTls).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut blocked = false;
+    while std::time::Instant::now() < deadline {
+        blocked = observer.query_one("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))", &[&holder_pid]).unwrap().get(0);
+        if blocked {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let run_available = held.query_one(
+        "SELECT id FROM public.app_core_agentrun WHERE id='cancel-run' FOR UPDATE NOWAIT",
+        &[],
+    );
+    held.rollback().unwrap();
+    let cancellation_result = cancellation.join().unwrap();
+    assert!(
+        blocked,
+        "cancellation must actually wait on the owned Session row"
+    );
+    assert!(
+        run_available.is_ok(),
+        "waiting cancellation must not pin Run before Session: {run_available:?}"
+    );
+    cancellation_result.unwrap();
     db.execute(
         "INSERT INTO public.app_core_sessionevent VALUES('cancel-run',false)",
         &[],
@@ -1185,6 +1232,7 @@ fn postgres_lease_budget_forward_migration_preserves_published_job_facts() {
         .unwrap();
     drop(store);
     let mut db = Client::connect(&url, NoTls).unwrap();
+    retained_instance_tests::downgrade_to_eight(&mut db);
     db.batch_execute("DELETE FROM runtime.schema_migrations WHERE version>=6; DROP TABLE runtime.execution_instances; DROP TABLE runtime.resident_sandboxes; ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_count; ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_not_before_ms;").unwrap();
     let history = db
         .query(

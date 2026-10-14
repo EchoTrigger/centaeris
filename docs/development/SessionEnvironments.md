@@ -3,8 +3,9 @@
 Every Session has a stable logical environment. Creating another Run in that
 Session captures the same environment; creating a child work Session allocates a
 separate one. `SessionEnvironment` is a business identity, not a container or a
-lease. Execution remains `perRun`: this change does not keep processes alive,
-reuse physical instances, or change snapshot storage and reclamation.
+lease. Execution defaults to `perRun`. The opt-in retained path described below
+keeps a living physical instance across Runs; it does not provide host-loss
+process recovery or change the online snapshot encoding.
 
 ## Persistence and admission
 
@@ -70,7 +71,7 @@ prefixed payload digest. Runtime verifies both signatures, Run/Session/digest
 agreement, exact fields, and supported mode before admission. Old start versions
 fail closed; the original v1 grant is never extended or re-signed.
 
-## Physical allocation
+## Default per-Run physical allocation
 
 Core continues to select execution IDs and own Run/recovery semantics. The hosted
 adapter binds an execution to a distinct `instanceId`, its logical environment,
@@ -96,7 +97,37 @@ instance and binding-digest labels alongside existing Run/execution/grant labels
 Create/adoption verifies all requested labels and security configuration; missing
 or foreign labels fail closed. Backend container IDs remain in resident rows.
 Host and physical-instance IDs are internal and never become browser/model
-capabilities. Teardown remains per Run; no cross-Run reuse or supervisor is added.
+capabilities. In this default mode, teardown removes the Run's physical instance.
+
+## Opt-in retained execution
+
+`AGENT_RUN_EXECUTION_MODE=retained` selects the coordinated API/Worker/Runtime
+path. Start v4 carries a separately signed environment authorization v2 with
+controller identity, epoch, lease digest and purpose. Step v2 and teardown v2
+preserve that distinction; a retained request cannot enter legacy teardown.
+The original signed Run authorization v1 remains unchanged.
+
+Runtime schema v9 separates each Run's execution association from the original
+physical allocation. A later Run may attach to that same allocation only after
+current authority, complete host inventory, image/configuration and incarnation
+checks. Immutable physical labels continue to identify the original allocation.
+The resident row accounts for it once. Known mode conflicts fail before reserving
+another debit; uncertain creation outcomes retain their reservation and do not
+authorize a second writer.
+
+The instance task service runs independently of the Runtime controller. Registered
+Environment tasks survive Run completion; registered Run tasks are terminated and
+their output/cleanup state confirmed. Runtime schema v10 persists immutable cleanup
+receipts, and API migration 0018 persists release receipts. A controller takeover
+revokes the old controller's operations without killing valid Environment tasks.
+Migration 0017 stores controller state; 0019 records explicit snapshot encoding
+without rewriting historical snapshot objects.
+
+Hot attachment uses live files instead of restoring an older file checkpoint.
+Terminal file protection is explicitly deferred because background tasks may
+write concurrently. The supported entry points and real integration acceptance
+are documented in [Environment task service acceptance](../workspace/eval/EnvironmentTaskService.md).
+Archive encoding candidates remain separate from online upload integration.
 
 ## Upgrade and rollback
 
@@ -144,7 +175,9 @@ schema v8 adds the allocation table through a forward migration; it preserves al
 v7 resident reservations and migration history and does not fabricate allocations
 for old containers. Old live/waiting containers lack the required labels and
 cannot be adopted by this Runtime. Complete them under their matching old stack
-or postpone the switch; this code does not automatically terminate them.
+before switching API/Runtime or applying Runtime schema v8, or postpone the
+upgrade. Old and new stacks must not share the upgraded database as a way to
+drain old executions. This code does not automatically terminate them.
 Rollback to a v7 Runtime fails schema validation. Preserve allocation identities
 and upgrade history with a compatible forward repair or restore an operator-owned
 pre-upgrade backup after draining; do not drop mapping rows to permit adoption.

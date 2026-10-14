@@ -21,6 +21,7 @@ fn postgres_instance_allocation_precedes_create_and_unknown_creation_keeps_budge
         agent_run_id: fixture.run.clone(),
         agent_run_authorization_digest: digest.clone(),
         execution_mode: "perRun".into(),
+        controller: None,
     };
     db.batch_execute("ALTER TABLE public.app_core_agentrun ADD COLUMN IF NOT EXISTS environment_id text; CREATE TABLE IF NOT EXISTS public.app_core_agentrunauthorization(agent_run_id text PRIMARY KEY,digest text NOT NULL);").unwrap();
     db.execute(
@@ -28,7 +29,7 @@ fn postgres_instance_allocation_precedes_create_and_unknown_creation_keeps_budge
         &[&fixture.run, &binding.environment_id],
     )
     .unwrap();
-    db.execute("INSERT INTO public.app_core_agentrunauthorization VALUES($1,$2) ON CONFLICT(agent_run_id) DO UPDATE SET digest=EXCLUDED.digest", &[&fixture.run,&digest]).unwrap();
+    db.execute("INSERT INTO public.app_core_agentrunauthorization(agent_run_id,digest) VALUES($1,$2) ON CONFLICT(agent_run_id) DO UPDATE SET digest=EXCLUDED.digest", &[&fixture.run,&digest]).unwrap();
     db.batch_execute("DROP TABLE IF EXISTS public.execution_instance_commit_policy; CREATE TABLE public.execution_instance_commit_policy(execution_id text NOT NULL,commit_policy text NOT NULL); CREATE OR REPLACE FUNCTION public.observe_execution_instance_commit_policy() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO public.execution_instance_commit_policy VALUES(NEW.execution_id,current_setting('synchronous_commit')); RETURN NEW; END $$; CREATE TRIGGER observe_execution_instance_commit_policy AFTER INSERT ON runtime.execution_instances FOR EACH ROW EXECUTE FUNCTION public.observe_execution_instance_commit_policy();").unwrap();
     let image = format!("sha256:{}", "b".repeat(64));
     let mut instance = None;
@@ -500,7 +501,7 @@ fn setup() -> (String, PostgresRuntimeStore) {
     let url = test_url();
     reset_store(&url);
     let mut db = Client::connect(&url, NoTls).unwrap();
-    db.batch_execute("ALTER TABLE public.app_core_agentrun ADD COLUMN IF NOT EXISTS workspace_id text NOT NULL DEFAULT 'resident-test'; ALTER TABLE public.app_core_agentrun ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'running';").unwrap();
+    db.batch_execute("ALTER TABLE public.app_core_agentrun ADD COLUMN IF NOT EXISTS workspace_id text NOT NULL DEFAULT 'resident-test'; ALTER TABLE public.app_core_agentrun ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'running'; ALTER TABLE public.app_core_agentrun ADD COLUMN IF NOT EXISTS environment_id text;").unwrap();
     let store = PostgresRuntimeStore::new(&url).unwrap();
     (url, store)
 }
@@ -955,6 +956,7 @@ fn postgres_resident_forward_migration_preserves_reclaim_budget_and_rejects_bad_
     let first = sandbox(&store, &url, "resident-previous-schema", "tenant-one");
     let before = store.get_runtime_job(&first.job).unwrap();
     let mut db = Client::connect(&url, NoTls).unwrap();
+    super::retained_instance_tests::downgrade_to_eight(&mut db);
     db.batch_execute("DROP TABLE runtime.execution_instances; DROP TABLE runtime.resident_sandboxes; DELETE FROM runtime.schema_migrations WHERE version>=7; UPDATE runtime.runtime_jobs SET lease_reclaim_count=2,lease_reclaim_not_before_ms=12345;").unwrap();
     let history = db
         .query(

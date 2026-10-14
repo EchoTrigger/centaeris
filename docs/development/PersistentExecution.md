@@ -1,0 +1,197 @@
+# Persistent execution and versioned working volumes
+
+## Status and delivery contract
+
+This is the implementation and acceptance design for the persistent execution
+candidate. It describes required behavior, not a claim that every path below is
+implemented. The existing per-Run execution and authorization remain the tested
+baseline until the integrated acceptance gate passes. One pull request will carry
+the complete candidate, with independently reviewable commits.
+
+The acceptance scenario is: Run A starts a registered environment task and writes
+working files; A completes; the client disconnects and Runtime restarts; the next
+controller finds the same task and output; Run B is newly authorized against the
+same environment; an explicit stop or environment destruction terminates the
+intended scope. Separately, an accepted file checkpoint restores correctly into
+a fresh volume and revoked protected inputs do not reappear as authorized input.
+
+No new browser status interface, host identifiers, arbitrary host migration,
+lazy restoration, environment forks, custom filesystem or general backup engine
+is included. File restoration does not promise process-memory restoration.
+
+## Authority and identity
+
+- Core remains authoritative for Run, execution and tool-result semantics.
+- The API owns Session environment identity, membership and business authorization.
+- Runtime owns physical allocation, controller fencing and resource reconciliation.
+- A task service in the instance owns registered processes and output independently
+  of a controller connection. Transport reconnection must not restart a command.
+- A working volume has a stable identity and a single permitted physical writer.
+  Replacing an instance does not silently reuse an old instance identity.
+- The existing resident resource ledger remains authoritative for resource usage;
+  allocation history is not a second heartbeat, lease or liveness ledger.
+
+The original signed v1 Run authorization stays unchanged. Persistent execution
+requires an explicitly versioned environment binding and strict validation; it
+must not reinterpret the existing perRun authorization as permission to reuse.
+Protocol types, ownership of migrations and production call sites are reviewed
+together before parallel implementation changes shared interfaces.
+
+## Execution and control
+
+One foreground Run may hold an environment at a time. Registered environment
+tasks may remain active across Runs, so a single foreground owner does not imply
+that files are quiescent. Run-scoped tasks end with their Run. Ordinary shell
+backgrounding does not automatically establish durable task registration.
+
+Controller takeover advances a monotonically fenced authority. Launch, signal,
+input, file mutation, restore and destroy must reject obsolete control at their
+actual execution boundaries. Losing control does not terminate a legitimately
+started environment task. Revocation and explicit cancellation are separate
+actions with their own scope and result.
+
+Lease expiry alone does not prove a former process or writer stopped. Unknown
+instance state retains its reservation and prevents creation of a second writer.
+Recovery needs positive evidence of the prior instance's loss or fenced storage.
+The initial supported continuity domain is a still-live instance on one host.
+
+## Working files and protected inputs
+
+Online reads and writes use a mature Linux filesystem and its page cache, not
+per-file PostgreSQL requests. PostgreSQL holds identities, authorizations,
+operations and checkpoint roots. Rust coordinates capture, restore and bounded
+I/O; it does not duplicate all file contents into an application cache.
+
+Working files, protected Library inputs and reconstructible caches have explicit
+mount and retention boundaries. Protected inputs are not silently copied into
+an unrestricted archived input tree. Restore rechecks current authorization and
+reconstructs controlled input mounts. Existing bytes already read by a process
+cannot be recalled by unlinking a path; strong revocation may require stopping
+the affected execution scope.
+
+Persistent volume capacity must be enforced by the supported host backend.
+Replacing bounded tmpfs with an unbounded directory is prohibited. The backend
+must report its quota and consistency prerequisites, fail when they are absent,
+and account for retained volumes separately from resident memory. Host filesystem
+and quota selection requires the implementation audit and isolated Linux test.
+
+## Capture, archive and publication
+
+Capture produces a receipt identifying the environment, instance, working volume,
+source generation, consistency method and covered filesystem scopes. Read-only
+mounting alone does not establish a consistent point in time. Existing active
+writer checks remain until a tested replacement covers the same boundary.
+
+The deployed snapshot representation is the uncompressed
+`workspace.snapshot.v1` manifest-and-content frame. Tar plus zstd is the selected
+candidate representation, not an existing production codec. Introducing it
+requires explicit encoding identification and tested reads of retained v1
+snapshots; changing the writer does not migrate previously published objects.
+
+Implement bounded streaming tar plus zstd
+from a supported consistent view through tar encoding and zstd compression,
+avoiding an intermediate complete uncompressed archive. Compressed staging may
+still be necessary for destination retries and verification and must be measured
+and bounded. This remains full-content capture, not incremental capture; the
+streaming path requires implementation and comparative acceptance evidence.
+Reuse the online working volume across Runs and avoid unnecessary captures before
+adding cross-checkpoint deduplication.
+
+Restic measurements remain experimental evidence only. Remove the candidate
+adapter, its tests and implementation-specific documentation from the active
+candidate; do not wire it into the production save path.
+Reconsider a deduplicating repository only with representative retained-version
+workloads showing benefits after capture, restore, cache, reclamation and
+operational costs. Existing synthetic byte savings alone do not select a backend.
+Do not build a custom chunk store or backup engine as an alternative.
+
+Product code owns checkpoint authority and retention roots. Archive credentials
+are configuration references, never command-line secrets, tool-visible fields or
+captured output. Storage scope must preserve tenant isolation and all I/O must
+have explicit resource bounds.
+
+Publication follows these steps:
+
+1. Commit a stable operation identity and expected environment/control generation.
+2. Acquire a supported consistent view, archive and verify outside a long database
+   transaction. Apply explicit concurrency and temporary-space bounds.
+3. In a short transaction, recheck authority and expected generation, then publish
+   the verified archive reference. Never publish missing or partial content.
+4. Preserve uncertain operations for reconciliation. Retry the original operation
+   instead of pretending the database and external archive commit atomically.
+
+Failed publication may leave an unreferenced archive snapshot. Its creation is
+tracked until reconciliation or safe reclamation; it is not a visible checkpoint.
+
+## Restore and reclamation
+
+Restore pins a fixed checkpoint, checks current authorization/configuration and
+materializes a fresh bounded working volume. Only after validation may the
+controller publish the new usable binding. An interrupted restore must not
+overwrite the last usable volume or release its protection prematurely.
+
+The first implementation restores eagerly. Validate the exact supported file,
+directory, link and metadata contract; reject unsupported entries rather than
+silently changing them. Process memory and open-descriptor restoration are outside
+this filesystem receipt.
+
+Retention roots include current and retained checkpoints and operations actively
+capturing, publishing or restoring. A grace period alone is insufficient for GC.
+Product root changes and archive-object deletion must coordinate so a
+newly published or pinned checkpoint cannot be reclaimed. Start with dry-run,
+bounded work and durable cleanup receipts. Do not delete allocation history merely
+because resident resources were released.
+
+## Task service
+
+The minimum service surface is start, query/list, cursor-based output, input and
+terminate. Task identity is stable; retries compare the complete request identity.
+A crash between spawn and durable acknowledgement is an uncertain result requiring
+reconciliation, not permission to spawn again.
+
+Output is drained independently of browsers and controllers, retained under a
+bounded policy and served with explicit cursor gaps. Logs are not unbounded rows
+in the control database. Termination covers the registered task process scope,
+including descendants; PID reuse cannot redirect a signal to another task.
+
+Control files (authority, task identity and operation receipts) and task output
+must use separate storage locations and independently enforced budgets. Output
+rotation, exhaustion or cleanup must not consume the control-file reservation or
+delete control records. Output retention is not control-state durability. This
+separation is an acceptance requirement, not a claim about the current candidate.
+
+The task supervisor's Linux tests cover kill-only cgroup v2 domains, including
+descendants that start a new process session. Task cgroups must remain below the
+charged Docker instance cgroup; aggregate memory, CPU and PID limits belong to
+that instance. A standalone delegated test subtree does not establish this
+deployment property. Retained admission must verify the actual hierarchy and
+limits before accepting work, and teardown must confirm the subtree is empty
+before releasing its resident reservation.
+
+## Acceptance and measurement
+
+Behavioral tests precede changes and record red/green evidence. Required boundaries
+include stale control rejection, concurrent starts, lost acknowledgements,
+controller restart, task output backpressure, descendant termination, volume quota,
+mid-capture failure, mid-restore failure, revoked inputs, publication/GC races,
+resource reconciliation and forward migration of retained authoritative facts.
+
+Real Linux acceptance must exercise the production API/Worker/Runtime/backend
+chain. Fixture-only adapter tests do not establish isolation or process survival.
+Run focused Core query_loop and all affected release gates. Do not restart the
+previously stopped full local API suite; remote CI handles full API discovery.
+
+Compare identical source state, metadata scope, consistency, retention and restore
+oracles. Report scanned entries, application reads, temporary bytes, stored bytes,
+network bytes, CPU, peak memory, capture time and restore time separately. Mark
+unmeasured device I/O explicitly. Include cold/warm runs, source trees, incompressible
+and compressed files, many small files and sparse files. Existing synthetic results
+motivate implementation but are not production performance guarantees.
+
+## Integration ownership
+
+The primary reviewer owns protocol/schema integration, shared Runtime entry points,
+Worker teardown semantics, deployment configuration, cross-component gates and
+publication. Isolated implementation work covers storage/archive, lifecycle/control
+and task supervision. Shared files require an explicit ownership handoff. A module
+is not complete until its real production caller and failure recovery are exercised.

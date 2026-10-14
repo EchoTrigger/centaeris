@@ -1,0 +1,367 @@
+{
+  "schema": "retained.acceptance.observation.v1",
+  "sourceRevision": "a168010d98c15ba0157c77e5542b22f0d9536324",
+  "model": "deterministic local HTTPS fixture; real API, Worker, Runtime, PostgreSQL and Docker",
+  "scope": "same-live-instance continuity with Runtime restart; not host-loss recovery",
+  "priorDiagnosticRun": "agent_run_ab484dd4a8bb40d09e3a1e1b801de280",
+  "priorDiagnosticNote": "An earlier failed Run started one environment task; both it and successful A task are preserved. Two tasks are not two resident allocations.",
+  "binarySha256": {
+    "environment_task_service": "22b9a29fec0a5cf72ca879c929a55076053fd40f44d4a66d83000cf14051c85f",
+    "runtime_server": "f0251b27a4c33ab9d8c580da1211850dd0f2aefa295ff1bb236fd9f17d2a9de4",
+    "execution_agent": "e20129de0ee69cc689efc2c28e69f6a4d9b2e444300afea9218a21474dd9a214"
+  },
+  "observations": [
+    {
+      "agentRunId": "agent_run_3c5e6c9e955f4ede932b42308fbf34f6",
+      "sessionId": "session_39C7v8olT84F6jK_",
+      "environmentId": "environment_ce92c18e9baa4e2d9194ebaffb2f5487",
+      "instanceId": "instance_71fa62286ed0c29740c657d38ef6a5c13c7a70c82bb283037e652e8603e379bc",
+      "containerId": "c9f5ce5b65cc3839ed48f9a7fae8a45d938e129a55faae7d9f82f54a34008010",
+      "resources": [
+        268435456,
+        1000,
+        128,
+        67108864
+      ],
+      "releaseReceiptId": "environment_release_e780adb5b0354f5983c2f9aca1bbc0e3",
+      "backgroundTaskIds": [
+        "task-60e1b4487cd1c322b15045b3387b5c0ace5a9a0837488ff52f9611e5dd34b225",
+        "task-de0f4b4fdd18c4087b18c7db0d169b2ca514ea51d4133548bd1a29cbe4d6f11e"
+      ],
+      "fileSha256": "66e39569c900254a44a1780699048afbebcd6ce5d6c952448fda495b92f6f709",
+      "runtimeStartup": {
+        "containerId": "105955ac44ec38c6b12b1d46838af7430a9be227e19ab156cee49df8ec19cac1",
+        "startedAt": "2026-10-14T09:20:20.190202123Z",
+        "hostPid": 2840048
+      },
+      "runStatus": "completed",
+      "residentCount": 1,
+      "controllerEpoch": 4,
+      "cleanupReceiptComplete": true,
+      "tasks": [
+        {
+          "taskId": "task-232c03eb2f911875b4efd717643bcbf7b94ddb810cfca69f455456035ca4fe31",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_ab484dd4a8bb40d09e3a1e1b801de280"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-3c2c1e6d369e1676378807951b33184cb830ad0567a0d0f1a412b4f3e2a36556",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_ab484dd4a8bb40d09e3a1e1b801de280"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-4eeb66ed3b9e2e2183ba693aff05de563fbc008fe9c772dfd82bbd2f474df602",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_3c5e6c9e955f4ede932b42308fbf34f6"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-60e1b4487cd1c322b15045b3387b5c0ace5a9a0837488ff52f9611e5dd34b225",
+          "scope": {
+            "kind": "environment"
+          },
+          "state": "running",
+          "cleanupComplete": false,
+          "exitCode": null
+        },
+        {
+          "taskId": "task-67b693fd0a4d2d80103c7897e3308c7dae7a7d223e0a359a1fa1ce47be596a6f",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_3c5e6c9e955f4ede932b42308fbf34f6"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-7d381c0808f6904993b076c4abc51574403567f5a412bdc5fe0acd7d52523d65",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_3c5e6c9e955f4ede932b42308fbf34f6"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-895c7c0b0b0a218b31398e030a06e99cffd8e60d73517b0544a3a31e90dd818a",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_3c5e6c9e955f4ede932b42308fbf34f6"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-b62504579c41eb3a0ccfc7604229f3a9a27162e8f0877d8a17405587bee55056",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_ab484dd4a8bb40d09e3a1e1b801de280"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-b73d473f56748d749d57ebbe7dc3e58de1028bc383ac3adf9da42c48ac0f1583",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_ab484dd4a8bb40d09e3a1e1b801de280"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-de0f4b4fdd18c4087b18c7db0d169b2ca514ea51d4133548bd1a29cbe4d6f11e",
+          "scope": {
+            "kind": "environment"
+          },
+          "state": "running",
+          "cleanupComplete": false,
+          "exitCode": null
+        }
+      ],
+      "oldControllerQueryRejected": null,
+      "oldControllerTerminationRejected": null
+    },
+    {
+      "agentRunId": "agent_run_a299a3b709a1457a8cdcf403e802433f",
+      "sessionId": "session_39C7v8olT84F6jK_",
+      "environmentId": "environment_ce92c18e9baa4e2d9194ebaffb2f5487",
+      "instanceId": "instance_71fa62286ed0c29740c657d38ef6a5c13c7a70c82bb283037e652e8603e379bc",
+      "containerId": "c9f5ce5b65cc3839ed48f9a7fae8a45d938e129a55faae7d9f82f54a34008010",
+      "resources": [
+        268435456,
+        1000,
+        128,
+        67108864
+      ],
+      "releaseReceiptId": "environment_release_53c783fedf0747b5a607c219c2281c76",
+      "backgroundTaskIds": [
+        "task-60e1b4487cd1c322b15045b3387b5c0ace5a9a0837488ff52f9611e5dd34b225",
+        "task-de0f4b4fdd18c4087b18c7db0d169b2ca514ea51d4133548bd1a29cbe4d6f11e"
+      ],
+      "fileSha256": "66e39569c900254a44a1780699048afbebcd6ce5d6c952448fda495b92f6f709",
+      "runtimeStartup": {
+        "containerId": "105955ac44ec38c6b12b1d46838af7430a9be227e19ab156cee49df8ec19cac1",
+        "startedAt": "2026-10-14T09:21:23.982161493Z",
+        "hostPid": 2844028
+      },
+      "runStatus": "completed",
+      "residentCount": 1,
+      "controllerEpoch": 6,
+      "cleanupReceiptComplete": true,
+      "tasks": [
+        {
+          "taskId": "task-169db5088f90c5cc0ca7d95f05f44a594b436651745f4465ffa27618e76e6cdb",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_a299a3b709a1457a8cdcf403e802433f"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-22e3becf668329a97c2042207868492d78cccb4cf3b9e3e39cb8df5757f95ed7",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_a299a3b709a1457a8cdcf403e802433f"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-232c03eb2f911875b4efd717643bcbf7b94ddb810cfca69f455456035ca4fe31",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_ab484dd4a8bb40d09e3a1e1b801de280"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-3c2c1e6d369e1676378807951b33184cb830ad0567a0d0f1a412b4f3e2a36556",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_ab484dd4a8bb40d09e3a1e1b801de280"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-47063feb88a71ccb697dc6d9c9a273ebf548a0350784cda969aee0391799ed60",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_a299a3b709a1457a8cdcf403e802433f"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-4d3834a2e667973b3a8c617669ca80775cca9b45bd2a11bccd066383a11a5902",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_a299a3b709a1457a8cdcf403e802433f"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-4eeb66ed3b9e2e2183ba693aff05de563fbc008fe9c772dfd82bbd2f474df602",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_3c5e6c9e955f4ede932b42308fbf34f6"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-5a4ddefccae4137f73b02b32cad2c3b8d03bff1ec122111d4ef5ae8aa02eda1f",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_a299a3b709a1457a8cdcf403e802433f"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-60e1b4487cd1c322b15045b3387b5c0ace5a9a0837488ff52f9611e5dd34b225",
+          "scope": {
+            "kind": "environment"
+          },
+          "state": "running",
+          "cleanupComplete": false,
+          "exitCode": null
+        },
+        {
+          "taskId": "task-67b693fd0a4d2d80103c7897e3308c7dae7a7d223e0a359a1fa1ce47be596a6f",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_3c5e6c9e955f4ede932b42308fbf34f6"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-7a2f6f85ff719df56704cb7f2235fbc1bbdbcf4626389e9243af303108124eff",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_a299a3b709a1457a8cdcf403e802433f"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-7d381c0808f6904993b076c4abc51574403567f5a412bdc5fe0acd7d52523d65",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_3c5e6c9e955f4ede932b42308fbf34f6"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-895c7c0b0b0a218b31398e030a06e99cffd8e60d73517b0544a3a31e90dd818a",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_3c5e6c9e955f4ede932b42308fbf34f6"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-a08c3a4d57180a40db6e0f31c09fc08aba20fce2a8275215fe644973c7a91f4a",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_a299a3b709a1457a8cdcf403e802433f"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-b62504579c41eb3a0ccfc7604229f3a9a27162e8f0877d8a17405587bee55056",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_ab484dd4a8bb40d09e3a1e1b801de280"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-b73d473f56748d749d57ebbe7dc3e58de1028bc383ac3adf9da42c48ac0f1583",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_ab484dd4a8bb40d09e3a1e1b801de280"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-de0f4b4fdd18c4087b18c7db0d169b2ca514ea51d4133548bd1a29cbe4d6f11e",
+          "scope": {
+            "kind": "environment"
+          },
+          "state": "running",
+          "cleanupComplete": false,
+          "exitCode": null
+        },
+        {
+          "taskId": "task-e221b318d7c2340ee3c52de2fdbaf1a7730e2251eae1ab0df7c08786687c4c7e",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_a299a3b709a1457a8cdcf403e802433f"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        },
+        {
+          "taskId": "task-e72ab941faa13c5712db31af0f9f9b127f1277b7139d85a23c855ad8983b9f1d",
+          "scope": {
+            "kind": "run",
+            "runId": "agent_run_a299a3b709a1457a8cdcf403e802433f"
+          },
+          "state": "exited",
+          "cleanupComplete": true,
+          "exitCode": 0
+        }
+      ],
+      "oldControllerQueryRejected": true,
+      "oldControllerTerminationRejected": true
+    }
+  ],
+  "taskRunningAfterStaleTermination": true,
+  "ciResult": "notCollected"
+}
