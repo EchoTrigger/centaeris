@@ -2,18 +2,30 @@
 
 ## Status and delivery contract
 
-This is the implementation and acceptance design for the persistent execution
-candidate. It describes required behavior, not a claim that every path below is
-implemented. The existing per-Run execution and authorization remain the tested
-baseline until the integrated acceptance gate passes. One pull request will carry
-the complete candidate, with independently reviewable commits.
+This document contains the broader persistent execution design. PR #36 delivers
+only an internal opt-in, single-host continuity boundary: the same still-live
+instance may be used by successive Runs under a verified runc, systemd and cgroup
+v2 configuration. `perRun` remains the default. The original persistent working
+volume design is not complete when this limited candidate passes acceptance.
 
-The acceptance scenario is: Run A starts a registered environment task and writes
-working files; A completes; the client disconnects and Runtime restarts; the next
-controller finds the same task and output; Run B is newly authorized against the
-same environment; an explicit stop or environment destruction terminates the
-intended scope. Separately, an accepted file checkpoint restores correctly into
-a fresh volume and revoked protected inputs do not reappear as authorized input.
+Required acceptance for this PR: Run A starts an environment task and writes
+files; A completes with immutable cleanup and release receipts; Runtime restarts;
+Run B obtains a new fence and uses the same container, instance, task and bytes.
+Stale controllers fail, bounded task/output/operation history remains usable
+across at least 100 releases, and authorized maintenance stops the exact instance,
+confirms physical absence and reconciles its resource holding exactly once.
+
+Candidate components only: tar+zstd encoding, validation and bridge support.
+They are not enabled for production capture/upload or cold restoration. All
+retained online file protection is currently disabled, including at terminal
+Run completion. `/mnt/data` remains a bounded tmpfs; files survive only while
+that instance lives. Destroying it can lose every unarchived working file.
+
+Deferred work: persistent disk working volumes, consistent online checkpoints,
+production archive upload/restoration, restic, CAS/Nydus, deduplication, lazy
+restore, runsc retained, Firecracker, process-memory recovery, multiple hosts and
+new UI. The filesystem design and its acceptance requirements below describe
+this future work; they are not additional delivery claims for this PR.
 
 No new browser status interface, host identifiers, arbitrary host migration,
 lazy restoration, environment forks, custom filesystem or general backup engine
@@ -172,9 +184,11 @@ before releasing its resident reservation.
 
 Behavioral tests precede changes and record red/green evidence. Required boundaries
 include stale control rejection, concurrent starts, lost acknowledgements,
-controller restart, task output backpressure, descendant termination, volume quota,
-mid-capture failure, mid-restore failure, revoked inputs, publication/GC races,
-resource reconciliation and forward migration of retained authoritative facts.
+controller restart, task output backpressure, descendant termination, bounded
+tmpfs, safe task/receipt retirement, maintenance destruction, resource
+reconciliation and forward migration of retained authoritative facts. File
+capture/restore failures, revoked-input restoration and publication/GC races
+remain acceptance requirements for the deferred filesystem delivery.
 
 Real Linux acceptance must exercise the production API/Worker/Runtime/backend
 chain. Fixture-only adapter tests do not establish isolation or process survival.

@@ -419,6 +419,8 @@ def execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
         require_healthy_lease()
         finish_agent_run_lifecycle(job, lease_owner, agent_run_start, resolved["terminalState"])
         return False
+    if retained:
+        require_supported_retained_configuration(agent_run_start)
     transition_agent_run(agent_run_id, "running", "agent_run_lifecycle_step_started")
     require_healthy_lease()
     result = agent_run_step_request(
@@ -484,6 +486,21 @@ def execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
     else:
         finish_agent_run_lifecycle(job, lease_owner, agent_run_start, result["terminalState"])
     return False
+
+
+def require_supported_retained_configuration(start):
+    """Reject unsupported opt-in combinations before dispatching execution.
+
+    Runtime still validates the signed contract and enforces its host boundary.
+    This worker preflight never changes the configured execution mode.
+    """
+    authorization = start.get('authorization', {})
+    initial = start.get('initialInput', {})
+    packages = authorization.get('pluginActivation', {}).get('packages', [])
+    if (authorization.get('assetRefs') or authorization.get('messageAssetRefs')
+            or initial.get('attachmentRefs')
+            or any(package.get('mcpServers') or package.get('hooks') for package in packages)):
+        raise RuntimeError('retained_configuration_unsupported')
 
 
 def environment_controller_purpose(envelope):

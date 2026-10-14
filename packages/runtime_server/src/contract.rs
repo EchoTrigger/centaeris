@@ -144,6 +144,22 @@ pub enum AgentRunTailAction {
 }
 
 impl AgentRunStart {
+    fn validate_retained_support(&self) -> Result<(), String> {
+        if self.environment_authorization.payload.execution_mode == "retained"
+            && (!self.authorization.asset_refs.is_empty()
+                || !self.authorization.message_asset_refs.is_empty()
+                || self
+                    .authorization
+                    .plugin_activation
+                    .packages
+                    .iter()
+                    .any(|p| !p.mcp_servers.is_empty() || !p.hooks.is_empty())
+                || matches!(&self.initial_input, AgentRunStartInitialInput::UserInput { attachment_refs, .. } if !attachment_refs.is_empty()))
+        {
+            return Err("retained_configuration_unsupported".into());
+        }
+        Ok(())
+    }
     pub fn validate(self, signing_key: &[u8]) -> Result<Self, String> {
         match (
             self.schema.as_str(),
@@ -193,6 +209,7 @@ impl AgentRunStart {
             &self.authorization_digest,
             signing_key,
         )?;
+        self.validate_retained_support()?;
         if self
             .coordination_session_id
             .as_ref()
@@ -531,6 +548,33 @@ mod tests {
         start.environment_authorization.signature =
             format!("hmac-sha256:{:x}", mac.finalize().into_bytes());
         start
+    }
+
+    #[test]
+    fn retained_support_rejects_materialization_mcp_and_hooks_before_dispatch() {
+        use centaeris_core::extension::{ActivatedPluginPackageV1, PluginResourceDigestV1};
+        for capability in ["attachment", "declaredInput", "messageAsset", "mcp", "hook"] {
+            let mut start = retained_start("execute");
+            match capability {
+                "attachment" => start.initial_input=AgentRunStartInitialInput::UserInput {input_id:"input".into(),message:"message".into(),attachment_refs:vec!["asset".into()]},
+                "messageAsset" => start.authorization.message_asset_refs.push("asset".into()),
+                "declaredInput" => start.authorization.asset_refs.push(serde_json::from_value(serde_json::json!({"schema":"workspace.declared_input.v1","inputRef":"input","inputIdentity":{"ownerKind":"asset","ownerId":"asset","generation":1,"sha256":"a".repeat(64)},"sizeBytes":1,"displayName":"file","contentType":"text/plain"})).unwrap()),
+                _ => {
+                    let resource=PluginResourceDigestV1 {path:"entry.json".into(),digest:format!("sha256:{}","a".repeat(64))};
+                    start.authorization.plugin_activation.packages.push(ActivatedPluginPackageV1 {name:"fixture".into(),version:"1".into(),package_digest:format!("sha256:{}","b".repeat(64)),skills:vec![],cli:vec![],mcp_servers:if capability=="mcp" {vec![resource.clone()]} else {vec![]},hooks:if capability=="hook" {vec![resource]} else {vec![]}});
+                }
+            }
+            assert_eq!(
+                start.validate_retained_support().unwrap_err(),
+                "retained_configuration_unsupported",
+                "{capability}"
+            );
+            start.environment_authorization.payload.execution_mode = "perRun".into();
+            assert!(start.validate_retained_support().is_ok());
+        }
+        assert!(retained_start("execute")
+            .validate_retained_support()
+            .is_ok());
     }
 
     #[test]

@@ -28,10 +28,9 @@ test database, image configuration and containers separate from existing product
 deployments. Component tests alone do not satisfy this gate.
 
 The retained path exposes registered background tasks and Run-scoped commands.
-Old privileged file helpers, MCP dispatch and lifecycle hooks fail explicitly;
-their retained equivalents are not part of this acceptance. Terminal file
-protection is deferred while live tasks can write: completion must not quiesce
-the whole instance or label an uncoordinated image as a recovery checkpoint.
+All retained online file protection is disabled, including terminal completion;
+completion must not quiesce the whole instance or label an uncoordinated image as
+a recovery checkpoint. `/mnt/data` is a bounded tmpfs, not a persistent disk.
 Task output has bounded retention and reports cursor gaps. It is not an unlimited
 log archive. Archive uploads and cold restoration require separate acceptance.
 
@@ -48,9 +47,45 @@ receipts, and a child that creates a new process session. Completion requires
 the owned task subtree to report empty; process-group termination alone is not
 the acceptance condition.
 
-## Observed Docker configuration
+## Supported configuration and coordinated exit
 
-The real retained Run gate passed at source revision `a168010` using a local
+| Capability | Retained support |
+| --- | --- |
+| Linux Docker runc with verified systemd cgroup v2 hierarchy | Only accepted backend; no silent fallback |
+| Ordinary filesystem helpers | Run-scoped tasks; consume the same bounded task/input budgets |
+| Registered environment tasks | Same live instance only; no host-loss or supervisor-memory recovery |
+| Privileged helper, input materialization, MCP, lifecycle hooks | Unsupported; input and extension combinations reject before Worker execution dispatch, helper dispatch explicitly rejects |
+| Skills and ordinary CLI packages | Subject to existing authorization and execution policy |
+| runsc retained, Firecracker, archive upload/cold restore | Outside this acceptance |
+
+`AGENT_RUN_EXECUTION_MODE` is a Worker process setting, not durable Session/Job
+routing. This version is for internal opt-in use; public Session presentation
+does not advertise retained continuity. Use a matched API, Worker, Runtime and
+tools image with the new execution agent. Do not adopt unknown old instances.
+
+To upgrade or disable retained admission:
+
+1. Stop submitting new work to the retained cohort; inventory its bound Runs,
+   instances, active tasks, resource holdings and pending operations.
+2. Keep the matching Worker/Runtime consumers and tools image available for
+   already-bound work. Complete Runs and reconcile cleanup/release receipts.
+3. Explicitly retain still-needed environment tasks with their compatible
+   consumers, or use separately authorized maintenance destruction for each exact
+   instance. Declare that unarchived tmpfs files will be lost before destruction.
+4. Require actual container/task-domain absence and committed resource
+   reconciliation. Unknown Docker outcomes stay pending and keep the holding.
+   Preserve allocation, release and maintenance history.
+5. Switch the process configuration only after the cohort is drained, or keep its
+   old consumers until it is. Changing to `perRun` alone does not clean an instance
+   and cannot process an existing retained binding through the legacy path.
+
+See [the final-tree acceptance checklist](RetainedCloseout.md). Run destruction
+and environment destruction have separate authority; Run cleanup does not grant
+permission to destroy arbitrary environments.
+
+## Historical Docker observations
+
+The real retained Run gate passed at the historical source revision `a168010` using a local
 deterministic HTTPS model and the real API, Worker, Runtime, PostgreSQL and Docker
 path. [The observation record](retained-continuity-observation.json) includes
 the exact source and binary identities, A/B Run and release identities, matching
@@ -61,7 +96,9 @@ service; a subsequent current-controller query confirmed the task still ran.
 An earlier failed diagnostic Run had already started another environment task;
 the evidence preserves both tasks rather than presenting a fresh-environment
 experiment. Ordinary filesystem helpers and model-visible task identities were
-exercised. The full regression result is pending CI.
+exercised. This record does not validate the final repaired tree. Final-head
+complete remote CI and final-tree physical-chain evidence are independent gates;
+neither replaces the other.
 
 The stale-operation probe invokes the task-service relay using the persisted
 fence; it does not independently prove the outer Runtime HTTP authorization

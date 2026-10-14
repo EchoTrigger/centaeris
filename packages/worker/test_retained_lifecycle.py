@@ -7,6 +7,48 @@ import worker
 
 
 class RetainedLifecycleTests(unittest.TestCase):
+    def test_per_run_keeps_attachment_and_extension_dispatch(self):
+        job, start = lifecycle_fixture()
+        start['authorization'] = {'assetRefs': [{'inputRef': 'library:input'}],
+            'pluginActivation': {'packages': [{'mcpServers': [{'path': 'mcp.json'}],
+                'hooks': [{'path': 'hooks.json'}]}]}}
+        resolved = {'schema': 'runtime.agent_run_lifecycle.resolved.v1',
+            'disposition': 'ready', 'agentRunStart': start}
+        result = {'schema': 'runtime.agent_run.step.result.v1', 'agentRunId': 'agent_run_1',
+            'disposition': 'waiting', 'terminalState': None, 'transitionReason': 'runtime_job_wait'}
+        with patch.object(worker, 'AGENT_RUN_EXECUTION_MODE', 'perRun'), \
+                patch.object(worker, 'api_request', return_value=resolved), \
+                patch.object(worker, 'transition_agent_run'), patch.object(worker, 'yield_job'), \
+                patch.object(worker, 'agent_run_step_request', return_value=result) as execute:
+            worker.execute_agent_run_lifecycle_job(job, 'worker:test-owner', lambda: None)
+            self.assertEqual(execute.call_args.args[0]['agentRunStart'], start)
+
+    def test_unsupported_configuration_fails_before_running_or_runtime_dispatch(self):
+        cases = [
+            {'authorization': {'assetRefs': [{'inputRef': 'library:input'}]}},
+            {'authorization': {'messageAssetRefs': ['attachment:input']}},
+            {'initialInput': {'type': 'userInput', 'attachmentRefs': ['attachment:input']}},
+            {'authorization': {'pluginActivation': {'packages': [{'mcpServers': [{'path': 'mcp.json'}]}]}}},
+            {'authorization': {'pluginActivation': {'packages': [{'hooks': [{'path': 'hooks.json'}]}]}}},
+        ]
+        for configuration in cases:
+            with self.subTest(configuration=configuration):
+                _, start = lifecycle_fixture()
+                start.update(configuration)
+                start['schema'] = 'workspace.agent_run.start.v4'
+                start['environmentAuthorization'] = {'payload': {'controllerPurpose': 'execute'}}
+                resolved = {'schema': 'runtime.agent_run_lifecycle.resolved.v2',
+                    'disposition': 'ready', 'agentRunStart': start}
+                job, _ = lifecycle_fixture()
+                with patch.object(worker, 'AGENT_RUN_EXECUTION_MODE', 'retained'), \
+                        patch.object(worker, 'api_request', return_value=resolved), \
+                        patch.object(worker, 'transition_agent_run') as transition, \
+                        patch.object(worker, 'agent_run_step_request') as execute:
+                    with self.assertRaisesRegex(RuntimeError, 'retained_configuration_unsupported'):
+                        worker.execute_agent_run_lifecycle_job(job, 'worker:test-owner', lambda: None)
+                    transition.assert_not_called()
+                    execute.assert_not_called()
+
     def test_retained_reconciler_pages_terminal_cleanup_without_requeue(self):
         next_cursor = {'createdAt': '2026-10-14T00:00:00+00:00', 'id': 'run-1'}
         def api(path, body, reason):
