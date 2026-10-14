@@ -5,13 +5,7 @@ fn setup() -> (String, Client) {
     // Check the live database as well as the reset opt-in before any destructive SQL.
     let url = test_url();
     let mut db = Client::connect(&url, NoTls).unwrap();
-    assert_eq!(
-        db.query_one("SELECT current_database()", &[])
-            .unwrap()
-            .get::<_, String>(0),
-        "test_cleanup_migration",
-        "cleanup migration fixtures require their exclusively owned database"
-    );
+    super::owned_database::require_owned_database(&mut db);
     reset_store(&url);
     drop(PostgresRuntimeStore::new(&url).unwrap());
     (url, db)
@@ -112,7 +106,7 @@ fn insert_receipt(db: &mut Client, patch: serde_json::Value) -> Result<u64, post
 }
 
 #[test]
-#[ignore = "requires destructive exclusively owned test_cleanup_migration Postgres database"]
+#[ignore = "requires destructive gate-owned disposable Postgres database"]
 fn postgres_cleanup_migration_fresh_store_creates_receipt_table() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let (_, mut db) = setup();
@@ -124,7 +118,7 @@ fn postgres_cleanup_migration_fresh_store_creates_receipt_table() {
 }
 
 #[test]
-#[ignore = "requires destructive exclusively owned test_cleanup_migration Postgres database"]
+#[ignore = "requires destructive gate-owned disposable Postgres database"]
 fn postgres_cleanup_migration_preserves_allocations_resources_and_receipts_on_reopen() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let (url, mut db) = setup();
@@ -167,7 +161,7 @@ fn postgres_cleanup_migration_preserves_allocations_resources_and_receipts_on_re
 }
 
 #[test]
-#[ignore = "requires destructive exclusively owned test_cleanup_migration Postgres database"]
+#[ignore = "requires destructive gate-owned disposable Postgres database"]
 fn postgres_cleanup_migration_enforces_complete_exclusive_and_unique_receipts() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let (_, mut db) = setup();
@@ -211,7 +205,7 @@ fn postgres_cleanup_migration_enforces_complete_exclusive_and_unique_receipts() 
 }
 
 #[test]
-#[ignore = "requires destructive exclusively owned test_cleanup_migration Postgres database"]
+#[ignore = "requires destructive gate-owned disposable Postgres database"]
 fn postgres_cleanup_migration_rejects_invalid_legacy_schema_without_partial_upgrade() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     for conflicting_receipt_table in [false, true] {

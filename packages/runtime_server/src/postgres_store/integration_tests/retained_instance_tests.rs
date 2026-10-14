@@ -56,17 +56,7 @@ impl Run {
     }
 }
 fn require_owned_database(db: &mut Client) {
-    let database = db
-        .query_one("SELECT current_database()", &[])
-        .unwrap()
-        .get::<_, String>(0);
-    assert!(
-        matches!(
-            database.as_str(),
-            "test_instance_b7c0dce6d3" | "test_retained_cleanup" | "test_cleanup_migration"
-        ),
-        "retained fixture requires an explicitly owned disposable database"
-    );
+    super::owned_database::require_owned_database(db);
 }
 fn setup() -> (String, PostgresRuntimeStore, Client) {
     let url = test_url();

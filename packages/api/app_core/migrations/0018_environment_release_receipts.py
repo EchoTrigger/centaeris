@@ -3,7 +3,7 @@ import hashlib
 import json
 
 import django.db.models.deletion
-from django.db import migrations, models
+from django.db import NotSupportedError, migrations, models
 import app_core.models
 
 
@@ -50,6 +50,25 @@ CREATE TRIGGER environment_release_immutable BEFORE UPDATE OR DELETE ON app_core
 FOR EACH ROW EXECUTE FUNCTION enforce_environment_release_immutable();
 """
 
+REVERSE = "DROP TRIGGER environment_release_immutable ON app_core_agentrunenvironmentrelease; DROP FUNCTION enforce_environment_release_immutable();"
+
+
+def _backend_sql(schema_editor, sql):
+    vendor = schema_editor.connection.vendor
+    if vendor == "postgresql":
+        schema_editor.execute(sql, params=None)
+    elif vendor != "sqlite":
+        raise NotSupportedError(f"environment_release_backend_unsupported: {vendor}")
+    # SQLite covers structure only; PostgreSQL enforces production immutability.
+
+
+def install_immutability(apps, schema_editor):
+    _backend_sql(schema_editor, IMMUTABLE)
+
+
+def remove_immutability(apps, schema_editor):
+    _backend_sql(schema_editor, REVERSE)
+
 
 def guard_reversal(apps, schema_editor):
     if apps.get_model("app_core", "AgentRunEnvironmentRelease").objects.using(schema_editor.connection.alias).exists():
@@ -70,6 +89,6 @@ class Migration(migrations.Migration):
             ("environment", models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name="releases", to="app_core.sessionenvironment")),
         ], options={"constraints": [models.CheckConstraint(condition=models.Q(controller_epoch__gt=0), name="environment_release_epoch_positive")]}),
         migrations.RunPython(reconstruct_releases, migrations.RunPython.noop),
-        migrations.RunSQL(IMMUTABLE, "DROP TRIGGER environment_release_immutable ON app_core_agentrunenvironmentrelease; DROP FUNCTION enforce_environment_release_immutable();"),
+        migrations.RunPython(install_immutability, remove_immutability),
         migrations.RunPython(migrations.RunPython.noop, guard_reversal),
     ]

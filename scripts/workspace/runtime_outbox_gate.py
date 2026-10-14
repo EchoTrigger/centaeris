@@ -1,5 +1,6 @@
 """Run focused Runtime PostgreSQL regressions in a fresh disposable database."""
 import os
+import json
 from pathlib import Path
 import subprocess
 import uuid
@@ -21,6 +22,19 @@ def discovered_tests(output):
     return names
 
 
+def required_tests():
+    names = json.loads(Path(__file__).with_name('runtime_outbox_required_tests.json').read_text())
+    if not names or len(names) != len(set(names)):
+        raise RuntimeError('Runtime PostgreSQL required manifest is empty or contains duplicates')
+    return names
+
+
+def validate_required_tests(names):
+    missing = set(required_tests()) - set(names)
+    if missing:
+        raise RuntimeError('Runtime PostgreSQL required tests missing: ' + ', '.join(sorted(missing)))
+
+
 def main():
     import psycopg
     from psycopg import sql
@@ -28,11 +42,14 @@ def main():
     root = Path(__file__).resolve().parents[2]
     settings = database_settings()
     database = 'test_outbox_' + uuid.uuid4().hex
+    ownership_token = uuid.uuid4().hex
     host = settings['host']
     if ':' in host and not host.startswith('['):
         host = '[' + host + ']'
     url = f"postgresql://{quote(settings['user'], safe='')}:{quote(settings['password'], safe='')}@{host}:{settings['port']}/{database}"
     env = {**os.environ, 'CENTAERIS_ALLOW_POSTGRES_TEST_RESET': '1',
+           'CENTAERIS_TEST_POSTGRES_DATABASE': database,
+           'CENTAERIS_TEST_POSTGRES_OWNERSHIP_TOKEN': ownership_token,
            'CENTAERIS_TEST_POSTGRES_URL': url, 'INTERNAL_API_TOKEN': uuid.uuid4().hex,
            'CARGO_BUILD_JOBS': '1', 'EXECUTION_GLOBAL_LIMIT': '8',
            'EXECUTION_TENANT_LIMIT': '4', 'CENTAERIS_CAPTURE_BOUNDARY_DATABASE': url,
@@ -53,7 +70,11 @@ def main():
                 ['cargo', 'test', '--locked', '-p', 'runtime_server',
                  'postgres_store::integration_tests::residency_tests', '--'],
                 ['cargo', 'test', '--locked', '-p', 'runtime_server',
-                 'postgres_store::integration_tests::execution_instance_tests', '--']]
+                 'postgres_store::integration_tests::execution_instance_tests', '--'],
+                ['cargo', 'test', '--locked', '-p', 'runtime_server',
+                 'postgres_store::integration_tests::retained_instance_tests', '--'],
+                ['cargo', 'test', '--locked', '-p', 'runtime_server',
+                 'postgres_store::integration_tests::cleanup_migration_tests', '--']]
     exact_tests = [
         'checkpoint_requests::postgres_direct_store_validates_checkpoint_requests_before_transactions',
         'snapshot_cas_tests::postgres_snapshot_cas_rejects_stale_writers_and_preserves_concurrent_results',
@@ -98,9 +119,14 @@ def main():
         names.extend(discovered_tests(discovered.stdout))
     if len(names) != len(set(names)):
         raise RuntimeError('Runtime PostgreSQL test discovery contains duplicates')
+    validate_required_tests(names)
     with psycopg.connect(**settings, autocommit=True) as admin:
         admin.execute(sql.SQL('CREATE DATABASE {}').format(sql.Identifier(database)))
         try:
+            admin.execute(sql.SQL('COMMENT ON DATABASE {} IS {}').format(
+                sql.Identifier(database), sql.Literal('centaeris-test-owner:' + ownership_token)))
+            for name in names:
+                print('Runtime PostgreSQL selected: ' + name, flush=True)
             for command in commands:
                 subprocess.run([*command, '--ignored', '--test-threads=1'], cwd=root,
                                env=env, check=True)

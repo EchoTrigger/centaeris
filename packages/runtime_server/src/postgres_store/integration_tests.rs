@@ -38,6 +38,7 @@ static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 mod checkpoint_requests;
 mod cleanup_migration_tests;
 mod execution_instance_tests;
+mod owned_database;
 mod residency_tests;
 mod retained_instance_tests;
 mod snapshot_cas_tests;
@@ -342,6 +343,7 @@ fn test_url() -> String {
 
 fn reset_store(url: &str) {
     let mut client = Client::connect(url, NoTls).expect("connect test Postgres");
+    owned_database::require_owned_database(&mut client);
     client.batch_execute("CREATE TABLE IF NOT EXISTS public.app_core_agentrun(id text PRIMARY KEY, session_id text NOT NULL, \"preAdmissionCancelledAt\" timestamptz); DELETE FROM public.app_core_agentrun;").expect("reset hosted run receipts");
     client
         .batch_execute("DROP SCHEMA IF EXISTS runtime CASCADE")

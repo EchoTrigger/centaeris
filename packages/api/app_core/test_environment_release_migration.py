@@ -1,11 +1,29 @@
 """Reconstruct only the last authoritative business release, preserving history."""
-from django.db import transaction
+import importlib
+from types import SimpleNamespace
+from django.db import IntegrityError, NotSupportedError, transaction
 from django.db.migrations.executor import MigrationExecutor
-from django.test import TransactionTestCase
+from django.test import SimpleTestCase, TransactionTestCase
 
 from .migration_testing import isolated_migration_database
 from .runtime_contract import authorization_digest, authorization_signature
 from .test_agent_run_authorization import fixture, KEY
+
+
+class EnvironmentReleaseBackendTests(SimpleTestCase):
+    def test_backend_dispatch_keeps_sqlite_structural_and_rejects_unknown_backend(self):
+        migration = importlib.import_module("app_core.migrations.0018_environment_release_receipts")
+        statements = []
+        editor = SimpleNamespace(connection=SimpleNamespace(vendor="sqlite"),
+            execute=lambda sql, params=None: statements.append(sql))
+        for operation in (migration.install_immutability, migration.remove_immutability):
+            operation(None, editor)
+        self.assertEqual(statements, [])
+        editor.connection.vendor = "unknown"
+        for operation in (migration.install_immutability, migration.remove_immutability):
+            with self.assertRaises(NotSupportedError):
+                operation(None, editor)
+        self.assertEqual(statements, [])
 
 
 class EnvironmentReleaseMigrationTests(TransactionTestCase):
@@ -60,6 +78,21 @@ class EnvironmentReleaseMigrationTests(TransactionTestCase):
             with self.assertRaisesRegex(RuntimeError, "release_history_requires_forward_migration"):
                 MigrationExecutor(database).migrate(self.old)
             self.assertEqual(Receipt.count(), 1)
+
+    def test_postgres_reconstructed_release_rejects_raw_update_and_delete(self):
+        from django.db import connection
+        if connection.vendor != "postgresql":
+            self.skipTest("requires production PostgreSQL immutability triggers")
+        with isolated_migration_database(self.old) as database:
+            self.seed(database)
+            MigrationExecutor(database).migrate(self.current)
+            for sql in ("UPDATE app_core_agentrunenvironmentrelease SET controller_epoch=8",
+                        "DELETE FROM app_core_agentrunenvironmentrelease"):
+                with self.assertRaisesRegex(IntegrityError, "environment_release_immutable"):
+                    with transaction.atomic(using=database.alias), database.cursor() as cursor:
+                        cursor.execute(sql)
+            state = MigrationExecutor(database).loader.project_state(self.current).apps
+            self.assertEqual(state.get_model("app_core", "AgentRunEnvironmentRelease").objects.using(database.alias).count(), 1)
 
     def test_inconsistent_candidate_grant_explicitly_refuses_forward_migration(self):
         with isolated_migration_database(self.old) as database:
