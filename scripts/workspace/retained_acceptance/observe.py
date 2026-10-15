@@ -9,6 +9,8 @@ query with the already persisted controller fence, including one stale query.
 import argparse
 
 import json
+import inspect
+from workload import command_facts, agents_manifest_facts
 
 from pathlib import Path
 
@@ -44,6 +46,25 @@ def task_rpc(container_id,fence,operation="list",**arguments):
     return response
 
 
+def validate_terminal(state, _legacy_opt_in=False):
+    if state.get('releaseReceiptCount') != 1 or state.get('cleanupComplete') is not True:
+        raise RuntimeError('Run lacks exact release and completed cleanup receipts')
+    terminal=state.get('coreTerminal') or {}
+    if state.get('coreTerminalCount') != 1:
+        raise RuntimeError('Run lacks one actual Core terminal fact')
+    if state.get('runStatus') != 'completed' or terminal.get('type') != 'agent_run_completed':
+        raise RuntimeError('Run did not actually complete')
+
+
+def history_observation(state):
+    validate_terminal(state)
+    facts=state.get('workloadObservation')
+    if (state.get('historySuccessfulCommands')!=70 or state.get('historyAttemptedCommands')!=70
+            or facts!={'completedCommands':70,'attemptedCommands':70,'distinctCallIds':70}):
+        raise RuntimeError('same-Run history lacks70 distinct actual successful commands')
+    return facts
+
+
 def main():
 
     parser=argparse.ArgumentParser()
@@ -64,7 +85,7 @@ def main():
 
         raise SystemExit("file must be a safe relative workspace path")
 
-    code='''
+    code=inspect.getsource(command_facts)+'\n'+inspect.getsource(agents_manifest_facts)+'\n'+'''
 
 import json
 
@@ -72,13 +93,39 @@ from django.conf import settings
 
 from django.db import connection
 
-from app_core.models import AgentRun, AgentRunEnvironmentRelease
+from app_core.models import AgentRun, AgentRunEnvironmentRelease, SessionEvent
 
 assert settings.DATABASES['default']['NAME']=='retained_acceptance'
 
-run=AgentRun.objects.select_related('environment').get(id=RUN)
+run=AgentRun.objects.select_related('environment').get(id=RUN_ID_LITERAL)
 
-assert run.status=='completed', 'Run is not actually completed'
+records=list(SessionEvent.objects.filter(agent_run=run,session_id=run.session_id,
+ workspace_id=run.workspace_id,session_level=False).order_by('agent_run_sequence'))
+terminals=[event for event in records if event.payload.get('type') in
+ ('agent_run_completed','agent_run_failed','agent_run_interrupted')]
+terminal=terminals[0] if len(terminals)==1 and records[-1].eventId==terminals[0].eventId else None
+core_terminal=None if terminal is None else {'eventId':terminal.eventId,'type':terminal.payload['type'],
+ 'reasonType':terminal.payload.get('payload',{}).get('reasonType'),'atMs':terminal.createdAtMs}
+calls=[event.payload['payload'] for event in records if event.payload.get('type')=='tool_call'
+ and event.payload.get('payload',{}).get('toolName')=='bash'
+ and event.payload['payload'].get('normalizedInput',{}).get('command')=='printf acceptance-history-ok']
+call_ids={call['callId'] for call in calls}
+successful=[event for event in records if event.payload.get('type')=='tool_result'
+ and event.payload.get('payload',{}).get('callId') in call_ids
+ and event.payload['payload'].get('resultState')=='successWithOutput'
+ and 'acceptance-history-ok' in event.payload['payload'].get('modelContent','')]
+
+workload_observation=None
+if run.prompt=='ACCEPTANCE_HISTORY':
+ workload_observation=command_facts(records,'acceptance-history-ok',70)
+elif run.prompt=='ACCEPTANCE_LONG_RUN':
+ workload_observation=command_facts(records,'acceptance-long-',1000)
+ with connection.cursor() as c:
+  c.execute('SELECT manifest_digest,manifest_json FROM runtime.model_observation_manifests WHERE session_id=%s',[run.session_id])
+  manifests=c.fetchall()
+  c.execute('SELECT content_digest,content_json FROM runtime.model_observation_contents WHERE session_id=%s AND kind=%s',[run.session_id,'message'])
+  contents=c.fetchall()
+ workload_observation['agentsInstructions']=agents_manifest_facts(records,manifests,contents,'Keep all acceptance commands bounded.\\n')
 
 release=AgentRunEnvironmentRelease.objects.get(agent_run=run)
 
@@ -110,11 +157,17 @@ with connection.cursor() as c:
 
 print(json.dumps({'agentRunId':run.id,'sessionId':run.session_id,'environmentId':env.id,'instanceId':instances[0],
 
+ 'runStatus':run.status,'runPrompt':run.prompt,'coreTerminal':core_terminal,'coreTerminalCount':len(terminals),
+ 'releaseReceiptCount':AgentRunEnvironmentRelease.objects.filter(agent_run=run).count(),'cleanupComplete':receipt[1],
+ 'workloadObservation':workload_observation,'historySuccessfulCommands':len(successful),'historyAttemptedCommands':len(calls),
+ 'successfulOrdinaryCommands':sum(event.payload.get('type')=='tool_result'
+  and event.payload.get('payload',{}).get('toolName')=='bash'
+  and event.payload['payload'].get('resultState') in ('successWithOutput','successNoOutput') for event in records),
  'containerId':residents[0][0],'resources':residents[0][1:5], 'hostId':residents[0][5], 'releaseReceiptId':release.id,
 
  'fence':{'environmentInstanceId':instances[0],'controllerId':run.id,'controllerEpoch':env.controller_epoch,'controllerPurpose':'cleanup'}}))
 
-'''.replace("RUN",repr(args.run))
+'''.replace("RUN_ID_LITERAL",repr(args.run))
 
     cmd=["docker","compose","-f",str(args.compose),"exec","-T","api","/app/.venv/bin/python","manage.py","shell","-c",code]
 
@@ -123,6 +176,8 @@ print(json.dumps({'agentRunId':run.id,'sessionId':run.session_id,'environmentId'
     # Django shell may print its standard auto-import banner.
 
     state=json.loads(next(line for line in reversed(raw.splitlines()) if line.startswith("{")))
+
+    validate_terminal(state)
 
     def rpc(fence,operation="list",**arguments):
         return task_rpc(state["containerId"],fence,operation,**arguments)
@@ -147,23 +202,33 @@ print(json.dumps({'agentRunId':run.id,'sessionId':run.session_id,'environmentId'
 
     for task in listed["tasks"]:
 
-        if task["scope"]=={"kind":"run","runId":state["agentRunId"]} and not task["cleanupComplete"]:
+        if task["scope"]=={"kind":"run","runId":state["agentRunId"]} and (task["state"]!="exited" or not task["cleanupComplete"]):
 
             raise RuntimeError("Run-scoped task cleanup incomplete")
 
     state["backgroundTaskIds"]=sorted(task["taskId"] for task in backgrounds)
 
     state["taskService"]=tasks
+    # The fixed-path root-only inspector opens SQLite read-only in a short
+    # transaction. Copying a live database would not provide a safe snapshot.
+    from progress import inspect_store, validate_resource_bytes
+    state["store"]=inspect_store(state['containerId'],state['fence'])
     sizes=subprocess.run(['docker','exec','--user','0:0',state['containerId'],'/bin/sh','-c',
-        'wc -c < /run/centaeris/task-control/journal.json; du -sb /run/centaeris/task-output'],
+        'du -sb /run/centaeris/task-control /run/centaeris/task-output'],
         check=True,capture_output=True,text=True).stdout.splitlines()
-    state['retention']={'journalBytes':int(sizes[0]),'outputDirectoryBytes':int(sizes[1].split()[0]),
+    state['retention']={'taskRecords':len(listed['tasks']),'controlDirectoryBytes':int(sizes[0].split()[0]),'outputDirectoryBytes':int(sizes[1].split()[0]),
         'activeTasks':sum(task['state']!='exited' for task in listed['tasks']),
-        'terminalTasks':sum(task['state']=='exited' for task in listed['tasks'])}
+        'terminalTasks':sum(task['state']=='exited' for task in listed['tasks']),
+        'activeRunTasks':sum(task['scope'].get('kind')=='run' and task['state']!='exited' for task in listed['tasks']),
+        'currentRunTerminalTasks':sum(task['scope']=={'kind':'run','runId':state['agentRunId']}
+            and task['state']=='exited' for task in listed['tasks'])}
+    validate_resource_bytes(state['retention'])
 
     digest=subprocess.run(["docker","exec",state["containerId"],"sha256sum","/mnt/data/" + args.file],check=True,capture_output=True,text=True).stdout.split()[0]
 
     state["fileSha256"]=digest
+    state['agentsFileSha256']=subprocess.run(['docker','exec',state['containerId'],'sha256sum',
+        '/mnt/data/AGENTS.md'],check=True,capture_output=True,text=True).stdout.split()[0]
     runtime_id=subprocess.run(["docker","compose","-f",str(args.compose),"ps","-q","runtime"],check=True,capture_output=True,text=True).stdout.strip()
     if not runtime_id:
         raise RuntimeError("dedicated Runtime container is missing")
@@ -176,7 +241,7 @@ print(json.dumps({'agentRunId':run.id,'sessionId':run.session_id,'environmentId'
 
         previous=json.loads(args.previous.read_text(encoding="utf-8"))
 
-        for key in ("sessionId","environmentId","instanceId","containerId","fileSha256","resources","backgroundTaskIds"):
+        for key in ("sessionId","environmentId","instanceId","containerId","fileSha256","agentsFileSha256","resources","backgroundTaskIds"):
 
             if state[key] != previous[key]:
 
@@ -230,6 +295,9 @@ print(json.dumps({'agentRunId':run.id,'sessionId':run.session_id,'environmentId'
                 raise RuntimeError('obsolete controller mutation accepted: '+operation)
             state['stale'+operation.title()+'Result']=rejected
 
+    if state["runPrompt"]=="ACCEPTANCE_HISTORY":
+        state["historyObservation"]=history_observation(state)
+
     args.result.write_text(json.dumps(state,indent=2),encoding="utf-8")
 
     print(json.dumps({"agentRunId":state["agentRunId"],"instanceId":state["instanceId"],"residentCount":1,"oldControllerRejected":state.get("oldControllerRejected",False)}))
@@ -237,4 +305,3 @@ print(json.dumps({'agentRunId':run.id,'sessionId':run.session_id,'environmentId'
 if __name__ == "__main__":
 
     main()
-

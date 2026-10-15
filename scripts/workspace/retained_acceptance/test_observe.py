@@ -70,6 +70,74 @@ class StaleProbeTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'canonical operation'):
             observe.stale_execute_fence(previous)
 
+class StrictTerminalTests(unittest.TestCase):
+    def state(self):
+        return {'runStatus':'completed','coreTerminal':{'type':'agent_run_completed'},
+            'releaseReceiptCount':1,'cleanupComplete':True,'coreTerminalCount':1}
+
+    def test_exact_completed_terminal_and_release_required(self):
+        observe.validate_terminal(self.state(),False)
+        for changes in ({'runStatus':'failed','coreTerminal':{'type':'agent_run_failed','reasonType':'task_history_capacity'}},
+                {'releaseReceiptCount':0},{'cleanupComplete':False},{'coreTerminalCount':2}):
+            with self.subTest(changes=changes),self.assertRaises(RuntimeError):
+                observe.validate_terminal(self.state()|changes,True)
+
+    def test_history_requires70_actual_completed_commands(self):
+        state=self.state()|{'historyAttemptedCommands':70,'historySuccessfulCommands':70,
+            'workloadObservation':{'attemptedCommands':70,'completedCommands':70,'distinctCallIds':70}}
+        self.assertEqual(observe.history_observation(state)['completedCommands'],70)
+        for changes in ({'historySuccessfulCommands':21},{'historyAttemptedCommands':69},
+                {'workloadObservation':None},{'runStatus':'failed'}):
+            with self.subTest(changes=changes),self.assertRaises(RuntimeError):
+                observe.history_observation(state|changes)
+
+class StoredHistoryObservationTests(unittest.TestCase):
+    def test_embedded_database_observer_derives_metrics_from_actual_record_shapes(self):
+        import contextlib
+        import io
+        from types import ModuleType
+        records=[]
+        for index in range(21):
+            call='call-'+str(index)
+            records += [SimpleNamespace(eventId='call-event-'+str(index),payload={'type':'tool_call',
+                'payload':{'callId':call,'toolName':'bash','normalizedInput':{'command':'printf acceptance-history-ok'}}}),
+                SimpleNamespace(eventId='result-event-'+str(index),payload={'type':'tool_result',
+                    'payload':{'callId':call,'toolName':'bash','resultState':'successWithOutput','modelContent':'acceptance-history-ok'}})]
+        records.append(SimpleNamespace(eventId='empty-call',payload={'type':'tool_call',
+            'payload':{'callId':'empty-call','toolName':'bash','normalizedInput':{'command':'true'}}}))
+        records.append(SimpleNamespace(eventId='empty-success',payload={'type':'tool_result',
+            'payload':{'callId':'empty-call','toolName':'bash','resultState':'successNoOutput','modelContent':''}}))
+        records.append(SimpleNamespace(eventId='capacity-terminal',createdAtMs=100,
+            payload={'type':'agent_run_failed','payload':{'reasonType':'task_history_capacity'}}))
+        env=SimpleNamespace(id='env',controller_run_id='run',controller_purpose='cleanup',controller_released=True,controller_epoch=6)
+        run=SimpleNamespace(id='run',session_id='session',workspace_id='workspace',environment=env,status='failed',prompt='DIAGNOSTIC_HISTORY')
+        cursor=SimpleNamespace(execute=lambda *a:None,fetchall=unittest.mock.Mock(side_effect=[
+            [('instance',)],[('container',268435456,1000,128,67108864,'host')]]),fetchone=lambda:('instance',True))
+        connection=SimpleNamespace(cursor=lambda:contextlib.nullcontext(cursor))
+        models=ModuleType('app_core.models')
+        models.AgentRun=SimpleNamespace(objects=SimpleNamespace(select_related=lambda *a:SimpleNamespace(get=lambda **kw:run)))
+        models.SessionEvent=SimpleNamespace(objects=SimpleNamespace(filter=lambda **kw:SimpleNamespace(order_by=lambda *a:records)))
+        models.AgentRunEnvironmentRelease=SimpleNamespace(objects=SimpleNamespace(get=lambda **kw:SimpleNamespace(id='release'),
+            filter=lambda **kw:SimpleNamespace(count=lambda:1)))
+        conf=ModuleType('django.conf');conf.settings=SimpleNamespace(DATABASES={'default':{'NAME':'retained_acceptance'}})
+        db=ModuleType('django.db');db.connection=connection
+        class StopAfterDatabaseObservation(Exception):pass
+        def command(argv,**kwargs):
+            with patch.dict(sys.modules,{'django.conf':conf,'django.db':db,'app_core.models':models}),contextlib.redirect_stdout(io.StringIO()) as output:
+                exec(compile(argv[-1],'<actual-database-observer>','exec'),{})
+            observed=json.loads(output.getvalue())
+            self.assertEqual(observed['historySuccessfulCommands'],21)
+            self.assertEqual(observed['historyAttemptedCommands'],21)
+            self.assertEqual(observed['successfulOrdinaryCommands'],22)
+            self.assertEqual(observed['coreTerminal']['reasonType'],'task_history_capacity')
+            self.assertEqual(observed['coreTerminal']['eventId'],'capacity-terminal')
+            self.assertEqual(observed['releaseReceiptCount'],1)
+            self.assertIs(observed['cleanupComplete'],True)
+            raise StopAfterDatabaseObservation
+        with patch.object(sys,'argv',['observe','--compose','fixture','--run','run','--result','unused',
+                '--previous','previous']),patch.object(observe.subprocess,'run',side_effect=command):
+            with self.assertRaises(StopAfterDatabaseObservation):observe.main()
+
 
 if __name__=='__main__':
     unittest.main()

@@ -11,6 +11,8 @@ import json
 import uuid
 import os
 import ssl
+import re
+import hashlib
 
 def content_text(message):
 
@@ -88,7 +90,11 @@ def find_task_id(value):
 
     return None
 
-def next_call(request):
+def long_command(index):
+    return "printf '%%s\\n' %04d >> /mnt/data/retained-long-run-markers.txt; printf acceptance-long-%04d" % (index,index)
+
+
+def next_call(request, progress=None):
 
     messages=request["messages"]
 
@@ -110,19 +116,34 @@ def next_call(request):
 
             return None
 
-        return "background_task_start", {"program":"/bin/sh","args":["-c","printf 'retained acceptance file\\n' > /mnt/data/retained-acceptance.txt; exec sleep 7200"],"cwd":"/mnt/data","timeout_ms":7500000}
+        return "background_task_start", {"program":"/bin/sh","args":["-c","printf 'retained acceptance file\\n' > /mnt/data/retained-acceptance.txt; printf 'Keep all acceptance commands bounded.\\n' > /mnt/data/AGENTS.md; exec sleep 14400"],"cwd":"/mnt/data","timeout_ms":14700000}
 
     if "ACCEPTANCE_HISTORY" in marker:
-        if replies and 'task_history_capacity' in content_text(replies[-1]):
-            if not all('acceptance-history-ok' in content_text(reply) for reply in replies[:-1]):
-                raise ValueError('history capacity followed an unrelated failure')
-            return None  # Recoverable terminal retention bound; next Run must admit work.
         if len(replies) < 70:
             if replies and "acceptance-history-ok" not in content_text(replies[-1]):
                 raise ValueError("history command failed instead of completing")
             return "bash", {"command":"printf acceptance-history-ok"}
         if "acceptance-history-ok" not in content_text(replies[-1]):
             raise ValueError("last history command failed")
+        return None
+
+    if "ACCEPTANCE_LONG_RUN" in marker:
+        count=0
+        if replies:
+            matches=set(re.findall(r'(?<![A-Za-z0-9_-])acceptance-long-(\d{4})(?!\d)',content_text(replies[-1])))
+            if len(matches)!=1:
+                raise ValueError('long Run command did not return its unique actual output')
+            count=int(matches.pop())+1
+        if not 0<=count<=1000:
+            raise ValueError('long Run has an unexpected tool count')
+        if progress is not None:
+            if marker not in progress and len(progress)>=16:
+                raise ValueError('bounded acceptance-model progress slots exhausted')
+            if count<progress.get(marker,0):
+                raise ValueError('long Run context lost progress; refusing to restart sequence')
+            progress[marker]=count
+        if count < 1000:
+            return 'bash', {'command':long_command(count)}
         return None
 
     if "ACCEPTANCE_RUN_B" in marker:
@@ -155,7 +176,21 @@ def next_call(request):
 
     raise ValueError("unsupported acceptance prompt or unexpected tool round")
 
+LONG_INSTRUCTIONS='Keep all acceptance commands bounded.'
+
+
+def instructions_observation(request, call):
+    if not call or call[0]!='bash' or 'acceptance-long-' not in call[1].get('command',''):
+        return None
+    if not any(LONG_INSTRUCTIONS in content_text(message) for message in request['messages']):
+        raise ValueError('long Run model request lacks the actual AGENTS.md instructions')
+    return {'kind':'automaticInstructionsObserved','commandIndex':int(call[1]['command'][-4:]),
+        'instructionSha256':hashlib.sha256((LONG_INSTRUCTIONS+'\n').encode()).hexdigest()}
+
+
 class Handler(BaseHTTPRequestHandler):
+
+    progress={}  # Bounded fixture bookkeeping; authoritative acceptance uses Core events.
 
     def log_message(self,*args):
 
@@ -177,7 +212,10 @@ class Handler(BaseHTTPRequestHandler):
 
             request=json.loads(self.rfile.read(size))
 
-            call=next_call(request)
+            call=next_call(request,self.progress)
+            observation=instructions_observation(request,call)
+            if observation is not None:
+                print(json.dumps(observation),flush=True)
 
             if call and call[0] not in {tool["function"]["name"] for tool in request.get("tools",[])}:
 
@@ -200,13 +238,6 @@ class Handler(BaseHTTPRequestHandler):
         else:
 
             delta={"role":"assistant","content":"Retained acceptance Run complete."}
-            last_user=max(index for index,message in enumerate(request['messages']) if message.get('role')=='user')
-            if 'ACCEPTANCE_HISTORY' in content_text(request['messages'][last_user]):
-                replies=[message for message in request['messages'][last_user+1:] if message.get('role')=='tool']
-                rejected=bool(replies and 'task_history_capacity' in content_text(replies[-1]))
-                print(json.dumps({'kind':'historyObservation','completedCommands':len(replies)-int(rejected),
-                    'attemptedCommands':len(replies),'explicitRecoverableCapacity':rejected}),flush=True)
-
             reason="stop"
 
         self.send_response(200)

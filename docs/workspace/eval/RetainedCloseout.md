@@ -78,6 +78,17 @@ database ownership use `scripts/workspace/runtime_outbox_gate.py`; record its
 explicit expected and executed identities. A passing total cannot replace an
 omitted ignored test. Do not run the previously stopped full local API suite.
 
+
+The instance-private SQLite task index is control/replay state, not Session
+history or the resource ledger. Import old JSON state under the existing
+exclusive lock, verify fence/task/request/pending identities, retain the original
+journal and switch only after the import commits. Never keep JSON and SQLite as
+two writable authorities. Existing active old-version instances retain compatible
+consumers and images until drained or explicitly retired; replacing/restarting
+the task supervisor does not constitute process adoption. A rollback must read
+the new index or use a verified conversion with no active instances. Files on
+private tmpfs do not create a host-power-loss recovery guarantee.
+
 ## Physical lifecycle sequence
 
 1. Start Run A through the API and Worker. Request one environment task that
@@ -94,14 +105,21 @@ omitted ignored test. Do not run the previously stopped full local API suite.
    outer Runtime authorization evidence from direct task-service fence evidence.
 5. Complete at least 100 sequential uses/releases on this same live instance.
    Retain the background task. Record active/terminal tasks, output bytes,
-   receipts, journal bytes and task-domain count before/after each retention
-   boundary. Exercise more than 64 completed tasks within one Run and across
-   Runs; record either successful retirement/admission or the documented
-   recoverable rejection and continued cleanup availability.
-6. Exercise more than 256 short inputs and near-journal-capacity admission.
+   indexed replay receipts, whole control/output directory bytes and task-domain
+   count before/after each retention boundary. Every Run must complete; a
+   cumulative-history rejection does not satisfy this sequence. Separately,
+   complete at least 1000 ordinary commands/internal file-operation combinations
+   within one Run, with automatic AGENTS.md reads enabled and the environment
+   background task alive. Record actual command/helper identities, a real
+   controller restart during that Run, active tasks <=32, hot records <=64 and
+   bounded storage/output. The sample count is not a new product limit.
+6. Exercise more than 256 short inputs and near-control-storage admission.
    Confirm input rejection cannot prevent terminate/EndRun or poison existing
    tasks. Replay old starts and inputs before/after retirement, lose one ACK,
    restart the controller and retry: no duplicate spawn or input side effect.
+   Include same-key/different-request rejection, cold-record Query and explicit
+   output gaps; retain the last recoverable output until its safe release fact.
+   A lost spawn/input acknowledgement remains unknown rather than re-executing.
 7. Start a task whose descendant double-forks and calls setsid, alongside an
    unrelated task. Terminate the first and require its cgroup to be empty while
    the second remains alive. Process-group disappearance alone is insufficient.

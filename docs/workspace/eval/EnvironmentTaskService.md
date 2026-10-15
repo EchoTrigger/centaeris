@@ -34,6 +34,24 @@ a recovery checkpoint. `/mnt/data` is a bounded tmpfs, not a persistent disk.
 Task output has bounded retention and reports cursor gaps. It is not an unlimited
 log archive. Archive uploads and cold restoration require separate acceptance.
 
+The active-task budget (32) and hot-record cache (64) are resource boundaries,
+not a Run's cumulative task limit. Same-Run sequential work must progress after
+64 completed helpers/commands. The private SQLite index preserves stable task
+and operation identities when hot objects retire; a cold Query or old operation
+retry cannot become a new spawn. Output completion alone is not consumer
+persistence acknowledgement. The current narrow design retains compact output
+in the private bounded store until authoritative Run closure instead of adding
+a generic ACK/watermark protocol. Index, transaction, temporary and output files
+all count toward storage pressure, with reserved capacity for termination,
+EndRun and maintenance. Private tmpfs index storage gives no host-loss recovery.
+
+The final real-chain gate requires at least 1000 completed commands and automatic
+AGENTS.md observations in one Run, a live environment task, controller restart,
+actual command/helper evidence and bounded live metrics. Keep this separate from
+the 100 completed cross-Run use/release sequence and isolated fault gates. A
+clearly reported cumulative-history failure does not satisfy either gate.
+
+
 Run the ordinary `hosted_execution` tests on Linux. The ignored tests in
 `task_service::linux::tests` additionally require an explicitly delegated,
 disposable cgroup v2 subtree, supplied by `CENTAERIS_TASK_TEST_CGROUP_ROOT`.
@@ -52,7 +70,7 @@ the acceptance condition.
 | Capability | Retained support |
 | --- | --- |
 | Linux Docker runc with verified systemd cgroup v2 hierarchy | Only accepted backend; no silent fallback |
-| Ordinary filesystem helpers | Run-scoped tasks; consume the same bounded task/input budgets |
+| Ordinary filesystem helpers | Run-scoped supervised work; finished hot objects may retire within the same Run while replay/output facts remain in the private index |
 | Registered environment tasks | Same live instance only; no host-loss or supervisor-memory recovery |
 | Privileged helper, input materialization, MCP, lifecycle hooks | Unsupported; input and extension combinations reject before Worker execution dispatch, helper dispatch explicitly rejects |
 | Skills and ordinary CLI packages | Subject to existing authorization and execution policy |

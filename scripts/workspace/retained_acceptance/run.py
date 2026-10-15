@@ -4,6 +4,7 @@ The caller authorizes destruction only of this generated fixture's exact retaine
 instance. Private credentials are read locally and never included in evidence.
 """
 import argparse
+from collections import deque
 import hashlib
 import json
 from pathlib import Path
@@ -12,11 +13,68 @@ import sys
 import time
 import urllib.request
 import uuid
+from workload import instructions_facts
+from progress import probe_reclaimed_controller
+
+
+def append_command_evidence(path, sequence, argv, result):
+    limit=1024*1024
+    row={'sequence':sequence,'command':argv,'exitCode':result.returncode,'outputTruncated':False}
+    for name in ('stdout','stderr'):
+        data=getattr(result,name).encode()
+        row[name+'Bytes']=len(data)
+        row[name+'Sha256']=hashlib.sha256(data).hexdigest()
+        row[name]=data[:limit].decode(errors='replace')
+        row['outputTruncated']|=len(data)>limit
+    with path.open('a',encoding='utf-8') as stream:
+        stream.write(json.dumps(row)+'\n')
+    if row['outputTruncated']:
+        raise RuntimeError('command evidence output exceeded1MiB per stream; bounded diagnostic preserved')
+
+
+class ProgressEvidence:
+    """Retain a bounded window and monotonic aggregates over every observation."""
+    def __init__(self):
+        self.samples=deque(maxlen=256)
+        self.count=0
+        self.maxima={}
+
+    def record(self,sample):
+        self.count+=1
+        self.samples.append(sample)
+        for section in ('store','live'):
+            for key,value in sample.get(section,{}).items():
+                if type(value) is int:
+                    name=section+'.'+key
+                    self.maxima[name]=max(value,self.maxima.get(name,0))
+
+    def snapshot(self):
+        return {'observationCount':self.count,'retainedSampleLimit':256,
+            'retainedSamples':list(self.samples),'maxima':self.maxima}
+
+
+def retryable_observation(result):
+    if result.returncode!=75:return False
+    try:
+        value=json.loads(result.stderr.strip().splitlines()[-1])
+    except (ValueError,IndexError):return False
+    return (isinstance(value,dict) and value.get('schema')=='retained.acceptance.observation.v1'
+        and value.get('status')=='notReady' and isinstance(value.get('reason'),str))
+
+
+def history_metrics(state):
+    facts=state.get('historyObservation')
+    if (state.get('runStatus')!='completed'
+            or (state.get('coreTerminal') or {}).get('type')!='agent_run_completed'
+            or facts!={'attemptedCommands':70,'completedCommands':70,'distinctCallIds':70}):
+        raise RuntimeError('same-Run history lacks70 distinct actual successful commands')
+    return facts
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--fixture', required=True, type=Path)
+    parser.add_argument('--long-run',action='store_true',help='separate1000-command same-Run gate; use a fresh fixture')
     parser.add_argument('--acknowledge-tmpfs-loss', action='store_true', required=True)
     args = parser.parse_args()
     root = args.fixture.resolve(strict=True)
@@ -48,13 +106,13 @@ def main():
     helpers = Path(__file__).parent
     evidence = root / ('evidence-' + uuid.uuid4().hex)
     evidence.mkdir(mode=0o700)
-    transcript = []
+    command_sequence=0
 
     def command(argv):
+        nonlocal command_sequence
         result = subprocess.run(argv, capture_output=True, text=True, timeout=180)
-        transcript.append({'command':argv, 'exitCode':result.returncode,
-                           'stdout':result.stdout, 'stderr':result.stderr})
-        (evidence / 'commands.json').write_text(json.dumps(transcript, indent=2))
+        command_sequence+=1
+        append_command_evidence(evidence/'commands.jsonl',command_sequence,argv,result)
         return result
 
     def dc(*parts):
@@ -76,14 +134,67 @@ def main():
                 '--run', admitted['agentRunId'], '--result', str(path)]
         if previous:
             argv += ['--previous', str(previous)]
-        deadline = time.monotonic() + 120
+        deadline = time.monotonic() + (7200 if args.long_run else 120)
         while True:
             result = command(argv)
             if not result.returncode:
                 return json.loads(path.read_text()), path
             if time.monotonic() >= deadline:
-                raise RuntimeError('Run release/physical observation failed within120s')
+                raise RuntimeError('Run release/physical observation failed within its bounded deadline')
             time.sleep(1)
+
+    progress_evidence=ProgressEvidence()
+    long_restart=None
+    def wait_long_progress(admitted, previous_path):
+        nonlocal long_restart
+        deadline=time.monotonic()+7200
+        while time.monotonic()<deadline:
+            sample_path=evidence/'long-live.json'
+            result=command([sys.executable,str(helpers/'progress.py'),'--compose',str(compose),
+                '--run',admitted['agentRunId'],'--previous',str(previous_path),'--result',str(sample_path)])
+            if result.returncode:
+                if not retryable_observation(result):
+                    raise RuntimeError('fatal live observation; preserve fixture and exact failed command')
+                time.sleep(1)
+                continue
+            sample=json.loads(sample_path.read_text())
+            progress_evidence.record(sample)
+            if progress_evidence.count%32==0 or sample['runStatus']=='completed':
+                (evidence/'long-live-samples.json').write_text(json.dumps(progress_evidence.snapshot(),indent=2))
+            if sample['completedCommands']>=100 and long_restart is None:
+                if sample['runStatus']=='completed':
+                    raise RuntimeError('long Run completed before a real mid-Run restart could be tested')
+                def runtime_state():
+                    identity=dc('ps','-q','runtime')
+                    if identity.returncode or not identity.stdout.strip():
+                        raise RuntimeError('long Run Runtime identity unavailable')
+                    result=command(['docker','inspect',identity.stdout.strip(),'--format','{{json .State}}'])
+                    if result.returncode:raise RuntimeError('long Run Runtime state unavailable')
+                    return json.loads(result.stdout)
+                before=runtime_state()
+                if dc('restart','runtime').returncode:raise RuntimeError('mid-Run Runtime restart failed')
+                after=runtime_state()
+                if (not after['Running'] or before['Pid']==after['Pid']
+                        or before['StartedAt']==after['StartedAt']):
+                    raise RuntimeError('mid-Run Runtime process did not actually restart')
+                long_restart={'before':before,'after':after,'completedCommandsBefore':sample['completedCommands'],
+                    'beforeFence':sample['fence'],'controllerReclaim':None}
+                (evidence/'long-runtime-restart.json').write_text(json.dumps(long_restart,indent=2))
+            if (long_restart is not None and long_restart['controllerReclaim'] is None
+                    and sample['runStatus']=='running'
+                    and sample['fence']['controllerPurpose']=='execute'
+                    and sample['fence']['controllerEpoch']>long_restart['beforeFence']['controllerEpoch']):
+                long_restart['controllerReclaim']=probe_reclaimed_controller(sample['containerId'],
+                    long_restart['beforeFence'],sample['fence'],sample['live']['backgroundTaskIds'][0])
+                (evidence/'long-runtime-restart.json').write_text(json.dumps(long_restart,indent=2))
+            if sample['runStatus']=='completed':
+                if (sample['completedCommands']!=1000 or long_restart is None
+                        or long_restart['controllerReclaim'] is None
+                        or progress_evidence.maxima.get('store.indexedRunTasks',0)<=1000):
+                    raise RuntimeError('long Run lacks complete work and mid-Run restart evidence')
+                return
+            time.sleep(1)
+        raise RuntimeError('long Run progress exceeded7200s; fixture preserved')
 
     a = admission('ACCEPTANCE_RUN_A', 'acceptance-a-' + uuid.uuid4().hex)
     state_a, path_a = observed(a, 'observed-a')
@@ -92,27 +203,43 @@ def main():
     candidate_image=command(['docker','image','inspect','--format','{{.Id}}',project+'-general:fixed'])
     if candidate_image.returncode:
         raise RuntimeError('candidate tools image identity unavailable')
-    b = admission('ACCEPTANCE_RUN_B', 'acceptance-b-' + uuid.uuid4().hex, a['sessionId'])
+    b = admission('ACCEPTANCE_LONG_RUN' if args.long_run else 'ACCEPTANCE_RUN_B', 'acceptance-b-' + uuid.uuid4().hex, a['sessionId'])
+    if args.long_run:
+        wait_long_progress(b,path_a)
     state, _ = observed(b, 'observed-b', path_a)
-    for index in range(98):
+    completed_ordinary=state_a['successfulOrdinaryCommands']+state['successfulOrdinaryCommands']
+    history=None
+    for index in range(0 if args.long_run else 98):
         marker = 'ACCEPTANCE_HISTORY' if index == 0 else 'ACCEPTANCE_RUN_B'
         admitted = admission(marker, 'acceptance-use-' + str(index) + '-' + uuid.uuid4().hex,
                              a['sessionId'])
         state, _ = observed(admitted, 'observed-use-' + str(index), path_a)
-    model_logs=dc('logs','--no-log-prefix','model')
-    history=[]
-    for line in model_logs.stdout.splitlines():
-        try:
-            item=json.loads(line)
-        except ValueError:
-            continue
-        if item.get('kind')=='historyObservation':
-            history.append(item)
-    if (model_logs.returncode or len(history)!=1
-            or not 1<=history[0]['completedCommands']<=64
-            or not history[0]['explicitRecoverableCapacity']
-            or history[0]['attemptedCommands']<=history[0]['completedCommands']):
-        raise RuntimeError('same-Run history did not provide successful commands and explicit recoverable capacity')
+        completed_ordinary+=state['successfulOrdinaryCommands']
+        if index==0:
+            history=history_metrics(state)
+    marker_proof=None
+    automatic_instructions=None
+    uses=2 if args.long_run else 100
+    if args.long_run:
+        facts=state.get('workloadObservation')
+        if (not isinstance(facts,dict) or {key:facts.get(key) for key in ('attemptedCommands','completedCommands','distinctCallIds')}
+                !={'attemptedCommands':1000,'completedCommands':1000,'distinctCallIds':1000}
+                or facts.get('agentsInstructions',{}).get('mainRequestsWithAgentsInstructions',0)<1000
+                or facts['agentsInstructions'].get('agentsFileSha256')!=state['agentsFileSha256']):
+            raise RuntimeError('long Run lacks1000 actual distinct successful command results')
+        logs=dc('logs','--no-color','--no-log-prefix','model')
+        if logs.returncode:raise RuntimeError('actual model-request metadata unavailable')
+        automatic_instructions=instructions_facts(logs.stdout.splitlines(),state['agentsFileSha256'])
+        (evidence/'automatic-instructions.json').write_text(json.dumps(automatic_instructions,indent=2))
+        markers=command(['docker','exec',state['containerId'],'head','-c','65537',
+            '/mnt/data/retained-long-run-markers.txt'])
+        if markers.returncode or markers.stdout.splitlines()!=['%04d'%i for i in range(1000)]:
+            raise RuntimeError('actual long-command side effects are missing, duplicated or reordered')
+        marker_proof={'lines':1000,'bytes':len(markers.stdout.encode()),
+            'sha256':hashlib.sha256(markers.stdout.encode()).hexdigest(),'exactSequence':True}
+        (evidence/'long-side-effect-proof.json').write_text(json.dumps(marker_proof,indent=2))
+    elif history is None or completed_ordinary <= 64:
+        raise RuntimeError('history pressure or cross-window command evidence missing')
 
     request = {'schema':'runtime.environment.retire.v1', 'operationId':'retire-' + uuid.uuid4().hex,
         'environmentId':state['environmentId'], 'instanceId':state['instanceId'],
@@ -153,11 +280,11 @@ with connection.cursor() as c:
  c.execute('SELECT count(*) FROM runtime.execution_instances WHERE environment_id=%s AND instance_id=%s',[ENV,INSTANCE])
  assert c.fetchone()[0]>0,'allocation history lost'
  c.execute('SELECT count(*) FROM app_core_agentrunenvironmentrelease r JOIN app_core_agentrun a ON a.id=r.agent_run_id WHERE a.environment_id=%s',[ENV])
- assert c.fetchone()[0]>=100,'release history lost'
+ assert c.fetchone()[0]==USES,'release count must match all actual uses'
 print(json.dumps({'maintenanceReceiptCount':len(receipt),'status':receipt[0][0],'residentHoldingCount':0,'historyPreserved':True}))
 """
     for key, value in [('OP',request['operationId']),('ENV',state['environmentId']),
-                       ('INSTANCE',state['instanceId']),('HOST',state['hostId'])]:
+                       ('INSTANCE',state['instanceId']),('HOST',state['hostId']),('USES',uses)]:
         query = query.replace(key, repr(value))
     verified = dc('exec', '-T', 'api', '/app/.venv/bin/python', 'manage.py', 'shell', '-c', query)
     if verified.returncode:
@@ -166,12 +293,18 @@ print(json.dumps({'maintenanceReceiptCount':len(receipt),'status':receipt[0][0],
     if result.get('status') != 'destroyed':
         raise RuntimeError('completed maintenance replay changed result')
     (evidence / 'summary.json').write_text(json.dumps({'sourceRevision':manifest['sourceRevision'],
-        'binarySha256':manifest['binarySha256'], 'uses':100,'physicalChain':'passed',
+        'binarySha256':manifest['binarySha256'], 'uses':uses,'physicalChain':'passed',
         'sourceTree':manifest['buildManifest']['sourceTree'],'baseImages':manifest['images'],
         'candidateToolsImageId':candidate_image.stdout.strip(),
         'maintenanceResponseDiscarded':True,'containerAbsent':True,'remoteCI':'not-evaluated',
-        'historyObservation':history[0],'nextRunRecoveredAfterHistory':True,
-        'completedOrdinaryCommandsAcrossRuns':98+history[0]['completedCommands'],
+        'completedRuns':uses,'failedRuns':0,'historyObservation':history,
+        'longRunObservation':state.get('workloadObservation') if args.long_run else None,
+        'longRunObservationCount':progress_evidence.count,'longRunRetainedSamples':len(progress_evidence.samples),'longRunRuntimeRestart':long_restart,
+        'longRunMaxIndexedRunTasks':progress_evidence.maxima.get('store.indexedRunTasks',0),
+        'longRunMetricMaxima':progress_evidence.maxima,
+        'longRunExtraIndexedTasksAreUncategorized':True if args.long_run else None,
+        'automaticInstructionsObservation':automatic_instructions,'longSideEffectProof':marker_proof,
+        'completedOrdinaryCommandsAcrossRuns':completed_ordinary,
         'unrun':['more-than256-inputs','near-journal-capacity','concurrent-run-retirement',
             'revoked-user-maintenance','unobservable-docker','descendant-task-isolation'],
         'evidenceDirectory':str(evidence)}, indent=2))
