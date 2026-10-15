@@ -22,7 +22,7 @@ def compaction_request(records, previous=''):
     return {'model':'retained-acceptance','messages':[{'role':'user','content':prompt}], 'max_tokens':4096}
 
 
-def result(index, status='ok', state='success_with_output'):
+def result(index, status='ok', state='successWithOutput'):
     return {'role':'tool','content':'acceptance-long-%04d' % index,
         'toolCallId':'call-%04d' % index,'name':'bash','status':status,'resultState':state}
 
@@ -46,6 +46,25 @@ class CompactionWireTests(unittest.TestCase):
         with urlopen(request,timeout=5) as response:
             return response.headers.get_content_type(),response.read().decode()
 
+    def test_canonical_camel_case_result_states_preserve_actual_success_and_failures(self):
+        for state,content in (('successWithOutput','acceptance-long-0000'),
+                ('successNoOutput',''),('successNoMatches','No matching files.'),
+                ('failed','failed acceptance-long-0009'),('denied','denied'),('aborted','aborted')):
+            success=state.startswith('success')
+            row=result(0,'ok' if success else 'error',state);row['content']=content
+            summary=model.compaction_summary(compaction_request([
+                {'role':'user','content':'ACCEPTANCE_LONG_RUN fixture'},row]))
+            with self.subTest(state=state):
+                self.assertIn('Failed tool results: %d.' % (0 if success else 1),summary)
+                if state=='successWithOutput':self.assertIn('Last successful output: `acceptance-long-0000`.',summary)
+                else:self.assertNotIn('Last successful output:',summary)
+
+    def test_noncanonical_result_state_spellings_are_rejected_without_aliases(self):
+        for state in ('success_with_output','success_without_output','success_no_matches','failure','unknown'):
+            with self.subTest(state=state),self.assertRaisesRegex(ValueError,'resultState'):
+                model.compaction_summary(compaction_request([
+                    {'role':'user','content':'ACCEPTANCE_LONG_RUN fixture'},result(0,'ok',state)]))
+
     def test_actual_nonstream_compaction_wire_returns_meaningful_json_summary(self):
         payload=compaction_request([{'role':'user','content':'ACCEPTANCE_LONG_RUN fixture'},result(499)])
         content_type,body=self.post(payload)
@@ -66,7 +85,7 @@ class CompactionWireTests(unittest.TestCase):
                 'name':'background_task_start','argumentsJson':json.dumps({'program':'/bin/sh',
                     'args':['-c',"printf fixture > /mnt/data/retained-acceptance.txt; printf bounded > /mnt/data/AGENTS.md; exec sleep 14400"]})}]},
             {'role':'tool','toolCallId':'start-a','name':'background_task_start','status':'ok',
-                'resultState':'success_with_output','content':json.dumps({'schema':'background_task.result.v1',
+                'resultState':'successWithOutput','content':json.dumps({'schema':'background_task.result.v1',
                     'taskId':'actual-background-a','state':'running','cleanupComplete':False,'output':[]})},
             {'role':'assistant','content':'Retained acceptance Run complete.'}]
         content_type,body=self.post(compaction_request(records))
@@ -108,9 +127,9 @@ class CompactionWireTests(unittest.TestCase):
         records=[{'role':'user','content':'ACCEPTANCE_LONG_RUN fixture'},result(499),
             {'role':'assistant','content':'','toolCalls':[{'toolCallId':'pending-500','name':'bash',
                 'argumentsJson':json.dumps({'command':model.long_command(500)})}]},
-            result(999,'error','failure'),
+            result(999,'error','failed'),
             {'role':'tool','toolCallId':'background','name':'background_task_list','status':'ok',
-                'resultState':'success_with_output','content':json.dumps({'tasks':[
+                'resultState':'successWithOutput','content':json.dumps({'tasks':[
                     {'taskId':'actual-background-task','state':'running','cleanupComplete':False}]})}]
         summary=model.compaction_summary(compaction_request(records))
         self.assertIn('Last successful output: `acceptance-long-0499`.',summary)
@@ -124,7 +143,7 @@ class CompactionWireTests(unittest.TestCase):
         self.assertIn('actual-background-task',repeated)
 
     def test_failed_result_details_survive_repeated_compaction(self):
-        failure=result(4,'error','failure')
+        failure=result(4,'error','failed')
         failure['content']='task_history_capacity: no command executed'
         summary=model.compaction_summary(compaction_request([
             {'role':'user','content':'ACCEPTANCE_LONG_RUN fixture'},result(3),failure]))
@@ -135,7 +154,7 @@ class CompactionWireTests(unittest.TestCase):
     def test_thousand_real_shaped_completed_tasks_keep_only_active_background_identity(self):
         records=[{'role':'user','content':'ACCEPTANCE_RUN_A'},
             {'role':'tool','toolCallId':'bg','name':'background_task_start','status':'ok',
-                'resultState':'success_with_output','content':json.dumps({
+                'resultState':'successWithOutput','content':json.dumps({
                     'schema':'background_task.result.v1','taskId':'live-background',
                     'state':'running','cleanupComplete':False})},
             {'role':'user','content':'ACCEPTANCE_RUN_B'},
@@ -156,11 +175,11 @@ class CompactionWireTests(unittest.TestCase):
         previous=model.compaction_summary(compaction_request([
             {'role':'user','content':'ACCEPTANCE_LONG_RUN fixture'},result(3),
             {'role':'tool','toolCallId':'bg','name':'background_task_start','status':'ok',
-                'resultState':'success_with_output','content':json.dumps({
+                'resultState':'successWithOutput','content':json.dumps({
                     'taskId':'live-background','state':'running','cleanupComplete':False})}]))
         summary=model.compaction_summary(compaction_request([
             {'role':'tool','toolCallId':'bg-query','name':'background_task_query','status':'ok',
-                'resultState':'success_with_output','content':json.dumps({
+                'resultState':'successWithOutput','content':json.dumps({
                     'taskId':'live-background','state':'exited','cleanupComplete':True})}],previous))
         self.assertNotIn('Observed taskId: `live-background`.',summary)
 

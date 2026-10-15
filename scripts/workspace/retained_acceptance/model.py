@@ -157,7 +157,10 @@ def compaction_summary(request):
         if row['role']!='tool':
             continue
         pending.pop(row['toolCallId'],None)
-        if row['status']!='ok' or row['resultState'] not in ('success_with_output','success_without_output'):
+        state=row['resultState']
+        if state not in ('successWithOutput','successNoOutput','successNoMatches','failed','denied','aborted'):
+            raise ValueError('unsupported canonical tool resultState')
+        if row['status']!='ok' or state not in ('successWithOutput','successNoOutput','successNoMatches'):
             failed+=1
             last_failure=json.dumps(row['content'][:384],ensure_ascii=True)
             continue
