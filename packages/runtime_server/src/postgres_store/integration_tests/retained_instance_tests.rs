@@ -18,6 +18,7 @@ const KEY: &[u8] = b"retained-test-key";
 mod allocation_mode_tests;
 mod cleanup_authority_tests;
 mod cleanup_receipt_tests;
+mod pre_admission_failure_tests;
 mod retirement_tests;
 fn controller_lease_digest(owner: &str) -> String {
     let mut hash = Sha256::new();

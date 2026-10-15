@@ -47,5 +47,10 @@
   "postgres_store::integration_tests::wait_handoff_tests::postgres_wait_handoff_expired_or_reclaimed_lease_publishes_nothing",
   "postgres_store::integration_tests::wait_handoff_tests::postgres_wait_handoff_lost_ack_reopens_immutable_snapshot",
   "postgres_store::integration_tests::wait_handoff_tests::postgres_wait_handoff_model_anchor_is_reobserved_before_publication",
-  "postgres_store::integration_tests::wait_handoff_tests::postgres_wait_handoff_source_change_rolls_back_publication"
+  "postgres_store::integration_tests::wait_handoff_tests::postgres_wait_handoff_source_change_rolls_back_publication",
+  "postgres_store::integration_tests::retained_instance_tests::pre_admission_failure_tests::postgres_pre_admission_failed_producer_commits_control_receipt_without_history",
+  "postgres_store::integration_tests::retained_instance_tests::pre_admission_failure_tests::postgres_pre_admission_failure_is_fenced_durable_and_blocks_history",
+  "postgres_store::integration_tests::retained_instance_tests::pre_admission_failure_tests::postgres_pre_admission_failure_rejects_admitted_or_cancelled_runs",
+  "postgres_store::integration_tests::retained_instance_tests::cleanup_authority_tests::postgres_cleanup_authority_accepts_bound_pre_admission_failure_and_rejects_reexecution",
+  "postgres_store::integration_tests::retained_instance_tests::cleanup_receipt_tests::postgres_cleanup_zero_history_failure_requires_fenced_receipt_before_never_allocated_cleanup"
 ]

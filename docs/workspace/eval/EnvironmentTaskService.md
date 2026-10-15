@@ -65,7 +65,10 @@ tools image with the new execution agent. Do not adopt unknown old instances.
 
 To upgrade or disable retained admission:
 
-1. Stop submitting new work to the retained cohort; inventory its bound Runs,
+1. Stop all admission writers for the retained cohort: public messages, pending
+   AgentInput dispatch, child work and work-return admission. Follow the
+   [coordinated admission boundary](../../development/SessionEnvironments.md).
+   Inventory its bound Runs,
    instances, active tasks, resource holdings and pending operations.
 2. Keep the matching Worker/Runtime consumers and tools image available for
    already-bound work. Complete Runs and reconcile cleanup/release receipts.

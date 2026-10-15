@@ -1888,7 +1888,7 @@ class AgentWorkReturn(models.Model):
 
     def save(self, *args, **kwargs):
         require_enum("AgentWorkReturn.fact_kind", self.fact_kind,
-            {"sessionTerminal", "preAdmissionCancellation", "lifecycleFailure"})
+            {"sessionTerminal", "preAdmissionCancellation", "preAdmissionFailure", "lifecycleFailure"})
         if self.work.operation.agentRunId != self.child_run_id or self.child_run.session_id != self.work_id:
             raise ValueError("agent_work_return_identity_mismatch")
         if not self._state.adding:

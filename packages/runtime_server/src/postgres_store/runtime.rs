@@ -1542,6 +1542,70 @@ impl PostgresSessionLog {
             )
         })
     }
+    /// Commit a hosted terminal fact before Core admission, under its Session
+    /// lock and the current canonical lifecycle job lease. No history is made up.
+    pub fn commit_pre_admission_failure(
+        &self,
+        agent_run_id: &str,
+        authorization_digest: &str,
+        fence: &RuntimeJobLeaseFence,
+    ) -> Result<(), String> {
+        run_postgres_blocking(|| {
+            self.connections.with_client(|client| {
+            let mut tx = client.transaction().map_err(|e| e.to_string())?;
+            tx.query_opt("SELECT id FROM public.app_core_session WHERE id=$1 AND workspace_id=$2 FOR UPDATE",
+                &[&self.session_id, &self.workspace_id]).map_err(|e| e.to_string())?
+                .ok_or("pre-admission failure session missing")?;
+            let row = tx.query_opt(
+                "SELECT r.session_id,r.workspace_id,r.\"preAdmissionCancelledAt\" IS NOT NULL,r.status,a.digest,a.payload::text FROM public.app_core_agentrun r LEFT JOIN public.app_core_agentrunauthorization a ON a.agent_run_id=r.id WHERE r.id=$1 FOR UPDATE OF r",
+                &[&agent_run_id],
+            ).map_err(|e| e.to_string())?.ok_or("pre-admission failure run missing")?;
+            if row.get::<_, String>(0) != self.session_id || row.get::<_, String>(1) != self.workspace_id
+                || row.get::<_, bool>(2) || row.get::<_, String>(3) == "cancelled"
+                || row.get::<_, Option<String>>(4).as_deref() != Some(authorization_digest)
+            {
+                return Err("pre-admission failure run binding mismatch".into());
+            }
+            let authorization: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
+                serde_json::from_str(&row.get::<_, Option<String>>(5).ok_or("pre-admission failure authorization missing")?)
+                    .map_err(|_| "pre-admission failure authorization malformed")?;
+            if authorization.agent_run_id != agent_run_id || authorization.session_id != self.session_id
+                || authorization.workspace_id != self.workspace_id
+            {
+                return Err("pre-admission failure authorization binding mismatch".into());
+            }
+            authorization.checked_binding(agent_run_id)?.verify_digest_binding(authorization_digest)?;
+            let expected_job = format!("agent_run.lifecycle:{agent_run_id}");
+            if fence.job_id != expected_job || fence.job_kind != AGENT_RUN_LIFECYCLE_JOB_KIND {
+                return Err(RUNTIME_JOB_LEASE_FENCE_REJECTED.into());
+            }
+            tx.query_opt(
+                "SELECT job_id FROM runtime.runtime_jobs WHERE job_id=$1 AND job_kind=$2 AND status='running' AND lease_owner=$3 AND session_id=$4 AND idempotency_key=$5 AND payload_ref=$6 AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint FOR UPDATE",
+                &[&fence.job_id, &fence.job_kind, &fence.lease_owner, &self.session_id,
+                    &format!("{expected_job}:{authorization_digest}"), &format!("record:agent_run:{agent_run_id}")],
+            ).map_err(|e| e.to_string())?.ok_or(RUNTIME_JOB_LEASE_FENCE_REJECTED)?;
+            let admitted: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM public.app_core_sessionevent WHERE agent_run_id=$1 AND NOT session_level)",
+                &[&agent_run_id]).map_err(|e| e.to_string())?.get(0);
+            if admitted { return Err("pre-admission failure rejected after Session admission".into()); }
+            if !super::pre_admission_failure::has_pre_admission_failure(&mut tx, &self.workspace_id, &self.session_id, agent_run_id, authorization_digest)? {
+                let failed_at_ms: i64 = tx.query_one("SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint", &[])
+                    .map_err(|e| e.to_string())?.get(0);
+                let receipt = super::pre_admission_failure::PreAdmissionFailure {
+                    schema: super::pre_admission_failure::SCHEMA.into(),
+                    workspace_id: self.workspace_id.clone(), session_id: self.session_id.clone(),
+                    agent_run_id: agent_run_id.into(), authorization_digest: authorization_digest.into(),
+                    job_id: fence.job_id.clone(), lease_owner: fence.lease_owner.clone(), failed_at_ms,
+                };
+                let payload = serde_json::to_string(&receipt).map_err(|e| e.to_string())?;
+                tx.execute("INSERT INTO runtime.runtime_events(event_id,session_id,task_id,event_type,at_ms,visibility,payload_json) VALUES($1,$2,$3,$4,$5,'internal',$6)",
+                    &[&super::pre_admission_failure::event_id(agent_run_id), &self.session_id, &agent_run_id,
+                        &super::pre_admission_failure::SCHEMA, &failed_at_ms, &payload]).map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())
+        })
+        })
+    }
+
     /// A hosted terminal receipt for cancellation before Session admission.
     /// It is committed under the same Session lock as admission, with a current
     /// lifecycle lease and a durable cancellation request. No model history is written.
@@ -1566,6 +1630,7 @@ impl PostgresSessionLog {
             if run.get::<_, String>(0) != self.session_id {
                 return Err("pre-admission session mismatch".into());
             }
+            super::pre_admission_failure::reject_history_after_failure(&mut tx, agent_run_id)?;
             let expected_job = format!("agent_run.lifecycle:{agent_run_id}");
             if fence.job_id != expected_job || fence.job_kind != AGENT_RUN_LIFECYCLE_JOB_KIND {
                 return Err(RUNTIME_JOB_LEASE_FENCE_REJECTED.into());
@@ -1866,6 +1931,7 @@ impl PostgresSessionLog {
             if session.get::<_, String>(0) != self.workspace_id {
                 return Err("chat session workspace binding mismatch".to_string());
             }
+            super::pre_admission_failure::reject_history_after_failure(&mut tx, agent_run_id)?;
             self.validate_input_binding(&mut tx, agent_run_id)?;
             if let Some(fence) = fence {
                 let lease_is_current = tx
@@ -2800,6 +2866,7 @@ impl PostgresSessionLog {
             if cancelled {
                 return Err("new user turn admission rejected after cancellation".into());
             }
+            super::pre_admission_failure::reject_history_after_failure(&mut tx, new_agent_run_id)?;
             self.validate_input_binding(&mut tx, new_agent_run_id)?;
             let mut entries = Vec::with_capacity(closure_events.len() + new_run_events.len());
             for closure_event in closure_events {

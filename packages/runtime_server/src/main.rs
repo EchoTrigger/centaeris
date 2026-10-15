@@ -1594,7 +1594,17 @@ fn terminalize_agent_run_failure(
         &mut committed_sequence,
         now_ms()?,
     )?;
-    if !events.is_empty() {
+    if events.is_empty() {
+        session_log.commit_pre_admission_failure(
+            &agent_run_start.agent_run_id,
+            &agent_run_start.authorization_digest,
+            &RuntimeJobLeaseFence {
+                job_id: lifecycle_job_id.to_string(),
+                job_kind: AGENT_RUN_LIFECYCLE_JOB_KIND.to_string(),
+                lease_owner: lifecycle_lease_owner.to_string(),
+            },
+        )?;
+    } else {
         let receipt = append_agent_run_session_records(
             runtime,
             &session_log,
@@ -4231,6 +4241,21 @@ fn commit_failed_agent_run(
     lease_fence: &RuntimeJobLeaseFence,
 ) -> Result<AgentRunStepOutcome, String> {
     failure_diagnostics::report(&agent_run_start.agent_run_id, "core_turn", internal_error);
+    // No Core turn exists before admission. Persist a fenced hosted failure
+    // instead of returning an HTTP-only terminal outcome or inventing history.
+    if session_record_sequence.is_empty() {
+        session_log.commit_pre_admission_failure(
+            &agent_run_start.agent_run_id,
+            &agent_run_start.authorization_digest,
+            lease_fence,
+        )?;
+        return Ok(AgentRunStepOutcome {
+            retry_at_ms: None,
+            disposition: "terminal",
+            terminal_state: Some("failed"),
+            transition_reason: transition_reason.to_string(),
+        });
+    }
     if provider_response_was_interrupted(internal_error) {
         return commit_interrupted_agent_run(
             runtime,
@@ -5610,6 +5635,18 @@ fn load_existing_terminal_state(
         if cancelled {
             return Ok(Some("cancelled"));
         }
+        let failed = store.with_client(|client| {
+            postgres_store::pre_admission_failure::has_pre_admission_failure(
+                client,
+                &agent_run_start.authorization.workspace_id,
+                &agent_run_start.authorization.session_id,
+                &agent_run_start.agent_run_id,
+                &agent_run_start.authorization_digest,
+            )
+        })?;
+        if failed {
+            return Ok(Some("failed"));
+        }
     }
     Ok(terminal)
 }
@@ -5639,7 +5676,18 @@ fn has_terminal_agent_run_identity(
     if rows.len() > 1 {
         return Err("terminal AgentRun identity conflict".to_string());
     }
-    Ok(rows.len() == 1)
+    if rows.len() == 1 {
+        return Ok(true);
+    }
+    let session = client.query_opt(
+        "SELECT workspace_id FROM app_core_session WHERE id=$1",
+        &[&session_id],
+    ).map_err(|error| format!("query terminal Session identity failed: {error}"))?
+        .ok_or("terminal Session identity missing")?;
+    postgres_store::pre_admission_failure::has_pre_admission_failure(
+        client, &session.get::<_, String>(0), session_id,
+        &identity.agent_run_id, &identity.authorization_digest,
+    )
     })
 }
 
@@ -6919,8 +6967,9 @@ mod tests {
                 .skill_md_path
                 .clone();
             let store = SqliteRuntimeStore::new(root.join("runtime.sqlite")).expect("store");
+            let jobs = Arc::new(store.job_store(129).expect("native test Job store"));
             let engine = AgentRuntime::new(
-                std::sync::Arc::new(store.job_store(129).expect("native test Job store")),
+                jobs.clone(),
                 store,
                 layer,
                 AgentRuntimeConfig {
@@ -6970,6 +7019,10 @@ mod tests {
             }
             // DiscoveryHost allows only the ordinary AGENTS.md probe; private
             // Memory and skill bodies are not read during prompt construction.
+            tokio::runtime::Runtime::new()
+                .expect("close runtime")
+                .block_on(jobs.close())
+                .expect("close isolated Job connection before removing its files");
         }
         std::fs::remove_dir_all(root).expect("remove isolated fixture");
     }

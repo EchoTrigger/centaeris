@@ -16,7 +16,7 @@ from app_core.app_delegations import DelegationRejected, session_authority_is_cu
 from app_core.assets import DeferredInputResolutionError
 from app_core.deferred_input import DeferredInputBindingError, input_storage_batch
 from app_core.models import AgentCoordinationSession, Artifact, SessionEvent
-from app_core.session_event import committed_session_terminal_state
+from app_core.session_event import committed_session_terminal_state, pre_admission_terminal_fact
 
 from .downloads import _is_code_preview
 from .office_preview import FORMATS, _owner, _preview_selection
@@ -33,7 +33,7 @@ router = Router(tags=['agent-previews'], by_alias=True)
 class RunFact(StrictSchema):
     agent_run_id: str
     status: Literal['queued', 'running', 'completed', 'failed', 'cancelled']
-    source_type: Literal['hostedRun', 'sessionEvent', 'preAdmissionCancellation']
+    source_type: Literal['hostedRun', 'sessionEvent', 'preAdmissionCancellation', 'preAdmissionFailure']
     event_id: str | None
     created_at_ms: int
 
@@ -87,9 +87,10 @@ def _run_fact(session):
     terminal = committed_session_terminal_state(run)
     if terminal is not None:
         event = SessionEvent.objects.filter(agent_run=run, session_level=False).order_by('-agent_run_sequence').first()
+        fact = pre_admission_terminal_fact(run) if event is None else None
         return {'agentRunId': run.pk, 'status': terminal,
-            'sourceType': 'sessionEvent' if event else 'preAdmissionCancellation', 'eventId': event.pk if event else None,
-            'createdAtMs': event.createdAtMs if event else int(run.preAdmissionCancelledAt.timestamp()*1000)}
+            'sourceType': 'sessionEvent' if event else fact['sourceType'], 'eventId': event.pk if event else None,
+            'createdAtMs': event.createdAtMs if event else fact['atMs']}
     if run.status not in {'queued', 'running'}:
         return None
     return {'agentRunId': run.pk, 'status': run.status, 'sourceType': 'hostedRun', 'eventId': None,

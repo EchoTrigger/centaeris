@@ -64,6 +64,109 @@ fn postgres_cleanup_preflight_pins_authority_before_other_terminal_side_effects(
 
 #[test]
 #[ignore = "requires owned disposable PostgreSQL cleanup database"]
+fn postgres_cleanup_zero_history_failure_requires_fenced_receipt_before_never_allocated_cleanup() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_url, store, mut db) = setup();
+    let mut r = run(&store, &mut db, "run-unallocated-failure", 1);
+    let run_id = r.original.agent_run_id.clone();
+    let digest = r.original.digest().unwrap();
+    db.execute(
+        "UPDATE public.app_core_agentrun SET status='failed' WHERE id=$1",
+        &[&run_id],
+    )
+    .unwrap();
+    let mut binding = r.grant.payload.clone();
+    binding.controller.as_mut().unwrap().controller_purpose = "cleanup".into();
+    r.grant = sign(binding);
+    db.execute(
+        "UPDATE public.app_core_sessionenvironment SET controller_purpose='cleanup' WHERE controller_run_id=$1",
+        &[&run_id],
+    )
+    .unwrap();
+    let cleanup = AgentRunCleanup {
+        schema: "workspace.agent_run.cleanup.v1".into(),
+        agent_run_id: run_id.clone(),
+        authorization_digest: digest.clone(),
+        authorization_signature: r.original.signature(KEY).unwrap(),
+        authorization: r.original.clone(),
+        environment_authorization: r.grant.clone(),
+    };
+    let request = CleanupAuthorityRequest {
+        cleanup: &cleanup,
+        signing_key: KEY,
+        lease: &r.fence,
+        host_id: "host",
+    };
+    assert!(store
+        .with_cleanup_authority(
+            &request,
+            || panic!("status-only failure must not inspect physical resources"),
+            |_, _| panic!("status-only failure must not authorize cleanup"),
+        )
+        .is_err());
+
+    // Exercise the real lease-fenced producer, without fabricating Session
+    // history or a cancellation marker to make cleanup authority pass.
+    let log = store.session_log(
+        r.original.workspace_id.clone(),
+        r.original.session_id.clone(),
+        "unadmitted input".into(),
+    );
+    log.commit_pre_admission_failure(&run_id, &digest, &r.fence)
+        .unwrap();
+    let receipt = store
+        .with_cleanup_authority(
+            &request,
+            || Ok(vec![]),
+            |target, verified| {
+                assert!(matches!(target, CleanupTarget::NeverAllocated));
+                assert_eq!(verified.authorization_digest, digest);
+                // No container/task stop or removal is needed for this target.
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(receipt.allocation, CleanupAllocation::NeverAllocated {});
+    assert!(receipt.cleanup_complete);
+    let replay = store
+        .with_cleanup_authority(
+            &request,
+            || panic!("receipt replay must not reinspect resources"),
+            |_, _| panic!("receipt replay must not repeat cleanup"),
+        )
+        .unwrap();
+    assert_eq!(replay, receipt);
+    let read = store
+        .get_cleanup_receipt(
+            &crate::postgres_store::cleanup_receipts::CleanupReceiptQuery {
+                schema: "runtime.agent_run.cleanup_receipt.get.v1".into(),
+                agent_run_id: run_id.clone(),
+                authorization_digest: digest,
+                cleanup_receipt_id: receipt.receipt_id,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(read, replay);
+    let facts = db
+        .query_one(
+            "SELECT (SELECT count(*) FROM public.app_core_sessionevent WHERE agent_run_id=$1), (SELECT count(*) FROM runtime.execution_instances WHERE agent_run_id=$1), (SELECT count(*) FROM runtime.resident_sandboxes), (SELECT count(*) FROM runtime.agent_run_cleanup_receipts WHERE agent_run_id=$1), (SELECT \"preAdmissionCancelledAt\" IS NULL FROM public.app_core_agentrun WHERE id=$1), (SELECT controller_released FROM public.app_core_sessionenvironment WHERE controller_run_id=$1)",
+            &[&run_id],
+        )
+        .unwrap();
+    assert_eq!(facts.get::<_, i64>(0), 0);
+    assert_eq!(facts.get::<_, i64>(1), 0);
+    assert_eq!(facts.get::<_, i64>(2), 0);
+    assert_eq!(facts.get::<_, i64>(3), 1);
+    assert!(facts.get::<_, bool>(4));
+    assert!(
+        !facts.get::<_, bool>(5),
+        "cleanup receipt cannot silently release the controller"
+    );
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL cleanup database"]
 fn postgres_cleanup_receipt_proves_no_allocation_for_cancel_and_pre_admission_core_failure() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     for pre_cancel in [true, false] {

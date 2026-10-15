@@ -121,7 +121,14 @@ pub(crate) fn verify_controller_authority(
     // Session remains locked against Core record writers. Status is a delayed
     // presentation projection and cannot reopen already committed termination.
     let terminal=tx.query_one("SELECT EXISTS(SELECT 1 FROM public.app_core_sessionevent WHERE workspace_id=$1 AND session_id=$2 AND agent_run_id=$3 AND session_level=false AND payload->>'type' IN('agent_run_completed','agent_run_failed','agent_run_interrupted'))", &[&tenant,&b.session_id,&b.agent_run_id]).map_err(|e|e.to_string())?.get::<_,bool>(0);
-    let terminal = !run.get::<_, bool>(8) || terminal;
+    let pre_admission_failure = super::pre_admission_failure::has_pre_admission_failure(
+        tx,
+        &tenant,
+        &b.session_id,
+        &b.agent_run_id,
+        &b.agent_run_authorization_digest,
+    )?;
+    let terminal = !run.get::<_, bool>(8) || terminal || pre_admission_failure;
     if r.purpose == ControllerPurpose::Execute && terminal {
         return Err("retained Core terminal execution rejected".into());
     }

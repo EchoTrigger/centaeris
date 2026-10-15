@@ -1,6 +1,7 @@
+import json
 from datetime import UTC, datetime
 
-from django.db import transaction
+from django.db import connection, transaction
 
 from .models import AgentRun, ArtifactPublication, SessionCitationProjection, SessionEvent
 
@@ -32,15 +33,71 @@ def _committed_events(agent_run: AgentRun) -> list[SessionEvent]:
     return list(_run_records(agent_run).order_by("agent_run_sequence"))
 
 
+def pre_admission_terminal_fact(agent_run: AgentRun) -> dict | None:
+    """Read a Runtime-committed control fact, never a cached business status.
+
+    Runtime stores no model history for preparation failures. Its lease-fenced
+    receipt binds the original lifecycle owner; later controller leases need
+    not have that same owner. SQLite has no Runtime ledger.
+    """
+    failure = None
+    if connection.vendor == "postgresql":
+        event_id = "agent_run_pre_admission_failure:" + agent_run.id
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT to_regclass('runtime.runtime_events')")
+            if cursor.fetchone()[0] is not None:
+                cursor.execute(
+                    "SELECT session_id,task_id,event_type,visibility,at_ms,payload_json "
+                    "FROM runtime.runtime_events WHERE event_id=%s", [event_id])
+                row = cursor.fetchone()
+                if row is not None:
+                    session_id, task_id, event_type, visibility, at_ms, raw = row
+                    try:
+                        payload = json.loads(raw)
+                    except (TypeError, ValueError) as error:
+                        raise ValueError("pre-admission failure receipt invalid") from error
+                    schema = "runtime.agent_run.pre_admission_failure.v1"
+                    fields = {"schema", "workspaceId", "sessionId", "agentRunId",
+                        "authorizationDigest", "jobId", "leaseOwner", "failedAtMs"}
+                    if (not isinstance(payload, dict) or set(payload) != fields
+                            or payload["schema"] != schema or event_type != schema
+                            or session_id != agent_run.session_id or task_id != agent_run.id
+                            or visibility != "internal" or type(at_ms) is not int
+                            or type(payload["failedAtMs"]) is not int
+                            or not 0 < payload["failedAtMs"] <= 253402300799999
+                            or at_ms != payload["failedAtMs"]
+                            or agent_run.session.workspace_id != agent_run.workspace_id
+                            or payload["workspaceId"] != agent_run.workspace_id
+                            or payload["sessionId"] != agent_run.session_id
+                            or payload["agentRunId"] != agent_run.id
+                            or payload["authorizationDigest"] != agent_run.authorization.digest
+                            or payload["jobId"] != "agent_run.lifecycle:" + agent_run.id
+                            or not isinstance(payload["leaseOwner"], str) or not payload["leaseOwner"].strip()):
+                        raise ValueError("pre-admission failure receipt binding mismatch")
+                    failure = {"state": "failed", "sourceType": "preAdmissionFailure",
+                        "factRef": event_id, "atMs": at_ms}
+    if failure is not None:
+        if agent_run.preAdmissionCancelledAt is not None or SessionEvent.objects.filter(
+                agent_run_id=agent_run.id, session_level=False).exists():
+            raise ValueError("pre-admission failure conflicts with committed execution")
+        return failure
+    if agent_run.preAdmissionCancelledAt is not None and not SessionEvent.objects.filter(
+            agent_run_id=agent_run.id, session_level=False).exists():
+        return {"state": "cancelled", "sourceType": "preAdmissionCancellation",
+            "factRef": agent_run.id, "atMs": int(agent_run.preAdmissionCancelledAt.timestamp() * 1000)}
+    return None
+
+
 def committed_session_terminal_state(agent_run: AgentRun) -> str | None:
+    pre_admission = pre_admission_terminal_fact(agent_run)
+    if pre_admission is not None:
+        return pre_admission["state"]
     terminal = (
         _run_records(agent_run)
         .order_by("-agent_run_sequence")
         .values_list("payload__type", flat=True)
         .first()
     )
-    if terminal is None and agent_run.preAdmissionCancelledAt is not None:
-        return "cancelled"
     return TERMINAL_STATES.get(terminal)
 
 
@@ -54,14 +111,17 @@ def project_committed_agent_run(
             .select_related("workspace", "session")
             .get(id=agent_run.id)
         )
+        fact = pre_admission_terminal_fact(locked_agent_run)
         events = _committed_events(locked_agent_run)
         if not events:
-            if locked_agent_run.preAdmissionCancelledAt is not None:
-                if expected_status not in (None, "cancelled"):
+            if fact is not None:
+                if expected_status not in (None, fact["state"]):
                     raise ValueError("runtime and pre-admission terminal states mismatch")
-                locked_agent_run.status = "cancelled"
+                locked_agent_run.status = fact["state"]
                 locked_agent_run.startedAt = None
-                locked_agent_run.completedAt = locked_agent_run.preAdmissionCancelledAt
+                locked_agent_run.completedAt = (locked_agent_run.preAdmissionCancelledAt
+                    if fact["sourceType"] == "preAdmissionCancellation"
+                    else datetime.fromtimestamp(fact["atMs"] / 1000, tz=UTC))
                 locked_agent_run.save(update_fields=["status", "startedAt", "completedAt", "updatedAt"])
             return locked_agent_run
         status = TERMINAL_STATES.get(events[-1].payload["type"])

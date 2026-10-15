@@ -67,6 +67,15 @@ instance state retains its reservation and prevents creation of a second writer.
 Recovery needs positive evidence of the prior instance's loss or fenced storage.
 The initial supported continuity domain is a still-live instance on one host.
 
+A Run rejected before Core admission has no Session model history. Runtime must
+commit a separate `runtime.agent_run.pre_admission_failure.v1` control receipt
+under the current lifecycle lease before returning terminal failure. Its stable
+Run identity, original authorization digest and first failure time survive
+retries. API projection and cleanup verify that receipt; a `failed` presentation
+status alone grants no cleanup authority. The receipt prevents later admission
+or execution, but does not prove physical absence or release resident resources.
+The existing exact-instance cleanup and immutable release receipts still apply.
+
 ## Working files and protected inputs
 
 Online reads and writes use a mature Linux filesystem and its page cache, not

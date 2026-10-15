@@ -82,6 +82,7 @@ pub(crate) mod controller_authority;
 mod execution_capacity;
 pub(crate) mod execution_instances;
 mod external_context;
+pub(crate) mod pre_admission_failure;
 mod reliability;
 pub(crate) mod residency;
 mod resource_commit;

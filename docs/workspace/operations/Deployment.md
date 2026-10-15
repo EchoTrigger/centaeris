@@ -64,5 +64,9 @@ services understand current data formats or a tested restore is performed.
 
 ## Stop
 
+For an opt-in retained cohort, complete the
+[retained exit procedure](../eval/EnvironmentTaskService.md#supported-configuration-and-coordinated-exit)
+before stopping its matching API, Worker and Runtime consumers.
+
 `docker compose down` stops containers and preserves named volumes. Adding
 `--volumes` is destructive and is not part of routine stop or upgrade.
