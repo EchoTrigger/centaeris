@@ -2329,12 +2329,98 @@ mod tests {
         assert_eq!(recovered, state.response());
     }
 
+    // A parallel test's fork can briefly inherit remove_dir_all's directory
+    // descriptors until exec. A held descriptor delays the root DELETE_SELF
+    // notification, so immediate root-removal assertions own a whole process.
+    #[cfg(target_os = "linux")]
+    fn isolated_workspace_watch_fixture(name: &str) -> bool {
+        const FLAG: &str = "CENTAERIS_WORKSPACE_WATCH_FIXTURE";
+        if std::env::var(FLAG).as_deref() == Ok(name) {
+            return false;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("agent::tests::{name}"),
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(FLAG, name)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed; 0 failed; 0 ignored"),
+            "isolated workspace watcher fixture failed: stdout={stdout} stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        true
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn workspace_generation_root_removal_notification_waits_for_directory_descriptor_release() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+
+        if isolated_workspace_watch_fixture(
+            "workspace_generation_root_removal_notification_waits_for_directory_descriptor_release",
+        ) {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-workspace-watch-held-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let descriptor = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        assert!(descriptor >= 0);
+        let mut inotify = unsafe { File::from_raw_fd(descriptor) };
+        let mut watches = BTreeMap::new();
+        add_workspace_watches(inotify.as_raw_fd(), &root, &mut watches).unwrap();
+        let root_watch = *watches.keys().next().unwrap();
+        let directory = File::open(&root).unwrap();
+        assert_ne!(
+            unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+        let mut state = WorkspaceWatchState {
+            instance_epoch: "held-directory-test".into(),
+            generation: 0,
+            diagnostic: None,
+        };
+        fs::remove_dir(&root).unwrap();
+        assert_eq!(
+            fs::symlink_metadata(&root).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        drain_workspace_events(&mut inotify, root_watch, &mut watches, &mut state);
+        assert!(state.response().generation.is_some());
+        assert!(state.diagnostic.is_none());
+
+        drop(directory);
+        drain_workspace_events(&mut inotify, root_watch, &mut watches, &mut state);
+        assert!(state.response().generation.is_none());
+        assert_eq!(
+            state.diagnostic.as_deref(),
+            Some("workspace root watcher was replaced or removed")
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn workspace_generation_drains_vanished_directories_and_new_tree_writes() {
         use std::os::fd::{AsRawFd, FromRawFd};
         use std::os::unix::fs::symlink;
 
+        if isolated_workspace_watch_fixture(
+            "workspace_generation_drains_vanished_directories_and_new_tree_writes",
+        ) {
+            return;
+        }
         let root = std::env::temp_dir().join(format!(
             "centaeris-workspace-watch-{}-{}",
             std::process::id(),
