@@ -255,6 +255,11 @@ fn run_command_with_input(
         if gap || earliest_cursor > cursor {
             return Err(ExecutionError::OutputUnavailable {
                 reason: "command_output_gap".into(),
+                exit_code: if task.state == EnvironmentTaskState::Exited {
+                    task.exit_code
+                } else {
+                    None
+                },
             });
         }
         let mut bytes = 0usize;
@@ -607,6 +612,7 @@ mod tests {
         })
         .unwrap_err();
         assert!(error.internal_debug_message().contains("output_gap"));
+        assert!(error.internal_debug_message().contains("exitCode=Some(0)"));
         assert!(!error.is_cancellation_indeterminate());
         assert!(error.model_visible_message().contains("output"));
     }

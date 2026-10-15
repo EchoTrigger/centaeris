@@ -57,6 +57,7 @@ pub enum ExecutionError {
     },
     OutputUnavailable {
         reason: String,
+        exit_code: Option<i32>,
     },
     CancellationIndeterminate {
         reason: String,
@@ -82,7 +83,9 @@ impl ExecutionError {
             Self::OperationIndeterminate { stage, reason } => {
                 format!("execution {} outcome unknown: {reason}", stage.as_str())
             }
-            Self::OutputUnavailable { reason } => format!("execution output unavailable: {reason}"),
+            Self::OutputUnavailable { reason, exit_code } => {
+                format!("execution output unavailable: {reason}; exitCode={exit_code:?}")
+            }
             Self::CancellationIndeterminate { reason } => {
                 format!("execution cancellation indeterminate: {reason}")
             }
@@ -148,8 +151,11 @@ impl ExecutionError {
     pub fn execution_started(&self) -> Option<bool> {
         match self {
             Self::OperationIndeterminate {
-                stage: ExecutionOperationStage::Start,
+                stage: ExecutionOperationStage::Start | ExecutionOperationStage::Query,
                 ..
+            }
+            | Self::OutputUnavailable {
+                exit_code: None, ..
             }
             | Self::CancellationIndeterminate { .. } => None,
             Self::CapacityRejected {
@@ -160,6 +166,13 @@ impl ExecutionError {
             | Self::OperationIndeterminate { .. }
             | Self::OutputUnavailable { .. } => Some(true),
             _ => Some(false),
+        }
+    }
+    /// An output gap must not erase a known process exit.
+    pub fn known_exit_code(&self) -> Option<i32> {
+        match self {
+            Self::OutputUnavailable { exit_code, .. } => *exit_code,
+            _ => None,
         }
     }
     pub fn is_cancellation_indeterminate(&self) -> bool {

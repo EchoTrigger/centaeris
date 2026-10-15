@@ -5104,7 +5104,7 @@ fn failed_session_records(
             "execution_input_rejected" => Some("The task was started, but this input was not accepted because execution resources are exhausted. Do not repeat the command.".into()),
             "execution_start_unknown" => Some("The task start outcome is unknown. Do not repeat the operation.".into()),
             "execution_input_unknown" => Some("The task was started, but input delivery is unconfirmed. Do not repeat the operation.".into()),
-            "execution_query_unknown" => Some("The task was started, but its result could not be confirmed. Do not repeat the operation.".into()),
+            "execution_query_unknown" => Some("Task execution result could not be confirmed. Do not repeat the operation.".into()),
             "execution_output_unavailable" => Some("Task output is unavailable. The command must not be repeated automatically.".into()),
             _ => None,
         });

@@ -209,7 +209,7 @@ fn bash_execution_host_error_result(
         "bashDialect": bash_dialect,
         "cwd": cwd,
         "timeoutMs": timeout_ms,
-        "exitCode": Value::Null,
+        "exitCode": err.known_exit_code(),
         "timedOut": false,
         "stdout": "",
         "stderr": "",
@@ -664,6 +664,14 @@ mod tests {
             ),
             (
                 ExecutionError::OperationIndeterminate {
+                    stage: ExecutionOperationStage::Query,
+                    reason: "accepted task, spawn not confirmed".into(),
+                },
+                None,
+                false,
+            ),
+            (
+                ExecutionError::OperationIndeterminate {
                     stage: ExecutionOperationStage::Input,
                     reason: "partial write".into(),
                 },
@@ -672,7 +680,16 @@ mod tests {
             ),
             (
                 ExecutionError::OutputUnavailable {
+                    reason: "no confirmed exit".into(),
+                    exit_code: None,
+                },
+                None,
+                false,
+            ),
+            (
+                ExecutionError::OutputUnavailable {
                     reason: "expired".into(),
+                    exit_code: Some(7),
                 },
                 Some(true),
                 false,
@@ -691,6 +708,13 @@ mod tests {
             assert_eq!(
                 output.details["executed"],
                 started.map(Value::Bool).unwrap_or(Value::Null)
+            );
+            assert_eq!(
+                output.details["exitCode"],
+                error
+                    .known_exit_code()
+                    .map(|code| json!(code))
+                    .unwrap_or(Value::Null)
             );
             assert_eq!(output.details["toolError"]["retryable"], retryable);
             assert!(!error.is_cancellation_indeterminate());
