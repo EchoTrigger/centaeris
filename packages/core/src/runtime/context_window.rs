@@ -12,6 +12,27 @@ const PROMPT_COMPACTION_USER_REPLAY_KIND: &str = "prompt_compaction_user_replay"
 pub(crate) const LIFECYCLE_HOOK_CONTEXT_META_KEY: &str = "lifecycle_hook_context_v1";
 const FIRST_KEPT_MESSAGE_ID: &str = "first_kept_message_id";
 const COMPACTION_ID: &str = "compaction_id";
+pub(crate) const CAUSAL_ANCHOR_REFERENCE: &str = "causal_user_anchor_v1_json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompactionCausalAnchorReference {
+    schema: String,
+    message_id: String,
+    message_sha256: String,
+}
+
+pub(crate) fn compaction_causal_anchor_reference(message: &ChatMessage) -> Result<String, String> {
+    let reference = CompactionCausalAnchorReference {
+        schema: "compaction_causal_anchor_v1".into(),
+        message_id: message.message_id.clone(),
+        message_sha256: crate::runtime::canonical_json::sha256(
+            "centaeris.compaction_causal_anchor.v1",
+            message,
+        )?,
+    };
+    serde_json::to_string(&reference).map_err(|error| error.to_string())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MaterializationDiagnostic {
@@ -25,6 +46,20 @@ pub struct ContextWindowMaterialization {
     pub messages: Vec<ChatMessage>,
     diagnostics: Vec<MaterializationDiagnostic>,
     source_message_count: usize,
+}
+
+impl ContextWindowMaterialization {
+    pub(crate) fn ensure_valid(&self) -> Result<(), String> {
+        if let Some(diagnostic) = self
+            .diagnostics
+            .iter()
+            .find(|diagnostic| is_critical_compaction_materialization_diagnostic(diagnostic.reason))
+        {
+            return Err(format!("context_window_materialization_invalid_compaction_lifecycle: reason={} messageId={}",
+                diagnostic.reason, diagnostic.message_id));
+        }
+        Ok(())
+    }
 }
 
 pub fn refresh_session_context_window(session: &mut SessionStateSnapshot) {
@@ -85,6 +120,15 @@ fn active_projection_messages(
             })
             .cloned(),
     );
+    match referenced_causal_anchor(messages, summary, summary_index, suffix_start) {
+        Ok(Some(anchor)) => active_messages.push(anchor.clone()),
+        Ok(None) => {}
+        Err(reason) => diagnostics.push(MaterializationDiagnostic {
+            reason,
+            message_id: summary.message_id.clone(),
+            message_index: summary_index,
+        }),
+    }
     active_messages.extend(
         messages[suffix_start..]
             .iter()
@@ -95,6 +139,48 @@ fn active_projection_messages(
             .cloned(),
     );
     (active_messages, diagnostics)
+}
+
+fn referenced_causal_anchor<'a>(
+    messages: &'a [ChatMessage],
+    summary: &ChatMessage,
+    summary_index: usize,
+    suffix_start: usize,
+) -> Result<Option<&'a ChatMessage>, &'static str> {
+    let Some(raw) = summary.metadata.get(CAUSAL_ANCHOR_REFERENCE) else {
+        return Ok(None);
+    };
+    let reference: CompactionCausalAnchorReference =
+        serde_json::from_str(raw).map_err(|_| "context_compaction_anchor_reference_invalid")?;
+    if reference.schema != "compaction_causal_anchor_v1" {
+        return Err("context_compaction_anchor_schema_unsupported");
+    }
+    let matches = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.message_id == reference.message_id)
+        .collect::<Vec<_>>();
+    let [(position, anchor)] = matches.as_slice() else {
+        return Err("context_compaction_anchor_missing_or_ambiguous");
+    };
+    if *position >= suffix_start
+        || *position >= summary_index
+        || messages[position + 1..suffix_start]
+            .iter()
+            .any(is_reliable_tool_chain_user_anchor)
+    {
+        return Err("context_compaction_anchor_reference_conflict");
+    }
+    if !is_reliable_tool_chain_user_anchor(anchor) {
+        return Err("context_compaction_anchor_semantics_invalid");
+    }
+    let actual =
+        crate::runtime::canonical_json::sha256("centaeris.compaction_causal_anchor.v1", anchor)
+            .map_err(|_| "context_compaction_anchor_digest_invalid")?;
+    if actual != reference.message_sha256 {
+        return Err("context_compaction_anchor_content_changed");
+    }
+    Ok(Some(anchor))
 }
 
 fn is_prompt_compaction_user_replay(message: &ChatMessage) -> bool {
@@ -217,6 +303,7 @@ pub fn validate_context_window_materialization(
 
 fn is_critical_compaction_materialization_diagnostic(reason: &str) -> bool {
     reason == "context_compaction_first_kept_message_missing"
+        || reason.starts_with("context_compaction_anchor_")
 }
 
 pub fn trailing_unpaired_model_tool_call_ids(
