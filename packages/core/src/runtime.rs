@@ -22,6 +22,8 @@ mod prompt_projection;
 mod provider_polling;
 pub mod query_loop;
 mod recovery;
+mod run_result;
+use run_result::RunResultCollector;
 mod status_events;
 pub mod subagent;
 pub(crate) mod subagent_contracts;
@@ -58,7 +60,8 @@ pub use self::driver::{
     GenerateDriverFuture, GenerateDriverOutcome, GenerateDriverPromptCompactionFuture,
     GenerateDriverPromptCompactionOutcome, GenerateDriverRequest, ModelObservationV1,
     ModelRequestPurposeV1, ModelRequestStartedV1, ProcessTurnRequest, RejectedToolCallIdentity,
-    ToolSafePoint, TurnControl, TurnInput, TurnStepResult, TurnUpdate,
+    ToolSafePoint, TurnCheckpointRef, TurnCommitReceipt, TurnControl, TurnInput, TurnStepResult,
+    TurnUpdate,
 };
 use self::engine_state::*;
 use self::external_context_objects::*;
@@ -235,8 +238,8 @@ pub fn completed_turn_projection_from_result(
         _ => return Err("completed_turn_projection_requires_terminal_result".to_string()),
     };
     let final_response = result
-        .turn_responses
-        .last()
+        .last_turn
+        .as_ref()
         .ok_or_else(|| "completed_turn_projection_final_response_missing".to_string())?;
     if final_response.continuation != expected_continuation {
         return Err("completed_turn_projection_final_continuation_mismatch".to_string());
@@ -245,10 +248,9 @@ pub fn completed_turn_projection_from_result(
         return Err("completed_turn_projection_session_id_mismatch".to_string());
     }
     let mut expected_tool_call_ids = result
-        .turn_responses
+        .turn_receipts
         .iter()
-        .flat_map(|response| response.tool_results.iter())
-        .map(|result| result.tool_call_id.clone())
+        .flat_map(|receipt| receipt.tool_result_ids.iter().cloned())
         .collect::<Vec<_>>();
     expected_tool_call_ids.sort_unstable();
     if expected_tool_call_ids
@@ -1765,15 +1767,11 @@ fn subagent_worker_outcome_from_query_loop_response(
         };
     }
     let output_refs = response
-        .turn_responses
+        .turn_receipts
         .iter()
         .map(|item| format!("turn:{}", item.turn_id))
         .collect::<Vec<_>>();
-    let final_summary = response
-        .turn_responses
-        .iter()
-        .rev()
-        .find_map(|item| latest_assistant_message(item.session_snapshot.messages.as_slice()));
+    let final_summary = response.final_reply;
 
     match final_summary {
         Some(summary) => SubagentWorkerRunOutcome::Succeeded {
@@ -1790,13 +1788,9 @@ fn subagent_worker_outcome_from_query_loop_response(
     }
 }
 
-fn latest_assistant_message(messages: &[ChatMessage]) -> Option<String> {
-    messages
-        .iter()
-        .rev()
-        .find(|message| matches!(message.role, MessageRole::Assistant))
-        .map(|message| message.content.trim().to_string())
-        .filter(|content| !content.is_empty())
+fn nonempty_current_assistant_reply(content: &str) -> Option<String> {
+    let content = content.trim();
+    (!content.is_empty()).then(|| content.to_owned())
 }
 
 fn collect_recovery_trace(traces: &mut Vec<String>, report: &ToolExecutionResult, stage: &str) {

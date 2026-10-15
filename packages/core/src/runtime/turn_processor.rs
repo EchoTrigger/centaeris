@@ -384,6 +384,9 @@ impl<
         refresh_session_context_window(&mut session);
         self.session_manager.save_session(&session)?;
         Ok(TurnStepResult {
+            current_assistant_reply: nonempty_current_assistant_reply(
+                &effective_generate_result.content,
+            ),
             turn_id: req.turn_id,
             continuation,
             checkpoint,

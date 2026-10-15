@@ -1,3 +1,4 @@
+use super::contracts::CheckpointKindV1;
 use super::*;
 use crate::model::prepared_prompt::{
     estimate_text_tokens, ModelInputImageObservationV1, ModelMessageV1, PreparedPromptV1,
@@ -851,6 +852,8 @@ pub struct ProcessTurnRequest {
 
 #[derive(Debug, Clone)]
 pub struct TurnStepResult {
+    /// Nonempty assistant text produced by this turn, never recovered from history.
+    pub current_assistant_reply: Option<String>,
     pub turn_id: String,
     pub continuation: QueryContinuation,
     pub checkpoint: Option<CheckpointRecord>,
@@ -1616,18 +1619,44 @@ impl<D: AsyncGenerateDriver> AsyncModelCompactionSummaryCandidateProducer
     }
 }
 
+/// Identity-only evidence retained after a short-lived completed turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnCheckpointRef {
+    pub checkpoint_id: String,
+    pub kind: CheckpointKindV1,
+    pub session_id: String,
+    pub turn_id: String,
+    pub status: String,
+    pub done_reason: Option<String>,
+    pub updated_at_ms: i64,
+    pub payload_sha256: String,
+    pub payload_byte_length: u64,
+}
+
+/// Identities of a processed turn whose required persistence callbacks returned.
+/// Never owns a Session snapshot, tool arguments, or result body, and does not
+/// acknowledge delivery to the consuming host.
+#[derive(Debug, Clone)]
+pub struct TurnCommitReceipt {
+    pub turn_id: String,
+    pub continuation: QueryContinuation,
+    pub provider_tool_call_ids: Vec<String>,
+    pub tool_result_ids: Vec<String>,
+    pub checkpoint_ref: Option<TurnCheckpointRef>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentRunResult {
-    pub turn_responses: Vec<TurnStepResult>,
+    /// Nonempty reply from the final effective turn; never an earlier Session message.
+    pub final_reply: Option<String>,
+    pub turn_receipts: Vec<TurnCommitReceipt>,
+    pub last_turn: Option<TurnStepResult>,
     pub stop: AgentRunStop,
 }
 
 impl AgentRunResult {
-    pub(super) fn new(turn_responses: Vec<TurnStepResult>, stop: AgentRunStop) -> Self {
-        Self {
-            turn_responses,
-            stop,
-        }
+    pub(super) fn new(turn_responses: RunResultCollector, stop: AgentRunStop) -> Self {
+        turn_responses.into_result(stop)
     }
 }
 

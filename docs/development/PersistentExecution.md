@@ -19,6 +19,23 @@ facts and output retention, and real resource pressure remains bounded. Across
 at least 100 separate completed uses/releases, authorized maintenance stops the exact instance,
 confirms physical absence and reconciles its resource holding exactly once.
 
+The Core long-loop gate also requires committed turns to release obsolete full
+Session snapshots. Accumulated Run results retain compact tool and checkpoint
+identities plus one final state, preserving exact completion, wait and child
+result semantics. A same-process structural regression covers 100, 1000 and
+10000 commits without a restart. The real 1000-command gate keeps the original
+512 MiB Runtime limit, exercises actual model-context compaction and records
+process and cgroup memory separately from the execution instance. A restart's
+lower memory use does not establish release of pre-restart objects.
+
+This result-lifetime change does not complete Session hot-state separation.
+The current Session may still contain full history; repeated full-snapshot
+loads/saves and context-selection copies remain measurable costs. Follow-up
+work must first prove lossless historical coverage and bounded reads, then
+separate execution state and model context, and finally validate versioned
+migration and recovery. Only that work can establish ordinary-turn cost bounded
+by the current working set rather than the entire historical transcript.
+
 Candidate components only: tar+zstd encoding, validation and bridge support.
 They are not enabled for production capture/upload or cold restoration. All
 retained online file protection is currently disabled, including at terminal

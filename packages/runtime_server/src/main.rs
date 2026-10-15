@@ -3663,8 +3663,8 @@ fn execute_agent_run(
                 AgentRunStop::RuntimeJobWait | AgentRunStop::QuestionWait
             ) {
                 let wait_turn_id = response
-                    .turn_responses
-                    .last()
+                    .last_turn
+                    .as_ref()
                     .ok_or_else(|| "agent_run_cancel_wait_response_missing".to_string())?
                     .checkpoint
                     .as_ref()
@@ -3777,8 +3777,8 @@ fn execute_agent_run(
             )?;
             if response.stop == AgentRunStop::RuntimeJobWait {
                 let turn = response
-                    .turn_responses
-                    .last()
+                    .last_turn
+                    .as_ref()
                     .ok_or("runtime job wait response missing")?;
                 wait_recovery::WaitHandoffPublisher {
                     store: job_store.as_ref(),
@@ -4172,6 +4172,11 @@ impl AssistantTextProjection {
         if self.responses.last().is_some_and(|response| !response.done) {
             return Err("model request started before the previous response completed".to_string());
         }
+        // Tool-bearing responses never produce assistant records. Their facts
+        // are committed separately; keep only the current live-text scratch.
+        // Plain text may still await delivery (including output-limit prefixes).
+        self.responses
+            .retain(|response| !response.done || !response.has_tool_call);
         self.responses.push(AssistantResponse {
             turn_id,
             text: initial_content,
@@ -5227,17 +5232,20 @@ fn tool_session_records(
     sequence: &mut AgentRunSessionState,
     created_at_ms: i64,
 ) -> Result<Vec<SequencedSessionRecord>, String> {
-    let mut events = Vec::new();
-    for turn in &response.turn_responses {
-        events.extend(tool_safe_point_session_records(
-            agent_run_start,
-            resolved_inputs,
-            turn,
-            sequence,
-            created_at_ms,
-        )?);
+    let _ = (agent_run_start, resolved_inputs, created_at_ms);
+    // Bodies and facts were committed at the per-turn safe point. Verify every
+    // exact retained identity against that durable ledger; never replay a tool
+    // or reconstruct its facts from a historical result body here.
+    for receipt in &response.turn_receipts {
+        for id in &receipt.tool_result_ids {
+            if !sequence.has_tool_result(id) {
+                return Err(format!(
+                    "completed Turn has an uncommitted tool result: {id}"
+                ));
+            }
+        }
     }
-    Ok(events)
+    Ok(Vec::new())
 }
 
 fn provider_usage_session_records(
@@ -6560,7 +6568,9 @@ mod tests {
         let start = agent_run_start();
         let assistant = assistant_projection(&start.turn_id, "Completed synthetic reply");
         let response = AgentRunResult {
-            turn_responses: vec![],
+            turn_receipts: vec![],
+            last_turn: None,
+            final_reply: None,
             stop: AgentRunStop::Finalized,
         };
         let mut sequence = agent_run_session_state(&start);
@@ -7437,7 +7447,7 @@ mod tests {
     }
 
     #[test]
-    fn assistant_text_projection_keeps_each_model_response() {
+    fn assistant_text_projection_preserves_final_response_after_tool_round() {
         let mut projection = AssistantTextProjection::default();
         projection
             .begin_model_request("turn_1".to_string(), String::new())
@@ -7461,8 +7471,112 @@ mod tests {
             .finish_model_request("turn_1:2")
             .expect("second done");
         assert_eq!(projection.terminal_text(), "检查完成，已生成结果。");
-        assert_eq!(projection.responses.len(), 2);
-        assert_eq!(projection.responses[0].text, "阶段一：检查工作区");
+        let start = agent_run_start();
+        let records = assistant_session_records(
+            &start,
+            &projection,
+            Some("done"),
+            &mut agent_run_session_state(&start),
+            10,
+        )
+        .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].event.turn_id.as_deref(), Some("turn_1:2"));
+        assert_eq!(
+            records[0].event.payload["modelMarkdown"],
+            "检查完成，已生成结果。"
+        );
+    }
+
+    #[test]
+    fn assistant_text_projection_retires_committed_tool_round_bodies() {
+        for rounds in [100, 1000, 10000] {
+            let mut projection = AssistantTextProjection::default();
+            for index in 0..rounds {
+                let turn = format!("tool-turn-{index}");
+                projection
+                    .begin_model_request(turn.clone(), String::new())
+                    .unwrap();
+                projection
+                    .push_token(&turn, &"prefix".repeat(1024))
+                    .unwrap();
+                projection
+                    .begin_model_request(turn.clone(), String::new())
+                    .unwrap();
+                assert!(projection
+                    .begin_model_request("premature-next".into(), String::new())
+                    .is_err());
+                projection.mark_tool_call(&turn).unwrap();
+                projection.push_token(&turn, "suffix").unwrap();
+                projection
+                    .replace_content(&turn, "full tool response".repeat(512))
+                    .unwrap();
+                projection.finish_model_request(&turn).unwrap();
+                // Keep this current response for the existing live-text check.
+                assert_eq!(
+                    projection.responses.last().unwrap().text,
+                    "full tool response".repeat(512)
+                );
+            }
+            let retained_capacity: usize = projection
+                .responses
+                .iter()
+                .map(|item| item.text.capacity())
+                .sum();
+            assert_eq!(
+                retained_capacity,
+                projection.responses.last().unwrap().text.capacity(),
+                "completed tool response allocations must retire before the next turn"
+            );
+            let start = agent_run_start();
+            assert!(assistant_session_records(
+                &start,
+                &projection,
+                None,
+                &mut agent_run_session_state(&start),
+                10
+            )
+            .unwrap()
+            .is_empty());
+        }
+    }
+
+    #[test]
+    fn assistant_text_projection_keeps_undelivered_plain_text_while_retiring_tool_rounds() {
+        let mut projection = AssistantTextProjection::default();
+        projection
+            .begin_model_request("prefix".into(), "partial answer".into())
+            .unwrap();
+        projection.finish_model_request("prefix").unwrap();
+        for turn in ["tool-1", "tool-2"] {
+            projection
+                .begin_model_request(turn.into(), "tool-only scratch".repeat(1024))
+                .unwrap();
+            projection.mark_tool_call(turn).unwrap();
+            projection.finish_model_request(turn).unwrap();
+        }
+        projection
+            .begin_model_request("final".into(), "partial answer completed".into())
+            .unwrap();
+        projection.finish_model_request("final").unwrap();
+        let start = agent_run_start();
+        let records = assistant_session_records(
+            &start,
+            &projection,
+            Some("done"),
+            &mut agent_run_session_state(&start),
+            10,
+        )
+        .unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].event.turn_id.as_deref(), Some("prefix"));
+        assert_eq!(records[0].event.payload["modelMarkdown"], "partial answer");
+        assert_eq!(records[1].event.turn_id.as_deref(), Some("final"));
+        assert_eq!(
+            records[1].event.payload["modelMarkdown"],
+            "partial answer completed"
+        );
+        assert_eq!(projection.terminal_text(), "partial answer completed");
     }
 
     #[test]
@@ -7801,7 +7915,9 @@ mod tests {
     fn runtime_builds_direct_session_start_and_terminal_records() {
         let agent_run_start = agent_run_start();
         let response = AgentRunResult {
-            turn_responses: vec![],
+            turn_receipts: vec![],
+            last_turn: None,
+            final_reply: None,
             stop: AgentRunStop::Finalized,
         };
         let mut sequence = agent_run_session_state(&agent_run_start);
@@ -8000,7 +8116,9 @@ mod tests {
             None,
             &assistant_text,
             &AgentRunResult {
-                turn_responses: Vec::new(),
+                turn_receipts: Vec::new(),
+                last_turn: None,
+                final_reply: None,
                 stop: AgentRunStop::Finalized,
             },
             &mut agent_run_session_state(&agent_run_start),
@@ -8256,7 +8374,9 @@ mod tests {
             None,
             &assistant_projection("turn_1", "done"),
             &AgentRunResult {
-                turn_responses: vec![],
+                turn_receipts: vec![],
+                last_turn: None,
+                final_reply: None,
                 stop: AgentRunStop::Finalized,
             },
             &mut sequence,
@@ -8571,6 +8691,74 @@ mod tests {
     }
 
     #[test]
+    fn run_completion_checks_every_committed_tool_identity_after_step_bodies_are_released() {
+        let start = agent_run_start();
+        let mut sequence = agent_run_session_state(&start);
+        let mut receipts = Vec::new();
+        for (turn_id, call_id) in [("turn-earlier", "call-earlier"), ("turn-last", "call-last")] {
+            let call = ToolCallEnvelope {
+                id: call_id.into(),
+                name: "read".into(),
+                args_json: "{}".into(),
+            };
+            let result = ToolExecutionResult {
+                tool_call_id: call_id.into(),
+                tool_name: "read".into(),
+                status: "ok".into(),
+                content: "released after the safe point".repeat(1024),
+                details: json!({}),
+                facts: Vec::new(),
+                error: None,
+                started_at_ms: 1,
+                completed_at_ms: 2,
+                latency_ms: 1,
+                parallel_group: None,
+                transition_reason: None,
+            };
+            sequence
+                .record_tool_call(
+                    turn_id,
+                    &call,
+                    "fixture",
+                    &format!("sha256:{}", "a".repeat(64)),
+                    "read",
+                    1,
+                )
+                .unwrap();
+            sequence
+                .record_tool_result(turn_id, &call, &result, 2)
+                .unwrap();
+            receipts.push(centaeris_core::runtime::TurnCommitReceipt {
+                turn_id: turn_id.into(),
+                continuation: centaeris_core::runtime::QueryContinuation::ExecuteTools,
+                provider_tool_call_ids: vec![call_id.into()],
+                tool_result_ids: vec![call_id.into()],
+                checkpoint_ref: None,
+            });
+        }
+        let mut response = AgentRunResult {
+            turn_receipts: receipts,
+            last_turn: None,
+            final_reply: None,
+            stop: AgentRunStop::Finalized,
+        };
+        assert!(
+            tool_session_records(&start, None, &response, &mut sequence, 3)
+                .unwrap()
+                .is_empty()
+        );
+        // Equal counts cannot hide substitution of an earlier result identity.
+        response.turn_receipts[0].tool_result_ids[0] = "call-uncommitted".into();
+        assert!(
+            tool_session_records(&start, None, &response, &mut sequence, 3)
+                .unwrap_err()
+                .contains("call-uncommitted")
+        );
+        assert!(sequence.has_tool_result("call-earlier"));
+        assert!(!sequence.has_tool_result("call-uncommitted"));
+    }
+
+    #[test]
     fn resumed_knowledge_read_projects_citation_after_pending_receipt() {
         let agent_run_start = agent_run_start();
         let call = ToolCallEnvelope {
@@ -8693,6 +8881,7 @@ mod tests {
             transition_reason: Some("runtime_job_succeeded".to_string()),
         };
         let turn = TurnStepResult {
+            current_assistant_reply: None,
             turn_id: "turn_1".to_string(),
             continuation: centaeris_core::runtime::QueryContinuation::ExecuteTools,
             checkpoint: None,

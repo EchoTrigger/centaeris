@@ -922,14 +922,22 @@ impl AgentRunSessionState {
         &mut self,
         checkpoint: &CheckpointRecord,
     ) -> Result<SequencedSessionRecord, String> {
+        self.committed_checkpoint_ref(&crate::runtime::TurnCheckpointRef::from(checkpoint))
+    }
+
+    /// Publish an already committed checkpoint's exact content identity without
+    /// keeping its body alive in a Run's accumulated result.
+    pub fn committed_checkpoint_ref(
+        &mut self,
+        checkpoint: &crate::runtime::TurnCheckpointRef,
+    ) -> Result<SequencedSessionRecord, String> {
         if checkpoint.session_id != self.session_id {
             return Err("checkpoint Session identity mismatch".to_string());
         }
-        let payload_bytes = checkpoint.payload_json.as_bytes();
-        if payload_bytes.is_empty() {
+        if checkpoint.payload_byte_length == 0 {
             return Err("checkpoint payload_json is required".to_string());
         }
-        let payload_sha256 = format!("sha256:{:x}", Sha256::digest(payload_bytes));
+        let payload_sha256 = &checkpoint.payload_sha256;
         self.record(canonical_session_record(
             format!(
                 "evt:checkpoint_ref:{}:{}",
@@ -946,7 +954,7 @@ impl AgentRunSessionState {
                 "objectRef": format!("checkpoint-object:{payload_sha256}"),
                 "status": checkpoint.status,
                 "payloadSha256": payload_sha256,
-                "payloadByteLength": payload_bytes.len(),
+                "payloadByteLength": checkpoint.payload_byte_length,
                 "updatedAtMs": checkpoint.updated_at_ms,
             }),
         )?)
@@ -6728,6 +6736,46 @@ mod tests {
                 .is_none(),
             "a checkpoint used by a started execution is permanently excluded"
         );
+    }
+
+    #[test]
+    fn checkpoint_reference_preserves_body_identity_without_copying_body_into_event() {
+        let mut state = AgentRunSessionState::new("session-1", "agent-run-1").unwrap();
+        let payload = "{\"unresolved\":\"original-tool-identity\"}".repeat(1024);
+        let expected_digest = format!("sha256:{:x}", Sha256::digest(payload.as_bytes()));
+        let expected_len = payload.len();
+        let checkpoint = CheckpointRecord {
+            checkpoint_id: "checkpoint-original".into(),
+            kind: crate::runtime::contracts::CheckpointKindV1::Recovery,
+            session_id: "session-1".into(),
+            turn_id: "turn-original".into(),
+            status: "committed".into(),
+            done_reason: None,
+            updated_at_ms: 123,
+            payload_json: payload,
+        };
+        let compact = crate::runtime::TurnCheckpointRef::from(&checkpoint);
+        let record = state.checkpoint_ref(&checkpoint).unwrap();
+        drop(checkpoint);
+        let compact_record = AgentRunSessionState::new("session-1", "agent-run-1")
+            .unwrap()
+            .committed_checkpoint_ref(&compact)
+            .unwrap();
+        assert_eq!(record, compact_record);
+        assert_eq!(record.event.turn_id.as_deref(), Some("turn-original"));
+        assert_eq!(record.event.agent_run_id.as_deref(), Some("agent-run-1"));
+        assert_eq!(
+            record.event.payload,
+            serde_json::json!({
+                "checkpointId": "checkpoint-original", "kind": "recovery",
+                "objectRef": format!("checkpoint-object:{expected_digest}"),
+                "status": "committed", "payloadSha256": expected_digest,
+                "payloadByteLength": expected_len, "updatedAtMs": 123,
+            })
+        );
+        let mut replay = AgentRunSessionState::new("session-1", "agent-run-1").unwrap();
+        replay.restore(record).unwrap();
+        assert!(replay.has_checkpoint("checkpoint-original"));
     }
 
     #[test]

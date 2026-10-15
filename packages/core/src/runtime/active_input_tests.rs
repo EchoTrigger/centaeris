@@ -245,7 +245,7 @@ async fn query_loop_initial_user_identity_and_active_batch_are_read_once_without
         queue.0.lock().unwrap().acknowledged,
         ["initial-user", "next-user"]
     );
-    let snapshot = &result.turn_responses[0].session_snapshot;
+    let snapshot = &result.last_turn.as_ref().unwrap().session_snapshot;
     assert!(snapshot.messages.iter().any(|message| message
         .metadata
         .get(MESSAGE_SEMANTIC_KIND_META_KEY)
@@ -502,7 +502,7 @@ async fn query_loop_pending_native_returns_prevent_run_final_after_plain_or_comp
             .unwrap();
         assert_eq!(result.stop, AgentRunStop::Finalized);
         assert_eq!(
-            result.turn_responses.len(),
+            result.turn_receipts.len(),
             2,
             "turn completion cannot end a Run holding pending input"
         );
@@ -636,7 +636,7 @@ async fn query_loop_active_native_returns_share_the_run_preserve_the_objective_a
         .unwrap();
     assert_eq!(result.stop, AgentRunStop::Finalized);
     assert_eq!(model.requests.lock().unwrap().len(), 2);
-    assert_eq!(result.turn_responses.len(), 2);
+    assert_eq!(result.turn_receipts.len(), 2);
     assert_eq!(executions.load(Ordering::SeqCst), 1);
     assert_eq!(
         input_ids(records.last().unwrap()),
@@ -656,7 +656,7 @@ async fn query_loop_active_native_returns_share_the_run_preserve_the_objective_a
             .iter()
             .any(|message| message.message_id == input.message_id
                 && message.content.contains("non-authoritative")));
-        let snapshot = &result.turn_responses.last().unwrap().session_snapshot;
+        let snapshot = &result.last_turn.as_ref().unwrap().session_snapshot;
         let message = snapshot
             .messages
             .iter()

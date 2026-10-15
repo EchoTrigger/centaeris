@@ -332,6 +332,7 @@ impl<
         self.session_manager.save_session(&session)?;
         let tool_operations_json = project_tool_operations_json(&tool_results);
         Ok(TurnStepResult {
+            current_assistant_reply: nonempty_current_assistant_reply(&generate_result.content),
             turn_id: turn_id.clone(),
             continuation: if complete_turn {
                 QueryContinuation::CompleteTerminalTool
@@ -402,6 +403,7 @@ impl<
             },
         )?;
         Ok(TurnStepResult {
+            current_assistant_reply: None,
             turn_id: checkpoint.turn_id.clone(),
             continuation: QueryContinuation::ExecuteTools,
             checkpoint: None,
@@ -589,6 +591,7 @@ impl<
         )?;
         let session = self.session_manager.load_or_create_session(session_id)?;
         Ok(TurnStepResult {
+            current_assistant_reply: None,
             turn_id: turn_id.to_string(),
             continuation: QueryContinuation::ExecuteTools,
             checkpoint: None,
@@ -777,6 +780,7 @@ impl<
         }
         if waiting {
             return Ok(TurnStepResult {
+                current_assistant_reply: None,
                 turn_id: checkpoint.turn_id.clone(),
                 continuation: QueryContinuation::AwaitRuntimeJob,
                 checkpoint: Some(checkpoint),
@@ -920,6 +924,7 @@ impl<
             ),
         );
         Ok(TurnStepResult {
+            current_assistant_reply: nonempty_current_assistant_reply(&generate_result.content),
             turn_id: checkpoint.turn_id.clone(),
             continuation: if complete_turn {
                 QueryContinuation::CompleteTerminalTool
@@ -1754,7 +1759,7 @@ impl<
         let _active_agent_run_guard = self.acquire_active_agent_run(session_id.as_str())?;
         let mut turn_control_close_guard = TurnControlCloseGuard::new(turn_control);
 
-        let mut responses = vec![];
+        let mut responses = RunResultCollector::default();
         let mut next_turn_id = initial_turn_id.clone();
         let mut next_turn_supplements = Vec::new();
         let mut next_host_events = Vec::new();
