@@ -1035,7 +1035,10 @@ fn worker_delivery_failure_retains_supervision_and_does_not_respawn_unknown_star
         .journal
         .tasks
         .iter()
-        .find(|(_, record)| record.snapshot.operation_id == "failed-delivery")
+        .find(|(_, record)| {
+            matches!(&attempt, EnvironmentTaskRequest::Start { operation_id, .. }
+            if record.snapshot.operation_id == *operation_id)
+        })
         .map(|(id, _)| id.clone())
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
