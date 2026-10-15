@@ -121,7 +121,7 @@ class DurableCompactionTests(unittest.TestCase):
             event(40,'tool_call',{'toolName':'bash','callId':'command-700','normalizedInput':{'command':'printf acceptance-long-0700'}}),
             event(50,'tool_result',{'callId':'command-700','resultState':'successWithOutput','modelContent':'acceptance-long-0700'})]
         class Cursor:
-            snapshot=[(summary,{'kind':'context_compaction','compaction_id':'compact-1','first_kept_message_id':'tail'},300)]
+            snapshot=[(summary,{'kind':'context_compaction','compaction_id':'compact-1','first_kept_message_id':'tail'},300,'System')]
             contents=[content]
             failure_count=0
             def execute(self,sql,params):self.sql=sql;self.params=params
@@ -143,6 +143,57 @@ class DurableCompactionTests(unittest.TestCase):
         self.assertEqual(facts['lastMainObservation']['requestId'],'main-after')
         self.assertNotIn('committed synthetic summary',json.dumps(facts))
 
+    def test_reduced_snapshot_empty_metadata_preserves_canonical_cas_summary_identity(self):
+        events,cursor,_=self.fixture()
+        summary=cursor.snapshot[0][0]
+        cursor.snapshot=[(summary,{},300,'System')]
+        facts=progress.durable_compaction_facts(events,'session',cursor,'summary-1')
+        self.assertEqual(facts['summaryMessageId'],'summary-1')
+        self.assertEqual(facts['requestBound']['requestId'],'compact-request')
+        self.assertEqual(facts['lastMainObservation']['requestId'],'main-after')
+        # Earlier real main observation proves the reduced representation. It
+        # never substitutes for a newer request beyond the recovery watermark.
+        waiting=progress.durable_compaction_facts(events,'session',cursor,'summary-1',50)
+        self.assertEqual(waiting['summarySha256'],facts['summarySha256'])
+        self.assertIsNone(waiting['lastMainObservation'])
+
+    def test_reconstructed_summary_requires_an_existing_canonical_main_reference(self):
+        events,cursor,_=self.fixture()
+        cursor.snapshot=[(cursor.snapshot[0][0],{},300,'System')]
+        # Even a valid CAS content row alone is not evidence it reached main.
+        self.assertIsNone(progress.durable_compaction_facts(events[:2],'session',cursor))
+        with self.assertRaisesRegex(RuntimeError,'no canonical main observation'):
+            progress.durable_compaction_facts(events[:2],'session',cursor,'summary-1')
+
+    def test_reconstructed_summary_still_requires_exact_cas_hash_and_commit(self):
+        events,cursor,_=self.fixture()
+        cursor.snapshot=[(cursor.snapshot[0][0],{},300,'System')]
+        self.assertIsNone(progress.durable_compaction_facts([events[0]]+events[2:],'session',cursor))
+        cursor.contents=[(cursor.contents[0][0],cursor.contents[0][1]+' ')]
+        with self.assertRaisesRegex(RuntimeError,'observation digest mismatch'):
+            progress.durable_compaction_facts(events,'session',cursor,'summary-1')
+
+    def test_present_metadata_conflicts_are_never_treated_as_reconstruction(self):
+        for metadata in ({'kind':'wrong','compaction_id':'compact-1','first_kept_message_id':'tail'},
+                {'kind':'context_compaction','compaction_id':'different','first_kept_message_id':'tail'},
+                {'kind':'context_compaction','compaction_id':'compact-1','first_kept_message_id':'different'},
+                {'kind':'context_compaction'}):
+            events,cursor,_=self.fixture();cursor.snapshot=[(cursor.snapshot[0][0],metadata,300,'System')]
+            with self.subTest(metadata=metadata),self.assertRaisesRegex(RuntimeError,'identity changed'):
+                progress.durable_compaction_facts(events,'session',cursor,'summary-1')
+
+    def test_reconstruction_cannot_hide_wrong_snapshot_role_or_duplicate_identity(self):
+        for role in ('system','User'):
+            events,cursor,_=self.fixture();cursor.snapshot=[(cursor.snapshot[0][0],{},300,role)]
+            with self.subTest(role=role),self.assertRaisesRegex(RuntimeError,'identity changed'):
+                progress.durable_compaction_facts(events,'session',cursor,'summary-1')
+        events,cursor,_=self.fixture();row=(cursor.snapshot[0][0],{},300,'System');cursor.snapshot=[row,row]
+        with self.assertRaisesRegex(RuntimeError,'persisted summary missing or duplicated'):
+            progress.durable_compaction_facts(events,'session',cursor,'summary-1')
+        events,cursor,_=self.fixture();events.insert(2,events[1])
+        with self.assertRaisesRegex(RuntimeError,'required summary missing or duplicated'):
+            progress.durable_compaction_facts(events,'session',cursor,'summary-1')
+
     def test_no_commit_is_an_explicit_unready_observation(self):
         events,cursor,_=self.fixture()
         self.assertIsNone(progress.durable_compaction_facts([events[0]],'session',cursor))
@@ -152,7 +203,7 @@ class DurableCompactionTests(unittest.TestCase):
             progress.durable_compaction_facts(events,'session',cursor,'summary-1')
 
     def test_changed_summary_or_wrong_model_purpose_cannot_qualify(self):
-        events,cursor,_=self.fixture();cursor.snapshot=[('changed',{},300)]
+        events,cursor,_=self.fixture();cursor.snapshot=[('changed',{},300,'System')]
         with self.assertRaisesRegex(RuntimeError,'identity changed'):
             progress.durable_compaction_facts(events,'session',cursor)
         events,cursor,_=self.fixture();events[0].payload['payload']['purpose']='main'

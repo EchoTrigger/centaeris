@@ -111,13 +111,18 @@ def durable_compaction_facts(records, session_id, cursor, required_summary=None,
     event=commits[-1];body=event.payload['payload'];summary_id=body['summaryMessageId']
     summary=body['summaryMarkdown']
     if not summary.strip() or len(summary.encode())>262144:fail('summary body invalid')
-    cursor.execute("SELECT item->>'content',item->'metadata',message_ordinal-1 FROM runtime.session_runtime_snapshots s CROSS JOIN LATERAL jsonb_array_elements(s.snapshot_json::jsonb->'messages') WITH ORDINALITY AS messages(item,message_ordinal) WHERE s.session_id=%s AND item->>'message_id'=%s",[session_id,summary_id])
+    cursor.execute("SELECT item->>'content',item->'metadata',message_ordinal-1,item->>'role' FROM runtime.session_runtime_snapshots s CROSS JOIN LATERAL jsonb_array_elements(s.snapshot_json::jsonb->'messages') WITH ORDINALITY AS messages(item,message_ordinal) WHERE s.session_id=%s AND item->>'message_id'=%s",[session_id,summary_id])
     snapshot_rows=cursor.fetchall()
     if not snapshot_rows and required_summary is None:return None
     if len(snapshot_rows)!=1:fail('persisted summary missing or duplicated')
-    content,metadata,position=snapshot_rows[0]
+    content,metadata,position,role=snapshot_rows[0]
     if isinstance(metadata,str):metadata=json.loads(metadata)
-    if (content!=summary or metadata.get('kind')!='context_compaction'
+    # ChatMessage's internal MessageRole serde is "System". ModelMessageV1's
+    # public CAS projection uses "system" and is checked independently below.
+    if content!=summary or role!='System' or not isinstance(metadata,dict):
+        fail('persisted summary identity changed')
+    reconstructed=metadata=={}
+    if not reconstructed and (metadata.get('kind')!='context_compaction'
             or metadata.get('compaction_id')!=body['compactionId']
             or metadata.get('first_kept_message_id')!=body.get('firstKeptMessageId')):
         fail('persisted summary identity changed')
@@ -173,13 +178,16 @@ def durable_compaction_facts(records, session_id, cursor, required_summary=None,
                 or message.get('messageId')!=summary_id or message.get('content')!=summary):fail('summary observation changed')
         summary_digests.add(key)
     main=None
+    observed_by_main=False
     for candidate in reversed(records):
         if (candidate.payload.get('type')!='model_request_started'
                 or candidate.payload['payload'].get('purpose')!='main'
-                or candidate.agent_run_sequence<=max(after_sequence,event.agent_run_sequence)):
+                or candidate.agent_run_sequence<=event.agent_run_sequence):
             continue
         matched=[ref for ref in references(candidate) if ref['kind']=='message' and ref['contentDigest'] in summary_digests]
         if matched:
+            observed_by_main=True
+            if candidate.agent_run_sequence<=after_sequence:continue
             next_main=min((r.agent_run_sequence for r in records if r.payload.get('type')=='model_request_started'
                 and r.payload['payload'].get('purpose')=='main' and r.agent_run_sequence>candidate.agent_run_sequence),default=float('inf'))
             successful=[]
@@ -205,6 +213,9 @@ def durable_compaction_facts(records, session_id, cursor, required_summary=None,
                 'manifestDigest':candidate.payload['payload']['observations']['manifestDigest'],
                 'summaryContentDigest':matched[0]['contentDigest'],'successfulCommand':successful[0]}
             break
+    if reconstructed and not observed_by_main:
+        if required_summary is None:return None
+        fail('reconstructed summary has no canonical main observation')
     cursor.execute('SELECT count(*) FROM runtime.runtime_events WHERE session_id=%s AND event_type=%s',[session_id,'prompt.compaction.failed'])
     failures=cursor.fetchone()[0]
     return {'compactionId':body['compactionId'],'summaryMessageId':summary_id,
