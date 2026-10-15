@@ -61,6 +61,39 @@ class PreparationTests(unittest.TestCase):
             self.assertEqual(compose['services']['runtime']['ports'],['127.0.0.1:19001:9000'])
             self.assertTrue(compose['name'].startswith('retainedaccept'))
 
+    def test_only_runtime_inherits_maintenance_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            with patch.object(sys,'argv',self.fixture(root)), \
+                    patch.object(prepare.subprocess,'run',side_effect=[subprocess.CompletedProcess([],0,'','')]
+                        + [subprocess.CompletedProcess([],0,'sha256:'+'b'*64+'\n','')]*6
+                        + [subprocess.CompletedProcess([],0,'a'*40,'')]
+                        + [subprocess.CompletedProcess([],0,'','')]
+                        + [subprocess.CompletedProcess([],0,'c'*40,'')]), patch('builtins.print'):
+                prepare.main()
+            config=json.loads((root / 'result/compose.json').read_text())
+            def effective_environment(service):
+                result={}
+                for env_file in service.get('env_file',[]):
+                    result.update(line.split('=',1) for line in Path(env_file).read_text().splitlines())
+                result.update(service.get('environment',{}))
+                return result
+            for name in ('api','worker'):
+                effective=effective_environment(config['services'][name])
+                with self.subTest(service=name):
+                    self.assertTrue('ENVIRONMENT_MAINTENANCE_TOKEN' not in effective,
+                        name+' must not inherit independent maintenance authority')
+                    self.assertTrue(bool(effective.get('INTERNAL_API_TOKEN')),
+                        name+' still needs its ordinary internal authority')
+            runtime=effective_environment(config['services']['runtime'])
+            full=dict(line.split('=',1) for line in (root / 'result/synthetic.env').read_text().splitlines())
+            self.assertTrue(len(runtime.get('ENVIRONMENT_MAINTENANCE_TOKEN','').encode())>=32,
+                'Runtime must retain valid independent maintenance authority')
+            self.assertTrue(runtime['ENVIRONMENT_MAINTENANCE_TOKEN']==full['ENVIRONMENT_MAINTENANCE_TOKEN'],
+                'Runtime and private maintainer driver must use the same maintenance authority')
+            self.assertTrue(runtime['ENVIRONMENT_MAINTENANCE_TOKEN']!=runtime['INTERNAL_API_TOKEN'],
+                'maintenance and ordinary internal authority must remain distinct')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -161,6 +161,11 @@ def main():
     envpath.write_text("".join(f"{k}={v}\n" for k,v in sorted(env.items())), encoding="utf-8")
 
     os.chmod(envpath, 0o600)
+    # Only Runtime and the private host maintainer receive maintenance authority.
+    service_envpath = root / 'service.env'
+    service_envpath.write_text(''.join(f'{key}={value}\n' for key,value in sorted(env.items())
+        if key != 'ENVIRONMENT_MAINTENANCE_TOKEN'), encoding='utf-8')
+    os.chmod(service_envpath, 0o600)
 
     source_mounts = [f"{source / 'packages/api'}:/app/packages/api:ro", f"{source / 'packages/worker'}:/app/packages/worker:ro"]
 
@@ -174,11 +179,11 @@ def main():
 
         "model": {"image":images['api']['id'], "entrypoint":[], "command":["/app/.venv/bin/python","/harness/model.py"], "volumes":[f"{model}:/harness/model.py:ro"]},
 
-        "api": {"image":images['api']['id'], "env_file":[str(envpath)], "entrypoint":[], "working_dir":"/app/packages/api", "command":["/app/.venv/bin/uvicorn","api.asgi:application","--host","0.0.0.0","--port","8000"], "volumes":source_mounts+["storage:/var/lib/centaeris-storage","uploads:/var/lib/centaeris-upload-temp","plugins:/opt/centaeris/plugins:ro"], "ports":[f"127.0.0.1:{args.api_port}:8000"]},
+        "api": {"image":images['api']['id'], "env_file":[str(service_envpath)], "entrypoint":[], "working_dir":"/app/packages/api", "command":["/app/.venv/bin/uvicorn","api.asgi:application","--host","0.0.0.0","--port","8000"], "volumes":source_mounts+["storage:/var/lib/centaeris-storage","uploads:/var/lib/centaeris-upload-temp","plugins:/opt/centaeris/plugins:ro"], "ports":[f"127.0.0.1:{args.api_port}:8000"]},
 
         "runtime": {"image":images['runtime']['id'], "env_file":[str(envpath)], "entrypoint":["/usr/local/bin/runtime_server"], "volumes":[f"{bins / 'runtime_server'}:/usr/local/bin/runtime_server:ro","/var/run/docker.sock:/var/run/docker.sock","runtime:/var/lib/centaeris-runtime","memory:/var/lib/centaeris-agent-memory","plugins:/opt/centaeris/plugins:ro"]},
 
-        "worker": {"image":images['worker']['id'], "env_file":[str(envpath)], "working_dir":"/app/packages/worker", "command":["/app/.venv/bin/python","worker.py","serve"], "volumes":source_mounts, "init":True},
+        "worker": {"image":images['worker']['id'], "env_file":[str(service_envpath)], "working_dir":"/app/packages/worker", "command":["/app/.venv/bin/python","worker.py","serve"], "volumes":source_mounts, "init":True},
 
     }
     services['runtime']['ports'] = [f'127.0.0.1:{args.runtime_port}:9000']

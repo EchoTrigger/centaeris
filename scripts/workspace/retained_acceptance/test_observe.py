@@ -1,6 +1,9 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import json
+from types import SimpleNamespace
+from unittest.mock import patch
 
 spec=importlib.util.spec_from_file_location('observe',Path(__file__).with_name('observe.py'))
 observe=importlib.util.module_from_spec(spec)
@@ -8,6 +11,30 @@ spec.loader.exec_module(observe)
 
 
 class StaleProbeTests(unittest.TestCase):
+    def test_rpc_uses_current_protocol_and_exact_target_and_fence(self):
+        fence={'environmentInstanceId':'instance','controllerId':'run-a',
+            'controllerEpoch':7,'controllerPurpose':'execute'}
+        response={'schema':'environment.task.v2','status':'success',
+            'result':{'kind':'listed','tasks':[]}}
+        def service(command, **kwargs):
+            self.assertEqual(command,['docker','exec','-i','--user','0:0','container-a',
+                '/opt/centaeris/bin/execution_agent','environment-task-rpc'])
+            self.assertEqual(json.loads(kwargs['input']),{'schema':'environment.task.v2',
+                'request':{'operation':'query','fence':fence,'taskId':'task-a','cursor':0,'maxBytes':1024}})
+            return SimpleNamespace(stdout=json.dumps(response))
+        with patch.object(observe.subprocess,'run',side_effect=service):
+            self.assertEqual(observe.task_rpc('container-a',fence,'query',
+                taskId='task-a',cursor=0,maxBytes=1024),response)
+
+    def test_rpc_rejects_older_response_and_preserves_current_fence_error(self):
+        response={'schema':'environment.task.v1','status':'success','result':{'kind':'listed','tasks':[]}}
+        with patch.object(observe.subprocess,'run',return_value=SimpleNamespace(stdout=json.dumps(response))):
+            with self.assertRaisesRegex(RuntimeError,'response schema invalid'):
+                observe.task_rpc('container-a',{})
+        response={'schema':'environment.task.v2','status':'error','error':'task_controller_fenced'}
+        with patch.object(observe.subprocess,'run',return_value=SimpleNamespace(stdout=json.dumps(response))):
+            self.assertEqual(observe.task_rpc('container-a',{}),response)
+
     def test_probe_uses_task_original_epoch_with_valid_operation_identity(self):
         previous={'fence':{'environmentInstanceId':'instance','controllerId':'run-a',
             'controllerEpoch':2,'controllerPurpose':'cleanup'},'backgroundTaskIds':['task-a'],

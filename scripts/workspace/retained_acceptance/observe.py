@@ -29,6 +29,21 @@ def stale_execute_fence(previous):
 def stale_operation_id(fence, operation):
     return str(fence['controllerEpoch'])+':acceptance-stale-'+operation+'-'+uuid.uuid4().hex
 
+def task_rpc(container_id,fence,operation="list",**arguments):
+
+    payload={"schema":"environment.task.v2","request":{"operation":operation,"fence":fence,**arguments}}
+
+    result=subprocess.run(["docker","exec","-i","--user","0:0",container_id,"/opt/centaeris/bin/execution_agent","environment-task-rpc"],input=json.dumps(payload),check=True,capture_output=True,text=True)
+
+    response=json.loads(result.stdout)
+
+    if response.get("schema")!="environment.task.v2":
+
+        raise RuntimeError("task service response schema invalid")
+
+    return response
+
+
 def main():
 
     parser=argparse.ArgumentParser()
@@ -110,18 +125,7 @@ print(json.dumps({'agentRunId':run.id,'sessionId':run.session_id,'environmentId'
     state=json.loads(next(line for line in reversed(raw.splitlines()) if line.startswith("{")))
 
     def rpc(fence,operation="list",**arguments):
-
-        payload={"schema":"environment.task.v1","request":{"operation":operation,"fence":fence,**arguments}}
-
-        result=subprocess.run(["docker","exec","-i","--user","0:0",state["containerId"],"/opt/centaeris/bin/execution_agent","environment-task-rpc"],input=json.dumps(payload),check=True,capture_output=True,text=True)
-
-        response=json.loads(result.stdout)
-
-        if response.get("schema")!="environment.task.v1":
-
-            raise RuntimeError("task service response schema invalid")
-
-        return response
+        return task_rpc(state["containerId"],fence,operation,**arguments)
 
     tasks=rpc(state["fence"])
 
