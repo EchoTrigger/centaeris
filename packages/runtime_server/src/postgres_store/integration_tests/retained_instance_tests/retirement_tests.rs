@@ -17,7 +17,7 @@ fn request(a: &RetainedInstanceAllocation, epoch: i64) -> RetirementRequest {
 #[ignore = "requires exclusively owned disposable PostgreSQL"]
 fn postgres_retirement_pending_fences_current_and_new_runs_until_exact_absence() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-    let (_, store, mut db) = setup();
+    let (url, store, mut db) = setup();
     let a = run(&store, &mut db, "run-a", 1);
     let physical = Arc::new(Mutex::new(vec![]));
     let allocation = prepare(&store, &a, "execution-a", &physical).unwrap();
@@ -66,12 +66,31 @@ fn postgres_retirement_pending_fences_current_and_new_runs_until_exact_absence()
             .get::<_, i64>(0),
         1
     );
+    let receipt_sql = "SELECT row_to_json(receipt)::text FROM runtime.environment_retirements receipt WHERE environment_id=$1 AND operation_id=$2";
+    let receipt_before = db
+        .query_one(receipt_sql, &[&r.environment_id, &r.operation_id])
+        .unwrap()
+        .get::<_, String>(0);
+    drop(store);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    assert_eq!(
+        db.query_one(receipt_sql, &[&r.environment_id, &r.operation_id])
+            .unwrap()
+            .get::<_, String>(0),
+        receipt_before
+    );
     assert_eq!(
         store
-            .retire_retained_instance(&r, |_| panic!("replay must not delete again"))
+            .retire_retained_instance(&r, |_| panic!("replay after reopen must not delete again"))
             .unwrap()
             .status,
         "destroyed"
+    );
+    assert_eq!(
+        db.query_one(receipt_sql, &[&r.environment_id, &r.operation_id])
+            .unwrap()
+            .get::<_, String>(0),
+        receipt_before
     );
     let b = run(&store, &mut db, "run-b", 2);
     db.execute(
