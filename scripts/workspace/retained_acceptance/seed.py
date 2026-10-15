@@ -18,7 +18,7 @@ from app_core.models import (Agent, ModelConfig, ModelProvider, ProviderCredenti
 assert settings.DATABASES['default']['NAME'] == 'retained_acceptance'
 assert os.environ.get('AGENT_RUN_EXECUTION_MODE') == 'retained'
 assert not Workspace.objects.exists(), 'refusing to seed an existing workspace database'
-output = Path(settings.STORAGE_ROOT) / 'acceptance-seed.json'
+output = Path(settings.MEDIA_ROOT) / 'acceptance-seed.json'
 assert not output.exists(), 'refusing to replace fixture credentials'
 email = 'retained-' + secrets.token_hex(8) + '@fixture.invalid'
 password = secrets.token_urlsafe(40)
