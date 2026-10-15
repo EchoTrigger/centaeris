@@ -126,11 +126,15 @@ def compaction_summary(request):
     if any(not isinstance(row,dict) or row.get('role') not in ('system','user','assistant','tool')
             or not isinstance(row.get('content'),str) for row in records):
         raise ValueError('malformed Core conversation record')
-    goals=[row['content'] for row in records if row['role']=='user' and 'ACCEPTANCE_LONG_RUN' in row['content']]
+    goals=[row['content'] for row in records if row['role']=='user'][-1:]
     if not goals:
-        goals=re.findall(r'^Goal: (ACCEPTANCE_LONG_RUN[^\n]*)$',previous,re.MULTILINE)
+        goals=re.findall(r'^Goal: ([^\n]+)$',previous,re.MULTILINE)
     if len(goals)!=1 or len(goals[0])>1024:
         raise ValueError('compaction lacks unique bounded acceptance goal')
+    goal=re.fullmatch(r'(ACCEPTANCE_RUN_A|ACCEPTANCE_LONG_RUN)(?:[ \t]+[^\n]+)?',goals[0])
+    if goal is None or len(re.findall(r'ACCEPTANCE_[A-Z_]+',goals[0]))!=1:
+        raise ValueError('compaction has unsupported or ambiguous acceptance goal')
+    long_run=goal[1]=='ACCEPTANCE_LONG_RUN'
     prior=re.findall(r'^Last successful output: `(acceptance-long-\d{4})`\.$',previous,re.MULTILINE)
     last=prior[-1] if prior else None
     failed=int(re.search(r'^Failed tool results: (\d+)\.$',previous,re.MULTILINE).group(1)) if re.search(
@@ -138,6 +142,7 @@ def compaction_summary(request):
     last_failure=re.findall(r'^Last failure: (.+)$',previous,re.MULTILINE)
     last_failure=last_failure[-1] if last_failure else None
     pending={}
+    requested_files=set(re.findall(r'^Requested file setup: `([^`\n]+)` \(tool arguments; existence not inferred\)\.$',previous,re.MULTILINE))
     task_ids=set(re.findall(r'^Observed taskId: `([^`\n]+)`\.$',previous,re.MULTILINE))
     for identifier,name in re.findall(r'^Pending tool: `([^`\n]+)` \(`([^`\n]+)`\)\.$',previous,re.MULTILINE):
         pending[identifier]=name
@@ -145,6 +150,10 @@ def compaction_summary(request):
         if row['role']=='assistant':
             for call in row.get('toolCalls',[]):
                 pending[call['toolCallId']]=call['name']
+                if call['name']=='background_task_start':
+                    arguments=json.loads(call['argumentsJson'])
+                    for path in ('/mnt/data/retained-acceptance.txt','/mnt/data/AGENTS.md'):
+                        if path in json.dumps(arguments):requested_files.add(path)
         if row['role']!='tool':
             continue
         pending.pop(row['toolCallId'],None)
@@ -158,14 +167,15 @@ def compaction_summary(request):
             update_background_references(json.loads(row['content']),task_ids)
         outputs=set(re.findall(r'(?<![A-Za-z0-9_-])acceptance-long-(\d{4})(?!\d)',row['content']))
         if outputs:
-            if row['name']!='bash' or len(outputs)!=1:
+            if not long_run or row['name']!='bash' or len(outputs)!=1:
                 raise ValueError('ambiguous successful command output')
             index=int(outputs.pop())
             if index>=1000 or (last is not None and index<=int(last[-4:])):
                 raise ValueError('compaction output position regressed')
             last='acceptance-long-%04d' % index
     lines=['## Goal','Goal: '+goals[0],
-        'Complete exactly 1000 bounded commands; preserve the retained background task and files.',
+        ('Complete exactly 1000 bounded commands; preserve the retained background task and files.' if long_run
+         else 'Preserve the requested retained background task and its observed identity; retain the requested file setup.'),
         '## Progress']
     if last:
         lines.append('Last successful output: `'+last+'`.')
@@ -175,9 +185,11 @@ def compaction_summary(request):
     if last_failure:
         lines.append('Last failure: '+last_failure)
     lines.extend('Observed taskId: `'+identifier+'`.' for identifier in sorted(task_ids))
+    lines.extend('Requested file setup: `'+path+'` (tool arguments; existence not inferred).' for path in sorted(requested_files))
     lines.extend('Pending tool: `'+identifier+'` (`'+name+'`).' for identifier,name in sorted(pending.items()))
     lines.extend(['## Next steps',
-        'Continue from actual numbered tool results; never replay completed commands. Resolve pending calls and failures before proceeding.',
+        ('Continue from actual numbered tool results; never replay completed commands. Resolve pending calls and failures before proceeding.' if long_run
+         else 'Continue from the supplied background task observations; resolve pending calls and failures before proceeding.'),
         'Keep all acceptance commands bounded. Do not terminate the retained background task.'])
     summary='\n'.join(lines)
     if len(summary)>4096:

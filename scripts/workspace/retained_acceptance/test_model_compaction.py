@@ -60,6 +60,43 @@ class CompactionWireTests(unittest.TestCase):
         self.assertIn('1000',summary)
         self.assertNotIn('tool_calls',choice['message'])
 
+    def test_actual_a_only_prefix_has_meaningful_summary_without_invented_long_work(self):
+        records=[{'role':'user','content':'ACCEPTANCE_RUN_A'},
+            {'role':'assistant','content':'','toolCalls':[{'toolCallId':'start-a',
+                'name':'background_task_start','argumentsJson':json.dumps({'program':'/bin/sh',
+                    'args':['-c',"printf fixture > /mnt/data/retained-acceptance.txt; printf bounded > /mnt/data/AGENTS.md; exec sleep 14400"]})}]},
+            {'role':'tool','toolCallId':'start-a','name':'background_task_start','status':'ok',
+                'resultState':'success_with_output','content':json.dumps({'schema':'background_task.result.v1',
+                    'taskId':'actual-background-a','state':'running','cleanupComplete':False,'output':[]})},
+            {'role':'assistant','content':'Retained acceptance Run complete.'}]
+        content_type,body=self.post(compaction_request(records))
+        self.assertEqual(content_type,'application/json')
+        summary=json.loads(body)['choices'][0]['message']['content']
+        self.assertIn('Goal: ACCEPTANCE_RUN_A',summary)
+        self.assertIn('Observed taskId: `actual-background-a`.',summary)
+        self.assertIn('/mnt/data/retained-acceptance.txt',summary)
+        self.assertIn('/mnt/data/AGENTS.md',summary)
+        self.assertIn('requested',summary.lower())
+        self.assertNotIn('1000',summary)
+        self.assertNotIn('ACCEPTANCE_LONG_RUN',summary)
+        self.assertNotIn('Last successful output:',summary)
+        repeated=model.compaction_summary(compaction_request([],summary))
+        self.assertIn('Goal: ACCEPTANCE_RUN_A',repeated)
+        self.assertIn('actual-background-a',repeated)
+        self.assertIn('/mnt/data/AGENTS.md',repeated)
+        # This accepted A-prefix summary says nothing about the uncompressed
+        # LONG user/tool suffix. Only that actual suffix advances the command.
+        messages=[{'role':'system','content':summary},
+            {'role':'user','content':'ACCEPTANCE_LONG_RUN fixture'},
+            {'role':'tool','content':'acceptance-long-0499'}]
+        self.assertEqual(model.next_call({'messages':messages}),('bash',{'command':model.long_command(500)}))
+        self.assertEqual(model.next_call({'messages':messages[:-1]}),('bash',{'command':model.long_command(0)}))
+
+    def test_unknown_or_ambiguous_user_goal_cannot_be_replaced_by_fixture_intent(self):
+        for goal in ('UNSUPPORTED_FIXTURE_GOAL','ACCEPTANCE_RUN_A ACCEPTANCE_LONG_RUN'):
+            with self.subTest(goal=goal),self.assertRaisesRegex(ValueError,'unsupported or ambiguous'):
+                model.compaction_summary(compaction_request([{'role':'user','content':goal}]))
+
     def test_compacted_actual_output_advances_without_fixture_state(self):
         summary=model.compaction_summary(compaction_request([
             {'role':'user','content':'ACCEPTANCE_LONG_RUN fixture'},result(499)]))
