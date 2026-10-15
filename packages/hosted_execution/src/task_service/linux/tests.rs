@@ -665,11 +665,13 @@ fn one_hundred_runs_release_history_without_stopping_environment_task() {
 #[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
 fn same_run_history_retirement_keeps_output_and_progress_before_run_close() {
     let mut f = Fixture::new();
-    let background = id(&Manager::handle(
-        &f.manager,
-        f.start("resident", EnvironmentTaskScope::Environment, "cat"),
-    )
-    .unwrap());
+    let mut resident = f.start("resident", EnvironmentTaskScope::Environment, "cat");
+    // This background task must survive the whole history test; the isolated
+    // gate bounds its lifetime and fixture cleanup terminates its exact tree.
+    if let EnvironmentTaskRequest::Start { timeout_ms, .. } = &mut resident {
+        *timeout_ms = 0;
+    }
+    let background = id(&Manager::handle(&f.manager, resident).unwrap());
     for index in 0..1000 {
         let task = id(&Manager::handle(
             &f.manager,
@@ -817,17 +819,19 @@ fn same_run_reconstructed_controller_does_not_repeat_spawn_or_acknowledged_input
 #[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
 fn input_history_pressure_leaves_termination_and_end_run_reconcilable() {
     let f = Fixture::new();
-    let task = id(&Manager::handle(
-        &f.manager,
-        f.start(
-            "cat",
-            EnvironmentTaskScope::Run {
-                run_id: f.fence.controller_id.clone(),
-            },
-            "cat",
-        ),
-    )
-    .unwrap());
+    let mut start = f.start(
+        "cat",
+        EnvironmentTaskScope::Run {
+            run_id: f.fence.controller_id.clone(),
+        },
+        "cat",
+    );
+    // This case measures receipt capacity, not a command deadline. The enclosing
+    // isolated gate has a hard budget and Terminate below owns the final cleanup.
+    if let EnvironmentTaskRequest::Start { timeout_ms, .. } = &mut start {
+        *timeout_ms = 0;
+    }
+    let task = id(&Manager::handle(&f.manager, start).unwrap());
     let first = EnvironmentTaskRequest::Input {
         fence: f.fence.clone(),
         task_id: task.clone(),
@@ -873,6 +877,65 @@ fn input_history_pressure_leaves_termination_and_end_run_reconcilable() {
         }
     ));
     assert!(Manager::handle(&f.manager, end).is_ok());
+}
+
+#[test]
+#[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
+fn task_deadline_exits_before_late_input_and_uncertain_input_is_not_replayed() {
+    let f = Fixture::new();
+    let mut start = f.start(
+        "deadline-cat",
+        EnvironmentTaskScope::Run {
+            run_id: f.fence.controller_id.clone(),
+        },
+        "exec cat",
+    );
+    if let EnvironmentTaskRequest::Start { timeout_ms, .. } = &mut start {
+        *timeout_ms = 100;
+    }
+    let began = Instant::now();
+    let task = id(&Manager::handle(&f.manager, start).unwrap());
+    f.await_cleanup(&task);
+    assert!(began.elapsed() >= Duration::from_millis(100));
+    {
+        let manager = f.manager.lock().unwrap();
+        let snapshot = &manager.journal.tasks[&task].snapshot;
+        assert_eq!(snapshot.state, EnvironmentTaskState::Exited);
+        assert_eq!(
+            snapshot.exit_code, None,
+            "deadline kills the owned task tree"
+        );
+        assert!(snapshot.cleanup_complete);
+        assert!(!manager.journal.poisoned);
+    }
+    let input = EnvironmentTaskRequest::Input {
+        fence: f.fence.clone(),
+        task_id: task.clone(),
+        operation_id: f.fence.operation_id("late-input"),
+        data: b"must-not-be-replayed".to_vec(),
+        close: false,
+    };
+    assert_eq!(
+        Manager::handle(&f.manager, input.clone()).unwrap_err(),
+        "task_not_running"
+    );
+    assert_eq!(
+        Manager::handle(&f.manager, input).unwrap_err(),
+        "task_operation_unknown"
+    );
+    let result = Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Query {
+            fence: f.fence.clone(),
+            task_id: task,
+            cursor: 0,
+            max_bytes: ENVIRONMENT_TASK_READ_BYTES as u32,
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(result,EnvironmentTaskResult::Task{task,output,..} if task.state==EnvironmentTaskState::Exited && output.is_empty())
+    );
 }
 
 #[test]
@@ -1143,18 +1206,13 @@ fn real_background_tree_survives_controller_takeover_and_drains_both_streams() {
     loop {
         let m = f.manager.lock().unwrap();
         let mut log = m.logs[&task_id].lock().unwrap();
-        let cursor = log.next.saturating_sub(2);
-        let (chunks, _, _, gap, _) = log.read(cursor, ENVIRONMENT_TASK_READ_BYTES).unwrap();
-        if gap
-            || chunks
-                .iter()
-                .any(|c| c.data.windows(11).any(|s| s == b"stderr-done"))
-        {
+        let (stdout_done, stderr_done, gap) = retained_drain_markers(&mut log);
+        if stdout_done && stderr_done && gap {
             break;
         }
         drop(log);
         drop(m);
-        assert!(Instant::now() < end);
+        assert!(Instant::now()<end,"both streams must drain through their completion markers and expose the overwritten prefix");
         thread::sleep(Duration::from_millis(20));
     }
     let mut updated = request;
@@ -1212,6 +1270,70 @@ fn real_background_tree_survives_controller_takeover_and_drains_both_streams() {
     )
     .unwrap();
     f.await_cleanup(&task_id);
+}
+
+fn retained_drain_markers(log: &mut OutputLog) -> (bool, bool, bool) {
+    let mut cursor = 0;
+    let mut gap = false;
+    let mut seen = [false, false];
+    let mut tails = [Vec::new(), Vec::new()];
+    let markers = [b"stdout-done".as_slice(), b"stderr-done".as_slice()];
+    loop {
+        let (chunks, _, next, page_gap, more) =
+            log.read(cursor, ENVIRONMENT_TASK_READ_BYTES).unwrap();
+        gap |= page_gap;
+        for chunk in chunks {
+            let index = if chunk.stream == EnvironmentTaskStream::Stdout {
+                0
+            } else {
+                1
+            };
+            let tail = &mut tails[index];
+            tail.extend_from_slice(&chunk.data);
+            seen[index] |= tail
+                .windows(markers[index].len())
+                .any(|bytes| bytes == markers[index]);
+            let retain = markers[index].len() - 1;
+            if tail.len() > retain {
+                tail.drain(..tail.len() - retain);
+            }
+        }
+        if !more {
+            return (seen[0], seen[1], gap);
+        }
+        assert!(next > cursor, "bounded output observation must advance");
+        cursor = next;
+    }
+}
+
+#[test]
+fn drain_marker_observation_survives_split_stderr_and_later_stdout_chunks() {
+    let root = lock_root();
+    let mut log = OutputLog::open(&root.join("output"), 8).unwrap();
+    for _ in 0..10 {
+        log.append(EnvironmentTaskStream::Stdout, &[0; CHUNK])
+            .unwrap();
+    }
+    log.append(EnvironmentTaskStream::Stderr, b"stderr-")
+        .unwrap();
+    log.append(EnvironmentTaskStream::Stdout, b"stdout-")
+        .unwrap();
+    log.append(EnvironmentTaskStream::Stderr, b"done").unwrap();
+    log.append(EnvironmentTaskStream::Stdout, b"done").unwrap();
+    log.append(EnvironmentTaskStream::Stdout, &[0; CHUNK])
+        .unwrap();
+    log.append(EnvironmentTaskStream::Stdout, &[0; CHUNK])
+        .unwrap();
+    let (last_two, _, _, _, _) = log.read(log.next - 2, ENVIRONMENT_TASK_READ_BYTES).unwrap();
+    assert!(
+        last_two
+            .iter()
+            .all(|chunk| chunk.data.iter().all(|byte| *byte == 0)),
+        "later stdout can completely hide completion markers from the old two-chunk window"
+    );
+    assert_eq!(retained_drain_markers(&mut log), (true, true, true));
+    drop(log);
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
