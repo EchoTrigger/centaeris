@@ -20,6 +20,7 @@ from .agent_messages import message_contract_digest, validate_agent_message
 from .agent_run_authorization_factory import create_agent_run_authorization
 from .models import Agent, AgentRun, ModelConfig, Session, SessionAssetLink, SessionEvent, UserLibraryObject, Workspace, WorkspaceMembership
 from .runtime_client import build_agent_run_start
+from .runtime_schema_test_helpers import remove_runtime_trigger_functions
 
 
 class AgentMessageRuntimeTests(LiveServerTestCase):
@@ -78,7 +79,7 @@ class AgentMessageRuntimeTests(LiveServerTestCase):
                 if not previous_schema_exists:
                     # A second production-store fixture must see the original
                     # absent schema, rather than an empty migrated namespace.
-                    cursor.execute("DROP FUNCTION IF EXISTS runtime.notify_runtime_job_ready_v1()")
+                    remove_runtime_trigger_functions(cursor)
                     cursor.execute("DROP SCHEMA IF EXISTS runtime")
 
         self.addCleanup(remove_created_runtime_tables)

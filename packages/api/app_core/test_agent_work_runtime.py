@@ -19,6 +19,7 @@ from django.utils import timezone
 from .agent_run_authorization_factory import create_agent_run_authorization
 from .models import Agent, AgentCoordinationSession, AgentDefinition, AgentDefinitionVersion, AgentRun, AgentWorkSession, BusinessApplication, HostedOperationReceipt, ModelConfig, Session, UserAppDelegation, Workspace, WorkspaceMembership
 from .runtime_client import build_agent_run_start
+from .runtime_schema_test_helpers import remove_runtime_trigger_functions
 
 
 class AgentWorkRuntimeTests(LiveServerTestCase):
@@ -109,7 +110,7 @@ class AgentWorkRuntimeTests(LiveServerTestCase):
                     names = ", ".join("runtime." + connection.ops.quote_name(name) for name in sorted(created))
                     cursor.execute("DROP TABLE " + names)
                 if not previous_schema_exists:
-                    cursor.execute("DROP FUNCTION IF EXISTS runtime.notify_runtime_job_ready_v1()")
+                    remove_runtime_trigger_functions(cursor)
                     cursor.execute("DROP SCHEMA IF EXISTS runtime")
         self.addCleanup(cleanup_runtime_tables)
         database = settings.DATABASES["default"]

@@ -14,6 +14,7 @@ from . import test_agent_work as fixture
 from . import test_agent_work_returns as returns_fixture
 from .models import AgentRun, AgentWorkReturn, AgentWorkSession, HostedOperationReceipt
 from .runtime_client import build_agent_run_start
+from .runtime_schema_test_helpers import remove_runtime_trigger_functions
 
 
 class WorkReturnRuntimeTests(LiveServerTestCase):
@@ -41,7 +42,7 @@ class WorkReturnRuntimeTests(LiveServerTestCase):
                 if created:
                     cursor.execute("DROP TABLE " + ", ".join("runtime." + connection.ops.quote_name(name) for name in sorted(created)))
                 if not previous_schema_exists:
-                    cursor.execute("DROP FUNCTION IF EXISTS runtime.notify_runtime_job_ready_v1()")
+                    remove_runtime_trigger_functions(cursor)
                     cursor.execute("DROP SCHEMA IF EXISTS runtime")
         self.addCleanup(cleanup_runtime_tables)
         database = settings.DATABASES["default"]
