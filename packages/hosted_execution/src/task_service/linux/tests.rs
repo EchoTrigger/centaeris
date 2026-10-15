@@ -97,15 +97,16 @@ fn seeded_running_journal(root: &Path) -> Vec<u8> {
             root,
         )
         .unwrap();
+    let task = task_identity(journal.fence.as_ref().unwrap(), "3:operation").unwrap();
     journal.tasks.insert(
-        "task".into(),
+        task.clone(),
         Record {
-            digest: "digest".into(),
+            digest: "d".repeat(64),
             creator_controller_id: "r".into(),
             creator_epoch: 3,
             snapshot: EnvironmentTaskSnapshot {
-                task_id: "task".into(),
-                operation_id: "operation".into(),
+                task_id: task.clone(),
+                operation_id: "3:operation".into(),
                 scope: EnvironmentTaskScope::Environment,
                 state: EnvironmentTaskState::Running,
                 exit_code: None,
@@ -115,10 +116,10 @@ fn seeded_running_journal(root: &Path) -> Vec<u8> {
         },
     );
     journal.persist(root).unwrap();
-    fs::read(root.join("journal.json")).unwrap()
+    fs::read(root.join("history.sqlite")).unwrap()
 }
 fn assert_control_unchanged(root: &Path, before: &[u8]) {
-    let after = fs::read(root.join("journal.json")).unwrap();
+    let after = fs::read(root.join("history.sqlite")).unwrap();
     assert!(
         after.as_slice() == before,
         "control journal changed: before={:x}, after={:x}",
@@ -310,9 +311,10 @@ fn corrupt_or_removed_output_does_not_prevent_control_restart_and_queries() {
     };
     let mut journal = Journal::open(&control, "i").unwrap();
     journal.takeover_persist(fence.clone(), &control).unwrap();
+    let task_id = task_identity(&fence, "1:operation").unwrap();
     let snapshot = EnvironmentTaskSnapshot {
-        task_id: "task".into(),
-        operation_id: "operation".into(),
+        task_id: task_id.clone(),
+        operation_id: "1:operation".into(),
         scope: EnvironmentTaskScope::Environment,
         state: EnvironmentTaskState::Exited,
         exit_code: Some(7),
@@ -320,9 +322,9 @@ fn corrupt_or_removed_output_does_not_prevent_control_restart_and_queries() {
         output_complete: true,
     };
     journal.tasks.insert(
-        "task".into(),
+        task_id.clone(),
         Record {
-            digest: "digest".into(),
+            digest: "d".repeat(64),
             creator_controller_id: "r".into(),
             creator_epoch: 1,
             snapshot: snapshot.clone(),
@@ -330,8 +332,8 @@ fn corrupt_or_removed_output_does_not_prevent_control_restart_and_queries() {
     );
     journal.persist(&control).unwrap();
     drop(journal);
-    let original = fs::read(control.join("journal.json")).unwrap();
-    File::create(output.join("task.output"))
+    let original = fs::read(control.join("history.sqlite")).unwrap();
+    File::create(output.join(format!("{task_id}.output")))
         .unwrap()
         .set_len((ENVIRONMENT_TASK_OUTPUT_BYTES / CHUNK * (HEADER + CHUNK) + 1) as u64)
         .unwrap();
@@ -351,7 +353,7 @@ fn corrupt_or_removed_output_does_not_prevent_control_restart_and_queries() {
             &manager,
             EnvironmentTaskRequest::Query {
                 fence: fence.clone(),
-                task_id: "task".into(),
+                task_id: task_id.clone(),
                 cursor: 0,
                 max_bytes: ENVIRONMENT_TASK_READ_BYTES as u32,
             },
@@ -624,14 +626,14 @@ fn one_hundred_runs_release_history_without_stopping_environment_task() {
 
 #[test]
 #[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
-fn same_run_history_limit_recovers_after_confirmed_close_and_new_run() {
+fn same_run_history_retirement_keeps_output_and_progress_before_run_close() {
     let mut f = Fixture::new();
     let background = id(&Manager::handle(
         &f.manager,
         f.start("resident", EnvironmentTaskScope::Environment, "cat"),
     )
     .unwrap());
-    for index in 0..ENVIRONMENT_TASK_MAX_RECORDS - 1 {
+    for index in 0..1000 {
         let task = id(&Manager::handle(
             &f.manager,
             f.start(
@@ -639,11 +641,12 @@ fn same_run_history_limit_recovers_after_confirmed_close_and_new_run() {
                 EnvironmentTaskScope::Run {
                     run_id: f.fence.controller_id.clone(),
                 },
-                "true",
+                "printf retained-output",
             ),
         )
         .unwrap());
         f.await_cleanup(&task);
+        assert!(f.manager.lock().unwrap().journal.tasks.len() <= ENVIRONMENT_TASK_MAX_RECORDS);
     }
     let overflow = f.start(
         "overflow",
@@ -652,10 +655,8 @@ fn same_run_history_limit_recovers_after_confirmed_close_and_new_run() {
         },
         "false",
     );
-    assert_eq!(
-        Manager::handle(&f.manager, overflow).unwrap_err(),
-        "task_history_capacity"
-    );
+    let task = id(&Manager::handle(&f.manager, overflow).unwrap());
+    f.await_cleanup(&task);
     assert!(!f.manager.lock().unwrap().journal.poisoned);
     Manager::handle(
         &f.manager,
@@ -798,7 +799,7 @@ fn input_history_pressure_leaves_termination_and_end_run_reconcilable() {
         close: false,
     };
     let receipt = Manager::handle(&f.manager, first.clone()).unwrap();
-    for index in 1..256 {
+    for index in 1..1000 {
         Manager::handle(
             &f.manager,
             EnvironmentTaskRequest::Input {
@@ -812,20 +813,6 @@ fn input_history_pressure_leaves_termination_and_end_run_reconcilable() {
         .unwrap();
     }
     assert_eq!(Manager::handle(&f.manager, first).unwrap(), receipt);
-    assert_eq!(
-        Manager::handle(
-            &f.manager,
-            EnvironmentTaskRequest::Input {
-                fence: f.fence.clone(),
-                task_id: task.clone(),
-                operation_id: f.fence.operation_id("overflow"),
-                data: b"unexpected".to_vec(),
-                close: false,
-            }
-        )
-        .unwrap_err(),
-        "task_input_receipt_capacity"
-    );
     Manager::handle(
         &f.manager,
         EnvironmentTaskRequest::Terminate {
@@ -876,7 +863,7 @@ fn unavailable_worker_threads_reject_before_exec_without_poisoning_resident_task
             .unwrap()
             .storage
             .control_root
-            .join("journal.json"),
+            .join("history.sqlite"),
     )
     .unwrap();
     for failed_thread in 1..=3 {
@@ -901,7 +888,7 @@ fn unavailable_worker_threads_reject_before_exec_without_poisoning_resident_task
             .unwrap()
             .is_none());
         assert_eq!(
-            fs::read(manager.storage.control_root.join("journal.json")).unwrap(),
+            fs::read(manager.storage.control_root.join("history.sqlite")).unwrap(),
             before
         );
     }
@@ -1226,15 +1213,17 @@ fn successful_input_receipt_replays_after_child_exit_without_writing_twice() {
 fn running_journal_failure_keeps_supervision_and_drain_ownership() {
     let f = Fixture::new();
     f.manager.lock().unwrap().fail_running_commit = true;
-    assert!(Manager::handle(
+    let error = Manager::handle(
         &f.manager,
         f.start(
             "fail",
             EnvironmentTaskScope::Environment,
-            "head -c 2097152 /dev/zero; sleep 30 & wait"
-        )
+            "head -c 2097152 /dev/zero; sleep 30 & wait",
+        ),
     )
-    .is_err());
+    .unwrap_err();
+    assert_ne!(error, "task_journal_capacity");
+    assert_ne!(error, "task_history_capacity");
     let task_id = f
         .manager
         .lock()
@@ -1266,7 +1255,9 @@ fn lost_input_receipt_never_rewrites_stdin() {
         data: b"one-input\n".to_vec(),
         close: false,
     };
-    assert!(Manager::handle(&f.manager, input.clone()).is_err());
+    let error = Manager::handle(&f.manager, input.clone()).unwrap_err();
+    assert_ne!(error, "task_journal_capacity");
+    assert_ne!(error, "task_input_receipt_capacity");
     assert!(Manager::handle(&f.manager, input).is_err());
     f.await_cleanup(&task_id);
     let m = f.manager.lock().unwrap();
@@ -1434,9 +1425,17 @@ fn output_capacity_failure_preserves_existing_process_control_and_allows_cleanup
     )
     .unwrap());
     let control = f.manager.lock().unwrap().storage.control_root.clone();
-    let before = fs::read(control.join("journal.json")).unwrap();
-    f.manager.lock().unwrap().storage.output_budget_bytes =
-        (ENVIRONMENT_TASK_OUTPUT_BYTES / CHUNK * (HEADER + CHUNK)) as u64;
+    let before = fs::read(control.join("history.sqlite")).unwrap();
+    {
+        let mut manager = f.manager.lock().unwrap();
+        let unit = fs::metadata(&manager.storage.output_root)
+            .unwrap()
+            .blksize()
+            .max(1);
+        manager.storage.output_budget_bytes = ((ENVIRONMENT_TASK_OUTPUT_BYTES / CHUNK
+            * (HEADER + CHUNK)) as u64)
+            .next_multiple_of(unit);
+    }
     assert_eq!(
         Manager::handle(
             &f.manager,
@@ -1445,7 +1444,7 @@ fn output_capacity_failure_preserves_existing_process_control_and_allows_cleanup
         .unwrap_err(),
         "task_output_capacity"
     );
-    assert_eq!(fs::read(control.join("journal.json")).unwrap(), before);
+    assert_eq!(fs::read(control.join("history.sqlite")).unwrap(), before);
     assert_eq!(f.manager.lock().unwrap().live.len(), 1);
     assert_eq!(
         fs::read_dir(&f.cgroups)

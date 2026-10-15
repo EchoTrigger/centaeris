@@ -1227,6 +1227,7 @@ version = "0.1.0"
 dependencies = [
  "centaeris-core",
  "libc",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",

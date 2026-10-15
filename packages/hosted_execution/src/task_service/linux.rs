@@ -242,6 +242,21 @@ impl Manager {
         cursor: u64,
         max: usize,
     ) -> Result<EnvironmentTaskResult, String> {
+        if !self.journal.tasks.contains_key(id) {
+            let task = store::task(&self.storage.control_root, id)?
+                .ok_or("task_not_found")?
+                .snapshot;
+            let path = self.storage.output_root.join(format!("{id}.output"));
+            let mut output = OutputLog::open_retained(&path).ok();
+            let incomplete = !task.output_complete;
+            let mut result = task_query_result(task, output.as_mut(), cursor, max)?;
+            if incomplete {
+                if let EnvironmentTaskResult::Task { gap, .. } = &mut result {
+                    *gap = true;
+                }
+            }
+            return Ok(result);
+        }
         self.reconcile(id)?;
         let task = self
             .journal
@@ -250,13 +265,25 @@ impl Manager {
             .ok_or("task_not_found")?
             .snapshot
             .clone();
-        match self.logs.get(id) {
+        let lost = !task.output_complete
+            && !self.live.contains_key(id)
+            && self
+                .logs
+                .get(id)
+                .is_none_or(|log| Arc::strong_count(log) == 1);
+        let mut result = match self.logs.get(id) {
             Some(log) => match log.lock() {
                 Ok(mut log) => task_query_result(task, Some(&mut log), cursor, max),
                 Err(_) => task_query_result(task, None, cursor, max),
             },
             None => task_query_result(task, None, cursor, max),
+        }?;
+        if lost {
+            if let EnvironmentTaskResult::Task { gap, .. } = &mut result {
+                *gap = true;
+            }
         }
+        Ok(result)
     }
     fn receipt(&mut self, key: &str, d: &str) -> Result<Option<EnvironmentTaskResult>, String> {
         if let Some(result) = self.journal.reserve_receipt(key, d)? {
@@ -264,6 +291,34 @@ impl Manager {
         }
         self.persist()?;
         Ok(None)
+    }
+    fn collect_closed_history(&mut self) -> Result<(), String> {
+        let current = self
+            .journal
+            .fence
+            .as_ref()
+            .map(|f| f.controller_id.clone())
+            .ok_or("task_controller_fenced")?;
+        let mut after = String::new();
+        while let Some((id, _)) = store::next_closed(&self.storage.control_root, &after, &current)?
+        {
+            after = id.clone();
+            if self.live.contains_key(&id) {
+                continue;
+            }
+            self.logs.remove(&id);
+            match fs::remove_file(self.storage.output_root.join(format!("{id}.output"))) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err("task_history_retirement_pending".into()),
+            }
+            store::forget_closed(&self.storage.control_root, &id)?;
+            self.journal.tasks.remove(&id);
+            self.journal.receipts.retain(|key, _| {
+                !key.starts_with(&format!("input:{id}:")) && key != &format!("terminate:{id}")
+            });
+        }
+        Ok(())
     }
     fn retire_history(&mut self, epoch: u64) -> Result<(), String> {
         let retired: Vec<_> = self
@@ -273,14 +328,16 @@ impl Manager {
             .filter(|(id, r)| {
                 self.journal.fence.as_ref().is_some_and(|f| {
                     r.can_retire(epoch, &f.controller_id, self.live.contains_key(*id))
-                }) && (r.snapshot.output_complete
-                    || self
-                        .logs
-                        .get(*id)
-                        .is_none_or(|log| Arc::strong_count(log) == 1))
+                }) && self
+                    .logs
+                    .get(*id)
+                    .is_none_or(|log| Arc::strong_count(log) == 1)
             })
             .map(|(id, _)| id.clone())
             .collect();
+        if retired.is_empty() {
+            return Ok(());
+        }
         for id in retired {
             let domain = self.cgroups.join(&id);
             if domain.exists() {
@@ -292,11 +349,13 @@ impl Manager {
                 }
                 fs::remove_dir(&domain).map_err(|_| "task_history_retirement_pending")?;
             }
-            self.logs.remove(&id);
-            match fs::remove_file(self.storage.output_root.join(format!("{id}.output"))) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => return Err("task_history_retirement_pending".into()),
+            // Flush terminal identity before retiring the hot object. Its compact
+            // output remains the recoverable copy until authoritative Run closure.
+            self.persist()?;
+            if let Some(log) = self.logs.remove(&id) {
+                log.lock()
+                    .map_err(|_| "task_output_unavailable")?
+                    .compact()?;
             }
             self.journal.retire_task(&id, epoch, false);
         }
@@ -309,7 +368,7 @@ impl Manager {
     ) -> Result<EnvironmentTaskResult, String> {
         #[cfg(test)]
         if self.fail_mutation_commit {
-            fs::create_dir(self.storage.control_root.join("journal.pending"))
+            fs::create_dir(self.storage.control_root.join("history.sqlite-journal"))
                 .map_err(|_| "fault_injection_failed")?;
         }
         self.journal
@@ -361,6 +420,7 @@ impl Manager {
                 m.journal.takeover_pending = false;
                 m.persist()?;
                 m.retire_history(fence.controller_epoch)?;
+                m.collect_closed_history()?;
                 Ok(EnvironmentTaskResult::TakenOver { fence })
             }
             EnvironmentTaskRequest::Query {
@@ -485,7 +545,20 @@ impl Manager {
                 };
                 m.logs.insert(id.clone(), log.clone());
                 m.journal.tasks.insert(id.clone(), record);
-                m.persist()?;
+                if let Err(error) = m.persist() {
+                    if error == "task_index_capacity" {
+                        // SQLITE_FULL rolls back the pre-spawn intent. Keep other
+                        // tasks supervised and discard only this unaccepted task.
+                        m.journal.tasks.remove(&id);
+                        m.logs.remove(&id);
+                        drop(log);
+                        drop(procs);
+                        let _ = fs::remove_file(m.storage.output_root.join(format!("{id}.output")));
+                        let _ = fs::remove_dir(&cgroup);
+                        return Err("task_journal_capacity".into());
+                    }
+                    return Err(error);
+                }
                 // Establish supervision before spawning. The supervisor waits on this
                 // manager lock until the child (or a failed-spawn record) is installed.
                 let supervisor = match workers.arm(manager.clone(), id.clone(), timeout_ms) {
@@ -605,7 +678,7 @@ impl Manager {
                         }
                         #[cfg(test)]
                         if m.fail_running_commit {
-                            fs::create_dir(m.storage.control_root.join("journal.pending"))
+                            fs::create_dir(m.storage.control_root.join("history.sqlite-journal"))
                                 .map_err(|_| "fault_injection_failed")?;
                         }
                         if input_failed {
@@ -643,7 +716,9 @@ impl Manager {
                 if data.len() > CHUNK {
                     return Err("task_input_too_large".into());
                 }
-                if m.journal.closed_run.as_ref() == Some(&fence.controller_id) {
+                if m.journal.closed_run.as_ref() == Some(&fence.controller_id)
+                    || store::closed(&m.storage.control_root, &fence.controller_id)?
+                {
                     return Err("task_run_closed".into());
                 }
                 let key = input_identity(&fence, &task_id, &operation_id)?;
@@ -671,7 +746,15 @@ impl Manager {
                 m.journal.check(&fence)?;
                 valid_operation(&operation_id)?;
                 if !m.journal.tasks.contains_key(&task_id) {
-                    return Err("task_not_found".into());
+                    let record =
+                        store::task(&m.storage.control_root, &task_id)?.ok_or("task_not_found")?;
+                    fence.authorize_termination(&record.snapshot.scope)?;
+                    if record.snapshot.cleanup_complete {
+                        return Ok(EnvironmentTaskResult::Mutated {
+                            task: record.snapshot,
+                        });
+                    }
+                    return Err("task_operation_unknown".into());
                 }
                 fence.authorize_termination(&m.journal.tasks[&task_id].snapshot.scope)?;
                 // Termination is intrinsically idempotent for this never-reused task identity.

@@ -11,14 +11,31 @@ use std::{
 
 #[cfg(any(target_os = "linux", test))]
 mod instance;
+#[cfg(any(target_os = "linux", test))]
+mod store;
 
 const CONTROL_JOURNAL_BYTES: usize = 2 * 1024 * 1024;
+// Docker mounts an 8 MiB private control tmpfs. Preserve a possible 2 MiB
+// legacy journal, a full SQLite rollback copy, and completion space.
+const CONTROL_ROOT_BYTES: usize = 8 * 1024 * 1024;
+const INDEX_BYTES: usize = (CONTROL_ROOT_BYTES - CONTROL_JOURNAL_BYTES - 256 * 1024) / 2;
 // Ordinary admission cannot consume space needed for bounded task completion and controls.
 #[cfg(any(target_os = "linux", test))]
 const CONTROL_COMPLETION_RESERVE_BYTES: usize = 256 * 1024;
-#[cfg(any(target_os = "linux", test))]
-const INPUT_RECEIPT_LIMIT: usize = 256;
+
+fn charged_bytes(metadata: &fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        metadata.len().max(metadata.blocks().saturating_mul(512))
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.len()
+    }
+}
 struct TaskStorage {
+    #[cfg(target_os = "linux")]
     control_root: PathBuf,
     output_root: PathBuf,
     output_budget_bytes: u64,
@@ -42,6 +59,7 @@ impl TaskStorage {
             return Err("task_storage_roots_overlap".into());
         }
         Ok(Self {
+            #[cfg(target_os = "linux")]
             control_root,
             output_root,
             output_budget_bytes,
@@ -58,6 +76,18 @@ impl TaskStorage {
         let required = slots
             .checked_mul(HEADER + CHUNK)
             .ok_or("task_output_invalid_capacity")? as u64;
+        #[cfg(unix)]
+        let required = {
+            use std::os::unix::fs::MetadataExt;
+            let unit = fs::metadata(&self.output_root)
+                .map_err(|_| "task_output_root_unavailable")?
+                .blksize()
+                .max(1);
+            required
+                .div_ceil(unit)
+                .checked_mul(unit)
+                .ok_or("task_output_capacity")?
+        };
         let path = self.output_root.join(format!("{id}.output"));
         let mut used = 0u64;
         let mut existing = 0;
@@ -70,10 +100,10 @@ impl TaskStorage {
                 return Err("task_output_invalid_entry".into());
             }
             used = used
-                .checked_add(metadata.len())
+                .checked_add(charged_bytes(&metadata))
                 .ok_or("task_output_capacity")?;
             if entry.path() == path {
-                existing = metadata.len();
+                existing = charged_bytes(&metadata);
             }
         }
         if used
@@ -92,6 +122,27 @@ impl TaskStorage {
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{relay_once, serve, serve_instance};
+
+#[cfg(target_os = "linux")]
+pub fn inspect_history() -> Result<(), String> {
+    // The private index is unavailable to the ordinary agent UID.
+    // SAFETY: geteuid has no arguments or side effects.
+    if unsafe { libc::geteuid() } != 0 {
+        return Err("task_inspection_denied".into());
+    }
+    if std::env::args().len() != 2 {
+        return Err("task_inspection_arguments_invalid".into());
+    }
+    let inspection = store::inspection(
+        Path::new("/run/centaeris/task-control"),
+        Path::new("/run/centaeris/task-output"),
+    )?;
+    println!(
+        "{}",
+        serde_json::to_string(&inspection).map_err(|_| "task_encoding_failed")?
+    );
+    Ok(())
+}
 
 #[cfg(any(target_os = "linux", test))]
 fn digest(value: &impl Serialize) -> Result<String, String> {
@@ -136,6 +187,29 @@ struct Record {
 }
 #[cfg(any(target_os = "linux", test))]
 impl Record {
+    fn validate(&self, instance: &str, id: &str) -> Result<(), String> {
+        let fence = EnvironmentTaskFence {
+            environment_instance_id: instance.to_owned(),
+            controller_id: self.creator_controller_id.clone(),
+            controller_epoch: self.creator_epoch,
+            controller_purpose: EnvironmentTaskControllerPurpose::Execute,
+        };
+        if self.creator_controller_id.is_empty()
+            || self.creator_controller_id.len() > 128
+            || self.creator_epoch == 0
+            || self.digest.len() != 64
+            || !self
+                .digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || self.snapshot.task_id != id
+            || task_identity(&fence, &self.snapshot.operation_id).as_deref() != Ok(id)
+            || matches!(&self.snapshot.scope,EnvironmentTaskScope::Run{run_id} if run_id!=&self.creator_controller_id)
+        {
+            return Err("task_index_invalid".into());
+        }
+        Ok(())
+    }
     fn can_retire(&self, epoch: u64, controller_id: &str, owned_live: bool) -> bool {
         !owned_live
             && self.snapshot.cleanup_complete
@@ -143,8 +217,8 @@ impl Record {
                 self.snapshot.state,
                 EnvironmentTaskState::Exited | EnvironmentTaskState::Unknown
             )
-            && self.creator_epoch < epoch
-            && self.creator_controller_id != controller_id
+            && self.creator_epoch <= epoch
+            && (self.creator_controller_id == controller_id || self.creator_epoch < epoch)
     }
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -158,6 +232,8 @@ struct Receipt {
 struct Journal {
     #[serde(skip)]
     poisoned: bool,
+    #[serde(skip)]
+    index_root: Option<PathBuf>,
     schema: String,
     instance: String,
     fence: Option<EnvironmentTaskFence>,
@@ -166,6 +242,54 @@ struct Journal {
     tasks: BTreeMap<String, Record>,
     receipts: BTreeMap<String, Receipt>,
 }
+const INDEX_MARKER: &[u8] = br#"{"schema":"environment.task.index.v1"}"#;
+fn index_marker(root: &Path, instance: &str) -> Result<(), String> {
+    let file = root.join("journal.json");
+    if file.exists() {
+        let bytes = fs::read(&file).map_err(|_| "task_journal_read_failed")?;
+        if bytes == INDEX_MARKER {
+            return Ok(());
+        }
+        let legacy: Journal = serde_json::from_slice(&bytes).map_err(|_| "task_journal_invalid")?;
+        legacy.validate_import()?;
+        if legacy.instance != instance {
+            return Err("task_instance_changed".into());
+        }
+        let backup = root.join("journal.legacy.json");
+        if backup.exists() {
+            if fs::read(&backup).map_err(|_| "task_journal_read_failed")? != bytes {
+                return Err("task_journal_history_conflict".into());
+            }
+        } else {
+            let mut target = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&backup)
+                .map_err(|_| "task_journal_write_failed")?;
+            target
+                .write_all(&bytes)
+                .and_then(|_| target.sync_all())
+                .map_err(|_| "task_journal_sync_failed")?;
+        }
+    }
+    let pending = root.join("journal.index.pending");
+    let mut target = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&pending)
+        .map_err(|_| "task_journal_write_failed")?;
+    target
+        .write_all(INDEX_MARKER)
+        .and_then(|_| target.sync_all())
+        .map_err(|_| "task_journal_sync_failed")?;
+    fs::rename(pending, file).map_err(|_| "task_journal_commit_failed")?;
+    #[cfg(unix)]
+    File::open(root)
+        .and_then(|file| file.sync_all())
+        .map_err(|_| "task_journal_sync_failed")?;
+    Ok(())
+}
 impl Journal {
     #[cfg(test)]
     fn takeover_persist(&mut self, f: EnvironmentTaskFence, root: &Path) -> Result<(), String> {
@@ -173,8 +297,26 @@ impl Journal {
         self.persist(root)
     }
     fn open(root: &Path, instance: &str) -> Result<Self, String> {
-        let file = root.join("journal.json");
-        let mut j = if file.exists() {
+        let mut file = root.join("journal.json");
+        if file.exists()
+            && fs::metadata(&file)
+                .map_err(|_| "task_journal_read_failed")?
+                .len()
+                > CONTROL_JOURNAL_BYTES as u64
+        {
+            return Err("task_journal_too_large".into());
+        }
+        let marker = file.exists()
+            && fs::read(&file).map_err(|_| "task_journal_read_failed")? == INDEX_MARKER;
+        if marker && !root.join("history.sqlite").exists() {
+            return Err("task_index_missing".into());
+        }
+        if marker {
+            file = root.join("journal.legacy.json");
+        }
+        let mut j = if let Some(indexed) = store::load(root)? {
+            indexed
+        } else if file.exists() {
             if fs::metadata(&file)
                 .map_err(|_| "task_journal_read_failed")?
                 .len()
@@ -184,6 +326,7 @@ impl Journal {
             }
             let bytes = fs::read(file).map_err(|_| "task_journal_read_failed")?;
             let j: Self = serde_json::from_slice(&bytes).map_err(|_| "task_journal_invalid")?;
+            j.validate_import()?;
             if j.schema != ENVIRONMENT_TASK_SCHEMA || j.instance != instance {
                 return Err("task_instance_changed".into());
             }
@@ -191,6 +334,7 @@ impl Journal {
         } else {
             Self {
                 poisoned: false,
+                index_root: Some(root.to_owned()),
                 schema: ENVIRONMENT_TASK_SCHEMA.into(),
                 instance: instance.into(),
                 fence: None,
@@ -200,6 +344,10 @@ impl Journal {
                 receipts: BTreeMap::new(),
             }
         };
+        if j.schema != ENVIRONMENT_TASK_SCHEMA || j.instance != instance {
+            return Err("task_instance_changed".into());
+        }
+        j.index_root = Some(root.to_owned());
         for r in j.tasks.values_mut() {
             if matches!(
                 r.snapshot.state,
@@ -208,30 +356,53 @@ impl Journal {
                 r.snapshot.state = EnvironmentTaskState::Unknown;
             }
         }
+        index_marker(root, instance)?;
         j.save(root)?;
         Ok(j)
     }
-    fn save(&self, root: &Path) -> Result<(), String> {
-        let bytes = serde_json::to_vec(self).map_err(|_| "task_journal_write_failed")?;
-        if bytes.len() > CONTROL_JOURNAL_BYTES {
-            return Err("task_journal_too_large".into());
+    fn validate_import(&self) -> Result<(), String> {
+        if self.schema != ENVIRONMENT_TASK_SCHEMA
+            || self.instance.is_empty()
+            || self.instance.len() > 128
+            || self.tasks.len() > ENVIRONMENT_TASK_MAX_RECORDS
+        {
+            return Err("task_journal_invalid".into());
         }
-        let mut f = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(root.join("journal.pending"))
-            .map_err(|_| "task_journal_write_failed")?;
-        f.write_all(&bytes)
-            .map_err(|_| "task_journal_write_failed")?;
-        f.sync_all().map_err(|_| "task_journal_sync_failed")?;
-        fs::rename(root.join("journal.pending"), root.join("journal.json"))
-            .map_err(|_| "task_journal_commit_failed")?;
-        #[cfg(unix)]
-        File::open(root)
-            .and_then(|f| f.sync_all())
-            .map_err(|_| "task_journal_sync_failed")?;
+        if let Some(fence) = &self.fence {
+            if fence.environment_instance_id != self.instance
+                || fence.controller_id.is_empty()
+                || fence.controller_id.len() > 128
+                || fence.controller_epoch == 0
+            {
+                return Err("task_journal_invalid".into());
+            }
+        } else if !self.tasks.is_empty()
+            || !self.receipts.is_empty()
+            || self.takeover_pending
+            || self.closed_run.is_some()
+        {
+            return Err("task_journal_invalid".into());
+        }
+        for (id, record) in &self.tasks {
+            record
+                .validate(&self.instance, id)
+                .map_err(|_| "task_journal_invalid")?;
+        }
+        for (key, receipt) in &self.receipts {
+            if key.len() > 512
+                || !(key.starts_with("input:")
+                    || key.starts_with("terminate:")
+                    || key.starts_with("endRun:"))
+                || receipt.digest.len() != 64
+                || !receipt.digest.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Err("task_journal_invalid".into());
+            }
+        }
         Ok(())
+    }
+    fn save(&self, root: &Path) -> Result<(), String> {
+        store::save(root, self)
     }
     fn persist(&mut self, root: &Path) -> Result<(), String> {
         if self.poisoned {
@@ -240,7 +411,7 @@ impl Journal {
         let result = self.save(root);
         if result
             .as_ref()
-            .is_err_and(|error| error != "task_journal_too_large")
+            .is_err_and(|error| error != "task_journal_too_large" && error != "task_index_capacity")
         {
             self.poisoned = true;
         }
@@ -280,10 +451,34 @@ impl Journal {
     }
     #[cfg(any(target_os = "linux", test))]
     fn preflight(&self, extra: usize) -> Result<(), String> {
+        let directory = self
+            .index_root
+            .as_ref()
+            .map(|root| store::bytes(root))
+            .transpose()?
+            .unwrap_or(0) as usize;
+        let file_bytes = self
+            .index_root
+            .as_ref()
+            .and_then(|root| fs::metadata(root.join("history.sqlite")).ok())
+            .map(|m| m.len() as usize)
+            .unwrap_or(0);
+        let used = self
+            .index_root
+            .as_ref()
+            .map(|root| store::live_bytes(root))
+            .transpose()?
+            .unwrap_or(0) as usize;
         let size = serde_json::to_vec(self)
             .map_err(|_| "task_encoding_failed")?
             .len();
-        if size.saturating_add(extra) > CONTROL_JOURNAL_BYTES - CONTROL_COMPLETION_RESERVE_BYTES {
+        if used.max(size).saturating_add(extra.saturating_mul(2))
+            > INDEX_BYTES - CONTROL_COMPLETION_RESERVE_BYTES
+            || directory
+                .saturating_add(file_bytes)
+                .saturating_add(extra.saturating_mul(2))
+                > CONTROL_ROOT_BYTES - CONTROL_COMPLETION_RESERVE_BYTES
+        {
             Err("task_journal_capacity".into())
         } else {
             Ok(())
@@ -291,10 +486,15 @@ impl Journal {
     }
     #[cfg(any(target_os = "linux", test))]
     fn check_admission(&self) -> Result<(), String> {
-        if self
-            .fence
-            .as_ref()
-            .is_some_and(|f| self.closed_run.as_ref() == Some(&f.controller_id))
+        let closed = match (&self.index_root, &self.fence) {
+            (Some(root), Some(fence)) => store::closed(root, &fence.controller_id)?,
+            _ => false,
+        };
+        if closed
+            || self
+                .fence
+                .as_ref()
+                .is_some_and(|f| self.closed_run.as_ref() == Some(&f.controller_id))
         {
             return Err("task_run_closed".into());
         }
@@ -318,7 +518,13 @@ impl Journal {
         key: &str,
         d: &str,
     ) -> Result<Option<EnvironmentTaskResult>, String> {
-        if let Some(receipt) = self.receipts.get(key) {
+        let indexed = self
+            .index_root
+            .as_ref()
+            .map(|root| store::receipt(root, key))
+            .transpose()?
+            .flatten();
+        if let Some(receipt) = self.receipts.get(key).or(indexed.as_ref()) {
             if receipt.digest != d {
                 return Err("task_operation_conflict".into());
             }
@@ -331,16 +537,6 @@ impl Journal {
                 return Ok(None);
             }
             return Err("task_operation_unknown".into());
-        }
-        if key.starts_with("input:")
-            && self
-                .receipts
-                .keys()
-                .filter(|key| key.starts_with("input:"))
-                .count()
-                >= INPUT_RECEIPT_LIMIT
-        {
-            return Err("task_input_receipt_capacity".into());
         }
         let mut candidate = self.clone();
         candidate.receipts.insert(
@@ -364,7 +560,24 @@ impl Journal {
         {
             return Err("task_journal_capacity".into());
         }
+        if let Some(root) = &self.index_root {
+            store::save(root, &candidate)?;
+        }
         self.receipts = candidate.receipts;
+        if self.index_root.is_some() {
+            while self.receipts.len() > ENVIRONMENT_TASK_MAX_RECORDS {
+                let oldest = self
+                    .receipts
+                    .keys()
+                    .find(|stored| stored.as_str() != key)
+                    .cloned();
+                if let Some(oldest) = oldest {
+                    self.receipts.remove(&oldest);
+                } else {
+                    break;
+                }
+            }
+        }
         Ok(None)
     }
     #[cfg(any(target_os = "linux", test))]
@@ -375,6 +588,11 @@ impl Journal {
                 .is_some_and(|r| r.can_retire(epoch, &f.controller_id, owned_live))
         });
         if eligible {
+            if let Some(root) = &self.index_root {
+                if store::cool(root, id).is_err() {
+                    return false;
+                }
+            }
             self.tasks.remove(id);
         }
         eligible
@@ -393,7 +611,13 @@ impl Journal {
         }
     }
     fn existing(&self, id: &str, d: &str) -> Result<Option<EnvironmentTaskSnapshot>, String> {
-        match self.tasks.get(id) {
+        let indexed = self
+            .index_root
+            .as_ref()
+            .map(|root| store::task(root, id))
+            .transpose()?
+            .flatten();
+        match self.tasks.get(id).or(indexed.as_ref()) {
             Some(r) if r.digest == d => Ok(Some(r.snapshot.clone())),
             Some(_) => Err("task_operation_conflict".into()),
             None => Ok(None),
@@ -411,6 +635,40 @@ struct OutputLog {
     corrupt: bool,
 }
 impl OutputLog {
+    #[cfg(any(target_os = "linux", test))]
+    fn compact(&mut self) -> Result<(), String> {
+        self.file
+            .set_len(self.next.min(self.slots as u64) * (HEADER + CHUNK) as u64)
+            .and_then(|_| self.file.sync_all())
+            .map_err(|_| "task_output_write_failed".into())
+    }
+    #[cfg(any(target_os = "linux", test))]
+    fn open_retained(path: &Path) -> Result<Self, String> {
+        let file = OpenOptions::new()
+            .read(true)
+            .open(path)
+            .map_err(|_| "task_output_unavailable")?;
+        let len = file
+            .metadata()
+            .map_err(|_| "task_output_unavailable")?
+            .len() as usize;
+        if !len.is_multiple_of(HEADER + CHUNK) {
+            return Err("task_output_invalid_size".into());
+        }
+        let slots = len / (HEADER + CHUNK);
+        let mut log = Self {
+            file,
+            slots: slots.max(1),
+            next: 0,
+            corrupt: false,
+        };
+        for slot in 0..slots {
+            if let Some(chunk) = log.slot(slot)? {
+                log.next = log.next.max(chunk.cursor + 1);
+            }
+        }
+        Ok(log)
+    }
     fn open(path: &Path, slots: usize) -> Result<Self, String> {
         if slots == 0 {
             return Err("task_output_invalid_capacity".into());

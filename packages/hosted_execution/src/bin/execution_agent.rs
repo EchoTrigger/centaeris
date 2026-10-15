@@ -6,6 +6,8 @@ fn main() {
             _ => Err("environment-init requires exactly one instanceId".into()),
         },
         #[cfg(target_os = "linux")]
+        Some("environment-task-store-inspect") => hosted_execution::task_service::inspect_history(),
+        #[cfg(target_os = "linux")]
         Some("environment-task-rpc") => hosted_execution::task_service::relay_once(),
         Some("filesystem-once") => hosted_execution::agent::run_filesystem_once(),
         Some("agent-process-state") => hosted_execution::agent::run_agent_process_state_once(),
