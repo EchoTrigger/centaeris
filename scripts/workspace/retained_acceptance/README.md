@@ -51,6 +51,7 @@ PROJECT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["proje
 docker build -t "$PROJECT-general:fixed" "$FIXTURE/general-image"
 docker compose -f "$FIXTURE/compose.json" up -d --wait postgres redis
 docker compose -f "$FIXTURE/compose.json" run --rm api /app/.venv/bin/python manage.py migrate --noinput
+docker compose -f "$FIXTURE/compose.json" run --rm -T catalog-init
 docker compose -f "$FIXTURE/compose.json" run --rm -T api /app/.venv/bin/python manage.py shell < "$TOOLS/seed.py"
 docker compose -f "$FIXTURE/compose.json" up -d model api runtime worker
 API_CONTAINER=$(docker compose -f "$FIXTURE/compose.json" ps -q api)

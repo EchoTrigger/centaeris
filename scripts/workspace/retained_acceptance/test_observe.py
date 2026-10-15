@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 import unittest
 import json
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -11,6 +12,21 @@ spec.loader.exec_module(observe)
 
 
 class StaleProbeTests(unittest.TestCase):
+    def test_observer_emits_executable_django_shell_code(self):
+        class StopBeforeExecution(Exception):
+            pass
+        def validate_command(command, **kwargs):
+            self.assertEqual(command[:3],['docker','compose','-f'])
+            self.assertEqual(command[-3:-1],['shell','-c'])
+            compile(command[-1],'<observer-django-shell>','exec')
+            raise StopBeforeExecution
+        with patch.object(sys,'argv',['observe','--compose','fixture-compose.json',
+                '--run','fixture-run','--result','fixture-result.json']), \
+                patch.object(observe.subprocess,'run',side_effect=validate_command) as execute:
+            with self.assertRaises(StopBeforeExecution):
+                observe.main()
+            self.assertEqual(execute.call_count,1)
+
     def test_rpc_uses_current_protocol_and_exact_target_and_fence(self):
         fence={'environmentInstanceId':'instance','controllerId':'run-a',
             'controllerEpoch':7,'controllerPurpose':'execute'}

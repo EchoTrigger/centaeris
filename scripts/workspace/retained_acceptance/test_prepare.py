@@ -61,6 +61,43 @@ class PreparationTests(unittest.TestCase):
             self.assertEqual(compose['services']['runtime']['ports'],['127.0.0.1:19001:9000'])
             self.assertTrue(compose['name'].startswith('retainedaccept'))
 
+    def test_catalog_initialization_is_separate_from_read_only_runtime_services(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            with patch.object(sys,'argv',self.fixture(root)), \
+                    patch.object(prepare.subprocess,'run',side_effect=[subprocess.CompletedProcess([],0,'','')]
+                        + [subprocess.CompletedProcess([],0,'sha256:'+'b'*64+'\n','')]*6
+                        + [subprocess.CompletedProcess([],0,'a'*40,'')]
+                        + [subprocess.CompletedProcess([],0,'','')]
+                        + [subprocess.CompletedProcess([],0,'c'*40,'')]), patch('builtins.print'):
+                prepare.main()
+            config=json.loads((root / 'result/compose.json').read_text())
+            self.assertTrue('catalog-init' in config['services'],
+                'fixture needs an explicit setup service for the installed Plugin catalog')
+            setup=config['services']['catalog-init']
+            self.assertEqual(setup['command'],['/app/.venv/bin/python','manage.py','initialize_plugin_catalog'])
+            self.assertEqual(setup['profiles'],['setup'])
+            self.assertNotIn('ports',setup)
+            self.assertEqual(setup['env_file'],config['services']['api']['env_file'])
+            plugin_target='/opt/centaeris/plugins'
+            def plugin_mount(service):
+                return next(mount.split(':') for mount in service['volumes']
+                    if len(mount.split(':'))>=2 and mount.split(':')[1]==plugin_target)
+            self.assertEqual(plugin_mount(setup),['plugins',plugin_target,'rw'])
+            for name in ('api','runtime'):
+                self.assertEqual(plugin_mount(config['services'][name]),['plugins',plugin_target,'ro'])
+            for mount in config['services']['api']['volumes']:
+                if mount.split(':')[0]!='plugins':
+                    self.assertIn(mount,setup['volumes'])
+            for name in ('catalog-init','api','worker'):
+                effective={}
+                service=config['services'][name]
+                for env_file in service['env_file']:
+                    effective.update(line.split('=',1) for line in Path(env_file).read_text().splitlines())
+                effective.update(service.get('environment',{}))
+                self.assertTrue('ENVIRONMENT_MAINTENANCE_TOKEN' not in effective,
+                    name+' must not receive maintenance authority')
+
     def test_only_runtime_inherits_maintenance_authority(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)

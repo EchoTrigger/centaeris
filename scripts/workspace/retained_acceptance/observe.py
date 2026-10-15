@@ -94,7 +94,7 @@ with connection.cursor() as c:
 
  assert len(instances)==1, 'Run must have one actual retained instance'
 
- c.execute('SELECT container_id,memory_bytes,cpu_milli,pids,workspace_bytes,host_id FROM runtime.resident_sandboxes WHERE environment_id=%s AND state=\'resident\'',[env.id])
+ c.execute('SELECT container_id,memory_bytes,cpu_milli,pids,workspace_bytes,host_id FROM runtime.resident_sandboxes WHERE environment_id=%s AND state=%s',[env.id,'resident'])
 
  residents=c.fetchall()
 

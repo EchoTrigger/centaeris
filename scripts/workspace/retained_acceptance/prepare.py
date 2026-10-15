@@ -205,6 +205,14 @@ def main():
         services["model"]["volumes"].append(f"{tls}:/harness/tls:ro")
         services["api"].setdefault("environment",{})["SSL_CERT_FILE"]="/harness/combined-ca.pem"
         services["api"]["volumes"].append(f"{tls/'combined-ca.pem'}:/harness/combined-ca.pem:ro")
+    services['catalog-init'] = {
+        **services['api'],
+        'profiles':['setup'],
+        'command':['/app/.venv/bin/python','manage.py','initialize_plugin_catalog'],
+        'volumes':['plugins:/opt/centaeris/plugins:rw' if mount=='plugins:/opt/centaeris/plugins:ro'
+            else mount for mount in services['api']['volumes']],
+    }
+    services['catalog-init'].pop('ports',None)
     for service in services.values():
 
         service.update({"restart":"no", "labels":{"centaeris.acceptance.project":project}, "mem_limit":"512m", "cpus":"1", "pids_limit":128})
