@@ -204,7 +204,7 @@ fn bash_execution_host_error_result(
     let tool_failure_kind = execution_host_tool_failure_kind(err);
     let mut output = bash_local_tool_output(json!({
         "schema": "bash_result_v1",
-        "executed": if err.is_cancellation_indeterminate() { Value::Null } else { Value::Bool(false) },
+        "executed": err.execution_started().map(Value::Bool).unwrap_or(Value::Null),
         "command": command,
         "bashDialect": bash_dialect,
         "cwd": cwd,
@@ -233,7 +233,7 @@ fn bash_execution_host_error_result(
             "modelMessage": err.model_visible_message(),
             "userMessage": err.user_visible_message(),
             "diagnosticId": diagnostic_id,
-            "retryable": !err.is_cancellation_indeterminate() && matches!(
+            "retryable": err.execution_started() == Some(false) && matches!(
                 tool_failure_kind,
                 ToolFailureKind::SandboxUnavailable
                     | ToolFailureKind::HostUnavailable
@@ -252,7 +252,10 @@ fn execution_host_tool_failure_kind(err: &ExecutionError) -> ToolFailureKind {
         ExecutionError::HostUnavailable { .. } => ToolFailureKind::HostUnavailable,
         ExecutionError::PolicyUnavailable { .. } => ToolFailureKind::SandboxUnavailable,
         ExecutionError::CancellationIndeterminate { .. } => ToolFailureKind::HostUnavailable,
-        ExecutionError::Io(_) => ToolFailureKind::HostUnavailable,
+        ExecutionError::CapacityRejected { .. }
+        | ExecutionError::OperationIndeterminate { .. }
+        | ExecutionError::OutputUnavailable { .. }
+        | ExecutionError::Io(_) => ToolFailureKind::HostUnavailable,
     }
 }
 
@@ -264,7 +267,10 @@ fn execution_host_failure_kind(err: &ExecutionError) -> ExecutionHostFailureKind
         ExecutionError::CancellationIndeterminate { .. } => {
             ExecutionHostFailureKind::HostUnavailable
         }
-        ExecutionError::Io(_) => ExecutionHostFailureKind::HostUnavailable,
+        ExecutionError::CapacityRejected { .. }
+        | ExecutionError::OperationIndeterminate { .. }
+        | ExecutionError::OutputUnavailable { .. }
+        | ExecutionError::Io(_) => ExecutionHostFailureKind::HostUnavailable,
     }
 }
 
@@ -625,6 +631,74 @@ mod tests {
             assert!(!error
                 .model_visible_message()
                 .contains("private native diagnostic"));
+        }
+    }
+
+    #[test]
+    fn retained_rpc_errors_preserve_acceptance_and_never_repeat_known_or_unknown_work() {
+        use crate::execution::ExecutionOperationStage;
+        let cases = [
+            (
+                ExecutionError::CapacityRejected {
+                    stage: ExecutionOperationStage::Start,
+                    reason: "task_capacity".into(),
+                },
+                Some(false),
+                true,
+            ),
+            (
+                ExecutionError::CapacityRejected {
+                    stage: ExecutionOperationStage::Input,
+                    reason: "task_input_receipt_capacity".into(),
+                },
+                Some(true),
+                false,
+            ),
+            (
+                ExecutionError::OperationIndeterminate {
+                    stage: ExecutionOperationStage::Start,
+                    reason: "private transport".into(),
+                },
+                None,
+                false,
+            ),
+            (
+                ExecutionError::OperationIndeterminate {
+                    stage: ExecutionOperationStage::Input,
+                    reason: "partial write".into(),
+                },
+                Some(true),
+                false,
+            ),
+            (
+                ExecutionError::OutputUnavailable {
+                    reason: "expired".into(),
+                },
+                Some(true),
+                false,
+            ),
+        ];
+        for (error, started, retryable) in cases {
+            let output = bash_execution_host_error_result(
+                "printf once",
+                "bash",
+                ".",
+                1000,
+                ExecutionHostMode::Remote,
+                "run",
+                &error,
+            );
+            assert_eq!(
+                output.details["executed"],
+                started.map(Value::Bool).unwrap_or(Value::Null)
+            );
+            assert_eq!(output.details["toolError"]["retryable"], retryable);
+            assert!(!error.is_cancellation_indeterminate());
+            assert_ne!(
+                output.transition_reason,
+                EXECUTION_CANCELLATION_INDETERMINATE
+            );
+            assert!(!error.model_visible_message().contains("private transport"));
         }
     }
 

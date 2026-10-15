@@ -19,8 +19,9 @@ pub use residency::{admit_resident_resources, ResidentResourceUsage};
 pub use policy::{ExecutionPolicy, FileSystemPolicy, NetworkPolicy};
 pub use process::{
     decode_process_output, normalize_process_output, DecodedProcessOutput, ExecutionAttempt,
-    ExecutionCommandRequest, ExecutionError, ExecutionPolicySummary, ExecutionProcessOutput,
-    NormalizedProcessOutput, ProcessOutputDecodeSummary, RuntimeOutputDiagnostic,
+    ExecutionCommandRequest, ExecutionError, ExecutionOperationStage, ExecutionPolicySummary,
+    ExecutionProcessOutput, NormalizedProcessOutput, ProcessOutputDecodeSummary,
+    RuntimeOutputDiagnostic,
 };
 
 pub use filesystem::{

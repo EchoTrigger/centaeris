@@ -3,6 +3,21 @@ use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
 
 fn unknown(reason: impl Into<String>) -> ExecutionError {
+    ExecutionError::OperationIndeterminate {
+        stage: ExecutionOperationStage::Query,
+        reason: reason.into(),
+    }
+}
+fn attempt_error(stage: ExecutionOperationStage, reason: String) -> ExecutionError {
+    // These exact errors are emitted only before accepting this RPC attempt.
+    // An Input rejection does not undo an earlier accepted Start.
+    if environment_task_capacity_rejection(&reason) {
+        ExecutionError::CapacityRejected { stage, reason }
+    } else {
+        ExecutionError::OperationIndeterminate { stage, reason }
+    }
+}
+fn cancellation_unknown(reason: impl Into<String>) -> ExecutionError {
     ExecutionError::CancellationIndeterminate {
         reason: reason.into(),
     }
@@ -131,7 +146,7 @@ fn run_command_with_input(
         cwd: WORKSPACE_DATA_ROOT.into(),
         timeout_ms: request.timeout_ms.saturating_add(3000),
     })
-    .map_err(unknown)?;
+    .map_err(|reason| attempt_error(ExecutionOperationStage::Start, reason))?;
     let (id, running) = match &first {
         EnvironmentTaskResult::Task { task, .. }
             if task.scope == scope
@@ -142,7 +157,12 @@ fn run_command_with_input(
                 task.state == EnvironmentTaskState::Running,
             )
         }
-        _ => return Err(unknown("command_start_unconfirmed")),
+        _ => {
+            return Err(attempt_error(
+                ExecutionOperationStage::Start,
+                "command_start_unconfirmed".into(),
+            ))
+        }
     };
     if running {
         for (index, chunk) in input.chunks(4096).enumerate() {
@@ -153,11 +173,14 @@ fn run_command_with_input(
                 data: chunk.to_vec(),
                 close: false,
             })
-            .map_err(unknown)?;
+            .map_err(|reason| attempt_error(ExecutionOperationStage::Input, reason))?;
             if !matches!(response, EnvironmentTaskResult::Mutated { ref task }
                 if task.task_id == id && task.scope == scope && fence.matches_original_operation_id(&task.operation_id, &start_id))
             {
-                return Err(unknown("command_input_unconfirmed"));
+                return Err(attempt_error(
+                    ExecutionOperationStage::Input,
+                    "command_input_unconfirmed".into(),
+                ));
             }
         }
         // A fast process can exit before stdin is closed. Its confirmed terminal
@@ -170,10 +193,13 @@ fn run_command_with_input(
             close: true,
         });
         if !input.is_empty() {
-            closed.map_err(unknown)?;
+            closed.map_err(|reason| attempt_error(ExecutionOperationStage::Input, reason))?;
         }
     } else if !input.is_empty() {
-        return Err(unknown("command_exited_before_input"));
+        return Err(attempt_error(
+            ExecutionOperationStage::Input,
+            "command_exited_before_input".into(),
+        ));
     }
     let deadline = Instant::now() + Duration::from_millis(request.timeout_ms.saturating_add(5000));
     let mut first = Some(first);
@@ -195,7 +221,7 @@ fn run_command_with_input(
                 task_id: id.clone(),
                 operation_id: operation(fence, operation_id, "cancel"),
             })
-            .map_err(unknown)?;
+            .map_err(cancellation_unknown)?;
             cancelled = true;
             cancel_deadline = Some(Instant::now() + Duration::from_secs(5));
         }
@@ -227,7 +253,9 @@ fn run_command_with_input(
             return Err(unknown("command_task_identity_changed"));
         }
         if gap || earliest_cursor > cursor {
-            return Err(unknown("command_output_gap"));
+            return Err(ExecutionError::OutputUnavailable {
+                reason: "command_output_gap".into(),
+            });
         }
         let mut bytes = 0usize;
         for chunk in output {
@@ -266,7 +294,7 @@ fn run_command_with_input(
                 task_id: id.clone(),
                 operation_id: operation(fence, operation_id, "deadline"),
             });
-            return Err(unknown("command_cleanup_unconfirmed"));
+            return Err(cancellation_unknown("command_cleanup_unconfirmed"));
         }
         if !has_more {
             std::thread::sleep(Duration::from_millis(25));
@@ -323,6 +351,108 @@ fn run_command_with_input(
 mod tests {
     use super::*;
     use std::collections::{HashMap, VecDeque};
+
+    #[test]
+    fn run_failure_classification_preserves_canonical_history_capacity() {
+        for reason in [
+            "read AGENTS.md failed: Execution cancellation could not be verified",
+            "read AGENTS.md failed: task_history_capacity: transport context",
+            "unrelated task_history_capacity",
+        ] {
+            assert_eq!(
+                crate::public_agent_failure_reason(reason, "core_run_failed"),
+                "core_run_failed"
+            );
+        }
+        assert_eq!(
+            crate::public_agent_failure_reason(
+                "read AGENTS.md failed: task_history_capacity",
+                "core_run_failed"
+            ),
+            "task_history_capacity"
+        );
+    }
+
+    #[test]
+    fn start_rpc_history_capacity_is_a_definitive_rejection() {
+        let mut calls = 0;
+        let error = run_command(
+            &fence(),
+            "tool-1",
+            command(),
+            None,
+            "/usr/bin:/bin",
+            |request| {
+                calls += 1;
+                assert!(matches!(request, EnvironmentTaskRequest::Start { .. }));
+                Err("task_history_capacity".into())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            calls, 1,
+            "a rejected Start must not query, input, terminate, or retry"
+        );
+        assert_eq!(
+            error,
+            ExecutionError::CapacityRejected {
+                stage: ExecutionOperationStage::Start,
+                reason: "task_history_capacity".into()
+            }
+        );
+    }
+
+    #[test]
+    fn start_rpc_file_helper_preserves_history_capacity_reason() {
+        let mut calls = 0;
+        let error = run_file_helper(
+            &fence(),
+            "helper-1",
+            b"filesystem request",
+            1024,
+            "/usr/bin",
+            |request| {
+                calls += 1;
+                assert!(matches!(request, EnvironmentTaskRequest::Start { .. }));
+                Err("task_history_capacity".into())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(calls, 1);
+        assert_eq!(error, "task_history_capacity");
+    }
+
+    #[test]
+    fn start_rpc_unknown_errors_remain_indeterminate_without_retry() {
+        for reason in [
+            "ack lost",
+            "task_history_capacity: transport context",
+            " task_history_capacity",
+        ] {
+            let mut calls = 0;
+            let error = run_command(
+                &fence(),
+                "tool-1",
+                command(),
+                None,
+                "/usr/bin:/bin",
+                |request| {
+                    calls += 1;
+                    assert!(matches!(request, EnvironmentTaskRequest::Start { .. }));
+                    Err(reason.into())
+                },
+            )
+            .unwrap_err();
+            assert_eq!(calls, 1);
+            assert_eq!(
+                error,
+                ExecutionError::OperationIndeterminate {
+                    stage: ExecutionOperationStage::Start,
+                    reason: reason.into()
+                }
+            );
+        }
+    }
 
     #[test]
     fn file_helper_delivers_exact_stdin_and_requires_bounded_complete_output() {
@@ -477,6 +607,8 @@ mod tests {
         })
         .unwrap_err();
         assert!(error.internal_debug_message().contains("output_gap"));
+        assert!(!error.is_cancellation_indeterminate());
+        assert!(error.model_visible_message().contains("output"));
     }
     #[test]
     fn lost_start_acknowledgement_is_never_retried_with_another_identity() {
@@ -487,7 +619,27 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(calls, 1);
-        assert!(error.is_cancellation_indeterminate());
+        assert!(!error.is_cancellation_indeterminate());
+        assert!(error.model_visible_message().contains("start"));
+        assert!(error.model_visible_message().contains("unknown"));
+    }
+
+    #[test]
+    fn input_capacity_does_not_claim_the_command_never_started() {
+        let mut calls = 0;
+        let error = run_file_helper(&fence(), "tool-1", b"request", 100, "/bin", |request| {
+            calls += 1;
+            match request {
+                EnvironmentTaskRequest::Start { .. } => Ok(started()),
+                EnvironmentTaskRequest::Input { .. } => Err("task_input_receipt_capacity".into()),
+                _ => panic!("must not repeat or terminate after failed input"),
+            }
+        })
+        .unwrap_err();
+        assert_eq!(calls, 2);
+        assert!(error.contains("input rejected"));
+        assert!(error.contains("already started"));
+        assert!(!error.contains("cancellation"));
     }
 
     #[test]
@@ -567,7 +719,7 @@ mod tests {
             requests.push(r);
             replies.pop_front().ok_or("unexpected signal".into())
         });
-        assert!(result.unwrap_err().is_cancellation_indeterminate());
+        assert!(!result.unwrap_err().is_cancellation_indeterminate());
         assert_eq!(requests.len(), 2);
         assert!(requests.iter().all(|r| matches!(
             r,

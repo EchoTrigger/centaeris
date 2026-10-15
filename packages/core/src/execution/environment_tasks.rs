@@ -7,6 +7,20 @@ pub const ENVIRONMENT_TASK_MAX_RECORDS: usize = 64;
 pub const ENVIRONMENT_TASK_OUTPUT_BYTES: usize = 1024 * 1024;
 pub const ENVIRONMENT_TASK_READ_BYTES: usize = 64 * 1024;
 
+/// Exact service rejections that prove this individual RPC was not accepted.
+/// The service must resolve a prior operation identity before these checks.
+pub fn environment_task_capacity_rejection(reason: &str) -> bool {
+    matches!(
+        reason,
+        "task_history_capacity"
+            | "task_capacity"
+            | "task_thread_capacity"
+            | "task_output_capacity"
+            | "task_journal_capacity"
+            | "task_input_receipt_capacity"
+    )
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EnvironmentTaskEnvelope {
@@ -320,6 +334,30 @@ impl EnvironmentTaskResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn capacity_rejection_requires_an_exact_pre_acceptance_service_reason() {
+        for reason in [
+            "task_capacity",
+            "task_history_capacity",
+            "task_thread_capacity",
+            "task_output_capacity",
+            "task_journal_capacity",
+            "task_input_receipt_capacity",
+        ] {
+            assert!(environment_task_capacity_rejection(reason));
+            assert!(!environment_task_capacity_rejection(&format!(
+                "{reason}: lost acknowledgement"
+            )));
+            assert!(!environment_task_capacity_rejection(&format!(" {reason}")));
+        }
+        assert!(!environment_task_capacity_rejection(
+            "task_journal_write_failed"
+        ));
+        assert!(!environment_task_capacity_rejection(
+            "task_journal_commit_failed"
+        ));
+    }
+
     #[test]
     fn older_task_service_cannot_accept_retirement_protocol_operations() {
         let old = EnvironmentTaskEnvelope {

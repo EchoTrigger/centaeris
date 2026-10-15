@@ -5041,6 +5041,26 @@ fn provider_response_was_interrupted(error: &str) -> bool {
 }
 
 fn public_agent_failure_reason<'a>(internal_error: &'a str, transition_reason: &'a str) -> &'a str {
+    if let Some(reason) = internal_error.strip_prefix("read AGENTS.md failed: ") {
+        if centaeris_core::execution::environment_task_capacity_rejection(reason) {
+            return reason;
+        }
+    }
+    if let Some(reason) = internal_error
+        .strip_prefix("read AGENTS.md failed: execution input rejected: ")
+        .and_then(|reason| reason.strip_suffix("; the command was already started"))
+    {
+        if centaeris_core::execution::environment_task_capacity_rejection(reason) {
+            return "execution_input_rejected";
+        }
+    }
+    match internal_error {
+        "read AGENTS.md failed: execution start outcome is unknown; do not repeat the operation" => return "execution_start_unknown",
+        "read AGENTS.md failed: execution input outcome is unknown; do not repeat the operation" => return "execution_input_unknown",
+        "read AGENTS.md failed: execution query outcome is unknown; do not repeat the operation" => return "execution_query_unknown",
+        "read AGENTS.md failed: execution output unavailable; do not repeat the command" => return "execution_output_unavailable",
+        _ => {}
+    }
     if api_model_client::hosted_model_failure(internal_error).is_some()
         || matches!(
             internal_error,
@@ -5073,7 +5093,21 @@ fn failed_session_records(
         .unwrap_or(failure_kind);
     let failure_message = model_failure
         .as_ref()
-        .map(|failure| failure.public_message());
+        .map(|failure| failure.public_message())
+        .or_else(|| {
+            centaeris_core::execution::environment_task_capacity_rejection(failure_kind).then(|| {
+            "Execution resources are temporarily exhausted. The requested task was not started; existing tasks remain supervised."
+                .to_string()
+        })
+        })
+        .or_else(|| match failure_kind {
+            "execution_input_rejected" => Some("The task was started, but this input was not accepted because execution resources are exhausted. Do not repeat the command.".into()),
+            "execution_start_unknown" => Some("The task start outcome is unknown. Do not repeat the operation.".into()),
+            "execution_input_unknown" => Some("The task was started, but input delivery is unconfirmed. Do not repeat the operation.".into()),
+            "execution_query_unknown" => Some("The task was started, but its result could not be confirmed. Do not repeat the operation.".into()),
+            "execution_output_unavailable" => Some("Task output is unavailable. The command must not be repeated automatically.".into()),
+            _ => None,
+        });
     let mut events = Vec::new();
     if assistant_text
         .responses
@@ -7823,6 +7857,96 @@ mod tests {
         // The new user turn was never admitted, so nothing enters the model
         // history; the failure stays in the AgentRun control plane.
         assert!(failed.is_empty());
+    }
+
+    #[test]
+    fn helper_failures_keep_rpc_stage_through_public_terminal() {
+        for (detail, reason, message) in [
+            (
+                "execution input rejected: task_journal_capacity; the command was already started",
+                "execution_input_rejected",
+                "input was not accepted",
+            ),
+            (
+                "execution start outcome is unknown; do not repeat the operation",
+                "execution_start_unknown",
+                "start outcome is unknown",
+            ),
+            (
+                "execution input outcome is unknown; do not repeat the operation",
+                "execution_input_unknown",
+                "input delivery is unconfirmed",
+            ),
+            (
+                "execution query outcome is unknown; do not repeat the operation",
+                "execution_query_unknown",
+                "result could not be confirmed",
+            ),
+            (
+                "execution output unavailable; do not repeat the command",
+                "execution_output_unavailable",
+                "output is unavailable",
+            ),
+            (
+                "task_journal_capacity",
+                "task_journal_capacity",
+                "not started",
+            ),
+        ] {
+            let internal = format!("read AGENTS.md failed: {detail}");
+            assert_eq!(
+                public_agent_failure_reason(&internal, "core_run_failed"),
+                reason
+            );
+            let start = agent_run_start();
+            let mut sequence = agent_run_session_state(&start);
+            started_session_records(&start, &mut sequence, 1).unwrap();
+            let records = failed_session_records(
+                &start,
+                reason,
+                &AssistantTextProjection::default(),
+                &mut sequence,
+                2,
+            )
+            .unwrap();
+            let payload = &records.last().unwrap().event.payload;
+            assert_eq!(payload["reasonType"], reason);
+            assert!(payload["message"].as_str().unwrap().contains(message));
+            assert_eq!(
+                public_agent_failure_reason(
+                    &format!("{internal}: transport context"),
+                    "core_run_failed"
+                ),
+                "core_run_failed"
+            );
+        }
+    }
+
+    #[test]
+    fn capacity_terminal_preserves_resource_reason_without_requiring_a_new_run() {
+        let start = agent_run_start();
+        let mut sequence = agent_run_session_state(&start);
+        started_session_records(&start, &mut sequence, 1).unwrap();
+        let failure = public_agent_failure_reason(
+            "read AGENTS.md failed: task_history_capacity",
+            "core_run_failed",
+        );
+        let records = failed_session_records(
+            &start,
+            failure,
+            &AssistantTextProjection::default(),
+            &mut sequence,
+            2,
+        )
+        .unwrap();
+        let terminal = &records.last().unwrap().event;
+        assert_eq!(terminal.event_type, SessionRecordType::AgentRunFailed);
+        let payload = &terminal.payload;
+        assert_eq!(payload["reasonType"], "task_history_capacity");
+        assert!(payload["message"]
+            .as_str()
+            .unwrap()
+            .contains("existing tasks remain supervised"));
     }
 
     #[test]
