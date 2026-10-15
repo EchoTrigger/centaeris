@@ -1,8 +1,9 @@
 # Owned retained acceptance fixture
 
 These executable tools adapt the historical deterministic model and actual
-API/Worker/Runtime/Docker observer for the final repaired candidate. They have
-not passed the final physical-chain gate. `prepare.py` and `run.py` both reject
+API/Worker/Runtime/Docker observer for the final repaired candidate. Passing the
+physical-chain gate requires saved observations from the final tree.
+`prepare.py` and `run.py` both reject
 any pre-existing managed sandbox, including foreign deployments: an isolated
 database cannot reconcile another stack's host-wide managed inventory.
 

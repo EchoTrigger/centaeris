@@ -9,7 +9,8 @@ image; complete remote CI for the exact published head is a separate condition.
 prepares fresh synthetic business inputs, exercises A/B, Runtime restart, 100
 uses/releases, same-Run history, stale controls and maintenance reconciliation.
 It preserves the foreign-managed-instance guard and reports remaining fault and
-capacity tests explicitly. It is prepared tooling, not observed final-tree evidence.
+capacity tests explicitly. The harness alone is tooling; its saved commands,
+source and binary identities, and physical observations establish the evidence.
 
 ## Fixture ownership and prerequisites
 
