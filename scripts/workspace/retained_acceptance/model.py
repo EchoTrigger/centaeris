@@ -94,6 +94,97 @@ def long_command(index):
     return "printf '%%s\\n' %04d >> /mnt/data/retained-long-run-markers.txt; printf acceptance-long-%04d" % (index,index)
 
 
+def update_background_references(value, task_ids):
+    if isinstance(value,dict):
+        identifier=value.get('taskId')
+        if isinstance(identifier,str):
+            if value.get('state')=='exited' and value.get('cleanupComplete') is True:
+                task_ids.discard(identifier)
+            else:
+                task_ids.add(identifier)
+        for child in value.values():
+            update_background_references(child,task_ids)
+    elif isinstance(value,list):
+        for child in value:
+            update_background_references(child,task_ids)
+
+
+def compaction_summary(request):
+    """Summarize the real Core JSONL contract, never fixture progress bookkeeping."""
+    messages=request['messages']
+    if not any(content_text(message).startswith('[model_compaction_prompt_v1]') for message in messages):
+        return None
+    if (len(messages)!=1 or messages[0].get('role')!='user' or request.get('tools')
+            or request.get('tool_choice','none')!='none'):
+        raise ValueError('unsupported compaction request shape')
+    match=re.fullmatch(r'\[model_compaction_prompt_v1\].*?<previous-summary>\n(.*?)\n</previous-summary>\s*<conversation>\n(.*)\n</conversation>\s*',
+        content_text(messages[0]),re.DOTALL)
+    if match is None:
+        raise ValueError('malformed Core compaction prompt')
+    previous,conversation=match.groups()
+    records=[json.loads(line) for line in conversation.splitlines() if line.strip()]
+    if any(not isinstance(row,dict) or row.get('role') not in ('system','user','assistant','tool')
+            or not isinstance(row.get('content'),str) for row in records):
+        raise ValueError('malformed Core conversation record')
+    goals=[row['content'] for row in records if row['role']=='user' and 'ACCEPTANCE_LONG_RUN' in row['content']]
+    if not goals:
+        goals=re.findall(r'^Goal: (ACCEPTANCE_LONG_RUN[^\n]*)$',previous,re.MULTILINE)
+    if len(goals)!=1 or len(goals[0])>1024:
+        raise ValueError('compaction lacks unique bounded acceptance goal')
+    prior=re.findall(r'^Last successful output: `(acceptance-long-\d{4})`\.$',previous,re.MULTILINE)
+    last=prior[-1] if prior else None
+    failed=int(re.search(r'^Failed tool results: (\d+)\.$',previous,re.MULTILINE).group(1)) if re.search(
+        r'^Failed tool results: (\d+)\.$',previous,re.MULTILINE) else 0
+    last_failure=re.findall(r'^Last failure: (.+)$',previous,re.MULTILINE)
+    last_failure=last_failure[-1] if last_failure else None
+    pending={}
+    task_ids=set(re.findall(r'^Observed taskId: `([^`\n]+)`\.$',previous,re.MULTILINE))
+    for identifier,name in re.findall(r'^Pending tool: `([^`\n]+)` \(`([^`\n]+)`\)\.$',previous,re.MULTILINE):
+        pending[identifier]=name
+    for row in records:
+        if row['role']=='assistant':
+            for call in row.get('toolCalls',[]):
+                pending[call['toolCallId']]=call['name']
+        if row['role']!='tool':
+            continue
+        pending.pop(row['toolCallId'],None)
+        if row['status']!='ok' or row['resultState'] not in ('success_with_output','success_without_output'):
+            failed+=1
+            last_failure=json.dumps(row['content'][:384],ensure_ascii=True)
+            continue
+        if row['name'] in ('background_task_start','background_task_query','background_task_list','background_task_stop'):
+            # Ordinary terminal bash task IDs are historical storage facts, not
+            # live continuation references. Preserve only the background domain.
+            update_background_references(json.loads(row['content']),task_ids)
+        outputs=set(re.findall(r'(?<![A-Za-z0-9_-])acceptance-long-(\d{4})(?!\d)',row['content']))
+        if outputs:
+            if row['name']!='bash' or len(outputs)!=1:
+                raise ValueError('ambiguous successful command output')
+            index=int(outputs.pop())
+            if index>=1000 or (last is not None and index<=int(last[-4:])):
+                raise ValueError('compaction output position regressed')
+            last='acceptance-long-%04d' % index
+    lines=['## Goal','Goal: '+goals[0],
+        'Complete exactly 1000 bounded commands; preserve the retained background task and files.',
+        '## Progress']
+    if last:
+        lines.append('Last successful output: `'+last+'`.')
+    else:
+        lines.append('No successful numbered command output was supplied.')
+    lines.append('Failed tool results: %d.' % failed)
+    if last_failure:
+        lines.append('Last failure: '+last_failure)
+    lines.extend('Observed taskId: `'+identifier+'`.' for identifier in sorted(task_ids))
+    lines.extend('Pending tool: `'+identifier+'` (`'+name+'`).' for identifier,name in sorted(pending.items()))
+    lines.extend(['## Next steps',
+        'Continue from actual numbered tool results; never replay completed commands. Resolve pending calls and failures before proceeding.',
+        'Keep all acceptance commands bounded. Do not terminate the retained background task.'])
+    summary='\n'.join(lines)
+    if len(summary)>4096:
+        raise ValueError('bounded fixture summary capacity exceeded')
+    return summary
+
+
 def next_call(request, progress=None):
 
     messages=request["messages"]
@@ -134,6 +225,17 @@ def next_call(request, progress=None):
             if len(matches)!=1:
                 raise ValueError('long Run command did not return its unique actual output')
             count=int(matches.pop())+1
+        else:
+            # Core may retain no tool suffix. Its accepted summary is then the
+            # durable observation; the in-memory progress map never supplies it.
+            summaries=[content_text(message) for message in messages[:last_user]
+                if content_text(message).startswith('## Goal\nGoal: '+marker+'\n')]
+            if summaries:
+                outputs=re.findall(r'^Last successful output: `acceptance-long-(\d{4})`\.$',
+                    summaries[-1],re.MULTILINE)
+                if len(outputs)!=1:
+                    raise ValueError('compacted long Run lacks unique actual output')
+                count=int(outputs[0])+1
         if not 0<=count<=1000:
             raise ValueError('long Run has an unexpected tool count')
         if progress is not None:
@@ -212,7 +314,8 @@ class Handler(BaseHTTPRequestHandler):
 
             request=json.loads(self.rfile.read(size))
 
-            call=next_call(request,self.progress)
+            summary=compaction_summary(request)
+            call=None if summary is not None else next_call(request,self.progress)
             observation=instructions_observation(request,call)
             if observation is not None:
                 print(json.dumps(observation),flush=True)
@@ -237,18 +340,31 @@ class Handler(BaseHTTPRequestHandler):
 
         else:
 
-            delta={"role":"assistant","content":"Retained acceptance Run complete."}
+            delta={"role":"assistant","content":summary if summary is not None else "Retained acceptance Run complete."}
             reason="stop"
 
         self.send_response(200)
 
-        self.send_header("Content-Type","text/event-stream")
+        streaming=request.get('stream',False)
+        self.send_header("Content-Type","text/event-stream" if streaming else "application/json")
 
         self.send_header("Connection","close")
 
         self.end_headers()
 
         self.close_connection=True
+
+        if not streaming:
+            message=dict(delta)
+            if 'tool_calls' in message:
+                message['tool_calls']=[{key:value for key,value in item.items() if key!='index'}
+                    for item in message['tool_calls']]
+            body={'id':response_id,'object':'chat.completion','created':0,'model':'retained-acceptance',
+                'choices':[{'index':0,'message':message,'finish_reason':reason}],
+                'usage':{'prompt_tokens':100,'completion_tokens':10,'total_tokens':110}}
+            self.wfile.write(json.dumps(body).encode())
+            self.wfile.flush()
+            return
 
         def emit(choice,usage=None):
 
