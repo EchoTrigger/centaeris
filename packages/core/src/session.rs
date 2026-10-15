@@ -338,6 +338,8 @@ pub struct AgentRunSessionState {
     committed_tool_result_ids: HashSet<String>,
     committed_phase_turn_ids: HashSet<String>,
     agent_composition_digest: Option<String>,
+    compaction_request_identities: HashMap<String, (String, String)>,
+    compaction_record_digests: HashMap<String, String>,
     provider_usages: HashMap<String, Value>,
     committed_supplement_ids: HashSet<String>,
     host_event_inputs: HashMap<String, (String, host_event_input::HostEventInput)>,
@@ -382,6 +384,8 @@ impl AgentRunSessionState {
             committed_tool_result_ids: HashSet::new(),
             committed_phase_turn_ids: HashSet::new(),
             agent_composition_digest: None,
+            compaction_request_identities: HashMap::new(),
+            compaction_record_digests: HashMap::new(),
             provider_usages: HashMap::new(),
             committed_supplement_ids: HashSet::new(),
             host_event_inputs: HashMap::new(),
@@ -400,6 +404,34 @@ impl AgentRunSessionState {
             last_execution_ended_at_ms: None,
             latest_recovery_checkpoint_id: None,
         })
+    }
+
+    pub(crate) fn compaction_source_matches(
+        &self,
+        run: &str,
+        request: &str,
+        turn: &str,
+        prompt: &str,
+    ) -> bool {
+        self.agent_run_id == run
+            && self
+                .compaction_request_identities
+                .get(request)
+                .is_some_and(|identity| identity.0 == turn && identity.1 == prompt)
+    }
+    pub(crate) fn has_identical_compaction_record(
+        &self,
+        event: &SessionLogRecord,
+    ) -> Result<bool, String> {
+        let Some(existing) = self.compaction_record_digests.get(&event.event_id) else {
+            return Ok(false);
+        };
+        if existing
+            != &crate::runtime::canonical_json::sha256("centaeris.compaction_record.v1", event)?
+        {
+            return Err("committed compaction event identity conflict".into());
+        }
+        Ok(true)
     }
 
     pub fn session_id(&self) -> &str {
@@ -1137,6 +1169,57 @@ impl AgentRunSessionState {
                     .ok_or_else(|| "phase event turn is missing".to_string())?;
                 if !self.committed_phase_turn_ids.insert(turn_id.to_string()) {
                     return Err(format!("duplicate committed phase event: {turn_id}"));
+                }
+            }
+            SessionRecordType::Compaction => {
+                let digest = crate::runtime::canonical_json::sha256(
+                    "centaeris.compaction_record.v1",
+                    event,
+                )?;
+                if let Some(existing) = self
+                    .compaction_record_digests
+                    .insert(event.event_id.clone(), digest.clone())
+                {
+                    if existing != digest {
+                        return Err("committed compaction event identity conflict".into());
+                    }
+                }
+            }
+            SessionRecordType::ModelRequestStarted
+                if state_payload_string(&event.payload, "purpose")? == "compaction" =>
+            {
+                let request_id = state_payload_string(&event.payload, "requestId")?;
+                let observations = event.payload["observations"]
+                    .as_array()
+                    .ok_or("compaction observations missing")?;
+                let prompts = observations
+                    .iter()
+                    .filter(|observation| observation["kind"] == "compaction_prompt")
+                    .collect::<Vec<_>>();
+                if prompts.len() != 1 {
+                    return Err("compaction request prompt identity missing".into());
+                }
+                let text = prompts[0]
+                    .pointer("/message/content")
+                    .and_then(Value::as_str)
+                    .ok_or("compaction prompt content missing")?;
+                let identity = (
+                    event
+                        .turn_id
+                        .clone()
+                        .ok_or("compaction request turn missing")?,
+                    crate::runtime::canonical_json::sha256(
+                        "centaeris.compaction_prompt.v1",
+                        &text,
+                    )?,
+                );
+                if let Some(existing) = self
+                    .compaction_request_identities
+                    .insert(request_id.into(), identity.clone())
+                {
+                    if existing != identity {
+                        return Err("compaction request identity conflict".into());
+                    }
                 }
             }
             SessionRecordType::ModelRequestStarted
@@ -2650,6 +2733,41 @@ pub fn restore_runtime_snapshot_from_session_records(
         )?;
     }
     snapshot.context_window = snapshot.messages.clone();
+    if let Some(main_index) = latest_request_index {
+        let main = &active[main_index];
+        let observations = main.payload["observations"]
+            .as_array()
+            .ok_or("restored main observations missing")?;
+        if let Some((compaction_index, compaction)) = active[..main_index]
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, event)| {
+                event.event_type == SessionRecordType::Compaction
+                    && event.agent_run_id == main.agent_run_id
+                    && observations.iter().any(|observation| {
+                        observation["kind"] == "message"
+                            && observation["message"]["role"] == "system"
+                            && observation["message"]["messageId"]
+                                == event.payload["summaryMessageId"]
+                            && observation["message"]["content"] == event.payload["summaryMarkdown"]
+                    })
+            })
+        {
+            if let Some(source) = active[..compaction_index].iter().rev().find(|event| {
+                event.event_type == SessionRecordType::ModelRequestStarted
+                    && event.agent_run_id == main.agent_run_id
+                    && event.payload["purpose"] == "compaction"
+            }) {
+                crate::runtime::prompt_compaction_commit::record_reconstructed_main_proof(
+                    &mut snapshot,
+                    main,
+                    compaction,
+                    source,
+                )?;
+            }
+        }
+    }
     Ok(snapshot)
 }
 

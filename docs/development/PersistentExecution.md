@@ -28,6 +28,21 @@ result semantics. A same-process structural regression covers 100, 1000 and
 process and cgroup memory separately from the execution instance. A restart's
 lower memory use does not establish release of pre-restart objects.
 
+Within a continuing tool chain, compaction can summarize older, fully closed tool
+batches while retaining the original accepted input identity and bytes plus the
+latest complete tool batch. A versioned, validated reference reconstructs that
+original input from authoritative messages; replay text is not a replacement for
+its execution identity. Missing or changed source references fail explicitly.
+For automatic Run compaction, a successful summary and the main request that
+first observes it share the existing canonical commit boundary before that main
+request can execute. Retrying
+an uncertain commit reuses the same summary and receipt identity.
+
+New compaction projections require their reader. Finish active Runs with a
+compatible Runtime before rolling back, or use a tested reconstruction from the
+authoritative main-request observations. Ignoring a new projection reference is
+not a supported rollback procedure.
+
 This result-lifetime change does not complete Session hot-state separation.
 The current Session may still contain full history; repeated full-snapshot
 loads/saves and context-selection copies remain measurable costs. Follow-up

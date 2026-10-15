@@ -1373,15 +1373,34 @@ impl<
         cancellation_probe: &(dyn Fn() -> Result<Option<String>, String> + Sync),
         tool_safe_point: &mut (dyn FnMut(ToolSafePoint) -> Result<(), String> + Send),
     ) -> Result<AgentRunResult, String> {
+        let mut commit_with_compaction_ack = |point: ToolSafePoint| {
+            let receipt = match &point {
+                ToolSafePoint::ModelRequestStarted(started) => started.prompt_compaction.clone(),
+                _ => None,
+            };
+            let observed_main_request_id = match &point {
+                ToolSafePoint::ModelRequestStarted(started) => started.request_id(),
+                _ => "",
+            };
+            let expected =
+                self.compaction_ack_snapshot(receipt.as_deref(), observed_main_request_id)?;
+            tool_safe_point(point)?;
+            self.acknowledge_compaction_after_safe_point(receipt.as_deref(), expected.as_ref())
+        };
         let tool_safe_point = ToolSafePointDispatcher {
-            sink: Mutex::new(tool_safe_point),
+            sink: Mutex::new(&mut commit_with_compaction_ack),
         };
         let composition_environment = self.agent_composition_environment()?;
+        let source_run_id = req
+            .agent_run_identity
+            .as_ref()
+            .map(|identity| identity.agent_run_id.clone());
         let driver = ModelClientGenerateDriver::new_with_tool_safe_point(
             model_client,
             session_config_store,
             &tool_safe_point,
             &composition_environment,
+            source_run_id.as_deref(),
         );
         self.process_turn_loop_with_async_driver_and_sink_cancellable(
             req,
@@ -1410,7 +1429,7 @@ impl<
             sink: Mutex::new(tool_safe_point),
         };
         let composition_environment = self.agent_composition_environment()?;
-        let driver = ModelClientGenerateDriver::new_with_tool_safe_point(
+        let driver = ModelClientGenerateDriver::new_manual_with_tool_safe_point(
             model_client,
             session_config_store,
             &tool_safe_point,
@@ -1493,7 +1512,21 @@ impl<
                 ToolSafePoint::ModelRequestStarted(started) => Some(started.session_id.clone()),
                 _ => None,
             };
+            let compaction_receipt = match &point {
+                ToolSafePoint::ModelRequestStarted(started) => started.prompt_compaction.clone(),
+                _ => None,
+            };
+            let observed_main_request_id = match &point {
+                ToolSafePoint::ModelRequestStarted(started) => started.request_id(),
+                _ => "",
+            };
+            let compaction_snapshot = self
+                .compaction_ack_snapshot(compaction_receipt.as_deref(), observed_main_request_id)?;
             tool_safe_point(point)?;
+            self.acknowledge_compaction_after_safe_point(
+                compaction_receipt.as_deref(),
+                compaction_snapshot.as_ref(),
+            )?;
             if turn_control.uses_durable_inputs() && !ids.is_empty() {
                 if let (Some(run), Some(session_id)) = (&recovery_run, committed_session) {
                     let mut session = self.session_manager.load_or_create_session(&session_id)?;
@@ -1517,6 +1550,7 @@ impl<
             session_config_store,
             &tool_safe_point,
             &composition_environment,
+            recovery_run.as_deref(),
         );
         self.process_turn_loop_with_async_driver_and_sink_cancellable(
             req,
@@ -1552,18 +1586,39 @@ impl<
             storage_error: Mutex::new(None),
         };
         let result = if let Some(tool_safe_point) = tool_safe_point {
+            let mut commit_with_compaction_ack = |point: ToolSafePoint| {
+                let receipt = match &point {
+                    ToolSafePoint::ModelRequestStarted(started) => {
+                        started.prompt_compaction.clone()
+                    }
+                    _ => None,
+                };
+                let observed_main_request_id = match &point {
+                    ToolSafePoint::ModelRequestStarted(started) => started.request_id(),
+                    _ => "",
+                };
+                let expected =
+                    self.compaction_ack_snapshot(receipt.as_deref(), observed_main_request_id)?;
+                tool_safe_point(point)?;
+                self.acknowledge_compaction_after_safe_point(receipt.as_deref(), expected.as_ref())
+            };
             let tool_safe_point = ToolSafePointDispatcher {
-                sink: Mutex::new(tool_safe_point),
+                sink: Mutex::new(&mut commit_with_compaction_ack),
             };
             let composition_environment = match self.agent_composition_environment() {
                 Ok(environment) => environment,
                 Err(error) => return SubagentWorkerRunOutcome::Failed { error, retry: None },
             };
+            let source_run_id = request
+                .agent_run_identity
+                .as_ref()
+                .map(|identity| identity.agent_run_id.clone());
             let driver = ModelClientGenerateDriver::new_with_tool_safe_point(
                 model_client,
                 session_config_store,
                 &tool_safe_point,
                 &composition_environment,
+                source_run_id.as_deref(),
             );
             self.process_turn_loop_with_async_driver_and_sink_cancellable(
                 request,

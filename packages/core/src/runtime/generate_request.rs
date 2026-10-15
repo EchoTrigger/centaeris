@@ -37,6 +37,75 @@ impl<
             + 'static,
     > AgentRuntime<S>
 {
+    pub(super) fn compaction_ack_snapshot(
+        &self,
+        commit: Option<&super::prompt_compaction_commit::PreparedCompactionCommit>,
+        observed_main_request_id: &str,
+    ) -> Result<Option<super::prompt_compaction_commit::CompactionAckSnapshot>, String> {
+        let Some(commit) = commit else {
+            return Ok(None);
+        };
+        if commit.acknowledged {
+            return Ok(None);
+        }
+        let raw = self
+            .runtime_store
+            .load_agent_runtime_snapshot(&commit.event.session_id)?
+            .ok_or_else(|| "compaction acknowledgment snapshot missing".to_string())?;
+        Ok(Some(
+            super::prompt_compaction_commit::CompactionAckSnapshot {
+                raw,
+                observed_main_request_id: observed_main_request_id.into(),
+            },
+        ))
+    }
+
+    pub(super) fn acknowledge_compaction_after_safe_point(
+        &self,
+        commit: Option<&super::prompt_compaction_commit::PreparedCompactionCommit>,
+        expected: Option<&super::prompt_compaction_commit::CompactionAckSnapshot>,
+    ) -> Result<(), String> {
+        let Some(commit) = commit else { return Ok(()) };
+        if commit.acknowledged {
+            return Ok(());
+        }
+        let expected =
+            expected.ok_or("compaction acknowledgment requires its pre-commit snapshot")?;
+        let mut session: SessionStateSnapshot =
+            serde_json::from_str(&expected.raw).map_err(|error| error.to_string())?;
+        if super::prompt_compaction_commit::acknowledge_commit(&mut session, commit)? {
+            let updated = serde_json::to_string(&session).map_err(|error| error.to_string())?;
+            if !self.runtime_store.compare_and_save_agent_runtime_snapshot(
+                &commit.event.session_id,
+                Some(&expected.raw),
+                &updated,
+                now_ms(),
+            )? {
+                // A host may immediately replace the cache with the authoritative
+                // just-committed main observations. Accept that exact projection
+                // without writing old metadata back into the reconstructed state.
+                if let Some(raw) = self
+                    .runtime_store
+                    .load_agent_runtime_snapshot(&commit.event.session_id)?
+                {
+                    let mut current: SessionStateSnapshot =
+                        serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+                    if super::prompt_compaction_commit::active_commit(&current)?.is_none()
+                        && super::prompt_compaction_commit::matches_reconstructed_main_proof(
+                            &mut current,
+                            &expected.observed_main_request_id,
+                            commit,
+                        )?
+                    {
+                        return Ok(());
+                    }
+                }
+                return Err("compaction acknowledgment snapshot changed after safe point".into());
+            }
+        }
+        Ok(())
+    }
+
     pub(super) async fn compact_session_with_async_driver<D: AsyncGenerateDriver>(
         &self,
         session_id: &str,
@@ -44,10 +113,18 @@ impl<
         driver: &D,
     ) -> Result<bool, String> {
         let mut session = self.session_manager.load_or_create_session(session_id)?;
+        if super::prompt_compaction_commit::active_commit(&session)?
+            .is_some_and(|commit| !commit.acknowledged)
+        {
+            return Err(
+                "manual compaction cannot replace an unacknowledged automatic summary".into(),
+            );
+        }
         clear_prompt_compaction_failure_metadata(&mut session);
         refresh_session_context_window(&mut session);
         let candidate_producer = AsyncGenerateDriverPromptCompactionCandidateProducer {
             driver,
+            source_request: Mutex::new(None),
             resource_usage: Mutex::new(AgentRunResourceUsageV1::default()),
         };
         let result = self
@@ -208,6 +285,14 @@ impl<
         intake: Option<&mut MainRequestIntake<'_>>,
     ) -> Result<GenerateDriverRequest, String> {
         let mut session = self.session_manager.load_or_create_session(session_id)?;
+        let pending_compaction = super::prompt_compaction_commit::active_commit(&session)?
+            .filter(|commit| !commit.acknowledged);
+        if let Some(commit) = pending_compaction.as_ref() {
+            if driver.durable_agent_run_id() != Some(commit.source.agent_run_id.as_str()) {
+                return Err("unacknowledged compaction receipt belongs to another AgentRun".into());
+            }
+        }
+
         if input.semantic_kind() == MESSAGE_SEMANTIC_USER_REQUEST {
             clear_prompt_compaction_failure_metadata(&mut session);
         }
@@ -233,6 +318,7 @@ impl<
 
         let candidate_producer = AsyncGenerateDriverPromptCompactionCandidateProducer {
             driver,
+            source_request: Mutex::new(None),
             resource_usage: Mutex::new(
                 agent_run_resource_usage
                     .as_deref()
@@ -240,8 +326,16 @@ impl<
                     .unwrap_or_default(),
             ),
         };
-        let compaction_result = self
-            .apply_prompt_compaction_for_generate_request_async(
+        let compaction_result = if pending_compaction.is_some() {
+            PromptCompactionApplyResult {
+                stats_json: session
+                    .metadata
+                    .get("prompt_compaction_stats_json")
+                    .cloned(),
+                runtime_events: Vec::new(),
+            }
+        } else {
+            self.apply_prompt_compaction_for_generate_request_async(
                 &mut session,
                 turn_id,
                 runtime_scope,
@@ -249,7 +343,8 @@ impl<
                 false,
                 Some(&candidate_producer),
             )
-            .await?;
+            .await?
+        };
         let tracked_resource_usage = candidate_producer
             .resource_usage
             .into_inner()
@@ -257,6 +352,14 @@ impl<
         if let Some(usage) = agent_run_resource_usage {
             *usage = tracked_resource_usage;
         }
+        super::prompt_compaction_commit::remember_commit(
+            &mut session,
+            &compaction_result.runtime_events,
+            candidate_producer
+                .source_request
+                .into_inner()
+                .map_err(|_| "compaction source identity lock poisoned")?,
+        )?;
         self.session_manager.save_session(&session)?;
         let prepared_inputs = if let Some(intake) = intake {
             let prepared = intake(input)?;
@@ -569,6 +672,7 @@ impl<
         }
         Ok((
             GenerateDriverRequest {
+                prompt_compaction: super::prompt_compaction_commit::active_commit(&session)?,
                 session_id: session_id.to_string(),
                 turn_id: turn_id.to_string(),
                 loop_index,

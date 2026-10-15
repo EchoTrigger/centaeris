@@ -16,6 +16,7 @@ mod lifecycle_hooks_runtime;
 mod loop_runtime;
 pub(crate) mod message_handler;
 pub mod projection;
+pub mod prompt_compaction_commit;
 mod prompt_compaction_metadata;
 mod prompt_compaction_runtime;
 mod prompt_projection;
@@ -963,7 +964,18 @@ pub fn canonical_model_request_started_records(
         return Err("canonical model request identity is required".to_string());
     }
     let request_id = started.request_id.clone();
-    Ok(vec![canonical_session_record(
+    let mut records = Vec::new();
+    if let Some(commit) = &started.prompt_compaction {
+        prompt_compaction_commit::validate_observed_commit(started, commit)?;
+        if commit.source.agent_run_id != task_id {
+            return Err("compaction source AgentRun identity mismatch".into());
+        }
+        records.push(
+            canonical_session_record_from_runtime_event(&commit.event, task_id)?
+                .ok_or("successful compaction has no canonical record")?,
+        );
+    }
+    records.push(canonical_session_record(
         events::stable_session_event_id("model_request_started", &[request_id.as_str()]),
         SessionRecordType::ModelRequestStarted,
         started.session_id.as_str(),
@@ -984,7 +996,8 @@ pub fn canonical_model_request_started_records(
             "agentComposition": started.agent_composition,
             "observations": started.observations,
         }),
-    )?])
+    )?);
+    Ok(records)
 }
 
 impl AgentRunSessionState {
@@ -1022,14 +1035,31 @@ impl AgentRunSessionState {
         created_at_ms: i64,
     ) -> Result<Vec<SequencedSessionRecord>, String> {
         let mut candidate = self.clone();
-        let records = canonical_model_request_started_records(
+        if let Some(commit) = &started.prompt_compaction {
+            if !candidate.compaction_source_matches(
+                &commit.source.agent_run_id,
+                &commit.source.request_id,
+                &commit.source.request_turn_id,
+                &commit.source.prompt_sha256,
+            ) {
+                return Err(
+                    "compaction source request is not durably bound to this AgentRun".into(),
+                );
+            }
+        }
+        let mut records = Vec::new();
+        for record in canonical_model_request_started_records(
             candidate.agent_run_id(),
             started,
             created_at_ms,
-        )?
-        .into_iter()
-        .map(|record| candidate.record(record))
-        .collect::<Result<Vec<_>, _>>()?;
+        )? {
+            if record.event_type == SessionRecordType::Compaction
+                && candidate.has_identical_compaction_record(&record)?
+            {
+                continue;
+            }
+            records.push(candidate.record(record)?);
+        }
         *self = candidate;
         Ok(records)
     }

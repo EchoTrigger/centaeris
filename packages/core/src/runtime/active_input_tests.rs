@@ -78,9 +78,15 @@ async fn query_loop_input_arriving_during_compaction_enters_the_main_request_and
         requests: Mutex::new(vec![]),
     };
     let mut records = vec![];
+    let mut request = input_run("input-compaction");
+    request.agent_run_identity = Some(RuntimeAgentRunIdentityV1 {
+        agent_run_id: "input-run".into(),
+        execution_id: "input-execution".into(),
+        authorization_digest: format!("sha256:{}", "a".repeat(64)),
+    });
     let result = engine
         .process_turn_loop_online_with_model_client_stream_controlled_and_tool_safe_point_async(
-            input_run("input-compaction"),
+            request,
             &model,
             &StaticModelSessionConfigStore {
                 config: Some(ModelSessionConfig::default()),
@@ -104,20 +110,21 @@ async fn query_loop_input_arriving_during_compaction_enters_the_main_request_and
     assert_eq!(result.stop, AgentRunStop::Finalized);
     assert_eq!(
         records.len(),
-        2,
+        3,
         "one finite preparation check does not require another compaction or reply"
     );
     assert_eq!(records[0].payload["purpose"], "compaction");
     assert!(input_ids(&records[0]).is_empty());
-    assert_eq!(records[1].payload["purpose"], "main");
-    assert_eq!(input_ids(&records[1]), *ids.lock().unwrap());
+    assert_eq!(records[1].event_type, SessionRecordType::Compaction);
+    assert_eq!(records[2].payload["purpose"], "main");
+    assert_eq!(input_ids(&records[2]), *ids.lock().unwrap());
     assert_eq!(ids.lock().unwrap().len(), 1);
     assert!(model.requests.lock().unwrap()[1]
         .prepared_prompt
         .messages
         .iter()
         .any(|message| message.content.contains("arrived during compaction")));
-    let mut historical = serde_json::to_value(&records[1]).unwrap();
+    let mut historical = serde_json::to_value(&records[2]).unwrap();
     historical["payload"]["observations"]
         .as_array_mut()
         .unwrap()
@@ -129,7 +136,7 @@ async fn query_loop_input_arriving_during_compaction_enters_the_main_request_and
     );
     let restored = crate::session::restore_runtime_snapshot_from_session_records(
         "input-compaction",
-        &[records[1].clone()],
+        &[records[2].clone()],
     )
     .unwrap();
     let old_restored = crate::session::restore_runtime_snapshot_from_session_records(

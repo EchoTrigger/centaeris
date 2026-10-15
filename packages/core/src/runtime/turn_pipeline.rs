@@ -26,6 +26,8 @@ pub(super) struct ModelClientGenerateDriver<'a, M: ModelClient, S: ModelSessionC
     model_client: &'a M,
     session_config_store: &'a S,
     tool_safe_point: Option<&'a super::ToolSafePointDispatcher<'a>>,
+    source_agent_run_id: Option<&'a str>,
+    manual_compaction: bool,
     composition_environment:
         Option<&'a crate::extension::composition::AgentCompositionEnvironmentV1>,
 }
@@ -36,6 +38,8 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> ModelClientGenerateDriver<'
             model_client,
             session_config_store,
             tool_safe_point: None,
+            source_agent_run_id: None,
+            manual_compaction: false,
             composition_environment: None,
         }
     }
@@ -45,13 +49,33 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> ModelClientGenerateDriver<'
         session_config_store: &'a S,
         tool_safe_point: &'a super::ToolSafePointDispatcher<'a>,
         composition_environment: &'a crate::extension::composition::AgentCompositionEnvironmentV1,
+        source_agent_run_id: Option<&'a str>,
     ) -> Self {
         Self {
             model_client,
             session_config_store,
             tool_safe_point: Some(tool_safe_point),
+            source_agent_run_id,
+            manual_compaction: false,
             composition_environment: Some(composition_environment),
         }
+    }
+
+    pub(super) fn new_manual_with_tool_safe_point(
+        model_client: &'a M,
+        session_config_store: &'a S,
+        tool_safe_point: &'a super::ToolSafePointDispatcher<'a>,
+        composition_environment: &'a crate::extension::composition::AgentCompositionEnvironmentV1,
+    ) -> Self {
+        let mut driver = Self::new_with_tool_safe_point(
+            model_client,
+            session_config_store,
+            tool_safe_point,
+            composition_environment,
+            None,
+        );
+        driver.manual_compaction = true;
+        driver
     }
 
     fn commit_model_request_started(
@@ -59,6 +83,7 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> ModelClientGenerateDriver<'
         purpose: ModelRequestPurposeV1,
         request: ModelClientRequest,
         observations: Vec<ModelObservationV1>,
+        prompt_compaction: Option<super::prompt_compaction_commit::PreparedCompactionCommit>,
     ) -> Result<Option<String>, String> {
         let Some(sink) = self.tool_safe_point else {
             return Ok(None);
@@ -67,8 +92,16 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> ModelClientGenerateDriver<'
             .composition_environment
             .ok_or_else(|| "model request durability requires agent composition".to_string())?
             .resolve_request(&request)?;
-        let started =
+        let mut started =
             ModelRequestStartedV1::from_request(purpose, &request, observations, composition)?;
+        if let Some(commit) = prompt_compaction {
+            super::prompt_compaction_commit::validate_observed_commit(&started, &commit)?;
+            if Some(commit.source.agent_run_id.as_str()) == self.source_agent_run_id {
+                started.prompt_compaction = Some(Box::new(commit));
+            } else if !commit.acknowledged {
+                return Err("unacknowledged compaction receipt belongs to another AgentRun".into());
+            }
+        }
         let request_id = started.request_id().to_string();
         sink.commit(ToolSafePoint::ModelRequestStarted(started))?;
         Ok(Some(request_id))
@@ -103,6 +136,10 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> ModelClientGenerateDriver<'
 impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
     for ModelClientGenerateDriver<'a, M, S>
 {
+    fn durable_agent_run_id(&self) -> Option<&str> {
+        self.source_agent_run_id
+    }
+
     fn generate_prompt_compaction_summary_async<'b>(
         &'b self,
         request: &'b ModelCompactionSummaryCandidateRequest,
@@ -114,6 +151,8 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
                     self.session_config_store,
                     self.tool_safe_point,
                     self.composition_environment,
+                    self.source_agent_run_id,
+                    self.manual_compaction,
                     request,
                 )
                 .await,
@@ -146,6 +185,7 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
                 ModelRequestPurposeV1::Main,
                 request.clone(),
                 req.observations.clone(),
+                req.prompt_compaction.clone(),
             )?;
             let response = self
                 .model_client
@@ -186,6 +226,7 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
                 ModelRequestPurposeV1::Main,
                 request.clone(),
                 req.observations.clone(),
+                req.prompt_compaction.clone(),
             )?;
             sink(TurnUpdate::ModelRequestStart {
                 session_id: req.session_id.clone(),
@@ -219,6 +260,7 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
                                     ModelRequestPurposeV1::Main,
                                     request.clone(),
                                     req.observations.clone(),
+                                    req.prompt_compaction.clone(),
                                 )
                             });
                             match restarted {
@@ -406,6 +448,8 @@ async fn generate_prompt_compaction_summary_with_model_client_async<
     session_config_store: &S,
     tool_safe_point: Option<&super::ToolSafePointDispatcher<'_>>,
     composition_environment: Option<&crate::extension::composition::AgentCompositionEnvironmentV1>,
+    source_agent_run_id: Option<&str>,
+    manual_compaction: bool,
     request: &ModelCompactionSummaryCandidateRequest,
 ) -> super::GenerateDriverPromptCompactionOutcome {
     let mut session_config =
@@ -413,6 +457,7 @@ async fn generate_prompt_compaction_summary_with_model_client_async<
             Ok(config) => config.unwrap_or_else(ModelSessionConfig::default),
             Err(err) => {
                 return super::GenerateDriverPromptCompactionOutcome {
+                    source_request: None,
                     result: Err(PromptCompactionError::provider(format!(
                         "load model compaction session config failed: {err}"
                     ))),
@@ -425,6 +470,7 @@ async fn generate_prompt_compaction_summary_with_model_client_async<
         .unwrap_or(DEFAULT_MODEL_OUTPUT_TOKENS);
     if request.max_output_tokens == 0 || request.max_output_tokens > configured_max_output_tokens {
         return super::GenerateDriverPromptCompactionOutcome {
+                    source_request: None,
             result: Err(PromptCompactionError::provider(format!(
                 "model compaction output limit invalid: request={} model={configured_max_output_tokens}",
                 request.max_output_tokens
@@ -450,6 +496,7 @@ async fn generate_prompt_compaction_summary_with_model_client_async<
         Ok(prepared_prompt) => prepared_prompt,
         Err(err) => {
             return super::GenerateDriverPromptCompactionOutcome {
+                source_request: None,
                 result: Err(PromptCompactionError::provider(err)),
                 resource_usage: AgentRunResourceUsageV1::default(),
             };
@@ -458,11 +505,13 @@ async fn generate_prompt_compaction_summary_with_model_client_async<
     let context_token_estimate = match super::generate_request::estimate_prepared_prompt_input_tokens(&prepared_prompt) {
         Ok(tokens) if tokens <= request.input_limit_tokens => tokens,
         Ok(tokens) => return super::GenerateDriverPromptCompactionOutcome {
+                    source_request: None,
             result: Err(PromptCompactionError::provider(format!(
                 "model compaction input budget exceeded: estimatedTokens={tokens} inputLimitTokens={}", request.input_limit_tokens
             ))), resource_usage: AgentRunResourceUsageV1::default(),
         },
         Err(error) => return super::GenerateDriverPromptCompactionOutcome {
+                    source_request: None,
             result: Err(PromptCompactionError::provider(error)), resource_usage: AgentRunResourceUsageV1::default(),
         },
     };
@@ -483,7 +532,17 @@ async fn generate_prompt_compaction_summary_with_model_client_async<
         prepared_prompt,
         session_config,
     };
+    let mut source_request = None;
     if let Some(sink) = tool_safe_point {
+        if source_agent_run_id.is_none_or(str::is_empty) && !manual_compaction {
+            return super::GenerateDriverPromptCompactionOutcome {
+                source_request: None,
+                result: Err(PromptCompactionError::durability(
+                    "compaction source AgentRun identity missing",
+                )),
+                resource_usage: AgentRunResourceUsageV1::default(),
+            };
+        }
         let composition = match composition_environment
             .ok_or_else(|| "model compaction durability requires agent composition".to_string())
             .and_then(|environment| environment.resolve_request(&client_request))
@@ -491,6 +550,7 @@ async fn generate_prompt_compaction_summary_with_model_client_async<
             Ok(composition) => composition,
             Err(error) => {
                 return super::GenerateDriverPromptCompactionOutcome {
+                    source_request: None,
                     result: Err(PromptCompactionError::durability(error)),
                     resource_usage: AgentRunResourceUsageV1::default(),
                 }
@@ -504,10 +564,24 @@ async fn generate_prompt_compaction_summary_with_model_client_async<
             }],
             composition,
         );
-        if let Err(error) =
-            started.and_then(|started| sink.commit(ToolSafePoint::ModelRequestStarted(started)))
-        {
+        if let Err(error) = started.and_then(|started| {
+            let request_id = started.request_id().to_string();
+            sink.commit(ToolSafePoint::ModelRequestStarted(started))?;
+            if let Some(agent_run_id) = source_agent_run_id {
+                source_request = Some(super::prompt_compaction_commit::CompactionSourceRequest {
+                    agent_run_id: agent_run_id.into(),
+                    request_id,
+                    request_turn_id: client_request.turn_id.clone(),
+                    prompt_sha256: super::canonical_json::sha256(
+                        "centaeris.compaction_prompt.v1",
+                        &client_request.prepared_prompt.messages[0].content,
+                    )?,
+                });
+            }
+            Ok(())
+        }) {
             return super::GenerateDriverPromptCompactionOutcome {
+                source_request: None,
                 result: Err(PromptCompactionError::durability(error)),
                 resource_usage: AgentRunResourceUsageV1::default(),
             };
@@ -523,6 +597,7 @@ async fn generate_prompt_compaction_summary_with_model_client_async<
                 response.provider_attempts,
             );
             super::GenerateDriverPromptCompactionOutcome {
+                source_request,
                 result: Ok(response.generate_result.content),
                 resource_usage,
             }
@@ -531,6 +606,7 @@ async fn generate_prompt_compaction_summary_with_model_client_async<
             let mut resource_usage = AgentRunResourceUsageV1::default();
             resource_usage.record_provider_attempts(context_token_estimate, err.provider_attempts);
             super::GenerateDriverPromptCompactionOutcome {
+                source_request: None,
                 result: Err(PromptCompactionError::provider(format!(
                     "model compaction request failed(kind={},retryable={}): {}",
                     err.kind.as_str(),

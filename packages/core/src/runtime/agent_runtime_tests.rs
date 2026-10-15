@@ -42,6 +42,7 @@ mod completion_delivery_tests;
 mod host_event_tests;
 mod prompt_compaction_attempt_tests;
 mod prompt_compaction_live_chain_tests;
+mod prompt_compaction_recovery_tests;
 mod wait_recovery_tests;
 
 #[tokio::test]
@@ -2359,6 +2360,7 @@ async fn failed_stream_retracts_tentative_content_before_runtime_error() {
     };
     let driver = ModelClientGenerateDriver::new(&model_client, &config_store);
     let request = GenerateDriverRequest {
+        prompt_compaction: None,
         session_id: "chat-partial-stream".to_string(),
         turn_id: "turn-partial-stream".to_string(),
         loop_index: 0,
@@ -2832,6 +2834,7 @@ async fn query_loop_preserves_dynamic_description_at_durable_model_request_bound
         &serde_json::to_string(&prepared_prompt.tool_definitions).unwrap(),
     );
     let request = GenerateDriverRequest {
+        prompt_compaction: None,
         session_id: "chat-description".to_string(),
         turn_id: "turn-description".to_string(),
         loop_index: 0,
@@ -2868,6 +2871,7 @@ async fn query_loop_preserves_dynamic_description_at_durable_model_request_bound
         &config,
         &dispatcher,
         &environment,
+        Some("test-agent-run"),
     );
     driver
         .generate_next_async(&request)
@@ -2912,6 +2916,7 @@ async fn query_loop_persistence_failure_prevents_provider_call() {
         &config_store,
         &safe_point,
         &composition_environment,
+        Some("test-agent-run"),
     );
     let prepared_prompt = crate::model::prepared_prompt::PreparedPromptV1::new(
         None,
@@ -2934,6 +2939,7 @@ async fn query_loop_persistence_failure_prevents_provider_call() {
             .as_str(),
     );
     let request = GenerateDriverRequest {
+        prompt_compaction: None,
         session_id: "chat-safe-point".to_string(),
         turn_id: "turn-safe-point".to_string(),
         loop_index: 0,
@@ -3094,6 +3100,7 @@ impl AsyncGenerateDriver for TestPromptCompactionAsyncDriver {
                 1,
             );
             Some(GenerateDriverPromptCompactionOutcome {
+                source_request: None,
                 result: Ok(test_model_compaction_summary(request)),
                 resource_usage,
             })
@@ -11993,6 +12000,7 @@ async fn query_loop_reasoning_commits_before_return_and_persistence_failure_stop
             .as_str(),
     );
     let request = GenerateDriverRequest {
+        prompt_compaction: None,
         session_id: "chat-safe-point".to_string(),
         turn_id: "turn-safe-point".to_string(),
         loop_index: 0,
@@ -12064,6 +12072,7 @@ async fn query_loop_reasoning_commits_before_return_and_persistence_failure_stop
                 &config_store,
                 &safe_point,
                 &composition,
+                Some("test-agent-run"),
             );
             let result = if streaming {
                 driver
@@ -12161,6 +12170,7 @@ async fn query_loop_live_reasoning_seals_failure_cancel_and_retry_without_mixing
             .as_str(),
     );
     let request = GenerateDriverRequest {
+        prompt_compaction: None,
         session_id: "chat-safe-point".to_string(),
         turn_id: "turn-safe-point".to_string(),
         loop_index: 0,
@@ -12211,6 +12221,7 @@ async fn query_loop_live_reasoning_seals_failure_cancel_and_retry_without_mixing
             &config,
             &dispatcher,
             &composition,
+            Some("test-agent-run"),
         );
         let mut updates = Vec::new();
         let mut sink = |event| updates.push(event);
