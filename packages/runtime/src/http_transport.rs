@@ -554,8 +554,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn independently_created_model_transports_share_runtime_capacity() {
+        // This tests the actual process-global factory. Other parallel tests
+        // legitimately consume its capacity, so run the assertions in a fresh
+        // process instead of substituting a different admission domain.
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "http_transport::tests::runtime_capacity_child",
+                "--ignored",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env("CENTAERIS_RUNTIME_CAPACITY_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "isolated capacity test failed: {} {}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stdout).contains("RUNTIME_MODEL_CAPACITY_OK"),
+            "capacity child did not complete its assertions: {} {}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
     #[tokio::test]
-    async fn independently_created_model_transports_share_runtime_capacity() {
+    #[ignore = "runs in the isolated process-global capacity child"]
+    async fn runtime_capacity_child() {
+        assert_eq!(
+            std::env::var("CENTAERIS_RUNTIME_CAPACITY_CHILD").unwrap(),
+            "1"
+        );
         use futures::poll;
         use std::sync::{
             atomic::{AtomicUsize, Ordering},
@@ -613,6 +648,7 @@ mod tests {
             started.load(Ordering::SeqCst),
             LOCAL_MODEL_IN_FLIGHT_LIMIT * 2 + 1
         );
+        println!("RUNTIME_MODEL_CAPACITY_OK");
     }
 
     #[tokio::test]
