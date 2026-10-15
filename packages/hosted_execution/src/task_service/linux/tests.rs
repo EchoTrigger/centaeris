@@ -3,6 +3,31 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
+// An unrelated test's fork inherits flock descriptions until exec closes them.
+// Fixtures that assert immediate lock release therefore own an entire process.
+fn isolated_lock_fixture(flag: &str, name: &str) -> bool {
+    if std::env::var_os(flag).is_some() {
+        return false;
+    }
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            &format!("task_service::linux::tests::{name}"),
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(flag, "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "isolated lock fixture failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
+}
+
 struct LockProcess {
     child: Child,
     root: PathBuf,
@@ -153,6 +178,12 @@ fn startup_refuses_stale_socket_before_rewriting_control_and_keeps_socket() {
 }
 #[test]
 fn startup_lease_survives_manager_lifetime_but_not_exec_child() {
+    if isolated_lock_fixture(
+        "CENTAERIS_TASK_STARTUP_LEASE_FIXTURE",
+        "startup_lease_survives_manager_lifetime_but_not_exec_child",
+    ) {
+        return;
+    }
     let root = lock_root();
     let control_root = root.join("control");
     let output_root = root.join("output");
@@ -294,6 +325,12 @@ fn relay_marks_unsupported_response_schema_unknown() {
 
 #[test]
 fn corrupt_or_removed_output_does_not_prevent_control_restart_and_queries() {
+    if isolated_lock_fixture(
+        "CENTAERIS_TASK_STORAGE_RESTART_FIXTURE",
+        "corrupt_or_removed_output_does_not_prevent_control_restart_and_queries",
+    ) {
+        return;
+    }
     let root = std::env::temp_dir().join(format!(
         "task-storage-{}-{}",
         std::process::id(),
