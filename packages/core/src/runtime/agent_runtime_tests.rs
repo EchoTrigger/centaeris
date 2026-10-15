@@ -40,6 +40,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod active_input_tests;
 mod completion_delivery_tests;
 mod host_event_tests;
+mod prompt_compaction_attempt_tests;
 mod wait_recovery_tests;
 
 #[tokio::test]

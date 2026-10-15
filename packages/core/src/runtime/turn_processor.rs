@@ -94,7 +94,11 @@ impl<
         }
         refresh_session_context_window(&mut session);
         let prompt_compaction_result =
-            if prompt_compaction_stats_match_turn(&session, req.turn_id.as_str()) {
+            if prompt_compaction_failure_matches_turn(&session, req.turn_id.as_str()) {
+                // The async request preparation already attempted this turn.
+                // Preserve that failure instead of attempting without its driver.
+                PromptCompactionApplyResult::default()
+            } else if prompt_compaction_stats_match_turn(&session, req.turn_id.as_str()) {
                 PromptCompactionApplyResult {
                     stats_json: session
                         .metadata
