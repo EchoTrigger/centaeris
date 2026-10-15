@@ -99,3 +99,97 @@ class ObservationExitTests(unittest.TestCase):
             with self.subTest(control=control,output=output),self.assertRaises(RuntimeError):
                 progress.validate_resource_bytes({'controlDirectoryBytes':control,'outputDirectoryBytes':output,
                     'instanceMemoryBytes':1,'instancePids':1})
+
+
+class DurableCompactionTests(unittest.TestCase):
+    def fixture(self):
+        import hashlib,json
+        from types import SimpleNamespace
+        def stored(value,domain):
+            raw=json.dumps(value,separators=(',',':'))
+            key='sha256:'+hashlib.sha256(('centaeris.model_observation_'+domain+'.v1\0'+raw).encode()).hexdigest()
+            return key,raw
+        summary='committed synthetic summary'
+        content=stored({'kind':'message','message':{'messageId':'summary-1','role':'system','content':summary}},'content')
+        prompt_digest='sha256:'+'a'*64
+        manifests=[stored({'parentDigest':None,'observationCount':1,'changes':[{'index':0,'kind':'compaction_prompt','contentDigest':prompt_digest}]},'manifest'),
+            stored({'parentDigest':None,'observationCount':1,'changes':[{'index':0,'kind':'message','contentDigest':content[0]}]},'manifest')]
+        def event(n,kind,body):return SimpleNamespace(agent_run_sequence=n,eventId='event-'+str(n),payload={'type':kind,'payload':body})
+        events=[event(10,'model_request_started',{'purpose':'compaction','requestId':'compact-request','observations':{'manifestDigest':manifests[0][0]}}),
+            event(20,'compaction',{'compactionId':'compact-1','summaryMessageId':'summary-1','summaryMarkdown':summary,'firstKeptMessageId':'tail'}),
+            event(30,'model_request_started',{'purpose':'main','requestId':'main-after','observations':{'manifestDigest':manifests[1][0]}}),
+            event(40,'tool_call',{'toolName':'bash','callId':'command-700','normalizedInput':{'command':'printf acceptance-long-0700'}}),
+            event(50,'tool_result',{'callId':'command-700','resultState':'successWithOutput','modelContent':'acceptance-long-0700'})]
+        class Cursor:
+            snapshot=[(summary,{'kind':'context_compaction','compaction_id':'compact-1','first_kept_message_id':'tail'},300)]
+            contents=[content]
+            failure_count=0
+            def execute(self,sql,params):self.sql=sql;self.params=params
+            def fetchall(self):
+                if 'session_runtime_snapshots' in self.sql:return self.snapshot
+                if 'model_observation_manifests' in self.sql:return manifests
+                if 'content_json FROM' in self.sql:return self.contents
+                return [('compaction_prompt',12345)]
+            def fetchone(self):return (self.failure_count,)
+        return events,Cursor(),manifests
+
+    def test_persisted_summary_and_real_request_are_bound_without_full_prompt_or_snapshot(self):
+        import json
+        events,cursor,_=self.fixture()
+        facts=progress.durable_compaction_facts(events,'session',cursor)
+        self.assertEqual(facts['summaryMessageId'],'summary-1')
+        self.assertEqual(facts['snapshotMessagePosition'],300)
+        self.assertEqual(facts['requestBound']['requestId'],'compact-request')
+        self.assertEqual(facts['lastMainObservation']['requestId'],'main-after')
+        self.assertNotIn('committed synthetic summary',json.dumps(facts))
+
+    def test_no_commit_is_an_explicit_unready_observation(self):
+        events,cursor,_=self.fixture()
+        self.assertIsNone(progress.durable_compaction_facts([events[0]],'session',cursor))
+        cursor.snapshot=[]
+        self.assertIsNone(progress.durable_compaction_facts(events,'session',cursor))
+        with self.assertRaisesRegex(RuntimeError,'persisted summary'):
+            progress.durable_compaction_facts(events,'session',cursor,'summary-1')
+
+    def test_changed_summary_or_wrong_model_purpose_cannot_qualify(self):
+        events,cursor,_=self.fixture();cursor.snapshot=[('changed',{},300)]
+        with self.assertRaisesRegex(RuntimeError,'identity changed'):
+            progress.durable_compaction_facts(events,'session',cursor)
+        events,cursor,_=self.fixture();events[0].payload['payload']['purpose']='main'
+        with self.assertRaisesRegex(RuntimeError,'request binding missing'):
+            progress.durable_compaction_facts(events,'session',cursor)
+
+    def test_corrupted_cas_and_missing_post_restart_main_are_not_recovery(self):
+        events,cursor,manifests=self.fixture();manifests[0]=(manifests[0][0],manifests[0][1]+' ')
+        with self.assertRaisesRegex(RuntimeError,'manifest digest mismatch'):
+            progress.durable_compaction_facts(events,'session',cursor)
+        events,cursor,_=self.fixture()
+        facts=progress.durable_compaction_facts(events,'session',cursor,'summary-1',30)
+        self.assertIsNone(facts['lastMainObservation'])
+
+    def test_recovery_requires_same_summary_request_new_epoch_and_new_main(self):
+        events,cursor,_=self.fixture();facts=progress.durable_compaction_facts(events,'session',cursor)
+        before={'durableCompaction':facts,'highestSessionSequence':25,'completedCommands':700,
+            'fence':{'controllerId':'same-run','environmentInstanceId':'instance','controllerEpoch':3}}
+        current={'durableCompaction':facts,'completedCommands':701,'fence':before['fence']|{'controllerEpoch':4}}
+        baseline={'highestSessionSequence':26,'completedCommands':700,'fence':current['fence']}
+        proof=progress.compaction_recovery_proof(before,current,baseline)
+        self.assertEqual(proof['originalCompactionRequestId'],'compact-request')
+        self.assertEqual(proof['postRestartMainObservation']['sequence'],30)
+        for changed in ({'summarySha256':'sha256:'+'f'*64},{'requestBound':facts['requestBound']|{'requestId':'regenerated'}}):
+            with self.subTest(changed=changed),self.assertRaises(RuntimeError):
+                progress.compaction_recovery_proof(before,current|{'durableCompaction':facts|changed},baseline)
+        self.assertIsNone(progress.compaction_recovery_proof(before|{'highestSessionSequence':30},current,baseline|{'highestSessionSequence':30}))
+        with self.assertRaisesRegex(RuntimeError,'newer same-Run controller'):
+            progress.compaction_recovery_proof(before,current|{'fence':before['fence']},baseline)
+
+    def test_old_runtime_tail_after_pre_restart_sample_cannot_prove_new_main(self):
+        events,cursor,_=self.fixture();facts=progress.durable_compaction_facts(events,'session',cursor)
+        before={'durableCompaction':facts,'highestSessionSequence':25,'completedCommands':700,
+            'fence':{'controllerId':'same-run','environmentInstanceId':'instance','controllerEpoch':3}}
+        new_fence=before['fence']|{'controllerEpoch':4}
+        # Main sequence30 and old task results can commit between pre-sample25 and restart.
+        # They are already visible in the first post-restart read at sequence55.
+        baseline={'highestSessionSequence':55,'completedCommands':701,'fence':new_fence}
+        current={'durableCompaction':facts,'completedCommands':702,'fence':new_fence}
+        self.assertIsNone(progress.compaction_recovery_proof(before,current,baseline))

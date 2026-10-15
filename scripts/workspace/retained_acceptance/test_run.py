@@ -17,7 +17,7 @@ class HistoryDriverTests(unittest.TestCase):
 
 
 class LongDriverSequenceTests(unittest.TestCase):
-    def exercise(self, progress_failure=None, cleanup_only=None):
+    def exercise(self, progress_failure=None, cleanup_only=None, missing_summary=False):
         import hashlib,json,sys,tempfile
         from types import SimpleNamespace
         from unittest.mock import patch
@@ -44,11 +44,17 @@ class LongDriverSequenceTests(unittest.TestCase):
                         return SimpleNamespace(returncode=progress_failure,stdout='',stderr=json.dumps({
                             'schema':'retained.acceptance.observation.v1','status':'notReady' if progress_failure==75 else 'fatal','reason':'fixture'}))
                     successful_samples+=1
-                    completed=successful_samples>=3 or (cleanup_only=='completed' and successful_samples==2)
+                    completed=successful_samples>=5 or (cleanup_only=='completed' and successful_samples==2)
                     purpose='cleanup' if completed or (cleanup_only and successful_samples>=2) else 'execute'
                     Path(argv[argv.index('--result')+1]).write_text(json.dumps({'runStatus':'completed' if completed else 'running',
-                        'completedCommands':100 if successful_samples==1 else (1000 if completed else 900),'containerId':'instance-cid',
-                        'fence':{'environmentInstanceId':'instance','controllerId':'run-2','controllerEpoch':3 if successful_samples==1 else (5 if purpose=='cleanup' else 4),'controllerPurpose':purpose},
+                        'completedCommands':100 if successful_samples==1 else (1000 if completed else (900 if successful_samples==2 else (950 if successful_samples==3 else 975))),'containerId':'instance-cid',
+                        'highestSessionSequence':40 if successful_samples==1 else (100 if successful_samples==2 else 250+(successful_samples-3)*100),
+                        'durableCompaction':None if successful_samples==1 or missing_summary else {
+                            'compactionId':'compact-1','summaryMessageId':'summary-1','summarySha256':'sha256:'+'a'*64,
+                            'summaryBytes':100,'sequence':80,'sessionEventId':'event-80','failureCount':0,
+                            'requestBound':{'requestId':'request-compact','sequence':70,'manifestDigest':'sha256:'+'b'*64,'compactionPromptDigest':'sha256:'+'c'*64},
+                            'lastMainObservation':{'requestId':'main-before' if successful_samples==2 else 'main-after-'+str(successful_samples),'sequence':85 if successful_samples==2 else 210+(successful_samples-3)*100,'manifestDigest':'sha256:'+'d'*64,'summaryContentDigest':'sha256:'+'e'*64,'successfulCommand':{'callId':'command-'+str(successful_samples),'commandIndex':899 if successful_samples==2 else (949 if successful_samples==3 else 974),'callSequence':90 if successful_samples==2 else 220+(successful_samples-3)*100,'resultSequence':95 if successful_samples==2 else 230+(successful_samples-3)*100}}},
+                        'fence':{'environmentInstanceId':'instance','controllerId':'run-2','controllerEpoch':3 if successful_samples<=2 else (5 if purpose=='cleanup' else 4),'controllerPurpose':purpose},
                         'live':{'backgroundTaskIds':['background']},'store':{'indexedRunTasks':301 if successful_samples==1 else 3000}}))
                 if len(argv)>1 and Path(argv[1]).name=='observe.py':
                     Path(argv[argv.index('--result')+1]).write_text(json.dumps({'successfulOrdinaryCommands':1000 if len(admissions)==2 else 0,
@@ -58,7 +64,7 @@ class LongDriverSequenceTests(unittest.TestCase):
                             'agentsInstructions':{'mainRequestsWithAgentsInstructions':1001,'agentsFileSha256':digest}}}))
                 if argv[-3:]==['ps','-q','runtime']:output='runtime-cid'
                 if argv[:2]==['docker','inspect']:
-                    inspections+=1;output=json.dumps({'Running':True,'Pid':10+inspections,'StartedAt':str(inspections)})
+                    inspections+=1;output=json.dumps({'Running':True,'Pid':10+min(inspections,2),'StartedAt':str(min(inspections,2))})
                 if 'logs' in argv:
                     output='\n'.join(json.dumps({'kind':'automaticInstructionsObserved','commandIndex':i,'instructionSha256':digest}) for i in range(1000))
                 if 'head' in argv:output='\n'.join('%04d'%i for i in range(1000))+'\n'
@@ -71,7 +77,7 @@ class LongDriverSequenceTests(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError,'fatal live observation'):driver.main()
                     self.assertEqual(progress_calls,1)
                     return
-                if cleanup_only:
+                if cleanup_only or missing_summary:
                     with self.assertRaisesRegex(RuntimeError,'long Run lacks complete work'):driver.main()
                     stale.assert_not_called()
                     return
@@ -83,9 +89,25 @@ class LongDriverSequenceTests(unittest.TestCase):
             evidence=next(root.glob('evidence-*'))
             self.assertEqual(json.loads((evidence/'long-side-effect-proof.json').read_text())['lines'],1000)
             self.assertEqual(json.loads((evidence/'automatic-instructions.json').read_text())['distinctCommandIndices'],1000)
+            proof=json.loads((evidence/'long-compaction-before-restart.json').read_text())
+            self.assertEqual(proof['completedCommands'],900)
+            self.assertEqual(proof['durableCompaction']['summaryMessageId'],'summary-1')
+            restart=json.loads((evidence/'long-runtime-restart.json').read_text())
+            self.assertEqual(restart['compactionRecovery']['originalCompactionRequestId'],'request-compact')
+            self.assertEqual(restart['postRestartBaseline']['highestSessionSequence'],250)
+            self.assertEqual(restart['compactionRecovery']['postRestartMainObservation']['sequence'],310)
+            self.assertEqual(restart['compactionRecovery']['postRestartCommandResult']['resultSequence'],330)
+            progresses=[i for i,argv in enumerate(commands) if len(argv)>1 and Path(argv[1]).name=='progress.py' and (not progress_failure or i>0)]
+            restarts=[i for i,argv in enumerate(commands) if argv[-2:]==['restart','runtime']]
+            # Actual driver must observe the summary-bearing second sample first.
+            self.assertGreater(restarts[-1],progresses[1 if not progress_failure else 2])
+            self.assertTrue(any('--compaction-proof' in argv for argv in commands if len(argv)>1 and Path(argv[1]).name=='progress.py'))
 
     def test_real_driver_requires_mid_run_restart_and_complete_evidence_before_retirement(self):
         self.exercise()
+
+    def test_no_summary_before_completion_explicitly_fails_without_restart(self):
+        self.exercise(missing_summary=True)
 
     def test_fatal_live_invariant_stops_before_a_later_success_can_hide_it(self):
         self.exercise(progress_failure=1)
@@ -148,3 +170,19 @@ class CommandTranscriptTests(unittest.TestCase):
             self.assertTrue(row['outputTruncated'])
             self.assertEqual(row['stdoutBytes'],1024*1024+1)
             self.assertLessEqual(len(row['stdout'].encode()),1024*1024)
+
+class CompactedRestartBoundaryTests(unittest.TestCase):
+    def sample(self):
+        return {'completedCommands':700,'runStatus':'running','highestSessionSequence':90,'fence':{'controllerPurpose':'execute'},
+            'durableCompaction':{'compactionId':'compact-1','summaryMessageId':'summary-1','summarySha256':'sha256:'+'a'*64,'summaryBytes':100,'sequence':80,'sessionEventId':'event-80','failureCount':0,
+                'requestBound':{'requestId':'request-compact','sequence':70,'manifestDigest':'sha256:'+'b'*64,'compactionPromptDigest':'sha256:'+'c'*64},
+                'lastMainObservation':{'requestId':'main-before','sequence':85,'manifestDigest':'sha256:'+'d'*64,'summaryContentDigest':'sha256:'+'e'*64}}}
+    def test_100_without_summary_cannot_restart(self):
+        self.assertFalse(driver.should_restart_long_run({'completedCommands':100,'runStatus':'running','durableCompaction':None},None))
+    def test_committed_and_observed_summary_allows_restart_without_changing_work_target(self):
+        self.assertTrue(driver.should_restart_long_run(self.sample(),None))
+        self.assertFalse(driver.should_restart_long_run(self.sample(),{}))
+    def test_summary_must_be_bound_to_real_model_request_and_used(self):
+        for changes in ({'requestBound':None},{'lastMainObservation':None}):
+            value=self.sample();value['durableCompaction']|=changes
+            self.assertFalse(driver.should_restart_long_run(value,None))

@@ -14,7 +14,7 @@ import time
 import urllib.request
 import uuid
 from workload import instructions_facts
-from progress import probe_reclaimed_controller
+from progress import probe_reclaimed_controller, compaction_recovery_proof
 
 
 def append_command_evidence(path, sequence, argv, result):
@@ -69,6 +69,27 @@ def history_metrics(state):
             or facts!={'attemptedCommands':70,'completedCommands':70,'distinctCallIds':70}):
         raise RuntimeError('same-Run history lacks70 distinct actual successful commands')
     return facts
+
+
+def should_restart_long_run(sample, previous_restart):
+    if previous_restart is not None or sample['completedCommands']<100:return False
+    if sample.get('runStatus')!='running' or sample.get('fence',{}).get('controllerPurpose')!='execute':return False
+    summary=sample.get('durableCompaction')
+    if summary is None:return False
+    request=summary.get('requestBound');main=summary.get('lastMainObservation')
+    if request is None or main is None:return False
+    import re
+    if (summary.get('failureCount')!=0 or not summary.get('compactionId')
+            or not summary.get('summaryMessageId') or not summary.get('sessionEventId')
+            or not re.fullmatch(r'sha256:[0-9a-f]{64}',summary.get('summarySha256',''))
+            or type(summary.get('summaryBytes')) is not int or summary['summaryBytes']<=0
+            or type(request.get('sequence')) is not int or type(summary.get('sequence')) is not int
+            or not request.get('requestId') or not main.get('requestId')
+            or not re.fullmatch(r'sha256:[0-9a-f]{64}',request.get('manifestDigest',''))
+            or not re.fullmatch(r'sha256:[0-9a-f]{64}',request.get('compactionPromptDigest',''))
+            or not request['sequence']<summary['sequence']<main.get('sequence',0)<=sample.get('highestSessionSequence',0)):
+        raise RuntimeError('long Run durable compaction proof is invalid or failed')
+    return True
 
 
 def main():
@@ -150,8 +171,11 @@ def main():
         deadline=time.monotonic()+7200
         while time.monotonic()<deadline:
             sample_path=evidence/'long-live.json'
-            result=command([sys.executable,str(helpers/'progress.py'),'--compose',str(compose),
-                '--run',admitted['agentRunId'],'--previous',str(previous_path),'--result',str(sample_path)])
+            progress_command=[sys.executable,str(helpers/'progress.py'),'--compose',str(compose),
+                '--run',admitted['agentRunId'],'--previous',str(previous_path),'--result',str(sample_path)]
+            if long_restart is not None:
+                progress_command.extend(['--compaction-proof',str(evidence/'long-compaction-before-restart.json')])
+            result=command(progress_command)
             if result.returncode:
                 if not retryable_observation(result):
                     raise RuntimeError('fatal live observation; preserve fixture and exact failed command')
@@ -161,7 +185,7 @@ def main():
             progress_evidence.record(sample)
             if progress_evidence.count%32==0 or sample['runStatus']=='completed':
                 (evidence/'long-live-samples.json').write_text(json.dumps(progress_evidence.snapshot(),indent=2))
-            if sample['completedCommands']>=100 and long_restart is None:
+            if should_restart_long_run(sample,long_restart):
                 if sample['runStatus']=='completed':
                     raise RuntimeError('long Run completed before a real mid-Run restart could be tested')
                 def runtime_state():
@@ -172,28 +196,53 @@ def main():
                     if result.returncode:raise RuntimeError('long Run Runtime state unavailable')
                     return json.loads(result.stdout)
                 before=runtime_state()
+                compaction_before={'agentRunId':admitted['agentRunId'],'sessionId':admitted['sessionId'],
+                    'sourceRevision':manifest['sourceRevision'],'binarySha256':manifest['binarySha256'],
+                    'completedCommands':sample['completedCommands'],'highestSessionSequence':sample['highestSessionSequence'],
+                    'fence':sample['fence'],'durableCompaction':sample['durableCompaction'],'runtimeBefore':before}
+                (evidence/'long-compaction-before-restart.json').write_text(json.dumps(compaction_before,indent=2))
+                if not before.get('Running') or before.get('OOMKilled') or before.get('ExitCode')==137:
+                    raise RuntimeError('Runtime was not healthy before the planned summary recovery restart')
                 if dc('restart','runtime').returncode:raise RuntimeError('mid-Run Runtime restart failed')
                 after=runtime_state()
                 if (not after['Running'] or before['Pid']==after['Pid']
                         or before['StartedAt']==after['StartedAt']):
                     raise RuntimeError('mid-Run Runtime process did not actually restart')
                 long_restart={'before':before,'after':after,'completedCommandsBefore':sample['completedCommands'],
-                    'beforeFence':sample['fence'],'controllerReclaim':None}
+                    'beforeFence':sample['fence'],'controllerReclaim':None,'compactionBefore':compaction_before,'compactionRecovery':None,'postRestartBaseline':None}
                 (evidence/'long-runtime-restart.json').write_text(json.dumps(long_restart,indent=2))
             if (long_restart is not None and long_restart['controllerReclaim'] is None
                     and sample['runStatus']=='running'
                     and sample['fence']['controllerPurpose']=='execute'
                     and sample['fence']['controllerEpoch']>long_restart['beforeFence']['controllerEpoch']):
-                long_restart['controllerReclaim']=probe_reclaimed_controller(sample['containerId'],
-                    long_restart['beforeFence'],sample['fence'],sample['live']['backgroundTaskIds'][0])
-                (evidence/'long-runtime-restart.json').write_text(json.dumps(long_restart,indent=2))
+                if long_restart['postRestartBaseline'] is None:
+                    now=runtime_state()
+                    if (not now.get('Running') or now.get('OOMKilled')
+                            or any(now[key]!=long_restart['after'][key] for key in ('StartedAt','Pid'))):
+                        raise RuntimeError('Runtime changed before the post-restart evidence baseline')
+                    long_restart['postRestartBaseline']={'highestSessionSequence':sample['highestSessionSequence'],
+                        'completedCommands':sample['completedCommands'],'fence':sample['fence'],'runtime':now}
+                    (evidence/'long-compaction-post-restart-baseline.json').write_text(json.dumps(long_restart['postRestartBaseline'],indent=2))
+                    (evidence/'long-runtime-restart.json').write_text(json.dumps(long_restart,indent=2))
+                recovery=compaction_recovery_proof(long_restart['compactionBefore'],sample,long_restart['postRestartBaseline'])
+                if recovery is not None:
+                    long_restart['controllerReclaim']=probe_reclaimed_controller(sample['containerId'],
+                        long_restart['beforeFence'],sample['fence'],sample['live']['backgroundTaskIds'][0])
+                    long_restart['compactionRecovery']=recovery
+                    (evidence/'long-runtime-restart.json').write_text(json.dumps(long_restart,indent=2))
             if sample['runStatus']=='completed':
+                if long_restart is None:
+                    raise RuntimeError('long Run lacks complete work: no committed and observed compaction summary before restart')
                 if (sample['completedCommands']!=1000 or long_restart is None
-                        or long_restart['controllerReclaim'] is None
+                        or long_restart['controllerReclaim'] is None or long_restart['compactionRecovery'] is None
                         or progress_evidence.maxima.get('store.indexedRunTasks',0)<=1000):
-                    raise RuntimeError('long Run lacks complete work and mid-Run restart evidence')
+                    raise RuntimeError('long Run lacks complete work, committed summary reuse, and mid-Run restart evidence')
                 return
             time.sleep(1)
+        if long_restart is None:
+            raise RuntimeError('long Run has no committed and observed summary for restart within7200s; fixture preserved')
+        if long_restart['compactionRecovery'] is None:
+            raise RuntimeError('long Run did not reuse its committed summary after restart within7200s; fixture preserved')
         raise RuntimeError('long Run progress exceeded7200s; fixture preserved')
 
     a = admission('ACCEPTANCE_RUN_A', 'acceptance-a-' + uuid.uuid4().hex)

@@ -1,6 +1,7 @@
 """Read-only live observations of the owned long-Run fixture; no task mutation."""
 import argparse
 import json
+import inspect
 from pathlib import Path
 import subprocess
 import sys
@@ -94,15 +95,167 @@ def inspect_store(container, fence):
     return metrics
 
 
+
+def durable_compaction_facts(records, session_id, cursor, required_summary=None, after_sequence=0):
+    """Bind one committed summary without fetching full snapshots or prompt bodies."""
+    import hashlib
+    import json
+    import re
+    def fail(message):raise RuntimeError('durable compaction '+message)
+    def digest(value):return 'sha256:'+hashlib.sha256(value.encode()).hexdigest()
+    commits=[event for event in records if event.payload.get('type')=='compaction']
+    if required_summary is not None:
+        commits=[event for event in commits if event.payload['payload'].get('summaryMessageId')==required_summary]
+        if len(commits)!=1:fail('required summary missing or duplicated')
+    if not commits:return None
+    event=commits[-1];body=event.payload['payload'];summary_id=body['summaryMessageId']
+    summary=body['summaryMarkdown']
+    if not summary.strip() or len(summary.encode())>262144:fail('summary body invalid')
+    cursor.execute("SELECT item->>'content',item->'metadata',message_ordinal-1 FROM runtime.session_runtime_snapshots s CROSS JOIN LATERAL jsonb_array_elements(s.snapshot_json::jsonb->'messages') WITH ORDINALITY AS messages(item,message_ordinal) WHERE s.session_id=%s AND item->>'message_id'=%s",[session_id,summary_id])
+    snapshot_rows=cursor.fetchall()
+    if not snapshot_rows and required_summary is None:return None
+    if len(snapshot_rows)!=1:fail('persisted summary missing or duplicated')
+    content,metadata,position=snapshot_rows[0]
+    if isinstance(metadata,str):metadata=json.loads(metadata)
+    if (content!=summary or metadata.get('kind')!='context_compaction'
+            or metadata.get('compaction_id')!=body['compactionId']
+            or metadata.get('first_kept_message_id')!=body.get('firstKeptMessageId')):
+        fail('persisted summary identity changed')
+    requests=[r for r in records if r.payload.get('type')=='model_request_started'
+        and r.payload['payload'].get('purpose')=='compaction'
+        and r.agent_run_sequence<event.agent_run_sequence]
+    previous=max((r.agent_run_sequence for r in records if r.payload.get('type')=='compaction'
+        and r.agent_run_sequence<event.agent_run_sequence),default=0)
+    if not requests or requests[-1].agent_run_sequence<=previous:fail('model request binding missing')
+    request=requests[-1];payload=request.payload['payload']
+    cursor.execute('SELECT manifest_digest,manifest_json FROM runtime.model_observation_manifests WHERE session_id=%s',[session_id])
+    rows=cursor.fetchall()
+    if len(rows)>15000 or sum(len(raw.encode()) for _,raw in rows)>64*1024*1024:fail('manifest observation bound exceeded')
+    manifests={}
+    for key,raw in rows:
+        if key!=digest('centaeris.model_observation_manifest.v1\0'+raw):fail('manifest digest mismatch')
+        manifests[key]=json.loads(raw)
+    def references(item):
+        reference=item.payload['payload']['observations']
+        if set(reference)!={'manifestDigest'}:fail('request manifest invalid')
+        root=reference['manifestDigest'];chain=[];seen=set()
+        while root is not None:
+            if root in seen or root not in manifests:fail('manifest chain incomplete')
+            seen.add(root);manifest=manifests[root]
+            if set(manifest)!={'parentDigest','observationCount','changes'}:fail('manifest fields invalid')
+            chain.append(manifest);root=manifest['parentDigest']
+        refs=[]
+        for manifest in reversed(chain):
+            count=manifest['observationCount'];changed=set()
+            if type(count) is not int or count<0:fail('observation count invalid')
+            for change in manifest['changes']:
+                i=change.get('index')
+                if (set(change)!={'index','kind','contentDigest'} or type(i) is not int
+                        or not 0<=i<count or i>len(refs) or i in changed):fail('manifest changes invalid')
+                changed.add(i)
+                if i==len(refs):refs.append(change)
+                else:refs[i]=change
+            refs=refs[:count]
+            if len(refs)!=count:fail('manifest references incomplete')
+        return refs
+    prompts=[ref for ref in references(request) if ref['kind']=='compaction_prompt']
+    if len(prompts)!=1:fail('request has no unique compaction prompt')
+    cursor.execute('SELECT kind,content_bytes FROM runtime.model_observation_contents WHERE session_id=%s AND content_digest=%s',[session_id,prompts[0]['contentDigest']])
+    stored=cursor.fetchall()
+    if len(stored)!=1 or stored[0][0]!='compaction_prompt' or not 0<stored[0][1]<=1048576:fail('compaction prompt reference missing')
+    cursor.execute("SELECT content_digest,content_json FROM runtime.model_observation_contents WHERE session_id=%s AND kind='message' AND content_json::jsonb->'message'->>'messageId'=%s",[session_id,summary_id])
+    matching=cursor.fetchall()
+    summary_digests=set()
+    for key,raw in matching:
+        if key!=digest('centaeris.model_observation_content.v1\0'+raw):fail('summary observation digest mismatch')
+        observation=json.loads(raw);message=observation.get('message',{})
+        if (observation.get('kind')!='message' or message.get('role')!='system'
+                or message.get('messageId')!=summary_id or message.get('content')!=summary):fail('summary observation changed')
+        summary_digests.add(key)
+    main=None
+    for candidate in reversed(records):
+        if (candidate.payload.get('type')!='model_request_started'
+                or candidate.payload['payload'].get('purpose')!='main'
+                or candidate.agent_run_sequence<=max(after_sequence,event.agent_run_sequence)):
+            continue
+        matched=[ref for ref in references(candidate) if ref['kind']=='message' and ref['contentDigest'] in summary_digests]
+        if matched:
+            next_main=min((r.agent_run_sequence for r in records if r.payload.get('type')=='model_request_started'
+                and r.payload['payload'].get('purpose')=='main' and r.agent_run_sequence>candidate.agent_run_sequence),default=float('inf'))
+            successful=[]
+            for call in records:
+                value=call.payload.get('payload',{})
+                if (call.payload.get('type')!='tool_call' or value.get('toolName')!='bash'
+                        or not candidate.agent_run_sequence<call.agent_run_sequence<next_main):continue
+                marker=re.search(r'acceptance-long-(\d{4})$',value.get('normalizedInput',{}).get('command',''))
+                if marker is None:continue
+                results=[r for r in records if r.payload.get('type')=='tool_result'
+                    and r.payload.get('payload',{}).get('callId')==value['callId']]
+                if not results:continue
+                if len(results)!=1:fail('command result duplicated')
+                result=results[0];output=result.payload['payload']
+                if (not call.agent_run_sequence<result.agent_run_sequence<next_main
+                        or output.get('resultState')!='successWithOutput'
+                        or 'acceptance-long-'+marker[1] not in output.get('modelContent','')):fail('command result invalid')
+                successful.append({'callId':value['callId'],'commandIndex':int(marker[1]),
+                    'callSequence':call.agent_run_sequence,'resultSequence':result.agent_run_sequence})
+            if not successful:continue
+            if len(successful)!=1:fail('main command binding ambiguous')
+            main={'requestId':candidate.payload['payload']['requestId'],'sequence':candidate.agent_run_sequence,
+                'manifestDigest':candidate.payload['payload']['observations']['manifestDigest'],
+                'summaryContentDigest':matched[0]['contentDigest'],'successfulCommand':successful[0]}
+            break
+    cursor.execute('SELECT count(*) FROM runtime.runtime_events WHERE session_id=%s AND event_type=%s',[session_id,'prompt.compaction.failed'])
+    failures=cursor.fetchone()[0]
+    return {'compactionId':body['compactionId'],'summaryMessageId':summary_id,
+        'summarySha256':digest(summary),'summaryBytes':len(summary.encode()),'snapshotMessagePosition':position,
+        'firstKeptMessageId':body.get('firstKeptMessageId'),'sessionEventId':event.eventId,
+        'sequence':event.agent_run_sequence,'failureCount':failures,
+        'requestBound':{'requestId':payload['requestId'],'sequence':request.agent_run_sequence,
+            'manifestDigest':payload['observations']['manifestDigest'],'compactionPromptDigest':prompts[0]['contentDigest']},
+        'lastMainObservation':main}
+
+
+def compaction_recovery_proof(before, current, post_restart_baseline):
+    """None means an honest post-restart main request has not been observed yet."""
+    old=before['durableCompaction'];new=current.get('durableCompaction')
+    if new is None:raise RuntimeError('restarted Run lost its committed compaction summary')
+    for key in ('compactionId','summaryMessageId','summarySha256','summaryBytes','sessionEventId','sequence','requestBound'):
+        if new.get(key)!=old.get(key):raise RuntimeError('restarted Run replaced its committed compaction '+key)
+    if new.get('failureCount')!=0:raise RuntimeError('restarted Run has prompt compaction failures')
+    baseline=post_restart_baseline
+    if (baseline is None or baseline['highestSessionSequence']<before['highestSessionSequence']
+            or baseline['completedCommands']<before['completedCommands']
+            or baseline['fence']['controllerId']!=before['fence']['controllerId']
+            or baseline['fence']['environmentInstanceId']!=before['fence']['environmentInstanceId']
+            or baseline['fence']['controllerEpoch']<=before['fence']['controllerEpoch']
+            or current['fence']!=baseline['fence']):
+        raise RuntimeError('summary recovery has no stable newer same-Run controller')
+    main=new.get('lastMainObservation')
+    if main is None or main['sequence']<=baseline['highestSessionSequence']:return None
+    command=main.get('successfulCommand')
+    if (command is None or command['callSequence']<=main['sequence']
+            or command['resultSequence']<=command['callSequence']
+            or command['commandIndex']<baseline['completedCommands']
+            or current['completedCommands']<=command['commandIndex']):return None
+    if current['completedCommands']<=baseline['completedCommands']:return None
+    return {'compactionId':new['compactionId'],'summaryMessageId':new['summaryMessageId'],
+        'summarySha256':new['summarySha256'],'originalCompactionRequestId':new['requestBound']['requestId'],
+        'postRestartMainObservation':main,'postRestartCommandResult':command,
+        'postRestartBaseline':baseline,'completedCommandsBefore':before['completedCommands'],
+        'completedCommandsAfter':current['completedCommands']}
+
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--compose',required=True,type=Path)
     parser.add_argument('--run',required=True)
     parser.add_argument('--previous',required=True,type=Path)
     parser.add_argument('--result',required=True,type=Path)
+    parser.add_argument('--compaction-proof',type=Path)
     args=parser.parse_args()
     previous=json.loads(args.previous.read_text())
-    code="""
+    proof=json.loads(args.compaction_proof.read_text()) if args.compaction_proof else None
+    code=inspect.getsource(durable_compaction_facts)+'\n'+"""
 import json
 from django.conf import settings
 from django.db import connection
@@ -132,12 +285,15 @@ results=[r.payload['payload'] for r in records if r.payload.get('type')=='tool_r
  and r.payload['payload'].get('resultState')=='successWithOutput']
 assert len(ids)==len(calls)
 assert len({r['callId'] for r in results})==len(results)
+with connection.cursor() as c:
+ compaction=durable_compaction_facts(records,run.session_id,c,SUMMARY_ID_LITERAL,AFTER_SEQUENCE_LITERAL)
 print(json.dumps({'agentRunId':run.id,'runStatus':run.status,'containerId':rows[0][0],
  'sessionId':run.session_id,'environmentId':env.id,'instanceId':instances[0][0],
  'completedCommands':len(results),'attemptedCommands':len(calls),
+ 'highestSessionSequence':max((r.agent_run_sequence for r in records),default=0),'durableCompaction':compaction,
  'fence':{'environmentInstanceId':instances[0][0],'controllerId':run.id,
  'controllerEpoch':env.controller_epoch,'controllerPurpose':env.controller_purpose}}))
-""".replace('RUN_ID_LITERAL',repr(args.run))
+""".replace('RUN_ID_LITERAL',repr(args.run)).replace('SUMMARY_ID_LITERAL',repr(proof['durableCompaction']['summaryMessageId'] if proof else None)).replace('AFTER_SEQUENCE_LITERAL',repr(proof['highestSessionSequence'] if proof else 0))
     raw=subprocess.run(['docker','compose','-f',str(args.compose),'exec','-T','api',
         '/app/.venv/bin/python','manage.py','shell','-c',code],check=True,capture_output=True,text=True).stdout
     state=json.loads(next(line for line in reversed(raw.splitlines()) if line.startswith('{')))
