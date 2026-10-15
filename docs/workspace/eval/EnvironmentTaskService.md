@@ -45,6 +45,21 @@ a generic ACK/watermark protocol. Index, transaction, temporary and output files
 all count toward storage pressure, with reserved capacity for termination,
 EndRun and maintenance. Private tmpfs index storage gives no host-loss recovery.
 
+The existing private mounts remain 8 MiB for control and 72 MiB for output.
+The index budget is derived from the control mount after reserving the possible
+2 MiB legacy journal, a full SQLite rollback copy and 256 KiB of completion
+space. Admission also preserves completion headroom within that index budget.
+Completed output files are compacted without discarding their retained bytes;
+allocated storage as well as logical file length participates in Linux quotas.
+
+The service imports legacy facts only under its exclusive control lock. It
+preserves the original bytes in `journal.legacy.json`, installs an unsupported
+format marker at `journal.json` so older binaries fail closed, and commits the
+index before accepting new work. The backup is not a second writable authority.
+An interrupted import must resume from verified facts; a missing index must not
+turn an upgraded instance into a fresh empty service. Rollback requires a reader
+for the new index or an explicitly verified conversion with no active instance.
+
 The final real-chain gate requires at least 1000 completed commands and automatic
 AGENTS.md observations in one Run, a live environment task, controller restart,
 actual command/helper evidence and bounded live metrics. Keep this separate from
