@@ -1,0 +1,122 @@
+{
+  "agentRunId": "agent_run_edc6dc4a653d4fa896fd69191094afb5",
+  "sessionId": "session_x1LchPtXSd1ad8cA",
+  "environmentId": "environment_6eaabd363f0a4b0380326e86d85451f7",
+  "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+  "runStatus": "completed",
+  "runPrompt": "ACCEPTANCE_RUN_B",
+  "coreTerminal": {
+    "eventId": "evt:agent_run_completed:session_x1LchPtXSd1ad8cA:agent_run_edc6dc4a653d4fa896fd69191094afb5:1792164641587",
+    "type": "agent_run_completed",
+    "reasonType": null,
+    "atMs": 1792164641587
+  },
+  "coreTerminalCount": 1,
+  "releaseReceiptCount": 1,
+  "cleanupComplete": true,
+  "workloadObservation": null,
+  "historySuccessfulCommands": 0,
+  "historyAttemptedCommands": 0,
+  "successfulOrdinaryCommands": 1,
+  "containerId": "5ac2023a5b38cc4b3188c69310471d263b486bb0b46e671f253e8508c8b30f64",
+  "resources": [
+    268435456,
+    1000,
+    128,
+    67108864
+  ],
+  "hostId": "d63ba114-5509-4927-8572-04785a93c8bc",
+  "releaseReceiptId": "environment_release_7cc25502f232410cb7a4b0d62de1a042",
+  "fence": {
+    "environmentInstanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+    "controllerId": "agent_run_edc6dc4a653d4fa896fd69191094afb5",
+    "controllerEpoch": 142,
+    "controllerPurpose": "cleanup"
+  },
+  "backgroundTaskIds": [
+    "task-756c053b27c6df2c4369c64d9bbb1c2a201407369c90eeb8b881f80b4adec8ec"
+  ],
+  "taskService": {
+    "status": "success",
+    "schema": "environment.task.v2",
+    "result": {
+      "kind": "listed",
+      "tasks": [
+        {
+          "taskId": "task-756c053b27c6df2c4369c64d9bbb1c2a201407369c90eeb8b881f80b4adec8ec",
+          "operationId": "1:tool-04eb34151439bbd1b758c7f38509210c56edf927d1cbaee0016dfa356a41e345",
+          "scope": {
+            "kind": "environment"
+          },
+          "state": "running",
+          "exitCode": null,
+          "cleanupComplete": false,
+          "outputComplete": false
+        }
+      ]
+    }
+  },
+  "store": {
+    "activeTasks": 1,
+    "controlDirectoryBytes": 196608,
+    "controllerEpoch": 142,
+    "controllerId": "agent_run_edc6dc4a653d4fa896fd69191094afb5",
+    "hotTasks": 1,
+    "indexedRunTasks": 9,
+    "indexedTasks": 148,
+    "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+    "outputDirectoryBytes": 1668017,
+    "schema": "environment.task.store.inspection.v1"
+  },
+  "retention": {
+    "taskRecords": 1,
+    "controlDirectoryBytes": 192650,
+    "outputDirectoryBytes": 1671017,
+    "activeTasks": 1,
+    "terminalTasks": 0,
+    "activeRunTasks": 0,
+    "currentRunTerminalTasks": 0
+  },
+  "fileSha256": "66e39569c900254a44a1780699048afbebcd6ce5d6c952448fda495b92f6f709",
+  "agentsFileSha256": "b4873e9ea2c12559c798ccc862ed31a5c5b0d67336da57b260d09953124bd0fc",
+  "runtimeStartup": {
+    "containerId": "9a64c1db651e0b45491a98901b7476ae5110954ed1709d2501a3bb4ebc8fd87e",
+    "startedAt": "2026-10-16T13:03:25.379048826Z",
+    "hostPid": 1888617
+  },
+  "oldControllerRejected": true,
+  "staleTerminationRejected": true,
+  "currentQueryAfterStaleTermination": {
+    "status": "success",
+    "schema": "environment.task.v2",
+    "result": {
+      "kind": "task",
+      "task": {
+        "taskId": "task-756c053b27c6df2c4369c64d9bbb1c2a201407369c90eeb8b881f80b4adec8ec",
+        "operationId": "1:tool-04eb34151439bbd1b758c7f38509210c56edf927d1cbaee0016dfa356a41e345",
+        "scope": {
+          "kind": "environment"
+        },
+        "state": "running",
+        "exitCode": null,
+        "cleanupComplete": false,
+        "outputComplete": false
+      },
+      "output": [],
+      "earliestCursor": 0,
+      "nextCursor": 0,
+      "gap": false,
+      "hasMore": false
+    }
+  },
+  "staleStartResult": {
+    "status": "error",
+    "schema": "environment.task.v2",
+    "error": "task_controller_fenced"
+  },
+  "staleInputResult": {
+    "status": "error",
+    "schema": "environment.task.v2",
+    "error": "task_controller_fenced"
+  }
+}

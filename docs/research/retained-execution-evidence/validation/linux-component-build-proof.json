@@ -1,0 +1,25 @@
+{
+  "sourceRevision": "735b1c2ec651c095f8efb3dccfafb948f2e881c6",
+  "sourceTree": "902e818c1729810937824a0331f9f43567831fcd",
+  "binarySha256": {
+    "runtime_server": "e83196c22b0a0940a9f25c1efe7a6083a827c1ddae0ecfd52640e75f40f1a679",
+    "execution_agent": "b18fca65e18afcabafdb6592d5e693defef8e92f0ada517cfac1551f4642b4f6",
+    "environment_task_service": "748055dfe69cd5b919969d74aa1c7353682f780940bf7b201a2cce50dd2b5546"
+  },
+  "testBinarySha256": "066a7fc1a3a6f744f410b0eea020f3c9d7c2106b2656fc60ac9fb5a091214eea",
+  "nativeHostedTestExit": 0,
+  "nativeRuntimeTestExit": 0,
+  "nativeCoreQueryLoopExit": 0,
+  "nativeHostedClippyStatus": "unavailable-in-fixed-offline-image",
+  "sourceInputs": [
+    "100644 blob 8150f4995be3dcb4931b076235723459c8a57938\tCargo.lock",
+    "100644 blob bd88cfbf3d7cd139e2e46801e7b985a34b2d6ba3\tCargo.toml",
+    "040000 tree 08907f3e76a1a23152b82d18a3a0448e860cfadc\tpackages/core",
+    "040000 tree 8188150d3de5c08dea671a329900554267e24274\tpackages/hosted_execution",
+    "040000 tree 8cbb552f5435915c13274de44e63955181a5b5ec\tpackages/model-catalog",
+    "040000 tree f632aa8154b9bc4186ef701ff7fd4bacdce4b1f0\tpackages/runtime_server",
+    "100644 blob 8770b1d875864c5356dc4abad904b69ec484817f\trust-toolchain.toml"
+  ],
+  "rustVersion": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "buildScriptSha256": "dfe6a8fb3203dc1e1235ac3702102f2d9dab06b3eb7068b9180f83056d5df56b"
+}

@@ -1,0 +1,1302 @@
+[
+  {
+    "sourceFile": "commands.jsonl",
+    "commandSequence": 5,
+    "sourceRecordSha256": "384a999691f0b5ae9632fd31587c0165a2e0d4090f62f7285916b384b60ab9b3",
+    "commandSha256": "d4c3ff7f2e2da290698733b4936eca60f70636db262cd18623bedc6e35212f08",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_7e3d77c002734931b40d65b21315b4ba",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": false
+    }
+  },
+  {
+    "sourceFile": "commands.jsonl",
+    "commandSequence": 15,
+    "sourceRecordSha256": "4f9b842365215cc131aa231d5b04f704ee2fc965328f5bd3537c537a555eeca8",
+    "commandSha256": "a4f9aa0d1d7ce0ccab9c851aa550e946f2117fb78656d886c60702ec6d965b63",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_2f27beb5dabb430480212a327230e327",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 3,
+    "sourceRecordSha256": "e98482bf68c8dd944282538c0c256439236459e56ac3b6d427462cd961712fc7",
+    "commandSha256": "648bcaf25bafd048872233120a29261eec4ad64d9e7e4b9a5fe578b6d5aaeb57",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_98b04c1b41dd420da33d725cbf41a890",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 9,
+    "sourceRecordSha256": "df477820e661f50ae532019fbdc93271ef3ff162c736fba46e76bcefd6d7b6ce",
+    "commandSha256": "a2583063a9d23d0e87d20445718c75a1f69d5cccfaf778b1707269ec5de5a2ef",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_5b1e5f0e51154649992778a32c859ca3",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 15,
+    "sourceRecordSha256": "9137349aa0dc6b2410053282a30c3e2e18581733ae22746a6f6df2357fe030dc",
+    "commandSha256": "17ee7ead4d36f24c6b72b313e462fdd3a645f81a144b1c49218de2383bab4768",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_dfb2ab33eb7e4504827db29f14b5f4e5",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 21,
+    "sourceRecordSha256": "a7adbb1905138f82550131ebbbc15e21af150c4f4c98130f078dc746e8d34cdc",
+    "commandSha256": "8bd7b6e6131573a5b2c0c1ec2ff18169b76e8b36c02171f0b9e15f53e3491599",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_cb6c7ff06a3d47febd8770c146c1dabb",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 27,
+    "sourceRecordSha256": "f7c87af4782dc36b4097dfb665d1084386c913d90cc7cbab8f5685c4342f802c",
+    "commandSha256": "19f5f8f0c80b160e6f59572d40612895c482cb611dbb73a8fd3d185ffd99a383",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_d2de23d601d34913bcced69fb064484f",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 33,
+    "sourceRecordSha256": "08172388478edd55dfaef9462283d7a208c620d919d3f899429fff5ab262d5f7",
+    "commandSha256": "abcf07c49a7adaeda912ae1c2cfac6857f4702afc7248376be3a0460e7473595",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_171914266de247b5a8ad6e6b8c4ef320",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 39,
+    "sourceRecordSha256": "cb4bd443323362fb4ee3690491a00da0f869e2efaa1fae6b5c3db71cfe44fa7b",
+    "commandSha256": "db90f5cadd034f4dbc35c8ad8f2c9a7238122d0dd8fe7d572c28d318040316f6",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_ecb43ad268144c35a5779db7e108187a",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 45,
+    "sourceRecordSha256": "b37ecd00e59269dde44eeb7d7cdeaba1bb43d66218c9fd3b4b465b244ef7eedf",
+    "commandSha256": "8cde1aaca0a8acf9c9cb05f46b119ff9c75d1d18bba363bae9e3a6dd24c922d4",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_c1eae8f1c29a461db44499b72c70a8d9",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 51,
+    "sourceRecordSha256": "7004ad80e31e9d2d3c8aacffa7b2ac6e79742cfc36bc2d4010831c71ec910067",
+    "commandSha256": "c29643ab8799b886d70534a3ca15f977f5668c265d404aa3f45d63a13ae8f325",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_ae19a78010ed424d83676cc847cd3b7e",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 57,
+    "sourceRecordSha256": "cbc0ef32b5e47f67bcd81d38c34cf47f22caa637671f15ed92235b62252c67a3",
+    "commandSha256": "c1395903e4d5e7be3af0befb798bd23980c32b9274a38781c7aaccd4d99a8b3f",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_cd64114172cf47a2b0579a8dd95167f1",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 63,
+    "sourceRecordSha256": "ca2745c933304674453426712e4c30680fef8f6a1cd954622e11725acbc88a55",
+    "commandSha256": "e304912602298b3d74228edef0d2727712441321343d2cebb7e7c750030f3817",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_2b41f284456649868855b477d4188d14",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 69,
+    "sourceRecordSha256": "31ebe8b02bc33b79135064465b9f9333f529ccffdf49b2290a8099becc8bf6a6",
+    "commandSha256": "5da4438bb8773e2e085c0a77665e2406b62048b9ad0329e0e0d6f8bb1d8cd5f6",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_10786da5c894499699edbe6e7a782b78",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 75,
+    "sourceRecordSha256": "12c4e25cbe27d22e10452b3267a36c516c58e79974f729a880d0c8145dac4f49",
+    "commandSha256": "1ae42c0b3e70a6f6e7490528e6f0f9146d9670ec68e7be76f2d386a870e85e7e",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_7e587a1ca74949019604b2a2c0d66179",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 81,
+    "sourceRecordSha256": "7f1c218864c94527c14c78e99eb676f061b05a886e2e93c8ea1f2169c43eefe8",
+    "commandSha256": "a637a482adb5285336415a396cfde9039acc1cc58f0ece9d7247cb107d2f1b26",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_e66a0a110b5448749f11b6a7616c1a8f",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 87,
+    "sourceRecordSha256": "69c51dce52121583eb8c73d07075f09aeb717989a4386df94b2c8a7c644a3862",
+    "commandSha256": "f3294686db1dff00faa6252e1b0d35ce4cfd1f74727890f6f68c87de35ee0073",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_2252f9b5e8e04ab29231dff213d494ca",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 93,
+    "sourceRecordSha256": "568447de0352e4f64caf671e1ab43095d67f4cfeaac46216112fd2c1f716cdd3",
+    "commandSha256": "1966f52ff300eaeae6fb07ab6f4a61fd8df776e7931d3bdd1f90d7d438e103be",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_ec91fda400e24f16855171693a2f96aa",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 99,
+    "sourceRecordSha256": "d6a9fae9f2a61cf31bff6c0d26ebaa923ff69f7300fb24efbf1858af5cd55a69",
+    "commandSha256": "6055eb182f8e0ef482beb9f4d29a98d159477af26cbc389978bfb3d91f11dec6",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_89a76e9adfd541f8a08bb02f57349832",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 105,
+    "sourceRecordSha256": "cf68dc9bb6bc1f02abd6f5d4b033c8756714a674f5d5b352b16363d25a96699e",
+    "commandSha256": "02cff017d5ee478f05a457a8883e6bdc10195e618be2a18ddda38bf02e053a59",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_32d529ca965b44d1b2e3f1af0fb430fc",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 111,
+    "sourceRecordSha256": "ce9cf0c1afb6bddd2d76a4060f3f9f92653fbb7b5fdf2925c5a3132aa2add2d5",
+    "commandSha256": "908b4a97f62cfe2648ba3b5f6439923570f139ee2d5c82a05bcc003f0106a785",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_304ff83dd3614c95aa0a86fef1919c99",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 117,
+    "sourceRecordSha256": "88c615dbc36471e3c5667d4cf262bde9e74d39117781f2b2dbc12d9d3269d414",
+    "commandSha256": "54fe5e5dee973b509e2c20b45086441298c43fed8479124fefe51b5c24bef3b1",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_7049aacbc2444c949deb9e2bcf131092",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 123,
+    "sourceRecordSha256": "173d02b6246215f264ad921ad97785dc56de0285bb6564a1c44130e83dd4a9d4",
+    "commandSha256": "2d8d67e2b61153272079b60699081fe5ef8294aa32af58f3d3287a68b8e9c2ca",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_ce267e0b83684b39a98fbd6ec2f27ee7",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 130,
+    "sourceRecordSha256": "a4b8ba6e1ca3e10444f9d7943f06da399275b0e1521cde7b0b8d82b78251ba8a",
+    "commandSha256": "89eedaed44dcdffd63e6cbd18de8b4220c54e4f06ce788d69b15ce36906f2e65",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_e974e23f8f634f1c8fb496eab9a08aac",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 137,
+    "sourceRecordSha256": "a702f877f733fccee7dc634a874557504d8ddbcc3cb27f41267a8ccd82ce3948",
+    "commandSha256": "a225cad2e5a7abf6e42c34865f05824302e03261539e8a0d03a17d7f081a20d8",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_f500a4b8bea941e9ab35d5e45e59df68",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 144,
+    "sourceRecordSha256": "4c38d918d9081faa58698b16b2ba4b83a0dc79bd32099858c61aa1c12f5e399f",
+    "commandSha256": "23674fd9cf78eeddd3980ae43da04f89996d547f6dc2528e44a3dd180044f3ad",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_b9aab96275cf46b48593fc9a6f17e56e",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 151,
+    "sourceRecordSha256": "dc1d5ab16f18153f75f33d6ab9f730775f80c5b62a576337437a44813e9700b7",
+    "commandSha256": "8990cf2a8a95ba2f8d5f89a675f0f9abafc229687b2774173ebbd6293945fd8a",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_b1c2e824c0d74729a9767ab6f61a05aa",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 158,
+    "sourceRecordSha256": "26cd297c906a5f274ae8a5da5212acf82849ae2eff0f07e5af76c10ae507e52a",
+    "commandSha256": "7ab1bd5d347d0b562d5f41523515b94095567105ba4d03297fe15f1a995e177c",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_bb1aa9caea1c436992ad099d7ddf7497",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 165,
+    "sourceRecordSha256": "808c5e81185f55ab7dda45702188506e544d3fd4c6dd76c2d483d03098a111ba",
+    "commandSha256": "1cb4a49b1050ea01134d5e68e8ff888eb724c07ae46ab367c82a36528c482048",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_5a6686cb779646f38d2d1d869b78d1c3",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 172,
+    "sourceRecordSha256": "18a0ce5eb1157088aedce8f51c4853153b3a61f3f2887ab04bd47814d46b1fc7",
+    "commandSha256": "0edfbe17f4eb3abb8c699c343fbf6b54c4a2bf8937c2c66057ec7d1587e0417a",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_4743a77e6aa3486ab74b36d3d6822fde",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 179,
+    "sourceRecordSha256": "9d0335ae5d72e013a68e8f24f45c9b70ea9d8fa5917bf55f76903159cf366f03",
+    "commandSha256": "4f301cfc698c20d86a86c72a91b65d092fbe1c5bef47fb0eca6a5e5d0f33af24",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_6522a0ec52ce47159221e660279d4582",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 186,
+    "sourceRecordSha256": "3d9cb5de301db2db50c06f84c3ec474f24753cef363358231f092287ebd47675",
+    "commandSha256": "44fe1ed1ecde4cdf7212f3563100d113df5821e75ebf2bf232fab8f3ab2de70f",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_37d3c7693e3444059d10ebdeadfa00f6",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 193,
+    "sourceRecordSha256": "dd6109d4fc97a53202327443e6be1a4ea7d8e6c2fdcb1d32980b78c5cd599f10",
+    "commandSha256": "ed1dbd9d554662fde78d584870106472f33150c2348045ee6592d35a3aa6ed30",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_56b814740135450389249c9798c3ed6c",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 200,
+    "sourceRecordSha256": "a57673aa27a300427f173adf97e4a8c75b89cb74c09674ea1fca19bac9b1c20b",
+    "commandSha256": "23b335faed1567a21e9a513240c36d2b6d4fdd98f493b2eb3a39e92273a2af5a",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_3bc96fddeb6d46dea0caf8015146e4af",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 207,
+    "sourceRecordSha256": "6f6a22d1a11c190968bc4d758c70148706eb1c547796a826f1350ebe45bdb749",
+    "commandSha256": "3b1cf717d1fd65f65039c99ffd46e20ee19a126177aa626ad53fd4a6a2fef9f3",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_1623686722e843b4b3bb831e6397b441",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 214,
+    "sourceRecordSha256": "9ddc04ea73f0011e021585ddff9ff90091d5e5082f35074bb1e0de217be2c044",
+    "commandSha256": "83935641672af36722f1024430c2260ad2c7f9adf36c6b64371c8422c89a81dc",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_d1301f45b8654d19a953f8aaff7cdd73",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 221,
+    "sourceRecordSha256": "838e7528bc1cce0a46e8e45ae5d5d5fac220f57b6bf1eca150c3d4daab60924a",
+    "commandSha256": "087fc91bac1d198600b8bcb553a028bd56ff4c2915903b73b1c4b3fb9d434f7a",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_7f9019ec70094478ab054f0366432196",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 228,
+    "sourceRecordSha256": "b54ed6d1813acca356519aa0216026e52347a3cd7f5e81339a23603dde125e09",
+    "commandSha256": "b9d4a3c7a983fe8f9c6dd9bbde494c10a63fb885dd4888a7abb9ddcaaf6853ac",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_e7746f846fd148d68354a77efded474b",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 235,
+    "sourceRecordSha256": "4955bdb8819526c371463f34540992ee9f18100fdc98dde1bf18cb4ef922cec9",
+    "commandSha256": "e77f6be9ac5f42ebc882b340a46424d8c4267f1eccf44ad46bc96ff2c7136d2f",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_58e9022e19d244aea8d33b3feeeb4882",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 242,
+    "sourceRecordSha256": "1804e557037c024efaf1c97d95cba1633ecdfe1af3d65e524ee9f9c5577df446",
+    "commandSha256": "9f4a027c2ace256eda73457e7ac9386f84acbb3f1cb0471fec862a238bba4a21",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_4d9d1db78fad4657bc989a919f8f79b0",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 249,
+    "sourceRecordSha256": "596bed17a3bd15741acc5128d97f2a8f8971cc92ed0fb759ff6031a41b4acab2",
+    "commandSha256": "3a278f299925ea6140c03e45e141e79a4c0712e31b2631080f91cc887cddc615",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_51e132f4c3b84c55b36c01172cefc110",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 257,
+    "sourceRecordSha256": "ed7713a151cb28590ee31c7809ca82f37484b77b0964847ebf3c66fbab84ccf9",
+    "commandSha256": "482d47f026f71fd661c9ae7dc40783ae4ad7de1f5dad1ccdc13444958fc45cd1",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_0f97747ac799460996f990a1adb9fc22",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 265,
+    "sourceRecordSha256": "c62dc6a9a97c4b9c060505c2020f3afb0368f4d2b05ad260b32306a607592dff",
+    "commandSha256": "b1ad4c3761136e99537080af06749e3b500cb501030aed24557cc89915332ed3",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_b4808f7d6faa4325bf8c9ef7c1b56fd5",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 273,
+    "sourceRecordSha256": "eb1036c94db4354d1312dd342229c6fa0772a48c8f1a39463938862d23511fe1",
+    "commandSha256": "f5060a63ff712186f1d9ac652bd6cbca33e59a4589b9c99394bf727b7669d043",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_17e7d9306aec4638954edf0b4f500a80",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 281,
+    "sourceRecordSha256": "d3a5670ac65b0be3d7ededa421906821fd1167953a9246d4ea8808b571ddab2d",
+    "commandSha256": "901489d2dd690dbe6a6cae13d182043b37f9dc02509e1714efa7a81e9ba84e53",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_056e176de0784b0982d8dff2d142e748",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 289,
+    "sourceRecordSha256": "35f2764019dcea3d08538dd8a49b62579227889a611184a88eede7a1e3e08310",
+    "commandSha256": "abc1b0c1aaccd6546b70da0f68e280a26640000717c97ca4cbba12eedf00c49f",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_714f0ee5454d40de9737af2c797036b4",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 297,
+    "sourceRecordSha256": "7db9e2ae322810a1525a7fbdb282c464353c37bb39a4d38111cc147c3cfd4a58",
+    "commandSha256": "6ce5d29f74caa4502e5b3c5ac83bed7581385212074e0bbef4c19982d8bfd063",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_6533a16d61c2443f8e105bfcdf88cc07",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 305,
+    "sourceRecordSha256": "f76e3fcf7878b8e5d773e4f13ae5aa32258cfaa160eeb397fe01a9e433c5cd29",
+    "commandSha256": "c4a57212bab750f20a4f9452dbe5352dc0d3f884114b1c57e68f9a7380fda01f",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_642b437cf3c24341b907172ec7e82d13",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 313,
+    "sourceRecordSha256": "d8041cadaa7a2f16ca231803d67cf9711c4fe7ab63555f015d8207e39978bf95",
+    "commandSha256": "c1baf5a416162f26574de005355fee543c7394307943b0fddbeffcf8da162f6e",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_ac110876d37347309fed35807b4a8421",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 321,
+    "sourceRecordSha256": "e2492c6b9e27c817f8a0fa2b20d3218c075e53bc6d86d15aabdbf4af1ca922d3",
+    "commandSha256": "c341b1c2c78db5fb1229af137c31def7df06622b7648932dffe52e9e0f994d98",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_90f406ce00f84244adbaffda0b17afc1",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 329,
+    "sourceRecordSha256": "7b4376c7cd4eb8cf239be94004e1d1db0ec63ea7d90ad17c79703f65b8d6530c",
+    "commandSha256": "b554c96fc2ac31dd8a14ca682cfc8479bf60c7a0ad759a0e793e6c8617f8bf5d",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_cb35b37e9fdb444dba437c6e24b8b7a9",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 337,
+    "sourceRecordSha256": "916d9d8c871e3bc9ed2072e401ca513fafa24811f6b20788387cb99eb60b3789",
+    "commandSha256": "26833fb605402ce96828ee984ab9d8f3f23f1e92bc619f5507cd99446e7d848c",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_beec68f02a204eb0b797046fc53023e8",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 346,
+    "sourceRecordSha256": "9045814cb60e1ec83d4995cade8330fcc4d050edace1522b77dd4a3b278e96c3",
+    "commandSha256": "ae4167e029250db9787220c9c873aad0875bc86ffbff32a1e310e962cbdc8c6a",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_cf27f3c9090043338e5428e022136d0b",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 355,
+    "sourceRecordSha256": "b43de4a3fc2c780482143160edc2da4f84cf44c1c7aeb3fddb2b1d89a06905d7",
+    "commandSha256": "f20f02e5d6d04a88336f4ed043604e990b6213af208b94fcd0bc57d45b5f1dab",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_11896bbc8f4c4c87ab201936e3e3ea41",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 364,
+    "sourceRecordSha256": "2afe03822e6a362eb59ddd4e53b898e4e9356dec823495e849c6a4eef942f320",
+    "commandSha256": "447f2968758c25745a70b01c1662bef3e4cecb05deaf2294673be92b1bfb111f",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_34886988cd0946eaaf08c307fa3c895b",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 373,
+    "sourceRecordSha256": "60086f141a02196f06ea505a1d1e849f4d284e7a5fad8ad4ff87a07134862ab2",
+    "commandSha256": "0954916146c5ac245479940738e873c345aea04d6f0a2b37bae04216cd4118d2",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_14529e70d99946b2816953b59a35d5b9",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 382,
+    "sourceRecordSha256": "99abc3b9f99d7ba5be20b7fd3a9633766fd3ba8e91b7a7e9eb88781497a37e64",
+    "commandSha256": "f965dd113c5342ac644aa28c3c390efe5cbde6f239536b11e3b126b1e5e12adc",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_46bbfd939bd34d43932480151097d1bd",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 391,
+    "sourceRecordSha256": "d9dec778edc88fe7ee7ca1032e09bd3a2c29e5456a75b796b74c38e33746f156",
+    "commandSha256": "32b013b72cb309fc0f27de09be98ff171fc1bd94fd6a56d180bde47995bb9fbd",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_2cc50a4ba2e34d5ab759773bf998165a",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 400,
+    "sourceRecordSha256": "7f2cc3422389c9191346a69ca35b678a353d8909ba7a593b0f6530aba79aecb2",
+    "commandSha256": "b301584f0abcfdcad86694d73c982ee524153751b43fe6e37358d86c7a6b1784",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_bd822ce213824adcade785392b632878",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 409,
+    "sourceRecordSha256": "0cf01497820a5907d0cf0b9033e7fbc1f3fffc14a6e2631fc49951a106cdcb2c",
+    "commandSha256": "ff74adeef3028b1bb819ea9e5438803bead9a65513cc272e57082404a1f6b36b",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_8c4ae5727b9649e1b7c790fd7e258ed0",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 418,
+    "sourceRecordSha256": "8cacaaea27e8294305de2ac54982ac7f565bc1b321955c991b9af0b5a0e14df9",
+    "commandSha256": "6371a7d69bfac67f738ba46f8d9a9c0f0e3449299b0c2a83b7b1a4caafbf5dba",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_e9045b28f61440d3abcac4baed132918",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 427,
+    "sourceRecordSha256": "71ffd97a3c635c04527c2bcaa15eedae7c187b010605a5e68d3716c714417fe5",
+    "commandSha256": "bdfa0775a99a0bb32b30987926d645a605315db555d765ee980b348710293da9",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_7433d15b5bb14ded8c753932ede96a8c",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 436,
+    "sourceRecordSha256": "e0f435c344139f35ac4764722c55899ac5fe3e3a65035041f23d2e8a59a3c995",
+    "commandSha256": "989fde47de2859f44c6a9cd8cf6938f3ecbb085cae56f67d6c62b18980c79428",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_a8bdf58b575744f5a2c37ae6e7ab1606",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 445,
+    "sourceRecordSha256": "1d36d192c737726722a661bb7d26084228c78a4243fb9d3d152df36a7043e28d",
+    "commandSha256": "9f49ddc65ad5ce3121f24b2fb762fea3a0749e79ec9658e98b74ab391ff0e0fe",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_8d2e3814800b4fffb971bbf055df39e2",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 455,
+    "sourceRecordSha256": "db607f0961cc2505ee51530fd1a1bff1e4871b481c24da2a97dc3146083aa4fe",
+    "commandSha256": "cde849eabaa03c4e587182dbf492ae596ef6d1c9be529c53011718a59f2e68de",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_746ebe8e28064d9885bb7fe45be1fb8b",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 465,
+    "sourceRecordSha256": "aba7b598d9e8317e0ecdf60186d83d2945abb18b90584952c95ad0bbe3c0a927",
+    "commandSha256": "81a5d95358eae3bdd788cba694993773c3cba2161699432f829c263b8cd8362b",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_749ed84b05c0453792519a85a39b276b",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 475,
+    "sourceRecordSha256": "78453ca45ea2fff07279a5ac180516fcbf19f6f86d6304c1bc5dbfdf364e258c",
+    "commandSha256": "c4720a65f90eb6b5b3c810a5d573dc5503fb140bce3a687d882ef720e10b4d99",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_ed3090911ce1487cad6a22514f479e6e",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 485,
+    "sourceRecordSha256": "6b067d44cdc23b026c98896af6bfbf16abd7e42c45dd89497b5015865adffb9b",
+    "commandSha256": "c62604951e98ef3cdb4c543a80e08885ba3d34a2f422a26f64cffbf537a58780",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_7749a0f09ad74b0ebf5e565878da1e74",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 495,
+    "sourceRecordSha256": "0230530defb057c36f910bdaeac84359fc40434f5519215bcb48b75293aea697",
+    "commandSha256": "add03f042fc3cd583454eaf4e0d4d00914a8c3a66a780e2edaa23134c55762e7",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_c321fd7322da4637a64cd9f4f0ba8700",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 505,
+    "sourceRecordSha256": "41e1585684016e05125c2146eeb776238d04a361a682844da969d4a70334e557",
+    "commandSha256": "0cae45bfccfb418f3e91e5e143bb5e847f1795a952dc10a3d5be957a223f1fac",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_652ff61450a344f38c85ab5111723eb2",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 515,
+    "sourceRecordSha256": "a70a05358095e1fee0918bb0f5526c6aab9478ec97e7ed022001aa2988c9042a",
+    "commandSha256": "f004e90df19faf72608681de8ab50e494e9a6507c583373518551f6ac937cdbf",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_edc6dc4a653d4fa896fd69191094afb5",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 525,
+    "sourceRecordSha256": "4e72bab592d7dc6d3ae20e91c3a2b5cf064e3e1dfb7867d5467d53df8b6b4e62",
+    "commandSha256": "70c8d7ec6a057863e55758918eefcd583fad744e2c22af910b9e4b847aaae091",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_aca33eb526a14b5aab477581008c92d1",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 535,
+    "sourceRecordSha256": "da7f25e190ac0c3d84974d0e4550ec0e9f8b4875fd4b35fe8c9d91cbc109eeef",
+    "commandSha256": "23651c6c2e10f8fabdbd098dc91036e5f182eb14bb6114a8996ac27c797a0f59",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_57bb95e030164a52a9bd89986ac640a8",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 545,
+    "sourceRecordSha256": "75af3aaf489aa7817836570b2544f9cbc4f27725ccdd6c4ffbb8677e475e04a1",
+    "commandSha256": "a62bd1464c513c524a7090ab1ad355d3dd16268fce72a609dd274fbd7a720e6f",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_80c5cfdb933944a7812fd5b48c343b50",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 555,
+    "sourceRecordSha256": "bec45b907599f9f2d6fef9bb3dcde294f0a3412e903e3a46e6e8f8965bd98346",
+    "commandSha256": "4d2ac390f0dc7c8a9f05a93477b969a47b4e2a568d541e9b04362049fdceb62e",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_1dc074f2be2142baa7bfe22963ddc00e",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 566,
+    "sourceRecordSha256": "332f906597fc539e73e58ff1fa97d09280c373d8a598117ebb2df704c901bbb8",
+    "commandSha256": "3f0d87fca8c23ac7e6f82beff39b8d6544f445a46a6168ddc3de86cfee6e68af",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_56b3383892864675b3307a87a0d00a38",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 577,
+    "sourceRecordSha256": "7dd1ecd10bbedacc2ef1200393c56973a6780b7798d74a542f96b28297cbd37d",
+    "commandSha256": "8d8d0ef4e2bcf92b1c2c7d66d98b9c5989fa1ce91e97f73662039055c19acd73",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_245a96f2fdf34219af1cafe763777c7b",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 587,
+    "sourceRecordSha256": "2c7f4f02afa787279c321d31437a47b908fd3e543d268d9abbd0a15dbabbbba8",
+    "commandSha256": "32fa7a30270a7246e0ec1ed5e36ee494ed44e86ae4b406d7421a73e8a4e69170",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_6cdabe6889ff4039aadf27a93a274f83",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 598,
+    "sourceRecordSha256": "b7790ee7a5f656e5bd1806d75183a32286a73582c86c1883308d60538102ff24",
+    "commandSha256": "fd82a38209cd667aea302e868ed5dc496d467d498b2bfd43cafebd4e73334577",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_aba9a128a4eb4725955795db4a0e50bb",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 609,
+    "sourceRecordSha256": "a19c446d6dad78fc6b1cc35a80fa2676f81d3d310ee4ef44875373d3685e4976",
+    "commandSha256": "fa330ea68355d931c0272caa3eec430d5386e112c7b5b45dfdb9699c8348ec9b",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_e44ff105fdd94ee7a0e123a20502c2d2",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 620,
+    "sourceRecordSha256": "3a62a83e26ddf17406b289154268050e2bbb5968dfa9950875ae9f3885970b5a",
+    "commandSha256": "6d3961d2a782358fcb60fadfe79d7fab9a5351440e53d4a506deaf235225d984",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_797aa1625d814ecb82220c38558665c3",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 631,
+    "sourceRecordSha256": "70ac50517bacb2c51739c03c74d6eb306087b744c0d2283a1c04ad366a126feb",
+    "commandSha256": "6803f823a11319c5d2a8b7e3ec653d9f824f85c7fd6c625b4d582db12a83d095",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_88852b0905854c95b1f61260c2a68d7e",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 642,
+    "sourceRecordSha256": "99aea7c371180d30494f193dc4d658d29582367f3c5812e60756120f1c1a1393",
+    "commandSha256": "f148b5c72c3f8d873a33632075f6cdd074c2511c6ed6246f2a936b066d02aad0",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_9dcd8ec2468044d1b2d7c5f3ae821274",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 653,
+    "sourceRecordSha256": "ff258effd295d606aec9cfe625ed0955f23034db20700d03b5ab310a00578aae",
+    "commandSha256": "a4f263ffef0c00a3e6ed6e19ea12ac2dc81eaf034d92eb86dfd502ccbf13e5a1",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_36e10a805a534b0380bafffd03766e5a",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 664,
+    "sourceRecordSha256": "380a9b87cb7b58d38c1244734013e9655e65ac669cee0dd187bee6a1646674b1",
+    "commandSha256": "e28b509934cfce4ec5de49000aacdb002a8b89060c88c141d88912e3dd3e5fe4",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_22c78f41e33944be8295fdae26170366",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 675,
+    "sourceRecordSha256": "3a938ca925b8f5267745007ad71588f9634e5db13fabf59e416f86eb0f8512c0",
+    "commandSha256": "fad13a0a4ee8df2f1bb8f65a0133d333b2883a54bf34e1278883b9df4e116467",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_d07edf454da7494abb9dfd50ced7c73a",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 686,
+    "sourceRecordSha256": "52f147fc08453a6f4eadbff1849e49ead22d728e2d687a2e9d1a27a1bf2505a5",
+    "commandSha256": "414e1fdb68ea8f2f14dc6ba3e3bfdc08a91f8132f849c22ee9044bfef7a04e66",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_c0dc18d2eb2d453987c13c62d1b0d427",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 697,
+    "sourceRecordSha256": "36be2ab4638d8853b8fe3a1aef560774e9a1bcabc2b8838d67c93d6df4c532ed",
+    "commandSha256": "0397d62fa4907347933373433a82512eb2c18ac82199e0bd6b727fd5248a7fab",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_20097469761e4bf1a48c76a2e57b1d09",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 708,
+    "sourceRecordSha256": "27c850bbbe6c917631b5b50dc467b7f6ef5577880aad4d6bb6d14860746b3892",
+    "commandSha256": "325e0db06921449c66ba1abb478f850e92c2ef05e6b395172984506b061d60c6",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_3b0efa28f2eb4719ad219e555f3b3fff",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 719,
+    "sourceRecordSha256": "a91a3247aa2b5e0cd75041d4c8125e7da2ce97550a48928f41974431c87a62e0",
+    "commandSha256": "f7cc1a390ed4514b0266985595ae5e40382d724164fc96888191167c4b9c1b89",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_b56713f0d394489597a729d54ab11f6f",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 731,
+    "sourceRecordSha256": "2c07bae16280e9d50da2650621bfd99c136b41a32469a72889fc527022eb9077",
+    "commandSha256": "fa7d77b0061138d869ba0d4b7ace718685b9ee87f38a704935429b643130daab",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_82cb67e0580f4366ae3a02166b2bed4a",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 743,
+    "sourceRecordSha256": "8f9c83a00b961616f2c2acfd0dce273a527f16aee5e5f77a6e03b6c76e420fa1",
+    "commandSha256": "0badd3baa3816967b39a6152bf3c69cc37638213f08468ac190c7e38afd54027",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_16824aa49cf4452a86e47ffc2115e24c",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 755,
+    "sourceRecordSha256": "f50b9d874129918385e79b3d768e049a0746d5ca873a8d6e49c8ab794f6b46fa",
+    "commandSha256": "3ed6b4a6e5ff42be3d7adbcff5aa02fbd3b6f530044a81a97137303679d8388b",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_657df0153e0b4d9781fdf619a1e1dc57",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 767,
+    "sourceRecordSha256": "d5441a8283ec45b1fd3b0dd8aa019aefecd3cbf72b19f52610dac298da375fb4",
+    "commandSha256": "aa30e97fef5d963f4ca29425cccc02f9962ac9661f4fdb2ea192ff88736f68ef",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_067b175812174f5981e61591341295ec",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 779,
+    "sourceRecordSha256": "39f2cfb1d567f544d6eedd02f9ff612c04b9860388be74125543391240bba58f",
+    "commandSha256": "15649a06456339e81a1641a637084741b57fcc7502c3c8aca918071d75979b7a",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_384e6ff356e1492dada2f5201d1a06ad",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 792,
+    "sourceRecordSha256": "d0da7b91f8a5a0990a289b77f6e077266d57e302e1135b28b591cd0b75b8c9e5",
+    "commandSha256": "2f0895262f4f7360814b46f177a7e098ff9583172bad1fe2fe0a5998666a836b",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_a08ff6ab77de44a48f3f8d7d4bfd59c5",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 805,
+    "sourceRecordSha256": "da955dafe9f1462da54fc5a66ef5265f0313b6a7e45e568dbc79043c67a7a4f3",
+    "commandSha256": "b5c35320bc1afe69da88d820a59ed4d3cbe20c336f0bf9c67ccfccc0d49b8630",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_1336b01d02fa4a6b8d86c9ef54e6883b",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 818,
+    "sourceRecordSha256": "51a9d93266c5b5623a03702246eed6122eab9532f804c552dd79200410cfc929",
+    "commandSha256": "834b1c42427bd6d0c8b69b646c5ca1f4073928af0080a872dea9f054c528c1bf",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_6cd44954a13f4d4c911c75aae981aaa6",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 831,
+    "sourceRecordSha256": "79660ab818a73edb4542242657ee83e77504f17acd9934022baf7185562ae81e",
+    "commandSha256": "a4dcba805658f31032320088048094c96ae2d2a764673646459f07eafd90cc96",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_562d04c4a4894cc3a7dbe7d5ff1e5b9a",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  },
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 845,
+    "sourceRecordSha256": "45a38c90d1cd8ac86a9abcf6c074cd4cd2a2597c51bed74d2020ac50a39c4d15",
+    "commandSha256": "eff3847132d96112bc543187e6e239d20eda6a5abca715dfef034444003472ee",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_9989c73beaf34f8a9e4051e55b9648c2",
+      "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  }
+]

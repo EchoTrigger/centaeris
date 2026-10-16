@@ -1,0 +1,13 @@
+{
+  "sourceRevision": "25d3a95087a7662eb67610b235440a0b6c6a8264",
+  "runId": 38942094515,
+  "runNumber": 120,
+  "url": "https://github.com/EchoTrigger/centaeris/actions/runs/38942094515",
+  "status": "in_progress",
+  "conclusion": null,
+  "historicalFailedRuns": [
+    38904734135,
+    38931095748
+  ],
+  "note": "Snapshot recorded while the run was in progress; this is not a live monitor. Final passing CI remains a merge condition."
+}

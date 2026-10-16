@@ -1,0 +1,13 @@
+{
+  "temporaryTestDatabasesAbsent": true,
+  "removedContainers": [
+    "centaeris-pr36-ci-red-6fdd724",
+    "centaeris-pr36-ci-green-6fdd724",
+    "centaeris-pr36-ci-complete-6fdd724",
+    "centaeris-pr36-ci-warm-6fdd724",
+    "centaeris-pr36-ci-pg-6fdd724"
+  ],
+  "removedNetwork": "centaeris-pr36-ci-6fdd724",
+  "workspaceContainersUnchanged": true,
+  "evidencePreserved": true
+}

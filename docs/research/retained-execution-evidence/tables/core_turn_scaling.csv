@@ -1,0 +1,4 @@
+receiptIdentityBytes,retainedFullSnapshots,retainedSnapshotSerializedBytes,rounds,retainedCurrentToolAndCheckpointContentBytes,retainedToolCallCount,retainedToolResultCount
+13560,1,6716,100,6155,1,1
+140465,1,64318,1000,6155,1,1
+1454470,1,640320,10000,6155,1,1

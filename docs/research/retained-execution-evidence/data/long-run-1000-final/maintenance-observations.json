@@ -1,0 +1,15 @@
+[
+  {
+    "sourceFile": "commands.jsonl",
+    "commandSequence": 1455,
+    "sourceRecordSha256": "88c9b383814c3baa6605204d89597f956115e84a39140011a60112c97031fe38",
+    "commandSha256": "8210544464efdb35d4b5b783252f5db91fa227735330a210a037a46a1496bd89",
+    "exitCode": 0,
+    "observation": {
+      "maintenanceReceiptCount": 1,
+      "status": "destroyed",
+      "residentHoldingCount": 0,
+      "historyPreserved": true
+    }
+  }
+]

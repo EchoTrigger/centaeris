@@ -1,0 +1,87 @@
+{
+  "agentRunId": "agent_run_0e88d3491830481aa6c50e816866fe1f",
+  "sessionId": "session_XwSWVXXDNs1RwqHE",
+  "environmentId": "environment_ae19c52f734d4efcbde2e2737180c40a",
+  "instanceId": "instance_cd695c38a7c5eea5cd207ed44ba4af85eeb5076c42eaf85cd0d7e593590248ef",
+  "runStatus": "completed",
+  "runPrompt": "ACCEPTANCE_RUN_A",
+  "coreTerminal": {
+    "eventId": "evt:agent_run_completed:session_XwSWVXXDNs1RwqHE:agent_run_0e88d3491830481aa6c50e816866fe1f:1792155781802",
+    "type": "agent_run_completed",
+    "reasonType": null,
+    "atMs": 1792155781802
+  },
+  "coreTerminalCount": 1,
+  "releaseReceiptCount": 1,
+  "cleanupComplete": true,
+  "workloadObservation": null,
+  "historySuccessfulCommands": 0,
+  "historyAttemptedCommands": 0,
+  "successfulOrdinaryCommands": 0,
+  "containerId": "8c314a17ce97129d1f4389290afdd189cb46f27072e09a59067d3edc7ed63914",
+  "resources": [
+    268435456,
+    1000,
+    128,
+    67108864
+  ],
+  "hostId": "a318490c-cfd3-4156-99d9-0bca6e7806ed",
+  "releaseReceiptId": "environment_release_e15c07b11cad4f8b96557e7b1343ca90",
+  "fence": {
+    "environmentInstanceId": "instance_cd695c38a7c5eea5cd207ed44ba4af85eeb5076c42eaf85cd0d7e593590248ef",
+    "controllerId": "agent_run_0e88d3491830481aa6c50e816866fe1f",
+    "controllerEpoch": 2,
+    "controllerPurpose": "cleanup"
+  },
+  "backgroundTaskIds": [
+    "task-c8bdfde1402282f2d8e96afca2e58794d29a6241d15babeb823093df1650ccbc"
+  ],
+  "taskService": {
+    "status": "success",
+    "schema": "environment.task.v2",
+    "result": {
+      "kind": "listed",
+      "tasks": [
+        {
+          "taskId": "task-c8bdfde1402282f2d8e96afca2e58794d29a6241d15babeb823093df1650ccbc",
+          "operationId": "1:tool-b2df919f03256e07c5db8d4310ff58b7211e2826e7e4c975c6a46cd2197ff310",
+          "scope": {
+            "kind": "environment"
+          },
+          "state": "running",
+          "exitCode": null,
+          "cleanupComplete": false,
+          "outputComplete": false
+        }
+      ]
+    }
+  },
+  "store": {
+    "activeTasks": 1,
+    "controlDirectoryBytes": 24576,
+    "controllerEpoch": 2,
+    "controllerId": "agent_run_0e88d3491830481aa6c50e816866fe1f",
+    "hotTasks": 1,
+    "indexedRunTasks": 5,
+    "indexedTasks": 5,
+    "instanceId": "instance_cd695c38a7c5eea5cd207ed44ba4af85eeb5076c42eaf85cd0d7e593590248ef",
+    "outputDirectoryBytes": 1076140,
+    "schema": "environment.task.store.inspection.v1"
+  },
+  "retention": {
+    "taskRecords": 1,
+    "controlDirectoryBytes": 20618,
+    "outputDirectoryBytes": 1076280,
+    "activeTasks": 1,
+    "terminalTasks": 0,
+    "activeRunTasks": 0,
+    "currentRunTerminalTasks": 0
+  },
+  "fileSha256": "66e39569c900254a44a1780699048afbebcd6ce5d6c952448fda495b92f6f709",
+  "agentsFileSha256": "b4873e9ea2c12559c798ccc862ed31a5c5b0d67336da57b260d09953124bd0fc",
+  "runtimeStartup": {
+    "containerId": "47e9c76ae0a6071c8fd4b2b0f01a5cc4b4e1e332441a8d1e669216c255b71aef",
+    "startedAt": "2026-10-16T13:02:42.914333501Z",
+    "hostPid": 1879896
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "sourceRevision": "735b1c2ec651c095f8efb3dccfafb948f2e881c6",
+  "binarySha256": {
+    "runtime_server": "e83196c22b0a0940a9f25c1efe7a6083a827c1ddae0ecfd52640e75f40f1a679",
+    "execution_agent": "b18fca65e18afcabafdb6592d5e693defef8e92f0ada517cfac1551f4642b4f6",
+    "environment_task_service": "748055dfe69cd5b919969d74aa1c7353682f780940bf7b201a2cce50dd2b5546"
+  },
+  "uses": 100,
+  "physicalChain": "passed",
+  "driverSha256": "95c358e82c76f240c2075473cceb71ba6c40b1d350b2790af49fd5aecc1eeb42",
+  "resumedCrossRun": true,
+  "retryCommandEvidence": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+  "sourceTree": "902e818c1729810937824a0331f9f43567831fcd",
+  "baseImages": {
+    "api": {
+      "requestedRef": "sha256:12959c483035c746fb011ce6abc87b23dbd1e3ee6b61a8aac6f5b3984139279f",
+      "id": "sha256:12959c483035c746fb011ce6abc87b23dbd1e3ee6b61a8aac6f5b3984139279f"
+    },
+    "worker": {
+      "requestedRef": "sha256:69bc3a59dfb603fa3ec62c45731060ea49433b644972a62818831db1e9c72580",
+      "id": "sha256:69bc3a59dfb603fa3ec62c45731060ea49433b644972a62818831db1e9c72580"
+    },
+    "runtime": {
+      "requestedRef": "sha256:3968d64644d9144e5254e2be1d6931a09a19d7be98d9cc0efc75b785782a030a",
+      "id": "sha256:3968d64644d9144e5254e2be1d6931a09a19d7be98d9cc0efc75b785782a030a"
+    },
+    "general": {
+      "requestedRef": "sha256:2a4658082220ba70e0134b23276d3372a86de157d9f6c5fc0f8ecca9558c6016",
+      "id": "sha256:2a4658082220ba70e0134b23276d3372a86de157d9f6c5fc0f8ecca9558c6016"
+    },
+    "postgres": {
+      "requestedRef": "sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15",
+      "id": "sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15"
+    },
+    "redis": {
+      "requestedRef": "sha256:978f0e01593e65eed801f2402944efcd936d43b5027e4908a7897baf88ed6241",
+      "id": "sha256:978f0e01593e65eed801f2402944efcd936d43b5027e4908a7897baf88ed6241"
+    }
+  },
+  "candidateToolsImageId": "sha256:7d9413e58206a29f0cd0f807a62b6752ceec376afb26f5a3145aed8c69d17cbd",
+  "maintenanceResponseDiscarded": true,
+  "containerAbsent": true,
+  "remoteCI": "not-evaluated",
+  "completedRuns": 100,
+  "failedRuns": 0,
+  "historyObservation": {
+    "attemptedCommands": 70,
+    "completedCommands": 70,
+    "distinctCallIds": 70
+  },
+  "longRunObservation": null,
+  "boundaryRunObservation": null,
+  "longRunObservationCount": 0,
+  "longRunRetainedSamples": 0,
+  "longRunRuntimeRestart": null,
+  "longRunMaxIndexedRunTasks": 0,
+  "longRunMetricMaxima": {},
+  "longRunExtraIndexedTasksAreUncategorized": null,
+  "automaticInstructionsObservation": null,
+  "longSideEffectProof": null,
+  "completedOrdinaryCommandsAcrossRuns": 168,
+  "unrun": [
+    "more-than256-inputs",
+    "near-journal-capacity",
+    "concurrent-run-retirement",
+    "revoked-user-maintenance",
+    "unobservable-docker",
+    "descendant-task-isolation"
+  ],
+  "evidenceDirectory": "/var/lib/retained-recovery-cross/cross-735b1c2/evidence-c45a062b5cfd42c5a21219feb76e07e9"
+}

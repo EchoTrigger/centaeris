@@ -1,0 +1,60 @@
+{
+  "agentRunId": "agent_run_4a0f7e651ab24fa7bb72da05f3b95ca4",
+  "sessionId": "session_CO-hLwG6-EORsCnK",
+  "sourceRevision": "cb238d0c15ef885a5d0ddf92af4bfa2659870b75",
+  "binarySha256": {
+    "runtime_server": "9b3e99abba62865fddfd6bf5f6853c6681c9d329c8562b0e2262478b49f074a7",
+    "execution_agent": "bce317e8f748678ee009f27bd7e6a242cdef1eb26de4dda27d8891ff9124a911",
+    "environment_task_service": "f2e781870b7acbae1b0bdca262d3484e21ad67c69daec57d7034c7294a414c79"
+  },
+  "completedCommands": 706,
+  "highestSessionSequence": 2830,
+  "fence": {
+    "environmentInstanceId": "instance_f3165fbc15c5729409ccd81621ab95c9fcdeadc266653e60bc9c9ba696e68461",
+    "controllerId": "agent_run_4a0f7e651ab24fa7bb72da05f3b95ca4",
+    "controllerEpoch": 3,
+    "controllerPurpose": "execute"
+  },
+  "durableCompaction": {
+    "compactionId": "prompt_compaction:turn-18dee757c281946c-1-582:1792124069442",
+    "summaryMessageId": "msg:session_CO-hLwG6-EORsCnK:turn-18dee757c281946c-1-582:1792124069442:compact",
+    "summarySha256": "sha256:c708803535aed3c83ef0632efdd145f0eaec108c6a7e8d84478c6c46bddf1723",
+    "summaryBytes": 712,
+    "snapshotMessagePosition": 1421,
+    "firstKeptMessageId": "msg:session_CO-hLwG6-EORsCnK:1792124065971:1419",
+    "sessionEventId": "evt_v1_prompt_compaction:sha256:b638e509bc2f6c9aab94a60c3bed76cc8c10976e00474d681f7d61cc347ef9fe",
+    "sequence": 2825,
+    "failureCount": 0,
+    "requestBound": {
+      "requestId": "model_request:turn-18dee7589bf08c56-1-584",
+      "sequence": 2824,
+      "manifestDigest": "sha256:47d23187fd621d33315e86b9513d659c4b62aca9d3d6a822373206287d66a7b3",
+      "compactionPromptDigest": "sha256:aa92e12275b0d8197c5ba7520438686b93375b63a0821979ca9866bf313b75c5"
+    },
+    "lastMainObservation": {
+      "requestId": "model_request:turn-18dee7592ef3ca09-1-585",
+      "sequence": 2826,
+      "manifestDigest": "sha256:9e86703354afa2910523568c3a828876eaaf5b8d990e2774818ba8fc613b7edc",
+      "summaryContentDigest": "sha256:7663fc894ee6c878ea765d5f34de6be3219b833b02415dd1435f97bdcce5e2fe",
+      "successfulCommand": {
+        "callId": "call-abe18dc20e014a4a848b834629c39d5b",
+        "commandIndex": 705,
+        "callSequence": 2828,
+        "resultSequence": 2829
+      }
+    }
+  },
+  "runtimeBefore": {
+    "Status": "running",
+    "Running": true,
+    "Paused": false,
+    "Restarting": false,
+    "OOMKilled": false,
+    "Dead": false,
+    "Pid": 2479605,
+    "ExitCode": 0,
+    "Error": "",
+    "StartedAt": "2026-10-16T03:16:05.381513791Z",
+    "FinishedAt": "2026-10-16T03:16:05.066141798Z"
+  }
+}

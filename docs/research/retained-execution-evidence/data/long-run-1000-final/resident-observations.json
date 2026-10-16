@@ -1,0 +1,28 @@
+[
+  {
+    "sourceFile": "commands.jsonl",
+    "commandSequence": 6,
+    "sourceRecordSha256": "27716a6ad7a6f56f8d038e78795305a2e6d2312d5aff989110549dab1f09614c",
+    "commandSha256": "f68231549c4d8d2c01e53e9027ce2988a312eb665e1ccf10c2a52f23031a4ec2",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_0e88d3491830481aa6c50e816866fe1f",
+      "instanceId": "instance_cd695c38a7c5eea5cd207ed44ba4af85eeb5076c42eaf85cd0d7e593590248ef",
+      "residentCount": 1,
+      "oldControllerRejected": false
+    }
+  },
+  {
+    "sourceFile": "commands.jsonl",
+    "commandSequence": 1451,
+    "sourceRecordSha256": "df339cf4ea51fb93cee1b9ba1284776a49b336ea9aaa95d7e548a33238f051a7",
+    "commandSha256": "30fb6c4eed9f1b862e0a7922bfcfec84a662a8848eff8c45757acbf89e04b707",
+    "exitCode": 0,
+    "observation": {
+      "agentRunId": "agent_run_049de2fde3d9487496b3779b081890b5",
+      "instanceId": "instance_cd695c38a7c5eea5cd207ed44ba4af85eeb5076c42eaf85cd0d7e593590248ef",
+      "residentCount": 1,
+      "oldControllerRejected": true
+    }
+  }
+]

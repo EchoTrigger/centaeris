@@ -1,0 +1,77 @@
+{
+  "sourceRevision": "61b3bd400a143c7f10e526f73167880cab80f0d0",
+  "binarySha256": {
+    "runtime_server": "40fdf8395f59354b202cacfd28bb26cf0eea1ae76d53722952841ef520ee9767",
+    "execution_agent": "1009812d7598e6f8844d4c9d7832e0597043a9004d134d5baeab24fe0a7c9774",
+    "environment_task_service": "fadb593a0b7d6bf5920cfac575c26397f0ff308a74ddbb9be95849eeb56c6e86"
+  },
+  "runtimeContainerId": "d31f9b74c5657bbda94a50b74ade04937365486c6a4ff455f1f02a258003876c",
+  "state": {
+    "Status": "exited",
+    "Running": false,
+    "Paused": false,
+    "Restarting": false,
+    "OOMKilled": true,
+    "Dead": false,
+    "Pid": 0,
+    "ExitCode": 137,
+    "Error": "",
+    "StartedAt": "2026-10-15T07:47:34.879774972Z",
+    "FinishedAt": "2026-10-15T09:02:37.831306319Z"
+  },
+  "memoryBytes": 536870912,
+  "fixtureEvidenceFiles": [
+    {
+      "path": "/data/retained-long-61b3bd4/evidence-46f749441fb04efca27983f1c4c97d8b/acceptance-a-f83b04079ed74f939cf2cb659a8e09e9.json",
+      "bytes": 280,
+      "sha256": "5eb3f43270fd8a0fa2dd0fa3cfb53eb6569b03b9bc0e2c10306239bc4128e4f3"
+    },
+    {
+      "path": "/data/retained-long-61b3bd4/evidence-46f749441fb04efca27983f1c4c97d8b/acceptance-b-13d86cffc3bc4630a643fd7458105035.json",
+      "bytes": 280,
+      "sha256": "f9a5e715c1d4ac804576ba3894cc90278f23b228c025430286c48fec3f3dd4d8"
+    },
+    {
+      "path": "/data/retained-long-61b3bd4/evidence-46f749441fb04efca27983f1c4c97d8b/commands.jsonl",
+      "bytes": 1474098,
+      "sha256": "956d97d87f3a7a4c34e90ceaa6144ec50a5e4a56c196c3f46c0a7a6c4bfa7ac7"
+    },
+    {
+      "path": "/data/retained-long-61b3bd4/evidence-46f749441fb04efca27983f1c4c97d8b/long-live-samples.json",
+      "bytes": 406063,
+      "sha256": "409723dd0b8eea47bd1a3cc4f672ed177864c68bbdea2beb2d46e5ac612dc479"
+    },
+    {
+      "path": "/data/retained-long-61b3bd4/evidence-46f749441fb04efca27983f1c4c97d8b/long-live.json",
+      "bytes": 1426,
+      "sha256": "0f73857cf40349b409f25aab960b4e9fac80130cc100f9a87f26789f053fd2f8"
+    },
+    {
+      "path": "/data/retained-long-61b3bd4/evidence-46f749441fb04efca27983f1c4c97d8b/long-runtime-restart.json",
+      "bytes": 2227,
+      "sha256": "475203aca6f22baaf7d7fcfda50cbb5e390ad0b3d60e81506d5e81ba39189d1e"
+    },
+    {
+      "path": "/data/retained-long-61b3bd4/evidence-46f749441fb04efca27983f1c4c97d8b/observed-a.json",
+      "bytes": 2989,
+      "sha256": "62bbd2e729ca90fdd689ea685dafdeda1858c1787ebaf2cf5c3e73b722783376"
+    },
+    {
+      "path": "/data/retained-long-61b3bd4/evidence-46f749441fb04efca27983f1c4c97d8b/runtime-oom-incident.json",
+      "bytes": 2560,
+      "sha256": "cbf1429a8bf4999156b779c808e9e44e77549ae01fce9a3b07db7a10e081e660"
+    }
+  ],
+  "boundedRuntimeLogStdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "fixtureManifestSha256": "d08ed9777428b20322b01ff03bed70f1a4065ceaacb2bcc359de9d6c367ce6f7",
+  "composeSha256": "026860d5682cbe9f509d4d25cbbca46905ed879ce317285b6ee31d0322c1d52e",
+  "exitScriptSha256": "80210132348c02d7678092d5f3f18d066220da8a343de0bb7d86b5987fd7de4f",
+  "consumers": {
+    "worker": "b4085f02ed42207c00e4aa7db7cb2981a52989e6adeceba689ecb3f617f94723",
+    "api": "f18400b432a03a7322f20398c6fa97ff7729a7bd14f61fe1c4b644350d9d4ff7",
+    "runtime": "d31f9b74c5657bbda94a50b74ade04937365486c6a4ff455f1f02a258003876c",
+    "model": "c4d686d0981e157172ea9ba56b906b351ff55df0932dc96eedb13bbc1cc422c7",
+    "postgres": "4831366cecc15d81b3ff9bfe4b3eb29e407f6c820a4a6858180fd2402a7ba7ab",
+    "redis": "dbd85ee42b1d508336406eb4a44435e1f30826d62b23031f26924c1f709a4bfe"
+  }
+}

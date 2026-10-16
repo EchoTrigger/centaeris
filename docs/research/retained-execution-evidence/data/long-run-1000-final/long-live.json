@@ -1,0 +1,69 @@
+{
+  "agentRunId": "agent_run_049de2fde3d9487496b3779b081890b5",
+  "runStatus": "completed",
+  "containerId": "8c314a17ce97129d1f4389290afdd189cb46f27072e09a59067d3edc7ed63914",
+  "sessionId": "session_XwSWVXXDNs1RwqHE",
+  "environmentId": "environment_ae19c52f734d4efcbde2e2737180c40a",
+  "instanceId": "instance_cd695c38a7c5eea5cd207ed44ba4af85eeb5076c42eaf85cd0d7e593590248ef",
+  "completedCommands": 1000,
+  "attemptedCommands": 1000,
+  "highestSessionSequence": 4009,
+  "durableCompaction": {
+    "compactionId": "prompt_compaction:turn-18df07a99898ab2e-1-582:1792159605642",
+    "summaryMessageId": "msg:session_XwSWVXXDNs1RwqHE:turn-18df07a99898ab2e-1-582:1792159605642:compact",
+    "summarySha256": "sha256:d49761307004c7b8216979a28d90b78e2b494c3e3c92b6f59824111189ce4dc1",
+    "summaryBytes": 712,
+    "snapshotMessagePosition": 1421,
+    "firstKeptMessageId": "msg:session_XwSWVXXDNs1RwqHE:1792159601850:1419",
+    "sessionEventId": "evt_v1_prompt_compaction:sha256:41c1caea8000cb738c41248d3ab399e780860412fe3367f2b9b6c13e9dbc980d",
+    "sequence": 2825,
+    "failureCount": 0,
+    "requestBound": {
+      "requestId": "model_request:turn-18df07aa8564f64f-1-584",
+      "sequence": 2824,
+      "manifestDigest": "sha256:c9baacbf481e199d6d3fb397c173cb631a6e6ff99172b10b78f67fd8a3996111",
+      "compactionPromptDigest": "sha256:8b74b9197b15809077c12b458ee3a0402693afc92ad16843cea18bc5b1833362"
+    },
+    "lastMainObservation": {
+      "requestId": "model_request:turn-18df099b7522f5eb-1-247",
+      "sequence": 4001,
+      "manifestDigest": "sha256:e4f052e1f174bb476995c9aef08427f7b3940cef75a273ceacaa17d25223b617",
+      "summaryContentDigest": "sha256:5b69f98bc964db269d81baa2b9cf3264fec3b33f78929b258bfd7c6e12ae601b",
+      "successfulCommand": {
+        "callId": "call-cf07dbe6a4274c3db96fe71572192bf3",
+        "commandIndex": 999,
+        "callSequence": 4003,
+        "resultSequence": 4004
+      }
+    }
+  },
+  "fence": {
+    "environmentInstanceId": "instance_cd695c38a7c5eea5cd207ed44ba4af85eeb5076c42eaf85cd0d7e593590248ef",
+    "controllerId": "agent_run_049de2fde3d9487496b3779b081890b5",
+    "controllerEpoch": 5,
+    "controllerPurpose": "cleanup"
+  },
+  "live": {
+    "hotTaskRecords": 1,
+    "activeTasks": 1,
+    "backgroundTaskIds": [
+      "task-c8bdfde1402282f2d8e96afca2e58794d29a6241d15babeb823093df1650ccbc"
+    ],
+    "controlDirectoryBytes": 2412682,
+    "outputDirectoryBytes": 13553280,
+    "instanceMemoryBytes": 22564864,
+    "instancePids": 9
+  },
+  "store": {
+    "activeTasks": 1,
+    "controlDirectoryBytes": 2416640,
+    "controllerEpoch": 5,
+    "controllerId": "agent_run_049de2fde3d9487496b3779b081890b5",
+    "hotTasks": 1,
+    "indexedRunTasks": 3004,
+    "indexedTasks": 3005,
+    "instanceId": "instance_cd695c38a7c5eea5cd207ed44ba4af85eeb5076c42eaf85cd0d7e593590248ef",
+    "outputDirectoryBytes": 13493140,
+    "schema": "environment.task.store.inspection.v1"
+  }
+}

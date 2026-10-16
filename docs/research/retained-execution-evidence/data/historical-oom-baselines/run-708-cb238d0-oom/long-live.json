@@ -1,0 +1,69 @@
+{
+  "agentRunId": "agent_run_4a0f7e651ab24fa7bb72da05f3b95ca4",
+  "runStatus": "running",
+  "containerId": "134b6a3d32d1fb6392d8730c662cb84ba1fcec556379486f5f222454f95cc62e",
+  "sessionId": "session_CO-hLwG6-EORsCnK",
+  "environmentId": "environment_379196d5f4e2406cb038196c63117bc7",
+  "instanceId": "instance_f3165fbc15c5729409ccd81621ab95c9fcdeadc266653e60bc9c9ba696e68461",
+  "completedCommands": 708,
+  "attemptedCommands": 709,
+  "highestSessionSequence": 2840,
+  "durableCompaction": {
+    "compactionId": "prompt_compaction:turn-18dee757c281946c-1-582:1792124069442",
+    "summaryMessageId": "msg:session_CO-hLwG6-EORsCnK:turn-18dee757c281946c-1-582:1792124069442:compact",
+    "summarySha256": "sha256:c708803535aed3c83ef0632efdd145f0eaec108c6a7e8d84478c6c46bddf1723",
+    "summaryBytes": 712,
+    "snapshotMessagePosition": 1421,
+    "firstKeptMessageId": "msg:session_CO-hLwG6-EORsCnK:1792124065971:1419",
+    "sessionEventId": "evt_v1_prompt_compaction:sha256:b638e509bc2f6c9aab94a60c3bed76cc8c10976e00474d681f7d61cc347ef9fe",
+    "sequence": 2825,
+    "failureCount": 0,
+    "requestBound": {
+      "requestId": "model_request:turn-18dee7589bf08c56-1-584",
+      "sequence": 2824,
+      "manifestDigest": "sha256:47d23187fd621d33315e86b9513d659c4b62aca9d3d6a822373206287d66a7b3",
+      "compactionPromptDigest": "sha256:aa92e12275b0d8197c5ba7520438686b93375b63a0821979ca9866bf313b75c5"
+    },
+    "lastMainObservation": {
+      "requestId": "model_request:turn-18dee75bd6734434-1-589",
+      "sequence": 2834,
+      "manifestDigest": "sha256:34f868ba2fa7926c449b33a6db6f8b452e51956ea916e4674891e4dcbd731e4f",
+      "summaryContentDigest": "sha256:7663fc894ee6c878ea765d5f34de6be3219b833b02415dd1435f97bdcce5e2fe",
+      "successfulCommand": {
+        "callId": "call-2e06697340c14ee28f00962352b8e150",
+        "commandIndex": 707,
+        "callSequence": 2836,
+        "resultSequence": 2837
+      }
+    }
+  },
+  "fence": {
+    "environmentInstanceId": "instance_f3165fbc15c5729409ccd81621ab95c9fcdeadc266653e60bc9c9ba696e68461",
+    "controllerId": "agent_run_4a0f7e651ab24fa7bb72da05f3b95ca4",
+    "controllerEpoch": 4,
+    "controllerPurpose": "execute"
+  },
+  "live": {
+    "hotTaskRecords": 1,
+    "activeTasks": 1,
+    "backgroundTaskIds": [
+      "task-9062c70b11d5b4bde7032e54e638cffe7556c4560b8d6af9397f042adeb86b4b"
+    ],
+    "controlDirectoryBytes": 1679498,
+    "outputDirectoryBytes": 9901678,
+    "instanceMemoryBytes": 17305600,
+    "instancePids": 9
+  },
+  "store": {
+    "activeTasks": 1,
+    "controlDirectoryBytes": 1683456,
+    "controllerEpoch": 4,
+    "controllerId": "agent_run_4a0f7e651ab24fa7bb72da05f3b95ca4",
+    "hotTasks": 1,
+    "indexedRunTasks": 2126,
+    "indexedTasks": 2127,
+    "instanceId": "instance_f3165fbc15c5729409ccd81621ab95c9fcdeadc266653e60bc9c9ba696e68461",
+    "outputDirectoryBytes": 9859098,
+    "schema": "environment.task.store.inspection.v1"
+  }
+}

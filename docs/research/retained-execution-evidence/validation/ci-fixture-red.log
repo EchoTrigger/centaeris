@@ -1,0 +1,5 @@
+test_parallel_worker_preserves_heartbeat_deadline_and_completes_handoff (app_core.test_native_consumption_production.ParallelChildWorkerFixtureTests.test_parallel_worker_preserves_heartbeat_deadline_and_completes_handoff) ... ERROR
+test_cleanup_allows_the_next_serialized_initial_data_restore (app_core.test_runtime_schema_cleanup.RuntimeSchemaCleanupTests.test_cleanup_allows_the_next_serialized_initial_data_restore) ... ERROR
+Ran 2 tests in 0.888s
+FAILED (errors=2)
+Gate: discovered=2, executed=2, skipped=0, expectedFailures=0, passed=False
