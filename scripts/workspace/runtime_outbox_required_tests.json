@@ -66,5 +66,9 @@
   "postgres_store::integration_tests::lease_renewal_tests::postgres_worker_renewal_cannot_revive_expired_lease_with_old_client_clock",
   "postgres_store::integration_tests::lease_renewal_tests::postgres_worker_renewal_uses_database_time_despite_future_client_clock",
   "postgres_store::integration_tests::lease_renewal_tests::postgres_worker_renewal_rechecks_expiry_after_waiting_for_job_lock",
-  "postgres_store::integration_tests::lease_renewal_tests::postgres_worker_renewal_lock_timeout_is_unavailable_without_altering_authority"
+  "postgres_store::integration_tests::lease_renewal_tests::postgres_worker_renewal_lock_timeout_is_unavailable_without_altering_authority",
+  "postgres_store::integration_tests::retained_instance_tests::lease_contention_tests::postgres_retained_query_waits_for_same_owner_renewal_before_host_operation",
+  "postgres_store::integration_tests::retained_instance_tests::lease_contention_tests::postgres_retained_query_rejects_expiry_after_renewal_row_lock_wait",
+  "postgres_store::integration_tests::retained_instance_tests::lease_contention_tests::postgres_retained_query_rejects_reclaimed_owner_after_renewal_row_lock_wait",
+  "postgres_store::integration_tests::retained_instance_tests::lease_contention_tests::postgres_retained_query_exhausted_lease_lock_budget_releases_upstream_pins"
 ]

@@ -33,7 +33,9 @@ pub(crate) struct VerifiedOriginalGrant {
 }
 
 // Match API's Workspace → membership → Session → Environment → Run → grant
-// order. NOWAIT on the job avoids waiting on an inverse job→Session lock path.
+// order. A legitimate heartbeat briefly owns the job exclusively. Bound that
+// wait by the existing request/SQL budget, then verify authority with a fresh
+// database clock. Keep the SHARE pins through the physical operation.
 pub(crate) fn verify_controller_authority(
     tx: &mut postgres::Transaction<'_>,
     r: &ControllerAuthorityRequest<'_>,
@@ -154,7 +156,10 @@ pub(crate) fn verify_controller_authority(
     {
         return Err("retained original grant binding rejected".into());
     }
-    let job=tx.query_opt("SELECT 1 FROM runtime.runtime_jobs j JOIN runtime.execution_job_tenants t ON t.job_id=j.job_id WHERE j.job_id=$1 AND j.job_kind='agent_run.lifecycle' AND j.status IN('leased','running') AND j.lease_owner=$2 AND j.lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint AND j.session_id=$3 AND j.idempotency_key=$4 AND j.payload_ref=$5 AND t.workspace_id=$6 FOR SHARE OF j,t NOWAIT", &[&r.lease.job_id,&r.lease.lease_owner,&b.session_id,&format!("{}:{digest}",r.lease.job_id),&format!("record:agent_run:{}",b.agent_run_id),&tenant]).map_err(|e|format!("retained job fence busy or rejected: {e}"))?;
+    pin_lifecycle_job(tx, &r.lease.job_id)?;
+    // This is a separate statement after lock acquisition. A predicate evaluated
+    // before a pure lock wait cannot prove that an unchanged lease is unexpired.
+    let job=tx.query_opt("SELECT 1 FROM runtime.runtime_jobs j JOIN runtime.execution_job_tenants t ON t.job_id=j.job_id WHERE j.job_id=$1 AND j.job_kind='agent_run.lifecycle' AND j.status IN('leased','running') AND j.lease_owner=$2 AND j.lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint AND j.session_id=$3 AND j.idempotency_key=$4 AND j.payload_ref=$5 AND t.workspace_id=$6", &[&r.lease.job_id,&r.lease.lease_owner,&b.session_id,&format!("{}:{digest}",r.lease.job_id),&format!("record:agent_run:{}",b.agent_run_id),&tenant]).map_err(|e|format!("retained job fence busy or rejected: {e}"))?;
     if job.is_none() {
         return Err("retained job fence rejected".into());
     }
@@ -163,4 +168,44 @@ pub(crate) fn verify_controller_authority(
         authorization_digest: digest,
         controller_epoch: c.controller_epoch,
     })
+}
+
+fn pin_lifecycle_job(tx: &mut postgres::Transaction<'_>, job_id: &str) -> Result<(), String> {
+    let timeouts = tx
+        .query_one(
+            "SELECT current_setting('lock_timeout'),current_setting('statement_timeout'),(SELECT setting::bigint FROM pg_settings WHERE name='lock_timeout'),(SELECT setting::bigint FROM pg_settings WHERE name='statement_timeout')",
+            &[],
+        )
+        .map_err(|error| error.to_string())?;
+    let old_lock: String = timeouts.get(0);
+    let old_statement: String = timeouts.get(1);
+    let remaining = super::remaining_request_time()?
+        .unwrap_or(super::DEFAULT_POSTGRES_CHECKOUT_TIMEOUT)
+        .min(super::DEFAULT_POSTGRES_CHECKOUT_TIMEOUT);
+    let mut milliseconds = remaining.as_millis().max(1);
+    for configured_ms in [timeouts.get::<_, i64>(2), timeouts.get::<_, i64>(3)] {
+        if configured_ms > 0 {
+            milliseconds = milliseconds.min(configured_ms as u128);
+        }
+    }
+    tx.query_one(
+        "SELECT set_config('lock_timeout',$1,true),set_config('statement_timeout',$1,true)",
+        &[&format!("{milliseconds}ms")],
+    )
+    .map_err(|error| error.to_string())?;
+    let pinned = tx.query_opt(
+        "SELECT j.job_id FROM runtime.runtime_jobs j JOIN runtime.execution_job_tenants t ON t.job_id=j.job_id WHERE j.job_id=$1 FOR SHARE OF j,t",
+        &[&job_id],
+    ).map_err(|error| format!("retained job fence busy or rejected: {error}"))?;
+    // The statement limit also bounds combined waits for the job and tenant.
+    // Restore on success; a SQL failure rolls back transaction-local changes.
+    tx.query_one(
+        "SELECT set_config('lock_timeout',$1,true),set_config('statement_timeout',$2,true)",
+        &[&old_lock, &old_statement],
+    )
+    .map_err(|error| error.to_string())?;
+    if pinned.is_none() {
+        return Err("retained job fence rejected".into());
+    }
+    Ok(())
 }
