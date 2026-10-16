@@ -1,0 +1,35 @@
+{
+  "files": 173,
+  "uses": 100,
+  "commands": 1000,
+  "requiredPgIdentities": 72,
+  "strictMemoryGate": "incomplete-or-failed",
+  "pendingFaultScenarios": 6,
+  "ciConclusion": null,
+  "sourceCheckoutCompared": false
+}
+test_ci_success_requires_job_evidence (__main__.EvidenceVerifierTests.test_ci_success_requires_job_evidence) ... ok
+test_complete_bundle_is_consistent_with_open_conditions (__main__.EvidenceVerifierTests.test_complete_bundle_is_consistent_with_open_conditions) ... ok
+test_content_tampering_without_new_hash_rejects (__main__.EvidenceVerifierTests.test_content_tampering_without_new_hash_rejects) ... ok
+test_csv_value_and_recomputed_hash_still_need_source_agreement (__main__.EvidenceVerifierTests.test_csv_value_and_recomputed_hash_still_need_source_agreement) ... ok
+test_different_summary_after_restart_rejects (__main__.EvidenceVerifierTests.test_different_summary_after_restart_rejects) ... ok
+test_duplicate_inventory_entry_rejects (__main__.EvidenceVerifierTests.test_duplicate_inventory_entry_rejects) ... ok
+test_historical_oom_cannot_be_relabeled_pass_after_rehash (__main__.EvidenceVerifierTests.test_historical_oom_cannot_be_relabeled_pass_after_rehash) ... ok
+test_hot_record_65_rejects_even_with_forged_source_hash (__main__.EvidenceVerifierTests.test_hot_record_65_rejects_even_with_forged_source_hash) ... ok
+test_live_run_requires_one_resident_holding (__main__.EvidenceVerifierTests.test_live_run_requires_one_resident_holding) ... ok
+test_missing_file_rejects (__main__.EvidenceVerifierTests.test_missing_file_rejects) ... ok
+test_missing_required_configuration_field_rejects (__main__.EvidenceVerifierTests.test_missing_required_configuration_field_rejects) ... ok
+test_missing_required_pg_identity_rejects (__main__.EvidenceVerifierTests.test_missing_required_pg_identity_rejects) ... ok
+test_nested_inventory_file_is_not_self_excluded (__main__.EvidenceVerifierTests.test_nested_inventory_file_is_not_self_excluded) ... ok
+test_present_container_cannot_be_reported_destroyed (__main__.EvidenceVerifierTests.test_present_container_cannot_be_reported_destroyed) ... ok
+test_same_runtime_pid_and_start_time_reject_after_rehash (__main__.EvidenceVerifierTests.test_same_runtime_pid_and_start_time_reject_after_rehash) ... ok
+test_sample_above_512_mib_rejects_after_rehash (__main__.EvidenceVerifierTests.test_sample_above_512_mib_rejects_after_rehash) ... ok
+test_stopped_run_cannot_be_relabeled_pass_after_rehash (__main__.EvidenceVerifierTests.test_stopped_run_cannot_be_relabeled_pass_after_rehash) ... ok
+test_unknown_retirement_cannot_release_holding (__main__.EvidenceVerifierTests.test_unknown_retirement_cannot_release_holding) ... ok
+test_unregistered_file_rejects (__main__.EvidenceVerifierTests.test_unregistered_file_rejects) ... ok
+
+----------------------------------------------------------------------
+Ran 19 tests in 2.906s
+
+OK
+Six tables reproduce exactly.

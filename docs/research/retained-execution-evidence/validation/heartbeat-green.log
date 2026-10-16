@@ -1,0 +1,9 @@
+Found 1 test(s).
+Skipping setup of unused database(s): default.
+System check identified no issues (0 silenced).
+test_parallel_worker_preserves_heartbeat_deadline_and_completes_handoff (app_core.test_native_consumption_production.ParallelChildWorkerFixtureTests.test_parallel_worker_preserves_heartbeat_deadline_and_completes_handoff) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.007s
+
+OK

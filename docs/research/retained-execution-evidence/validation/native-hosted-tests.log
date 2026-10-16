@@ -1,0 +1,103 @@
+test agent::snapshot_capture::tests::active_process_before_or_after_capture_never_receives_unchanged_acknowledgement ... ok
+test agent::snapshot_capture::tests::changed_capture_keeps_the_existing_snapshot_frame ... ok
+test agent::snapshot_capture::tests::conditional_capture_observes_both_actual_reads_including_unchanged_and_failure ... ok
+test agent::snapshot_capture::tests::conditional_capture_reports_zero_reads_for_early_rejection_and_disabled_is_quiet ... ok
+test agent::snapshot_capture::tests::empty_and_metadata_changes_emit_full_frames ... ok
+test agent::snapshot_capture::tests::malformed_baselines_and_unknown_protocol_fields_are_rejected ... ok
+test agent::snapshot_capture::tests::mutation_during_revalidation_cannot_emit_an_unchanged_receipt ... ok
+test agent::snapshot_capture::tests::second_content_pass_rejects_equal_size_mutation ... ok
+test agent::tests::agent_process_observer_excludes_itself_other_users_and_zombies ... ok
+test agent::tests::agent_process_observer_propagates_unknown_state_instead_of_claiming_idle ... ok
+test agent::tests::agent_process_observer_reports_live_count_without_altering_processes ... ok
+test agent::tests::agent_process_state_has_exact_camel_case_nonnegative_count_contract ... ok
+test agent::tests::empty_collected_workspace_has_no_snapshot_frame ... ok
+test agent::tests::agent_process_observer_keeps_a_real_agent_uid_child_alive ... ok
+test agent::tests::filesystem_router_rejects_unknown_uri_scheme ... ok
+test agent::tests::plugin_paths_require_the_read_only_projection_shape ... ok
+test agent::snapshot_capture::tests::unchanged_capture_verifies_bytes_without_emitting_snapshot_payload ... ok
+test agent::tests::quiesce_recognizes_agent_process_status_only ... ok
+test agent::tests::read_root_projection_accepts_exact_catalog_root ... ok
+test agent::tests::read_root_system_catalog_mutations_rejected_before_dispatch ... ok
+test agent::tests::snapshot_content_copy_preserves_hash_and_reports_partial_write_failure ... ok
+test agent::tests::snapshot_manifest_requires_canonical_non_overlapping_paths ... ok
+test agent::tests::virtual_paths_stay_beneath_data_root ... ok
+test agent::tests::snapshot_observations_measure_both_source_passes_and_failed_copy_reads ... ok
+test agent::tests::snapshot_observations_count_visited_directories_and_files_without_changing_selection ... ok
+test agent::tests::workspace_generation_covers_write_revert_and_overflow ... ok
+test agent::tests::workspace_generation_requires_quiescence_before_and_after_read_without_poisoning ... ok
+test agent::tests::workspace_generation_rpc_serves_42_bounded_queries_and_fails_loudly ... ok
+test memory::tests::memory_write_is_atomic_private_and_hash_guarded ... ok
+test agent::tests::workspace_generation_root_removal_notification_waits_for_directory_descriptor_release ... ok
+test memory::tests::uri_parser_accepts_only_the_agent_private_memory_tree ... ok
+test task_service::instance::tests::instance_task_domain_requires_unique_positive_process_membership ... ok
+test task_service::linux::tests::control_lock_process_fixture ... ok
+test task_service::instance::tests::instance_task_domain_refuses_foreign_or_ambiguous_or_unverified_domains ... ok
+test task_service::linux::tests::cross_run_takeover_cleans_only_old_run_tasks_and_is_retryable ... ignored, requires explicitly delegated disposable Linux cgroup v2 subtree
+test task_service::linux::tests::double_fork_setsid_cleanup_preserves_another_task ... ignored, requires explicitly delegated disposable Linux cgroup v2 subtree and python3
+test agent::tests::workspace_generation_drains_vanished_directories_and_new_tree_writes ... ok
+test task_service::linux::tests::exec_failure_after_worker_reservation_remains_queryable_without_deadlock_or_retry_spawn ... ignored, requires explicitly delegated disposable Linux cgroup v2 subtree
+test task_service::linux::tests::input_history_pressure_leaves_termination_and_end_run_reconcilable ... ignored, requires explicitly delegated disposable Linux cgroup v2 subtree
+test task_service::linux::tests::kill_only_domain_cleans_setsid_descendants_without_per_task_controllers ... ignored, requires explicitly delegated disposable Linux cgroup v2 subtree
+test task_service::linux::tests::lost_data_ack_queries_original_receipt_then_closes_once ... ignored, requires explicitly delegated disposable Linux cgroup v2 subtree
+test task_service::linux::tests::lost_input_receipt_never_rewrites_stdin ... ignored, requires explicitly delegated disposable Linux cgroup v2 subtree
+test task_service::linux::tests::one_hundred_runs_release_history_without_stopping_environment_task ... ignored, requires explicitly delegated disposable Linux cgroup v2 subtree
+test task_service::linux::tests::output_capacity_failure_preserves_existing_process_control_and_allows_cleanup ... ignored, requires explicitly delegated disposable Linux cgroup v2 subtree
+test task_service::linux::tests::panicking_supervisor_is_unknown_until_owned_tree_is_empty_and_child_reaped ... ignored, requires explicitly delegated disposable Linux cgroup v2 subtree
+test task_service::linux::tests::real_background_tree_survives_controller_takeover_and_drains_both_streams ... ignored, requires explicitly delegated disposable Linux cgroup v2 subtree
+test task_service::linux::tests::relay_marks_invalid_response_shape_unknown ... ok
+test task_service::linux::tests::relay_marks_lost_response_unknown ... ok
+test task_service::linux::tests::drain_marker_observation_survives_split_stderr_and_later_stdout_chunks ... ok
+test task_service::linux::tests::relay_marks_oversized_response_unknown ... ok
+test task_service::linux::tests::relay_marks_truncated_response_unknown ... ok
+test task_service::linux::tests::relay_marks_unsupported_response_schema_unknown ... ok
+test task_service::linux::tests::relay_preserves_complete_semantic_error_response ... ok
+test task_service::linux::tests::relay_preserves_complete_valid_response ... ok
+test task_service::linux::tests::running_journal_failure_keeps_supervision_and_drain_ownership ... ignored, requires explicitly delegated disposable Linux cgroup v2 subtree
+test task_service::linux::tests::same_run_history_retirement_keeps_output_and_progress_before_run_close ... ignored, requires explicitly delegated disposable Linux cgroup v2 subtree
+test task_service::linux::tests::same_run_reconstructed_controller_does_not_repeat_spawn_or_acknowledged_input ... ignored, requires explicitly delegated disposable Linux cgroup v2 subtree
+test task_service::linux::tests::relay_preserves_response_at_exact_frame_limit ... ok
+test task_service::linux::tests::corrupt_or_removed_output_does_not_prevent_control_restart_and_queries ... ok
+test task_service::linux::tests::startup_lease_survives_manager_lifetime_but_not_exec_child ... ok
+test task_service::linux::tests::successful_input_receipt_replays_after_child_exit_without_writing_twice ... ignored, requires explicitly delegated disposable Linux cgroup v2 subtree
+test task_service::linux::tests::task_deadline_exits_before_late_input_and_uncertain_input_is_not_replayed ... ignored, requires explicitly delegated disposable Linux cgroup v2 subtree
+test task_service::linux::tests::terminal_cleanup_controller_cannot_resume_execution_or_kill_environment_scope ... ignored, requires explicitly delegated disposable Linux cgroup v2 subtree
+test task_service::linux::tests::unavailable_worker_threads_reject_before_exec_without_poisoning_resident_tasks ... ignored, requires explicitly delegated disposable Linux cgroup v2 subtree
+test task_service::linux::tests::worker_delivery_failure_retains_supervision_and_does_not_respawn_unknown_start ... ignored, requires explicitly delegated disposable Linux cgroup v2 subtree
+test task_service::linux::tests::startup_refuses_stale_socket_before_rewriting_control_and_keeps_socket ... ok
+test task_service::linux::tests::control_lock_process_fixture ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 99 filtered out; finished in 0.01s
+test task_service::linux::tests::startup_refuses_other_process_lock_before_reading_or_rewriting_control ... ok
+test task_service::store::commit_tests::rejected_receipt_commit_does_not_publish_memory_intent_or_poison_controls ... ok
+test task_service::store::tests::cold_corrupt_identity_is_rejected_instead_of_reinterpreted_or_repaired ... ok
+test task_service::store::tests::incomplete_output_quality_does_not_pin_finished_task_or_claim_complete_output ... ok
+test task_service::store::tests::input_receipt_query_uses_only_committed_original_ack_and_never_writes ... ok
+test task_service::store::tests::malformed_constraints_and_unexpected_triggers_are_rejected_without_repair ... ok
+test task_service::tests::accepted_receipt_recovers_unknown_and_same_operation_cannot_respawn ... ok
+test task_service::tests::admission_capacity_failure_does_not_poison_existing_work ... ok
+test task_service::tests::admission_preflight_preserves_committed_work_and_completion_space ... ok
+test task_service::tests::allocated_output_blocks_reject_admission_before_oversubscribing_output_budget ... ok
+test task_service::tests::closed_history_collection_preserves_environment_and_uncertain_input_and_does_not_resurrect_receipts ... ok
+test task_service::store::commit_tests::sqlite_full_rolls_back_and_preserves_controls_without_poisoning_existing_journal ... ok
+test task_service::tests::compact_cold_output_preserves_results_before_consumer_commit_and_ring_gaps ... ok
+test task_service::tests::closed_run_cannot_reopen_after_intervening_controller_and_store_reopen ... ok
+test task_service::tests::corrupted_output_record_is_a_cursor_gap_and_never_returns_unverified_bytes ... ok
+test task_service::store::tests::deleted_index_pages_restore_admission_without_a_second_database_copy ... ok
+test task_service::tests::failed_fence_persistence_refuses_all_subsequent_controller_commands ... ok
+test task_service::tests::control_serialized_budget_refuses_oversize_without_overwriting_committed_record ... ok
+test task_service::tests::one_hundred_controller_windows_retire_history_and_keep_environment_task ... ok
+test task_service::tests::input_exhaustion_keeps_task_termination_and_run_closure_available ... ok
+test task_service::tests::output_budget_exhaustion_and_cleanup_preserve_control_receipts_and_fence ... ok
+test task_service::tests::output_retains_bounded_tail_and_reports_cursor_gap_after_reopen ... ok
+test task_service::tests::reopened_fully_corrupt_output_explicitly_reports_loss ... ok
+test task_service::tests::same_epoch_cannot_upgrade_cleanup_to_execution_and_pending_takeover_refuses_mutation ... ok
+test task_service::tests::same_run_controller_reconstruction_keeps_start_and_input_operation_identity ... ok
+test task_service::tests::same_run_takeover_preserves_uncertain_input_and_terminal_start_history ... ok
+test task_service::tests::shared_core_query_budget_reads_real_output_log_and_small_budget_is_rejected ... ok
+test task_service::tests::stable_task_address_matches_existing_index_across_owner_renewal ... ok
+test task_service::tests::strict_forward_import_preserves_legacy_journal_and_rejects_invalid_identity ... ok
+test task_service::tests::takeover_fences_stale_controller_and_rejects_instance_mismatch ... ok
+test task_service::tests::unavailable_output_reports_gap_without_losing_queryable_control_snapshot ... ok
+test task_service::tests::unsupported_index_version_and_missing_table_are_not_repaired ... ok
+test task_service::tests::one_thousand_same_run_terminal_records_keep_original_start_identity ... ok
+test task_service::tests::index_counts_and_memory_stay_bounded_with_three_thousand_realistic_task_ids ... ok
+test result: ok. 81 passed; 0 failed; 19 ignored; 0 measured; 0 filtered out; finished in 41.76s

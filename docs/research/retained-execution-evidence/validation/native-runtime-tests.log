@@ -1,0 +1,580 @@
+test agent_inputs_tests::hosted_input_ack_recovery ... ignored, requires the owned API live server and migrated disposable PostgreSQL database
+test agent_inputs_tests::hosted_input_checkpoint_recovery ... ignored, requires the owned API live server and migrated disposable PostgreSQL database
+test agent_inputs_tests::hosted_input_main_request_recovery ... ignored, requires the owned API live server and migrated disposable PostgreSQL database
+test agent_inputs_tests::hosted_typed_input_store ... ignored, requires the API migrated disposable database and its owned input carriers
+test agent_messages::tests::first_party_message_contract_continues_and_ordinary_tools_do_not_include_it ... ok
+test agent_messages::tests::message_provider_rejects_unknown_identity_recipient_and_invalid_utf8_budget_without_dispatch ... ok
+test agent_messages::tests::runtime::django_message_revocation_commit_window ... ignored, executed by Django's validation/revocation barrier against its disposable database
+test agent_messages::tests::runtime::django_message_runtime_contract ... ignored, executed by Django LiveServerTestCase against its migrated disposable database
+test agent_run_authorization::parity::authentication_and_agent_run_binding_are_independent_checks ... ok
+test agent_messages::tests::message_provider_preserves_complete_body_refs_and_infers_own_context ... ok
+test agent_run_authorization::parity::python_signed_authorizations_reach_rust ... ok
+test agent_run_authorization::parity::resource_u64_overflow_is_rejected_on_the_wire ... ok
+test agent_run_authorization::tests::authorization_has_a_stable_signed_digest ... ok
+test agent_run_authorization::tests::authorization_rejects_oversized_direct_input ... ok
+test agent_run_authorization::tests::authorization_reserves_half_of_data_tmpfs_for_generated_files ... ok
+test agent_run_authorization::tests::authorization_validates_session_workspace_shape ... ok
+test agent_work::tests::confirmation_contract_has_two_exact_arguments_and_continue_turn ... ok
+test agent_work::tests::confirmation_provider_forwards_owned_identity_without_handling_facts ... ok
+test agent_work::tests::confirmation_provider_rejects_aliases_paths_and_unknown_fields_before_rpc ... ok
+test agent_run_authorization::parity::shared_authorization_corpus ... ok
+test agent_work::tests::first_party_work_contract_continues_and_ordinary_tools_do_not_include_it ... ok
+test agent_work::tests::query_contract_uses_exact_model_arguments_and_keeps_dispatch_digest ... ok
+test agent_messages::tests::message_provider_rejects_fake_success_foreign_response_and_http_failure ... ok
+test agent_work::tests::query_provider_reads_owned_final_work_output_as_untrusted_content ... ok
+test agent_work::tests::confirmation_provider_rejects_wrong_run_notice_attempt_source_and_extra_response_fields ... ok
+test agent_work::tests::query_provider_returns_source_and_admission_without_delivery_facts ... ok
+test agent_work::tests::returns::django_committed_work_return_facts ... ignored, requires API-owned work bindings in a fresh disposable PostgreSQL database
+test agent_work::tests::runtime::confirm_native_return_fenced_commit ... ignored, Django runs the real Core/provider/fenced PostgreSQL confirmation boundary
+test agent_work::tests::runtime::django_production_registration_model_tools ... ignored, executed by Django with real hosted Run start fixtures
+test agent_work::tests::runtime::django_work_commit_boundary ... ignored, executed by Django LiveServerTestCase against its disposable database
+test agent_work::tests::query_provider_rejects_missing_or_foreign_work_output ... ok
+test agent_work::tests::work_provider_preserves_complete_body_refs_and_infers_own_context ... ok
+test agent_work::tests::work_provider_rejects_unknown_identity_recipient_and_invalid_utf8_budget_without_dispatch ... ok
+test agent_work_trigger::tests::mixed_receipt_uses_all_success_event_ids_and_ignores_other_facts ... ok
+test api_model_client::tests::api_model_rate_limit_records_actual_attempts_and_exhaustion ... ok
+test api_model_client::tests::api_model_stream_configuration_failure_stops_after_one_attempt ... ok
+test api_model_client::tests::api_model_stream_recovers_typed_failure_after_reasoning_and_bounds_retries ... ok
+test api_model_client::tests::api_model_stream_retries_interrupted_body_and_replaces_partial_content ... ok
+test api_model_client::tests::exhausted_transport_failure_retains_terminal_identity_without_private_text ... ok
+test api_model_client::tests::hosted_model_errors_preserve_failure_facts_and_reject_malformed_frames ... ok
+test api_model_client::tests::model_response_preserves_reasoning_content ... ok
+test api_model_client::tests::model_response_rejects_malformed_tool_arguments_before_commit ... ok
+test api_model_client::tests::model_response_rejects_reasoning_field_aliases_and_wrong_types ... ok
+test agent_work::tests::query_provider_rejects_forged_identity_incoherent_state_and_extra_arguments ... ok
+test api_model_client::tests::model_run_wire_body_accepts_output_limit_below_model_capability ... ok
+test api_model_client::tests::model_run_wire_body_contains_only_the_prepared_prompt_contract ... ok
+test api_model_client::tests::model_run_wire_body_rejects_output_limit_above_model_capability ... ok
+test api_model_client::tests::sse_decoder_rejects_invalid_utf8_and_incomplete_tail ... ok
+test api_model_client::tests::sse_decoder_splits_multiple_frames_in_one_chunk_and_drops_empty ... ok
+test api_model_client::tests::sse_decoder_tolerates_chunk_boundaries_cutting_multibyte_utf8 ... ok
+test api_model_client::tests::terminal_failure_details_cross_core_conversion_and_reject_corruption ... ok
+test contract::tests::agent_message_context_is_optional_and_bound_to_authorized_session ... ok
+test contract::tests::agent_run_start_accepts_authorization_and_digest ... ok
+test contract::tests::agent_run_start_requires_authorization ... ok
+test contract::tests::agent_run_start_rejects_non_canonical_agent_instructions ... ok
+test contract::tests::agent_run_supplement_contract_is_strict_and_signed ... ok
+test contract::tests::authorization_error_precedence_is_stable ... ok
+test contract::tests::legacy_teardown_refuses_retained_execute_envelopes_before_container_removal ... ok
+test contract::tests::cleanup_uses_only_original_grant_and_cleanup_authority ... ok
+test contract::tests::per_run_start_cannot_admit_a_retained_controller ... ok
+test contract::tests::native_work_context_requires_the_same_coordination_and_authorized_session ... ok
+test contract::tests::retained_start_requires_execute_authority_and_explicit_protocol_version ... ok
+test contract::tests::retained_support_rejects_materialization_mcp_and_hooks_before_dispatch ... ok
+test contract::tests::retained_teardown_accepts_only_cleanup_envelope_and_preserves_explicit_per_run ... ok
+test contract::tests::start_requires_current_environment_authorization_without_legacy_aliases ... ok
+test agent_work::tests::work_provider_rejects_fake_success_foreign_response_and_http_failure ... ok
+test contract::tests::typed_host_initial_input_rejects_unknown_fields_foreign_ids_and_user_tail_actions ... ok
+test contract::tests::step_version_cannot_change_execution_lifecycle_mode ... ok
+test contract::tests::typed_host_initial_input_uses_core_identity_and_canonical_record_origin ... ok
+test contract::tests::typed_user_initial_input_is_required_and_legacy_start_wire_is_rejected ... ok
+test deferred_input_resolver::image_tests::image_reader_rejects_undeclared_and_oversized_captures_before_http ... ok
+test docker_engine::exec::tests::attached_binary_streams_preserve_separation_and_nonzero_exit ... ok
+test docker_engine::exec::tests::attachment_failure_and_unconfirmed_exit_never_become_successful_eof ... ok
+test docker_engine::exec::tests::exec_request_preserves_arguments_environment_and_identity_without_shell_parsing ... ok
+test docker_engine::exec::tests::disconnect_unblocks_readers_without_claiming_remote_cancellation ... ok
+test docker_engine::exec::tests::exec_resolves_only_the_expected_live_container ... ok
+test docker_engine::tests::adoption_requires_every_requested_identity_and_security_field ... ok
+test deferred_input_resolver::image_tests::image_reader_checks_captured_headers_and_actual_bytes ... ok
+test docker_engine::tests::create_limit_defaults_to_two_and_rejects_invalid_values ... ok
+test docker_engine::tests::mount_readonly_omission_is_writable_without_weakening_other_fields ... ok
+test docker_engine::tests::only_an_engine_404_means_missing_container ... ok
+test docker_execution_host::retained_commands::tests::agents_helper_data_digest_matches_the_read_request_receipt ... ok
+test docker_execution_host::retained_commands::tests::cancellation_probe_failure_is_unknown_and_does_not_authorize_a_signal ... ok
+test docker_execution_host::retained_commands::tests::command_identity_survives_controller_reconnect_but_is_scoped_to_run ... ok
+test docker_engine::exec::tests::stdin_eof_and_output_progress_concurrently_beyond_pipe_capacity ... ok
+test docker_execution_host::retained_commands::tests::fast_exit_retains_output_returned_with_the_start_receipt ... ok
+test docker_execution_host::retained_commands::tests::cancellation_targets_only_the_registered_run_task_and_waits_for_confirmation ... ok
+test docker_execution_host::retained_commands::tests::file_helper_delivers_exact_stdin_and_requires_bounded_complete_output ... ok
+test docker_execution_host::retained_commands::tests::foreground_command_is_registered_and_output_is_read_without_destroying_instance ... ok
+test docker_execution_host::retained_commands::tests::helper_lost_data_ack_reads_original_receipt_then_sends_only_first_eof ... ok
+test docker_execution_host::retained_commands::tests::helper_rejects_foreign_original_input_receipts_without_eof_or_rewrite ... ok
+test docker_execution_host::retained_commands::tests::helper_rejects_unconfirmed_eof_receipt_before_querying_output ... ok
+test docker_execution_host::retained_commands::tests::helper_unknown_input_never_rewrites_bytes_or_sends_eof ... ok
+test docker_execution_host::retained_commands::tests::input_capacity_does_not_claim_the_command_never_started ... ok
+test docker_execution_host::retained_commands::tests::lost_start_acknowledgement_is_never_retried_with_another_identity ... ok
+test docker_execution_host::retained_commands::tests::helper_lost_eof_ack_reads_its_receipt_without_closing_twice ... ok
+test docker_execution_host::retained_commands::tests::output_loss_is_not_reported_as_successful_complete_capture ... ok
+test docker_execution_host::retained_commands::tests::recovery_queries_original_task_without_start_or_input ... ok
+test docker_execution_host::retained_commands::tests::recovery_rejects_unknown_foreign_and_missing_output_without_dispatch ... ok
+test docker_execution_host::retained_commands::tests::run_failure_classification_preserves_canonical_history_capacity ... ok
+test docker_execution_host::retained_commands::tests::recovery_observes_running_task_and_preserves_original_output ... ok
+test docker_execution_host::retained_commands::tests::start_rpc_file_helper_preserves_history_capacity_reason ... ok
+test docker_execution_host::retained_commands::tests::start_rpc_history_capacity_is_a_definitive_rejection ... ok
+test docker_execution_host::retained_commands::tests::start_rpc_unknown_errors_remain_indeterminate_without_retry ... ok
+test docker_execution_host::snapshot_capture::tests::cache_requires_all_authoritative_descriptor_fields ... ok
+test docker_execution_host::snapshot_capture::tests::cache_seeds_only_after_success_and_is_bounded_to_one_runner_local_manifest ... ok
+test docker_execution_host::snapshot_capture::tests::conditional_capture_observation_reaches_helper_and_forwards_bound_counters_on_failure ... ok
+test docker_execution_host::retained_commands::tests::same_run_controller_reconstruction_reads_original_task_without_repeating_input ... ok
+test docker_execution_host::snapshot_capture::tests::empty_capture_remains_an_empty_persisted_snapshot_without_a_reuse_baseline ... ok
+test docker_execution_host::snapshot_capture::tests::failed_capture_preserves_nonzero_exit_status_even_without_output ... ok
+test docker_execution_host::snapshot_capture::tests::conditional_capture_observes_zero_spool_for_warm_runner_and_preserves_operation_identity ... ok
+test docker_execution_host::snapshot_capture::tests::full_capture_keeps_exact_v1_bytes_and_rejects_forged_manifest_or_content ... ok
+test docker_execution_host::snapshot_capture::tests::oversized_unknown_and_truncated_capture_responses_are_rejected ... ok
+test docker_execution_host::snapshot_capture::tests::unchanged_receipt_does_not_create_or_write_a_snapshot_spool ... ok
+test docker_execution_host::snapshot_capture::tests::unchanged_receipt_requires_the_current_capture_and_exact_manifest_binding ... ok
+test docker_execution_host::tests::activated_plugin_mount_is_read_only_and_cli_precedes_base_path ... ok
+test docker_execution_host::snapshot_capture::tests::repeated_runner_capture_reuses_only_after_verified_full_capture_and_restore_clears_it ... ok
+test docker_execution_host::tests::adoption_rejects_missing_or_foreign_environment_instance_and_grant_labels ... ok
+test docker_execution_host::tests::active_filesystem_helper_defers_capture_before_collect_or_quiesce ... ok
+test docker_execution_host::tests::agent_memory_scope_does_not_follow_symlinks ... ok
+test docker_execution_host::tests::agent_memory_scope_is_private_stable_and_exactly_mounted ... ok
+test docker_execution_host::tests::agent_process_observation_requires_exact_nonnegative_integer_contract ... ok
+test docker_execution_host::tests::background_agent_processes_defer_capture_and_constructor_without_signals ... ok
+test docker_execution_host::tests::collection_failure_and_panic_release_activity_gate_for_new_helpers ... ok
+test docker_execution_host::tests::command_capture_bounds_retention_and_keeps_failure_evidence ... ok
+test docker_execution_host::tests::container_names_do_not_embed_execution_ids ... ok
+test docker_execution_host::tests::docker_command_output_reader_preserves_all_bytes ... ok
+test docker_execution_host::tests::docker_filesystem_router_rejects_unknown_uri_scheme ... ok
+test docker_execution_host::tests::docker_image_digest_parser_accepts_only_exact_lowercase_sha256 ... ok
+test docker_execution_host::tests::docker_timeout_uses_coreutils_seconds ... ok
+test docker_execution_host::tests::docker_volume_names_reject_mount_option_injection ... ok
+test docker_execution_host::tests::empty_manifest_allows_activated_plugin_absolute_path_read ... ok
+test docker_execution_host::tests::engine_creation_preserves_sandbox_limits_and_mount_isolation ... ok
+test docker_execution_host::retained_commands::tests::complete_output_counts_bytes_beyond_retention_without_growing_the_buffer ... ok
+test docker_execution_host::tests::filesystem_response_budget_rejects_overflow_and_keeps_metadata_bounded ... ok
+test docker_execution_host::tests::helper_failure_with_empty_stderr_still_reports_observed_exit_code ... ok
+test docker_execution_host::tests::helper_frames_round_trip_exactly ... ok
+test docker_execution_host::tests::immutable_snapshot_capture_is_bounded_and_preserves_collected_bytes ... ok
+test docker_execution_host::tests::capture_holds_dispatch_until_complete_then_helper_proceeds_normally ... ok
+test docker_execution_host::tests::mcp_exec_is_bound_to_the_agent_run_container ... ok
+test docker_execution_host::tests::oci_runtime_rejects_unknown_empty_and_whitespace_values ... ok
+test docker_execution_host::tests::oci_runtime_runc_maps_to_oci_container_and_docker_runc ... ok
+test docker_execution_host::tests::oci_runtime_runsc_maps_to_gvisor_and_docker_runsc ... ok
+test docker_execution_host::tests::policy_summary_preserves_enforcement_without_backend_identity ... ok
+test docker_execution_host::tests::prepared_recovery_restore_holds_the_verified_immutable_source ... ok
+test docker_execution_host::tests::prepared_snapshot_releases_gate_and_requires_original_epoch_on_acceptance ... ok
+test docker_execution_host::tests::read_root_preserves_protected_input_guards ... ok
+test docker_execution_host::tests::read_root_system_catalog_is_not_parent_namespace_grant ... ok
+test docker_execution_host::tests::read_root_workspace_accepts_only_directory_listing ... ok
+test docker_execution_host::tests::real_docker_checkpoint_recovery_releases_only_confirmed_old_residency_and_restores_one_slot ... ignored, requires explicitly isolated Postgres, dedicated Docker volumes and an execution_agent image
+test docker_execution_host::tests::rebuilt_constructor_and_restore_defer_while_existing_helper_is_active ... ok
+test docker_execution_host::tests::rebuilt_runner_shares_activity_for_the_same_execution ... ok
+test docker_execution_host::tests::recovery_session_resolution_preserves_advanced_completion_without_download ... ok
+test docker_execution_host::tests::recovery_snapshot_activity_defers_without_reusing_old_witness_or_retrying ... ok
+test docker_execution_host::tests::recovery_snapshot_collection_error_still_fails_and_clears_witness ... ok
+test docker_execution_host::tests::filesystem_read_response_preserves_large_binary_bytes ... ok
+test docker_execution_host::tests::resident_inventory_counts_declared_limits_and_rejects_unknown_managed_resources ... ok
+test docker_execution_host::tests::retained_commands_reject_unsupported_policy_before_controller_or_rpc_access ... ok
+test docker_execution_host::tests::retained_container_payload_keeps_origin_labels_and_sentinel_after_takeover ... ok
+test docker_execution_host::tests::retained_container_starts_supervisor_with_isolated_bounded_control_and_output ... ok
+test docker_execution_host::tests::recovery_snapshot_http_lifecycle_is_safe_inside_async_safe_point ... ok
+test docker_execution_host::tests::retained_hot_workspace_uses_live_files_and_recovery_capture_is_explicitly_unavailable ... ok
+test docker_execution_host::tests::retained_old_dispatch_and_container_removal_are_rejected_before_io ... ok
+test docker_execution_host::tests::retained_profile_preserves_configuration_without_controller_identity ... ok
+test docker_execution_host::tests::retained_terminal_collection_defers_without_quiescing_environment_tasks ... ok
+test docker_execution_host::tests::snapshot_descriptor_match_requires_every_frozen_field ... ok
+test docker_execution_host::tests::snapshot_protection_observations_count_actual_spool_bytes_on_success_and_failure ... ok
+test docker_execution_host::tests::snapshot_upload_reads_captured_bytes_after_live_workspace_changes ... ok
+test docker_execution_host::tests::terminal_collection_returns_pending_instead_of_waiting_for_active_helper ... ok
+test docker_execution_host::tests::workspace_generation_rpc_docker_42_query_benchmark ... ignored, requires CENTAERIS_GENERATION_BENCH_CONTAINER with an idle workspace watcher
+test docker_execution_host::tests::slow_snapshot_upload_does_not_hold_workspace_dispatch_gate ... ok
+test docker_execution_host::tests::workspace_generation_rpc_failure_clears_process_and_next_query_rebuilds ... ok
+test docker_execution_host::tests::maintenance_capture_excludes_activity_without_relocking_for_internal_helper ... ok
+test docker_execution_host::tests::workspace_sentinel_uses_only_durable_execution_identity ... ok
+test docker_execution_host::tests::workspace_snapshot_stream_requires_canonical_file_hashes ... ok
+test environment_authorization::tests::controller_binding_rejects_invalid_authority_and_duplicate_fields ... ok
+test environment_authorization::tests::controller_signature_binds_epoch_lease_and_purpose ... ok
+test environment_authorization::tests::shared_python_signature_binds_run_session_digest_and_mode ... ok
+test execution_recovery_coordinator::tests::missing_and_stopped_hosts_allow_only_the_five_reserved_attempts ... ok
+test execution_recovery_coordinator::tests::running_unowned_and_unavailable_hosts_cannot_authorize_replacement ... ok
+test execution_recovery_policy::tests::activity_witness_never_resets_when_a_process_exits ... ok
+test execution_recovery_policy::tests::activity_witness_reuses_only_an_unchanged_quiesced_snapshot_epoch ... ok
+test execution_recovery_policy::tests::advances_checkpoint_past_durable_unexecuted_receipt ... ok
+test execution_recovery_policy::tests::capture_rejects_foreign_host_even_at_the_same_epoch ... ok
+test execution_recovery_policy::tests::completed_read_activity_releases_capture_without_changing_mutation_epoch ... ok
+test execution_recovery_policy::tests::dispatch_during_snapshot_collection_rejects_capture ... ok
+test execution_recovery_policy::tests::equal_epoch_from_a_replacement_host_instance_is_rejected ... ok
+test execution_recovery_policy::tests::executed_false_does_not_override_indeterminate_or_post_dispatch_phase ... ok
+test execution_recovery_policy::tests::generation_only_snapshot_is_not_quiescence_evidence ... ok
+test execution_recovery_policy::tests::persistent_extension_dispatch_defers_capture_across_rebuilt_witnesses ... ok
+test execution_recovery_policy::tests::rejects_any_suffix_other_than_one_closed_bash_receipt ... ok
+test execution_recovery_policy::tests::rejects_dispatch_started_indeterminate_io_unknown_and_unsafe_ledger ... ok
+test execution_recovery_policy::tests::rejects_missing_or_true_executed_receipt_flag ... ok
+test execution_recovery_policy::tests::rejects_stale_or_untrusted_workspace_evidence ... ok
+test failure_diagnostics::tests::diagnostics_classify_without_copying_dynamic_error_content ... ok
+test failure_diagnostics::tests::diagnostics_preserve_success_and_original_failure ... ok
+test docker_execution_host::tests::workspace_generation_rpc_reuses_one_process_for_42_queries_with_warm_metrics ... ok
+test file_mutation_commit::tests::mutation_commit_accepts_canonical_edit_tool_name ... ok
+test file_mutation_commit::tests::mutation_commit_accepts_canonical_write_tool_name ... ok
+test file_mutation_commit::tests::mutation_commit_accepts_only_canonical_agent_memory_files ... ok
+test file_mutation_commit::tests::mutation_commit_accepts_workspace_relative_display_path ... ok
+test file_mutation_commit::tests::mutation_commit_is_durable_idempotent_and_prefix_bound ... ok
+test file_mutation_commit::tests::mutation_commit_rejects_banana_and_empty_tool_name ... ok
+test http::agent_runs::cleanup_receipt_http_tests::receipt_query_rejects_unsupported_schema_and_unknown_fields_before_storage ... ok
+test http::agent_runs::cleanup_receipt_http_tests::retained_step_response_matches_the_worker_version ... ok
+test http::agent_runs::retained_cleanup::tests::asynchronous_endrun_requires_positive_query_and_preserves_environment_tasks ... ok
+test file_mutation_commit::tests::mutation_commit_rejects_parent_traversal_and_non_workspace_absolute_paths ... ok
+test http::agent_runs::retained_cleanup::tests::maximum_controller_identity_still_has_a_bounded_cleanup_operation ... ok
+test http::agent_runs::retained_cleanup::tests::missing_or_extra_run_task_and_wrong_query_identity_are_not_cleanup_success ... ok
+test http::agent_runs::retained_cleanup::tests::no_run_tasks_and_live_environment_tasks_are_successful_run_cleanup ... ok
+test http::agent_runs::retained_cleanup::tests::unknown_or_accepted_without_cleanup_proof_remains_pending ... ok
+test http::environment_retirement::tests::lost_delete_ack_is_resolved_by_exact_absence ... ok
+test http::environment_retirement::tests::run_token_never_confers_maintenance_authority ... ok
+test http::environment_retirement::tests::unobservable_or_foreign_instance_is_never_success_or_removed ... ok
+test job_protocol::tests::heartbeat_storage_outage_does_not_claim_definite_lease_loss ... ok
+test job_protocol::tests::protocol_refs_and_reasons_are_bounded ... ok
+test job_protocol::tests::runtime_job_claim_requires_exact_python_worker_kind ... ok
+test job_protocol::tests::runtime_job_failure_requires_explicit_retryability ... ok
+test job_protocol::tests::runtime_job_schedule_requires_canonical_session_identity ... ok
+test job_protocol::tests::runtime_job_outbox_ack_requires_generation ... ok
+test job_protocol::tests::runtime_job_wait_contract_is_exact_bounded_and_v1 ... ok
+test job_protocol::tests::runtime_job_yield_contract_is_exact_and_bounded ... ok
+test job_protocol::tests::work_return_job_uses_the_python_worker_claim_and_wait_contract ... ok
+test lifecycle_hooks::tests::hook_audit_event_contains_no_model_or_process_payload ... ok
+test mcp::tests::agent_run_preparation_loads_static_contract_without_credentials_or_network ... ok
+test lifecycle_hooks::tests::hook_catalog_projects_only_safe_static_fields ... ok
+test mcp::tests::connector_api_failure_rejects_cached_provider_without_fallback ... ok
+test mcp::tests::connector_cached_binding_change_does_not_call_or_reconnect ... ok
+test mcp::tests::connector_dispatch_rejects_binding_changed_after_connect ... ok
+test mcp::tests::connector_cached_calls_recheck_and_reject_revocation ... ok
+test mcp::tests::connector_initialization_revocation_blocks_first_and_queued_execute ... ok
+test mcp::tests::connector_initialization_revocation_blocks_first_and_queued_error_info ... ok
+test mcp::tests::connector_preserves_structured_provider_error ... ok
+test mcp::tests::connector_uses_current_authorization_api ... ok
+test mcp::tests::connector_without_bearer_and_stdio_still_check_each_dispatch ... ok
+test mcp::tests::credential_protocol_is_strict_and_secret_safe ... ok
+test mcp::tests::connector_invalid_authorization_never_calls_provider ... ok
+test mcp::tests::python_connector_interoperability ... ignored, launched by Django LiveServerTestCase with a synthetic test database
+test mcp::tests::workspace_catalog_reuses_frozen_package_and_core_declaration ... ok
+test native_consumption_tests::create_native_input ... ignored, invoked by the API native consume gate
+test native_consumption_tests::native_consumption_fenced_record ... ignored, requires the API's migrated disposable database and committed admission
+test native_consumption_tests::native_consumption_production_server ... ignored, requires the API live server and its migrated disposable database
+test observations::tests::protection_context_attributes_runtime_and_helper_records_without_payloads ... ok
+test observations::tests::protection_download_reports_failed_read_time_without_recording_payloads ... ok
+test observations::tests::protection_forwarding_rejects_payloads_foreign_operations_and_unmeasured_values ... ok
+test observations::tests::protection_missing_helper_counters_are_reported_without_forwarding_diagnostics ... ok
+test observations::tests::protection_opt_out_keeps_io_and_errors_without_records_or_helper_environment ... ok
+test observations::tests::protection_read_and_write_measurements_preserve_partial_io ... ok
+test observations::tests::timings_preserve_results_and_routes_have_bounded_cardinality ... ok
+test platform_materials::tests::material_registry_requires_the_complete_first_party_surface ... ok
+test platform_materials::tests::python_http_interoperability ... ignored, scripts/workspace/platform-mcp-client-gate.py owns the real API and isolated PostgreSQL fixture
+test postgres_store::cleanup_receipts::tests::allocation_is_an_exclusive_identity_or_proven_absence_not_an_unknown_alias ... ok
+test postgres_store::integration_tests::checkpoint_requests::postgres_direct_store_validates_checkpoint_requests_before_transactions ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::cleanup_migration_tests::postgres_cleanup_migration_enforces_complete_exclusive_and_unique_receipts ... ignored, requires destructive gate-owned disposable Postgres database
+test postgres_store::integration_tests::cleanup_migration_tests::postgres_cleanup_migration_fresh_store_creates_receipt_table ... ignored, requires destructive gate-owned disposable Postgres database
+test postgres_store::integration_tests::cleanup_migration_tests::postgres_cleanup_migration_preserves_allocations_resources_and_receipts_on_reopen ... ignored, requires destructive gate-owned disposable Postgres database
+test postgres_store::integration_tests::cleanup_migration_tests::postgres_cleanup_migration_rejects_invalid_legacy_schema_without_partial_upgrade ... ignored, requires destructive gate-owned disposable Postgres database
+test postgres_store::integration_tests::cold_append_fault_tests::postgres_cold_append_rejects_corrupt_middle_content_and_retries_without_partial_cache ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::cold_append_fault_tests::postgres_cold_append_transaction_failure_discards_rebuilt_cache_before_retry ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::cold_append_fault_tests::postgres_cold_append_validates_middle_page_ownership_sequences_and_missing_content ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::cold_append_fault_tests::postgres_fresh_logger_failure_and_cancel_handlers_rebuild_bounded_history ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::cold_append_fence_tests::postgres_append_waiting_for_job_lock_rechecks_database_time_after_lock ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::cold_append_fence_tests::postgres_cold_append_rechecks_owner_and_expiry_after_history_before_commit ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::cold_append_lease_tests::postgres_cold_append_history_barrier_does_not_block_lease_renewal ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::cold_append_tests::cold_append_control_records_follow_existing_core_schema ... ok
+test postgres_store::integration_tests::cold_append_tests::cold_append_control_records_restore_distinct_phase_turns ... ok
+test postgres_store::integration_tests::cold_append_tests::postgres_cold_append_bounds_overlapping_model_observations ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::cold_append_tests::postgres_cold_append_pressure_at_one_hundred_five_hundred_and_one_thousand_requests ... ignored, requires separately scheduled destructive Postgres history pressure test
+test postgres_store::integration_tests::execution_instance_tests::postgres_execution_instance_binding_is_durable_and_rejects_reassignment ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::execution_instance_tests::postgres_instance_forward_migration_preserves_reservations_and_rejects_bad_constraints ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::hosted_execution_capacity_is_shared_across_replicas_and_released_on_yield ... ignored, requires destructive dedicated Postgres test database and default execution limits
+test postgres_store::integration_tests::lease_renewal_tests::postgres_worker_renewal_cannot_revive_expired_lease_with_old_client_clock ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::lease_renewal_tests::postgres_worker_renewal_lock_timeout_is_unavailable_without_altering_authority ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::lease_renewal_tests::postgres_worker_renewal_rechecks_expiry_after_waiting_for_job_lock ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::lease_renewal_tests::postgres_worker_renewal_uses_database_time_despite_future_client_clock ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::owned_database::disposable_database_requires_exact_name_marker_owner_and_unpredictable_identity ... ok
+test postgres_store::integration_tests::postgres_checkpoint_profile_reconcile_waiters ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_control_and_listener_connections_do_not_consume_the_ordinary_pool ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_expired_lease_budget_persists_backoff_fencing_and_isolation ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_expired_lease_reclaim_pages_in_expiry_and_job_order_without_replay ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_expired_lease_reclaim_skips_another_workers_locked_job ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_fenced_rewrite_tombstones_completed_dispatch_request ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_hosted_worker_reclaim_changes_claim_identity ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_lease_budget_forward_migration_preserves_published_job_facts ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_model_request_batch_deduplicates_and_hydrates_observations ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_model_request_cold_recovery_preserves_snapshot ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_new_user_turn_admission_commits_closure_and_run_atomically ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_new_user_turn_after_unpaired_tool_call_fails_admission ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_outbox_late_waiters_recover_after_ack_and_restart_across_pages ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_outbox_reconcile_does_not_replay_acknowledged_history ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_outbox_unacknowledged_delivery_survives_restart_and_duplicate_ack ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_outbox_wake_during_active_waiter_survives_yield ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_pre_admission_cancellation_is_durable_fenced_and_history_free ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_runtime_job_wait_is_notified_and_closes_lost_wakeups ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_runtime_job_yield_requeues_same_job_without_queued_outbox_and_fences_old_owner ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_runtime_store_clones_reuse_one_short_lived_connection ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_runtime_store_discards_failed_and_panicked_leases_without_replay ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_runtime_store_persists_core_state_and_claims_jobs_once ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_runtime_store_pool_can_drop_inside_tokio_runtime ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_runtime_store_pool_checkout_is_bounded ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_runtime_store_recovery_pages_preserve_bytes_and_fixed_watermark ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_runtime_store_rejects_schema_drift ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_runtime_store_replaces_closed_idle_connection_before_operation ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_runtime_store_validates_waiter_owner_index_on_reopen ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_same_worker_reclaim_fences_old_writes_and_result_transaction ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_session_terminal_append_fences_reclaimed_lease_owner ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_subagent_projection_uses_core_durable_job_binding ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_transcript_concurrent_duplicate_commit_is_idempotent ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_transcript_generation_rotation_switches_pointer_without_deleting_old_rows ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_transcript_old_block_encoding_generation_is_invalidated_and_reinitialized ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_state ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_turn_supplement_queue_is_lease_fenced_and_cancel_closes_admission ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::postgres_worker_cancel_checks_claim_but_user_cancel_targets_job ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::recovery_orchestration_releases_capacity_before_followup_store_work ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::residency_tests::postgres_instance_allocation_precedes_create_and_unknown_creation_keeps_budget ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::residency_tests::postgres_preexisting_residents_are_charged_and_unknown_tenants_block_admission ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::residency_tests::postgres_resident_checkpoint_recovery_retires_old_execution_before_single_slot_restore ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::residency_tests::postgres_resident_concurrent_creation_cannot_exceed_last_slot ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::residency_tests::postgres_resident_declared_profile_waits_for_capacity_without_creation ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::residency_tests::postgres_resident_exact_recovery_retirement_fences_old_worker_and_preserves_replacement ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::residency_tests::postgres_resident_forward_migration_preserves_reclaim_budget_and_rejects_bad_constraints ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::residency_tests::postgres_resident_late_owner_cannot_remove_a_reclaimed_sandbox ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::residency_tests::postgres_resident_legal_question_and_runtime_job_waits_reuse_their_live_execution ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::residency_tests::postgres_resident_new_daemon_identity_does_not_reset_tenant_or_global_budget ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::residency_tests::postgres_resident_recovery_append_reuses_one_pool_connection_before_create ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::residency_tests::postgres_resident_recovery_attempt_is_durable_before_create_with_async_connection ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::residency_tests::postgres_resident_recovery_removal_failure_or_unknown_inventory_keeps_charge_and_blocks_create ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::residency_tests::postgres_resident_removal_serializes_lease_takeover_until_physical_absence ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::residency_tests::postgres_resident_restore_pins_owner_until_physical_completion_and_rejects_stale_dispatch ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::residency_tests::postgres_resident_stale_owner_and_terminal_run_cannot_create ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::residency_tests::postgres_resident_unavailable_or_corrupt_restore_source_preserves_old_execution ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::residency_tests::postgres_resident_unknown_creation_outcome_keeps_charge_and_adopts_after_restart ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::residency_tests::postgres_resident_waits_consume_host_and_tenant_resources_until_confirmed_removal ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::residency_tests::postgres_shipped_resource_profile_allows_serial_child_progress_after_confirmed_parent_release ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::retained_instance_tests::allocation_mode_tests::postgres_legacy_admission_rejection_preserves_single_retained_resource_debit ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::retained_instance_tests::allocation_mode_tests::postgres_legacy_admission_unknown_docker_result_keeps_its_resource_debit ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::retained_instance_tests::allocation_mode_tests::postgres_legacy_binding_cannot_add_writer_to_retained_environment ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::retained_instance_tests::allocation_mode_tests::postgres_legacy_binding_preserves_per_run_replay_and_new_execution_behavior ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::retained_instance_tests::allocation_mode_tests::postgres_legacy_binding_reenters_normal_admission_without_self_deadlock ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::retained_instance_tests::allocation_mode_tests::postgres_legacy_binding_waits_for_in_flight_retained_admission_before_checking_mode ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::retained_instance_tests::cleanup_authority_tests::postgres_cleanup_authority_accepts_bound_pre_admission_failure_and_rejects_reexecution ... ignored, requires owned disposable PostgreSQL cleanup database
+test postgres_store::integration_tests::retained_instance_tests::cleanup_authority_tests::postgres_cleanup_authority_accepts_pre_admission_cancellation_but_not_status_only_failure ... ignored, requires owned disposable PostgreSQL cleanup database
+test postgres_store::integration_tests::retained_instance_tests::cleanup_authority_tests::postgres_cleanup_authority_uses_core_terminal_and_allows_revoked_membership_without_execute ... ignored, requires owned disposable PostgreSQL cleanup database
+test postgres_store::integration_tests::retained_instance_tests::cleanup_receipt_tests::postgres_cleanup_cancelled_unallocated_run_checks_existing_environment_anchor_without_reassignment ... ignored, requires owned disposable PostgreSQL cleanup database
+test postgres_store::integration_tests::retained_instance_tests::cleanup_receipt_tests::postgres_cleanup_preflight_pins_authority_before_other_terminal_side_effects ... ignored, requires owned disposable PostgreSQL cleanup database
+test postgres_store::integration_tests::retained_instance_tests::cleanup_receipt_tests::postgres_cleanup_receipt_proves_no_allocation_for_cancel_and_pre_admission_core_failure ... ignored, requires owned disposable PostgreSQL cleanup database
+test postgres_store::integration_tests::retained_instance_tests::cleanup_receipt_tests::postgres_cleanup_receipt_rejects_historical_execution_unknown_inventory_and_unconfirmed_tasks ... ignored, requires owned disposable PostgreSQL cleanup database
+test postgres_store::integration_tests::retained_instance_tests::cleanup_receipt_tests::postgres_cleanup_receipt_replays_after_target_disappears_without_rewriting_fact_epoch ... ignored, requires owned disposable PostgreSQL cleanup database
+test postgres_store::integration_tests::retained_instance_tests::cleanup_receipt_tests::postgres_cleanup_rejects_corrupt_anchor_original_grant_before_task_rpc ... ignored, requires owned disposable PostgreSQL cleanup database
+test postgres_store::integration_tests::retained_instance_tests::cleanup_receipt_tests::postgres_cleanup_zero_history_failure_requires_fenced_receipt_before_never_allocated_cleanup ... ignored, requires owned disposable PostgreSQL cleanup database
+test postgres_store::integration_tests::retained_instance_tests::lease_contention_tests::postgres_retained_query_exhausted_lease_lock_budget_releases_upstream_pins ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::retained_instance_tests::lease_contention_tests::postgres_retained_query_rejects_expiry_after_renewal_row_lock_wait ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::retained_instance_tests::lease_contention_tests::postgres_retained_query_rejects_reclaimed_owner_after_renewal_row_lock_wait ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::retained_instance_tests::lease_contention_tests::postgres_retained_query_waits_for_same_owner_renewal_before_host_operation ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::retained_instance_tests::postgres_retained_admission_rejects_stale_grant_tenant_membership_and_configuration ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::retained_instance_tests::postgres_retained_confirmed_lost_environment_never_cold_creates_for_new_run ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::retained_instance_tests::postgres_retained_core_terminal_rejects_execution_before_status_projection ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::retained_instance_tests::postgres_retained_fact_window_rechecks_epoch_and_job_before_physical_work ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::retained_instance_tests::postgres_retained_migration_preserves_allocation_and_unknown_reservation ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::retained_instance_tests::postgres_retained_migration_rejects_provenance_conflict_atomically ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::retained_instance_tests::postgres_retained_new_run_reuses_origin_and_single_resource_holding ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::retained_instance_tests::postgres_retained_operation_requires_current_association_controller_and_job ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::retained_instance_tests::postgres_retained_physical_guard_pins_authority_and_global_host_admission ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::retained_instance_tests::postgres_retained_unknown_and_legacy_per_run_holding_block_creation ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::retained_instance_tests::postgres_retained_unknown_create_survives_restart_without_second_writer ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::retained_instance_tests::pre_admission_failure_tests::postgres_pre_admission_failed_producer_commits_control_receipt_without_history ... ignored, requires owned disposable PostgreSQL cleanup database
+test postgres_store::integration_tests::retained_instance_tests::pre_admission_failure_tests::postgres_pre_admission_failure_is_fenced_durable_and_blocks_history ... ignored, requires owned disposable PostgreSQL cleanup database
+test postgres_store::integration_tests::retained_instance_tests::pre_admission_failure_tests::postgres_pre_admission_failure_rejects_admitted_or_cancelled_runs ... ignored, requires owned disposable PostgreSQL cleanup database
+test postgres_store::integration_tests::retained_instance_tests::retirement_tests::postgres_retirement_committed_barrier_is_visible_before_physical_mutation ... ignored, requires exclusively owned disposable PostgreSQL
+test postgres_store::integration_tests::retained_instance_tests::retirement_tests::postgres_retirement_confirmed_destroyed_instance_allows_terminal_run_release_receipt ... ignored, requires exclusively owned disposable PostgreSQL
+test postgres_store::integration_tests::retained_instance_tests::retirement_tests::postgres_retirement_forward_migration_preserves_existing_allocation_and_release_facts ... ignored, requires exclusively owned disposable PostgreSQL
+test postgres_store::integration_tests::retained_instance_tests::retirement_tests::postgres_retirement_pending_fences_current_and_new_runs_until_exact_absence ... ignored, requires exclusively owned disposable PostgreSQL
+test postgres_store::integration_tests::retained_instance_tests::retirement_tests::postgres_retirement_pending_other_environment_does_not_block_healthy_run_cleanup ... ignored, requires exclusively owned disposable PostgreSQL
+test postgres_store::integration_tests::retained_instance_tests::retirement_tests::postgres_retirement_rejects_disabled_predicate_history_trigger_on_reopen ... ignored, requires exclusively owned disposable PostgreSQL
+test postgres_store::integration_tests::retained_instance_tests::retirement_tests::postgres_retirement_rejects_stale_epoch_conflicting_identity_and_preserves_history ... ignored, requires exclusively owned disposable PostgreSQL
+test postgres_store::integration_tests::retained_instance_tests::retirement_tests::postgres_retirement_uses_reserved_control_pool_when_ordinary_capacity_is_full ... ignored, requires exclusively owned disposable PostgreSQL
+test postgres_store::integration_tests::snapshot_cas_tests::postgres_snapshot_cas_rejects_stale_writers_and_preserves_concurrent_results ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::sqlite_runtime_store_passes_shared_contract ... ok
+test postgres_store::integration_tests::tool_result_storage_tests::postgres_new_turn_recovers_control_byte_output_from_core_receipt_without_reexecuting ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::tool_result_storage_tests::postgres_tool_result_control_bytes_preserve_receipts_and_allow_run_completion ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::wait_handoff_tests::postgres_completion_delivery_upgrade_preserves_records_and_accepts_core_observation_kind ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::wait_handoff_tests::postgres_completion_delivery_upgrade_rejects_unknown_legacy_constraint_without_changes ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::wait_handoff_tests::postgres_current_schema_rejects_unsupported_versions_and_drift_without_writes ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::wait_handoff_tests::postgres_current_schema_reopen_retains_sealed_wait_handoff ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::wait_handoff_tests::postgres_current_schema_reopens_observations_and_checkpoint_owners ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::wait_handoff_tests::postgres_wait_handoff_attachment_tampering_fails_closed ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::wait_handoff_tests::postgres_wait_handoff_crash_before_commit_preserves_uncovered_ledger ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::wait_handoff_tests::postgres_wait_handoff_duplicate_recovery_uses_one_checkpoint ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::wait_handoff_tests::postgres_wait_handoff_expired_or_reclaimed_lease_publishes_nothing ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::wait_handoff_tests::postgres_wait_handoff_lost_ack_reopens_immutable_snapshot ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::wait_handoff_tests::postgres_wait_handoff_model_anchor_is_reobserved_before_publication ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::integration_tests::wait_handoff_tests::postgres_wait_handoff_source_change_rolls_back_publication ... ignored, requires destructive dedicated Postgres test database
+test postgres_store::resource_commit::tests::critical_resource_commit_rejects_disabled_or_unknown_fsync ... ok
+test postgres_store::resource_commit::tests::critical_resource_transaction_overrides_asynchronous_session_without_changing_default ... ignored, requires the owned disposable PostgreSQL fixture
+test postgres_store::runtime::recovery_hydration_tests::recovery_hydration_branch_and_revisit_preserve_exact_record_bytes ... ok
+test postgres_store::runtime::recovery_hydration_tests::recovery_hydration_rejects_missing_ancestors_cycles_and_foreign_session ... ok
+test postgres_store::runtime::recovery_hydration_tests::recovery_hydration_rejects_missing_changed_or_wrong_kind_content ... ok
+test postgres_store::runtime::recovery_hydration_tests::recovery_hydration_releases_previous_expanded_manifest_working_sets ... ok
+test postgres_store::runtime::recovery_hydration_tests::recovery_manifest_decode_keeps_strict_fields_kind_and_digest_validation ... ok
+test postgres_store::runtime::tests::accepts_failed_agent_run_without_assistant_message ... ok
+test postgres_store::runtime::tests::accepts_workspace_finalization_failure_after_sealed_assistant ... ok
+test postgres_store::runtime::tests::model_observation_manifest_growth_and_validation_through_4095_observations ... ignored, performance/release gate
+test postgres_store::runtime::tests::model_observation_manifest_rejects_malformed_deltas_and_missing_ancestors ... ok
+test postgres_store::runtime::tests::model_request_completion_delivery_storage_round_trips_core_state ... ok
+test postgres_store::runtime::tests::model_request_input_uptake_storage_round_trips_exact_input_ids ... ok
+test postgres_store::runtime::tests::model_request_storage_manifest_round_trips_without_exposing_content ... ok
+test postgres_store::runtime::tests::model_request_storage_rejects_digest_kind_conflicts ... ok
+test postgres_store::runtime::tests::twenty_round_model_request_storage_amplification_is_quantified ... ok
+test postgres_store::schema::tests::runtime_index_ddl_and_validation_contracts_match ... ok
+test postgres_store::schema::tests::transcript_read_model_and_wait_handoff_have_explicit_store_schema ... ok
+test postgres_store::session_payload::tests::hosted_storage_rejects_tampered_query_index ... ok
+test postgres_store::session_payload::tests::hosted_tool_output_round_trips_control_characters_without_failing_the_tool ... ok
+test postgres_store::session_payload::tests::ordinary_failed_tool_wire_keeps_its_exact_content_and_state ... ok
+test postgres_store::session_payload::tests::storage_contract_matches_the_shared_rust_python_corpus ... ok
+test postgres_store::tests::connect_inside_tokio_runtime_returns_error_instead_of_panicking ... ok
+test postgres_store::tests::postgres_connection_defaults_reserve_ten_ordinary_two_control_and_eight_listeners ... ok
+test postgres_store::tests::postgres_operation_panic_inside_tokio_remains_an_error ... ok
+test postgres_store::tests::postgres_operation_stays_on_a_tokio_spawn_blocking_thread ... ok
+test postgres_store::tests::postgres_operation_uses_plain_thread_bridge_for_current_thread_runtime ... ok
+test postgres_store::tests::postgres_store_rejects_unrepresentable_checkout_timeout ... ok
+test postgres_store::tests::synchronous_session_append_inside_tokio_returns_error_instead_of_panicking ... ok
+test postgres_store::transcript::tests::compact_model_request_advances_through_core_envelope_without_hydration ... ok
+test postgres_store::transcript::tests::postgres_transcript_head_recovery_read_interleaves_with_next_commit ... ignored, explicit PostgreSQL catch-up contract against a fresh disposable database
+test postgres_store::transcript::tests::transcript_source_slice_is_bounded_before_projection ... ok
+test postgres_store::transcript::tests::workspace_resume_cursor_uses_one_session_display_stream ... ok
+test recovery_read::tests::bound_run_rejects_foreign_ownership_and_global_sequence ... ok
+test recovery_read::tests::byte_budget_preserves_order_and_resumes_without_loss ... ok
+test recovery_read::tests::inactive_history_still_requires_its_content_and_full_record_validation ... ok
+test recovery_read::tests::missing_positions_and_invalid_lengths_reject ... ok
+test recovery_read::tests::oversized_atomic_record_is_preserved_on_its_own_page ... ok
+test recovery_upload::tests::failed_upload_never_becomes_a_publishable_checkpoint ... ok
+test recovery_upload::tests::model_can_proceed_while_upload_waits_but_tool_fence_waits_for_object ... ok
+test recovery_upload::tests::terminal_exit_drains_worker_even_without_a_completion_safe_point ... ok
+test request_capacity::tests::full_execution_and_listener_lanes_leave_control_available ... ok
+test resident_capacity::tests::configured_resident_limits_cannot_overbook_a_smaller_daemon ... ok
+test retained_tasks::tests::contracts_expose_only_four_strict_model_tools ... ok
+test retained_tasks::tests::forged_tool_identity_and_invalid_task_cursor_never_obtain_authority ... ok
+test retained_tasks::tests::invalid_or_authority_injected_input_never_reaches_port ... ok
+test retained_tasks::tests::list_and_query_hide_run_scoped_control_tasks ... ok
+test retained_tasks::tests::model_can_read_task_identity_and_output_from_tool_content ... ok
+test retained_tasks::tests::next_controller_queries_same_task_and_old_controller_is_rejected ... ok
+test retained_tasks::tests::retired_operation_and_history_refusals_are_actionable_without_becoming_unknown ... ok
+test retained_tasks::tests::start_defaults_are_bounded_and_wrong_reply_cannot_leak_control_identity ... ok
+test retained_tasks::tests::start_replay_has_stable_run_scoped_identity_and_preserves_initial_output ... ok
+test retained_tasks::tests::stop_checks_environment_scope_and_reauthorizes_termination_with_same_fence ... ok
+test retained_tasks::tests::stop_only_terminates_requested_task_and_keeps_incomplete_cleanup_visible ... ok
+test retained_tasks::tests::uncertain_start_is_not_retried_and_raw_host_error_is_hidden ... ok
+test retained_tasks::tests::valid_utf8_status_and_empty_output_keep_exact_cursor_and_loss_flags ... ok
+test runtime_http_tests::runtime_http_body_and_header_rejection_order ... ok
+test runtime_http_tests::runtime_http_error_response_crosses_hyper_with_retry_headers ... ok
+test runtime_http_tests::runtime_http_response_contract ... ok
+test runtime_http_tests::runtime_http_router_contract ... ok
+test runtime_http_tests::runtime_http_timeout_and_disconnect_hold_capacity_until_blocking_work_exits ... ok
+test session_delivery::tests::a_transient_commit_retries_the_same_receipt_without_terminating_the_run ... ok
+test session_delivery::tests::failed_admission_cleans_only_its_provisional_execution_and_preserves_the_primary_error ... ok
+test session_delivery::tests::lease_and_validation_failures_are_never_retried_or_hidden ... ok
+test session_delivery::tests::pending_admission_keeps_its_execution_for_recovery ... ok
+test session_delivery::tests::persistent_outage_is_a_recoverable_delivery_wait_not_a_tool_failure ... ok
+test session_delivery::tests::pool_unavailability_does_not_escape_as_a_core_failure ... ok
+test skill_projection::tests::activated_package_projects_only_skill_metadata_and_model_readable_location ... ok
+test skill_projection::tests::system_memory_skill_is_present_without_plugin_activation ... ok
+test terminal_subagents::tests::active_snapshot_keeps_owned_child_when_other_jobs_finish_between_reads ... ok
+test terminal_subagents::tests::terminal_parent_settles_all_its_turns_and_preserves_other_runs_and_terminal_children ... ok
+test tests::agent_run_step_boundary_catches_panic_without_continuing ... ok
+test tests::agent_run_step_outcome_accepts_only_canonical_waiting_reasons ... ok
+test tests::assistant_message_state_machine_is_sealed_only ... ok
+test tests::assistant_message_state_machine_rejects_cross_turn_identity ... ok
+test tests::assistant_text_projection_carries_output_limit_prefix_into_recovery_request ... ok
+test tests::assistant_text_projection_keeps_undelivered_plain_text_while_retiring_tool_rounds ... ok
+test tests::assistant_text_projection_preserves_final_response_after_tool_round ... ok
+test tests::assistant_text_projection_replaces_current_model_response ... ok
+test tests::assistant_text_projection_retires_committed_tool_round_bodies ... ok
+test tests::attached_files_are_projected_into_the_model_user_message_not_system_events ... ok
+test tests::cancelled_agent_run_before_admission_writes_no_session_records ... ok
+test tests::cancelled_agent_run_persists_partial_answer_before_interruption ... ok
+test tests::capacity_terminal_preserves_resource_reason_without_requiring_a_new_run ... ok
+test tests::cold_instance_restore_keeps_resolution_and_failure_results ... ok
+test tests::committed_live_cleanup_failure_does_not_propagate_past_the_durable_commit ... ok
+test tests::completed_agent_run_skips_whitespace_tool_response ... ok
+test tests::completion_delivery_failures_retain_explicit_code_in_public_failed_event ... ok
+test tests::duplicate_publications_keep_one_final_attachment_in_first_occurrence_order ... ok
+test tests::execution_control_probe_reuses_the_agent_run_scoped_cache ... ok
+test tests::execution_profile_response_uses_exact_runtime_v1_contract ... ok
+test tests::exhausted_stream_failure_stays_terminal_after_core_error_conversion ... ok
+test tests::failed_agent_run_persists_partial_answer_without_internal_error ... ok
+test tests::failed_agent_run_without_model_text_emits_no_assistant_placeholder ... ok
+test tests::helper_failures_keep_rpc_stage_through_public_terminal ... ok
+test tests::hosted_model_configuration_failure_retains_its_code_in_session_history ... ok
+test tests::hosted_model_terminal_detail_survives_into_failure_history ... ok
+test tests::hosted_subagent_claim_budgets_preserve_one_pool_per_session_and_total_three ... ok
+test tests::hosted_subagent_fast_failure_keeps_slow_sibling_alive_until_completion ... ok
+test tests::hosted_subagent_future_retry_does_not_take_a_due_sessions_claim_budget ... ok
+test tests::hosted_subagent_sessions_progress_while_other_session_is_blocked ... ok
+test tests::hosted_worker_selects_only_exact_subagent_jobs_with_active_context ... ok
+test tests::internal_model_catalog_response_uses_exact_v1_envelope ... ok
+test tests::live_instance_attachment_does_not_replace_files_from_an_older_checkpoint ... ok
+test tests::live_overlay_errors_only_degrade_projection ... ok
+test tests::memory_discovery_reaches_the_model_request_without_plugins_or_eager_reads ... ok
+test tests::model_process_phase_is_durable_once_and_tool_round_is_not_an_assistant_message ... ok
+test tests::nonempty_recovery_workspace_uses_exact_session_baseline_without_stage ... ok
+test tests::one_commit_wake_uses_the_maximum_projected_sequence ... ok
+test tests::pending_result_delivery_is_recoverable_without_claiming_tool_or_run_failure ... ok
+test tests::plugin_inspection_accepts_only_exact_upload_staging_paths ... ok
+test tests::plugin_inspection_request_rejects_unknown_fields ... ok
+test tests::plugin_inspection_uses_core_snapshot_and_loads_mcp_contracts ... ok
+test tests::pre_admission_startup_failure_writes_no_session_records ... ok
+test tests::prepared_completion_pending_records_keep_done_reply_without_terminalizing_run ... ok
+test tests::prepared_completion_requires_receipts_before_retrying_workspace_commit ... ok
+test tests::prepared_completion_retries_busy_workspace_commit_without_model_work ... ok
+test tests::provider_poll_resolver_is_fenced_to_its_source_agent_run ... ok
+test tests::provider_usage_safe_point_is_durable_and_idempotent ... ok
+test tests::recovery_capacity_wait_does_not_consume_attempts_and_release_recovers_once ... ok
+test tests::recovery_preparation_commit_failure_prevents_create_and_preserves_replayed_attempts ... ok
+test tests::recovery_preparation_persists_before_create_and_restore_and_counts_failed_create ... ok
+test tests::resumed_knowledge_read_projects_citation_after_pending_receipt ... ok
+test tests::retryable_execution_interruptions_are_classified_before_terminalization ... ok
+test tests::run_completion_checks_every_committed_tool_identity_after_step_bodies_are_released ... ok
+test tests::runtime_bind_address_is_explicit_and_typed ... ok
+test tests::runtime_builds_direct_session_start_and_terminal_records ... ok
+test tests::runtime_http_rejects_oversized_body ... ok
+test tests::runtime_http_times_out_incomplete_headers ... ok
+test tests::runtime_user_admission_uses_authoritative_initial_turn ... ok
+test tests::session_workspace_restore_only_precedes_durable_start ... ok
+test tests::tool_call_only_response_has_no_assistant_record ... ok
+test tests::tool_receipt_keeps_bash_command_on_paired_tool_call ... ok
+test tests::trusted_workspace_generation_skips_42_readonly_bash_snapshots ... ok
+test tests::turn_supplement_http_status_is_typed ... ok
+test tests::unavailable_message_input_is_projected_as_controlled_model_context ... ok
+test tests::unknown_or_unstable_workspace_generation_forces_another_collect ... ok
+test tests::uploaded_checkpoint_reference_before_tool_preserves_replayed_frontier ... ok
+test tests::workspace_finalization_failure_keeps_sealed_assistant_without_duplicate ... ok
+test tests::workspace_skill_summary_is_direct_and_hides_runtime_paths ... ok
+test tests::workspace_uses_core_committed_turn_projection ... ok
+test transcript_capture::tests::transcript_capture_budget_exhaustion_disables_without_rebinding ... ok
+test transcript_capture::tests::transcript_capture_django_contract ... ignored, Django invokes this contract against its migrated disposable PostgreSQL database
+test transcript_capture::tests::transcript_capture_observes_real_core_spill_without_changing_tool_outcome ... ok
+test transcript_capture::tests::transcript_capture_publisher_queues_bursts_within_budget_and_preserves_order ... ok
+test transcript_capture::tests::transcript_capture_rejects_ambiguous_paths_binary_and_invalid_ranges ... ok
+test transcript_capture::tests::transcript_capture_requires_boolean_completion_and_consumes_rejected_bytes ... ok
+test transcript_capture::tests::transcript_capture_second_run_requires_committed_session_sequence ... ignored, explicit PostgreSQL publication contract against a fresh disposable database
+test transcript_capture::tests::transcript_capture_uses_successful_write_bytes_and_event_range_once ... ok
+test transcript_protocol::tests::store_generation_races_map_to_the_public_invalidation_contract ... ok
+test transcript_protocol::wire::tests::error_wire_values_stay_exact ... ok
+test transcript_protocol::wire::tests::page_request_preserves_optional_fields_and_rejects_unknown_names ... ok
+test transcript_protocol::wire::tests::patch_request_requires_generation_and_exact_names ... ok
+test transient_stream::tests::commit_wake_is_an_exact_payload_free_hint ... ok
+test transient_stream::tests::live_flush_is_immediate_then_coalesced_for_75ms ... ok
+test transient_stream::tests::live_meta_is_exact_and_ordered_after_a_committed_sequence ... ok
+test transient_stream::tests::live_open_is_fenced_by_the_durable_session_position ... ok
+test transient_stream::tests::live_script_only_buffers_full_replacements ... ok
+test transient_stream::tests::live_supersession_requires_identity_revision_and_an_older_anchor ... ok
+test transient_stream::tests::redis_keys_share_the_agent_run_hash_tag ... ok
+test transient_stream::tests::redis_reasoning_snapshot_survives_reconnect_and_seals_with_answer ... ignored, requires isolated TEST_REASONING_REDIS_URL Docker service
+test wait_recovery::tests::wait_replay_accepts_committed_child_result_without_resealing ... ok
+test wait_recovery::tests::wait_replay_preserves_unchanged_state_and_rejects_checkpoint_or_history_changes ... ok
+test workspace_archive::tests::actual_tar_zstd_roundtrip_preserves_manifest_order_content_and_executable_bits ... ok
+test workspace_archive::tests::bridges::cross_language_fixture_restores_identical_manifest_and_bodies ... ok
+test mcp::tests::preparation_rejects_aggregate_declarations_before_connections ... ok
+test workspace_archive::tests::bridges::generate_cross_language_archive_fixture ... ignored, explicit cross-language fixture generation
+test workspace_archive::tests::bridges::ordered_body_boundaries_match_independent_sources_and_existing_v1_parser ... ok
+test workspace_archive::tests::bridges::ordered_source_rejects_short_long_wrong_content_and_failed_final_read ... ok
+test workspace_archive::tests::bridges::v1_bridge_rejects_archive_failure_and_destination_failure_after_partial_output ... ok
+test workspace_archive::tests::consumer_must_consume_the_complete_file_and_failure_never_returns_a_summary ... ok
+test workspace_archive::tests::declared_resource_limits_fail_before_consumer_and_compressed_writer_cannot_exceed_budget ... ok
+test workspace_archive::tests::decoder_rejects_links_special_nodes_wrong_order_size_and_mode ... ok
+test workspace_archive::tests::decoder_rejects_truncated_corrupt_and_concatenated_zstd_or_trailing_tar_data ... ok
+test workspace_archive::tests::encoder_propagates_source_and_sink_errors_without_success_metadata ... ok
+test workspace_archive::tests::file_content_hash_short_and_long_sources_are_rejected ... ok
+test workspace_archive::tests::file_count_and_decoder_window_limits_reject_before_any_file_consumer ... ok
+test workspace_archive::tests::bridges::eight_mib_nonseekable_body_transcodes_through_one_compressed_file_to_valid_v1 ... ok
+test workspace_archive::tests::legal_maximum_path_and_exact_resource_limits_roundtrip ... ok
+test workspace_archive::tests::noncanonical_manifest_unknown_fields_and_oversized_long_name_are_rejected ... ok
+test workspace_archive::tests::nonseekable_source_and_sink_make_bounded_progress_without_materializing_a_tar ... ok
+test workspace_archive::tests::shared_manifest_semantics_reject_invalid_paths_order_and_hashes_before_source_open ... ok
+test workspace_tools::tests::artifact_contract_produces_a_typed_publication_fact ... ok
+test workspace_tools::tests::artifact_path_rejects_non_canonical_workspace_paths ... ok
+test workspace_tools::tests::workspace_contracts_are_exact_and_exclude_retired_knowledge_search ... ok
+test workspace_archive::tests::large_generated_source_streams_directly_into_one_compressed_file ... ok
+test docker_execution_host::tests::workspace_generation_rpc_no_reply_or_partial_line_times_out_and_rebuilds ... ok
+test result: ok. 419 passed; 0 failed; 160 ignored; 0 measured; 0 filtered out; finished in 4.50s

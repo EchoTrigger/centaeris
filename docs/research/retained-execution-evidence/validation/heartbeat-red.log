@@ -1,0 +1,60 @@
+test_parallel_worker_preserves_heartbeat_deadline_and_completes_handoff (app_core.test_native_consumption_production.ParallelChildWorkerFixtureTests.test_parallel_worker_preserves_heartbeat_deadline_and_completes_handoff) ... ERROR
+
+======================================================================
+ERROR: test_parallel_worker_preserves_heartbeat_deadline_and_completes_handoff (app_core.test_native_consumption_production.ParallelChildWorkerFixtureTests.test_parallel_worker_preserves_heartbeat_deadline_and_completes_handoff)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "$IMPLEMENTATION\packages\api\app_core\test_native_consumption_production.py", line 641, in test_parallel_worker_preserves_heartbeat_deadline_and_completes_handoff
+    NativeConsumptionProductionTests.execute_parallel_child(
+  File "$IMPLEMENTATION\packages\api\app_core\test_native_consumption_production.py", line 461, in execute_parallel_child
+    worker.run_job_loop(slot, stopped)
+  File "$USER_HOME\AppData\Roaming\uv\python\cpython-3.12.10-windows-x86_64-none\Lib\unittest\mock.py", line 1139, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "$USER_HOME\AppData\Roaming\uv\python\cpython-3.12.10-windows-x86_64-none\Lib\unittest\mock.py", line 1143, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "$USER_HOME\AppData\Roaming\uv\python\cpython-3.12.10-windows-x86_64-none\Lib\unittest\mock.py", line 1204, in _execute_mock_call
+    result = effect(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "$IMPLEMENTATION\packages\api\app_core\test_native_consumption_production.py", line 634, in loop
+    worker.execute_claimed_job(job, owner)
+  File "$USER_HOME\AppData\Roaming\uv\python\cpython-3.12.10-windows-x86_64-none\Lib\unittest\mock.py", line 1139, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "$USER_HOME\AppData\Roaming\uv\python\cpython-3.12.10-windows-x86_64-none\Lib\unittest\mock.py", line 1143, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "$USER_HOME\AppData\Roaming\uv\python\cpython-3.12.10-windows-x86_64-none\Lib\unittest\mock.py", line 1204, in _execute_mock_call
+    result = effect(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "$IMPLEMENTATION\packages\api\app_core\test_native_consumption_production.py", line 436, in execute
+    original_execute(job, owner)
+  File "$USER_HOME\AppData\Roaming\uv\python\cpython-3.12.10-windows-x86_64-none\Lib\unittest\mock.py", line 1139, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "$USER_HOME\AppData\Roaming\uv\python\cpython-3.12.10-windows-x86_64-none\Lib\unittest\mock.py", line 1143, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "$USER_HOME\AppData\Roaming\uv\python\cpython-3.12.10-windows-x86_64-none\Lib\unittest\mock.py", line 1204, in _execute_mock_call
+    result = effect(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "$IMPLEMENTATION\packages\api\app_core\test_native_consumption_production.py", line 628, in execute
+    with worker.lease_heartbeats(claimed["jobId"], lease_owner) as healthy:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "$USER_HOME\AppData\Roaming\uv\python\cpython-3.12.10-windows-x86_64-none\Lib\contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+  File "$IMPLEMENTATION\packages\worker\worker.py", line 331, in lease_heartbeats
+    require_healthy_lease()
+  File "$IMPLEMENTATION\packages\worker\worker.py", line 323, in require_healthy_lease
+    raise state["error"]
+native_consume_worker.RuntimeLeaseLost: agent_run_lifecycle_lease_lost
+
+----------------------------------------------------------------------
+Ran 1 test in 0.030s
+
+FAILED (errors=1)
+Found 1 test(s).
+Skipping setup of unused database(s): default.
+System check identified no issues (0 silenced).
