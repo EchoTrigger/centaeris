@@ -54,5 +54,10 @@
   "postgres_store::integration_tests::retained_instance_tests::cleanup_authority_tests::postgres_cleanup_authority_accepts_bound_pre_admission_failure_and_rejects_reexecution",
   "postgres_store::integration_tests::retained_instance_tests::cleanup_receipt_tests::postgres_cleanup_zero_history_failure_requires_fenced_receipt_before_never_allocated_cleanup",
   "postgres_store::integration_tests::postgres_runtime_store_recovery_pages_preserve_bytes_and_fixed_watermark",
-  "postgres_store::integration_tests::postgres_model_request_cold_recovery_preserves_snapshot"
+  "postgres_store::integration_tests::postgres_model_request_cold_recovery_preserves_snapshot",
+  "postgres_store::integration_tests::cold_append_tests::postgres_cold_append_bounds_overlapping_model_observations",
+  "postgres_store::integration_tests::cold_append_fault_tests::postgres_fresh_logger_failure_and_cancel_handlers_rebuild_bounded_history",
+  "postgres_store::integration_tests::cold_append_fault_tests::postgres_cold_append_rejects_corrupt_middle_content_and_retries_without_partial_cache",
+  "postgres_store::integration_tests::cold_append_fault_tests::postgres_cold_append_transaction_failure_discards_rebuilt_cache_before_retry",
+  "postgres_store::integration_tests::cold_append_fault_tests::postgres_cold_append_validates_middle_page_ownership_sequences_and_missing_content"
 ]

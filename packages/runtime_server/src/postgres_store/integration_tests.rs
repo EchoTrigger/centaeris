@@ -37,6 +37,8 @@ static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 mod checkpoint_requests;
 mod cleanup_migration_tests;
+mod cold_append_fault_tests;
+mod cold_append_tests;
 mod execution_instance_tests;
 mod owned_database;
 mod residency_tests;

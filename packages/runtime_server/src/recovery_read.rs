@@ -5,18 +5,61 @@ use serde_json::Value;
 const HEADER_PAGE_RECORDS: i64 = 64;
 const PAGE_BYTES: usize = 1024 * 1024;
 
+#[derive(Default)]
+pub(crate) struct ReadStats {
+    pub(crate) pages: usize,
+    pub(crate) records: usize,
+    pub(crate) max_encoded_page_bytes: usize,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum Scope<'a> {
     Session(&'a str),
     Run(&'a str),
+    BoundRun {
+        run: &'a str,
+        session: &'a str,
+        workspace: &'a str,
+    },
 }
 
 impl<'a> Scope<'a> {
     fn key(self) -> &'a str {
         match self {
             Self::Session(key) | Self::Run(key) => key,
+            Self::BoundRun { run, .. } => run,
         }
     }
+}
+
+fn validate_run_envelope(
+    wire: &Value,
+    scope: Scope<'_>,
+    id: &str,
+    session: &str,
+    global_sequence: i32,
+    run: &str,
+    workspace: &str,
+) -> Result<(), String> {
+    if wire["eventId"].as_str() != Some(id) || wire["sessionId"].as_str() != Some(session) {
+        return Err("recovery stored envelope identity mismatch".into());
+    }
+    if let Scope::BoundRun {
+        run: expected_run,
+        session: expected_session,
+        workspace: expected_workspace,
+    } = scope
+    {
+        if run != expected_run
+            || session != expected_session
+            || workspace != expected_workspace
+            || wire["agentRunId"].as_str() != Some(expected_run)
+            || wire["sequence"].as_i64() != Some(i64::from(global_sequence))
+        {
+            return Err("recovery stored Run binding mismatch".into());
+        }
+    }
+    Ok(())
 }
 
 fn page_end(after: i32, headers: &[(i32, i32)], budget: usize) -> Result<i32, String> {
@@ -48,19 +91,20 @@ pub(crate) fn visit<C: GenericClient>(
     scope: Scope<'_>,
     upper: i32,
     mut consume: impl FnMut(&mut C, i32, Value) -> Result<(), String>,
-) -> Result<(), String> {
+) -> Result<ReadStats, String> {
     if upper < 0 {
         return Err("recovery upper bound is invalid".into());
     }
     let header_sql = match scope {
         Scope::Session(_) => "SELECT sequence,octet_length(payload::text) FROM app_core_sessionevent WHERE session_id=$1 AND sequence>$2 AND sequence<=$3 ORDER BY sequence LIMIT $4",
-        Scope::Run(_) => "SELECT agent_run_sequence,octet_length(payload::text) FROM app_core_sessionevent WHERE agent_run_id=$1 AND session_level=false AND agent_run_sequence>$2 AND agent_run_sequence<=$3 ORDER BY agent_run_sequence LIMIT $4",
+        Scope::Run(_) | Scope::BoundRun { .. } => "SELECT agent_run_sequence,octet_length(payload::text) FROM app_core_sessionevent WHERE agent_run_id=$1 AND session_level=false AND agent_run_sequence>$2 AND agent_run_sequence<=$3 ORDER BY agent_run_sequence LIMIT $4",
     };
     let body_sql = match scope {
         Scope::Session(_) => "SELECT sequence,payload::text FROM app_core_sessionevent WHERE session_id=$1 AND sequence>$2 AND sequence<=$3 ORDER BY sequence",
-        Scope::Run(_) => r#"SELECT agent_run_sequence,payload::text,"eventId",session_id FROM app_core_sessionevent WHERE agent_run_id=$1 AND session_level=false AND agent_run_sequence>$2 AND agent_run_sequence<=$3 ORDER BY agent_run_sequence"#,
+        Scope::Run(_) | Scope::BoundRun { .. } => r#"SELECT agent_run_sequence,payload::text,"eventId",session_id,sequence,agent_run_id,workspace_id FROM app_core_sessionevent WHERE agent_run_id=$1 AND session_level=false AND agent_run_sequence>$2 AND agent_run_sequence<=$3 ORDER BY agent_run_sequence"#,
     };
     let mut after = 0;
+    let mut stats = ReadStats::default();
     while after < upper {
         let headers = client
             .query(
@@ -82,6 +126,15 @@ pub(crate) fn visit<C: GenericClient>(
         if rows.len() != usize::try_from(end - after).map_err(|_| "recovery page range invalid")? {
             return Err("recovery page changed while reading".into());
         }
+        stats.pages += 1;
+        stats.records += rows.len();
+        stats.max_encoded_page_bytes = stats.max_encoded_page_bytes.max(
+            headers
+                .iter()
+                .filter(|(sequence, _)| *sequence <= end)
+                .map(|(_, bytes)| *bytes as usize)
+                .sum(),
+        );
         for row in rows {
             let sequence = row.get::<_, i32>(0);
             if sequence != after + 1 {
@@ -99,20 +152,24 @@ pub(crate) fn visit<C: GenericClient>(
             let mut wire: Value = serde_json::from_str(&raw)
                 .map_err(|error| format!("decode recovery page wire failed: {error}"))?;
             crate::postgres_store::decode_session_payload(&mut wire)?;
-            if matches!(scope, Scope::Run(_)) {
+            if matches!(scope, Scope::Run(_) | Scope::BoundRun { .. }) {
                 let id = row.get::<_, String>(2);
                 let session = row.get::<_, String>(3);
-                if wire["eventId"].as_str() != Some(id.as_str())
-                    || wire["sessionId"].as_str() != Some(session.as_str())
-                {
-                    return Err("recovery stored envelope identity mismatch".into());
-                }
+                validate_run_envelope(
+                    &wire,
+                    scope,
+                    &id,
+                    &session,
+                    row.get(4),
+                    row.get::<_, String>(5).as_str(),
+                    row.get::<_, String>(6).as_str(),
+                )?;
             }
             consume(client, sequence, wire)?;
             after = sequence;
         }
     }
-    Ok(())
+    Ok(stats)
 }
 
 pub(crate) fn validate_for_replay(
@@ -128,6 +185,41 @@ pub(crate) fn validate_for_replay(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bound_run_rejects_foreign_ownership_and_global_sequence() {
+        let scope = Scope::BoundRun {
+            run: "run",
+            session: "session",
+            workspace: "workspace",
+        };
+        let wire = serde_json::json!({"eventId":"event","sessionId":"session","agentRunId":"run","sequence":17});
+        assert!(
+            validate_run_envelope(&wire, scope, "event", "session", 17, "run", "workspace").is_ok()
+        );
+        for (session, sequence, run, workspace) in [
+            ("foreign", 17, "run", "workspace"),
+            ("session", 18, "run", "workspace"),
+            ("session", 17, "foreign", "workspace"),
+            ("session", 17, "run", "foreign"),
+        ] {
+            assert!(validate_run_envelope(
+                &wire, scope, "event", session, sequence, run, workspace
+            )
+            .is_err());
+        }
+        let mut foreign_wire = wire;
+        foreign_wire["agentRunId"] = serde_json::json!("foreign");
+        assert!(validate_run_envelope(
+            &foreign_wire,
+            scope,
+            "event",
+            "session",
+            17,
+            "run",
+            "workspace"
+        )
+        .is_err());
+    }
     #[test]
     fn inactive_history_still_requires_its_content_and_full_record_validation() {
         let unavailable = validate_for_replay(serde_json::json!({}), |_| {

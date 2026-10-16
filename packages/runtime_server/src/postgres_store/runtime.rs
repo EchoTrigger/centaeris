@@ -853,6 +853,8 @@ pub struct PostgresSessionLog {
     /// Clones share incremental state and serialize append validation for this
     /// AgentRun, while each transaction holds a pooled connection only until commit.
     append_lock: Arc<Mutex<()>>,
+    #[cfg(test)]
+    cold_append_observation: Arc<Mutex<ColdAppendObservation>>,
 }
 
 impl std::fmt::Debug for PostgresSessionLog {
@@ -881,6 +883,35 @@ struct AgentRunAppendState {
     last_assistant_status: Option<String>,
     terminal_seen: bool,
     first_event_type: Option<SessionRecordType>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ColdAppendObservation {
+    pub loads: usize,
+    pub pages: usize,
+    pub records: usize,
+    pub expanded_model_records: usize,
+    pub max_encoded_page_bytes: usize,
+    pub max_expanded_model_records: usize,
+    pub max_expanded_model_bytes: usize,
+}
+
+#[cfg(test)]
+impl ColdAppendObservation {
+    fn observe_expanded<'a>(&mut self, wires: impl IntoIterator<Item = &'a serde_json::Value>) {
+        let mut count = 0;
+        let mut bytes = 0;
+        for wire in wires {
+            if wire["type"] == "model_request_started" {
+                count += 1;
+                bytes += wire["payload"]["observations"].to_string().len();
+            }
+        }
+        self.expanded_model_records += count;
+        self.max_expanded_model_records = self.max_expanded_model_records.max(count);
+        self.max_expanded_model_bytes = self.max_expanded_model_bytes.max(bytes);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1802,6 +1833,8 @@ impl PostgresSessionLog {
             projection_store: None,
             agent_run_state: Arc::new(Mutex::new(HashMap::new())),
             append_lock: Arc::new(Mutex::new(())),
+            #[cfg(test)]
+            cold_append_observation: Arc::new(Mutex::new(ColdAppendObservation::default())),
         }
     }
 
@@ -2398,20 +2431,44 @@ impl PostgresSessionLog {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn cold_append_observation(&self) -> ColdAppendObservation {
+        self.cold_append_observation.lock().unwrap().clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_append_cache(&self, agent_run_id: &str) -> bool {
+        self.agent_run_state
+            .lock()
+            .unwrap()
+            .contains_key(agent_run_id)
+    }
+
     fn load_agent_run_state(
         &self,
         tx: &mut Transaction<'_>,
         agent_run_id: &str,
     ) -> Result<AgentRunAppendState, String> {
         use centaeris_core::session::SessionRecordType as Type;
-        let rows = tx
-            .query(
-                "SELECT payload::text FROM app_core_sessionevent WHERE agent_run_id=$1 AND session_level=false ORDER BY agent_run_sequence",
-                &[&agent_run_id],
-            )
-            .map_err(|error| format!("load session AgentRun state failed: {error}"))?;
+        #[cfg(test)]
+        {
+            let mut probe = self.cold_append_observation.lock().unwrap();
+            let loads = probe.loads + 1;
+            *probe = ColdAppendObservation {
+                loads,
+                ..Default::default()
+            };
+        }
+        let upper_row = tx.query_one(
+            "SELECT COALESCE(MAX(agent_run_sequence),0),COUNT(*) FILTER(WHERE agent_run_sequence IS NULL OR agent_run_sequence<=0) FROM app_core_sessionevent WHERE agent_run_id=$1 AND session_level=false",
+            &[&agent_run_id],
+        ).map_err(|error| format!("load session AgentRun high-water mark failed: {error}"))?;
+        let upper = upper_row.get::<_, i32>(0);
+        if upper_row.get::<_, i64>(1) != 0 {
+            return Err("session record AgentRun sequence is invalid".into());
+        }
         let mut state = AgentRunAppendState {
-            last_sequence: rows.len() as u64,
+            last_sequence: 0,
             projection: SessionProjection::default(),
             seen_event_ids: HashSet::new(),
             open_tool_call_ids: HashMap::new(),
@@ -2430,30 +2487,51 @@ impl PostgresSessionLog {
             terminal_seen: false,
             first_event_type: None,
         };
-        let mut wires = rows
-            .iter()
-            .map(|row| {
-                serde_json::from_str(row.get::<_, String>(0).as_str())
-                    .map_err(|error| format!("decode session AgentRun state failed: {error}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        hydrate_session_wire_values(tx, wires.as_mut_slice())?;
-        let mut events = Vec::with_capacity(rows.len());
-        for value in wires {
-            events.push(
-                parse_wire_record(&value)
-                    .map_err(|error| error.to_string())?
-                    .event,
-            );
+        let mut hydrator = SessionWireHydrator::default();
+        let stats = crate::recovery_read::visit(
+            tx,
+            crate::recovery_read::Scope::BoundRun {
+                run: agent_run_id,
+                session: &self.session_id,
+                workspace: &self.workspace_id,
+            },
+            upper,
+            |client, position, mut wire| {
+                hydrator.hydrate_record(client, &mut wire)?;
+                #[cfg(test)]
+                self.cold_append_observation
+                    .lock()
+                    .unwrap()
+                    .observe_expanded(std::iter::once(&wire));
+                let record = parse_wire_record(&wire).map_err(|error| error.to_string())?;
+                apply_batch_to_state(
+                    &mut state,
+                    self.session_id.as_str(),
+                    std::iter::once(&record.event),
+                )?;
+                state.last_sequence = position as u64;
+                Ok(())
+            },
+        )?;
+        #[cfg(test)]
+        {
+            let mut probe = self.cold_append_observation.lock().unwrap();
+            probe.pages = stats.pages;
+            probe.records = stats.records;
+            probe.max_encoded_page_bytes = stats.max_encoded_page_bytes;
         }
-        apply_batch_to_state(&mut state, self.session_id.as_str(), events.iter())?;
-        if !rows.is_empty() {
+        #[cfg(not(test))]
+        let _ = stats;
+        if upper != 0 {
             if state.first_event_type != Some(Type::AgentRunStarted) {
                 return Err("session record log must start with one agent_run_started".to_string());
             }
             if state.agent_run_started_count != 1 {
                 return Err("session record log must contain one agent_run_started".to_string());
             }
+        }
+        if state.last_sequence != upper as u64 {
+            return Err("session record AgentRun high-water mark is missing".into());
         }
         Ok(state)
     }

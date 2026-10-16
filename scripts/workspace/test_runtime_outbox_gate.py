@@ -53,6 +53,7 @@ class OutboxGateTests(unittest.TestCase):
         self.assertTrue({
             "postgres_store::integration_tests::retained_instance_tests",
             "postgres_store::integration_tests::cleanup_migration_tests",
+            "postgres_store::integration_tests::cold_append_tests::postgres_cold_append_bounds_overlapping_model_observations",
         }.issubset(filters), filters)
 
     def test_database_target_ignores_deployment_settings(self):
