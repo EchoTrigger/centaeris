@@ -76,6 +76,34 @@ pub(crate) fn validate_hosted_native_input(
     Ok(())
 }
 
+// Lock by identity first, then evaluate time after any lock wait. A WHERE
+// predicate evaluated before waiting cannot authorize a later commit.
+fn lock_current_append_lease(
+    tx: &mut Transaction<'_>,
+    session: &str,
+    fence: &RuntimeJobLeaseFence,
+) -> Result<(), String> {
+    let row = tx
+        .query_opt(
+            "SELECT job_id FROM runtime.runtime_jobs WHERE job_id=$1 FOR UPDATE",
+            &[&fence.job_id],
+        )
+        .map_err(|error| {
+            crate::session_delivery::postgres_error("lock runtime job lease fence failed", error)
+        })?;
+    if row.is_none() {
+        return Err(RUNTIME_JOB_LEASE_FENCE_REJECTED.into());
+    }
+    let current: bool = tx.query_one(
+        "SELECT COALESCE(job_kind=$2 AND status='running' AND lease_owner=$3 AND session_id=$4 AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,FALSE) FROM runtime.runtime_jobs WHERE job_id=$1",
+        &[&fence.job_id, &fence.job_kind, &fence.lease_owner, &session],
+    ).map_err(|error| crate::session_delivery::postgres_error("verify locked runtime job lease fence failed", error))?.get(0);
+    if !current {
+        return Err(RUNTIME_JOB_LEASE_FENCE_REJECTED.into());
+    }
+    Ok(())
+}
+
 const AGENT_RUN_CANCEL_REQUESTED_EVENT_SCHEMA: &str = "runtime.agent_run.cancel_requested.v1";
 
 fn is_successful_work_confirmation(event: &centaeris_core::session::SessionLogRecord) -> bool {
@@ -855,6 +883,8 @@ pub struct PostgresSessionLog {
     append_lock: Arc<Mutex<()>>,
     #[cfg(test)]
     cold_append_observation: Arc<Mutex<ColdAppendObservation>>,
+    #[cfg(test)]
+    cold_append_barrier: Arc<Mutex<Option<ColdAppendBarrier>>>,
 }
 
 impl std::fmt::Debug for PostgresSessionLog {
@@ -884,6 +914,9 @@ struct AgentRunAppendState {
     terminal_seen: bool,
     first_event_type: Option<SessionRecordType>,
 }
+
+#[cfg(test)]
+type ColdAppendBarrier = Box<dyn FnOnce(i32) -> Result<(), String> + Send>;
 
 #[cfg(test)]
 #[derive(Clone, Debug, Default)]
@@ -1835,6 +1868,8 @@ impl PostgresSessionLog {
             append_lock: Arc::new(Mutex::new(())),
             #[cfg(test)]
             cold_append_observation: Arc::new(Mutex::new(ColdAppendObservation::default())),
+            #[cfg(test)]
+            cold_append_barrier: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -2095,62 +2130,69 @@ impl PostgresSessionLog {
             super::pre_admission_failure::reject_history_after_failure(&mut tx, agent_run_id)?;
             self.validate_input_binding(&mut tx, agent_run_id)?;
             if let Some(fence) = fence {
-                let lease_is_current = tx
-                    .query_opt(
-                        "SELECT 1 FROM runtime.runtime_jobs WHERE job_id=$1 AND job_kind=$2 AND status='running' AND lease_owner=$3 AND session_id=$4 AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint FOR UPDATE",
-                        &[&fence.job_id, &fence.job_kind, &fence.lease_owner, &self.session_id],
-                    )
-                    .map_err(|error| crate::session_delivery::postgres_error("lock runtime job lease fence failed", error))?
-                    .is_some();
-                if !lease_is_current {
-                    return Err(RUNTIME_JOB_LEASE_FENCE_REJECTED.to_string());
+                // An unlocked precheck avoids cold work for an already stale
+                // owner. Only the post-preparation locked check authorizes commit.
+                let current = tx.query_opt(
+                    "SELECT 1 FROM runtime.runtime_jobs WHERE job_id=$1 AND job_kind=$2 AND status='running' AND lease_owner=$3 AND session_id=$4 AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint",
+                    &[&fence.job_id, &fence.job_kind, &fence.lease_owner, &self.session_id],
+                ).map_err(|error| crate::session_delivery::postgres_error("precheck runtime job lease fence failed", error))?.is_some();
+                if !current {
+                    return Err(RUNTIME_JOB_LEASE_FENCE_REJECTED.into());
                 }
             }
-            if let Some(checkpoint) = checkpoint {
-                if checkpoint.kind != CheckpointKindV1::Recovery
-                    || checkpoint.session_id != self.session_id
-                    || checkpoint.status != "committed"
-                    || checkpoint.done_reason.is_some()
-                {
-                    return Err("recovery checkpoint binding mismatch".to_string());
+            let finalize_authority = |tx: &mut Transaction<'_>| -> Result<(), String> {
+                if let Some(fence) = fence {
+                    lock_current_append_lease(tx, &self.session_id, fence)?;
                 }
-                save_checkpoint(&mut tx, checkpoint)?;
-            }
-            if let Some(handoff) = handoff {
-                let checkpoint = checkpoint.ok_or("wait handoff requires recovery checkpoint")?;
-                let payload = serde_json::from_str::<
-                    centaeris_core::runtime::contracts::RuntimeRecoveryCheckpointV1,
-                >(&checkpoint.payload_json)
-                .map_err(|e| e.to_string())?;
-                handoff.validate(&payload)?;
-                if events.len() == 1 {
-                    crate::wait_recovery::WaitHandoff::validate_reference(
-                        checkpoint,
-                        &events[0].event,
-                    )?;
-                }
-                if payload.agent_run_id != agent_run_id
-                    || checkpoint.turn_id != handoff.wait_checkpoint.turn_id
-                    || events.len() != 1
-                    || events[0].event.event_type != SessionRecordType::CheckpointRef
-                    || events[0].event.payload["checkpointId"].as_str()
-                        != Some(checkpoint.checkpoint_id.as_str())
-                {
-                    return Err("wait handoff Session binding mismatch".into());
-                }
-                let serialized = serde_json::to_string(handoff).map_err(|e| e.to_string())?;
-                let stored: Option<String> = tx.query_one("SELECT wait_handoff_json FROM runtime.checkpoints WHERE checkpoint_id=$1 FOR UPDATE", &[&checkpoint.checkpoint_id]).map_err(|e|e.to_string())?.get(0);
-                match stored {
-                    Some(value) if value != serialized => {
-                        return Err("wait handoff idempotency conflict".into())
+                if let Some(checkpoint) = checkpoint {
+                    if checkpoint.kind != CheckpointKindV1::Recovery
+                        || checkpoint.session_id != self.session_id
+                        || checkpoint.status != "committed"
+                        || checkpoint.done_reason.is_some()
+                    {
+                        return Err("recovery checkpoint binding mismatch".to_string());
                     }
-                    Some(_) => {}
-                    None => {
-                        tx.execute("UPDATE runtime.checkpoints SET wait_handoff_json=$2 WHERE checkpoint_id=$1", &[&checkpoint.checkpoint_id,&serialized]).map_err(|e|e.to_string())?;
+                    save_checkpoint(tx, checkpoint)?;
+                }
+                if let Some(handoff) = handoff {
+                    let checkpoint =
+                        checkpoint.ok_or("wait handoff requires recovery checkpoint")?;
+                    let payload = serde_json::from_str::<
+                        centaeris_core::runtime::contracts::RuntimeRecoveryCheckpointV1,
+                    >(&checkpoint.payload_json)
+                    .map_err(|e| e.to_string())?;
+                    handoff.validate(&payload)?;
+                    if events.len() == 1 {
+                        crate::wait_recovery::WaitHandoff::validate_reference(
+                            checkpoint,
+                            &events[0].event,
+                        )?;
+                    }
+                    if payload.agent_run_id != agent_run_id
+                        || checkpoint.turn_id != handoff.wait_checkpoint.turn_id
+                        || events.len() != 1
+                        || events[0].event.event_type != SessionRecordType::CheckpointRef
+                        || events[0].event.payload["checkpointId"].as_str()
+                            != Some(checkpoint.checkpoint_id.as_str())
+                    {
+                        return Err("wait handoff Session binding mismatch".into());
+                    }
+                    let serialized = serde_json::to_string(handoff).map_err(|e| e.to_string())?;
+                    let stored: Option<String> = tx.query_one("SELECT wait_handoff_json FROM runtime.checkpoints WHERE checkpoint_id=$1 FOR UPDATE", &[&checkpoint.checkpoint_id]).map_err(|e|e.to_string())?.get(0);
+                    match stored {
+                        Some(value) if value != serialized => {
+                            return Err("wait handoff idempotency conflict".into())
+                        }
+                        Some(_) => {}
+                        None => {
+                            tx.execute("UPDATE runtime.checkpoints SET wait_handoff_json=$2 WHERE checkpoint_id=$1", &[&checkpoint.checkpoint_id,&serialized]).map_err(|e|e.to_string())?;
+                        }
                     }
                 }
-            }
+                Ok(())
+            };
             if let Some(receipt) = self.load_idempotent_batch(&mut tx, agent_run_id, events)? {
+                finalize_authority(&mut tx)?;
                 consume_waits_for_terminal_batch(&mut tx, &self.session_id, agent_run_id, events)?;
                 tx.commit().map_err(|error| {
                     crate::session_delivery::postgres_error(
@@ -2159,9 +2201,6 @@ impl PostgresSessionLog {
                     )
                 })?;
                 return Ok(receipt);
-            }
-            if let Some(handoff) = handoff {
-                validate_wait_handoff_source(&mut tx, agent_run_id, handoff)?;
             }
             let mut records_to_append = events.to_vec();
             let tombstoned_event_ids = if let Some(rewrite) = rewrite {
@@ -2238,6 +2277,19 @@ impl PostgresSessionLog {
                 next_session_sequence,
                 observation_state,
             )?;
+            finalize_authority(&mut tx)?;
+            if let Some(handoff) = handoff {
+                validate_wait_handoff_source(&mut tx, agent_run_id, handoff)?;
+            }
+            for (index, item) in records_to_append.iter().enumerate() {
+                if is_successful_work_confirmation(&item.event) {
+                    let start = self
+                        .accepted_start
+                        .as_ref()
+                        .ok_or("work_confirmation_admission_missing")?;
+                    validate_work_confirmation_commit(&mut tx, start, &records_to_append, index)?;
+                }
+            }
             self.insert_session_append(&mut tx, &prepared)?;
             consume_waits_for_terminal_batch(&mut tx, &self.session_id, agent_run_id, events)?;
             let records = prepared.rows.into_iter().map(|row| row.record).collect();
@@ -2444,6 +2496,14 @@ impl PostgresSessionLog {
             .contains_key(agent_run_id)
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_cold_append_barrier(
+        &self,
+        barrier: impl FnOnce(i32) -> Result<(), String> + Send + 'static,
+    ) {
+        *self.cold_append_barrier.lock().unwrap() = Some(Box::new(barrier));
+    }
+
     fn load_agent_run_state(
         &self,
         tx: &mut Transaction<'_>,
@@ -2458,6 +2518,14 @@ impl PostgresSessionLog {
                 loads,
                 ..Default::default()
             };
+        }
+        #[cfg(test)]
+        if let Some(barrier) = self.cold_append_barrier.lock().unwrap().take() {
+            let pid = tx
+                .query_one("SELECT pg_backend_pid()", &[])
+                .map_err(|error| error.to_string())?
+                .get(0);
+            barrier(pid)?;
         }
         let upper_row = tx.query_one(
             "SELECT COALESCE(MAX(agent_run_sequence),0),COUNT(*) FILTER(WHERE agent_run_sequence IS NULL OR agent_run_sequence<=0) FROM app_core_sessionevent WHERE agent_run_id=$1 AND session_level=false",
@@ -2550,15 +2618,8 @@ impl PostgresSessionLog {
         let mut rows = Vec::with_capacity(events.len());
         let mut contents = BTreeMap::<String, ModelObservationContent>::new();
         let mut manifests = BTreeMap::<String, ModelObservationManifest>::new();
-        for (index, item) in events.iter().enumerate() {
+        for item in events {
             let event = &item.event;
-            if is_successful_work_confirmation(event) {
-                let start = self
-                    .accepted_start
-                    .as_ref()
-                    .ok_or("work_confirmation_admission_missing")?;
-                validate_work_confirmation_commit(tx, start, events, index)?;
-            }
             let turn_id = event.turn_id.as_deref().unwrap_or_default();
             if event.session_id != self.session_id
                 || turn_id.trim().is_empty()

@@ -82,6 +82,7 @@ pub(crate) mod controller_authority;
 mod execution_capacity;
 pub(crate) mod execution_instances;
 mod external_context;
+pub(crate) mod lease_renewal;
 pub(crate) mod pre_admission_failure;
 mod reliability;
 pub(crate) mod residency;
@@ -281,6 +282,13 @@ impl PostgresRuntimeStore {
         operation: impl FnOnce(&mut Client) -> Result<T, String> + Send,
     ) -> Result<T, String> {
         run_postgres_blocking(|| self.control_connections.with_client(operation))
+    }
+
+    pub(crate) fn with_execution_control_client_error<T: Send, E: From<String> + Send>(
+        &self,
+        operation: impl FnOnce(&mut Client) -> Result<T, E> + Send,
+    ) -> Result<T, E> {
+        run_postgres_blocking_error(|| self.control_connections.with_client_error(operation))
     }
 
     pub(crate) fn with_listener_client<T: Send>(

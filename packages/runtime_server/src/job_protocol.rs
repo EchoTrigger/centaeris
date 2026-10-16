@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::postgres_store::lease_renewal::WorkerLeaseRenewalError as HeartbeatFailure;
 use crate::postgres_store::PostgresRuntimeStore;
 
 use centaeris_core::session::reliability::{
@@ -232,6 +233,13 @@ struct HeartbeatRequest {
 }
 
 pub(crate) fn heartbeat(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
+    heartbeat_with(body, |request| store.renew_worker_job_lease(request))
+}
+
+fn heartbeat_with(
+    body: &[u8],
+    renew: impl FnOnce(RenewRuntimeJobLeaseRequest) -> Result<(), HeartbeatFailure>,
+) -> ProtocolResult {
     let request: HeartbeatRequest = decode(body)?;
     if request.schema != "runtime.job.heartbeat.v1"
         || !runtime_job_id(&request.job_id)
@@ -240,14 +248,17 @@ pub(crate) fn heartbeat(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolRe
     {
         return Err((400, "job_heartbeat_invalid"));
     }
-    store
-        .renew_runtime_job_lease(RenewRuntimeJobLeaseRequest {
-            job_id: request.job_id,
-            lease_owner: request.lease_owner,
-            heartbeat_at_ms: request.heartbeat_at_ms,
-            lease_ms: request.lease_ms,
-        })
-        .map_err(|_| (409, "job_heartbeat_rejected"))?;
+    renew(RenewRuntimeJobLeaseRequest {
+        job_id: request.job_id,
+        lease_owner: request.lease_owner,
+        heartbeat_at_ms: request.heartbeat_at_ms,
+        lease_ms: request.lease_ms,
+    })
+    .map_err(|error| match error {
+        HeartbeatFailure::FenceRejected => (409, "job_heartbeat_rejected"),
+        HeartbeatFailure::InvalidRequest => (400, "job_heartbeat_invalid"),
+        HeartbeatFailure::Unavailable { .. } => (503, "job_heartbeat_unavailable"),
+    })?;
     Ok(json!({"ok":true}))
 }
 
@@ -744,6 +755,22 @@ fn now_ms() -> Result<i64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn heartbeat_storage_outage_does_not_claim_definite_lease_loss() {
+        let body=serde_json::to_vec(&json!({"schema":"runtime.job.heartbeat.v1","jobId":"agent_run.lifecycle:agent_run_test","leaseOwner":"worker-owner-original","heartbeatAtMs":123,"leaseMs":60000})).unwrap();
+        assert_eq!(
+            heartbeat_with(&body, |_| Err(HeartbeatFailure::Unavailable {
+                stage: "lock",
+                sqlstate: Some("55P03".into())
+            })),
+            Err((503, "job_heartbeat_unavailable"))
+        );
+        assert_eq!(
+            heartbeat_with(&body, |_| Err(HeartbeatFailure::FenceRejected)),
+            Err((409, "job_heartbeat_rejected"))
+        );
+        assert_eq!(heartbeat_with(&body, |_| Ok(())), Ok(json!({"ok":true})));
+    }
 
     #[test]
     fn protocol_refs_and_reasons_are_bounded() {
