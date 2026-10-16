@@ -81,6 +81,24 @@ Run the separate long-work gate against another fresh owned fixture:
 python3 "$TOOLS/run.py" --fixture "$LONG_RUN_FIXTURE" --long-run --acknowledge-tmpfs-loss < /dev/null
 ```
 
+Before the long-work gate, exercise the tool-call/result restart boundary in a
+separate fresh fixture:
+
+```sh
+python3 "$TOOLS/run.py" --fixture "$BOUNDARY_FIXTURE" --boundary-steps 16 \
+  --boundary-timeout-seconds 180 --acknowledge-tmpfs-loss < /dev/null
+```
+
+The opt-in command barrier holds one actual Bash task after its unique file
+write and before its result. The driver requires the committed original call,
+an absent canonical result and a running original task before restarting Runtime.
+It releases the barrier only after the new fence queries that same task and the
+old fence is rejected. This covers a running-task boundary; Core receipt and
+completed-host-result windows have separate focused regressions. It does not
+replace either the 1000-command or 100-use sequence. Independent sequences may
+run concurrently only on independently owned Docker endpoints and databases;
+their source and binary identities must agree.
+
 This starts A's environment background task, writes an actual AGENTS.md and
 workspace file, restarts Runtime, and requests 1000 distinct ordinary commands
 within the next single Run. Automatic AGENTS.md observation remains enabled.

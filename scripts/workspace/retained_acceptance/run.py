@@ -15,6 +15,8 @@ import urllib.request
 import uuid
 from workload import instructions_facts
 from progress import probe_reclaimed_controller, compaction_recovery_proof
+from observe import task_rpc
+import boundary
 
 
 def append_command_evidence(path, sequence, argv, result):
@@ -92,12 +94,25 @@ def should_restart_long_run(sample, previous_restart):
     return True
 
 
+def boundary_goal(steps,nonce,timeout,long_run):
+    if steps is None:return None
+    if long_run:raise ValueError('boundary and1000-command modes are mutually exclusive')
+    return boundary.marker_for(steps,nonce,timeout)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--fixture', required=True, type=Path)
-    parser.add_argument('--long-run',action='store_true',help='separate1000-command same-Run gate; use a fresh fixture')
+    modes=parser.add_mutually_exclusive_group()
+    modes.add_argument('--long-run',action='store_true',help='separate1000-command same-Run gate; use a fresh fixture')
+    modes.add_argument('--boundary-steps',type=int,choices=range(8,33),help='explicit8..32 command running-task restart gate; fresh fixture required')
+    parser.add_argument('--boundary-timeout-seconds',type=int,default=180,choices=range(60,301))
     parser.add_argument('--acknowledge-tmpfs-loss', action='store_true', required=True)
     args = parser.parse_args()
+    if args.boundary_steps is None and args.boundary_timeout_seconds!=180:
+        parser.error('--boundary-timeout-seconds requires --boundary-steps')
+    boundary_marker=boundary_goal(args.boundary_steps,uuid.uuid4().hex,args.boundary_timeout_seconds,args.long_run)
+    boundary_config=boundary.parse_marker(boundary_marker) if boundary_marker else None
     root = args.fixture.resolve(strict=True)
     manifest = json.loads((root / 'manifest.json').read_text())
     binaries=Path(manifest['binaryDirectory'])
@@ -139,6 +154,14 @@ def main():
     def dc(*parts):
         return command(['docker', 'compose', '-f', str(compose), *parts])
 
+    def runtime_state():
+        identity=dc('ps','-q','runtime')
+        if identity.returncode or not identity.stdout.strip():
+            raise RuntimeError('long Run Runtime identity unavailable')
+        result=command(['docker','inspect',identity.stdout.strip(),'--format','{{json .State}}'])
+        if result.returncode:raise RuntimeError('long Run Runtime state unavailable')
+        return json.loads(result.stdout)
+
     def admission(marker, operation, session='new'):
         result_path = evidence / (operation + '.json')
         result = command([sys.executable, str(helpers / 'admit.py'), '--base',
@@ -155,7 +178,7 @@ def main():
                 '--run', admitted['agentRunId'], '--result', str(path)]
         if previous:
             argv += ['--previous', str(previous)]
-        deadline = time.monotonic() + (7200 if args.long_run else 120)
+        deadline = time.monotonic() + (7200 if args.long_run else (args.boundary_timeout_seconds+60 if boundary_config else 120))
         while True:
             result = command(argv)
             if not result.returncode:
@@ -188,13 +211,6 @@ def main():
             if should_restart_long_run(sample,long_restart):
                 if sample['runStatus']=='completed':
                     raise RuntimeError('long Run completed before a real mid-Run restart could be tested')
-                def runtime_state():
-                    identity=dc('ps','-q','runtime')
-                    if identity.returncode or not identity.stdout.strip():
-                        raise RuntimeError('long Run Runtime identity unavailable')
-                    result=command(['docker','inspect',identity.stdout.strip(),'--format','{{json .State}}'])
-                    if result.returncode:raise RuntimeError('long Run Runtime state unavailable')
-                    return json.loads(result.stdout)
                 before=runtime_state()
                 compaction_before={'agentRunId':admitted['agentRunId'],'sessionId':admitted['sessionId'],
                     'sourceRevision':manifest['sourceRevision'],'binarySha256':manifest['binarySha256'],
@@ -252,13 +268,30 @@ def main():
     candidate_image=command(['docker','image','inspect','--format','{{.Id}}',project+'-general:fixed'])
     if candidate_image.returncode:
         raise RuntimeError('candidate tools image identity unavailable')
-    b = admission('ACCEPTANCE_LONG_RUN' if args.long_run else 'ACCEPTANCE_RUN_B', 'acceptance-b-' + uuid.uuid4().hex, a['sessionId'])
+    b = admission(boundary_marker or ('ACCEPTANCE_LONG_RUN' if args.long_run else 'ACCEPTANCE_RUN_B'), 'acceptance-b-' + uuid.uuid4().hex, a['sessionId'])
+    boundary_proof=None
     if args.long_run:
         wait_long_progress(b,path_a)
+    elif boundary_config:
+        def restart_boundary():
+            if dc('restart','runtime').returncode:raise RuntimeError('boundary Runtime restart failed')
+        def release_boundary(container,config):
+            value=boundary.release_token(config)
+            path=boundary.paths(config)[1]
+            # Unique validated hex nonce/call/index only. Noclobber refuses an
+            # existing release file; this is owned fixture control, not a tool.
+            result=command(['docker','exec','--user','0:0',container,'/bin/sh','-c',
+                "set -C; printf '%s' "+value+' > '+path])
+            if result.returncode:raise RuntimeError('boundary release failed; do not automatically retry')
+        def save_boundary(name,value):
+            with (evidence/name).open('x',encoding='utf-8') as stream:json.dump(value,stream,indent=2)
+        boundary_proof=boundary.execute_restart(b,boundary_config,state_a,
+            lambda:boundary.read_state(compose,b,boundary_config,command),runtime_state,restart_boundary,
+            task_rpc,release_boundary,save_boundary,probe_reclaimed_controller)
     state, _ = observed(b, 'observed-b', path_a)
     completed_ordinary=state_a['successfulOrdinaryCommands']+state['successfulOrdinaryCommands']
     history=None
-    for index in range(0 if args.long_run else 98):
+    for index in range(0 if args.long_run or boundary_config else 98):
         marker = 'ACCEPTANCE_HISTORY' if index == 0 else 'ACCEPTANCE_RUN_B'
         admitted = admission(marker, 'acceptance-use-' + str(index) + '-' + uuid.uuid4().hex,
                              a['sessionId'])
@@ -268,7 +301,7 @@ def main():
             history=history_metrics(state)
     marker_proof=None
     automatic_instructions=None
-    uses=2 if args.long_run else 100
+    uses=2 if args.long_run or boundary_config else 100
     if args.long_run:
         facts=state.get('workloadObservation')
         if (not isinstance(facts,dict) or {key:facts.get(key) for key in ('attemptedCommands','completedCommands','distinctCallIds')}
@@ -287,6 +320,17 @@ def main():
         marker_proof={'lines':1000,'bytes':len(markers.stdout.encode()),
             'sha256':hashlib.sha256(markers.stdout.encode()).hexdigest(),'exactSequence':True}
         (evidence/'long-side-effect-proof.json').write_text(json.dumps(marker_proof,indent=2))
+    elif boundary_config:
+        facts=boundary.read_state(compose,b,boundary_config,command)
+        if facts is None or facts['runStatus']!='completed':raise RuntimeError('boundary Run did not complete')
+        boundary.validate_facts(facts,boundary_config,b,complete=True)
+        markers=command(['docker','exec',state['containerId'],'head','-c','4097',boundary.paths(boundary_config)[0]])
+        if markers.returncode or markers.stdout.splitlines()!=['%04d'%i for i in range(boundary_config['steps'])]:
+            raise RuntimeError('boundary side effects missing/duplicated/reordered')
+        boundary_proof['completedSteps']=boundary_config['steps']
+        boundary_proof['originalResult']=next(result for result in facts['results'] if result['callId']==boundary_proof['callId'])
+        boundary_proof['sideEffects']={'lines':boundary_config['steps'],'sha256':hashlib.sha256(markers.stdout.encode()).hexdigest(),'exactSequence':True}
+        (evidence/'boundary-completion-proof.json').write_text(json.dumps(boundary_proof,indent=2))
     elif history is None or completed_ordinary <= 64:
         raise RuntimeError('history pressure or cross-window command evidence missing')
 
@@ -348,6 +392,7 @@ print(json.dumps({'maintenanceReceiptCount':len(receipt),'status':receipt[0][0],
         'maintenanceResponseDiscarded':True,'containerAbsent':True,'remoteCI':'not-evaluated',
         'completedRuns':uses,'failedRuns':0,'historyObservation':history,
         'longRunObservation':state.get('workloadObservation') if args.long_run else None,
+        'boundaryRunObservation':boundary_proof,
         'longRunObservationCount':progress_evidence.count,'longRunRetainedSamples':len(progress_evidence.samples),'longRunRuntimeRestart':long_restart,
         'longRunMaxIndexedRunTasks':progress_evidence.maxima.get('store.indexedRunTasks',0),
         'longRunMetricMaxima':progress_evidence.maxima,

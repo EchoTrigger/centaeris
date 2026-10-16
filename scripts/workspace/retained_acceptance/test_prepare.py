@@ -60,6 +60,7 @@ class PreparationTests(unittest.TestCase):
             compose = json.loads((root / 'result/compose.json').read_text())
             self.assertEqual(compose['services']['runtime']['ports'],['127.0.0.1:19001:9000'])
             self.assertTrue(compose['name'].startswith('retainedaccept'))
+            self.assertIn(str(Path(prepare.__file__).with_name('boundary.py').resolve())+':/harness/boundary.py:ro',compose['services']['model']['volumes'])
 
     def test_catalog_initialization_is_separate_from_read_only_runtime_services(self):
         with tempfile.TemporaryDirectory() as tmp:

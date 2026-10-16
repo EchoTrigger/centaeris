@@ -186,3 +186,11 @@ class CompactedRestartBoundaryTests(unittest.TestCase):
         for changes in ({'requestBound':None},{'lastMainObservation':None}):
             value=self.sample();value['durableCompaction']|=changes
             self.assertFalse(driver.should_restart_long_run(value,None))
+
+class BoundaryDriverOptionsTests(unittest.TestCase):
+    def test_boundary_goal_is_opt_in_and_cannot_mix_with_long(self):
+        marker=driver.boundary_goal(8,'a'*32,180,False)
+        self.assertIn('steps=8 index=4',marker)
+        self.assertIsNone(driver.boundary_goal(None,'a'*32,180,False))
+        with self.assertRaises(ValueError):driver.boundary_goal(8,'a'*32,180,True)
+        with self.assertRaises(ValueError):driver.boundary_goal(33,'a'*32,180,False)

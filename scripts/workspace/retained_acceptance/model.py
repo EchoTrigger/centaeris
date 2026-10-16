@@ -208,6 +208,10 @@ def next_call(request, progress=None):
 
     marker=content_text(messages[last_user])
 
+    if marker.startswith("ACCEPTANCE_BOUNDARY_RUN"):
+        from boundary import next_boundary_call
+        return next_boundary_call(request,marker)
+
     after=messages[last_user+1:]
 
     replies=[message for message in after if message.get("role")=="tool"]
@@ -349,7 +353,14 @@ class Handler(BaseHTTPRequestHandler):
 
             name,arguments=call
 
-            delta={"role":"assistant","tool_calls":[{"index":0,"id":"call-"+uuid.uuid4().hex,"type":"function","function":{"name":name,"arguments":json.dumps(arguments)}}]}
+            identifier="call-"+uuid.uuid4().hex
+            if "acceptance-boundary-" in arguments.get("command",""):
+                from boundary import parse_marker,call_id
+                marker=content_text(next(message for message in reversed(request["messages"]) if message.get("role")=="user"))
+                config=parse_marker(marker)
+                index=int(arguments["command"][-4:])
+                identifier=call_id(config,index)
+            delta={"role":"assistant","tool_calls":[{"index":0,"id":identifier,"type":"function","function":{"name":name,"arguments":json.dumps(arguments)}}]}
 
             reason="tool_calls"
 

@@ -177,7 +177,7 @@ def main():
 
         "redis": {"image":images['redis']['id'], "command":["redis-server","--save","","--appendonly","no","--maxmemory","32mb"], "healthcheck":{"test":["CMD","redis-cli","ping"],"interval":"2s","retries":30}},
 
-        "model": {"image":images['api']['id'], "entrypoint":[], "command":["/app/.venv/bin/python","/harness/model.py"], "volumes":[f"{model}:/harness/model.py:ro"]},
+        "model": {"image":images['api']['id'], "entrypoint":[], "command":["/app/.venv/bin/python","/harness/model.py"], "volumes":[f"{model}:/harness/model.py:ro",f"{Path(__file__).with_name('boundary.py').resolve(strict=True)}:/harness/boundary.py:ro"]},
 
         "api": {"image":images['api']['id'], "env_file":[str(service_envpath)], "entrypoint":[], "working_dir":"/app/packages/api", "command":["/app/.venv/bin/uvicorn","api.asgi:application","--host","0.0.0.0","--port","8000"], "volumes":source_mounts+["storage:/var/lib/centaeris-storage","uploads:/var/lib/centaeris-upload-temp","plugins:/opt/centaeris/plugins:ro"], "ports":[f"127.0.0.1:{args.api_port}:8000"]},
 
