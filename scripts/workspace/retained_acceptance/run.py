@@ -17,6 +17,7 @@ from workload import instructions_facts
 from progress import probe_reclaimed_controller, compaction_recovery_proof
 from observe import task_rpc
 import boundary
+from cross_retry import wait_for_release, load_resume
 
 
 def append_command_evidence(path, sequence, argv, result):
@@ -106,11 +107,15 @@ def main():
     modes=parser.add_mutually_exclusive_group()
     modes.add_argument('--long-run',action='store_true',help='separate1000-command same-Run gate; use a fresh fixture')
     modes.add_argument('--boundary-steps',type=int,choices=range(8,33),help='explicit8..32 command running-task restart gate; fresh fixture required')
+    modes.add_argument('--resume-cross-evidence',type=Path,help='resume only this existing cross-Run fixture; never recreate its instance')
+    parser.add_argument('--expected-container',help='exact managed container required for cross-Run retry')
     parser.add_argument('--boundary-timeout-seconds',type=int,default=180,choices=range(60,301))
     parser.add_argument('--acknowledge-tmpfs-loss', action='store_true', required=True)
     args = parser.parse_args()
     if args.boundary_steps is None and args.boundary_timeout_seconds!=180:
         parser.error('--boundary-timeout-seconds requires --boundary-steps')
+    if bool(args.resume_cross_evidence)!=bool(args.expected_container):
+        parser.error('--resume-cross-evidence and --expected-container are required together')
     boundary_marker=boundary_goal(args.boundary_steps,uuid.uuid4().hex,args.boundary_timeout_seconds,args.long_run)
     boundary_config=boundary.parse_marker(boundary_marker) if boundary_marker else None
     root = args.fixture.resolve(strict=True)
@@ -131,24 +136,38 @@ def main():
     if any(service['labels'].get('centaeris.acceptance.project') != project
            for service in config['services'].values()):
         raise SystemExit('fixture service ownership rejected')
-    inventory = subprocess.run(['docker','ps','-aq','--filter','label=centaeris.managed=true'],
+    inventory = subprocess.run(['docker','ps','-aq','--no-trunc','--filter','label=centaeris.managed=true'],
                                capture_output=True,text=True,check=True)
-    if inventory.stdout.strip():
+    resume=None
+    if args.resume_cross_evidence:
+        resume=load_resume(root,args.resume_cross_evidence,args.expected_container)
+        if inventory.stdout.splitlines()!=[args.expected_container]:
+            raise SystemExit('retry requires exactly the authorized managed container')
+        actual=subprocess.run(['docker','inspect',args.expected_container],capture_output=True,text=True,check=True)
+        rows=json.loads(actual.stdout)
+        if len(rows)!=1 or rows[0]['Id']!=args.expected_container or not rows[0]['State']['Running']:
+            raise SystemExit('exact retry container is not running')
+        labels=rows[0]['Config']['Labels'];old=resume['stateA']
+        if any(labels.get(k)!=v for k,v in {'centaeris.managed':'true',
+                'centaeris.environment_id':old['environmentId'],'centaeris.instance_id':old['instanceId']}.items()):
+            raise SystemExit('exact retry environment/instance labels mismatch')
+    elif inventory.stdout.strip():
         raise SystemExit('managed sandboxes already exist; isolated DB cannot reconcile this host')
     env = dict(line.split('=', 1) for line in (root / 'synthetic.env').read_text().splitlines())
     if (len(env.get('ENVIRONMENT_MAINTENANCE_TOKEN', '').encode()) < 32
             or env['ENVIRONMENT_MAINTENANCE_TOKEN'] == env['INTERNAL_API_TOKEN']):
         raise SystemExit('independent maintenance authority required')
     helpers = Path(__file__).parent
-    evidence = root / ('evidence-' + uuid.uuid4().hex)
-    evidence.mkdir(mode=0o700)
+    evidence = args.resume_cross_evidence.resolve() if resume else root / ('evidence-' + uuid.uuid4().hex)
+    if not resume:evidence.mkdir(mode=0o700)
+    command_log=evidence/('commands-retry-'+uuid.uuid4().hex+'.jsonl' if resume else 'commands.jsonl')
     command_sequence=0
 
     def command(argv):
         nonlocal command_sequence
         result = subprocess.run(argv, capture_output=True, text=True, timeout=180)
         command_sequence+=1
-        append_command_evidence(evidence/'commands.jsonl',command_sequence,argv,result)
+        append_command_evidence(command_log,command_sequence,argv,result)
         return result
 
     def dc(*parts):
@@ -164,6 +183,11 @@ def main():
 
     def admission(marker, operation, session='new'):
         result_path = evidence / (operation + '.json')
+        if resume and result_path.exists():
+            cached=json.loads(result_path.read_text())
+            if cached.get('status')!='accepted' or cached.get('sessionId')!=resume['stateA']['sessionId'] or not cached.get('agentRunId'):
+                raise RuntimeError('cached admission binding mismatch')
+            return cached
         result = command([sys.executable, str(helpers / 'admit.py'), '--base',
             f"http://127.0.0.1:{manifest['apiPort']}", '--seed', str(root / 'seed.json'),
             '--text', marker, '--operation-id', operation, '--session', session,
@@ -178,6 +202,23 @@ def main():
                 '--run', admitted['agentRunId'], '--result', str(path)]
         if previous:
             argv += ['--previous', str(previous)]
+        if not args.long_run and not boundary_config:
+            def status():
+                result=command([sys.executable,str(helpers/'run_status.py'),'--compose',str(compose),
+                    '--run',admitted['agentRunId']])
+                if result.returncode:raise RuntimeError('Run status unavailable; fixture preserved')
+                value=json.loads(next(line for line in reversed(result.stdout.splitlines()) if line.startswith('{')))
+                if value.get('schema')!='retained.acceptance.run.status.v1':
+                    raise RuntimeError('Run status schema rejected')
+                if resume and (value.get('environmentId')!=resume['stateA']['environmentId']
+                        or value.get('instanceId') not in (None,resume['stateA']['instanceId'])):
+                    raise RuntimeError('retry Run changed environment/instance')
+                return value
+            def complete():
+                result=command(argv)
+                if result.returncode:raise RuntimeError('completed Run failed strict physical observation; inspect command evidence')
+                return json.loads(path.read_text()),path
+            return wait_for_release(admitted,status,complete)
         deadline = time.monotonic() + (7200 if args.long_run else (args.boundary_timeout_seconds+60 if boundary_config else 120))
         while True:
             result = command(argv)
@@ -261,14 +302,17 @@ def main():
             raise RuntimeError('long Run did not reuse its committed summary after restart within7200s; fixture preserved')
         raise RuntimeError('long Run progress exceeded7200s; fixture preserved')
 
-    a = admission('ACCEPTANCE_RUN_A', 'acceptance-a-' + uuid.uuid4().hex)
-    state_a, path_a = observed(a, 'observed-a')
-    if dc('restart', 'runtime').returncode:
-        raise RuntimeError('owned Runtime restart failed')
+    if resume:
+        a=resume['a'];state_a=resume['stateA'];path_a=evidence/'observed-a.json'
+    else:
+        a = admission('ACCEPTANCE_RUN_A', 'acceptance-a-' + uuid.uuid4().hex)
+        state_a, path_a = observed(a, 'observed-a')
+        if dc('restart', 'runtime').returncode:
+            raise RuntimeError('owned Runtime restart failed')
     candidate_image=command(['docker','image','inspect','--format','{{.Id}}',project+'-general:fixed'])
     if candidate_image.returncode:
         raise RuntimeError('candidate tools image identity unavailable')
-    b = admission(boundary_marker or ('ACCEPTANCE_LONG_RUN' if args.long_run else 'ACCEPTANCE_RUN_B'), 'acceptance-b-' + uuid.uuid4().hex, a['sessionId'])
+    b = resume['b'] if resume else admission(boundary_marker or ('ACCEPTANCE_LONG_RUN' if args.long_run else 'ACCEPTANCE_RUN_B'), 'acceptance-b-' + uuid.uuid4().hex, a['sessionId'])
     boundary_proof=None
     if args.long_run:
         wait_long_progress(b,path_a)
@@ -288,13 +332,16 @@ def main():
         boundary_proof=boundary.execute_restart(b,boundary_config,state_a,
             lambda:boundary.read_state(compose,b,boundary_config,command),runtime_state,restart_boundary,
             task_rpc,release_boundary,save_boundary,probe_reclaimed_controller)
-    state, _ = observed(b, 'observed-b', path_a)
+    state=resume['stateB'] if resume else observed(b, 'observed-b', path_a)[0]
     completed_ordinary=state_a['successfulOrdinaryCommands']+state['successfulOrdinaryCommands']
     history=None
     for index in range(0 if args.long_run or boundary_config else 98):
         marker = 'ACCEPTANCE_HISTORY' if index == 0 else 'ACCEPTANCE_RUN_B'
-        admitted = admission(marker, 'acceptance-use-' + str(index) + '-' + uuid.uuid4().hex,
-                             a['sessionId'])
+        if resume and index==0:
+            admitted=resume['history']
+        else:
+            operation='acceptance-use-'+str(index)+'-'+(evidence.name.removeprefix('evidence-') if resume else uuid.uuid4().hex)
+            admitted=admission(marker,operation,a['sessionId'])
         state, _ = observed(admitted, 'observed-use-' + str(index), path_a)
         completed_ordinary+=state['successfulOrdinaryCommands']
         if index==0:
@@ -387,6 +434,8 @@ print(json.dumps({'maintenanceReceiptCount':len(receipt),'status':receipt[0][0],
         raise RuntimeError('completed maintenance replay changed result')
     (evidence / 'summary.json').write_text(json.dumps({'sourceRevision':manifest['sourceRevision'],
         'binarySha256':manifest['binarySha256'], 'uses':uses,'physicalChain':'passed',
+        'driverSha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        'resumedCrossRun':bool(resume),'retryCommandEvidence':command_log.name if resume else None,
         'sourceTree':manifest['buildManifest']['sourceTree'],'baseImages':manifest['images'],
         'candidateToolsImageId':candidate_image.stdout.strip(),
         'maintenanceResponseDiscarded':True,'containerAbsent':True,'remoteCI':'not-evaluated',
