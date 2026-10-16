@@ -153,14 +153,7 @@ fn digest(value: &impl Serialize) -> Result<String, String> {
 }
 #[cfg(any(target_os = "linux", test))]
 fn task_identity(fence: &EnvironmentTaskFence, operation_id: &str) -> Result<String, String> {
-    fence.validate_operation_id(operation_id)?;
-    let (_, opaque) = operation_id
-        .split_once(':')
-        .ok_or("task_invalid_operation_id")?;
-    Ok(format!(
-        "task-{}",
-        digest(&(&fence.environment_instance_id, &fence.controller_id, opaque))?
-    ))
+    fence.task_id(operation_id)
 }
 #[cfg(any(target_os = "linux", test))]
 fn input_identity(

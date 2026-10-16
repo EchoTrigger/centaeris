@@ -62,6 +62,21 @@ fn execute_bash(
     args_json: &str,
     runtime_context: &ToolRuntimeContext,
 ) -> Result<LocalToolOutput, LocalToolError> {
+    execute_bash_with_recovery(args_json, runtime_context, false)
+}
+
+pub(super) fn recover_bash(
+    args_json: &str,
+    runtime_context: &ToolRuntimeContext,
+) -> Result<LocalToolOutput, LocalToolError> {
+    execute_bash_with_recovery(args_json, runtime_context, true)
+}
+
+fn execute_bash_with_recovery(
+    args_json: &str,
+    runtime_context: &ToolRuntimeContext,
+    recovery: bool,
+) -> Result<LocalToolOutput, LocalToolError> {
     let args = parse_tool_args("bash", args_json)?;
     validate_bash_args(&args)?;
     let command = extract_string_arg(&args, &["command"])
@@ -69,12 +84,56 @@ fn execute_bash(
     let binding = runtime_context.execution_host_binding()?;
     let timeout_ms = bash_timeout_ms(&args)?;
     let (program, program_args, bash_dialect) = bash_program_and_args(command.as_str());
-    let execution = match binding.run_command(
-        program,
-        program_args,
-        std::collections::HashMap::new(),
-        timeout_ms,
-    ) {
+    let recovered = if recovery {
+        let outcome = match binding.recover_command(
+            program.clone(),
+            program_args.clone(),
+            std::collections::HashMap::new(),
+            timeout_ms,
+        ) {
+            Ok(outcome) => outcome,
+            Err(
+                error @ ExecutionError::OutputUnavailable {
+                    exit_code: Some(_), ..
+                },
+            ) => {
+                return Ok(bash_execution_host_error_result(
+                    command.as_str(),
+                    bash_dialect,
+                    ".",
+                    timeout_ms,
+                    binding.mode(),
+                    "recover_host_command",
+                    &error,
+                ));
+            }
+            Err(error) => return Err(error.internal_debug_message().into()),
+        };
+        match outcome {
+            crate::execution::ExecutionHostCommandRecovery::Completed(output) => Some(*output),
+            crate::execution::ExecutionHostCommandRecovery::NotAccepted { reason } => {
+                if reason.trim().is_empty() {
+                    return Err("command recovery NotAccepted proof missing"
+                        .to_string()
+                        .into());
+                }
+                None
+            }
+            crate::execution::ExecutionHostCommandRecovery::Unknown { reason } => {
+                return Err(format!("command recovery outcome unknown: {reason}").into())
+            }
+        }
+    } else {
+        None
+    };
+    let execution = match recovered.map(Ok).unwrap_or_else(|| {
+        binding.run_command(
+            program,
+            program_args,
+            std::collections::HashMap::new(),
+            timeout_ms,
+        )
+    }) {
         Ok(execution) => execution,
         Err(err) => {
             return Ok(bash_execution_host_error_result(

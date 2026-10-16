@@ -28,6 +28,17 @@ result semantics. A same-process structural regression covers 100, 1000 and
 process and cgroup memory separately from the execution instance. A restart's
 lower memory use does not establish release of pre-restart objects.
 
+Prepared-turn recovery reconciles the original committed tool batch before
+absorbing new input or requesting the model again. A missing result alone does
+not authorize another dispatch: recovery reuses a verified receipt or queries
+the original live retained task with the current fence. Unsupported or unknown
+outcomes remain explicit. Cold append validation, including failure and
+cancellation finalization, fixes a committed high-water mark and hydrates,
+validates and releases each historical record through the existing reducer.
+It retains complete validation without retaining every expanded model request.
+This bounds simultaneous expanded records; it does not claim constant history
+metadata, optimal cumulative I/O or complete Session hot/history separation.
+
 Within a continuing tool chain, compaction can summarize older, fully closed tool
 batches while retaining the original accepted input identity and bytes plus the
 latest complete tool batch. A versioned, validated reference reconstructs that

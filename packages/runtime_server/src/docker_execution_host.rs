@@ -29,10 +29,10 @@ use std::time::{Duration, Instant};
 use centaeris_core::execution::{
     classify_execution_host_failure, ExecutionCancellationProbe, ExecutionFileSystemError,
     ExecutionFileSystemErrorKind, ExecutionFileSystemOperation, ExecutionFileSystemOutput,
-    ExecutionFileSystemRequest, ExecutionHostCommandOutput, ExecutionHostFailureKind,
-    ExecutionHostHealth, ExecutionHostRunner, ExecutionHostStatus, ExecutionInputState,
-    ExecutionInputStateChange, ExecutionWorkspaceGeneration, MAX_PUBLISHED_ARTIFACT_BYTES,
-    WORKSPACE_DATA_ROOT, WORKSPACE_HOME,
+    ExecutionFileSystemRequest, ExecutionHostCommandOutput, ExecutionHostCommandRecovery,
+    ExecutionHostFailureKind, ExecutionHostHealth, ExecutionHostRunner, ExecutionHostStatus,
+    ExecutionInputState, ExecutionInputStateChange, ExecutionWorkspaceGeneration,
+    MAX_PUBLISHED_ARTIFACT_BYTES, WORKSPACE_DATA_ROOT, WORKSPACE_HOME,
 };
 use centaeris_core::execution::{
     decode_process_output, ExecutionAttempt, ExecutionCommandRequest, ExecutionError,
@@ -2569,6 +2569,32 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
             }
         }
         Ok(result)
+    }
+
+    fn recover_host_command(
+        &self,
+        operation_id: &str,
+        request: ExecutionCommandRequest,
+        cancellation_probe: Option<&ExecutionCancellationProbe>,
+    ) -> Result<ExecutionHostCommandRecovery, ExecutionError> {
+        if !self.is_retained() {
+            return Ok(ExecutionHostCommandRecovery::Unknown {
+                reason: "command recovery requires the original live retained instance".into(),
+            });
+        }
+        self.validate_policy(&request.policy)?;
+        let fence = self
+            .environment_task_fence()
+            .map_err(|error| self.unavailable(error))?;
+        retained_commands::recover_command(
+            &fence,
+            operation_id,
+            request,
+            cancellation_probe,
+            &self.command_path,
+            |request| self.environment_task_rpc(request),
+        )
+        .map(|output| ExecutionHostCommandRecovery::Completed(Box::new(output)))
     }
 
     fn run_host_command(

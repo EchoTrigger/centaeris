@@ -2,6 +2,35 @@ use super::*;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 static SEQ: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn stable_task_address_matches_existing_index_across_owner_renewal() {
+    let original = fixture_fence("instance", "run", 3);
+    let renewed = fixture_fence("instance", "run", 4);
+    let old_id = task_identity(&original, &original.operation_id("command-original")).unwrap();
+    assert_eq!(
+        old_id,
+        renewed
+            .task_id(&renewed.operation_id("command-original"))
+            .unwrap()
+    );
+    assert_ne!(
+        old_id,
+        renewed
+            .task_id(&renewed.operation_id("command-other"))
+            .unwrap()
+    );
+    let foreign = fixture_fence("instance", "other-run", 4);
+    assert_ne!(
+        old_id,
+        foreign
+            .task_id(&foreign.operation_id("command-original"))
+            .unwrap()
+    );
+    assert!(renewed
+        .task_id(&original.operation_id("command-original"))
+        .is_err());
+}
 pub(super) fn root() -> PathBuf {
     let p = std::env::temp_dir().join(format!(
         "centaeris-task-test-{}-{}-{}",

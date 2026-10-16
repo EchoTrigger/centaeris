@@ -54,6 +54,21 @@ pub enum EnvironmentTaskControllerPurpose {
 }
 
 impl EnvironmentTaskFence {
+    /// Resolve the stable task address across renewals of the same Run owner.
+    /// This derives an address only; a query must still check the current fence
+    /// and the returned original operation identity.
+    pub fn task_id(&self, operation_id: &str) -> Result<String, String> {
+        use sha2::{Digest, Sha256};
+        self.validate_operation_id(operation_id)?;
+        let (_, opaque) = operation_id
+            .split_once(':')
+            .ok_or("task_invalid_operation_id")?;
+        let encoded =
+            serde_json::to_vec(&(&self.environment_instance_id, &self.controller_id, opaque))
+                .map_err(|_| "task_encoding_failed")?;
+        Ok(format!("task-{:x}", Sha256::digest(encoded)))
+    }
+
     /// Create once from the original Run fence. Forwarders must preserve this identity.
     pub fn operation_id(&self, opaque: &str) -> String {
         format!("{}:{opaque}", self.controller_epoch)

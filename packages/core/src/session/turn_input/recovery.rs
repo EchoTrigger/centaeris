@@ -130,3 +130,22 @@ pub(crate) fn record_committed(
         .extend(input_ids.iter().cloned());
     save(session, &recovery)
 }
+
+/// Retire only after every original tool result passed its durable safe point.
+pub(crate) fn retire_prepared(
+    session: &mut SessionStateSnapshot,
+    run: &str,
+    turn: &str,
+    expected_ids: &[String],
+) -> Result<(), String> {
+    let mut recovery = load(session)?;
+    let prepared = recovery
+        .prepared_by_turn
+        .get(turn)
+        .ok_or("prepared_tool_recovery_membership_missing")?;
+    if prepared.agent_run_id != run || prepared.input_ids != expected_ids {
+        return Err("prepared_tool_recovery_membership_changed".into());
+    }
+    recovery.prepared_by_turn.remove(turn);
+    save(session, &recovery)
+}

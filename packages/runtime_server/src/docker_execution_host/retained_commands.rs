@@ -48,8 +48,16 @@ pub(super) fn run_file_helper(
         timeout_ms: 30_000,
         policy: ExecutionPolicy::workspace_write_no_network(WORKSPACE_DATA_ROOT),
     };
-    let output = run_command_with_input(fence, operation_id, request, None, path, input, rpc)
-        .map_err(|e| e.to_string())?;
+    let output = run_command_with_input(
+        fence,
+        operation_id,
+        request,
+        None,
+        path,
+        CommandMode::Execute(input),
+        rpc,
+    )
+    .map_err(|e| e.to_string())?;
     if output.process.exit_code != Some(0)
         || !output.process.runtime_diagnostics.is_empty()
         || output.process.stdout_decode.raw_byte_length > output_limit
@@ -92,9 +100,33 @@ pub(super) fn run_command(
         request,
         cancellation_probe,
         command_path,
-        &[],
+        CommandMode::Execute(&[]),
         rpc,
     )
+}
+
+pub(super) fn recover_command(
+    fence: &EnvironmentTaskFence,
+    operation_id: &str,
+    request: ExecutionCommandRequest,
+    cancellation_probe: Option<&ExecutionCancellationProbe>,
+    command_path: &str,
+    rpc: impl FnMut(EnvironmentTaskRequest) -> Result<EnvironmentTaskResult, String>,
+) -> Result<ExecutionHostCommandOutput, ExecutionError> {
+    run_command_with_input(
+        fence,
+        operation_id,
+        request,
+        cancellation_probe,
+        command_path,
+        CommandMode::Recover,
+        rpc,
+    )
+}
+
+enum CommandMode<'a> {
+    Execute(&'a [u8]),
+    Recover,
 }
 
 fn run_command_with_input(
@@ -103,9 +135,13 @@ fn run_command_with_input(
     request: ExecutionCommandRequest,
     cancellation_probe: Option<&ExecutionCancellationProbe>,
     command_path: &str,
-    input: &[u8],
+    mode: CommandMode<'_>,
     mut rpc: impl FnMut(EnvironmentTaskRequest) -> Result<EnvironmentTaskResult, String>,
 ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
+    let (input, recovering) = match mode {
+        CommandMode::Execute(input) => (input, false),
+        CommandMode::Recover => (&[][..], true),
+    };
     if operation_id.is_empty()
         || fence.controller_purpose != EnvironmentTaskControllerPurpose::Execute
     {
@@ -137,19 +173,35 @@ fn run_command_with_input(
         run_id: fence.controller_id.clone(),
     };
     let start_id = operation(fence, operation_id, "start");
-    let first = rpc(EnvironmentTaskRequest::Start {
-        fence: fence.clone(),
-        operation_id: start_id.clone(),
-        scope: scope.clone(),
-        program: "/usr/bin/env".into(),
-        args,
-        cwd: WORKSPACE_DATA_ROOT.into(),
-        timeout_ms: request.timeout_ms.saturating_add(3000),
-    })
-    .map_err(|reason| attempt_error(ExecutionOperationStage::Start, reason))?;
+    let first_request = if recovering {
+        EnvironmentTaskRequest::Query {
+            fence: fence.clone(),
+            task_id: fence.task_id(&start_id).map_err(unknown)?,
+            cursor: 0,
+            max_bytes: ENVIRONMENT_TASK_READ_BYTES as u32,
+        }
+    } else {
+        EnvironmentTaskRequest::Start {
+            fence: fence.clone(),
+            operation_id: start_id.clone(),
+            scope: scope.clone(),
+            program: "/usr/bin/env".into(),
+            args,
+            cwd: WORKSPACE_DATA_ROOT.into(),
+            timeout_ms: request.timeout_ms.saturating_add(3000),
+        }
+    };
+    let first = rpc(first_request).map_err(|reason| {
+        if recovering {
+            unknown(reason)
+        } else {
+            attempt_error(ExecutionOperationStage::Start, reason)
+        }
+    })?;
     let (id, running) = match &first {
         EnvironmentTaskResult::Task { task, .. }
             if task.scope == scope
+                && (!recovering || fence.task_id(&start_id).is_ok_and(|id| id == task.task_id))
                 && fence.matches_original_operation_id(&task.operation_id, &start_id) =>
         {
             (
@@ -164,7 +216,7 @@ fn run_command_with_input(
             ))
         }
     };
-    if running {
+    if running && !recovering {
         for (index, chunk) in input.chunks(4096).enumerate() {
             let response = rpc(EnvironmentTaskRequest::Input {
                 fence: fence.clone(),
@@ -195,7 +247,7 @@ fn run_command_with_input(
         if !input.is_empty() {
             closed.map_err(|reason| attempt_error(ExecutionOperationStage::Input, reason))?;
         }
-    } else if !input.is_empty() {
+    } else if !input.is_empty() && !recovering {
         return Err(attempt_error(
             ExecutionOperationStage::Input,
             "command_exited_before_input".into(),
@@ -356,6 +408,109 @@ fn run_command_with_input(
 mod tests {
     use super::*;
     use std::collections::{HashMap, VecDeque};
+
+    #[test]
+    fn recovery_queries_original_task_without_start_or_input() {
+        let mut renewed = fence();
+        renewed.controller_epoch += 1;
+        let task_id = renewed
+            .task_id(&operation(&renewed, "tool-1", "start"))
+            .unwrap();
+        let mut response = finished(false);
+        if let EnvironmentTaskResult::Task { task, .. } = &mut response {
+            task.task_id = task_id.clone();
+        }
+        let mut requests = Vec::new();
+        let out = recover_command(&renewed, "tool-1", command(), None, "/usr/bin:/bin", |request| {
+            requests.push(request.clone());
+            assert!(matches!(request, EnvironmentTaskRequest::Query { ref fence, task_id: ref observed_id, cursor: 0, .. } if fence == &renewed && observed_id == &task_id));
+            Ok(response.clone())
+        }).unwrap();
+        assert_eq!(out.process.stdout, "hello");
+        assert_eq!(requests.len(), 1);
+    }
+
+    #[test]
+    fn recovery_observes_running_task_and_preserves_original_output() {
+        let owner = fence();
+        let id = owner
+            .task_id(&operation(&owner, "tool-1", "start"))
+            .unwrap();
+        let mut replies = VecDeque::from([started(), finished(false)]);
+        let mut queries = 0;
+        let result = recover_command(
+            &owner,
+            "tool-1",
+            command(),
+            None,
+            "/usr/bin:/bin",
+            |request| {
+                assert!(matches!(request, EnvironmentTaskRequest::Query { .. }));
+                queries += 1;
+                let mut reply = replies.pop_front().unwrap();
+                if let EnvironmentTaskResult::Task { task, .. } = &mut reply {
+                    task.task_id = id.clone();
+                }
+                Ok(reply)
+            },
+        )
+        .unwrap();
+        assert_eq!(queries, 2);
+        assert_eq!(result.process.stdout, "hello");
+        assert_eq!(result.process.exit_code, Some(0));
+    }
+
+    #[test]
+    fn recovery_rejects_unknown_foreign_and_missing_output_without_dispatch() {
+        let owner = fence();
+        let id = owner
+            .task_id(&operation(&owner, "tool-1", "start"))
+            .unwrap();
+        for variant in 0..5 {
+            let mut calls = 0;
+            let result = recover_command(
+                &owner,
+                "tool-1",
+                command(),
+                None,
+                "/usr/bin:/bin",
+                |request| {
+                    calls += 1;
+                    assert!(matches!(request, EnvironmentTaskRequest::Query { .. }));
+                    if variant == 0 {
+                        return Err("task_not_found".into());
+                    }
+                    let mut reply = finished(variant == 4);
+                    if let EnvironmentTaskResult::Task { task, .. } = &mut reply {
+                        task.task_id = id.clone();
+                        match variant {
+                            1 => task.task_id = "foreign-task".into(),
+                            2 => task.operation_id = owner.operation_id("foreign-operation"),
+                            3 => {
+                                task.scope = EnvironmentTaskScope::Run {
+                                    run_id: "foreign-run".into(),
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok(reply)
+                },
+            );
+            assert_eq!(calls, 1);
+            if variant == 4 {
+                assert!(matches!(
+                    result,
+                    Err(ExecutionError::OutputUnavailable {
+                        exit_code: Some(0),
+                        ..
+                    })
+                ));
+            } else {
+                assert!(result.is_err());
+            }
+        }
+    }
 
     #[test]
     fn run_failure_classification_preserves_canonical_history_capacity() {

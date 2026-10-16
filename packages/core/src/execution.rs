@@ -160,6 +160,21 @@ pub const MAX_EXECUTION_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 
 pub type ExecutionCancellationProbe = dyn Fn() -> Result<Option<String>, String> + Send + Sync;
 
+/// Outcome of looking up the original command under the current host authority.
+/// This is an internal Rust capability, not a model-visible protocol.
+#[derive(Debug, Clone)]
+pub enum ExecutionHostCommandRecovery {
+    Completed(Box<ExecutionHostCommandOutput>),
+    /// Requires authoritative proof that the original operation was never
+    /// admitted. A missing task, expired index or failed query is not proof.
+    NotAccepted {
+        reason: String,
+    },
+    Unknown {
+        reason: String,
+    },
+}
+
 pub trait ExecutionHostRunner: Send + Sync {
     fn bash_description(&self) -> &'static str {
         "bash"
@@ -181,6 +196,18 @@ pub trait ExecutionHostRunner: Send + Sync {
         &self,
         request: ExecutionFileSystemRequest,
     ) -> Result<ExecutionFileSystemOutput, ExecutionFileSystemError>;
+
+    /// Must query the original operation; may not probe by starting it again.
+    fn recover_host_command(
+        &self,
+        _operation_id: &str,
+        _req: ExecutionCommandRequest,
+        _cancellation_probe: Option<&ExecutionCancellationProbe>,
+    ) -> Result<ExecutionHostCommandRecovery, ExecutionError> {
+        Ok(ExecutionHostCommandRecovery::Unknown {
+            reason: "execution host does not support command recovery".into(),
+        })
+    }
 
     fn run_host_command(
         &self,

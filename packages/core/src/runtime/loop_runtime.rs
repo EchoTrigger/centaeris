@@ -1855,11 +1855,32 @@ impl<
         let initial_cancellation_reason =
             poll_loop_cancellation_async(cancellation_probe, worker_cancellation).await?;
 
-        let resume_session = self
+        let mut resume_session = self
             .session_manager
             .load_or_create_session(session_id.as_str())?;
         let pending_runtime_wait_turn_id =
             pending_runtime_tool_batch(&resume_session)?.map(|pending| pending.turn_id);
+
+        let mut recovered_prepared_tools = false;
+        if initial_cancellation_reason.is_none()
+            && resume_from_turn_id.is_none()
+            && pending_runtime_wait_turn_id.is_none()
+            && turn_control.is_some_and(TurnControl::uses_durable_inputs)
+        {
+            if let Some(identity) = agent_run_identity.as_ref() {
+                recovered_prepared_tools = self
+                    .recover_prepared_tool_phase(
+                        &session_id,
+                        identity,
+                        &initial_input,
+                        tool_safe_point,
+                    )
+                    .await?;
+                if recovered_prepared_tools {
+                    resume_session = self.session_manager.load_or_create_session(&session_id)?;
+                }
+            }
+        }
 
         let host_input_already_accepted =
             if let AgentRunInitialInput::HostEvent(input) = &initial_input {
@@ -2113,7 +2134,12 @@ impl<
             }
             let mut applied_intervention_events = None;
             let mut input_ids = Vec::new();
-            let mut input = if responses.is_empty() && loop_index == 0 {
+            let mut input = if recovered_prepared_tools {
+                recovered_prepared_tools = false;
+                TurnInput::ToolContinuation {
+                    objective: root_user_message.clone(),
+                }
+            } else if responses.is_empty() && loop_index == 0 {
                 if let Some(id) = initial_input.input_id() {
                     input_ids.push(id.to_owned());
                     exclude_initial_queue_input(
@@ -2797,7 +2823,7 @@ fn merge_user_input_batch(
     }
 }
 
-fn restore_prepared_input(
+pub(super) fn restore_prepared_input(
     session: &SessionStateSnapshot,
     turn_id: &str,
     initial: &AgentRunInitialInput,
