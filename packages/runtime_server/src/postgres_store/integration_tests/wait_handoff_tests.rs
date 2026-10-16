@@ -22,6 +22,10 @@ const SESSION: &str = "session_wait_handoff";
 const TURN: &str = "turn_pg_fenced_terminal";
 
 fn fixture() -> Fixture {
+    fixture_with_model_request(false)
+}
+
+fn fixture_with_model_request(compaction: bool) -> Fixture {
     let url = test_url();
     reset_store(&url);
     let store = PostgresRuntimeStore::new(&url).unwrap();
@@ -95,7 +99,7 @@ fn fixture() -> Fixture {
             .unwrap(),
     );
     records.push(state.record(session_record(RUN,SESSION,4,SessionRecordType::ModelRequestStarted,serde_json::json!({
-        "requestId":"request_wait_handoff","purpose":"main","loopIndex":0,"toolChoice":{"type":"none"},"maxOutputTokens":1024,"promptCacheKey":null,"promptCacheRetention":null,"preparedPromptSchema":"prepared_prompt.v1","contextTokenEstimate":0,"contextTokenBreakdown":{"systemPromptTokens":0,"systemToolTokens":0,"mcpToolTokens":0,"skillsTokens":0,"messageTokens":0,"mcpTools":[]},"agentComposition":composition,"observations":[]}),now).event).unwrap());
+        "requestId":"request_wait_handoff","purpose":if compaction { "compaction" } else { "main" },"loopIndex":0,"toolChoice":{"type":"none"},"maxOutputTokens":1024,"promptCacheKey":null,"promptCacheRetention":null,"preparedPromptSchema":"prepared_prompt.v1","contextTokenEstimate":0,"contextTokenBreakdown":{"systemPromptTokens":0,"systemToolTokens":0,"mcpToolTokens":0,"skillsTokens":0,"messageTokens":0,"mcpTools":[]},"agentComposition":composition,"observations":if compaction { serde_json::json!([{"kind":"compaction_prompt","message":{"messageId":"wait-compaction-prompt","role":"user","content":"Summarize earlier context."}}]) } else { serde_json::json!([]) }}),now).event).unwrap());
     let mut payload = RuntimeRecoveryCheckpointV1 {
         schema: RUNTIME_RECOVERY_CHECKPOINT_SCHEMA_V1.into(),
         checkpoint_id: "checkpoint:before_wait_handoff".into(),
@@ -539,7 +543,7 @@ fn postgres_wait_handoff_model_anchor_is_reobserved_before_publication() {
         (
             "request_wait_handoff",
             "other",
-            "wait handoff model request missing",
+            "corrupted_session: session.event.v1 event:agent_run_wait_handoff:4 payload.purpose is unsupported",
         ),
     ] {
         f.store
@@ -576,6 +580,38 @@ fn postgres_wait_handoff_model_anchor_is_reobserved_before_publication() {
         .unwrap();
     append(&mut f).unwrap();
     assert_eq!(count(&f, "SELECT COUNT(*) FROM app_core_sessionevent"), 9);
+
+    // A legal non-main request passes the same real append/CAS/schema path.
+    // It still cannot authorize publication of a wait anchored to a main prompt.
+    drop(f);
+    let mut non_main = fixture_with_model_request(true);
+    assert_eq!(
+        non_main
+            .store
+            .latest_model_request_id(SESSION, RUN, TURN)
+            .unwrap_err(),
+        "wait handoff has no real model request"
+    );
+    assert_eq!(
+        append(&mut non_main).unwrap_err(),
+        "wait handoff model request missing"
+    );
+    assert!(non_main
+        .store
+        .load_recovery_checkpoint_by_id(&non_main.checkpoint.checkpoint_id)
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        count(&non_main, "SELECT COUNT(*) FROM app_core_sessionevent"),
+        8
+    );
+    assert_eq!(
+        count(
+            &non_main,
+            "SELECT COUNT(*) FROM runtime.runtime_job_waiters"
+        ),
+        1
+    );
 }
 
 fn observation_versions(f: &Fixture) -> Vec<i64> {
