@@ -39,6 +39,16 @@ It retains complete validation without retaining every expanded model request.
 This bounds simultaneous expanded records; it does not claim constant history
 metadata, optimal cumulative I/O or complete Session hot/history separation.
 
+Cold historical preparation must also leave the job row available for Worker
+renewal. The final commit takes that row lock and rechecks current authority in
+database time. A transient heartbeat failure can be verified within the last
+confirmed lease window; definite loss still blocks dispatch and commit. Retained
+filesystem helpers reconcile an uncertain Input/EOF acknowledgment by reading
+the original durable input receipt, bound to task, operation and request digest.
+They do not write the original bytes again. Missing or pending receipts remain
+unknown. These paths require focused database and Linux fault regressions as
+well as the final real-chain acceptance.
+
 Within a continuing tool chain, compaction can summarize older, fully closed tool
 batches while retaining the original accepted input identity and bytes plus the
 latest complete tool batch. A versioned, validated reference reconstructs that

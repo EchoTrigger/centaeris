@@ -170,6 +170,7 @@ impl DockerExecutionHostRunner {
             | EnvironmentTaskRequest::List { fence }
             | EnvironmentTaskRequest::Query { fence, .. }
             | EnvironmentTaskRequest::Input { fence, .. }
+            | EnvironmentTaskRequest::QueryInputReceipt { fence, .. }
             | EnvironmentTaskRequest::Terminate { fence, .. } => fence,
         };
         if supplied != &expected_fence {

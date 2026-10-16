@@ -722,7 +722,7 @@ impl Manager {
                     return Err("task_run_closed".into());
                 }
                 let key = input_identity(&fence, &task_id, &operation_id)?;
-                let d = digest(&(&data, close))?;
+                let d = environment_task_input_digest(&data, close)?;
                 if let Some(r) = m.receipt(&key, &d)? {
                     return Ok(r);
                 }
@@ -737,6 +737,21 @@ impl Manager {
                 }
                 let result = m.mutation(&task_id)?;
                 m.finish(key, result)
+            }
+            EnvironmentTaskRequest::QueryInputReceipt {
+                fence,
+                task_id,
+                operation_id,
+                request_digest,
+            } => {
+                m.journal.check(&fence)?;
+                if m.journal.closed_run.as_ref() == Some(&fence.controller_id)
+                    || store::closed(&m.storage.control_root, &fence.controller_id)?
+                {
+                    return Err("task_run_closed".into());
+                }
+                let key = input_identity(&fence, &task_id, &operation_id)?;
+                store::input_receipt(&m.storage.control_root, &key, &request_digest, &task_id)
             }
             EnvironmentTaskRequest::Terminate {
                 fence,

@@ -1369,6 +1369,64 @@ fn successful_input_receipt_replays_after_child_exit_without_writing_twice() {
 
 #[test]
 #[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
+fn lost_data_ack_queries_original_receipt_then_closes_once() {
+    let f = Fixture::new();
+    let task_id = id(&Manager::handle(
+        &f.manager,
+        f.start("receipt-cat", EnvironmentTaskScope::Environment, "cat"),
+    )
+    .unwrap());
+    let data = b"one-input\n".to_vec();
+    let input_operation = f.fence.operation_id("input");
+    // Deliberately discard the transport acknowledgement after durable success.
+    let receipt = Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Input {
+            fence: f.fence.clone(),
+            task_id: task_id.clone(),
+            operation_id: input_operation.clone(),
+            data: data.clone(),
+            close: false,
+        },
+    )
+    .unwrap();
+    let lookup = EnvironmentTaskRequest::QueryInputReceipt {
+        fence: f.fence.clone(),
+        task_id: task_id.clone(),
+        operation_id: input_operation,
+        request_digest: environment_task_input_digest(&data, false).unwrap(),
+    };
+    assert_eq!(
+        Manager::handle(&f.manager, lookup.clone()).unwrap(),
+        receipt
+    );
+    Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Input {
+            fence: f.fence.clone(),
+            task_id: task_id.clone(),
+            operation_id: f.fence.operation_id("close"),
+            data: Vec::new(),
+            close: true,
+        },
+    )
+    .unwrap();
+    f.await_cleanup(&task_id);
+    assert_eq!(Manager::handle(&f.manager, lookup).unwrap(), receipt);
+    let m = f.manager.lock().unwrap();
+    let (chunks, _, _, _, _) = m.logs[&task_id]
+        .lock()
+        .unwrap()
+        .read(0, ENVIRONMENT_TASK_READ_BYTES)
+        .unwrap();
+    assert_eq!(
+        chunks.into_iter().flat_map(|c| c.data).collect::<Vec<_>>(),
+        data
+    );
+}
+
+#[test]
+#[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
 fn running_journal_failure_keeps_supervision_and_drain_ownership() {
     let f = Fixture::new();
     f.manager.lock().unwrap().fail_running_commit = true;

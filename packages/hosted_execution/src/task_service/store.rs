@@ -347,6 +347,29 @@ pub(super) fn receipt(root: &Path, key: &str) -> Result<Option<Receipt>, String>
     Ok(Some(Receipt { digest, result }))
 }
 
+// Reconciliation must read the committed index, never an in-memory receipt
+// whose completion persist may have failed. This lookup does not reserve work.
+pub(super) fn input_receipt(
+    root: &Path,
+    key: &str,
+    request_digest: &str,
+    task_id: &str,
+) -> Result<EnvironmentTaskResult, String> {
+    let receipt = receipt(root, key)?.ok_or("task_operation_unknown")?;
+    if receipt.digest != request_digest {
+        return Err("task_operation_conflict".into());
+    }
+    match receipt.result {
+        Some(ref result @ EnvironmentTaskResult::Mutated { ref task })
+            if task.task_id == task_id =>
+        {
+            Ok(result.clone())
+        }
+        None => Err("task_operation_unknown".into()),
+        _ => Err("task_receipt_invalid".into()),
+    }
+}
+
 pub(super) fn live_bytes(root: &Path) -> Result<u64, String> {
     let connection = db(root, false)?;
     let pages: u64 = connection
@@ -588,6 +611,62 @@ mod tests {
             },
         }
     }
+    #[test]
+    fn input_receipt_query_uses_only_committed_original_ack_and_never_writes() {
+        let (root, mut journal) = fixture();
+        let task = record(&journal, 0);
+        let id = task.snapshot.task_id.clone();
+        let key = input_identity(
+            journal.fence.as_ref().unwrap(),
+            &id,
+            &journal.fence.as_ref().unwrap().operation_id("input"),
+        )
+        .unwrap();
+        let request_digest = environment_task_input_digest(b"one input", false).unwrap();
+        journal.tasks.insert(id.clone(), task.clone());
+        journal.receipts.insert(
+            key.clone(),
+            Receipt {
+                digest: request_digest.clone(),
+                result: None,
+            },
+        );
+        journal.persist(&root).unwrap();
+        let mut ack = task.snapshot.clone();
+        ack.state = EnvironmentTaskState::Running;
+        ack.exit_code = None;
+        ack.cleanup_complete = false;
+        ack.output_complete = false;
+        let result = EnvironmentTaskResult::Mutated { task: ack };
+        journal.receipts.get_mut(&key).unwrap().result = Some(result.clone());
+        let before = fs::read(root.join("history.sqlite")).unwrap();
+        assert_eq!(
+            input_receipt(&root, &key, &request_digest, &id).unwrap_err(),
+            "task_operation_unknown"
+        );
+        assert_eq!(fs::read(root.join("history.sqlite")).unwrap(), before);
+        journal.persist(&root).unwrap();
+        let before = fs::read(root.join("history.sqlite")).unwrap();
+        assert_eq!(
+            input_receipt(&root, &key, &request_digest, &id).unwrap(),
+            result
+        );
+        assert_eq!(
+            input_receipt(&root, &key, &"a".repeat(64), &id).unwrap_err(),
+            "task_operation_conflict"
+        );
+        assert_eq!(
+            input_receipt(&root, &key, &request_digest, "another-task").unwrap_err(),
+            "task_receipt_invalid"
+        );
+        assert_eq!(
+            input_receipt(&root, "absent", &request_digest, &id).unwrap_err(),
+            "task_operation_unknown"
+        );
+        assert_eq!(fs::read(root.join("history.sqlite")).unwrap(), before);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn malformed_constraints_and_unexpected_triggers_are_rejected_without_repair() {
         for change in [

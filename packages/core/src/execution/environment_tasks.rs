@@ -1,11 +1,18 @@
 //! Persistent environment task contracts. Hosts translate these contracts.
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub const ENVIRONMENT_TASK_SCHEMA: &str = "environment.task.v2";
 pub const ENVIRONMENT_TASK_MAX_ACTIVE: usize = 32;
 pub const ENVIRONMENT_TASK_MAX_RECORDS: usize = 64;
 pub const ENVIRONMENT_TASK_OUTPUT_BYTES: usize = 1024 * 1024;
 pub const ENVIRONMENT_TASK_READ_BYTES: usize = 64 * 1024;
+
+/// Identity of one original stdin mutation, including its EOF flag.
+pub fn environment_task_input_digest(data: &[u8], close: bool) -> Result<String, String> {
+    let bytes = serde_json::to_vec(&(data, close)).map_err(|_| "task_encoding_failed")?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
 
 /// Exact service rejections that prove this individual RPC was not accepted.
 /// The service must resolve a prior operation identity before these checks.
@@ -188,6 +195,12 @@ pub enum EnvironmentTaskRequest {
         data: Vec<u8>,
         close: bool,
     },
+    QueryInputReceipt {
+        fence: EnvironmentTaskFence,
+        task_id: String,
+        operation_id: String,
+        request_digest: String,
+    },
     Terminate {
         fence: EnvironmentTaskFence,
         task_id: String,
@@ -214,6 +227,11 @@ impl EnvironmentTaskRequest {
                 operation_id,
                 ..
             }
+            | Self::QueryInputReceipt {
+                fence,
+                operation_id,
+                ..
+            }
             | Self::Terminate {
                 fence,
                 operation_id,
@@ -236,7 +254,7 @@ impl EnvironmentTaskRequest {
                     return Err("task_run_scope_denied".into());
                 }
             }
-            Self::Input { fence, .. }
+            Self::Input { fence, .. } | Self::QueryInputReceipt { fence, .. }
                 if fence.controller_purpose != EnvironmentTaskControllerPurpose::Execute =>
             {
                 return Err("task_cleanup_execute_denied".into())
@@ -245,6 +263,15 @@ impl EnvironmentTaskRequest {
                 return Err("task_run_scope_denied".into())
             }
             _ => {}
+        }
+        if let Self::QueryInputReceipt { request_digest, .. } = self {
+            if request_digest.len() != 64
+                || !request_digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err("task_invalid_input_digest".into());
+            }
         }
         Ok(())
     }
@@ -349,6 +376,31 @@ impl EnvironmentTaskResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn input_receipt_query_has_exact_read_only_identity() {
+        let value = serde_json::json!({
+            "operation":"queryInputReceipt",
+            "fence":{"environmentInstanceId":"i","controllerId":"run","controllerEpoch":2,"controllerPurpose":"execute"},
+            "taskId":"task-original","operationId":"2:input-original",
+            "requestDigest":"a".repeat(64)
+        });
+        let request: EnvironmentTaskRequest = serde_json::from_value(value.clone())
+            .expect("the original input receipt must be queryable without sending its bytes again");
+        request.validate_authority().unwrap();
+        assert_eq!(serde_json::to_value(&request).unwrap(), value);
+        let mut invalid = value.clone();
+        invalid["data"] = serde_json::json!([1, 2, 3]);
+        assert!(serde_json::from_value::<EnvironmentTaskRequest>(invalid).is_err());
+        let mut cleanup = value;
+        cleanup["fence"]["controllerPurpose"] = serde_json::json!("cleanup");
+        assert_eq!(
+            serde_json::from_value::<EnvironmentTaskRequest>(cleanup)
+                .unwrap()
+                .validate_authority()
+                .unwrap_err(),
+            "task_cleanup_execute_denied"
+        );
+    }
     #[test]
     fn capacity_rejection_requires_an_exact_pre_acceptance_service_reason() {
         for reason in [

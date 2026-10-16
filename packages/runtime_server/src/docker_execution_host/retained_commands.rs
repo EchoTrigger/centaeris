@@ -129,6 +129,71 @@ enum CommandMode<'a> {
     Recover,
 }
 
+struct InputTarget<'a> {
+    task_id: &'a str,
+    start_id: &'a str,
+    scope: &'a EnvironmentTaskScope,
+}
+
+fn confirm_input(
+    fence: &EnvironmentTaskFence,
+    target: InputTarget<'_>,
+    operation_id: String,
+    data: Vec<u8>,
+    close: bool,
+    rpc: &mut impl FnMut(EnvironmentTaskRequest) -> Result<EnvironmentTaskResult, String>,
+) -> Result<(), ExecutionError> {
+    let InputTarget {
+        task_id,
+        start_id,
+        scope,
+    } = target;
+    let confirmed = |result: &EnvironmentTaskResult| {
+        matches!(result,
+        EnvironmentTaskResult::Mutated { task }
+        if task.task_id == task_id && task.scope == *scope
+            && fence.matches_original_operation_id(&task.operation_id, start_id))
+    };
+    let request_digest = environment_task_input_digest(&data, close)
+        .map_err(|reason| attempt_error(ExecutionOperationStage::Input, reason))?;
+    let phase = if close {
+        "retainedInputEof"
+    } else {
+        "retainedInputData"
+    };
+    let reason = match crate::observations::timed(phase, || {
+        rpc(EnvironmentTaskRequest::Input {
+            fence: fence.clone(),
+            task_id: task_id.into(),
+            operation_id: operation_id.clone(),
+            data,
+            close,
+        })
+    }) {
+        Ok(result) if confirmed(&result) => return Ok(()),
+        Ok(_) => "command_input_unconfirmed".into(),
+        Err(reason) if environment_task_capacity_rejection(&reason) => {
+            return Err(attempt_error(ExecutionOperationStage::Input, reason));
+        }
+        Err(reason) => reason,
+    };
+    // An uncertain acknowledgement permits only a read of this original
+    // operation's durable receipt. Never repeat the stdin write or EOF.
+    if crate::observations::timed("retainedInputReceipt", || {
+        rpc(EnvironmentTaskRequest::QueryInputReceipt {
+            fence: fence.clone(),
+            task_id: task_id.into(),
+            operation_id,
+            request_digest,
+        })
+    })
+    .is_ok_and(|result| confirmed(&result))
+    {
+        return Ok(());
+    }
+    Err(attempt_error(ExecutionOperationStage::Input, reason))
+}
+
 fn run_command_with_input(
     fence: &EnvironmentTaskFence,
     operation_id: &str,
@@ -218,34 +283,44 @@ fn run_command_with_input(
     };
     if running && !recovering {
         for (index, chunk) in input.chunks(4096).enumerate() {
-            let response = rpc(EnvironmentTaskRequest::Input {
-                fence: fence.clone(),
-                task_id: id.clone(),
-                operation_id: operation(fence, operation_id, &format!("input-{index}")),
-                data: chunk.to_vec(),
-                close: false,
-            })
-            .map_err(|reason| attempt_error(ExecutionOperationStage::Input, reason))?;
-            if !matches!(response, EnvironmentTaskResult::Mutated { ref task }
-                if task.task_id == id && task.scope == scope && fence.matches_original_operation_id(&task.operation_id, &start_id))
-            {
-                return Err(attempt_error(
-                    ExecutionOperationStage::Input,
-                    "command_input_unconfirmed".into(),
-                ));
-            }
+            confirm_input(
+                fence,
+                InputTarget {
+                    task_id: &id,
+                    start_id: &start_id,
+                    scope: &scope,
+                },
+                operation(fence, operation_id, &format!("input-{index}")),
+                chunk.to_vec(),
+                false,
+                &mut rpc,
+            )?;
         }
         // A fast process can exit before stdin is closed. Its confirmed terminal
         // query below resolves that race without replaying the command.
-        let closed = rpc(EnvironmentTaskRequest::Input {
-            fence: fence.clone(),
-            task_id: id.clone(),
-            operation_id: operation(fence, operation_id, "close"),
-            data: Vec::new(),
-            close: true,
-        });
-        if !input.is_empty() {
-            closed.map_err(|reason| attempt_error(ExecutionOperationStage::Input, reason))?;
+        if input.is_empty() {
+            let _ = crate::observations::timed("retainedInputEof", || {
+                rpc(EnvironmentTaskRequest::Input {
+                    fence: fence.clone(),
+                    task_id: id.clone(),
+                    operation_id: operation(fence, operation_id, "close"),
+                    data: Vec::new(),
+                    close: true,
+                })
+            });
+        } else {
+            confirm_input(
+                fence,
+                InputTarget {
+                    task_id: &id,
+                    start_id: &start_id,
+                    scope: &scope,
+                },
+                operation(fence, operation_id, "close"),
+                Vec::new(),
+                true,
+                &mut rpc,
+            )?;
         }
     } else if !input.is_empty() && !recovering {
         return Err(attempt_error(
@@ -612,6 +687,239 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn agents_helper_data_digest_matches_the_read_request_receipt() {
+        let frame = serde_json::to_vec(&super::super::SandboxFileSystemRequest {
+            path: "AGENTS.md".into(),
+            operation: ExecutionFileSystemOperation::ReadFile {
+                max_bytes: 32_768 * 4,
+            },
+        })
+        .unwrap();
+        assert_eq!(frame.len(), 70);
+        assert_eq!(
+            environment_task_input_digest(&frame, false).unwrap(),
+            "68cb8d8fc673e3426d24d9a3f268ba39f2d561987ac970ca699a41a33b2e4445"
+        );
+        assert_ne!(
+            environment_task_input_digest(&frame, true).unwrap(),
+            environment_task_input_digest(&frame, false).unwrap()
+        );
+    }
+
+    #[test]
+    fn helper_lost_data_ack_reads_original_receipt_then_sends_only_first_eof() {
+        let frame = serde_json::to_vec(&super::super::SandboxFileSystemRequest {
+            path: "AGENTS.md".into(),
+            operation: ExecutionFileSystemOperation::ReadFile {
+                max_bytes: 32_768 * 4,
+            },
+        })
+        .unwrap();
+        let (mut starts, mut writes, mut receipt_queries, mut closes) = (0, 0, 0, 0);
+        let mut original_input = String::new();
+        let result = run_file_helper(&fence(), "tool-1", &frame, 10, "/usr/bin", |r| match r {
+            EnvironmentTaskRequest::Start { .. } => {
+                starts += 1;
+                Ok(started())
+            }
+            EnvironmentTaskRequest::Input {
+                data,
+                close: false,
+                operation_id,
+                ..
+            } => {
+                writes += 1;
+                assert_eq!(writes, 1, "confirmed bytes must never be written twice");
+                assert_eq!(data, frame);
+                original_input = operation_id;
+                Err("task_relay_output_unknown".into())
+            }
+            EnvironmentTaskRequest::QueryInputReceipt {
+                task_id,
+                operation_id,
+                request_digest,
+                ..
+            } => {
+                receipt_queries += 1;
+                assert_eq!(task_id, "task-1");
+                assert_eq!(operation_id, original_input);
+                assert_eq!(
+                    request_digest,
+                    environment_task_input_digest(&frame, false).unwrap()
+                );
+                Ok(EnvironmentTaskResult::Mutated {
+                    task: snapshot(false),
+                })
+            }
+            EnvironmentTaskRequest::Input {
+                close: true, data, ..
+            } => {
+                closes += 1;
+                assert_eq!((writes, receipt_queries, closes), (1, 1, 1));
+                assert!(
+                    data.is_empty(),
+                    "EOF is still its original distinct operation"
+                );
+                Ok(EnvironmentTaskResult::Mutated {
+                    task: snapshot(false),
+                })
+            }
+            EnvironmentTaskRequest::Query { .. } => {
+                assert_eq!(closes, 1);
+                Ok(finished(false))
+            }
+            _ => panic!("receipt reconciliation must not mutate another task"),
+        })
+        .unwrap();
+        assert_eq!(result, b"hello");
+        assert_eq!((starts, writes, receipt_queries, closes), (1, 1, 1, 1));
+    }
+
+    #[test]
+    fn helper_lost_eof_ack_reads_its_receipt_without_closing_twice() {
+        let (mut writes, mut closes, mut queries) = (0, 0, 0);
+        let result = run_file_helper(&fence(), "tool-1", b"frame", 10, "/usr/bin", |r| match r {
+            EnvironmentTaskRequest::Start { .. } => Ok(started()),
+            EnvironmentTaskRequest::Input { close: false, .. } => {
+                writes += 1;
+                Ok(EnvironmentTaskResult::Mutated {
+                    task: snapshot(false),
+                })
+            }
+            EnvironmentTaskRequest::Input { close: true, .. } => {
+                closes += 1;
+                assert_eq!(closes, 1);
+                Err("task_relay_output_unknown".into())
+            }
+            EnvironmentTaskRequest::QueryInputReceipt {
+                operation_id,
+                request_digest,
+                ..
+            } => {
+                queries += 1;
+                assert_eq!(operation_id, operation(&fence(), "tool-1", "close"));
+                assert_eq!(
+                    request_digest,
+                    environment_task_input_digest(&[], true).unwrap()
+                );
+                Ok(EnvironmentTaskResult::Mutated {
+                    task: snapshot(false),
+                })
+            }
+            EnvironmentTaskRequest::Query { .. } => Ok(finished(false)),
+            _ => panic!("must not repeat Start/Input or terminate on ACK loss"),
+        })
+        .unwrap();
+        assert_eq!(result, b"hello");
+        assert_eq!((writes, closes, queries), (1, 1, 1));
+    }
+
+    #[test]
+    fn helper_rejects_unconfirmed_eof_receipt_before_querying_output() {
+        for invalid in [
+            EnvironmentTaskResult::Listed { tasks: Vec::new() },
+            EnvironmentTaskResult::Mutated {
+                task: EnvironmentTaskSnapshot {
+                    task_id: "different-task".into(),
+                    ..snapshot(false)
+                },
+            },
+            EnvironmentTaskResult::Mutated {
+                task: EnvironmentTaskSnapshot {
+                    operation_id: operation(&fence(), "different-tool", "start"),
+                    ..snapshot(false)
+                },
+            },
+        ] {
+            let mut queries = 0;
+            let mut starts = 0;
+            let mut data_inputs = 0;
+            let result =
+                run_file_helper(&fence(), "tool-1", b"frame", 10, "/usr/bin", |r| match r {
+                    EnvironmentTaskRequest::Start { .. } => {
+                        starts += 1;
+                        Ok(started())
+                    }
+                    EnvironmentTaskRequest::Input { close: false, .. } => {
+                        data_inputs += 1;
+                        Ok(EnvironmentTaskResult::Mutated {
+                            task: snapshot(false),
+                        })
+                    }
+                    EnvironmentTaskRequest::Input { close: true, .. } => Ok(invalid.clone()),
+                    EnvironmentTaskRequest::QueryInputReceipt { .. } => {
+                        Err("task_operation_unknown".into())
+                    }
+                    EnvironmentTaskRequest::Query { .. } => {
+                        queries += 1;
+                        Ok(finished(false))
+                    }
+                    _ => panic!("unconfirmed input must not repeat a mutation"),
+                });
+            assert!(result.is_err(), "EOF needs its exact original task receipt");
+            assert_eq!((starts, data_inputs, queries), (1, 1, 0));
+        }
+    }
+
+    #[test]
+    fn helper_rejects_foreign_original_input_receipts_without_eof_or_rewrite() {
+        for change in 0..4 {
+            let mut task = snapshot(false);
+            match change {
+                0 => task.task_id = "different-task".into(),
+                1 => task.scope = EnvironmentTaskScope::Environment,
+                2 => task.operation_id = operation(&fence(), "different-tool", "start"),
+                _ => (),
+            }
+            let mut data_inputs = 0;
+            let mut receipt_queries = 0;
+            let result =
+                run_file_helper(&fence(), "tool-1", b"frame", 10, "/usr/bin", |r| match r {
+                    EnvironmentTaskRequest::Start { .. } => Ok(started()),
+                    EnvironmentTaskRequest::Input { close: false, .. } => {
+                        data_inputs += 1;
+                        Err("task_relay_output_unknown".into())
+                    }
+                    EnvironmentTaskRequest::QueryInputReceipt { .. } => {
+                        receipt_queries += 1;
+                        if change == 3 {
+                            Ok(EnvironmentTaskResult::Listed { tasks: Vec::new() })
+                        } else {
+                            Ok(EnvironmentTaskResult::Mutated { task: task.clone() })
+                        }
+                    }
+                    _ => panic!(
+                        "invalid receipt must not authorize EOF, output query, or mutation replay"
+                    ),
+                });
+            assert!(result.is_err());
+            assert_eq!((data_inputs, receipt_queries), (1, 1));
+        }
+    }
+
+    #[test]
+    fn helper_unknown_input_never_rewrites_bytes_or_sends_eof() {
+        let mut starts = 0;
+        let mut inputs = 0;
+        let result = run_file_helper(&fence(), "tool-1", b"frame", 10, "/usr/bin", |r| match r {
+            EnvironmentTaskRequest::Start { .. } => {
+                starts += 1;
+                Ok(started())
+            }
+            EnvironmentTaskRequest::Input { close: false, .. } => {
+                inputs += 1;
+                Err("task_relay_output_unknown".into())
+            }
+            EnvironmentTaskRequest::QueryInputReceipt { .. } => {
+                Err("task_operation_unknown".into())
+            }
+            _ => panic!("unknown input must preserve its task and never resend input/EOF"),
+        });
+        assert!(result.unwrap_err().contains("input outcome is unknown"));
+        assert_eq!((starts, inputs), (1, 1));
     }
 
     #[test]
