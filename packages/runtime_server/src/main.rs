@@ -1,3 +1,5 @@
+#[cfg(test)]
+use centaeris_core::session::restore_runtime_snapshot_from_session_records;
 mod agent_inputs;
 #[cfg(test)]
 mod agent_inputs_tests;
@@ -27,6 +29,7 @@ mod native_consumption_tests;
 mod observations;
 mod platform_materials;
 mod postgres_store;
+mod recovery_read;
 mod recovery_upload;
 mod request_capacity;
 mod resident_capacity;
@@ -111,10 +114,9 @@ use centaeris_core::session::supplement::{
     EnqueueTurnSupplementRequest, TurnSupplementStoreError, TurnSupplementStorePort,
 };
 use centaeris_core::session::{
-    parse_wire_record, restore_runtime_snapshot_from_session_records,
-    session_record_projects_to_agent_run_stream, AgentRunSessionState, RewriteLastUserTailRequest,
-    RuntimeJobLeaseFence, SequencedSessionRecord, SessionCommitReceipt, SessionLogPort,
-    SessionRecordType, RUNTIME_JOB_LEASE_FENCE_REJECTED,
+    parse_wire_record, session_record_projects_to_agent_run_stream, AgentRunSessionState,
+    RewriteLastUserTailRequest, RuntimeJobLeaseFence, SequencedSessionRecord, SessionCommitReceipt,
+    SessionLogPort, SessionRecordType, RUNTIME_JOB_LEASE_FENCE_REJECTED,
 };
 use centaeris_core::tool::inputs::{
     DeferredInputResolutionFailureKind, ResolvedInputManifest, ResolvedInputState,
@@ -138,9 +140,7 @@ use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
 use lifecycle_hooks::{workspace_hook_catalog, workspace_lifecycle_hook_runtime};
-use postgres_store::{
-    hydrate_session_wire_values, PostgresConnectionLimits, PostgresRuntimeStore, PostgresSessionLog,
-};
+use postgres_store::{PostgresConnectionLimits, PostgresRuntimeStore, PostgresSessionLog};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -4677,10 +4677,10 @@ fn commit_new_user_turn_admission(
             closures: Vec::new(),
         }
     } else {
-        let records = load_recovery_session_events(job_store, session_id, session_head)?;
-        agent_runtime.plan_new_user_turn_closures(
+        let recovery = load_recovery_session_state(job_store, session_id, session_head)?;
+        agent_runtime.plan_new_user_turn_closures_from_recovery(
             session_id,
-            records.as_slice(),
+            &recovery,
             agent_run_start.agent_run_id.as_str(),
             agent_run_start.turn_id.as_str(),
             u64::try_from(session_head)
@@ -5404,64 +5404,50 @@ fn load_existing_session_sequence_on_client(
     client: &mut impl postgres::GenericClient,
     agent_run_start: &AgentRunStart,
 ) -> Result<AgentRunSessionState, String> {
-    let rows = client
-        .query(
-            "SELECT agent_run_sequence, \"eventId\", payload->>'type', session_id, payload::text FROM app_core_sessionevent WHERE agent_run_id = $1 AND session_level = false ORDER BY agent_run_sequence",
-            &[&agent_run_start.agent_run_id],
-        )
-        .map_err(|error| format!("query existing session sequence failed: {error}"))?;
+    let upper = client.query_one(
+        "SELECT COALESCE(MAX(agent_run_sequence),0) FROM app_core_sessionevent WHERE agent_run_id=$1 AND session_level=false",
+        &[&agent_run_start.agent_run_id],
+    ).map_err(|error| format!("read recovery Run high-water mark failed: {error}"))?.get::<_, i32>(0);
     let mut sequence = AgentRunSessionState::new(
         agent_run_start.authorization.session_id.clone(),
         agent_run_start.agent_run_id.clone(),
     )?;
-    let mut wires = rows
-        .iter()
-        .map(|row| {
-            serde_json::from_str::<serde_json::Value>(row.get::<_, String>(4).as_str())
-                .map_err(|error| format!("decode existing session wire failed: {error}"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    hydrate_session_wire_values(client, wires.as_mut_slice())?;
-    for ((index, row), wire) in rows.iter().enumerate().zip(wires) {
-        let stored_sequence = row.get::<_, i32>(0);
-        let expected = i32::try_from(index + 1)
-            .map_err(|_| "existing session sequence overflow".to_string())?;
-        if stored_sequence != expected
-            || row.get::<_, String>(3) != agent_run_start.authorization.session_id
-        {
-            return Err("existing session sequence identity mismatch".to_string());
-        }
-        let event = parse_wire_record(&wire)
-            .map_err(|error| format!("decode existing session record failed: {error}"))?
-            .event;
-        if row.get::<_, String>(1) != event.event_id {
-            return Err("existing session event identity mismatch".to_string());
-        }
-        sequence.restore(SequencedSessionRecord {
-            sequence: expected as u64,
-            event,
-        })?;
-    }
-    if !rows.is_empty() {
+    let mut hydrator = postgres_store::SessionWireHydrator::default();
+    let mut types = Vec::new();
+    recovery_read::visit(
+        client,
+        recovery_read::Scope::Run(&agent_run_start.agent_run_id),
+        upper,
+        |client, position, mut wire| {
+            hydrator.hydrate_record(client, &mut wire)?;
+            let event = parse_wire_record(&wire)
+                .map_err(|error| format!("decode existing Session record failed: {error}"))?
+                .event;
+            types.push(event.event_type);
+            sequence.restore(SequencedSessionRecord {
+                sequence: position as u64,
+                event,
+            })
+        },
+    )?;
+    if upper > 0 {
         let input_record_type = match agent_run_start.initial_input {
             AgentRunStartInitialInput::UserMessage {}
-            | AgentRunStartInitialInput::UserInput { .. } => "user_message",
-            AgentRunStartInitialInput::HostEvent { .. } => "host_event_input",
+            | AgentRunStartInitialInput::UserInput { .. } => SessionRecordType::UserMessage,
+            AgentRunStartInitialInput::HostEvent { .. } => SessionRecordType::HostEventInput,
         };
-        let types = rows
-            .iter()
-            .map(|row| row.get::<_, Option<String>>(2))
-            .collect::<Vec<_>>();
-        if types.first().and_then(Option::as_deref) != Some("agent_run_started")
-            || types.get(1).and_then(Option::as_deref) != Some(input_record_type)
-            || types.iter().flatten().any(|value| {
+        if types.first() != Some(&SessionRecordType::AgentRunStarted)
+            || types.get(1) != Some(&input_record_type)
+            || types.iter().any(|kind| {
                 matches!(
-                    value.as_str(),
-                    "agent_run_completed" | "agent_run_failed" | "agent_run_interrupted"
+                    kind,
+                    SessionRecordType::AgentRunCompleted
+                        | SessionRecordType::AgentRunFailed
+                        | SessionRecordType::AgentRunInterrupted
                 )
             })
         {
-            return Err("existing session sequence is not restartable".to_string());
+            return Err("existing session sequence is not restartable".into());
         }
     }
     let committed_session_sequence = client
@@ -5554,10 +5540,8 @@ fn refresh_runtime_state_after_admission(
     // Admission may close tools from an earlier AgentRun. The cached snapshot
     // predates that commit; replay Core's authoritative Session records before
     // starting the new turn, rather than weakening safe-point identity checks.
-    with_recovery_session_events(job_store, session_id, session_sequence, |events| {
-        let snapshot = restore_runtime_snapshot_from_session_records(session_id, &events)?;
-        SessionManager::new(store.clone()).save_session(&snapshot)
-    })
+    let recovery = load_recovery_session_state(job_store, session_id, session_sequence)?;
+    SessionManager::new(store.clone()).save_session(&recovery.snapshot)
 }
 
 fn restore_runtime_state_from_recovery_checkpoint(
@@ -5575,64 +5559,77 @@ fn restore_runtime_state_from_recovery_checkpoint(
     }
     let session_sequence = i32::try_from(checkpoint.session_sequence)
         .map_err(|_| "recovery checkpoint Session sequence overflow".to_string())?;
-    with_recovery_session_events(
-        job_store,
-        checkpoint.session_id.as_str(),
-        session_sequence,
-        |events| {
-            let snapshot = restore_runtime_snapshot_from_session_records(
-                checkpoint.session_id.as_str(),
-                &events,
-            )?;
-            SessionManager::new(store.clone()).save_session(&snapshot)
-        },
-    )
+    let recovery =
+        load_recovery_session_state(job_store, checkpoint.session_id.as_str(), session_sequence)?;
+    SessionManager::new(store.clone()).save_session(&recovery.snapshot)
 }
 
+fn load_recovery_session_state(
+    store: &PostgresRuntimeStore,
+    session_id: &str,
+    session_sequence: i32,
+) -> Result<centaeris_core::session::recovery::SessionRecoveryResult, String> {
+    // Fixed high-water mark; no append after it enters either pass. The first
+    // pass carries only stored references and envelope/tombstone decisions.
+    // Recheck every decoded stored wire digest before hydrating its body.
+    store.with_client(|client| {
+        let mut filter = centaeris_core::session::recovery::SessionRecoveryFilter::new(session_id);
+        let mut source_digests = Vec::new();
+        recovery_read::visit(
+            client,
+            recovery_read::Scope::Session(session_id),
+            session_sequence,
+            |_client, _position, wire| {
+                source_digests.push(
+                    Sha256::digest(serde_json::to_vec(&wire).map_err(|error| error.to_string())?)
+                        .to_vec(),
+                );
+                filter.push_wire_envelope(&wire)
+            },
+        )?;
+        let mut recovery =
+            centaeris_core::session::recovery::SessionRecoveryAccumulator::new(session_id);
+        let mut hydrator = postgres_store::SessionWireHydrator::default();
+        recovery_read::visit(
+            client,
+            recovery_read::Scope::Session(session_id),
+            session_sequence,
+            |client, position, wire| {
+                let digest =
+                    Sha256::digest(serde_json::to_vec(&wire).map_err(|error| error.to_string())?)
+                        .to_vec();
+                if source_digests.get(position as usize - 1) != Some(&digest) {
+                    return Err("recovery source changed between fixed-watermark passes".into());
+                }
+                let id = wire["eventId"].as_str().ok_or("recovery eventId missing")?;
+                let inactive = filter.is_inactive(id);
+                // Tombstones do not exempt old records from their original CAS
+                // and schema validation. Validate, then release inactive bodies.
+                let event = recovery_read::validate_for_replay(wire, |wire| {
+                    hydrator.hydrate_record(client, wire)
+                })?;
+                if inactive {
+                    recovery.push_inactive_record(event)?;
+                } else if event.event_type != SessionRecordType::Tombstone {
+                    recovery.push(event)?;
+                }
+                Ok(())
+            },
+        )?;
+        recovery.finish()
+    })
+}
+
+#[cfg(test)]
 fn with_recovery_session_events<T>(
     store: &PostgresRuntimeStore,
     session_id: &str,
     session_sequence: i32,
     followup: impl FnOnce(Vec<centaeris_core::session::SessionLogRecord>) -> Result<T, String>,
 ) -> Result<T, String> {
-    let events = load_recovery_session_events(store, session_id, session_sequence)?;
-    // Loading owns the decoded records, so its database lease ends before the
-    // follow-up may call RuntimeStoreActor through the same capacity-one pool.
-    followup(events)
-}
-
-fn load_recovery_session_events(
-    store: &PostgresRuntimeStore,
-    session_id: &str,
-    session_sequence: i32,
-) -> Result<Vec<centaeris_core::session::SessionLogRecord>, String> {
-    store.with_client(|client| {
-    let rows = client
-        .query(
-            "SELECT sequence,payload::text FROM app_core_sessionevent WHERE session_id=$1 AND sequence<=$2 ORDER BY sequence",
-            &[&session_id, &session_sequence],
-        )
-        .map_err(|error| format!("load recovery Session replay failed: {error}"))?;
-    if rows.last().map(|row| row.get::<_, i32>(0)) != Some(session_sequence) {
-        return Err("recovery checkpoint Session high-water mark is missing".to_string());
-    }
-    let mut wires = rows
-        .iter()
-        .map(|row| {
-            serde_json::from_str::<serde_json::Value>(row.get::<_, String>(1).as_str())
-                .map_err(|error| format!("decode recovery Session wire failed: {error}"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    hydrate_session_wire_values(client, wires.as_mut_slice())?;
-    wires
-        .iter()
-        .map(|wire| {
-            parse_wire_record(wire)
-                .map(|record| record.event)
-                .map_err(|error| format!("decode recovery Session record failed: {error}"))
-        })
-        .collect::<Result<Vec<_>, _>>()
-    })
+    let recovery = load_recovery_session_state(store, session_id, session_sequence)?;
+    // Pool capacity is released before follow-up calls through RuntimeStoreActor.
+    followup(recovery.source_records)
 }
 
 fn load_existing_terminal_state(

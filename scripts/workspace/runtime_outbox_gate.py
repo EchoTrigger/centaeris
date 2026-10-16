@@ -93,6 +93,8 @@ def main():
         'postgres_runtime_store_clones_reuse_one_short_lived_connection',
         'postgres_runtime_store_pool_can_drop_inside_tokio_runtime',
         'postgres_runtime_store_pool_checkout_is_bounded',
+        'postgres_runtime_store_recovery_pages_preserve_bytes_and_fixed_watermark',
+        'postgres_model_request_cold_recovery_preserves_snapshot',
         'postgres_runtime_store_discards_failed_and_panicked_leases_without_replay',
         'postgres_runtime_store_replaces_closed_idle_connection_before_operation',
         'postgres_control_and_listener_connections_do_not_consume_the_ordinary_pool',

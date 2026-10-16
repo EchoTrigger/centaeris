@@ -1081,6 +1081,52 @@ impl<
             session_id,
             session_records,
         )?;
+        let origins = session_records
+            .iter()
+            .filter_map(|record| {
+                crate::session::recovery::ToolCallRecoveryOrigin::from_record(record).transpose()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.plan_new_user_turn_closures_with_snapshot(
+            session_id,
+            &snapshot,
+            &origins,
+            (trigger_agent_run_id, trigger_turn_id),
+            expected_session_sequence,
+            now_ms,
+        )
+    }
+
+    /// Admission planning from a streamed, canonical recovery result.
+    pub fn plan_new_user_turn_closures_from_recovery(
+        &self,
+        session_id: &str,
+        recovery: &crate::session::recovery::SessionRecoveryResult,
+        trigger_agent_run_id: &str,
+        trigger_turn_id: &str,
+        expected_session_sequence: u64,
+        now_ms: i64,
+    ) -> Result<crate::runtime::contracts::NewUserTurnClosurePlanV1, String> {
+        self.plan_new_user_turn_closures_with_snapshot(
+            session_id,
+            &recovery.snapshot,
+            &recovery.tool_call_origins,
+            (trigger_agent_run_id, trigger_turn_id),
+            expected_session_sequence,
+            now_ms,
+        )
+    }
+
+    fn plan_new_user_turn_closures_with_snapshot(
+        &self,
+        session_id: &str,
+        snapshot: &crate::session::state::SessionStateSnapshot,
+        tool_call_origins: &[crate::session::recovery::ToolCallRecoveryOrigin],
+        trigger: (&str, &str),
+        expected_session_sequence: u64,
+        now_ms: i64,
+    ) -> Result<crate::runtime::contracts::NewUserTurnClosurePlanV1, String> {
+        let (trigger_agent_run_id, trigger_turn_id) = trigger;
         let open_tool_call_ids =
             crate::runtime::context_window::trailing_unpaired_model_tool_call_ids(
                 snapshot.messages.as_slice(),
@@ -1089,12 +1135,12 @@ impl<
         let mut evidence_preconditions = Vec::new();
         let mut closures = Vec::new();
         for tool_call_id in &open_tool_call_ids {
-            let call = find_model_assistant_semantics_tool_call(&snapshot, tool_call_id.as_str())
+            let call = find_model_assistant_semantics_tool_call(snapshot, tool_call_id.as_str())
                 .ok_or_else(|| {
-                format!("trailing unpaired tool call {tool_call_id} has no assistant semantics")
-            })?;
+                    format!("trailing unpaired tool call {tool_call_id} has no assistant semantics")
+                })?;
             let (original_agent_run_id, original_turn_id, call_event_id) =
-                locate_tool_call_record(session_records, tool_call_id.as_str())?;
+                locate_tool_call_record(tool_call_origins, tool_call_id.as_str())?;
             let evidence = self.read_unpaired_tool_call_evidence(session_id, &call)?;
             let effective_call = evidence
                 .as_ref()
@@ -1208,36 +1254,25 @@ fn build_input_user_message(
 }
 
 fn locate_tool_call_record(
-    session_records: &[crate::session::SessionLogRecord],
+    origins: &[crate::session::recovery::ToolCallRecoveryOrigin],
     tool_call_id: &str,
 ) -> Result<(String, String, Option<String>), String> {
-    let mut found: Option<(String, String, String)> = None;
-    for record in session_records {
-        if record.event_type != crate::session::SessionRecordType::ToolCall {
-            continue;
-        }
-        if record.payload.get("callId").and_then(Value::as_str) != Some(tool_call_id) {
-            continue;
-        }
-        let agent_run_id = record
-            .agent_run_id
-            .clone()
-            .ok_or_else(|| format!("tool_call {tool_call_id} record has no agentRunId"))?;
-        let turn_id = record
-            .turn_id
-            .clone()
-            .ok_or_else(|| format!("tool_call {tool_call_id} record has no turnId"))?;
-        if let Some((existing_run, existing_turn, _)) = found.as_ref() {
-            if existing_run != &agent_run_id || existing_turn != &turn_id {
+    let mut found: Option<(&str, &str, &str)> = None;
+    for origin in origins
+        .iter()
+        .filter(|origin| origin.call_id == tool_call_id)
+    {
+        if let Some((run, turn, _)) = found {
+            if run != origin.agent_run_id || turn != origin.turn_id {
                 return Err(format!(
                     "tool_call {tool_call_id} identity is ambiguous across session records"
                 ));
             }
         }
-        found = Some((agent_run_id, turn_id, record.event_id.clone()));
+        found = Some((&origin.agent_run_id, &origin.turn_id, &origin.event_id));
     }
     found
-        .map(|(agent_run_id, turn_id, event_id)| (agent_run_id, turn_id, Some(event_id)))
+        .map(|(run, turn, event)| (run.into(), turn.into(), Some(event.into())))
         .ok_or_else(|| format!("tool_call {tool_call_id} has no durable session record"))
 }
 

@@ -226,12 +226,9 @@ struct ReconstructedMainProof {
     snapshot_sha256: String,
 }
 
-pub(crate) fn record_reconstructed_main_proof(
-    snapshot: &mut SessionStateSnapshot,
-    main: &SessionLogRecord,
-    compaction: &SessionLogRecord,
+pub(crate) fn reconstructed_source_request(
     source: &SessionLogRecord,
-) -> Result<(), String> {
+) -> Result<CompactionSourceRequest, String> {
     let observations = source.payload["observations"]
         .as_array()
         .ok_or("reconstructed compaction source observations missing")?;
@@ -246,6 +243,29 @@ pub(crate) fn record_reconstructed_main_proof(
         .pointer("/message/content")
         .and_then(Value::as_str)
         .ok_or("reconstructed compaction source body missing")?;
+    Ok(CompactionSourceRequest {
+        agent_run_id: source
+            .agent_run_id
+            .clone()
+            .ok_or("reconstructed source AgentRun missing")?,
+        request_id: source.payload["requestId"]
+            .as_str()
+            .ok_or("reconstructed source request missing")?
+            .into(),
+        request_turn_id: source
+            .turn_id
+            .clone()
+            .ok_or("reconstructed source turn missing")?,
+        prompt_sha256: canonical_json::sha256("centaeris.compaction_prompt.v1", &text)?,
+    })
+}
+
+pub(crate) fn record_reconstructed_main_proof_from_source(
+    snapshot: &mut SessionStateSnapshot,
+    main: &SessionLogRecord,
+    compaction: &SessionLogRecord,
+    source: CompactionSourceRequest,
+) -> Result<(), String> {
     snapshot.metadata.remove(RECONSTRUCTED_MAIN_PROOF);
     let proof = ReconstructedMainProof {
         schema: "compaction_reconstructed_main_proof_v1".into(),
@@ -254,21 +274,7 @@ pub(crate) fn record_reconstructed_main_proof(
             .ok_or("reconstructed main request identity missing")?
             .into(),
         compaction_event_id: compaction.event_id.clone(),
-        source: CompactionSourceRequest {
-            agent_run_id: source
-                .agent_run_id
-                .clone()
-                .ok_or("reconstructed source AgentRun missing")?,
-            request_id: source.payload["requestId"]
-                .as_str()
-                .ok_or("reconstructed source request missing")?
-                .into(),
-            request_turn_id: source
-                .turn_id
-                .clone()
-                .ok_or("reconstructed source turn missing")?,
-            prompt_sha256: canonical_json::sha256("centaeris.compaction_prompt.v1", &text)?,
-        },
+        source,
         snapshot_sha256: canonical_json::sha256(
             "centaeris.compaction_reconstructed_snapshot.v1",
             snapshot,

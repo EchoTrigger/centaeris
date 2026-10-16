@@ -1383,6 +1383,134 @@ fn load_latest_model_observation_state<C: GenericClient>(
     Ok((Some(root_digest), references))
 }
 
+/// Recovery-only adapter. The caller consumes and drops each hydrated record.
+/// Only the last expanded manifest is retained; observation bodies never enter
+/// this state. Ancestor metadata and current-record bodies are call-local.
+#[derive(Default)]
+pub(crate) struct SessionWireHydrator {
+    root: Option<(String, String)>,
+    references: Vec<ModelObservationReference>,
+}
+
+impl SessionWireHydrator {
+    pub(crate) fn hydrate_record<C: GenericClient>(
+        &mut self,
+        client: &mut C,
+        wire: &mut serde_json::Value,
+    ) -> Result<(), String> {
+        super::session_payload::decode(wire)?;
+        let Some(key) = model_request_manifest_key(wire)? else {
+            return Ok(());
+        };
+        if self.root.as_ref() != Some(&key) {
+            // The common ordered-recovery case reads one compact delta, rather
+            // than loading the ancestor chain again for every historical root.
+            let row = client.query_opt(
+                "SELECT parent_digest,manifest_json,manifest_bytes,first_seen_at_ms FROM runtime.model_observation_manifests WHERE session_id=$1 AND manifest_digest=$2",
+                &[&key.0, &key.1],
+            ).map_err(|error|format!("load recovery model observation manifest failed: {error}"))?
+                .ok_or("stored model observation manifest is missing")?;
+            let manifest = decode_model_observation_manifest(
+                key.1.clone(),
+                row.get(0),
+                row.get(1),
+                row.get(2),
+                row.get(3),
+            )?;
+            let manifests = if self.can_extend(&key, &manifest) {
+                HashMap::from([(key.clone(), manifest)])
+            } else {
+                load_model_observation_manifests(client, &BTreeSet::from([key.clone()]))?
+            };
+            self.resolve_loaded_root(&key, &manifests)?;
+        }
+        let keys = self
+            .references
+            .iter()
+            .map(|reference| reference.content_digest.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let rows = client.query(
+            "SELECT content_digest,kind,content_json,content_bytes,first_seen_at_ms FROM runtime.model_observation_contents WHERE session_id=$1 AND content_digest=ANY($2)",
+            &[&key.0,&keys],
+        ).map_err(|error|format!("load recovery model observation contents failed: {error}"))?;
+        let contents = rows
+            .into_iter()
+            .map(|row| {
+                let content = ModelObservationContent {
+                    digest: row.get(0),
+                    kind: row.get(1),
+                    content_json: row.get(2),
+                    content_bytes: row.get(3),
+                    first_seen_at_ms: row.get(4),
+                };
+                ((key.0.clone(), content.digest.clone()), content)
+            })
+            .collect::<HashMap<_, _>>();
+        if contents.len() != keys.len() {
+            return Err("stored model observation content set is incomplete".into());
+        }
+        hydrate_model_request_wire(wire, &self.references, &contents)
+    }
+
+    fn can_extend(&self, key: &(String, String), manifest: &ModelObservationManifest) -> bool {
+        self.root.as_ref().is_some_and(|(session, digest)| {
+            session == &key.0 && manifest.parent_digest.as_ref() == Some(digest)
+        })
+    }
+
+    fn resolve_loaded_root(
+        &mut self,
+        key: &(String, String),
+        manifests: &HashMap<(String, String), ModelObservationManifest>,
+    ) -> Result<(), String> {
+        if self.root.as_ref() == Some(key) {
+            return Ok(());
+        }
+        let manifest = manifests
+            .get(key)
+            .ok_or("stored model observation manifest is missing")?;
+        let references = if self.can_extend(key, manifest) {
+            apply_model_observation_manifest(manifest, self.references.clone())?
+        } else {
+            // This temporary cache contains only this requested root. It is
+            // dropped before another record is hydrated, even after a branch.
+            resolve_model_observation_manifest(&key.0, &key.1, manifests, &mut HashMap::new())?
+        };
+        self.root = Some(key.clone());
+        self.references = references;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn hydrate_loaded_record(
+        &mut self,
+        wire: &mut serde_json::Value,
+        manifests: &HashMap<(String, String), ModelObservationManifest>,
+        contents: &HashMap<(String, String), ModelObservationContent>,
+    ) -> Result<(), String> {
+        let Some(key) = model_request_manifest_key(wire)? else {
+            return Ok(());
+        };
+        self.resolve_loaded_root(&key, manifests)?;
+        hydrate_model_request_wire(wire, &self.references, contents)
+    }
+
+    #[cfg(test)]
+    fn retained_reference_count(&self) -> usize {
+        self.references.len()
+    }
+
+    #[cfg(test)]
+    fn retained_reference_string_bytes(&self) -> usize {
+        self.references
+            .iter()
+            .map(|reference| reference.kind.len() + reference.content_digest.len())
+            .sum()
+    }
+}
+
 pub(crate) fn hydrate_session_wire_values<C: GenericClient>(
     client: &mut C,
     wires: &mut [serde_json::Value],
@@ -3841,3 +3969,6 @@ mod tests {
         assert_eq!(state.last_assistant_status.as_deref(), Some("done"));
     }
 }
+
+#[cfg(test)]
+mod recovery_hydration_tests;

@@ -43,6 +43,17 @@ compatible Runtime before rolling back, or use a tested reconstruction from the
 authoritative main-request observations. Ignoring a new projection reference is
 not a supported rollback procedure.
 
+Runtime recovery reads stored records at a fixed Session high-water mark in
+pages limited by record count and stored bytes. One oversized atomic record is
+read on its own page under its existing record contract. Historical model
+requests are hydrated and validated individually, including tombstoned records,
+then their bodies are released after folding the required control facts. The
+latest main request and its necessary source facts reconstruct the same model
+context; authority, input membership and tool provenance checks remain in Core.
+This removes simultaneous expansion of all historical request bodies. Historical
+validation, source metadata and ordinary Session snapshot reads/writes still have
+history-dependent costs; this is not complete bounded hot-state separation.
+
 This result-lifetime change does not complete Session hot-state separation.
 The current Session may still contain full history; repeated full-snapshot
 loads/saves and context-selection copies remain measurable costs. Follow-up

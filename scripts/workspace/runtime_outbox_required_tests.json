@@ -52,5 +52,7 @@
   "postgres_store::integration_tests::retained_instance_tests::pre_admission_failure_tests::postgres_pre_admission_failure_is_fenced_durable_and_blocks_history",
   "postgres_store::integration_tests::retained_instance_tests::pre_admission_failure_tests::postgres_pre_admission_failure_rejects_admitted_or_cancelled_runs",
   "postgres_store::integration_tests::retained_instance_tests::cleanup_authority_tests::postgres_cleanup_authority_accepts_bound_pre_admission_failure_and_rejects_reexecution",
-  "postgres_store::integration_tests::retained_instance_tests::cleanup_receipt_tests::postgres_cleanup_zero_history_failure_requires_fenced_receipt_before_never_allocated_cleanup"
+  "postgres_store::integration_tests::retained_instance_tests::cleanup_receipt_tests::postgres_cleanup_zero_history_failure_requires_fenced_receipt_before_never_allocated_cleanup",
+  "postgres_store::integration_tests::postgres_runtime_store_recovery_pages_preserve_bytes_and_fixed_watermark",
+  "postgres_store::integration_tests::postgres_model_request_cold_recovery_preserves_snapshot"
 ]

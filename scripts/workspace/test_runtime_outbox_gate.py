@@ -13,6 +13,20 @@ def discovery_output(command):
 
 
 class OutboxGateTests(unittest.TestCase):
+    def test_recovery_pagination_and_cas_paths_are_selected(self):
+        filters = set()
+        def discover(command, **kwargs):
+            filters.add(command[5])
+            return discovery_output(command)
+        driver = SimpleNamespace(connect=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("discovery complete")), sql=SimpleNamespace())
+        with patch.dict(sys.modules, {"psycopg": driver}), patch.object(gate.subprocess, "run", discover):
+            with self.assertRaisesRegex(RuntimeError, "discovery complete"):
+                gate.main()
+        self.assertTrue({
+            "postgres_store::integration_tests::postgres_runtime_store_recovery_pages_preserve_bytes_and_fixed_watermark",
+            "postgres_store::integration_tests::postgres_model_request_cold_recovery_preserves_snapshot",
+        }.issubset(filters), filters)
+
     def test_missing_required_identity_refuses_before_database_creation(self):
         omitted = gate.required_tests()[0]
         def discover(command, **kwargs):

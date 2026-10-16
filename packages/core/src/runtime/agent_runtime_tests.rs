@@ -43,6 +43,7 @@ mod host_event_tests;
 mod prompt_compaction_attempt_tests;
 mod prompt_compaction_live_chain_tests;
 mod prompt_compaction_recovery_tests;
+mod recovery_tool_origin_tests;
 mod wait_recovery_tests;
 
 #[tokio::test]

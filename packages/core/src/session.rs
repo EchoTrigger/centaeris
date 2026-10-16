@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 pub mod external_context;
 pub mod host_event_input;
 pub mod manager;
+pub mod recovery;
 pub mod reliability;
 pub mod state;
 pub mod store;
@@ -2384,19 +2385,30 @@ pub fn restore_runtime_snapshot_from_session_records(
     expected_session_id: &str,
     events: &[SessionLogRecord],
 ) -> Result<SessionStateSnapshot, String> {
-    let active = active_session_records(expected_session_id, events)?;
-    let projection = reduce_events(expected_session_id, active.iter())?;
+    let references = events.iter().collect::<Vec<_>>();
+    let inactive = active_tombstone_targets(expected_session_id, &references)?;
+    let mut recovery = recovery::SessionRecoveryAccumulator::new(expected_session_id);
+    for record in events.iter().filter(|record| {
+        record.event_type != SessionRecordType::Tombstone && !inactive.contains(&record.event_id)
+    }) {
+        recovery.push(record.clone())?;
+    }
+    Ok(recovery.finish()?.snapshot)
+}
+
+fn restore_active_runtime_snapshot(
+    expected_session_id: &str,
+    active: &[SessionLogRecord],
+    projection: &SessionProjection,
+    controls: &recovery::ModelControlFacts,
+    sources: &HashMap<String, crate::runtime::prompt_compaction_commit::CompactionSourceRequest>,
+    updated_at_ms: i64,
+) -> Result<SessionStateSnapshot, String> {
     let latest_request_index = active.iter().rposition(|event| {
         event.event_type == SessionRecordType::ModelRequestStarted
             && event.payload.get("purpose").and_then(Value::as_str) == Some("main")
     });
-    let mut snapshot = SessionStateSnapshot::new(
-        expected_session_id.to_string(),
-        active
-            .last()
-            .map(|event| event.created_at_ms)
-            .unwrap_or_default(),
-    );
+    let mut snapshot = SessionStateSnapshot::new(expected_session_id.to_string(), updated_at_ms);
 
     let tail_start = if let Some(request_index) = latest_request_index {
         let request = &active[request_index];
@@ -2451,7 +2463,7 @@ pub fn restore_runtime_snapshot_from_session_records(
             } else {
                 Vec::new()
             };
-            append_observed_model_message(&mut snapshot, message, created_at_ms, &projection)?;
+            append_observed_model_message(&mut snapshot, message, created_at_ms, projection)?;
             for call_id in missing_tool_result_ids {
                 let Some(result_event) = active[..request_index].iter().find(|event| {
                     event.event_type == SessionRecordType::ToolResult
@@ -2479,7 +2491,7 @@ pub fn restore_runtime_snapshot_from_session_records(
                         reasoning_content: None,
                     },
                     result_event.created_at_ms,
-                    &projection,
+                    projection,
                 )?;
             }
         }
@@ -2678,92 +2690,34 @@ pub fn restore_runtime_snapshot_from_session_records(
         &projection.host_event_owning_runs,
     )?;
     let current_request = latest_request_index.map(|index| &active[index]);
-    let mut current_input_ids = Vec::new();
-    for record in &active {
-        if record.event_type != SessionRecordType::ModelRequestStarted
-            || record.payload.get("purpose").and_then(Value::as_str) != Some("main")
-        {
-            continue;
-        }
-        let observations = serde_json::from_value::<Vec<ModelObservationV1>>(
-            record.payload["observations"].clone(),
-        )
-        .map_err(|error| format!("decode Session model observations failed: {error}"))?;
-        for observation in observations {
-            if let ModelObservationV1::RequiredCompletionDelivery { ref state } = observation {
-                crate::runtime::completion_delivery::restore_observation(
-                    &mut snapshot,
-                    state,
-                    required_event_agent_run_id(record)?.as_str(),
-                    record
-                        .turn_id
-                        .as_deref()
-                        .ok_or("completion_tool_delivery_observation_turn_missing")?,
-                )?;
-            }
-            if let ModelObservationV1::InputUptake { input_ids } = observation {
-                if current_request.is_some_and(|current| {
-                    current.agent_run_id == record.agent_run_id && current.turn_id == record.turn_id
-                }) {
-                    for id in &input_ids {
-                        if !current_input_ids.contains(id) {
-                            current_input_ids.push(id.clone());
-                        }
-                    }
-                }
-                turn_input::recovery::record_committed(
-                    &mut snapshot,
-                    required_event_agent_run_id(record)?.as_str(),
-                    &input_ids,
-                )?;
-            }
-        }
-    }
-    if let Some(current) = current_request {
-        // A retry can have no new uptake while retaining its original membership.
-        // Other turns contribute Read history, never the current preparation.
-        turn_input::recovery::freeze_prepared(
-            &mut snapshot,
-            required_event_agent_run_id(current)?.as_str(),
-            current
-                .turn_id
-                .as_deref()
-                .ok_or("model request turn is missing")?,
-            &current_input_ids,
-        )?;
-    }
+    controls.restore_into(&mut snapshot, current_request)?;
     snapshot.context_window = snapshot.messages.clone();
     if let Some(main_index) = latest_request_index {
         let main = &active[main_index];
         let observations = main.payload["observations"]
             .as_array()
             .ok_or("restored main observations missing")?;
-        if let Some((compaction_index, compaction)) = active[..main_index]
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, event)| {
-                event.event_type == SessionRecordType::Compaction
-                    && event.agent_run_id == main.agent_run_id
-                    && observations.iter().any(|observation| {
-                        observation["kind"] == "message"
-                            && observation["message"]["role"] == "system"
-                            && observation["message"]["messageId"]
-                                == event.payload["summaryMessageId"]
-                            && observation["message"]["content"] == event.payload["summaryMarkdown"]
-                    })
-            })
+        if let Some((_, compaction)) =
+            active[..main_index]
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, event)| {
+                    event.event_type == SessionRecordType::Compaction
+                        && event.agent_run_id == main.agent_run_id
+                        && observations.iter().any(|observation| {
+                            observation["kind"] == "message"
+                                && observation["message"]["role"] == "system"
+                                && observation["message"]["messageId"]
+                                    == event.payload["summaryMessageId"]
+                                && observation["message"]["content"]
+                                    == event.payload["summaryMarkdown"]
+                        })
+                })
         {
-            if let Some(source) = active[..compaction_index].iter().rev().find(|event| {
-                event.event_type == SessionRecordType::ModelRequestStarted
-                    && event.agent_run_id == main.agent_run_id
-                    && event.payload["purpose"] == "compaction"
-            }) {
-                crate::runtime::prompt_compaction_commit::record_reconstructed_main_proof(
-                    &mut snapshot,
-                    main,
-                    compaction,
-                    source,
+            if let Some(source) = sources.get(&compaction.event_id) {
+                crate::runtime::prompt_compaction_commit::record_reconstructed_main_proof_from_source(
+                    &mut snapshot, main, compaction, source.clone(),
                 )?;
             }
         }
@@ -5326,6 +5280,7 @@ fn validate_non_empty_string_array(
 #[cfg(test)]
 mod tests {
     mod reasoning;
+    mod recovery;
     use serde_json::json;
 
     use super::*;

@@ -524,8 +524,8 @@ fn run_postgres_blocking_error<T: Send, E: From<String> + Send>(
     operation()
 }
 
-pub(crate) use runtime::hydrate_session_wire_values;
 pub use runtime::PostgresSessionLog;
+pub(crate) use runtime::SessionWireHydrator;
 
 #[cfg(test)]
 mod integration_tests;
