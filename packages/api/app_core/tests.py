@@ -2835,7 +2835,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
         )
         authorization = create_agent_run_authorization(agent_run)
         agentRunStart = build_agent_run_start(agent_run)
-        self.assertEqual(agentRunStart["schema"], "workspace.agent_run.start.v2")
+        self.assertEqual(agentRunStart["schema"], "workspace.agent_run.start.v3")
         self.assertEqual(agentRunStart["initialInput"], {"type": "userMessage"})
         self.assertEqual(agentRunStart["agentInstructions"], "Prefer primary sources.")
         self.assertEqual(agentRunStart["authorization"], authorization.payload)

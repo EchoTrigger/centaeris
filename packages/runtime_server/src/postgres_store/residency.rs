@@ -4,6 +4,8 @@ use centaeris_core::session::RuntimeJobLeaseFence;
 use postgres::{Client, GenericClient};
 
 use super::PostgresRuntimeStore;
+mod retained;
+pub(crate) mod retirement;
 use crate::resident_capacity::{
     ObservedResidentSandbox, ResidentCapacity, ResidentSandboxRequest, RESIDENT_CAPACITY_WAIT,
 };
@@ -32,6 +34,18 @@ fn lock_host(client: &mut Client) -> Result<ResidentHostLock<'_>, String> {
     Ok(ResidentHostLock(client))
 }
 
+pub(super) fn with_host_inventory<T>(
+    client: &mut Client,
+    host_id: &str,
+    inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String>,
+    operation: impl FnOnce(&mut Client, &[ObservedResidentSandbox]) -> Result<T, String>,
+) -> Result<T, String> {
+    let lock = lock_host(client)?;
+    let physical = inventory()?;
+    reconcile(lock.0, host_id, &physical)?;
+    operation(lock.0, &physical)
+}
+
 impl PostgresRuntimeStore {
     pub(crate) fn with_resident_execution_restore<T: Send>(
         &self,
@@ -43,6 +57,7 @@ impl PostgresRuntimeStore {
     ) -> Result<T, String> {
         self.with_client(|client| {
             let mut tx = client.transaction().map_err(|error| error.to_string())?;
+            reject_retained_legacy(&mut tx, agent_run_id, Some(execution_id))?;
             // Pin the current owner throughout the bounded physical restore.
             // Lease reclaimers skip this row until the operation has finished.
             verify_removal_fence(&mut tx, agent_run_id, fence)?;
@@ -107,12 +122,16 @@ impl PostgresRuntimeStore {
             }
             let mut tx = lock.0.transaction().map_err(|error| error.to_string())?;
             super::resource_commit::require_durable_resource_commit(&mut tx)?;
+            reject_retained_legacy(&mut tx, request.agent_run_id, Some(request.execution_id))?;
             // Signed authorization supplies the workspace. Its durable job
             // binding and live lease must agree before physical creation.
-            let admitted = tx.query_opt("SELECT t.workspace_id FROM runtime_jobs j JOIN execution_job_tenants t ON t.job_id=j.job_id JOIN app_core_agentrun a ON a.id=$4 WHERE j.job_id=$1 AND j.job_kind='agent_run.lifecycle' AND j.status IN('leased','running') AND j.lease_owner=$2 AND j.lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint AND t.workspace_id=$3 AND a.workspace_id=t.workspace_id AND a.status IN('queued','running')", &[&request.lifecycle_job_id, &request.lifecycle_lease_owner, &request.workspace_id, &request.agent_run_id])
+            let admitted = tx.query_opt("SELECT t.workspace_id,a.environment_id FROM runtime_jobs j JOIN execution_job_tenants t ON t.job_id=j.job_id JOIN app_core_agentrun a ON a.id=$4 WHERE j.job_id=$1 AND j.job_kind='agent_run.lifecycle' AND j.status IN('leased','running') AND j.lease_owner=$2 AND j.lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint AND t.workspace_id=$3 AND a.workspace_id=t.workspace_id AND a.status IN('queued','running')", &[&request.lifecycle_job_id, &request.lifecycle_lease_owner, &request.workspace_id, &request.agent_run_id])
                 .map_err(|error| format!("verify resident admission owner failed: {error}"))?;
-            if admitted.is_none_or(|row| row.get::<_, String>(0) != request.workspace_id) {
+            let Some(admitted) = admitted.filter(|row| row.get::<_, String>(0) == request.workspace_id) else {
                 return Err("resident sandbox lease or tenant binding rejected".into());
+            };
+            if let Some(environment_id) = admitted.get::<_, Option<String>>(1) {
+                super::execution_instances::require_per_run_environment(&mut tx, &environment_id)?;
             }
             let existing = tx.query_opt("SELECT workspace_id,agent_run_id,state,memory_bytes,cpu_milli,pids,workspace_bytes FROM resident_sandboxes WHERE host_id=$1 AND execution_id=$2 FOR UPDATE", &[&host_id, &request.execution_id])
                 .map_err(|error| error.to_string())?;
@@ -218,6 +237,7 @@ impl PostgresRuntimeStore {
             let lock = lock_host(client)?;
             let mut tx = lock.0.transaction().map_err(|error| error.to_string())?;
             super::resource_commit::require_durable_resource_commit(&mut tx)?;
+            reject_retained_legacy(&mut tx, agent_run_id, execution_id)?;
             // Pin the validated owner until the bounded physical mutation and
             // confirmed budget release finish. Reclaimers skip this locked row.
             verify_removal_fence(&mut tx, agent_run_id, fence)?;
@@ -238,6 +258,17 @@ impl PostgresRuntimeStore {
             Ok(())
         })
     }
+}
+
+fn reject_retained_legacy(
+    client: &mut impl GenericClient,
+    run: &str,
+    execution: Option<&str>,
+) -> Result<(), String> {
+    if client.query_one("SELECT EXISTS(SELECT 1 FROM runtime.execution_instances WHERE allocation_mode='retained' AND (agent_run_id=$1 OR execution_id=$2))", &[&run,&execution]).map_err(|e|e.to_string())?.get::<_,bool>(0) {
+        return Err("retained allocation requires explicit controller operation; legacy restore/remove rejected".into());
+    }
+    Ok(())
 }
 
 fn verify_removal_fence(
@@ -311,7 +342,7 @@ fn insert(
     resources: ResidentResourceUsage,
 ) -> Result<(), String> {
     let value = |number: u64| i64::try_from(number).map_err(|error| error.to_string());
-    client.execute("INSERT INTO resident_sandboxes(host_id,execution_id,agent_run_id,workspace_id,container_id,state,memory_bytes,cpu_milli,pids,workspace_bytes,created_at_ms,updated_at_ms) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint)",
+    client.execute("INSERT INTO resident_sandboxes(host_id,execution_id,agent_run_id,workspace_id,container_id,state,memory_bytes,cpu_milli,pids,workspace_bytes,created_at_ms,updated_at_ms,instance_id,environment_id,allocation_mode) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,i.instance_id,i.environment_id,COALESCE(i.allocation_mode,'unbound') FROM (SELECT 1) seed LEFT JOIN runtime.execution_instances i ON i.execution_id=$2 AND i.allocation_execution_id=i.execution_id",
         &[&host_id, &execution_id, &agent_run_id, &workspace_id, &container_id, &state, &value(resources.memory_bytes)?, &value(resources.cpu_milli)?, &value(resources.pids)?, &value(resources.workspace_bytes)?])
         .map(|_| ()).map_err(|error| format!("reserve resident sandbox failed: {error}"))
 }

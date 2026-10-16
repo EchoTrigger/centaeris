@@ -1,4 +1,5 @@
 import json
+import hashlib
 import re
 import os
 import http.client
@@ -18,6 +19,9 @@ from datetime import datetime
 RUNTIME_INTERNAL_URL = os.environ["RUNTIME_INTERNAL_URL"].rstrip("/")
 API_INTERNAL_URL = os.environ["API_INTERNAL_URL"].rstrip("/")
 INTERNAL_API_TOKEN = os.environ["INTERNAL_API_TOKEN"]
+AGENT_RUN_EXECUTION_MODE = os.environ.get("AGENT_RUN_EXECUTION_MODE", "perRun")
+if AGENT_RUN_EXECUTION_MODE not in {"perRun", "retained"}:
+    raise ValueError("AGENT_RUN_EXECUTION_MODE must be perRun or retained")
 LEASE_MS = int(os.environ.get("WORKER_LEASE_MS", "60000"))
 AGENT_RUN_LIFECYCLE_RECHECK_MS = int(os.environ.get("AGENT_RUN_LIFECYCLE_RECHECK_MS", "30000"))
 RUNTIME_JOB_WAIT_RECHECK_MS = 5 * 60 * 1000
@@ -52,6 +56,14 @@ class RuntimeJobCancelled(RuntimeError):
     pass
 
 
+class RuntimeLeaseLost(RuntimeError):
+    def __init__(self):
+        super().__init__("agent_run_lifecycle_lease_lost")
+
+
+_lease_context = threading.local()
+
+
 class DependencyUnavailable(RuntimeError):
     def __init__(self, reason, http_status=None):
         super().__init__(reason)
@@ -66,14 +78,15 @@ class RuntimeStepFailed(RuntimeError):
         self.http_status = http_status
 
 
-def runtime_request(path, body=None):
+def runtime_request(path, body=None, *, timeout=None):
     return json_request(
         f"{RUNTIME_INTERNAL_URL}{path}",
         body,
         "X-Internal-Token",
         INTERNAL_API_TOKEN,
         "runtime_job_request_failed",
-        timeout=(CONTROL_HTTP_TIMEOUT_SECONDS
+        timeout=(timeout if timeout is not None else
+                 CONTROL_HTTP_TIMEOUT_SECONDS
                  if path == "/internal/jobs/heartbeat" or body is None else 10),
     )
 
@@ -145,7 +158,7 @@ def _json_request(url, body, token_header, token, default_reason, timeout=10):
         try:
             payload = json.loads(error.read())
             reason = payload.get("error", default_reason)
-        except (json.JSONDecodeError, AttributeError):
+        except (json.JSONDecodeError, AttributeError, http.client.IncompleteRead, OSError):
             payload = None
             reason = default_reason
         error.close()
@@ -183,6 +196,8 @@ def _json_request(url, body, token_header, token, default_reason, timeout=10):
         urllib.error.URLError,
         TimeoutError,
         http.client.RemoteDisconnected,
+        http.client.IncompleteRead,
+        OSError,
         json.JSONDecodeError,
     ) as error:
         raise DependencyUnavailable(default_reason) from error
@@ -192,9 +207,9 @@ def now_ms():
     return time.time_ns() // 1_000_000
 
 
-def heartbeat(job_id, lease_owner):
+def heartbeat(job_id, lease_owner, *, timeout=None):
     try:
-        runtime_request(
+        response = runtime_request(
             "/internal/jobs/heartbeat",
             {
                 "schema": "runtime.job.heartbeat.v1",
@@ -203,40 +218,180 @@ def heartbeat(job_id, lease_owner):
                 "heartbeatAtMs": now_ms(),
                 "leaseMs": LEASE_MS,
             },
+            **({"timeout": timeout} if timeout is not None else {}),
         )
     except RuntimeError as error:
-        raise_if_job_cancelled(job_id, error, "job_heartbeat_rejected")
+        # A confirmed 409 is authoritative loss. A second query must not
+        # downgrade it into a temporary failure and revive this owner.
+        if getattr(error, "http_status", None) == 409:
+            raise RuntimeLeaseLost() from None
+        raise
+    if not isinstance(response, dict) or set(response) != {"ok"} or response["ok"] is not True:
+        raise RuntimeError("runtime_job_heartbeat_response_invalid")
 
 
 @contextmanager
 def lease_heartbeats(job_id, lease_owner):
-    heartbeat(job_id, lease_owner)
+    if getattr(_lease_context, "guard", None) is not None:
+        raise RuntimeError("worker_lease_guard_already_active")
     stopped = threading.Event()
-    errors = []
+    changed = threading.Condition()
+    lease_seconds = LEASE_MS / 1000
+    margin = min(1.0, lease_seconds / 10)
+    state = {"deadline": 0.0, "status": "unconfirmed", "error": None, "attempt": 0, "renewing": False}
+    owner_digest = hashlib.sha256(lease_owner.encode()).hexdigest()
+
+    def observe(started, outcome, error=None):
+        observations.emit("leaseHeartbeat", started, jobId=job_id,
+            leaseOwnerSha256=owner_digest, attempt=state["attempt"], outcome=outcome,
+            httpStatus=getattr(error, "http_status", None),
+            errorCode=("temporary_unavailable" if isinstance(error, DependencyUnavailable)
+                       else "fence_rejected" if isinstance(error, RuntimeLeaseLost)
+                       else "invalid_response" if error is not None else None),
+            confirmedRemainingMs=max(0, round((state["deadline"] - time.monotonic()) * 1000)))
+
+    def lose(error=None):
+        state["status"] = "lost"
+        state["error"] = error if isinstance(error, RuntimeLeaseLost) else RuntimeLeaseLost()
+        changed.notify_all()
+
+    def attempt(initial=False):
+        started = time.monotonic()
+        with changed:
+            if stopped.is_set() or state["status"] == "lost":
+                return False
+            if not initial and started >= state["deadline"]:
+                lose()
+                return False
+            state["attempt"] += 1
+            previous_deadline = None if initial else state["deadline"]
+            budget = lease_seconds - margin if initial else state["deadline"] - started
+            state["renewing"] = True
+        try:
+            try:
+                heartbeat(job_id, lease_owner, timeout=min(CONTROL_HTTP_TIMEOUT_SECONDS, budget))
+            except DependencyUnavailable as error:
+                with changed:
+                    if initial:
+                        # No successfully confirmed window exists yet: dispatch is forbidden.
+                        observe(started, "unconfirmed", error)
+                        raise DependencyUnavailable("worker_heartbeat_unconfirmed", http_status=error.http_status) from None
+                    if time.monotonic() >= state["deadline"]:
+                        lose()
+                        observe(started, "lost", error)
+                    else:
+                        state["status"] = "unconfirmed"
+                        changed.notify_all()
+                        observe(started, "unconfirmed", error)
+                    return state["status"] != "lost"
+            except Exception as error:
+                with changed:
+                    lose()
+                    observe(started, "lost", error)
+                return False
+            with changed:
+                if state["status"] == "lost":
+                    return False
+                completed = time.monotonic()
+                if previous_deadline is not None and completed >= previous_deadline:
+                    lose()
+                    observe(started, "lost")
+                    return False
+                # The server renews for exactly leaseMs after obtaining its row lock.
+                # Request-start + duration is a conservative lower bound. ACK arrival
+                # and local wall-clock changes never grant an extra validity window.
+                deadline = started + lease_seconds - margin
+                if completed >= deadline:
+                    lose()
+                    observe(started, "lost")
+                    return False
+                state.update(deadline=deadline, status="healthy", error=None)
+                changed.notify_all()
+                observe(started, "renewed")
+                return True
+        finally:
+            with changed:
+                state["renewing"] = False
+                changed.notify_all()
+
+    def require_healthy_lease():
+        with changed:
+            while True:
+                remaining = state["deadline"] - time.monotonic()
+                if state["status"] in {"lost", "graceful_stop"} or remaining <= 0:
+                    lose()
+                    raise state["error"]
+                if state["status"] == "healthy":
+                    return
+                # Only the single renewal thread can verify an uncertain ACK.
+                # Callers cannot dispatch new work while that verification runs.
+                changed.wait(remaining)
+
+    if not attempt(initial=True):
+        require_healthy_lease()
 
     def renew():
-        while not stopped.wait(max(1, LEASE_MS // 3000)):
-            try:
-                heartbeat(job_id, lease_owner)
-            except Exception as error:
-                errors.append(error)
+        while True:
+            with changed:
+                remaining = state["deadline"] - time.monotonic()
+                delay = (min(0.25, max(0, remaining / 4)) if state["status"] == "unconfirmed"
+                         else min(max(1, LEASE_MS // 3000), max(0, remaining / 2)))
+            if stopped.wait(delay):
+                return
+            if not attempt():
                 return
 
     thread = threading.Thread(target=renew, daemon=True)
     thread.start()
 
-    def require_healthy_lease():
-        if errors:
-            raise errors[0]
+    def terminal_handoff():
+        # Only the final complete/yield RPC uses this. Teardown, release and
+        # maintenance retain their renewal guard for their entire duration.
+        with changed:
+            while True:
+                remaining = state["deadline"] - time.monotonic()
+                if state["status"] in {"lost", "graceful_stop"} or remaining <= 0:
+                    lose()
+                    raise state["error"]
+                if state["status"] == "healthy" and not state["renewing"]:
+                    # Only a confirmed, quiescent owner can stop its verifier.
+                    # attempt() checks stopped under this same Condition lock.
+                    stopped.set()
+                    break
+                changed.wait(remaining)
+        thread.join()
+        with changed:
+            if state["status"] != "healthy" or time.monotonic() >= state["deadline"]:
+                lose()
+                raise state["error"]
+            state["status"] = "graceful_stop"
+            changed.notify_all()
+            observe(time.monotonic(), "graceful_stop")
 
+    _lease_context.guard = (job_id, lease_owner, terminal_handoff)
     try:
         yield require_healthy_lease
     finally:
         stopped.set()
         thread.join()
+        with changed:
+            if state["status"] not in {"lost", "graceful_stop"}:
+                state["status"] = "graceful_stop"
+                changed.notify_all()
+                observe(time.monotonic(), "graceful_stop")
+        _lease_context.guard = None
+
+
+def _lease_terminal_handoff(job_id, lease_owner):
+    guard = getattr(_lease_context, "guard", None)
+    if guard is not None:
+        if guard[:2] != (job_id, lease_owner):
+            raise RuntimeError("worker_lease_guard_identity_mismatch")
+        guard[2]()
 
 
 def complete_job(job_id, lease_owner, output_refs):
+    _lease_terminal_handoff(job_id, lease_owner)
     try:
         runtime_request(
             "/internal/jobs/complete",
@@ -268,6 +423,7 @@ def start_job(job_id, lease_owner):
 
 
 def yield_job(job_id, lease_owner, run_at_ms, transition_reason):
+    _lease_terminal_handoff(job_id, lease_owner)
     try:
         runtime_request(
             "/internal/jobs/yield",
@@ -396,47 +552,33 @@ def agent_run_lifecycle_binding(job):
 
 def execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
     agent_run_id, digest = agent_run_lifecycle_binding(job)
-    resolved = api_request(
-        "/internal/agent-run-lifecycle/resolve",
-        {
-            "schema": "runtime.agent_run_lifecycle.resolve.v1",
-            "jobId": job["jobId"],
-            "agentRunId": agent_run_id,
-            "authorizationDigest": digest,
-        },
-        "agent_run_start_unavailable",
-    )
-    if (
-        not isinstance(resolved, dict)
-        or resolved.get("schema") != "runtime.agent_run_lifecycle.resolved.v1"
-        or resolved.get("disposition") not in {"ready", "terminal"}
-    ):
-        raise RuntimeError("agent_run_lifecycle_resolve_response_invalid")
+    retained = AGENT_RUN_EXECUTION_MODE == "retained"
+    version = "v2" if retained else "v1"
+    resolved = resolve_agent_run_lifecycle(job, lease_owner, agent_run_id, digest, retained)
+    if retained and resolved["disposition"] in {"terminal", "released"}:
+        require_healthy_lease()
+        finish_retained_agent_run(job, lease_owner, agent_run_id, digest, resolved, require_healthy_lease)
+        return False
     agent_run_start = resolved.get("agentRunStart")
     if (
         not isinstance(agent_run_start, dict)
         or agent_run_start.get("agentRunId") != agent_run_id
         or agent_run_start.get("authorizationDigest") != digest
+        or (retained and (agent_run_start.get("schema") != "workspace.agent_run.start.v4"
+            or environment_controller_purpose(agent_run_start) != "execute"))
     ):
         raise RuntimeError("agent_run_lifecycle_resolve_response_invalid")
     if resolved["disposition"] == "terminal":
-        if set(resolved) != {
-            "schema",
-            "disposition",
-            "terminalState",
-            "agentRunStart",
-        } or resolved["terminalState"] not in {"completed", "failed", "cancelled"}:
-            raise RuntimeError("agent_run_lifecycle_resolve_response_invalid")
         require_healthy_lease()
         finish_agent_run_lifecycle(job, lease_owner, agent_run_start, resolved["terminalState"])
         return False
-    if set(resolved) != {"schema", "disposition", "agentRunStart"}:
-        raise RuntimeError("agent_run_lifecycle_resolve_response_invalid")
+    if retained:
+        require_supported_retained_configuration(agent_run_start)
     transition_agent_run(agent_run_id, "running", "agent_run_lifecycle_step_started")
     require_healthy_lease()
     result = agent_run_step_request(
         {
-            "schema": "runtime.agent_run.step.v1",
+            "schema": f"runtime.agent_run.step.{version}",
             "jobId": job["jobId"],
             "leaseOwner": lease_owner,
             "agentRunStart": agent_run_start,
@@ -448,7 +590,7 @@ def execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
         or set(result)
         != ({"schema", "agentRunId", "disposition", "terminalState", "transitionReason"}
             | ({"retryAtMs"} if result.get("transitionReason") == "execution_recovery_checkpoint_committed" else set()))
-        or result.get("schema") != "runtime.agent_run.step.result.v1"
+        or result.get("schema") != f"runtime.agent_run.step.result.{version}"
         or result.get("agentRunId") != agent_run_id
         or result.get("disposition") not in {"waiting", "terminal"}
         or not isinstance(result.get("transitionReason"), str)
@@ -488,8 +630,120 @@ def execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
     if result["terminalState"] not in {"completed", "failed", "cancelled"}:
         raise RuntimeError("agent_run_step_response_invalid")
     require_healthy_lease()
-    finish_agent_run_lifecycle(job, lease_owner, agent_run_start, result["terminalState"])
+    if retained:
+        transition_agent_run(agent_run_id, result["terminalState"], "runtime_session_terminal_committed")
+        resolved = resolve_agent_run_lifecycle(job, lease_owner, agent_run_id, digest, True)
+        if resolved["disposition"] not in {"terminal", "released"} or resolved["terminalState"] != result["terminalState"]:
+            raise RuntimeError("agent_run_lifecycle_resolve_response_invalid")
+        finish_retained_agent_run(job, lease_owner, agent_run_id, digest, resolved, require_healthy_lease)
+    else:
+        finish_agent_run_lifecycle(job, lease_owner, agent_run_start, result["terminalState"])
     return False
+
+
+def require_supported_retained_configuration(start):
+    """Reject unsupported opt-in combinations before dispatching execution.
+
+    Runtime still validates the signed contract and enforces its host boundary.
+    This worker preflight never changes the configured execution mode.
+    """
+    authorization = start.get('authorization', {})
+    initial = start.get('initialInput', {})
+    packages = authorization.get('pluginActivation', {}).get('packages', [])
+    if (authorization.get('assetRefs') or authorization.get('messageAssetRefs')
+            or initial.get('attachmentRefs')
+            or any(package.get('mcpServers') or package.get('hooks') for package in packages)):
+        raise RuntimeError('retained_configuration_unsupported')
+
+
+def environment_controller_purpose(envelope):
+    authorization = envelope.get("environmentAuthorization")
+    if not isinstance(authorization, dict):
+        return None
+    payload = authorization.get("payload")
+    return payload.get("controllerPurpose") if isinstance(payload, dict) else None
+
+
+def resolve_agent_run_lifecycle(job, lease_owner, agent_run_id, digest, retained):
+    version = "v2" if retained else "v1"
+    resolved = api_request(
+        "/internal/agent-run-lifecycle/resolve",
+        {
+            "schema": f"runtime.agent_run_lifecycle.resolve.{version}",
+            "jobId": job["jobId"],
+            "agentRunId": agent_run_id,
+            "authorizationDigest": digest,
+            **({"leaseOwner": lease_owner} if retained else {}),
+        },
+        "agent_run_start_unavailable",
+    )
+    if (
+        not isinstance(resolved, dict)
+        or resolved.get("schema") != f"runtime.agent_run_lifecycle.resolved.{version}"
+        or resolved.get("disposition") not in ({"ready", "terminal", "released"} if retained else {"ready", "terminal"})
+    ):
+        raise RuntimeError("agent_run_lifecycle_resolve_response_invalid")
+    disposition = resolved["disposition"]
+    envelope = "agentRunCleanup" if retained else "agentRunStart"
+    expected = {"schema", "disposition"}
+    if disposition == "ready":
+        expected.add("agentRunStart")
+    else:
+        expected |= {"terminalState", "releaseReceiptId" if disposition == "released" else envelope}
+        if resolved.get("terminalState") not in {"completed", "failed", "cancelled"}:
+            raise RuntimeError("agent_run_lifecycle_resolve_response_invalid")
+    if set(resolved) != expected or (disposition == "released" and not valid_runtime_job_id(resolved["releaseReceiptId"])):
+        raise RuntimeError("agent_run_lifecycle_resolve_response_invalid")
+    return resolved
+
+
+class RetainedCleanupPending(RuntimeError):
+    """Cleanup is unconfirmed; retain the original terminal and retry this job."""
+
+
+def finish_retained_agent_run(job, lease_owner, run_id, digest, resolved, require_healthy_lease):
+    try:
+        return _finish_retained_agent_run(job, lease_owner, run_id, digest, resolved, require_healthy_lease)
+    except (RuntimeError, urllib.error.URLError, OSError) as error:
+        if str(error) == "agent_run_lifecycle_lease_lost":
+            raise
+        # Never include untrusted response bodies or transport credentials.
+        reason = str(error) if isinstance(error, RuntimeError) else "retained_cleanup_unavailable"
+        raise RetainedCleanupPending(reason) from error
+
+
+def _finish_retained_agent_run(job, lease_owner, run_id, digest, resolved, require_healthy_lease):
+    if resolved["disposition"] == "terminal":
+        cleanup = resolved["agentRunCleanup"]
+        if (not isinstance(cleanup, dict) or set(cleanup) != {"schema", "agentRunId", "authorizationDigest",
+                "authorizationSignature", "authorization", "environmentAuthorization"}
+                or cleanup["schema"] != "workspace.agent_run.cleanup.v1"
+                or cleanup["agentRunId"] != run_id or cleanup["authorizationDigest"] != digest
+                or not isinstance(cleanup["environmentAuthorization"], dict)):
+            raise RuntimeError("agent_run_lifecycle_resolve_response_invalid")
+        grant = cleanup["environmentAuthorization"].get("payload")
+        if (not isinstance(grant, dict) or grant.get("controllerPurpose") != "cleanup"
+                or type(grant.get("controllerEpoch")) is not int or not 1 <= grant["controllerEpoch"] <= 2**63 - 1):
+            raise RuntimeError("agent_run_lifecycle_resolve_response_invalid")
+        require_healthy_lease()
+        result = runtime_teardown_request({'schema': 'runtime.agent_run.teardown.v2',
+            'jobId': job['jobId'], 'leaseOwner': lease_owner, 'agentRunCleanup': cleanup})
+        if (not isinstance(result, dict) or set(result) != {'schema', 'agentRunId', 'status', 'cleanupReceiptId'}
+                or result['schema'] != 'runtime.agent_run.teardown.result.v2' or result['agentRunId'] != run_id
+                or result['status'] != 'retained' or not valid_runtime_job_id(result['cleanupReceiptId'])):
+            raise RuntimeError("runtime_teardown_response_invalid")
+        require_healthy_lease()
+        release = api_request('/internal/agent-run-lifecycle/release',
+            {'schema': 'runtime.agent_run_lifecycle.release.v1', 'jobId': job['jobId'],
+                'leaseOwner': lease_owner, 'agentRunId': run_id, 'authorizationDigest': digest,
+                'controllerEpoch': grant['controllerEpoch'], 'cleanupReceiptId': result['cleanupReceiptId']},
+            'agent_run_release_unavailable')
+        if (not isinstance(release, dict) or set(release) != {'schema', 'agentRunId', 'releaseReceiptId'}
+                or release['schema'] != 'runtime.agent_run_lifecycle.released.v1' or release['agentRunId'] != run_id
+                or not valid_runtime_job_id(release['releaseReceiptId'])):
+            raise RuntimeError('agent_run_release_response_invalid')
+    require_healthy_lease()
+    complete_job(job['jobId'], lease_owner, [])
 
 
 def finish_agent_run_lifecycle(job, lease_owner, agent_run_start, terminal_state):
@@ -630,11 +884,18 @@ def _execute_claimed_job(job, lease_owner):
             if completed:
                 require_healthy_lease()
                 complete_job(job["jobId"], lease_owner, output_refs)
+    except RuntimeLeaseLost:
+        print(f"worker lease stopped: jobId={job['jobId']}; transitionReason=lease_lost", flush=True)
+        return
     except RuntimeJobCancelled as error:
         print(
             f"worker job stopped: jobId={job['jobId']}; transitionReason={error}",
             flush=True,
         )
+    except RetainedCleanupPending:
+        # The job state machine records retry/deadletter, but cleanup failure
+        # cannot synthesize a different Core terminal or release residency.
+        fail_job(job, lease_owner, "retained_cleanup_pending", True)
     except DependencyUnavailable:
         fail_claimed_job(job, lease_owner, "dependency_unavailable", True)
     except RuntimeStepFailed as error:
@@ -796,6 +1057,7 @@ class LifecycleReconciler:
         # A restart safely begins a new pass; reconciliation is idempotent.
         self.active_after = None
         self.dead_letter_after = None
+        self.cleanup_after = None
         self.waiter_after = None
 
     def __call__(self):
@@ -812,12 +1074,32 @@ class LifecycleReconciler:
         # Advance successful API pages even if the independent waiter pass fails.
         self.active_after = lifecycle["activeNext"]
         self.dead_letter_after = lifecycle["deadLetterNext"]
+        cleanup_pending = None
+        if AGENT_RUN_EXECUTION_MODE == "retained":
+            cleanup_pending = api_request('/internal/agent-run-lifecycle/reconcile',
+                {'schema': 'runtime.agent_run_lifecycle.reconcile.v2', 'limit': CONTROL_PAGE_LIMIT,
+                    'after': self.cleanup_after}, 'retained_cleanup_reconcile_unavailable')
+            if (not isinstance(cleanup_pending, dict) or set(cleanup_pending) != {'schema', 'checked', 'pending', 'next'}
+                    or cleanup_pending['schema'] != 'runtime.agent_run_lifecycle.reconciled.v2'
+                    or type(cleanup_pending['checked']) is not int or not 0 <= cleanup_pending['checked'] <= CONTROL_PAGE_LIMIT
+                    or not isinstance(cleanup_pending['pending'], list)
+                    or len(cleanup_pending['pending']) > cleanup_pending['checked']):
+                raise RuntimeError('retained_cleanup_reconcile_response_invalid')
+            for entry in cleanup_pending['pending']:
+                if (not isinstance(entry, dict) or set(entry) != {'agentRunId', 'authorizationDigest', 'terminalState', 'jobStatus'}
+                        or not valid_runtime_job_id(entry['agentRunId'])
+                        or not isinstance(entry['authorizationDigest'], str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', entry['authorizationDigest'])
+                        or entry['terminalState'] not in {'completed', 'failed', 'cancelled'}
+                        or entry['jobStatus'] not in {'queued', 'leased', 'running', 'succeeded', 'failed', 'dead_lettered', 'cancelled', 'missing', 'unknown'}):
+                    raise RuntimeError('retained_cleanup_reconcile_response_invalid')
+            self.cleanup_after = cleanup_pending['next']
         waiters = runtime_request(
             "/internal/job-outbox/reconcile-waiters",
             {"schema": "runtime.job.waiters.reconcile.v1", "after": self.waiter_after},
         )
         self.waiter_after = waiter_page_next(waiters, {"reconciled"}, self.waiter_after)
-        return {"runtimeJobs": runtime, "runLifecycle": lifecycle, "waiters": waiters}
+        return {"runtimeJobs": runtime, "runLifecycle": lifecycle, "waiters": waiters,
+            **({'cleanupPending': cleanup_pending} if cleanup_pending is not None else {})}
 
 def work_cursor(value):
     if value is None:

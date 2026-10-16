@@ -1,3 +1,5 @@
+mod retained;
+mod retained_commands;
 mod snapshot_capture;
 
 use crate::docker_engine::{ExecChild, ExecRequest};
@@ -27,10 +29,10 @@ use std::time::{Duration, Instant};
 use centaeris_core::execution::{
     classify_execution_host_failure, ExecutionCancellationProbe, ExecutionFileSystemError,
     ExecutionFileSystemErrorKind, ExecutionFileSystemOperation, ExecutionFileSystemOutput,
-    ExecutionFileSystemRequest, ExecutionHostCommandOutput, ExecutionHostFailureKind,
-    ExecutionHostHealth, ExecutionHostRunner, ExecutionHostStatus, ExecutionInputState,
-    ExecutionInputStateChange, ExecutionWorkspaceGeneration, MAX_PUBLISHED_ARTIFACT_BYTES,
-    WORKSPACE_DATA_ROOT, WORKSPACE_HOME,
+    ExecutionFileSystemRequest, ExecutionHostCommandOutput, ExecutionHostCommandRecovery,
+    ExecutionHostFailureKind, ExecutionHostHealth, ExecutionHostRunner, ExecutionHostStatus,
+    ExecutionInputState, ExecutionInputStateChange, ExecutionWorkspaceGeneration,
+    MAX_PUBLISHED_ARTIFACT_BYTES, WORKSPACE_DATA_ROOT, WORKSPACE_HOME,
 };
 use centaeris_core::execution::{
     decode_process_output, ExecutionAttempt, ExecutionCommandRequest, ExecutionError,
@@ -97,6 +99,7 @@ pub(crate) struct SessionWorkspaceLease {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionWorkspaceResolution {
+    RetainedLive,
     Empty,
     Download,
     Advanced,
@@ -110,6 +113,7 @@ pub(crate) enum SessionWorkspaceApiError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SessionWorkspaceCommitOutcome {
+    ProtectionDeferred,
     Accepted,
     Unchanged,
     Rejected(String),
@@ -289,6 +293,9 @@ pub struct DockerExecutionHostRunner {
     agent_run_id: String,
     execution_id: String,
     authorization_digest: String,
+    environment_id: String,
+    instance_id: String,
+    binding_digest: String,
     image_digest: String,
     oci_runtime: OciRuntime,
     resources: SandboxResources,
@@ -304,6 +311,10 @@ pub struct DockerExecutionHostRunner {
     workspace_generation_rpc: Mutex<Option<WorkspaceGenerationRpc>>,
     resident_store: Option<Arc<PostgresRuntimeStore>>,
     resident_lease: Option<centaeris_core::session::RuntimeJobLeaseFence>,
+    retained_allocation:
+        Option<crate::postgres_store::execution_instances::RetainedInstanceAllocation>,
+    environment_authorization: Option<crate::environment_authorization::EnvironmentAuthorization>,
+    retained_workspace_id: Option<String>,
 }
 
 struct WorkspaceGenerationRpc {
@@ -491,6 +502,7 @@ pub struct DockerExecutionHostRequest<'a> {
     pub user_id: String,
     pub agent_id: String,
     pub authorization_digest: String,
+    pub environment_authorization: crate::environment_authorization::EnvironmentAuthorization,
     pub image_digest: String,
     pub resources: SandboxResources,
     pub has_execution_fact: bool,
@@ -499,11 +511,17 @@ pub struct DockerExecutionHostRequest<'a> {
     pub plugin_activation: &'a PluginActivationSnapshotV1,
 }
 
+#[derive(Clone, Copy)]
 struct ContainerExpectation<'a> {
+    retained: bool,
+    profile_digest: Option<&'a str>,
     name: &'a str,
     agent_run_id: &'a str,
     execution_id: &'a str,
     authorization_digest: &'a str,
+    environment_id: &'a str,
+    instance_id: &'a str,
+    binding_digest: &'a str,
     image_digest: &'a str,
     oci_runtime: OciRuntime,
     resources: SandboxResources,
@@ -554,8 +572,23 @@ impl DockerExecutionHostRunner {
         request: DockerExecutionHostRequest<'_>,
         before_create: &mut (dyn FnMut(&mut postgres::Client) -> Result<(), String> + Send),
     ) -> Result<Self, String> {
+        if request.environment_authorization.payload.agent_run_id != request.agent_run_id
+            || request
+                .environment_authorization
+                .payload
+                .agent_run_authorization_digest
+                != request.authorization_digest
+        {
+            return Err("Docker environment binding is invalid".into());
+        }
         #[cfg(test)]
-        if crate::native_consumption_tests::owns_identity(&request.user_id, &request.agent_id) {
+        if request
+            .environment_authorization
+            .payload
+            .controller
+            .is_none()
+            && crate::native_consumption_tests::owns_identity(&request.user_id, &request.agent_id)
+        {
             assert!(
                 !request.has_execution_fact,
                 "fresh execution required by native fixture"
@@ -567,6 +600,14 @@ impl DockerExecutionHostRunner {
             runner.container_name = format!("native-consume-test:{}", request.execution_id);
             runner.agent_run_id = request.agent_run_id;
             runner.execution_id = request.execution_id;
+            runner.environment_id = request
+                .environment_authorization
+                .payload
+                .environment_id
+                .clone();
+            runner.binding_digest = request.environment_authorization.payload.digest()?;
+            runner.instance_id =
+                crate::postgres_store::execution_instances::instance_id(&runner.execution_id);
             runner.authorization_digest = request.authorization_digest;
             runner.image_digest = request.image_digest;
             runner.resources = request.resources;
@@ -586,6 +627,7 @@ impl DockerExecutionHostRunner {
             user_id,
             agent_id,
             authorization_digest,
+            environment_authorization,
             image_digest,
             resources,
             has_execution_fact,
@@ -603,6 +645,12 @@ impl DockerExecutionHostRunner {
         {
             return Err("Docker sandbox binding is invalid".to_string());
         }
+        let environment_binding = &environment_authorization.payload;
+        let retained = environment_binding.controller.is_some();
+        let environment_id = environment_binding.environment_id.clone();
+        let binding_digest = environment_binding.digest()?;
+        let mut instance_id =
+            crate::postgres_store::execution_instances::instance_id(&execution_id);
         validate_plugin_activation_snapshot(plugin_activation)?;
         let plugin_volume_name = docker_volume_name_from_environment(PLUGIN_VOLUME_NAME_ENV)?;
         let plugin_mounts = plugin_mounts(plugin_activation);
@@ -611,15 +659,22 @@ impl DockerExecutionHostRunner {
             agent_id.as_str(),
             docker_volume_name_from_environment(AGENT_MEMORY_VOLUME_NAME_ENV)?,
         )?;
-        prepare_memory_scope(&memory_mount)?;
+        if !retained {
+            prepare_memory_scope(&memory_mount)?;
+        }
         let command_path = plugin_command_path(plugin_activation)?;
         let oci_runtime = OciRuntime::from_environment()?;
-        let container_name = container_name(execution_id.as_str());
+        let mut container_name = container_name(execution_id.as_str());
         let expected = ContainerExpectation {
+            retained,
+            profile_digest: None,
             name: container_name.as_str(),
             agent_run_id: agent_run_id.as_str(),
             execution_id: execution_id.as_str(),
             authorization_digest: authorization_digest.as_str(),
+            environment_id: &environment_id,
+            instance_id: &instance_id,
+            binding_digest: &binding_digest,
             image_digest: image_digest.as_str(),
             oci_runtime,
             resources,
@@ -628,27 +683,89 @@ impl DockerExecutionHostRunner {
             memory_mount: &memory_mount,
         };
         let (resident_host_id, resident_limits) = resident_host_context()?;
-        resident_store.prepare_resident_sandbox_with_client(
-            &resident_host_id,
-            &ResidentSandboxRequest {
+        let lease = centaeris_core::session::RuntimeJobLeaseFence {
+            job_id: lifecycle_job_id.clone(),
+            job_kind: centaeris_core::session::reliability::AGENT_RUN_LIFECYCLE_JOB_KIND.into(),
+            lease_owner: lifecycle_lease_owner.clone(),
+        };
+        let retained_allocation = if retained {
+            let key = retained::signing_key()?;
+            let profile = retained::profile_digest(&expected, plugin_activation)?;
+            let request = crate::postgres_store::execution_instances::RetainedInstanceRequest {
+                environment_authorization: &environment_authorization,
+                signing_key: key.as_bytes(),
                 execution_id: &execution_id,
-                agent_run_id: &agent_run_id,
                 workspace_id: &workspace_id,
-                lifecycle_job_id: &lifecycle_job_id,
-                lifecycle_lease_owner: &lifecycle_lease_owner,
-                must_exist: has_execution_fact,
+                host_id: &resident_host_id,
+                image_digest: &image_digest,
+                profile_digest: &profile,
                 resources: declared_usage(resources),
-            },
-            resident_limits,
-            observed_resident_sandboxes,
-            |client| {
-                before_create(client)?;
-                ensure_container(&expected, has_execution_fact)?;
-                Ok(inspect_container(&container_name)?
-                    .ok_or("prepared resident sandbox disappeared")?
-                    .id)
-            },
-        )?;
+                lease: &lease,
+            };
+            let allocation = resident_store.prepare_retained_instance(
+                &request,
+                resident_limits,
+                observed_resident_sandboxes,
+                |client, _| before_create(client),
+                |allocation| {
+                    if !allocation.reused {
+                        prepare_memory_scope(&memory_mount)?;
+                    }
+                    let name = self::container_name(&allocation.allocation_execution_id);
+                    let physical = retained::origin_expectation(&expected, allocation, &name);
+                    ensure_container(&physical, allocation.reused || has_execution_fact)?;
+                    let facts =
+                        inspect_container(&name)?.ok_or("retained container disappeared")?;
+                    if allocation
+                        .container_id
+                        .as_ref()
+                        .is_some_and(|id| id != &facts.id)
+                    {
+                        return Err("retained container incarnation mismatch".into());
+                    }
+                    let fence =
+                        retained::fence(&environment_authorization, &allocation.instance_id)?;
+                    retained::takeover(&physical, &facts.id, &fence)?;
+                    Ok(facts.id)
+                },
+            )?;
+            instance_id = allocation.instance_id.clone();
+            container_name = self::container_name(&allocation.allocation_execution_id);
+            Some(allocation)
+        } else {
+            resident_store.prepare_resident_sandbox_with_client(
+                &resident_host_id,
+                &ResidentSandboxRequest {
+                    execution_id: &execution_id,
+                    agent_run_id: &agent_run_id,
+                    workspace_id: &workspace_id,
+                    lifecycle_job_id: &lifecycle_job_id,
+                    lifecycle_lease_owner: &lifecycle_lease_owner,
+                    must_exist: has_execution_fact,
+                    resources: declared_usage(resources),
+                },
+                resident_limits,
+                observed_resident_sandboxes,
+                |client| {
+                    before_create(client)?;
+                    let committed = crate::postgres_store::execution_instances::bind(
+                        client,
+                        environment_binding,
+                        &execution_id,
+                        &resident_host_id,
+                        &image_digest,
+                    )?;
+                    if committed != instance_id {
+                        return Err("execution instance allocation mismatch".into());
+                    }
+                    ensure_container(&expected, has_execution_fact)?;
+                    Ok(inspect_container(&container_name)?
+                        .ok_or("prepared resident sandbox disappeared")?
+                        .id)
+                },
+            )?;
+            None
+        };
         let runner = Self {
             transcript_capture: Mutex::new(Default::default()),
             transcript_publisher: Arc::new(Default::default()),
@@ -664,6 +781,9 @@ impl DockerExecutionHostRunner {
             agent_run_id,
             execution_id,
             authorization_digest,
+            environment_id,
+            instance_id,
+            binding_digest,
             image_digest,
             oci_runtime,
             resources,
@@ -686,7 +806,13 @@ impl DockerExecutionHostRunner {
                 job_kind: centaeris_core::session::reliability::AGENT_RUN_LIFECYCLE_JOB_KIND.into(),
                 lease_owner: lifecycle_lease_owner,
             }),
+            retained_allocation,
+            environment_authorization: retained.then_some(environment_authorization),
+            retained_workspace_id: retained.then_some(workspace_id),
         };
+        if retained {
+            return Ok(runner);
+        }
         if has_execution_fact {
             runner.quiesce_existing_execution()?;
         }
@@ -707,11 +833,24 @@ impl DockerExecutionHostRunner {
     }
 
     fn container_expectation(&self) -> ContainerExpectation<'_> {
+        let origin = self.retained_allocation.as_ref();
         ContainerExpectation {
+            retained: origin.is_some(),
+            profile_digest: origin.map(|a| a.profile_digest.as_str()),
             name: self.container_name.as_str(),
-            agent_run_id: self.agent_run_id.as_str(),
-            execution_id: self.execution_id.as_str(),
-            authorization_digest: self.authorization_digest.as_str(),
+            agent_run_id: origin.map_or(self.agent_run_id.as_str(), |a| {
+                a.allocation_agent_run_id.as_str()
+            }),
+            execution_id: origin.map_or(self.execution_id.as_str(), |a| {
+                a.allocation_execution_id.as_str()
+            }),
+            authorization_digest: origin.map_or(self.authorization_digest.as_str(), |a| {
+                a.authorization_digest.as_str()
+            }),
+            environment_id: &self.environment_id,
+            instance_id: origin.map_or(self.instance_id.as_str(), |a| a.instance_id.as_str()),
+            binding_digest: origin
+                .map_or(self.binding_digest.as_str(), |a| a.binding_digest.as_str()),
             image_digest: self.image_digest.as_str(),
             oci_runtime: self.oci_runtime,
             resources: self.resources,
@@ -751,6 +890,9 @@ impl DockerExecutionHostRunner {
         program: &str,
         program_args: &[String],
     ) -> Result<ExecRequest, String> {
+        if self.is_retained() {
+            return Err("retained MCP dispatch unsupported".into());
+        }
         let _activity = self.recovery_activity.begin_dispatch_activity()?;
         let mount = self
             .plugin_mounts
@@ -781,6 +923,9 @@ impl DockerExecutionHostRunner {
         &self,
         handler: &LifecycleHookHandlerV1,
     ) -> Result<ExecRequest, String> {
+        if self.is_retained() {
+            return Err("retained lifecycle hook dispatch unsupported".into());
+        }
         if handler.source.kind != LifecycleHookSourceKindV1::Plugin {
             return Err("Workspace lifecycle hook source must be Plugin".to_string());
         }
@@ -909,6 +1054,9 @@ impl DockerExecutionHostRunner {
     }
 
     fn teardown_owned(&self) -> Result<(), String> {
+        if self.is_retained() {
+            return Err("retained instance removal requires explicit cleanup authority".into());
+        }
         if let Some(store) = self.resident_store.as_ref() {
             return Self::teardown(
                 &self.agent_run_id,
@@ -1143,6 +1291,9 @@ impl DockerExecutionHostRunner {
         frozen: &SessionWorkspace,
         input_upper_bound_bytes: u64,
     ) -> Result<SessionWorkspaceResolution, SessionWorkspaceApiError> {
+        if self.is_hot_reuse() {
+            return Ok(SessionWorkspaceResolution::RetainedLive);
+        }
         let resolution = self.resolve_session_workspace(lease, frozen)?;
         #[cfg(test)]
         if self.container_name.starts_with("native-consume-test:") {
@@ -1367,6 +1518,9 @@ impl DockerExecutionHostRunner {
         &self,
         collect: impl FnOnce(&SnapshotActivityGuard) -> Result<SessionWorkspaceCommitOutcome, String>,
     ) -> Result<SessionWorkspaceCommitOutcome, String> {
+        if self.is_retained() {
+            return Ok(SessionWorkspaceCommitOutcome::ProtectionDeferred);
+        }
         let Some(capture) = self.recovery_activity.try_final_snapshot_activity()? else {
             return Ok(SessionWorkspaceCommitOutcome::Pending);
         };
@@ -1523,6 +1677,9 @@ impl DockerExecutionHostRunner {
         observe: impl FnOnce(&SnapshotActivityGuard) -> Result<u64, String>,
         collect: impl FnOnce(&SnapshotActivityGuard) -> Result<T, String> + Send,
     ) -> Result<Option<(T, WorkspaceReuseEvidence)>, String> {
+        if self.is_retained() {
+            return Err("retained_consistent_capture_unavailable".into());
+        }
         *self
             .recovery_snapshot
             .lock()
@@ -1775,6 +1932,9 @@ impl DockerExecutionHostRunner {
         frozen: &SessionWorkspace,
     ) -> Result<SessionWorkspaceCommitOutcome, String> {
         match self.resolve_session_workspace(lease, frozen) {
+            Ok(SessionWorkspaceResolution::RetainedLive) => {
+                Ok(SessionWorkspaceCommitOutcome::ProtectionDeferred)
+            }
             Ok(SessionWorkspaceResolution::Advanced) => Ok(SessionWorkspaceCommitOutcome::Accepted),
             Ok(SessionWorkspaceResolution::Empty | SessionWorkspaceResolution::Download) => {
                 Ok(SessionWorkspaceCommitOutcome::Rejected(
@@ -2093,6 +2253,27 @@ impl DockerExecutionHostRunner {
         input: &[u8],
         output_limit: usize,
     ) -> Result<Vec<u8>, String> {
+        if self.is_retained() {
+            if mode == "filesystem-once" && user == Some(AGENT_USER) {
+                static HELPER_SEQUENCE: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0);
+                let sequence = HELPER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|e| e.to_string())?
+                    .as_nanos();
+                let id = format!("filesystem-{}-{timestamp}-{sequence}", std::process::id());
+                return retained_commands::run_file_helper(
+                    &self.environment_task_fence()?,
+                    &id,
+                    input,
+                    output_limit,
+                    &self.command_path,
+                    |request| self.environment_task_rpc(request),
+                );
+            }
+            return Err("retained helper dispatch unsupported".into());
+        }
         if !matches!(
             mode,
             "read-artifact" | "input-inventory" | "quiesce-agent-processes" | "agent-process-state"
@@ -2188,6 +2369,20 @@ impl LifecycleHookRunner for DockerExecutionHostRunner {
 impl ExecutionHostRunner for DockerExecutionHostRunner {
     fn status(&self, policy: &ExecutionPolicy) -> Result<ExecutionHostStatus, ExecutionError> {
         self.validate_policy(policy)?;
+        if self.is_retained() {
+            let fence = self
+                .environment_task_fence()
+                .map_err(|error| self.unavailable(error))?;
+            self.environment_task_rpc(centaeris_core::execution::EnvironmentTaskRequest::List {
+                fence,
+            })
+            .map_err(|error| self.unavailable(error))?;
+            return Ok(ExecutionHostStatus::remote(
+                true,
+                ExecutionHostHealth::Ready,
+                None,
+            ));
+        }
         let facts = inspect_container(self.container_name.as_str())
             .map_err(|error| self.unavailable(error))?
             .ok_or_else(|| {
@@ -2217,6 +2412,11 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
     }
 
     fn workspace_generation(&self) -> ExecutionWorkspaceGeneration {
+        if self.is_retained() {
+            return ExecutionWorkspaceGeneration::Unknown {
+                reason: "retained consistent capture unavailable".into(),
+            };
+        }
         #[cfg(test)]
         if self.container_name.starts_with("native-consume-test:") {
             return ExecutionWorkspaceGeneration::Known {
@@ -2371,12 +2571,55 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
         Ok(result)
     }
 
+    fn recover_host_command(
+        &self,
+        operation_id: &str,
+        request: ExecutionCommandRequest,
+        cancellation_probe: Option<&ExecutionCancellationProbe>,
+    ) -> Result<ExecutionHostCommandRecovery, ExecutionError> {
+        if !self.is_retained() {
+            return Ok(ExecutionHostCommandRecovery::Unknown {
+                reason: "command recovery requires the original live retained instance".into(),
+            });
+        }
+        self.validate_policy(&request.policy)?;
+        let fence = self
+            .environment_task_fence()
+            .map_err(|error| self.unavailable(error))?;
+        retained_commands::recover_command(
+            &fence,
+            operation_id,
+            request,
+            cancellation_probe,
+            &self.command_path,
+            |request| self.environment_task_rpc(request),
+        )
+        .map(|output| ExecutionHostCommandRecovery::Completed(Box::new(output)))
+    }
+
     fn run_host_command(
         &self,
-        _operation_id: Option<&str>,
+        operation_id: Option<&str>,
         request: ExecutionCommandRequest,
         cancellation_probe: Option<&ExecutionCancellationProbe>,
     ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
+        if self.is_retained() {
+            self.validate_policy(&request.policy)?;
+            let operation_id = operation_id
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| self.unavailable("retained command operation identity required"))?;
+            let fence = self
+                .environment_task_fence()
+                .map_err(|error| self.unavailable(error))?;
+            return retained_commands::run_command(
+                &fence,
+                operation_id,
+                request,
+                cancellation_probe,
+                &self.command_path,
+                |request| self.environment_task_rpc(request),
+            );
+        }
         let _activity = self
             .recovery_activity
             .begin_dispatch_activity()
@@ -2691,9 +2934,11 @@ fn container_create_body(expected: &ContainerExpectation<'_>) -> Result<serde_js
         "Target":MEMORY_CONTAINER_ROOT, "ReadOnly":false,
         "VolumeOptions":{"Subpath":expected.memory_mount.scope_key}}),
     );
-    Ok(json!({
+    let mut body = json!({
         "Image":expected.image_digest,
         "Labels":{"centaeris.managed":"true", "centaeris.agent_run_id":expected.agent_run_id,
+            "centaeris.environment_id":expected.environment_id,"centaeris.instance_id":expected.instance_id,
+            "centaeris.environment_authorization_digest":expected.binding_digest,
             "centaeris.execution_id":expected.execution_id},
         "HostConfig":{
             "Runtime":expected.oci_runtime.docker_runtime_name(), "NetworkMode":SANDBOX_NETWORK_MODE,
@@ -2707,7 +2952,45 @@ fn container_create_body(expected: &ContainerExpectation<'_>) -> Result<serde_js
                 "/run/centaeris":"rw,noexec,nosuid,nodev,size=8388608,uid=0,gid=0,mode=0700"
             }, "Mounts":mounts
         }
-    }))
+    });
+    if expected.retained {
+        if let Some(profile) = expected.profile_digest {
+            body["Labels"]["centaeris.retained_profile_digest"] = json!(profile);
+        }
+        if expected.oci_runtime != OciRuntime::Runc {
+            return Err("retained task supervision requires a verified runc cgroup backend".into());
+        }
+        let id = expected
+            .instance_id
+            .strip_prefix("instance_")
+            .filter(|id| {
+                id.len() == 64
+                    && id
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+            .ok_or("retained instance identity invalid")?;
+        // systemd treats hyphens as hierarchy separators. This slice is a
+        // direct child, and the guest sees only its own instance subtree.
+        let parent = format!("centaeris{id}.slice");
+        body["Cmd"] = json!([
+            "/opt/centaeris/bin/execution_agent",
+            "environment-init",
+            expected.instance_id
+        ]);
+        body["HostConfig"]["CgroupParent"] = json!(parent);
+        body["HostConfig"]["Binds"] = json!([format!(
+            "/sys/fs/cgroup/{parent}:/run/centaeris/instance-cgroups:rw"
+        )]);
+        body["HostConfig"]["CapAdd"] = json!(["CHOWN", "SETUID", "SETGID"]);
+        // Output exhaustion must not consume the space needed for control
+        // receipts. Both mounts remain under the same instance memory limit.
+        body["HostConfig"]["Tmpfs"]["/run/centaeris/task-control"] =
+            json!("rw,noexec,nosuid,nodev,size=8388608,uid=0,gid=0,mode=0700");
+        body["HostConfig"]["Tmpfs"]["/run/centaeris/task-output"] =
+            json!("rw,noexec,nosuid,nodev,size=75497472,uid=0,gid=0,mode=0700");
+    }
+    Ok(body)
 }
 
 fn container_name(execution_id: &str) -> String {
@@ -2809,7 +3092,7 @@ fn resident_host_id() -> Result<String, String> {
         .ok_or_else(|| "Docker daemon identity missing; resident admission blocked".into())
 }
 
-fn resident_host_context() -> Result<(String, ResidentCapacity), String> {
+pub(crate) fn resident_host_context() -> Result<(String, ResidentCapacity), String> {
     let info = crate::docker_engine::info()?;
     let id = info["ID"]
         .as_str()
@@ -2839,7 +3122,7 @@ fn resident_host_context() -> Result<(String, ResidentCapacity), String> {
     ))
 }
 
-fn observed_resident_sandboxes() -> Result<Vec<ObservedResidentSandbox>, String> {
+pub(crate) fn observed_resident_sandboxes() -> Result<Vec<ObservedResidentSandbox>, String> {
     observe_resident_container_ids(crate::docker_engine::list_managed(None)?)
 }
 
@@ -3697,6 +3980,13 @@ fn inspect_workspace_snapshot(
     inspect_workspace_snapshot_with_manifest(source).map(|(descriptor, _)| descriptor)
 }
 
+#[cfg(test)]
+pub(crate) fn inspect_workspace_snapshot_manifest_for_test(
+    source: &mut impl Read,
+) -> Result<Option<SandboxWorkspaceSnapshotManifest>, String> {
+    inspect_workspace_snapshot_with_manifest(source).map(|(_, manifest)| manifest)
+}
+
 fn inspect_workspace_snapshot_with_manifest(
     source: &mut impl Read,
 ) -> Result<
@@ -3818,7 +4108,7 @@ fn read_snapshot_exact(
     Ok(())
 }
 
-fn validate_workspace_snapshot_manifest(
+pub(crate) fn validate_workspace_snapshot_manifest(
     manifest: &SandboxWorkspaceSnapshotManifest,
 ) -> Result<u64, String> {
     if manifest.schema != SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA || manifest.files.is_empty() {
@@ -3960,6 +4250,167 @@ enum ProjectedInputState {
 
 #[cfg(test)]
 mod tests {
+    fn retained_test_runner() -> DockerExecutionHostRunner {
+        let mut runner = test_docker_execution_host_runner();
+        let origin_execution = "execution-origin";
+        let allocation = crate::postgres_store::execution_instances::RetainedInstanceAllocation {
+            allocation_execution_id: origin_execution.into(),
+            allocation_agent_run_id: "run-origin".into(),
+            instance_id: crate::postgres_store::execution_instances::instance_id(origin_execution),
+            environment_id: runner.environment_id.clone(),
+            host_id: "host".into(),
+            image_digest: runner.image_digest.clone(),
+            authorization_digest: runner.authorization_digest.clone(),
+            binding_digest: runner.binding_digest.clone(),
+            profile_digest: format!("sha256:{}", "e".repeat(64)),
+            container_id: Some("origin-container".into()),
+            reused: true,
+        };
+        runner.container_name = container_name(origin_execution);
+        runner.agent_run_id = "run-controller".into();
+        runner.execution_id = "execution-controller".into();
+        runner.authorization_digest = format!("sha256:{}", "d".repeat(64));
+        runner.retained_allocation = Some(allocation);
+        runner
+    }
+
+    #[test]
+    fn retained_container_payload_keeps_origin_labels_and_sentinel_after_takeover() {
+        let runner = retained_test_runner();
+        let expected = runner.container_expectation();
+        let body = container_create_body(&expected).unwrap();
+        assert_eq!(body["Labels"]["centaeris.agent_run_id"], "run-origin");
+        assert_eq!(body["Labels"]["centaeris.execution_id"], "execution-origin");
+        assert_eq!(
+            body["Labels"]["centaeris.instance_id"],
+            runner.retained_allocation.as_ref().unwrap().instance_id
+        );
+        assert_eq!(body["Cmd"][1], "environment-init");
+        let sentinel = expected_workspace_execution_sentinel(
+            expected.agent_run_id,
+            expected.execution_id,
+            expected.authorization_digest,
+        );
+        assert_eq!(sentinel.agent_run_id, "run-origin");
+        assert_eq!(sentinel.execution_id, "execution-origin");
+        assert_eq!(runner.agent_run_id, "run-controller");
+        assert_eq!(runner.execution_id, "execution-controller");
+    }
+
+    #[test]
+    fn retained_profile_preserves_configuration_without_controller_identity() {
+        let runner = retained_test_runner();
+        let plugins = PluginActivationSnapshotV1 {
+            schema: "workspace.plugin_activation.v1".into(),
+            digest: "digest-a".into(),
+            packages: Vec::new(),
+        };
+        let expected = runner.container_expectation();
+        let first = retained::profile_digest(&expected, &plugins).unwrap();
+        let mut next = expected;
+        next.agent_run_id = "another-run";
+        next.execution_id = "another-execution";
+        next.binding_digest = "another-controller-binding";
+        next.instance_id =
+            "instance_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert_eq!(first, retained::profile_digest(&next, &plugins).unwrap());
+        next.resources.memory_bytes += 1;
+        assert_ne!(first, retained::profile_digest(&next, &plugins).unwrap());
+        let mut changed = plugins;
+        changed.digest = "digest-b".into();
+        assert_ne!(
+            first,
+            retained::profile_digest(&expected, &changed).unwrap()
+        );
+    }
+
+    #[test]
+    fn retained_old_dispatch_and_container_removal_are_rejected_before_io() {
+        let runner = retained_test_runner();
+        assert!(runner.is_retained());
+        assert!(runner.is_hot_reuse());
+        assert_eq!(
+            runner.mcp_exec_request("banana", "main", &[]).unwrap_err(),
+            "retained MCP dispatch unsupported"
+        );
+        assert_eq!(
+            runner
+                .helper("input-inventory", None, b"{}", 100)
+                .unwrap_err(),
+            "retained helper dispatch unsupported"
+        );
+        assert_eq!(
+            runner.teardown_owned().unwrap_err(),
+            "retained instance removal requires explicit cleanup authority"
+        );
+    }
+
+    #[test]
+    fn retained_commands_reject_unsupported_policy_before_controller_or_rpc_access() {
+        // This runner has no authorization/store and cannot perform any RPC.
+        // Policy denial must precede even attempting to obtain that authority.
+        let runner = retained_test_runner();
+        for policy in [
+            ExecutionPolicy::workspace_write_public_internet(WORKSPACE_DATA_ROOT),
+            ExecutionPolicy::workspace_write_no_network("/another-workspace"),
+        ] {
+            let request = ExecutionCommandRequest {
+                program: "/usr/bin/true".into(),
+                args: Vec::new(),
+                cwd: WORKSPACE_DATA_ROOT.into(),
+                env: HashMap::new(),
+                timeout_ms: 1_000,
+                policy,
+            };
+            assert!(matches!(
+                runner.run_host_command(Some("policy-check"), request, None),
+                Err(ExecutionError::Denied { reason }) if reason == "Docker execution requires /mnt/data and disabled network policy"
+            ));
+        }
+    }
+
+    #[test]
+    fn retained_terminal_collection_defers_without_quiescing_environment_tasks() {
+        let runner = retained_test_runner();
+        assert_eq!(
+            runner
+                .with_terminal_collection(|_| panic!("retained final collection must not run"))
+                .unwrap(),
+            SessionWorkspaceCommitOutcome::ProtectionDeferred
+        );
+    }
+
+    #[test]
+    fn retained_hot_workspace_uses_live_files_and_recovery_capture_is_explicitly_unavailable() {
+        let runner = retained_test_runner();
+        let lease = SessionWorkspaceLease {
+            job_id: "job".into(),
+            lease_owner: "owner".into(),
+        };
+        let frozen = SessionWorkspace {
+            generation: 99,
+            snapshot_sha256: "old-snapshot".into(),
+            snapshot_size_bytes: 1,
+            expanded_size_bytes: 1,
+            file_count: 1,
+        };
+        assert_eq!(
+            runner
+                .restore_session_workspace(&lease, &frozen, 0)
+                .unwrap(),
+            SessionWorkspaceResolution::RetainedLive
+        );
+        assert_eq!(
+            runner
+                .capture_sealed_recovery_workspace_with_observer::<()>(
+                    |_| panic!("retained capture observer must not run"),
+                    |_| panic!("retained capture collector must not run")
+                )
+                .unwrap_err(),
+            "retained_consistent_capture_unavailable"
+        );
+    }
+
     #[test]
     #[ignore = "requires explicitly isolated Postgres, dedicated Docker volumes and an execution_agent image"]
     fn real_docker_checkpoint_recovery_releases_only_confirmed_old_residency_and_restores_one_slot()
@@ -4032,7 +4483,9 @@ mod tests {
             );
         }
         let observed = observed_resident_sandboxes().unwrap();
-        db.batch_execute("DROP SCHEMA IF EXISTS runtime CASCADE; CREATE TABLE IF NOT EXISTS public.app_core_agentrun(id text PRIMARY KEY,session_id text NOT NULL,workspace_id text NOT NULL,status text NOT NULL); DELETE FROM public.app_core_agentrun WHERE id='centaeris-recovery-test-run'; INSERT INTO public.app_core_agentrun VALUES('centaeris-recovery-test-run','centaeris-recovery-test-session','centaeris-recovery-test-tenant','running');").unwrap();
+        db.batch_execute("DROP SCHEMA IF EXISTS runtime CASCADE; CREATE TABLE IF NOT EXISTS public.app_core_agentrun(id text PRIMARY KEY,session_id text NOT NULL,workspace_id text NOT NULL,status text NOT NULL); DELETE FROM public.app_core_agentrun WHERE id='centaeris-recovery-test-run'; INSERT INTO public.app_core_agentrun(id,session_id,workspace_id,status) VALUES('centaeris-recovery-test-run','centaeris-recovery-test-session','centaeris-recovery-test-tenant','running');").unwrap();
+        db.batch_execute("ALTER TABLE public.app_core_agentrun ADD COLUMN IF NOT EXISTS environment_id text; UPDATE public.app_core_agentrun SET environment_id='environment_test' WHERE id='centaeris-recovery-test-run'; CREATE TABLE IF NOT EXISTS public.app_core_agentrunauthorization(agent_run_id text PRIMARY KEY,digest text NOT NULL);").unwrap();
+        db.execute("INSERT INTO public.app_core_agentrunauthorization VALUES($1,$2) ON CONFLICT(agent_run_id) DO UPDATE SET digest=EXCLUDED.digest", &[&run,&digest]).unwrap();
         let store = Arc::new(PostgresRuntimeStore::new(&url).unwrap());
         let owner = "centaeris-recovery-test-owner";
         let job = centaeris_core::session::reliability::agent_run_lifecycle_job_id(run).unwrap();
@@ -4105,6 +4558,19 @@ mod tests {
                         user_id: "centaeris-recovery-test-user".into(),
                         agent_id: "centaeris-recovery-test-agent".into(),
                         authorization_digest: digest.clone(),
+                        environment_authorization:
+                            crate::environment_authorization::EnvironmentAuthorization {
+                                signature: "fixture".into(),
+                                payload: crate::environment_authorization::EnvironmentBinding {
+                                    schema: "workspace.environment_authorization.v1".into(),
+                                    environment_id: "environment_test".into(),
+                                    session_id: "centaeris-recovery-test-session".into(),
+                                    agent_run_id: run.into(),
+                                    agent_run_authorization_digest: digest.clone(),
+                                    execution_mode: "perRun".into(),
+                                    controller: None,
+                                },
+                            },
                         image_digest: image.clone(),
                         resources,
                         has_execution_fact: false,
@@ -4952,6 +5418,61 @@ mod tests {
     }
 
     #[test]
+    fn retained_container_starts_supervisor_with_isolated_bounded_control_and_output() {
+        let runner = test_docker_execution_host_runner();
+        let mut expected = runner.container_expectation();
+        expected.retained = true;
+        let body = container_create_body(&expected).unwrap();
+        assert_eq!(
+            body["Cmd"],
+            serde_json::json!([
+                "/opt/centaeris/bin/execution_agent",
+                "environment-init",
+                expected.instance_id
+            ])
+        );
+        assert_eq!(
+            body["HostConfig"]["CapAdd"],
+            serde_json::json!(["CHOWN", "SETUID", "SETGID"])
+        );
+        let parent = body["HostConfig"]["CgroupParent"].as_str().unwrap();
+        assert!(
+            !parent.contains('-'),
+            "systemd hyphens change the parent hierarchy"
+        );
+        assert_eq!(
+            body["HostConfig"]["Binds"],
+            serde_json::json!([format!(
+                "/sys/fs/cgroup/{parent}:/run/centaeris/instance-cgroups:rw"
+            )])
+        );
+        let tmpfs = &body["HostConfig"]["Tmpfs"];
+        assert_eq!(
+            tmpfs["/run/centaeris/task-control"],
+            "rw,noexec,nosuid,nodev,size=8388608,uid=0,gid=0,mode=0700"
+        );
+        assert_eq!(
+            tmpfs["/run/centaeris/task-output"],
+            "rw,noexec,nosuid,nodev,size=75497472,uid=0,gid=0,mode=0700"
+        );
+        assert_eq!(
+            body["HostConfig"]["Memory"],
+            expected.resources.memory_bytes
+        );
+        assert_eq!(
+            body["HostConfig"]["PidsLimit"],
+            expected.resources.pids_limit
+        );
+        assert_eq!(body["HostConfig"]["CapDrop"], serde_json::json!(["ALL"]));
+        assert_eq!(body["HostConfig"]["NetworkMode"], "none");
+        expected.oci_runtime = OciRuntime::Runsc;
+        assert!(
+            container_create_body(&expected).is_err(),
+            "unverified delegated cgroup backend must not be admitted"
+        );
+    }
+
+    #[test]
     fn oci_runtime_runsc_maps_to_gvisor_and_docker_runsc() {
         let runtime = OciRuntime::parse("runsc").expect("runsc");
         assert_eq!(runtime.docker_runtime_name(), "runsc");
@@ -5688,6 +6209,39 @@ mod tests {
     }
 
     #[test]
+    fn adoption_rejects_missing_or_foreign_environment_instance_and_grant_labels() {
+        let runner = test_docker_execution_host_runner();
+        let request = container_create_body(&runner.container_expectation()).unwrap();
+        let mut config = request.clone();
+        config.as_object_mut().unwrap().remove("Image");
+        config.as_object_mut().unwrap().remove("HostConfig");
+        let facts = serde_json::json!({"Id":"test", "Image": request["Image"], "Config": config,
+            "HostConfig":request["HostConfig"]});
+        assert!(crate::docker_engine::verify_created(&facts, &request).is_ok());
+        for label in [
+            "centaeris.environment_id",
+            "centaeris.instance_id",
+            "centaeris.environment_authorization_digest",
+        ] {
+            let mut missing = facts.clone();
+            missing["Config"]["Labels"]
+                .as_object_mut()
+                .unwrap()
+                .remove(label);
+            assert!(
+                crate::docker_engine::verify_created(&missing, &request).is_err(),
+                "{label}"
+            );
+            let mut foreign = facts.clone();
+            foreign["Config"]["Labels"][label] = "foreign".into();
+            assert!(
+                crate::docker_engine::verify_created(&foreign, &request).is_err(),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
     fn engine_creation_preserves_sandbox_limits_and_mount_isolation() {
         let mut runner = test_docker_execution_host_runner();
         runner.resources.cpu_milli = 4000;
@@ -5698,6 +6252,15 @@ mod tests {
             body["Labels"]["centaeris.execution_id"],
             runner.execution_id
         );
+        assert_eq!(
+            body["Labels"]["centaeris.environment_id"],
+            "environment_test"
+        );
+        let instance = body["Labels"]["centaeris.instance_id"]
+            .as_str()
+            .expect("physical instance identity");
+        assert!(instance.starts_with("instance_"));
+        assert_ne!(instance, runner.execution_id);
         let host = &body["HostConfig"];
         assert_eq!(host["CpuPeriod"], 100000);
         assert_eq!(host["CpuQuota"], 400000);
@@ -6171,6 +6734,9 @@ mod tests {
             container_name: "centaeris-agent-run-test".to_string(),
             agent_run_id: "agent_run_test".to_string(),
             execution_id: "execution_test".to_string(),
+            environment_id: "environment_test".into(),
+            instance_id: crate::postgres_store::execution_instances::instance_id("execution_test"),
+            binding_digest: format!("sha256:{}", "c".repeat(64)),
             authorization_digest: format!("sha256:{}", "a".repeat(64)),
             image_digest: format!("sha256:{}", "b".repeat(64)),
             oci_runtime: OciRuntime::Runc,
@@ -6198,6 +6764,9 @@ mod tests {
             workspace_generation_rpc: Mutex::new(None),
             resident_store: None,
             resident_lease: None,
+            retained_allocation: None,
+            environment_authorization: None,
+            retained_workspace_id: None,
         }
     }
 

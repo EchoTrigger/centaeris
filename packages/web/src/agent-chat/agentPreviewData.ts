@@ -1,4 +1,4 @@
-export type RunPreviewFact = Readonly<{ agentRunId: string; status: "queued" | "running" | "completed" | "failed" | "cancelled"; sourceType: "hostedRun" | "sessionEvent" | "preAdmissionCancellation"; eventId: string | null; createdAtMs: number }>;
+export type RunPreviewFact = Readonly<{ agentRunId: string; status: "queued" | "running" | "completed" | "failed" | "cancelled"; sourceType: "hostedRun" | "sessionEvent" | "preAdmissionCancellation" | "preAdmissionFailure"; eventId: string | null; createdAtMs: number }>;
 export type FilePreviewFact = Readonly<{ inputRef: string | null; agentRunId: string; ownerKind: "artifact" | "sourceObject" | "userLibraryObject"; objectRef: string; sourceVersion: string; sha256: string; displayName: string; contentType: string; sizeBytes: number; previewUrl: string; downloadUrl: string }>;
 export type MessageFileBinding = Readonly<{ agentId: string; sessionId: string; agentRunId: string; inputRefs: readonly string[] }>;
 export type SessionPreviewPage = Readonly<{ schema: "session.preview.v1"; sessionId: string; runFact: RunPreviewFact | null; outputs: readonly FilePreviewFact[]; nextAfterArtifactId: string | null; hasMore: boolean }>;
@@ -18,7 +18,8 @@ function runFact(value: unknown): RunPreviewFact | null {
     || typeof row.createdAtMs !== "number" || !Number.isSafeInteger(row.createdAtMs) || row.createdAtMs < 0 || !Number.isFinite(new Date(row.createdAtMs).getTime())
     || (row.sourceType === "hostedRun" ? terminal || row.eventId !== null
       : row.sourceType === "sessionEvent" ? !terminal || !opaque(row.eventId)
-        : row.sourceType !== "preAdmissionCancellation" || row.status !== "cancelled" || row.eventId !== null)) throw new Error("agent_preview_run_fact_invalid");
+        : row.sourceType === "preAdmissionCancellation" ? row.status !== "cancelled" || row.eventId !== null
+          : row.sourceType !== "preAdmissionFailure" || row.status !== "failed" || row.eventId !== null)) throw new Error("agent_preview_run_fact_invalid");
   return structuredClone(row) as RunPreviewFact;
 }
 function fileFact(value: unknown, prefix: (file: FilePreviewFact) => string): FilePreviewFact {

@@ -264,6 +264,7 @@ struct PromptCompactionPlan {
     prefix: Vec<ChatMessage>,
     prefix_model_semantics: BTreeMap<String, ModelMessageSemanticsV1>,
     suffix: Vec<ChatMessage>,
+    causal_anchor_reference: Option<String>,
     compaction_id: String,
     first_kept_message_id: Option<String>,
     summary_max_tokens: u32,
@@ -283,12 +284,13 @@ struct PromptCompactionPressure {
     pressure_basis_points: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct PromptCompactionBoundaryPlan {
     split_index: usize,
     prefix_token_estimate: u32,
     live_tail_token_estimate: u32,
     boundary_reason: String,
+    causal_anchor: Option<ChatMessage>,
 }
 
 pub trait ModelCompactionSummaryCandidateProducer {
@@ -478,7 +480,12 @@ fn plan_prompt_compaction(
     prompt_input_token_estimate: Option<u32>,
     force: bool,
 ) -> PromptCompactionPlanResult {
-    let compactable_messages = compactable_active_messages(session);
+    let compactable_messages = match compactable_active_messages(session) {
+        Ok(messages) => messages,
+        Err(reason) => {
+            return PromptCompactionPlanResult::Failed(PromptCompactionError::validation(reason))
+        }
+    };
     let before_message_count = compactable_messages.len();
     let before_token_estimate =
         match estimate_messages_tokens(compactable_messages.as_slice(), &session.model_semantics) {
@@ -572,9 +579,22 @@ fn plan_prompt_compaction(
     let compaction_id = format!("prompt_compaction:{turn_id}:{recorded_at_ms}");
     let compaction_message_id_suffix = format!("{turn_id}:{recorded_at_ms}");
     let first_kept_message_id = suffix.first().map(|message| message.message_id.clone());
+    let causal_anchor_reference = match boundary_plan
+        .causal_anchor
+        .as_ref()
+        .map(crate::runtime::context_window::compaction_causal_anchor_reference)
+        .transpose()
+    {
+        Ok(reference) => reference,
+        Err(reason) => {
+            return PromptCompactionPlanResult::Failed(PromptCompactionError::validation(reason))
+        }
+    };
+    let mut protected_messages = suffix.clone();
+    protected_messages.extend(boundary_plan.causal_anchor.iter().cloned());
     let (user_replay_messages, user_replay_token_estimate) = match select_user_replay_messages(
         session.messages.as_slice(),
-        suffix.as_slice(),
+        protected_messages.as_slice(),
         &session.model_semantics,
         config.user_replay_tokens.max(1),
         session.session_id.as_str(),
@@ -625,6 +645,7 @@ fn plan_prompt_compaction(
         prefix,
         prefix_model_semantics,
         suffix,
+        causal_anchor_reference,
         compaction_id,
         first_kept_message_id,
         summary_max_tokens: compaction_max_output_tokens,
@@ -633,8 +654,11 @@ fn plan_prompt_compaction(
     }))
 }
 
-fn compactable_active_messages(session: &SessionStateSnapshot) -> Vec<ChatMessage> {
-    crate::runtime::context_window::materialize_context_window(session.messages.as_slice()).messages
+fn compactable_active_messages(session: &SessionStateSnapshot) -> Result<Vec<ChatMessage>, String> {
+    let materialized =
+        crate::runtime::context_window::materialize_context_window(session.messages.as_slice());
+    materialized.ensure_valid()?;
+    Ok(materialized.messages)
 }
 
 fn commit_prompt_compaction(
@@ -655,6 +679,7 @@ fn commit_prompt_compaction(
         metadata: build_compaction_metadata(
             plan.compaction_id.as_str(),
             plan.first_kept_message_id.as_deref(),
+            plan.causal_anchor_reference.as_deref(),
         ),
     };
 
@@ -690,7 +715,8 @@ fn commit_prompt_compaction(
                 user_replay_token_target: plan.user_replay_token_target,
                 selected_user_replay_messages: plan.user_replay_messages.len(),
                 selected_user_replay_tokens: plan.user_replay_token_estimate,
-                live_tail_messages: plan.suffix.len(),
+                live_tail_messages: plan.suffix.len()
+                    + usize::from(plan.causal_anchor_reference.is_some()),
                 live_tail_token_estimate: plan.live_tail_token_estimate,
                 split_index: plan.split_index,
                 prefix_token_estimate: plan.prefix_token_estimate,
@@ -713,7 +739,7 @@ fn commit_prompt_compaction(
         user_replay_token_target: plan.user_replay_token_target,
         selected_user_replay_messages: plan.user_replay_messages.len(),
         selected_user_replay_tokens: plan.user_replay_token_estimate,
-        live_tail_messages: plan.suffix.len(),
+        live_tail_messages: plan.suffix.len() + usize::from(plan.causal_anchor_reference.is_some()),
         live_tail_token_estimate: plan.live_tail_token_estimate,
         boundary_reason: plan.boundary_reason.clone(),
         summary_max_tokens: plan.summary_max_tokens,
@@ -753,7 +779,8 @@ fn blocked_ready_prompt_compaction_outcome(
                     user_replay_token_target: plan.user_replay_token_target,
                     selected_user_replay_messages: plan.user_replay_messages.len(),
                     selected_user_replay_tokens: plan.user_replay_token_estimate,
-                    live_tail_messages: plan.suffix.len(),
+                    live_tail_messages: plan.suffix.len()
+                        + usize::from(plan.causal_anchor_reference.is_some()),
                     live_tail_token_estimate: plan.live_tail_token_estimate,
                     split_index: plan.split_index,
                     prefix_token_estimate: plan.prefix_token_estimate,
@@ -776,7 +803,8 @@ fn blocked_ready_prompt_compaction_outcome(
             user_replay_token_target: plan.user_replay_token_target,
             selected_user_replay_messages: plan.user_replay_messages.len(),
             selected_user_replay_tokens: plan.user_replay_token_estimate,
-            live_tail_messages: plan.suffix.len(),
+            live_tail_messages: plan.suffix.len()
+                + usize::from(plan.causal_anchor_reference.is_some()),
             live_tail_token_estimate: plan.live_tail_token_estimate,
             boundary_reason: plan.boundary_reason,
             summary_max_tokens: plan.summary_max_tokens,
@@ -880,7 +908,7 @@ fn prompt_compaction_plan_v1_from_ready_plan(
         user_replay_token_target: plan.user_replay_token_target,
         selected_user_replay_messages: plan.user_replay_messages.len(),
         selected_user_replay_tokens: plan.user_replay_token_estimate,
-        live_tail_messages: plan.suffix.len(),
+        live_tail_messages: plan.suffix.len() + usize::from(plan.causal_anchor_reference.is_some()),
         live_tail_token_estimate: plan.live_tail_token_estimate,
         split_index: plan.split_index,
         prefix_token_estimate: plan.prefix_token_estimate,
@@ -994,6 +1022,7 @@ fn plan_live_turn_boundary(
             prefix_token_estimate: 0,
             live_tail_token_estimate: 0,
             boundary_reason: "no_messages_to_plan".to_string(),
+            causal_anchor: None,
         });
     }
     let last_conversation_message = messages
@@ -1007,7 +1036,43 @@ fn plan_live_turn_boundary(
         _ => messages.len(),
     };
     let original_split_index = split_index;
-    for message_index in original_split_index..messages.len() {
+    let mut causal_anchor = None;
+    if matches!(
+        last_conversation_message.map(|message| &message.role),
+        Some(MessageRole::Tool)
+    ) && original_split_index < messages.len()
+    {
+        let (last_tool_index, last_tool) = messages
+            .iter()
+            .enumerate()
+            .rfind(|(_, message)| message.role == MessageRole::Tool)
+            .unwrap();
+        let call_id = tool_result_semantics_call_id(last_tool, model_semantics)
+            .ok_or("tool_result_missing_trace")?;
+        let latest_batch = find_assistant_semantics_for_tool_call(
+            messages,
+            model_semantics,
+            last_tool_index,
+            &call_id,
+        )
+        .ok_or_else(|| format!("tool_result_missing_assistant_semantics:{call_id}"))?;
+        if latest_batch > original_split_index
+            && messages[original_split_index + 1..latest_batch]
+                .iter()
+                .any(|message| message.role == MessageRole::Tool)
+        {
+            // Retire only completed older batches. Keep the latest assistant
+            // and its entire parallel result group as an indivisible suffix.
+            crate::runtime::context_window::validate_model_context_window(
+                messages,
+                model_semantics,
+            )?;
+            causal_anchor = Some(messages[original_split_index].clone());
+            split_index = latest_batch;
+        }
+    }
+    let tool_boundary_start = split_index;
+    for message_index in tool_boundary_start..messages.len() {
         if !matches!(messages[message_index].role, MessageRole::Tool) {
             continue;
         }
@@ -1025,9 +1090,16 @@ fn plan_live_turn_boundary(
 
     let prefix_token_estimate =
         estimate_messages_tokens(&messages[..split_index], model_semantics)?;
-    let live_tail_token_estimate =
+    let mut live_tail_token_estimate =
         estimate_messages_tokens(&messages[split_index..], model_semantics)?;
-    let boundary_reason = if split_index < original_split_index {
+    if let Some(anchor) = causal_anchor.as_ref() {
+        live_tail_token_estimate = live_tail_token_estimate.saturating_add(
+            estimate_messages_tokens(std::slice::from_ref(anchor), model_semantics)?,
+        );
+    }
+    let boundary_reason = if causal_anchor.is_some() {
+        "closed_tool_batches_with_causal_anchor_reference".to_string()
+    } else if split_index < original_split_index {
         "live_turn+tool_pair_boundary_expanded".to_string()
     } else if split_index < messages.len() {
         "live_turn".to_string()
@@ -1040,6 +1112,7 @@ fn plan_live_turn_boundary(
         prefix_token_estimate,
         live_tail_token_estimate,
         boundary_reason,
+        causal_anchor,
     })
 }
 
@@ -1166,10 +1239,20 @@ fn tool_result_semantics_call_id(
     }
 }
 
-fn build_compaction_metadata(compaction_id: &str, first_kept_message_id: Option<&str>) -> JsonMap {
+fn build_compaction_metadata(
+    compaction_id: &str,
+    first_kept_message_id: Option<&str>,
+    causal_anchor_reference: Option<&str>,
+) -> JsonMap {
     let mut metadata = JsonMap::new();
     metadata.insert("kind".to_string(), "context_compaction".to_string());
     metadata.insert("compaction_id".to_string(), compaction_id.to_string());
+    if let Some(reference) = causal_anchor_reference {
+        metadata.insert(
+            crate::runtime::context_window::CAUSAL_ANCHOR_REFERENCE.into(),
+            reference.into(),
+        );
+    }
     if let Some(first_kept_message_id) = first_kept_message_id {
         metadata.insert(
             "first_kept_message_id".to_string(),

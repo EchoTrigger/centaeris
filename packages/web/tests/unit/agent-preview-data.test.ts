@@ -27,6 +27,16 @@ test("session run state requires its own authoritative source and cannot invent 
   assert.throws(() => parseSessionPreview(page({ hasActiveAgentRun: false }), "work"));
 });
 
+test("pre-admission failure previews require failed status and no Session event", () => {
+  const fact = { agentRunId: "run", status: "failed", sourceType: "preAdmissionFailure", eventId: null, createdAtMs: 4 };
+  assert.deepEqual(parseSessionPreview(page({ runFact: fact }), "work").runFact, fact);
+  for (const changes of [
+    { status: "queued" }, { status: "running" }, { status: "completed" }, { status: "cancelled" },
+    { eventId: "invented-terminal" }, { sourceType: "pre_admission_failure" },
+    { sourceType: "preAdmissionCancellation" }, { sourceType: "sessionEvent" }, { sourceType: "hostedRun" },
+  ]) assert.throws(() => parseSessionPreview(page({ runFact: { ...fact, ...changes } }), "work"));
+});
+
 test("Outputs retain Artifact identity and require strict scoped pagination", () => {
   const result = parseSessionPreview(page({ outputs: [output()], hasMore: true, nextAfterArtifactId: "artifact" }), "work", null, 1);
   assert.equal(result.outputs[0].ownerKind, "artifact"); assert.equal(result.outputs[0].inputRef, null);

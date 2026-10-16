@@ -76,6 +76,34 @@ pub(crate) fn validate_hosted_native_input(
     Ok(())
 }
 
+// Lock by identity first, then evaluate time after any lock wait. A WHERE
+// predicate evaluated before waiting cannot authorize a later commit.
+fn lock_current_append_lease(
+    tx: &mut Transaction<'_>,
+    session: &str,
+    fence: &RuntimeJobLeaseFence,
+) -> Result<(), String> {
+    let row = tx
+        .query_opt(
+            "SELECT job_id FROM runtime.runtime_jobs WHERE job_id=$1 FOR UPDATE",
+            &[&fence.job_id],
+        )
+        .map_err(|error| {
+            crate::session_delivery::postgres_error("lock runtime job lease fence failed", error)
+        })?;
+    if row.is_none() {
+        return Err(RUNTIME_JOB_LEASE_FENCE_REJECTED.into());
+    }
+    let current: bool = tx.query_one(
+        "SELECT COALESCE(job_kind=$2 AND status='running' AND lease_owner=$3 AND session_id=$4 AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,FALSE) FROM runtime.runtime_jobs WHERE job_id=$1",
+        &[&fence.job_id, &fence.job_kind, &fence.lease_owner, &session],
+    ).map_err(|error| crate::session_delivery::postgres_error("verify locked runtime job lease fence failed", error))?.get(0);
+    if !current {
+        return Err(RUNTIME_JOB_LEASE_FENCE_REJECTED.into());
+    }
+    Ok(())
+}
+
 const AGENT_RUN_CANCEL_REQUESTED_EVENT_SCHEMA: &str = "runtime.agent_run.cancel_requested.v1";
 
 fn is_successful_work_confirmation(event: &centaeris_core::session::SessionLogRecord) -> bool {
@@ -853,6 +881,10 @@ pub struct PostgresSessionLog {
     /// Clones share incremental state and serialize append validation for this
     /// AgentRun, while each transaction holds a pooled connection only until commit.
     append_lock: Arc<Mutex<()>>,
+    #[cfg(test)]
+    cold_append_observation: Arc<Mutex<ColdAppendObservation>>,
+    #[cfg(test)]
+    cold_append_barrier: Arc<Mutex<Option<ColdAppendBarrier>>>,
 }
 
 impl std::fmt::Debug for PostgresSessionLog {
@@ -881,6 +913,38 @@ struct AgentRunAppendState {
     last_assistant_status: Option<String>,
     terminal_seen: bool,
     first_event_type: Option<SessionRecordType>,
+}
+
+#[cfg(test)]
+type ColdAppendBarrier = Box<dyn FnOnce(i32) -> Result<(), String> + Send>;
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ColdAppendObservation {
+    pub loads: usize,
+    pub pages: usize,
+    pub records: usize,
+    pub expanded_model_records: usize,
+    pub max_encoded_page_bytes: usize,
+    pub max_expanded_model_records: usize,
+    pub max_expanded_model_bytes: usize,
+}
+
+#[cfg(test)]
+impl ColdAppendObservation {
+    fn observe_expanded<'a>(&mut self, wires: impl IntoIterator<Item = &'a serde_json::Value>) {
+        let mut count = 0;
+        let mut bytes = 0;
+        for wire in wires {
+            if wire["type"] == "model_request_started" {
+                count += 1;
+                bytes += wire["payload"]["observations"].to_string().len();
+            }
+        }
+        self.expanded_model_records += count;
+        self.max_expanded_model_records = self.max_expanded_model_records.max(count);
+        self.max_expanded_model_bytes = self.max_expanded_model_bytes.max(bytes);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1383,6 +1447,134 @@ fn load_latest_model_observation_state<C: GenericClient>(
     Ok((Some(root_digest), references))
 }
 
+/// Recovery-only adapter. The caller consumes and drops each hydrated record.
+/// Only the last expanded manifest is retained; observation bodies never enter
+/// this state. Ancestor metadata and current-record bodies are call-local.
+#[derive(Default)]
+pub(crate) struct SessionWireHydrator {
+    root: Option<(String, String)>,
+    references: Vec<ModelObservationReference>,
+}
+
+impl SessionWireHydrator {
+    pub(crate) fn hydrate_record<C: GenericClient>(
+        &mut self,
+        client: &mut C,
+        wire: &mut serde_json::Value,
+    ) -> Result<(), String> {
+        super::session_payload::decode(wire)?;
+        let Some(key) = model_request_manifest_key(wire)? else {
+            return Ok(());
+        };
+        if self.root.as_ref() != Some(&key) {
+            // The common ordered-recovery case reads one compact delta, rather
+            // than loading the ancestor chain again for every historical root.
+            let row = client.query_opt(
+                "SELECT parent_digest,manifest_json,manifest_bytes,first_seen_at_ms FROM runtime.model_observation_manifests WHERE session_id=$1 AND manifest_digest=$2",
+                &[&key.0, &key.1],
+            ).map_err(|error|format!("load recovery model observation manifest failed: {error}"))?
+                .ok_or("stored model observation manifest is missing")?;
+            let manifest = decode_model_observation_manifest(
+                key.1.clone(),
+                row.get(0),
+                row.get(1),
+                row.get(2),
+                row.get(3),
+            )?;
+            let manifests = if self.can_extend(&key, &manifest) {
+                HashMap::from([(key.clone(), manifest)])
+            } else {
+                load_model_observation_manifests(client, &BTreeSet::from([key.clone()]))?
+            };
+            self.resolve_loaded_root(&key, &manifests)?;
+        }
+        let keys = self
+            .references
+            .iter()
+            .map(|reference| reference.content_digest.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let rows = client.query(
+            "SELECT content_digest,kind,content_json,content_bytes,first_seen_at_ms FROM runtime.model_observation_contents WHERE session_id=$1 AND content_digest=ANY($2)",
+            &[&key.0,&keys],
+        ).map_err(|error|format!("load recovery model observation contents failed: {error}"))?;
+        let contents = rows
+            .into_iter()
+            .map(|row| {
+                let content = ModelObservationContent {
+                    digest: row.get(0),
+                    kind: row.get(1),
+                    content_json: row.get(2),
+                    content_bytes: row.get(3),
+                    first_seen_at_ms: row.get(4),
+                };
+                ((key.0.clone(), content.digest.clone()), content)
+            })
+            .collect::<HashMap<_, _>>();
+        if contents.len() != keys.len() {
+            return Err("stored model observation content set is incomplete".into());
+        }
+        hydrate_model_request_wire(wire, &self.references, &contents)
+    }
+
+    fn can_extend(&self, key: &(String, String), manifest: &ModelObservationManifest) -> bool {
+        self.root.as_ref().is_some_and(|(session, digest)| {
+            session == &key.0 && manifest.parent_digest.as_ref() == Some(digest)
+        })
+    }
+
+    fn resolve_loaded_root(
+        &mut self,
+        key: &(String, String),
+        manifests: &HashMap<(String, String), ModelObservationManifest>,
+    ) -> Result<(), String> {
+        if self.root.as_ref() == Some(key) {
+            return Ok(());
+        }
+        let manifest = manifests
+            .get(key)
+            .ok_or("stored model observation manifest is missing")?;
+        let references = if self.can_extend(key, manifest) {
+            apply_model_observation_manifest(manifest, self.references.clone())?
+        } else {
+            // This temporary cache contains only this requested root. It is
+            // dropped before another record is hydrated, even after a branch.
+            resolve_model_observation_manifest(&key.0, &key.1, manifests, &mut HashMap::new())?
+        };
+        self.root = Some(key.clone());
+        self.references = references;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn hydrate_loaded_record(
+        &mut self,
+        wire: &mut serde_json::Value,
+        manifests: &HashMap<(String, String), ModelObservationManifest>,
+        contents: &HashMap<(String, String), ModelObservationContent>,
+    ) -> Result<(), String> {
+        let Some(key) = model_request_manifest_key(wire)? else {
+            return Ok(());
+        };
+        self.resolve_loaded_root(&key, manifests)?;
+        hydrate_model_request_wire(wire, &self.references, contents)
+    }
+
+    #[cfg(test)]
+    fn retained_reference_count(&self) -> usize {
+        self.references.len()
+    }
+
+    #[cfg(test)]
+    fn retained_reference_string_bytes(&self) -> usize {
+        self.references
+            .iter()
+            .map(|reference| reference.kind.len() + reference.content_digest.len())
+            .sum()
+    }
+}
+
 pub(crate) fn hydrate_session_wire_values<C: GenericClient>(
     client: &mut C,
     wires: &mut [serde_json::Value],
@@ -1542,6 +1734,70 @@ impl PostgresSessionLog {
             )
         })
     }
+    /// Commit a hosted terminal fact before Core admission, under its Session
+    /// lock and the current canonical lifecycle job lease. No history is made up.
+    pub fn commit_pre_admission_failure(
+        &self,
+        agent_run_id: &str,
+        authorization_digest: &str,
+        fence: &RuntimeJobLeaseFence,
+    ) -> Result<(), String> {
+        run_postgres_blocking(|| {
+            self.connections.with_client(|client| {
+            let mut tx = client.transaction().map_err(|e| e.to_string())?;
+            tx.query_opt("SELECT id FROM public.app_core_session WHERE id=$1 AND workspace_id=$2 FOR UPDATE",
+                &[&self.session_id, &self.workspace_id]).map_err(|e| e.to_string())?
+                .ok_or("pre-admission failure session missing")?;
+            let row = tx.query_opt(
+                "SELECT r.session_id,r.workspace_id,r.\"preAdmissionCancelledAt\" IS NOT NULL,r.status,a.digest,a.payload::text FROM public.app_core_agentrun r LEFT JOIN public.app_core_agentrunauthorization a ON a.agent_run_id=r.id WHERE r.id=$1 FOR UPDATE OF r",
+                &[&agent_run_id],
+            ).map_err(|e| e.to_string())?.ok_or("pre-admission failure run missing")?;
+            if row.get::<_, String>(0) != self.session_id || row.get::<_, String>(1) != self.workspace_id
+                || row.get::<_, bool>(2) || row.get::<_, String>(3) == "cancelled"
+                || row.get::<_, Option<String>>(4).as_deref() != Some(authorization_digest)
+            {
+                return Err("pre-admission failure run binding mismatch".into());
+            }
+            let authorization: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
+                serde_json::from_str(&row.get::<_, Option<String>>(5).ok_or("pre-admission failure authorization missing")?)
+                    .map_err(|_| "pre-admission failure authorization malformed")?;
+            if authorization.agent_run_id != agent_run_id || authorization.session_id != self.session_id
+                || authorization.workspace_id != self.workspace_id
+            {
+                return Err("pre-admission failure authorization binding mismatch".into());
+            }
+            authorization.checked_binding(agent_run_id)?.verify_digest_binding(authorization_digest)?;
+            let expected_job = format!("agent_run.lifecycle:{agent_run_id}");
+            if fence.job_id != expected_job || fence.job_kind != AGENT_RUN_LIFECYCLE_JOB_KIND {
+                return Err(RUNTIME_JOB_LEASE_FENCE_REJECTED.into());
+            }
+            tx.query_opt(
+                "SELECT job_id FROM runtime.runtime_jobs WHERE job_id=$1 AND job_kind=$2 AND status='running' AND lease_owner=$3 AND session_id=$4 AND idempotency_key=$5 AND payload_ref=$6 AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint FOR UPDATE",
+                &[&fence.job_id, &fence.job_kind, &fence.lease_owner, &self.session_id,
+                    &format!("{expected_job}:{authorization_digest}"), &format!("record:agent_run:{agent_run_id}")],
+            ).map_err(|e| e.to_string())?.ok_or(RUNTIME_JOB_LEASE_FENCE_REJECTED)?;
+            let admitted: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM public.app_core_sessionevent WHERE agent_run_id=$1 AND NOT session_level)",
+                &[&agent_run_id]).map_err(|e| e.to_string())?.get(0);
+            if admitted { return Err("pre-admission failure rejected after Session admission".into()); }
+            if !super::pre_admission_failure::has_pre_admission_failure(&mut tx, &self.workspace_id, &self.session_id, agent_run_id, authorization_digest)? {
+                let failed_at_ms: i64 = tx.query_one("SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint", &[])
+                    .map_err(|e| e.to_string())?.get(0);
+                let receipt = super::pre_admission_failure::PreAdmissionFailure {
+                    schema: super::pre_admission_failure::SCHEMA.into(),
+                    workspace_id: self.workspace_id.clone(), session_id: self.session_id.clone(),
+                    agent_run_id: agent_run_id.into(), authorization_digest: authorization_digest.into(),
+                    job_id: fence.job_id.clone(), lease_owner: fence.lease_owner.clone(), failed_at_ms,
+                };
+                let payload = serde_json::to_string(&receipt).map_err(|e| e.to_string())?;
+                tx.execute("INSERT INTO runtime.runtime_events(event_id,session_id,task_id,event_type,at_ms,visibility,payload_json) VALUES($1,$2,$3,$4,$5,'internal',$6)",
+                    &[&super::pre_admission_failure::event_id(agent_run_id), &self.session_id, &agent_run_id,
+                        &super::pre_admission_failure::SCHEMA, &failed_at_ms, &payload]).map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())
+        })
+        })
+    }
+
     /// A hosted terminal receipt for cancellation before Session admission.
     /// It is committed under the same Session lock as admission, with a current
     /// lifecycle lease and a durable cancellation request. No model history is written.
@@ -1554,6 +1810,11 @@ impl PostgresSessionLog {
         run_postgres_blocking(|| {
             self.connections.with_client(|client| {
             let mut tx = client.transaction().map_err(|e| e.to_string())?;
+            // Admission and environment control acquire Session before Run.
+            // A cancellation waiting for Session must not pin the Run row.
+            tx.query_opt("SELECT id FROM app_core_session WHERE id=$1 AND workspace_id=$2 FOR UPDATE",
+                &[&self.session_id, &self.workspace_id]).map_err(|e| e.to_string())?
+                .ok_or("pre-admission session missing")?;
             let run = tx.query_opt(
                 "SELECT session_id FROM app_core_agentrun WHERE id=$1 FOR UPDATE",
                 &[&agent_run_id],
@@ -1561,9 +1822,7 @@ impl PostgresSessionLog {
             if run.get::<_, String>(0) != self.session_id {
                 return Err("pre-admission session mismatch".into());
             }
-            tx.query_opt("SELECT id FROM app_core_session WHERE id=$1 AND workspace_id=$2 FOR UPDATE",
-                &[&self.session_id, &self.workspace_id]).map_err(|e| e.to_string())?
-                .ok_or("pre-admission session missing")?;
+            super::pre_admission_failure::reject_history_after_failure(&mut tx, agent_run_id)?;
             let expected_job = format!("agent_run.lifecycle:{agent_run_id}");
             if fence.job_id != expected_job || fence.job_kind != AGENT_RUN_LIFECYCLE_JOB_KIND {
                 return Err(RUNTIME_JOB_LEASE_FENCE_REJECTED.into());
@@ -1607,6 +1866,10 @@ impl PostgresSessionLog {
             projection_store: None,
             agent_run_state: Arc::new(Mutex::new(HashMap::new())),
             append_lock: Arc::new(Mutex::new(())),
+            #[cfg(test)]
+            cold_append_observation: Arc::new(Mutex::new(ColdAppendObservation::default())),
+            #[cfg(test)]
+            cold_append_barrier: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1864,64 +2127,72 @@ impl PostgresSessionLog {
             if session.get::<_, String>(0) != self.workspace_id {
                 return Err("chat session workspace binding mismatch".to_string());
             }
+            super::pre_admission_failure::reject_history_after_failure(&mut tx, agent_run_id)?;
             self.validate_input_binding(&mut tx, agent_run_id)?;
             if let Some(fence) = fence {
-                let lease_is_current = tx
-                    .query_opt(
-                        "SELECT 1 FROM runtime.runtime_jobs WHERE job_id=$1 AND job_kind=$2 AND status='running' AND lease_owner=$3 AND session_id=$4 AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint FOR UPDATE",
-                        &[&fence.job_id, &fence.job_kind, &fence.lease_owner, &self.session_id],
-                    )
-                    .map_err(|error| crate::session_delivery::postgres_error("lock runtime job lease fence failed", error))?
-                    .is_some();
-                if !lease_is_current {
-                    return Err(RUNTIME_JOB_LEASE_FENCE_REJECTED.to_string());
+                // An unlocked precheck avoids cold work for an already stale
+                // owner. Only the post-preparation locked check authorizes commit.
+                let current = tx.query_opt(
+                    "SELECT 1 FROM runtime.runtime_jobs WHERE job_id=$1 AND job_kind=$2 AND status='running' AND lease_owner=$3 AND session_id=$4 AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint",
+                    &[&fence.job_id, &fence.job_kind, &fence.lease_owner, &self.session_id],
+                ).map_err(|error| crate::session_delivery::postgres_error("precheck runtime job lease fence failed", error))?.is_some();
+                if !current {
+                    return Err(RUNTIME_JOB_LEASE_FENCE_REJECTED.into());
                 }
             }
-            if let Some(checkpoint) = checkpoint {
-                if checkpoint.kind != CheckpointKindV1::Recovery
-                    || checkpoint.session_id != self.session_id
-                    || checkpoint.status != "committed"
-                    || checkpoint.done_reason.is_some()
-                {
-                    return Err("recovery checkpoint binding mismatch".to_string());
+            let finalize_authority = |tx: &mut Transaction<'_>| -> Result<(), String> {
+                if let Some(fence) = fence {
+                    lock_current_append_lease(tx, &self.session_id, fence)?;
                 }
-                save_checkpoint(&mut tx, checkpoint)?;
-            }
-            if let Some(handoff) = handoff {
-                let checkpoint = checkpoint.ok_or("wait handoff requires recovery checkpoint")?;
-                let payload = serde_json::from_str::<
-                    centaeris_core::runtime::contracts::RuntimeRecoveryCheckpointV1,
-                >(&checkpoint.payload_json)
-                .map_err(|e| e.to_string())?;
-                handoff.validate(&payload)?;
-                if events.len() == 1 {
-                    crate::wait_recovery::WaitHandoff::validate_reference(
-                        checkpoint,
-                        &events[0].event,
-                    )?;
-                }
-                if payload.agent_run_id != agent_run_id
-                    || checkpoint.turn_id != handoff.wait_checkpoint.turn_id
-                    || events.len() != 1
-                    || events[0].event.event_type != SessionRecordType::CheckpointRef
-                    || events[0].event.payload["checkpointId"].as_str()
-                        != Some(checkpoint.checkpoint_id.as_str())
-                {
-                    return Err("wait handoff Session binding mismatch".into());
-                }
-                let serialized = serde_json::to_string(handoff).map_err(|e| e.to_string())?;
-                let stored: Option<String> = tx.query_one("SELECT wait_handoff_json FROM runtime.checkpoints WHERE checkpoint_id=$1 FOR UPDATE", &[&checkpoint.checkpoint_id]).map_err(|e|e.to_string())?.get(0);
-                match stored {
-                    Some(value) if value != serialized => {
-                        return Err("wait handoff idempotency conflict".into())
+                if let Some(checkpoint) = checkpoint {
+                    if checkpoint.kind != CheckpointKindV1::Recovery
+                        || checkpoint.session_id != self.session_id
+                        || checkpoint.status != "committed"
+                        || checkpoint.done_reason.is_some()
+                    {
+                        return Err("recovery checkpoint binding mismatch".to_string());
                     }
-                    Some(_) => {}
-                    None => {
-                        tx.execute("UPDATE runtime.checkpoints SET wait_handoff_json=$2 WHERE checkpoint_id=$1", &[&checkpoint.checkpoint_id,&serialized]).map_err(|e|e.to_string())?;
+                    save_checkpoint(tx, checkpoint)?;
+                }
+                if let Some(handoff) = handoff {
+                    let checkpoint =
+                        checkpoint.ok_or("wait handoff requires recovery checkpoint")?;
+                    let payload = serde_json::from_str::<
+                        centaeris_core::runtime::contracts::RuntimeRecoveryCheckpointV1,
+                    >(&checkpoint.payload_json)
+                    .map_err(|e| e.to_string())?;
+                    handoff.validate(&payload)?;
+                    if events.len() == 1 {
+                        crate::wait_recovery::WaitHandoff::validate_reference(
+                            checkpoint,
+                            &events[0].event,
+                        )?;
+                    }
+                    if payload.agent_run_id != agent_run_id
+                        || checkpoint.turn_id != handoff.wait_checkpoint.turn_id
+                        || events.len() != 1
+                        || events[0].event.event_type != SessionRecordType::CheckpointRef
+                        || events[0].event.payload["checkpointId"].as_str()
+                            != Some(checkpoint.checkpoint_id.as_str())
+                    {
+                        return Err("wait handoff Session binding mismatch".into());
+                    }
+                    let serialized = serde_json::to_string(handoff).map_err(|e| e.to_string())?;
+                    let stored: Option<String> = tx.query_one("SELECT wait_handoff_json FROM runtime.checkpoints WHERE checkpoint_id=$1 FOR UPDATE", &[&checkpoint.checkpoint_id]).map_err(|e|e.to_string())?.get(0);
+                    match stored {
+                        Some(value) if value != serialized => {
+                            return Err("wait handoff idempotency conflict".into())
+                        }
+                        Some(_) => {}
+                        None => {
+                            tx.execute("UPDATE runtime.checkpoints SET wait_handoff_json=$2 WHERE checkpoint_id=$1", &[&checkpoint.checkpoint_id,&serialized]).map_err(|e|e.to_string())?;
+                        }
                     }
                 }
-            }
+                Ok(())
+            };
             if let Some(receipt) = self.load_idempotent_batch(&mut tx, agent_run_id, events)? {
+                finalize_authority(&mut tx)?;
                 consume_waits_for_terminal_batch(&mut tx, &self.session_id, agent_run_id, events)?;
                 tx.commit().map_err(|error| {
                     crate::session_delivery::postgres_error(
@@ -1930,9 +2201,6 @@ impl PostgresSessionLog {
                     )
                 })?;
                 return Ok(receipt);
-            }
-            if let Some(handoff) = handoff {
-                validate_wait_handoff_source(&mut tx, agent_run_id, handoff)?;
             }
             let mut records_to_append = events.to_vec();
             let tombstoned_event_ids = if let Some(rewrite) = rewrite {
@@ -2009,6 +2277,19 @@ impl PostgresSessionLog {
                 next_session_sequence,
                 observation_state,
             )?;
+            finalize_authority(&mut tx)?;
+            if let Some(handoff) = handoff {
+                validate_wait_handoff_source(&mut tx, agent_run_id, handoff)?;
+            }
+            for (index, item) in records_to_append.iter().enumerate() {
+                if is_successful_work_confirmation(&item.event) {
+                    let start = self
+                        .accepted_start
+                        .as_ref()
+                        .ok_or("work_confirmation_admission_missing")?;
+                    validate_work_confirmation_commit(&mut tx, start, &records_to_append, index)?;
+                }
+            }
             self.insert_session_append(&mut tx, &prepared)?;
             consume_waits_for_terminal_batch(&mut tx, &self.session_id, agent_run_id, events)?;
             let records = prepared.rows.into_iter().map(|row| row.record).collect();
@@ -2202,20 +2483,60 @@ impl PostgresSessionLog {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn cold_append_observation(&self) -> ColdAppendObservation {
+        self.cold_append_observation.lock().unwrap().clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_append_cache(&self, agent_run_id: &str) -> bool {
+        self.agent_run_state
+            .lock()
+            .unwrap()
+            .contains_key(agent_run_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_cold_append_barrier(
+        &self,
+        barrier: impl FnOnce(i32) -> Result<(), String> + Send + 'static,
+    ) {
+        *self.cold_append_barrier.lock().unwrap() = Some(Box::new(barrier));
+    }
+
     fn load_agent_run_state(
         &self,
         tx: &mut Transaction<'_>,
         agent_run_id: &str,
     ) -> Result<AgentRunAppendState, String> {
         use centaeris_core::session::SessionRecordType as Type;
-        let rows = tx
-            .query(
-                "SELECT payload::text FROM app_core_sessionevent WHERE agent_run_id=$1 AND session_level=false ORDER BY agent_run_sequence",
-                &[&agent_run_id],
-            )
-            .map_err(|error| format!("load session AgentRun state failed: {error}"))?;
+        #[cfg(test)]
+        {
+            let mut probe = self.cold_append_observation.lock().unwrap();
+            let loads = probe.loads + 1;
+            *probe = ColdAppendObservation {
+                loads,
+                ..Default::default()
+            };
+        }
+        #[cfg(test)]
+        if let Some(barrier) = self.cold_append_barrier.lock().unwrap().take() {
+            let pid = tx
+                .query_one("SELECT pg_backend_pid()", &[])
+                .map_err(|error| error.to_string())?
+                .get(0);
+            barrier(pid)?;
+        }
+        let upper_row = tx.query_one(
+            "SELECT COALESCE(MAX(agent_run_sequence),0),COUNT(*) FILTER(WHERE agent_run_sequence IS NULL OR agent_run_sequence<=0) FROM app_core_sessionevent WHERE agent_run_id=$1 AND session_level=false",
+            &[&agent_run_id],
+        ).map_err(|error| format!("load session AgentRun high-water mark failed: {error}"))?;
+        let upper = upper_row.get::<_, i32>(0);
+        if upper_row.get::<_, i64>(1) != 0 {
+            return Err("session record AgentRun sequence is invalid".into());
+        }
         let mut state = AgentRunAppendState {
-            last_sequence: rows.len() as u64,
+            last_sequence: 0,
             projection: SessionProjection::default(),
             seen_event_ids: HashSet::new(),
             open_tool_call_ids: HashMap::new(),
@@ -2234,30 +2555,51 @@ impl PostgresSessionLog {
             terminal_seen: false,
             first_event_type: None,
         };
-        let mut wires = rows
-            .iter()
-            .map(|row| {
-                serde_json::from_str(row.get::<_, String>(0).as_str())
-                    .map_err(|error| format!("decode session AgentRun state failed: {error}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        hydrate_session_wire_values(tx, wires.as_mut_slice())?;
-        let mut events = Vec::with_capacity(rows.len());
-        for value in wires {
-            events.push(
-                parse_wire_record(&value)
-                    .map_err(|error| error.to_string())?
-                    .event,
-            );
+        let mut hydrator = SessionWireHydrator::default();
+        let stats = crate::recovery_read::visit(
+            tx,
+            crate::recovery_read::Scope::BoundRun {
+                run: agent_run_id,
+                session: &self.session_id,
+                workspace: &self.workspace_id,
+            },
+            upper,
+            |client, position, mut wire| {
+                hydrator.hydrate_record(client, &mut wire)?;
+                #[cfg(test)]
+                self.cold_append_observation
+                    .lock()
+                    .unwrap()
+                    .observe_expanded(std::iter::once(&wire));
+                let record = parse_wire_record(&wire).map_err(|error| error.to_string())?;
+                apply_batch_to_state(
+                    &mut state,
+                    self.session_id.as_str(),
+                    std::iter::once(&record.event),
+                )?;
+                state.last_sequence = position as u64;
+                Ok(())
+            },
+        )?;
+        #[cfg(test)]
+        {
+            let mut probe = self.cold_append_observation.lock().unwrap();
+            probe.pages = stats.pages;
+            probe.records = stats.records;
+            probe.max_encoded_page_bytes = stats.max_encoded_page_bytes;
         }
-        apply_batch_to_state(&mut state, self.session_id.as_str(), events.iter())?;
-        if !rows.is_empty() {
+        #[cfg(not(test))]
+        let _ = stats;
+        if upper != 0 {
             if state.first_event_type != Some(Type::AgentRunStarted) {
                 return Err("session record log must start with one agent_run_started".to_string());
             }
             if state.agent_run_started_count != 1 {
                 return Err("session record log must contain one agent_run_started".to_string());
             }
+        }
+        if state.last_sequence != upper as u64 {
+            return Err("session record AgentRun high-water mark is missing".into());
         }
         Ok(state)
     }
@@ -2276,15 +2618,8 @@ impl PostgresSessionLog {
         let mut rows = Vec::with_capacity(events.len());
         let mut contents = BTreeMap::<String, ModelObservationContent>::new();
         let mut manifests = BTreeMap::<String, ModelObservationManifest>::new();
-        for (index, item) in events.iter().enumerate() {
+        for item in events {
             let event = &item.event;
-            if is_successful_work_confirmation(event) {
-                let start = self
-                    .accepted_start
-                    .as_ref()
-                    .ok_or("work_confirmation_admission_missing")?;
-                validate_work_confirmation_commit(tx, start, events, index)?;
-            }
             let turn_id = event.turn_id.as_deref().unwrap_or_default();
             if event.session_id != self.session_id
                 || turn_id.trim().is_empty()
@@ -2798,6 +3133,7 @@ impl PostgresSessionLog {
             if cancelled {
                 return Err("new user turn admission rejected after cancellation".into());
             }
+            super::pre_admission_failure::reject_history_after_failure(&mut tx, new_agent_run_id)?;
             self.validate_input_binding(&mut tx, new_agent_run_id)?;
             let mut entries = Vec::with_capacity(closure_events.len() + new_run_events.len());
             for closure_event in closure_events {
@@ -3772,3 +4108,6 @@ mod tests {
         assert_eq!(state.last_assistant_status.as_deref(), Some("done"));
     }
 }
+
+#[cfg(test)]
+mod recovery_hydration_tests;

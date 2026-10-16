@@ -9,7 +9,7 @@ from .app_delegations import session_authority_is_current
 from .models import AgentCoordinationSession, AgentRun, AgentWorkReturn, AgentWorkSession, SessionEvent
 from .runtime_client import agent_run_lifecycle_job_id
 from .runtime_job_client import get_runtime_job
-from .session_event import TERMINAL_STATES
+from .session_event import TERMINAL_STATES, pre_admission_terminal_fact
 from .workspace_access import agent_run_membership_is_current
 
 
@@ -67,14 +67,13 @@ def _terminal_fact(child):
             "state": TERMINAL_STATES[wire["type"]], "eventType": wire["type"],
             "reasonType": wire["payload"].get("reasonType"),
             "atMs": event.createdAtMs, "throughSequence": event.sequence}
-    if child.preAdmissionCancelledAt is not None:
-        if records.exists():
-            raise WorkReturnError(409, "agent_work_return_terminal_untrusted")
-        # Runtime commits this hosted receipt only after validating the durable
-        # cancellation request and current lifecycle lease. It creates no Session event.
-        return {"kind": "preAdmissionCancellation", "factRef": child.id,
-            "state": "cancelled", "eventType": None, "reasonType": "preAdmissionCancellation",
-            "atMs": int(child.preAdmissionCancelledAt.timestamp() * 1000), "throughSequence": 0}
+    if child.preAdmissionCancelledAt is not None and records.exists():
+        raise WorkReturnError(409, "agent_work_return_terminal_untrusted")
+    fact = pre_admission_terminal_fact(child)
+    if fact is not None:
+        return {"kind": fact["sourceType"], "factRef": fact["factRef"],
+            "state": fact["state"], "eventType": None, "reasonType": fact["sourceType"],
+            "atMs": fact["atMs"], "throughSequence": 0}
     if child.status == "failed" and child.transitionReason == "agent_run_lifecycle_dead_lettered":
         job_id = agent_run_lifecycle_job_id(child.id)
         job = get_runtime_job(job_id)

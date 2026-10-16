@@ -235,18 +235,22 @@ impl WorkspaceAgentRunAuthorization {
 }
 
 impl ValidatedAuthorization<'_> {
+    pub(crate) fn verify_digest_binding(&self, expected_digest: &str) -> Result<(), String> {
+        if self.0.digest_validated()? != expected_digest {
+            return Err("workspace AgentRun authorization digest mismatch".into());
+        }
+        Ok(())
+    }
+
     pub(crate) fn verify(
         self,
         expected_digest: &str,
         key: &[u8],
         signature: &str,
     ) -> Result<(), String> {
-        let digest = self.0.digest_validated()?;
-        if digest != expected_digest {
-            return Err("workspace AgentRun authorization digest mismatch".into());
-        }
+        self.verify_digest_binding(expected_digest)?;
         let bytes = decode_signature(signature)?;
-        WorkspaceAgentRunAuthorization::verify_digest_signature(key, &bytes, &digest)
+        WorkspaceAgentRunAuthorization::verify_digest_signature(key, &bytes, expected_digest)
     }
 }
 
@@ -316,7 +320,7 @@ fn validate_sha256(name: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn canonical_json(value: Value) -> Result<String, String> {
+pub(crate) fn canonical_json(value: Value) -> Result<String, String> {
     fn sort_value(value: Value) -> Value {
         match value {
             Value::Array(items) => Value::Array(items.into_iter().map(sort_value).collect()),

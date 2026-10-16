@@ -1,0 +1,11 @@
+{
+  "payload": {
+    "schema": "workspace.environment_authorization.v1",
+    "environmentId": "environment_1",
+    "sessionId": "sess_1",
+    "agentRunId": "agent_run_1",
+    "agentRunAuthorizationDigest": "sha256:bd93e8ba466c0d9851e805dd2a8c8a5962b351065c4d982ae961ea0cdb0a6a9f",
+    "executionMode": "perRun"
+  },
+  "signature": "hmac-sha256:7d374f10962bd1b4347cba92dbf0b64666e1e8e3c976d4332cc8c093cc782a90"
+}

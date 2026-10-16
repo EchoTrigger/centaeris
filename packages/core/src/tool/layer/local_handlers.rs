@@ -62,6 +62,21 @@ fn execute_bash(
     args_json: &str,
     runtime_context: &ToolRuntimeContext,
 ) -> Result<LocalToolOutput, LocalToolError> {
+    execute_bash_with_recovery(args_json, runtime_context, false)
+}
+
+pub(super) fn recover_bash(
+    args_json: &str,
+    runtime_context: &ToolRuntimeContext,
+) -> Result<LocalToolOutput, LocalToolError> {
+    execute_bash_with_recovery(args_json, runtime_context, true)
+}
+
+fn execute_bash_with_recovery(
+    args_json: &str,
+    runtime_context: &ToolRuntimeContext,
+    recovery: bool,
+) -> Result<LocalToolOutput, LocalToolError> {
     let args = parse_tool_args("bash", args_json)?;
     validate_bash_args(&args)?;
     let command = extract_string_arg(&args, &["command"])
@@ -69,12 +84,56 @@ fn execute_bash(
     let binding = runtime_context.execution_host_binding()?;
     let timeout_ms = bash_timeout_ms(&args)?;
     let (program, program_args, bash_dialect) = bash_program_and_args(command.as_str());
-    let execution = match binding.run_command(
-        program,
-        program_args,
-        std::collections::HashMap::new(),
-        timeout_ms,
-    ) {
+    let recovered = if recovery {
+        let outcome = match binding.recover_command(
+            program.clone(),
+            program_args.clone(),
+            std::collections::HashMap::new(),
+            timeout_ms,
+        ) {
+            Ok(outcome) => outcome,
+            Err(
+                error @ ExecutionError::OutputUnavailable {
+                    exit_code: Some(_), ..
+                },
+            ) => {
+                return Ok(bash_execution_host_error_result(
+                    command.as_str(),
+                    bash_dialect,
+                    ".",
+                    timeout_ms,
+                    binding.mode(),
+                    "recover_host_command",
+                    &error,
+                ));
+            }
+            Err(error) => return Err(error.internal_debug_message().into()),
+        };
+        match outcome {
+            crate::execution::ExecutionHostCommandRecovery::Completed(output) => Some(*output),
+            crate::execution::ExecutionHostCommandRecovery::NotAccepted { reason } => {
+                if reason.trim().is_empty() {
+                    return Err("command recovery NotAccepted proof missing"
+                        .to_string()
+                        .into());
+                }
+                None
+            }
+            crate::execution::ExecutionHostCommandRecovery::Unknown { reason } => {
+                return Err(format!("command recovery outcome unknown: {reason}").into())
+            }
+        }
+    } else {
+        None
+    };
+    let execution = match recovered.map(Ok).unwrap_or_else(|| {
+        binding.run_command(
+            program,
+            program_args,
+            std::collections::HashMap::new(),
+            timeout_ms,
+        )
+    }) {
         Ok(execution) => execution,
         Err(err) => {
             return Ok(bash_execution_host_error_result(
@@ -204,12 +263,12 @@ fn bash_execution_host_error_result(
     let tool_failure_kind = execution_host_tool_failure_kind(err);
     let mut output = bash_local_tool_output(json!({
         "schema": "bash_result_v1",
-        "executed": if err.is_cancellation_indeterminate() { Value::Null } else { Value::Bool(false) },
+        "executed": err.execution_started().map(Value::Bool).unwrap_or(Value::Null),
         "command": command,
         "bashDialect": bash_dialect,
         "cwd": cwd,
         "timeoutMs": timeout_ms,
-        "exitCode": Value::Null,
+        "exitCode": err.known_exit_code(),
         "timedOut": false,
         "stdout": "",
         "stderr": "",
@@ -233,7 +292,7 @@ fn bash_execution_host_error_result(
             "modelMessage": err.model_visible_message(),
             "userMessage": err.user_visible_message(),
             "diagnosticId": diagnostic_id,
-            "retryable": !err.is_cancellation_indeterminate() && matches!(
+            "retryable": err.execution_started() == Some(false) && matches!(
                 tool_failure_kind,
                 ToolFailureKind::SandboxUnavailable
                     | ToolFailureKind::HostUnavailable
@@ -252,7 +311,10 @@ fn execution_host_tool_failure_kind(err: &ExecutionError) -> ToolFailureKind {
         ExecutionError::HostUnavailable { .. } => ToolFailureKind::HostUnavailable,
         ExecutionError::PolicyUnavailable { .. } => ToolFailureKind::SandboxUnavailable,
         ExecutionError::CancellationIndeterminate { .. } => ToolFailureKind::HostUnavailable,
-        ExecutionError::Io(_) => ToolFailureKind::HostUnavailable,
+        ExecutionError::CapacityRejected { .. }
+        | ExecutionError::OperationIndeterminate { .. }
+        | ExecutionError::OutputUnavailable { .. }
+        | ExecutionError::Io(_) => ToolFailureKind::HostUnavailable,
     }
 }
 
@@ -264,7 +326,10 @@ fn execution_host_failure_kind(err: &ExecutionError) -> ExecutionHostFailureKind
         ExecutionError::CancellationIndeterminate { .. } => {
             ExecutionHostFailureKind::HostUnavailable
         }
-        ExecutionError::Io(_) => ExecutionHostFailureKind::HostUnavailable,
+        ExecutionError::CapacityRejected { .. }
+        | ExecutionError::OperationIndeterminate { .. }
+        | ExecutionError::OutputUnavailable { .. }
+        | ExecutionError::Io(_) => ExecutionHostFailureKind::HostUnavailable,
     }
 }
 
@@ -625,6 +690,98 @@ mod tests {
             assert!(!error
                 .model_visible_message()
                 .contains("private native diagnostic"));
+        }
+    }
+
+    #[test]
+    fn retained_rpc_errors_preserve_acceptance_and_never_repeat_known_or_unknown_work() {
+        use crate::execution::ExecutionOperationStage;
+        let cases = [
+            (
+                ExecutionError::CapacityRejected {
+                    stage: ExecutionOperationStage::Start,
+                    reason: "task_capacity".into(),
+                },
+                Some(false),
+                true,
+            ),
+            (
+                ExecutionError::CapacityRejected {
+                    stage: ExecutionOperationStage::Input,
+                    reason: "task_input_receipt_capacity".into(),
+                },
+                Some(true),
+                false,
+            ),
+            (
+                ExecutionError::OperationIndeterminate {
+                    stage: ExecutionOperationStage::Start,
+                    reason: "private transport".into(),
+                },
+                None,
+                false,
+            ),
+            (
+                ExecutionError::OperationIndeterminate {
+                    stage: ExecutionOperationStage::Query,
+                    reason: "accepted task, spawn not confirmed".into(),
+                },
+                None,
+                false,
+            ),
+            (
+                ExecutionError::OperationIndeterminate {
+                    stage: ExecutionOperationStage::Input,
+                    reason: "partial write".into(),
+                },
+                Some(true),
+                false,
+            ),
+            (
+                ExecutionError::OutputUnavailable {
+                    reason: "no confirmed exit".into(),
+                    exit_code: None,
+                },
+                None,
+                false,
+            ),
+            (
+                ExecutionError::OutputUnavailable {
+                    reason: "expired".into(),
+                    exit_code: Some(7),
+                },
+                Some(true),
+                false,
+            ),
+        ];
+        for (error, started, retryable) in cases {
+            let output = bash_execution_host_error_result(
+                "printf once",
+                "bash",
+                ".",
+                1000,
+                ExecutionHostMode::Remote,
+                "run",
+                &error,
+            );
+            assert_eq!(
+                output.details["executed"],
+                started.map(Value::Bool).unwrap_or(Value::Null)
+            );
+            assert_eq!(
+                output.details["exitCode"],
+                error
+                    .known_exit_code()
+                    .map(|code| json!(code))
+                    .unwrap_or(Value::Null)
+            );
+            assert_eq!(output.details["toolError"]["retryable"], retryable);
+            assert!(!error.is_cancellation_indeterminate());
+            assert_ne!(
+                output.transition_reason,
+                EXECUTION_CANCELLATION_INDETERMINATE
+            );
+            assert!(!error.model_visible_message().contains("private transport"));
         }
     }
 

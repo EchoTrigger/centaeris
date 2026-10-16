@@ -36,7 +36,16 @@ use centaeris_runtime_sqlite::SqliteRuntimeStore;
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 mod checkpoint_requests;
+mod cleanup_migration_tests;
+mod cold_append_fault_tests;
+mod cold_append_fence_tests;
+mod cold_append_lease_tests;
+mod cold_append_tests;
+mod execution_instance_tests;
+mod lease_renewal_tests;
+mod owned_database;
 mod residency_tests;
+mod retained_instance_tests;
 mod snapshot_cas_tests;
 mod tool_result_storage_tests;
 mod wait_handoff_tests;
@@ -339,6 +348,7 @@ fn test_url() -> String {
 
 fn reset_store(url: &str) {
     let mut client = Client::connect(url, NoTls).expect("connect test Postgres");
+    owned_database::require_owned_database(&mut client);
     client.batch_execute("CREATE TABLE IF NOT EXISTS public.app_core_agentrun(id text PRIMARY KEY, session_id text NOT NULL, \"preAdmissionCancelledAt\" timestamptz); DELETE FROM public.app_core_agentrun;").expect("reset hosted run receipts");
     client
         .batch_execute("DROP SCHEMA IF EXISTS runtime CASCADE")
@@ -438,6 +448,51 @@ fn postgres_pre_admission_cancellation_is_durable_fenced_and_history_free() {
             .get::<_, i64>(0),
         0
     );
+    // A controller acquiring Session then Run must not deadlock with cancellation.
+    // Observe cancellation blocked on our Session row before checking Run access.
+    let holder_pid: i32 = db.query_one("SELECT pg_backend_pid()", &[]).unwrap().get(0);
+    let mut held = db.transaction().unwrap();
+    held.query_one(
+        "SELECT id FROM public.app_core_session WHERE id='cancel-session' FOR UPDATE",
+        &[],
+    )
+    .unwrap();
+    let competing = store.clone();
+    let competing_fence = fence.clone();
+    let cancellation = std::thread::spawn(move || {
+        competing
+            .session_log(
+                "cancel-workspace".into(),
+                "cancel-session".into(),
+                "never admitted".into(),
+            )
+            .commit_pre_admission_cancellation("cancel-run", "digest", &competing_fence)
+    });
+    let mut observer = Client::connect(&url, NoTls).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut blocked = false;
+    while std::time::Instant::now() < deadline {
+        blocked = observer.query_one("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))", &[&holder_pid]).unwrap().get(0);
+        if blocked {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let run_available = held.query_one(
+        "SELECT id FROM public.app_core_agentrun WHERE id='cancel-run' FOR UPDATE NOWAIT",
+        &[],
+    );
+    held.rollback().unwrap();
+    let cancellation_result = cancellation.join().unwrap();
+    assert!(
+        blocked,
+        "cancellation must actually wait on the owned Session row"
+    );
+    assert!(
+        run_available.is_ok(),
+        "waiting cancellation must not pin Run before Session: {run_available:?}"
+    );
+    cancellation_result.unwrap();
     db.execute(
         "INSERT INTO public.app_core_sessionevent VALUES('cancel-run',false)",
         &[],
@@ -1184,7 +1239,8 @@ fn postgres_lease_budget_forward_migration_preserves_published_job_facts() {
         .unwrap();
     drop(store);
     let mut db = Client::connect(&url, NoTls).unwrap();
-    db.batch_execute("DELETE FROM runtime.schema_migrations WHERE version>=6; DROP TABLE runtime.resident_sandboxes; ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_count; ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_not_before_ms;").unwrap();
+    retained_instance_tests::downgrade_to_eight(&mut db);
+    db.batch_execute("DELETE FROM runtime.schema_migrations WHERE version>=6; DROP TABLE runtime.execution_instances; DROP TABLE runtime.resident_sandboxes; ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_count; ALTER TABLE runtime.runtime_jobs DROP COLUMN lease_reclaim_not_before_ms;").unwrap();
     let history = db
         .query(
             "SELECT version,applied_at_ms FROM runtime.schema_migrations ORDER BY version",
@@ -2923,6 +2979,11 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
         authorization_signature: authorization
             .signature(b"test-run-authorization-signing-key")
             .unwrap(),
+        environment_authorization:
+            crate::environment_authorization::EnvironmentAuthorization::for_test(
+                &authorization,
+                b"test-run-authorization-signing-key",
+            ),
         authorization,
         tail_action: crate::contract::AgentRunTailAction::Append,
         coordination_session_id: None,
@@ -3321,6 +3382,16 @@ fn postgres_peer_session_count(url: &str) -> i64 {
 #[test]
 #[ignore = "requires destructive dedicated Postgres test database"]
 fn postgres_model_request_batch_deduplicates_and_hydrates_observations() {
+    exercise_model_request_storage(true);
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_model_request_cold_recovery_preserves_snapshot() {
+    exercise_model_request_storage(false);
+}
+
+fn exercise_model_request_storage(include_growth: bool) {
     let _guard = TEST_LOCK.lock().expect("Postgres test lock");
     let url = test_url();
     reset_store(&url);
@@ -3507,6 +3578,50 @@ fn postgres_model_request_batch_deduplicates_and_hydrates_observations() {
             .get::<_, i64>(0),
         2
     );
+
+    // Compare the real two-pass recovery reader with the original fully hydrated
+    // record path at the same fixed watermark. These are the four committed
+    // start/input/request facts above, including two distinct CAS-backed roots.
+    let mut full_wires = audit
+        .query(
+            "SELECT payload::text FROM public.app_core_sessionevent WHERE session_id=$1 AND sequence<=4 ORDER BY sequence",
+            &[&session_id],
+        )
+        .expect("load original recovery batch")
+        .into_iter()
+        .map(|row| serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(0)).expect("decode original recovery wire"))
+        .collect::<Vec<_>>();
+    super::runtime::hydrate_session_wire_values(&mut audit, &mut full_wires)
+        .expect("hydrate original recovery batch");
+    let full_records = full_wires
+        .iter()
+        .map(|wire| {
+            centaeris_core::session::parse_wire_record(wire)
+                .expect("parse original recovery record")
+                .event
+        })
+        .collect::<Vec<_>>();
+    let expected = centaeris_core::session::restore_runtime_snapshot_from_session_records(
+        session_id,
+        &full_records,
+    )
+    .expect("restore original full-batch snapshot");
+    let streamed = crate::load_recovery_session_state(&store, session_id, 4)
+        .expect("restore actual fixed-watermark paged recovery");
+    assert_eq!(
+        serde_json::to_value(&streamed.snapshot).unwrap(),
+        serde_json::to_value(&expected).unwrap(),
+        "real PostgreSQL two-pass hydration must preserve the exact Core snapshot",
+    );
+    assert_eq!(streamed.source_records.len(), 2);
+    assert!(streamed
+        .source_records
+        .iter()
+        .all(|record| record.event_type != SessionRecordType::ModelRequestStarted));
+
+    if !include_growth {
+        return;
+    }
 
     // Real append/UNNEST/CAS/hydration growth, excluding the two fixtures above.
     let storage_totals = |audit: &mut Client| {
@@ -4704,4 +4819,52 @@ fn postgres_fenced_rewrite_tombstones_completed_dispatch_request() {
     ).unwrap().get(0);
     assert_eq!(inactive, 6);
     println!("completed-dispatch-rewrite-ok: real Core planner and fenced PostgreSQL rewrite invalidate committed call/result after a terminal Final; Session lock serializes replacement");
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_runtime_store_recovery_pages_preserve_bytes_and_fixed_watermark() {
+    let _guard = TEST_LOCK.lock().expect("Postgres test lock");
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    store.with_client(|client| {
+    client.batch_execute("CREATE TABLE runtime.app_core_sessionevent(sequence integer NOT NULL, session_id varchar(64) NOT NULL, payload jsonb NOT NULL)").unwrap();
+    let originals = (1..=70)
+        .map(|sequence| {
+            let bytes = match sequence {
+                1 | 2 => 500_000,
+                3 => 1_100_000,
+                _ => 40,
+            };
+            serde_json::json!({"text":format!("{}\0雪-{sequence}", "x".repeat(bytes))})
+        })
+        .collect::<Vec<_>>();
+    for (index, wire) in originals.iter().enumerate() {
+        let stored = super::session_payload::encode(wire).unwrap();
+        client.execute("INSERT INTO runtime.app_core_sessionevent(sequence,session_id,payload) VALUES($1,'paged-recovery',$2::text::jsonb)", &[&((index + 1) as i32), &stored.to_string()]).unwrap();
+    }
+    let mut seen = Vec::new();
+    crate::recovery_read::visit(client, crate::recovery_read::Scope::Session("paged-recovery"), 70,
+        |client, sequence, wire| {
+            if sequence == 1 {
+                client.execute("INSERT INTO runtime.app_core_sessionevent(sequence,session_id,payload) VALUES(71,'paged-recovery','{}')", &[]).unwrap();
+            }
+            assert_eq!(sequence as usize, seen.len() + 1);
+            seen.push(wire);
+            Ok(())
+        }).unwrap();
+    assert_eq!(seen, originals, "all original UTF-8/control-byte bodies must survive page boundaries; writes above the fixed upper bound stay excluded");
+    assert!(
+        crate::recovery_read::visit(
+            client,
+            crate::recovery_read::Scope::Session("paged-recovery"),
+            72,
+            |_, _, _| Ok(())
+        )
+        .is_err(),
+        "a missing declared high-water record must reject"
+    );
+    Ok(())
+    }).unwrap();
 }

@@ -1,5 +1,5 @@
 use centaeris_core::model::ToolCallEnvelope;
-use centaeris_core::runtime::contracts::{current_timestamp_ms, CheckpointRecord};
+use centaeris_core::runtime::contracts::current_timestamp_ms;
 use centaeris_core::runtime::event::RuntimeEventProjection;
 use centaeris_core::runtime::ModelRequestStartedV1;
 use centaeris_core::session::supplement::DurableTurnSupplement;
@@ -893,14 +893,14 @@ pub(crate) fn append_reasoning_block(
     projected_stream_items_for_event_ids(session_id, agent_run_id, &[event_id])
 }
 
-pub(crate) fn append_checkpoint_ref(
-    checkpoint: &CheckpointRecord,
+pub(crate) fn append_committed_checkpoint_ref(
+    checkpoint: &centaeris_core::runtime::TurnCheckpointRef,
     agent_run_id: &str,
 ) -> Result<(), String> {
     let session_id = required_string(checkpoint.session_id.as_str(), "sessionId")?;
     let agent_run_id = required_string(agent_run_id, "agentRunId")?;
     let mut state = agent_run_session_state(session_id.as_str(), agent_run_id.as_str())?;
-    let record = state.checkpoint_ref(checkpoint)?;
+    let record = state.committed_checkpoint_ref(checkpoint)?;
     append_agent_run_records(session_id.as_str(), vec![record]).map(|_| ())
 }
 

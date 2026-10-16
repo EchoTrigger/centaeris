@@ -13,7 +13,7 @@ from .plugin_catalog import plugin_activation_for_workspace, validate_plugin_act
 AGENT_RUN_AUTHORIZATION_SCHEMA = "workspace.agent_run_authorization.v1"
 RESOLVED_INPUT_SCHEMA = "runtime.resolved_input.v1"
 DECLARED_INPUT_SCHEMA = "runtime.declared_input.v1"
-AGENT_RUN_START_SCHEMA = "workspace.agent_run.start.v2"
+AGENT_RUN_START_SCHEMA = "workspace.agent_run.start.v3"
 MODEL_RUN_SCHEMA = "api.model.run.v1"
 AGENT_RUN_AUTHORIZATION_FIELDS = {
     "schema",

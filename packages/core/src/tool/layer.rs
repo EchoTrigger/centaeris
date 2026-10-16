@@ -1003,6 +1003,35 @@ impl ToolLayer {
         }
     }
 
+    pub(crate) async fn recover_execution_async(
+        &self,
+        req: ToolInvocationRequest,
+    ) -> Result<ToolExecutionResult, String> {
+        if req.tool_name != "bash" {
+            return Err(format!(
+                "same-Run recovery is unsupported for tool {}",
+                req.tool_name
+            ));
+        }
+        let context = self
+            .runtime_context
+            .clone()
+            .with_tool_invocation(req.tool_call_id.clone(), req.tool_name.clone());
+        let started_at_ms = now_ms();
+        let args = req.args_json.clone();
+        let output =
+            tokio::task::spawn_blocking(move || local_handlers::recover_bash(&args, &context))
+                .await
+                .map_err(|error| format!("join command recovery failed: {error}"))?
+                .map_err(|error| format!("command recovery failed: {}", error.content))?;
+        Ok(result_capture::seal_tool_result(
+            local_tool_execution_result(req.tool_call_id, req.tool_name, output, started_at_ms),
+            &req.args_json,
+            self.runtime_context.session_id.as_deref(),
+            self.runtime_context.execution_host_binding.as_deref(),
+        ))
+    }
+
     pub async fn execute_async(&self, req: ToolInvocationRequest) -> ToolExecutionResult {
         let args_json = req.args_json.clone();
         result_capture::seal_tool_result(
@@ -1326,7 +1355,16 @@ fn bash_tool_output_status(parsed: &Value) -> LocalToolOutputStatus {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let exit_code = parsed.get("exitCode").and_then(Value::as_i64);
-    if executed && !timed_out && exit_code == Some(0) {
+    let explicit_failure_kind = parsed
+        .pointer("/executionHost/failureKind")
+        .and_then(Value::as_str)
+        .filter(|kind| !kind.eq_ignore_ascii_case("none"));
+    if executed
+        && !timed_out
+        && exit_code == Some(0)
+        && explicit_failure_kind.is_none()
+        && tool_error_from_bash_payload(parsed).is_none()
+    {
         return LocalToolOutputStatus {
             status: "ok".to_string(),
             error: None,
@@ -1334,10 +1372,6 @@ fn bash_tool_output_status(parsed: &Value) -> LocalToolOutputStatus {
         };
     }
 
-    let explicit_failure_kind = parsed
-        .pointer("/executionHost/failureKind")
-        .and_then(Value::as_str)
-        .filter(|kind| !kind.eq_ignore_ascii_case("none"));
     let mut error = if let Some(error) = tool_error_from_bash_payload(parsed) {
         error
     } else if let Some(failure_kind) = explicit_failure_kind {
@@ -1416,6 +1450,8 @@ fn bash_tool_content(details: &Value, error: Option<&ToolErrorInfo>) -> String {
             Some(timeout_ms) => format!("Command timed out after {timeout_ms} ms."),
             None => "Command timed out.".to_string(),
         });
+    } else if let Some(error) = error.filter(|_| exit_code == Some(0)) {
+        sections.push(error.model_message.clone());
     } else if let Some(exit_code) = exit_code {
         if exit_code == 0 {
             sections.push("Command completed successfully with exit code 0.".to_string());

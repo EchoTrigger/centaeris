@@ -16,6 +16,7 @@ from . import test_agent_work_returns as return_fixture
 from . import test_agent_work_consumption as consume_fixture
 from .models import AgentRun
 from .runtime_client import build_agent_run_start
+from .runtime_schema_test_helpers import remove_runtime_trigger_functions
 
 
 def isolate_runtime_schema(test):
@@ -35,7 +36,7 @@ def isolate_runtime_schema(test):
             if tables:
                 cursor.execute("DROP TABLE " + ", ".join(
                     "runtime." + connection.ops.quote_name(table) for table in sorted(tables)))
-            cursor.execute("DROP FUNCTION IF EXISTS runtime.notify_runtime_job_ready_v1()")
+            remove_runtime_trigger_functions(cursor)
             cursor.execute("DROP SCHEMA IF EXISTS runtime")
             if previous_schema_exists:
                 cursor.execute("ALTER SCHEMA " + saved_schema + " RENAME TO runtime")

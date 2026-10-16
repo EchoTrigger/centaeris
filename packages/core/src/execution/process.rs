@@ -18,13 +18,50 @@ pub struct ExecutionPolicySummary {
     pub denied_write_path_count: usize,
 }
 
+/// The RPC attempt whose acceptance or result is being described.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionOperationStage {
+    Start,
+    Input,
+    Query,
+}
+impl ExecutionOperationStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Input => "input",
+            Self::Query => "query",
+        }
+    }
+}
+
 /// Failure categories are execution facts, independent of the Host backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionError {
-    Denied { reason: String },
-    PolicyUnavailable { reason: String },
-    HostUnavailable { reason: String },
-    CancellationIndeterminate { reason: String },
+    Denied {
+        reason: String,
+    },
+    PolicyUnavailable {
+        reason: String,
+    },
+    HostUnavailable {
+        reason: String,
+    },
+    CapacityRejected {
+        stage: ExecutionOperationStage,
+        reason: String,
+    },
+    OperationIndeterminate {
+        stage: ExecutionOperationStage,
+        reason: String,
+    },
+    OutputUnavailable {
+        reason: String,
+        exit_code: Option<i32>,
+    },
+    CancellationIndeterminate {
+        reason: String,
+    },
     Io(String),
 }
 
@@ -40,6 +77,15 @@ impl ExecutionError {
             Self::Denied { reason } => format!("execution policy denied: {reason}"),
             Self::PolicyUnavailable { reason } => format!("execution policy unavailable: {reason}"),
             Self::HostUnavailable { reason } => format!("execution host unavailable: {reason}"),
+            Self::CapacityRejected { stage, reason } => {
+                format!("execution {} capacity rejected: {reason}", stage.as_str())
+            }
+            Self::OperationIndeterminate { stage, reason } => {
+                format!("execution {} outcome unknown: {reason}", stage.as_str())
+            }
+            Self::OutputUnavailable { reason, exit_code } => {
+                format!("execution output unavailable: {reason}; exitCode={exit_code:?}")
+            }
             Self::CancellationIndeterminate { reason } => {
                 format!("execution cancellation indeterminate: {reason}")
             }
@@ -50,6 +96,21 @@ impl ExecutionError {
         match self {
             Self::Denied { .. } => "execution policy denied the requested operation".into(),
             Self::HostUnavailable { reason } => reason.clone(),
+            Self::CapacityRejected {
+                stage: ExecutionOperationStage::Start,
+                reason,
+            } => reason.clone(),
+            Self::CapacityRejected { stage, reason } => format!(
+                "execution {} rejected: {reason}; the command was already started",
+                stage.as_str()
+            ),
+            Self::OperationIndeterminate { stage, .. } => format!(
+                "execution {} outcome is unknown; do not repeat the operation",
+                stage.as_str()
+            ),
+            Self::OutputUnavailable { .. } => {
+                "execution output unavailable; do not repeat the command".into()
+            }
             Self::PolicyUnavailable { .. } => {
                 "execution policy unavailable; refusing to degrade to an unisolated process".into()
             }
@@ -63,11 +124,55 @@ impl ExecutionError {
         match self {
             Self::Denied { .. } => "Execution policy denied the operation".into(),
             Self::HostUnavailable { reason } => reason.clone(),
+            Self::CapacityRejected {
+                stage: ExecutionOperationStage::Start,
+                reason,
+            } => reason.clone(),
+            Self::CapacityRejected { stage, reason } => format!(
+                "execution {} rejected: {reason}; the command was already started",
+                stage.as_str()
+            ),
+            Self::OperationIndeterminate { stage, .. } => format!(
+                "execution {} outcome is unknown; do not repeat the operation",
+                stage.as_str()
+            ),
+            Self::OutputUnavailable { .. } => {
+                "execution output unavailable; do not repeat the command".into()
+            }
             Self::PolicyUnavailable { .. } => "Execution policy cannot be enforced".into(),
             Self::CancellationIndeterminate { .. } => {
                 "Execution cancellation could not be verified".into()
             }
             Self::Io(_) => "Execution I/O error".into(),
+        }
+    }
+    /// Whether this error proves the command never started. Unknown Start ACKs
+    /// must not be advertised as safe to repeat; Input failures follow a Start.
+    pub fn execution_started(&self) -> Option<bool> {
+        match self {
+            Self::OperationIndeterminate {
+                stage: ExecutionOperationStage::Start | ExecutionOperationStage::Query,
+                ..
+            }
+            | Self::OutputUnavailable {
+                exit_code: None, ..
+            }
+            | Self::CancellationIndeterminate { .. } => None,
+            Self::CapacityRejected {
+                stage: ExecutionOperationStage::Start,
+                ..
+            } => Some(false),
+            Self::CapacityRejected { .. }
+            | Self::OperationIndeterminate { .. }
+            | Self::OutputUnavailable { .. } => Some(true),
+            _ => Some(false),
+        }
+    }
+    /// An output gap must not erase a known process exit.
+    pub fn known_exit_code(&self) -> Option<i32> {
+        match self {
+            Self::OutputUnavailable { exit_code, .. } => *exit_code,
+            _ => None,
         }
     }
     pub fn is_cancellation_indeterminate(&self) -> bool {

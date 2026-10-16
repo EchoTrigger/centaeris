@@ -1,3 +1,5 @@
+#[cfg(test)]
+use centaeris_core::session::restore_runtime_snapshot_from_session_records;
 mod agent_inputs;
 #[cfg(test)]
 mod agent_inputs_tests;
@@ -11,6 +13,7 @@ mod contract;
 mod deferred_input_resolver;
 mod docker_engine;
 mod docker_execution_host;
+mod environment_authorization;
 mod execution_capacity;
 mod execution_recovery_coordinator;
 mod execution_recovery_policy;
@@ -26,9 +29,11 @@ mod native_consumption_tests;
 mod observations;
 mod platform_materials;
 mod postgres_store;
+mod recovery_read;
 mod recovery_upload;
 mod request_capacity;
 mod resident_capacity;
+mod retained_tasks;
 #[cfg(test)]
 mod runtime_http_tests;
 mod session_delivery;
@@ -38,6 +43,7 @@ mod transcript_capture;
 mod transcript_protocol;
 mod transient_stream;
 mod wait_recovery;
+pub mod workspace_archive;
 mod workspace_tools;
 
 use std::collections::{HashMap, HashSet};
@@ -108,10 +114,9 @@ use centaeris_core::session::supplement::{
     EnqueueTurnSupplementRequest, TurnSupplementStoreError, TurnSupplementStorePort,
 };
 use centaeris_core::session::{
-    parse_wire_record, restore_runtime_snapshot_from_session_records,
-    session_record_projects_to_agent_run_stream, AgentRunSessionState, RewriteLastUserTailRequest,
-    RuntimeJobLeaseFence, SequencedSessionRecord, SessionCommitReceipt, SessionLogPort,
-    SessionRecordType, RUNTIME_JOB_LEASE_FENCE_REJECTED,
+    parse_wire_record, session_record_projects_to_agent_run_stream, AgentRunSessionState,
+    RewriteLastUserTailRequest, RuntimeJobLeaseFence, SequencedSessionRecord, SessionCommitReceipt,
+    SessionLogPort, SessionRecordType, RUNTIME_JOB_LEASE_FENCE_REJECTED,
 };
 use centaeris_core::tool::inputs::{
     DeferredInputResolutionFailureKind, ResolvedInputManifest, ResolvedInputState,
@@ -135,9 +140,7 @@ use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
 use lifecycle_hooks::{workspace_hook_catalog, workspace_lifecycle_hook_runtime};
-use postgres_store::{
-    hydrate_session_wire_values, PostgresConnectionLimits, PostgresRuntimeStore, PostgresSessionLog,
-};
+use postgres_store::{PostgresConnectionLimits, PostgresRuntimeStore, PostgresSessionLog};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -1358,6 +1361,17 @@ fn requires_session_workspace_restore(has_started_fact: bool, completing_recover
     !has_started_fact && !completing_recovery
 }
 
+fn resolve_instance_workspace(
+    hot_reuse: bool,
+    restore: impl FnOnce() -> Result<SessionWorkspaceResolution, SessionWorkspaceApiError>,
+) -> Result<SessionWorkspaceResolution, SessionWorkspaceApiError> {
+    if hot_reuse {
+        Ok(SessionWorkspaceResolution::RetainedLive)
+    } else {
+        restore()
+    }
+}
+
 fn retry_completed_workspace_commit(
     resolution: SessionWorkspaceResolution,
     validate: impl FnOnce() -> Result<(), String>,
@@ -1580,7 +1594,17 @@ fn terminalize_agent_run_failure(
         &mut committed_sequence,
         now_ms()?,
     )?;
-    if !events.is_empty() {
+    if events.is_empty() {
+        session_log.commit_pre_admission_failure(
+            &agent_run_start.agent_run_id,
+            &agent_run_start.authorization_digest,
+            &RuntimeJobLeaseFence {
+                job_id: lifecycle_job_id.to_string(),
+                job_kind: AGENT_RUN_LIFECYCLE_JOB_KIND.to_string(),
+                lease_owner: lifecycle_lease_owner.to_string(),
+            },
+        )?;
+    } else {
         let receipt = append_agent_run_session_records(
             runtime,
             &session_log,
@@ -2056,6 +2080,7 @@ fn execute_agent_run(
                     user_id: agent_run_start.authorization.user_id.clone(),
                     agent_id: agent_run_start.authorization.agent_id.clone(),
                     authorization_digest: agent_run_start.authorization_digest.clone(),
+                    environment_authorization: agent_run_start.environment_authorization.clone(),
                     image_digest: agent_run_start.authorization.image_digest.clone(),
                     resources: agent_run_start.authorization.resources,
                     has_execution_fact,
@@ -2325,6 +2350,9 @@ fn execute_agent_run(
         }
     };
     let mut dynamic_tool_contracts = workspace_agent_tool_contracts(&agent_run_start);
+    if docker_execution.is_retained() {
+        dynamic_tool_contracts.extend(retained_tasks::retained_task_contracts());
+    }
     if let Some(provider) = &platform_materials {
         dynamic_tool_contracts.extend(provider.contracts.clone());
     }
@@ -2361,6 +2389,11 @@ fn execute_agent_run(
         artifact_publication,
     )))?;
     register_workspace_agent_tool_providers(&mut tool_layer, &agent_run_start, &api_url, &token)?;
+    if docker_execution.is_retained() {
+        tool_layer.register_dynamic_tool_provider(Arc::new(
+            retained_tasks::RetainedTaskToolProvider::new(docker_execution.clone()),
+        ))?;
+    }
     for provider in mcp_bindings.providers {
         tool_layer.register_dynamic_tool_provider(provider)?;
     }
@@ -2441,7 +2474,9 @@ fn execute_agent_run(
     )?;
     let completing_recovery = completed_projection.is_some();
     let workspace_restore_started = Instant::now();
-    let workspace_resolution = match if let Some(prepared) = prepared_recovery_restore.as_mut() {
+    let workspace_resolution = match if docker_execution.is_hot_reuse() {
+        resolve_instance_workspace(true, || unreachable!("hot reuse cannot restore old files"))
+    } else if let Some(prepared) = prepared_recovery_restore.as_mut() {
         docker_execution
             .restore_prepared_recovery_workspace(prepared, workspace_input_upper_bound_bytes)
     } else if let Some((_, checkpoint)) = recovery_checkpoint.as_ref() {
@@ -2531,7 +2566,8 @@ fn execute_agent_run(
             match workspace_commit {
                 Ok(
                     SessionWorkspaceCommitOutcome::Accepted
-                    | SessionWorkspaceCommitOutcome::Unchanged,
+                    | SessionWorkspaceCommitOutcome::Unchanged
+                    | SessionWorkspaceCommitOutcome::ProtectionDeferred,
                 ) => {}
                 Ok(SessionWorkspaceCommitOutcome::Pending) => {
                     return Ok(AgentRunStepOutcome {
@@ -3014,6 +3050,11 @@ fn execute_agent_run(
                         return Err(
                             "recovery checkpoint requires an empty in-flight tool set".to_string()
                         );
+                    }
+                    if docker_execution.is_retained() {
+                        // Live tasks may still write. Preserve the model fact without
+                        // claiming an uncoordinated file image is a recovery checkpoint.
+                        break 'checkpoint events;
                     }
                     let model_request = events
                         .iter()
@@ -3622,8 +3663,8 @@ fn execute_agent_run(
                 AgentRunStop::RuntimeJobWait | AgentRunStop::QuestionWait
             ) {
                 let wait_turn_id = response
-                    .turn_responses
-                    .last()
+                    .last_turn
+                    .as_ref()
                     .ok_or_else(|| "agent_run_cancel_wait_response_missing".to_string())?
                     .checkpoint
                     .as_ref()
@@ -3736,8 +3777,8 @@ fn execute_agent_run(
             )?;
             if response.stop == AgentRunStop::RuntimeJobWait {
                 let turn = response
-                    .turn_responses
-                    .last()
+                    .last_turn
+                    .as_ref()
                     .ok_or("runtime job wait response missing")?;
                 wait_recovery::WaitHandoffPublisher {
                     store: job_store.as_ref(),
@@ -3839,7 +3880,8 @@ fn execute_agent_run(
                 ) {
                     Ok(
                         SessionWorkspaceCommitOutcome::Accepted
-                        | SessionWorkspaceCommitOutcome::Unchanged,
+                        | SessionWorkspaceCommitOutcome::Unchanged
+                        | SessionWorkspaceCommitOutcome::ProtectionDeferred,
                     ) => {}
                     Ok(SessionWorkspaceCommitOutcome::Pending) => {
                         let mut pending_sequence =
@@ -4130,6 +4172,11 @@ impl AssistantTextProjection {
         if self.responses.last().is_some_and(|response| !response.done) {
             return Err("model request started before the previous response completed".to_string());
         }
+        // Tool-bearing responses never produce assistant records. Their facts
+        // are committed separately; keep only the current live-text scratch.
+        // Plain text may still await delivery (including output-limit prefixes).
+        self.responses
+            .retain(|response| !response.done || !response.has_tool_call);
         self.responses.push(AssistantResponse {
             turn_id,
             text: initial_content,
@@ -4199,6 +4246,21 @@ fn commit_failed_agent_run(
     lease_fence: &RuntimeJobLeaseFence,
 ) -> Result<AgentRunStepOutcome, String> {
     failure_diagnostics::report(&agent_run_start.agent_run_id, "core_turn", internal_error);
+    // No Core turn exists before admission. Persist a fenced hosted failure
+    // instead of returning an HTTP-only terminal outcome or inventing history.
+    if session_record_sequence.is_empty() {
+        session_log.commit_pre_admission_failure(
+            &agent_run_start.agent_run_id,
+            &agent_run_start.authorization_digest,
+            lease_fence,
+        )?;
+        return Ok(AgentRunStepOutcome {
+            retry_at_ms: None,
+            disposition: "terminal",
+            terminal_state: Some("failed"),
+            transition_reason: transition_reason.to_string(),
+        });
+    }
     if provider_response_was_interrupted(internal_error) {
         return commit_interrupted_agent_run(
             runtime,
@@ -4615,10 +4677,10 @@ fn commit_new_user_turn_admission(
             closures: Vec::new(),
         }
     } else {
-        let records = load_recovery_session_events(job_store, session_id, session_head)?;
-        agent_runtime.plan_new_user_turn_closures(
+        let recovery = load_recovery_session_state(job_store, session_id, session_head)?;
+        agent_runtime.plan_new_user_turn_closures_from_recovery(
             session_id,
-            records.as_slice(),
+            &recovery,
             agent_run_start.agent_run_id.as_str(),
             agent_run_start.turn_id.as_str(),
             u64::try_from(session_head)
@@ -4984,6 +5046,26 @@ fn provider_response_was_interrupted(error: &str) -> bool {
 }
 
 fn public_agent_failure_reason<'a>(internal_error: &'a str, transition_reason: &'a str) -> &'a str {
+    if let Some(reason) = internal_error.strip_prefix("read AGENTS.md failed: ") {
+        if centaeris_core::execution::environment_task_capacity_rejection(reason) {
+            return reason;
+        }
+    }
+    if let Some(reason) = internal_error
+        .strip_prefix("read AGENTS.md failed: execution input rejected: ")
+        .and_then(|reason| reason.strip_suffix("; the command was already started"))
+    {
+        if centaeris_core::execution::environment_task_capacity_rejection(reason) {
+            return "execution_input_rejected";
+        }
+    }
+    match internal_error {
+        "read AGENTS.md failed: execution start outcome is unknown; do not repeat the operation" => return "execution_start_unknown",
+        "read AGENTS.md failed: execution input outcome is unknown; do not repeat the operation" => return "execution_input_unknown",
+        "read AGENTS.md failed: execution query outcome is unknown; do not repeat the operation" => return "execution_query_unknown",
+        "read AGENTS.md failed: execution output unavailable; do not repeat the command" => return "execution_output_unavailable",
+        _ => {}
+    }
     if api_model_client::hosted_model_failure(internal_error).is_some()
         || matches!(
             internal_error,
@@ -5016,7 +5098,21 @@ fn failed_session_records(
         .unwrap_or(failure_kind);
     let failure_message = model_failure
         .as_ref()
-        .map(|failure| failure.public_message());
+        .map(|failure| failure.public_message())
+        .or_else(|| {
+            centaeris_core::execution::environment_task_capacity_rejection(failure_kind).then(|| {
+            "Execution resources are temporarily exhausted. The requested task was not started; existing tasks remain supervised."
+                .to_string()
+        })
+        })
+        .or_else(|| match failure_kind {
+            "execution_input_rejected" => Some("The task was started, but this input was not accepted because execution resources are exhausted. Do not repeat the command.".into()),
+            "execution_start_unknown" => Some("The task start outcome is unknown. Do not repeat the operation.".into()),
+            "execution_input_unknown" => Some("The task was started, but input delivery is unconfirmed. Do not repeat the operation.".into()),
+            "execution_query_unknown" => Some("Task execution result could not be confirmed. Do not repeat the operation.".into()),
+            "execution_output_unavailable" => Some("Task output is unavailable. The command must not be repeated automatically.".into()),
+            _ => None,
+        });
     let mut events = Vec::new();
     if assistant_text
         .responses
@@ -5136,17 +5232,20 @@ fn tool_session_records(
     sequence: &mut AgentRunSessionState,
     created_at_ms: i64,
 ) -> Result<Vec<SequencedSessionRecord>, String> {
-    let mut events = Vec::new();
-    for turn in &response.turn_responses {
-        events.extend(tool_safe_point_session_records(
-            agent_run_start,
-            resolved_inputs,
-            turn,
-            sequence,
-            created_at_ms,
-        )?);
+    let _ = (agent_run_start, resolved_inputs, created_at_ms);
+    // Bodies and facts were committed at the per-turn safe point. Verify every
+    // exact retained identity against that durable ledger; never replay a tool
+    // or reconstruct its facts from a historical result body here.
+    for receipt in &response.turn_receipts {
+        for id in &receipt.tool_result_ids {
+            if !sequence.has_tool_result(id) {
+                return Err(format!(
+                    "completed Turn has an uncommitted tool result: {id}"
+                ));
+            }
+        }
     }
-    Ok(events)
+    Ok(Vec::new())
 }
 
 fn provider_usage_session_records(
@@ -5305,64 +5404,50 @@ fn load_existing_session_sequence_on_client(
     client: &mut impl postgres::GenericClient,
     agent_run_start: &AgentRunStart,
 ) -> Result<AgentRunSessionState, String> {
-    let rows = client
-        .query(
-            "SELECT agent_run_sequence, \"eventId\", payload->>'type', session_id, payload::text FROM app_core_sessionevent WHERE agent_run_id = $1 AND session_level = false ORDER BY agent_run_sequence",
-            &[&agent_run_start.agent_run_id],
-        )
-        .map_err(|error| format!("query existing session sequence failed: {error}"))?;
+    let upper = client.query_one(
+        "SELECT COALESCE(MAX(agent_run_sequence),0) FROM app_core_sessionevent WHERE agent_run_id=$1 AND session_level=false",
+        &[&agent_run_start.agent_run_id],
+    ).map_err(|error| format!("read recovery Run high-water mark failed: {error}"))?.get::<_, i32>(0);
     let mut sequence = AgentRunSessionState::new(
         agent_run_start.authorization.session_id.clone(),
         agent_run_start.agent_run_id.clone(),
     )?;
-    let mut wires = rows
-        .iter()
-        .map(|row| {
-            serde_json::from_str::<serde_json::Value>(row.get::<_, String>(4).as_str())
-                .map_err(|error| format!("decode existing session wire failed: {error}"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    hydrate_session_wire_values(client, wires.as_mut_slice())?;
-    for ((index, row), wire) in rows.iter().enumerate().zip(wires) {
-        let stored_sequence = row.get::<_, i32>(0);
-        let expected = i32::try_from(index + 1)
-            .map_err(|_| "existing session sequence overflow".to_string())?;
-        if stored_sequence != expected
-            || row.get::<_, String>(3) != agent_run_start.authorization.session_id
-        {
-            return Err("existing session sequence identity mismatch".to_string());
-        }
-        let event = parse_wire_record(&wire)
-            .map_err(|error| format!("decode existing session record failed: {error}"))?
-            .event;
-        if row.get::<_, String>(1) != event.event_id {
-            return Err("existing session event identity mismatch".to_string());
-        }
-        sequence.restore(SequencedSessionRecord {
-            sequence: expected as u64,
-            event,
-        })?;
-    }
-    if !rows.is_empty() {
+    let mut hydrator = postgres_store::SessionWireHydrator::default();
+    let mut types = Vec::new();
+    recovery_read::visit(
+        client,
+        recovery_read::Scope::Run(&agent_run_start.agent_run_id),
+        upper,
+        |client, position, mut wire| {
+            hydrator.hydrate_record(client, &mut wire)?;
+            let event = parse_wire_record(&wire)
+                .map_err(|error| format!("decode existing Session record failed: {error}"))?
+                .event;
+            types.push(event.event_type);
+            sequence.restore(SequencedSessionRecord {
+                sequence: position as u64,
+                event,
+            })
+        },
+    )?;
+    if upper > 0 {
         let input_record_type = match agent_run_start.initial_input {
             AgentRunStartInitialInput::UserMessage {}
-            | AgentRunStartInitialInput::UserInput { .. } => "user_message",
-            AgentRunStartInitialInput::HostEvent { .. } => "host_event_input",
+            | AgentRunStartInitialInput::UserInput { .. } => SessionRecordType::UserMessage,
+            AgentRunStartInitialInput::HostEvent { .. } => SessionRecordType::HostEventInput,
         };
-        let types = rows
-            .iter()
-            .map(|row| row.get::<_, Option<String>>(2))
-            .collect::<Vec<_>>();
-        if types.first().and_then(Option::as_deref) != Some("agent_run_started")
-            || types.get(1).and_then(Option::as_deref) != Some(input_record_type)
-            || types.iter().flatten().any(|value| {
+        if types.first() != Some(&SessionRecordType::AgentRunStarted)
+            || types.get(1) != Some(&input_record_type)
+            || types.iter().any(|kind| {
                 matches!(
-                    value.as_str(),
-                    "agent_run_completed" | "agent_run_failed" | "agent_run_interrupted"
+                    kind,
+                    SessionRecordType::AgentRunCompleted
+                        | SessionRecordType::AgentRunFailed
+                        | SessionRecordType::AgentRunInterrupted
                 )
             })
         {
-            return Err("existing session sequence is not restartable".to_string());
+            return Err("existing session sequence is not restartable".into());
         }
     }
     let committed_session_sequence = client
@@ -5455,10 +5540,8 @@ fn refresh_runtime_state_after_admission(
     // Admission may close tools from an earlier AgentRun. The cached snapshot
     // predates that commit; replay Core's authoritative Session records before
     // starting the new turn, rather than weakening safe-point identity checks.
-    with_recovery_session_events(job_store, session_id, session_sequence, |events| {
-        let snapshot = restore_runtime_snapshot_from_session_records(session_id, &events)?;
-        SessionManager::new(store.clone()).save_session(&snapshot)
-    })
+    let recovery = load_recovery_session_state(job_store, session_id, session_sequence)?;
+    SessionManager::new(store.clone()).save_session(&recovery.snapshot)
 }
 
 fn restore_runtime_state_from_recovery_checkpoint(
@@ -5476,64 +5559,77 @@ fn restore_runtime_state_from_recovery_checkpoint(
     }
     let session_sequence = i32::try_from(checkpoint.session_sequence)
         .map_err(|_| "recovery checkpoint Session sequence overflow".to_string())?;
-    with_recovery_session_events(
-        job_store,
-        checkpoint.session_id.as_str(),
-        session_sequence,
-        |events| {
-            let snapshot = restore_runtime_snapshot_from_session_records(
-                checkpoint.session_id.as_str(),
-                &events,
-            )?;
-            SessionManager::new(store.clone()).save_session(&snapshot)
-        },
-    )
+    let recovery =
+        load_recovery_session_state(job_store, checkpoint.session_id.as_str(), session_sequence)?;
+    SessionManager::new(store.clone()).save_session(&recovery.snapshot)
 }
 
+fn load_recovery_session_state(
+    store: &PostgresRuntimeStore,
+    session_id: &str,
+    session_sequence: i32,
+) -> Result<centaeris_core::session::recovery::SessionRecoveryResult, String> {
+    // Fixed high-water mark; no append after it enters either pass. The first
+    // pass carries only stored references and envelope/tombstone decisions.
+    // Recheck every decoded stored wire digest before hydrating its body.
+    store.with_client(|client| {
+        let mut filter = centaeris_core::session::recovery::SessionRecoveryFilter::new(session_id);
+        let mut source_digests = Vec::new();
+        recovery_read::visit(
+            client,
+            recovery_read::Scope::Session(session_id),
+            session_sequence,
+            |_client, _position, wire| {
+                source_digests.push(
+                    Sha256::digest(serde_json::to_vec(&wire).map_err(|error| error.to_string())?)
+                        .to_vec(),
+                );
+                filter.push_wire_envelope(&wire)
+            },
+        )?;
+        let mut recovery =
+            centaeris_core::session::recovery::SessionRecoveryAccumulator::new(session_id);
+        let mut hydrator = postgres_store::SessionWireHydrator::default();
+        recovery_read::visit(
+            client,
+            recovery_read::Scope::Session(session_id),
+            session_sequence,
+            |client, position, wire| {
+                let digest =
+                    Sha256::digest(serde_json::to_vec(&wire).map_err(|error| error.to_string())?)
+                        .to_vec();
+                if source_digests.get(position as usize - 1) != Some(&digest) {
+                    return Err("recovery source changed between fixed-watermark passes".into());
+                }
+                let id = wire["eventId"].as_str().ok_or("recovery eventId missing")?;
+                let inactive = filter.is_inactive(id);
+                // Tombstones do not exempt old records from their original CAS
+                // and schema validation. Validate, then release inactive bodies.
+                let event = recovery_read::validate_for_replay(wire, |wire| {
+                    hydrator.hydrate_record(client, wire)
+                })?;
+                if inactive {
+                    recovery.push_inactive_record(event)?;
+                } else if event.event_type != SessionRecordType::Tombstone {
+                    recovery.push(event)?;
+                }
+                Ok(())
+            },
+        )?;
+        recovery.finish()
+    })
+}
+
+#[cfg(test)]
 fn with_recovery_session_events<T>(
     store: &PostgresRuntimeStore,
     session_id: &str,
     session_sequence: i32,
     followup: impl FnOnce(Vec<centaeris_core::session::SessionLogRecord>) -> Result<T, String>,
 ) -> Result<T, String> {
-    let events = load_recovery_session_events(store, session_id, session_sequence)?;
-    // Loading owns the decoded records, so its database lease ends before the
-    // follow-up may call RuntimeStoreActor through the same capacity-one pool.
-    followup(events)
-}
-
-fn load_recovery_session_events(
-    store: &PostgresRuntimeStore,
-    session_id: &str,
-    session_sequence: i32,
-) -> Result<Vec<centaeris_core::session::SessionLogRecord>, String> {
-    store.with_client(|client| {
-    let rows = client
-        .query(
-            "SELECT sequence,payload::text FROM app_core_sessionevent WHERE session_id=$1 AND sequence<=$2 ORDER BY sequence",
-            &[&session_id, &session_sequence],
-        )
-        .map_err(|error| format!("load recovery Session replay failed: {error}"))?;
-    if rows.last().map(|row| row.get::<_, i32>(0)) != Some(session_sequence) {
-        return Err("recovery checkpoint Session high-water mark is missing".to_string());
-    }
-    let mut wires = rows
-        .iter()
-        .map(|row| {
-            serde_json::from_str::<serde_json::Value>(row.get::<_, String>(1).as_str())
-                .map_err(|error| format!("decode recovery Session wire failed: {error}"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    hydrate_session_wire_values(client, wires.as_mut_slice())?;
-    wires
-        .iter()
-        .map(|wire| {
-            parse_wire_record(wire)
-                .map(|record| record.event)
-                .map_err(|error| format!("decode recovery Session record failed: {error}"))
-        })
-        .collect::<Result<Vec<_>, _>>()
-    })
+    let recovery = load_recovery_session_state(store, session_id, session_sequence)?;
+    // Pool capacity is released before follow-up calls through RuntimeStoreActor.
+    followup(recovery.source_records)
 }
 
 fn load_existing_terminal_state(
@@ -5578,6 +5674,18 @@ fn load_existing_terminal_state(
         if cancelled {
             return Ok(Some("cancelled"));
         }
+        let failed = store.with_client(|client| {
+            postgres_store::pre_admission_failure::has_pre_admission_failure(
+                client,
+                &agent_run_start.authorization.workspace_id,
+                &agent_run_start.authorization.session_id,
+                &agent_run_start.agent_run_id,
+                &agent_run_start.authorization_digest,
+            )
+        })?;
+        if failed {
+            return Ok(Some("failed"));
+        }
     }
     Ok(terminal)
 }
@@ -5607,7 +5715,18 @@ fn has_terminal_agent_run_identity(
     if rows.len() > 1 {
         return Err("terminal AgentRun identity conflict".to_string());
     }
-    Ok(rows.len() == 1)
+    if rows.len() == 1 {
+        return Ok(true);
+    }
+    let session = client.query_opt(
+        "SELECT workspace_id FROM app_core_session WHERE id=$1",
+        &[&session_id],
+    ).map_err(|error| format!("query terminal Session identity failed: {error}"))?
+        .ok_or("terminal Session identity missing")?;
+    postgres_store::pre_admission_failure::has_pre_admission_failure(
+        client, &session.get::<_, String>(0), session_id,
+        &identity.agent_run_id, &identity.authorization_digest,
+    )
     })
 }
 
@@ -6446,7 +6565,9 @@ mod tests {
         let start = agent_run_start();
         let assistant = assistant_projection(&start.turn_id, "Completed synthetic reply");
         let response = AgentRunResult {
-            turn_responses: vec![],
+            turn_receipts: vec![],
+            last_turn: None,
+            final_reply: None,
             stop: AgentRunStop::Finalized,
         };
         let mut sequence = agent_run_session_state(&start);
@@ -6486,6 +6607,39 @@ mod tests {
         assert!(!requires_session_workspace_restore(true, false));
         assert!(!requires_session_workspace_restore(false, true));
         assert!(!requires_session_workspace_restore(true, true));
+    }
+
+    #[test]
+    fn live_instance_attachment_does_not_replace_files_from_an_older_checkpoint() {
+        let workspace = tempfile::tempdir().unwrap();
+        let file = workspace.path().join("result.txt");
+        std::fs::write(&file, b"new live contents").unwrap();
+        let resolution = resolve_instance_workspace(true, || {
+            std::fs::write(&file, b"old checkpoint contents").unwrap();
+            Ok(SessionWorkspaceResolution::Download)
+        })
+        .unwrap();
+        assert_eq!(resolution, SessionWorkspaceResolution::RetainedLive);
+        assert_eq!(std::fs::read(&file).unwrap(), b"new live contents");
+    }
+
+    #[test]
+    fn cold_instance_restore_keeps_resolution_and_failure_results() {
+        for resolution in [
+            SessionWorkspaceResolution::Empty,
+            SessionWorkspaceResolution::Download,
+            SessionWorkspaceResolution::Advanced,
+        ] {
+            assert_eq!(
+                resolve_instance_workspace(false, || Ok(resolution)),
+                Ok(resolution)
+            );
+        }
+        let error = SessionWorkspaceApiError::Unavailable("download failed".into());
+        assert_eq!(
+            resolve_instance_workspace(false, || Err(error.clone())),
+            Err(error)
+        );
     }
 
     #[test]
@@ -6550,7 +6704,7 @@ mod tests {
         .digest()
         .expect("authorization digest");
         serde_json::from_value::<AgentRunStart>(serde_json::json!({
-            "schema": "workspace.agent_run.start.v2",
+            "schema": "workspace.agent_run.start.v3",
             "initialInput": {"type":"userMessage"},
             "agentRunId": "agent_run_1",
             "turnId": "turn_1",
@@ -6560,6 +6714,7 @@ mod tests {
             "modelMaxOutputTokens": 32768,
             "authorizationDigest": digest,
             "authorizationSignature": "hmac-sha256:test-only-not-validated",
+            "environmentAuthorization": crate::environment_authorization::EnvironmentAuthorization::for_test(&serde_json::from_value(authorization.clone()).unwrap(), b"test-run-authorization-signing-key"),
             "authorization": authorization,
             "tailAction": {"type": "append"}
         }))
@@ -6853,8 +7008,9 @@ mod tests {
                 .skill_md_path
                 .clone();
             let store = SqliteRuntimeStore::new(root.join("runtime.sqlite")).expect("store");
+            let jobs = Arc::new(store.job_store(129).expect("native test Job store"));
             let engine = AgentRuntime::new(
-                std::sync::Arc::new(store.job_store(129).expect("native test Job store")),
+                jobs.clone(),
                 store,
                 layer,
                 AgentRuntimeConfig {
@@ -6904,6 +7060,10 @@ mod tests {
             }
             // DiscoveryHost allows only the ordinary AGENTS.md probe; private
             // Memory and skill bodies are not read during prompt construction.
+            tokio::runtime::Runtime::new()
+                .expect("close runtime")
+                .block_on(jobs.close())
+                .expect("close isolated Job connection before removing its files");
         }
         std::fs::remove_dir_all(root).expect("remove isolated fixture");
     }
@@ -7284,7 +7444,7 @@ mod tests {
     }
 
     #[test]
-    fn assistant_text_projection_keeps_each_model_response() {
+    fn assistant_text_projection_preserves_final_response_after_tool_round() {
         let mut projection = AssistantTextProjection::default();
         projection
             .begin_model_request("turn_1".to_string(), String::new())
@@ -7308,8 +7468,112 @@ mod tests {
             .finish_model_request("turn_1:2")
             .expect("second done");
         assert_eq!(projection.terminal_text(), "检查完成，已生成结果。");
-        assert_eq!(projection.responses.len(), 2);
-        assert_eq!(projection.responses[0].text, "阶段一：检查工作区");
+        let start = agent_run_start();
+        let records = assistant_session_records(
+            &start,
+            &projection,
+            Some("done"),
+            &mut agent_run_session_state(&start),
+            10,
+        )
+        .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].event.turn_id.as_deref(), Some("turn_1:2"));
+        assert_eq!(
+            records[0].event.payload["modelMarkdown"],
+            "检查完成，已生成结果。"
+        );
+    }
+
+    #[test]
+    fn assistant_text_projection_retires_committed_tool_round_bodies() {
+        for rounds in [100, 1000, 10000] {
+            let mut projection = AssistantTextProjection::default();
+            for index in 0..rounds {
+                let turn = format!("tool-turn-{index}");
+                projection
+                    .begin_model_request(turn.clone(), String::new())
+                    .unwrap();
+                projection
+                    .push_token(&turn, &"prefix".repeat(1024))
+                    .unwrap();
+                projection
+                    .begin_model_request(turn.clone(), String::new())
+                    .unwrap();
+                assert!(projection
+                    .begin_model_request("premature-next".into(), String::new())
+                    .is_err());
+                projection.mark_tool_call(&turn).unwrap();
+                projection.push_token(&turn, "suffix").unwrap();
+                projection
+                    .replace_content(&turn, "full tool response".repeat(512))
+                    .unwrap();
+                projection.finish_model_request(&turn).unwrap();
+                // Keep this current response for the existing live-text check.
+                assert_eq!(
+                    projection.responses.last().unwrap().text,
+                    "full tool response".repeat(512)
+                );
+            }
+            let retained_capacity: usize = projection
+                .responses
+                .iter()
+                .map(|item| item.text.capacity())
+                .sum();
+            assert_eq!(
+                retained_capacity,
+                projection.responses.last().unwrap().text.capacity(),
+                "completed tool response allocations must retire before the next turn"
+            );
+            let start = agent_run_start();
+            assert!(assistant_session_records(
+                &start,
+                &projection,
+                None,
+                &mut agent_run_session_state(&start),
+                10
+            )
+            .unwrap()
+            .is_empty());
+        }
+    }
+
+    #[test]
+    fn assistant_text_projection_keeps_undelivered_plain_text_while_retiring_tool_rounds() {
+        let mut projection = AssistantTextProjection::default();
+        projection
+            .begin_model_request("prefix".into(), "partial answer".into())
+            .unwrap();
+        projection.finish_model_request("prefix").unwrap();
+        for turn in ["tool-1", "tool-2"] {
+            projection
+                .begin_model_request(turn.into(), "tool-only scratch".repeat(1024))
+                .unwrap();
+            projection.mark_tool_call(turn).unwrap();
+            projection.finish_model_request(turn).unwrap();
+        }
+        projection
+            .begin_model_request("final".into(), "partial answer completed".into())
+            .unwrap();
+        projection.finish_model_request("final").unwrap();
+        let start = agent_run_start();
+        let records = assistant_session_records(
+            &start,
+            &projection,
+            Some("done"),
+            &mut agent_run_session_state(&start),
+            10,
+        )
+        .unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].event.turn_id.as_deref(), Some("prefix"));
+        assert_eq!(records[0].event.payload["modelMarkdown"], "partial answer");
+        assert_eq!(records[1].event.turn_id.as_deref(), Some("final"));
+        assert_eq!(
+            records[1].event.payload["modelMarkdown"],
+            "partial answer completed"
+        );
+        assert_eq!(projection.terminal_text(), "partial answer completed");
     }
 
     #[test]
@@ -7648,7 +7912,9 @@ mod tests {
     fn runtime_builds_direct_session_start_and_terminal_records() {
         let agent_run_start = agent_run_start();
         let response = AgentRunResult {
-            turn_responses: vec![],
+            turn_receipts: vec![],
+            last_turn: None,
+            final_reply: None,
             stop: AgentRunStop::Finalized,
         };
         let mut sequence = agent_run_session_state(&agent_run_start);
@@ -7707,6 +7973,96 @@ mod tests {
     }
 
     #[test]
+    fn helper_failures_keep_rpc_stage_through_public_terminal() {
+        for (detail, reason, message) in [
+            (
+                "execution input rejected: task_journal_capacity; the command was already started",
+                "execution_input_rejected",
+                "input was not accepted",
+            ),
+            (
+                "execution start outcome is unknown; do not repeat the operation",
+                "execution_start_unknown",
+                "start outcome is unknown",
+            ),
+            (
+                "execution input outcome is unknown; do not repeat the operation",
+                "execution_input_unknown",
+                "input delivery is unconfirmed",
+            ),
+            (
+                "execution query outcome is unknown; do not repeat the operation",
+                "execution_query_unknown",
+                "result could not be confirmed",
+            ),
+            (
+                "execution output unavailable; do not repeat the command",
+                "execution_output_unavailable",
+                "output is unavailable",
+            ),
+            (
+                "task_journal_capacity",
+                "task_journal_capacity",
+                "not started",
+            ),
+        ] {
+            let internal = format!("read AGENTS.md failed: {detail}");
+            assert_eq!(
+                public_agent_failure_reason(&internal, "core_run_failed"),
+                reason
+            );
+            let start = agent_run_start();
+            let mut sequence = agent_run_session_state(&start);
+            started_session_records(&start, &mut sequence, 1).unwrap();
+            let records = failed_session_records(
+                &start,
+                reason,
+                &AssistantTextProjection::default(),
+                &mut sequence,
+                2,
+            )
+            .unwrap();
+            let payload = &records.last().unwrap().event.payload;
+            assert_eq!(payload["reasonType"], reason);
+            assert!(payload["message"].as_str().unwrap().contains(message));
+            assert_eq!(
+                public_agent_failure_reason(
+                    &format!("{internal}: transport context"),
+                    "core_run_failed"
+                ),
+                "core_run_failed"
+            );
+        }
+    }
+
+    #[test]
+    fn capacity_terminal_preserves_resource_reason_without_requiring_a_new_run() {
+        let start = agent_run_start();
+        let mut sequence = agent_run_session_state(&start);
+        started_session_records(&start, &mut sequence, 1).unwrap();
+        let failure = public_agent_failure_reason(
+            "read AGENTS.md failed: task_history_capacity",
+            "core_run_failed",
+        );
+        let records = failed_session_records(
+            &start,
+            failure,
+            &AssistantTextProjection::default(),
+            &mut sequence,
+            2,
+        )
+        .unwrap();
+        let terminal = &records.last().unwrap().event;
+        assert_eq!(terminal.event_type, SessionRecordType::AgentRunFailed);
+        let payload = &terminal.payload;
+        assert_eq!(payload["reasonType"], "task_history_capacity");
+        assert!(payload["message"]
+            .as_str()
+            .unwrap()
+            .contains("existing tasks remain supervised"));
+    }
+
+    #[test]
     fn failed_agent_run_without_model_text_emits_no_assistant_placeholder() {
         let agent_run_start = agent_run_start();
         let mut sequence = agent_run_session_state(&agent_run_start);
@@ -7757,7 +8113,9 @@ mod tests {
             None,
             &assistant_text,
             &AgentRunResult {
-                turn_responses: Vec::new(),
+                turn_receipts: Vec::new(),
+                last_turn: None,
+                final_reply: None,
                 stop: AgentRunStop::Finalized,
             },
             &mut agent_run_session_state(&agent_run_start),
@@ -8013,7 +8371,9 @@ mod tests {
             None,
             &assistant_projection("turn_1", "done"),
             &AgentRunResult {
-                turn_responses: vec![],
+                turn_receipts: vec![],
+                last_turn: None,
+                final_reply: None,
                 stop: AgentRunStop::Finalized,
             },
             &mut sequence,
@@ -8328,6 +8688,74 @@ mod tests {
     }
 
     #[test]
+    fn run_completion_checks_every_committed_tool_identity_after_step_bodies_are_released() {
+        let start = agent_run_start();
+        let mut sequence = agent_run_session_state(&start);
+        let mut receipts = Vec::new();
+        for (turn_id, call_id) in [("turn-earlier", "call-earlier"), ("turn-last", "call-last")] {
+            let call = ToolCallEnvelope {
+                id: call_id.into(),
+                name: "read".into(),
+                args_json: "{}".into(),
+            };
+            let result = ToolExecutionResult {
+                tool_call_id: call_id.into(),
+                tool_name: "read".into(),
+                status: "ok".into(),
+                content: "released after the safe point".repeat(1024),
+                details: json!({}),
+                facts: Vec::new(),
+                error: None,
+                started_at_ms: 1,
+                completed_at_ms: 2,
+                latency_ms: 1,
+                parallel_group: None,
+                transition_reason: None,
+            };
+            sequence
+                .record_tool_call(
+                    turn_id,
+                    &call,
+                    "fixture",
+                    &format!("sha256:{}", "a".repeat(64)),
+                    "read",
+                    1,
+                )
+                .unwrap();
+            sequence
+                .record_tool_result(turn_id, &call, &result, 2)
+                .unwrap();
+            receipts.push(centaeris_core::runtime::TurnCommitReceipt {
+                turn_id: turn_id.into(),
+                continuation: centaeris_core::runtime::QueryContinuation::ExecuteTools,
+                provider_tool_call_ids: vec![call_id.into()],
+                tool_result_ids: vec![call_id.into()],
+                checkpoint_ref: None,
+            });
+        }
+        let mut response = AgentRunResult {
+            turn_receipts: receipts,
+            last_turn: None,
+            final_reply: None,
+            stop: AgentRunStop::Finalized,
+        };
+        assert!(
+            tool_session_records(&start, None, &response, &mut sequence, 3)
+                .unwrap()
+                .is_empty()
+        );
+        // Equal counts cannot hide substitution of an earlier result identity.
+        response.turn_receipts[0].tool_result_ids[0] = "call-uncommitted".into();
+        assert!(
+            tool_session_records(&start, None, &response, &mut sequence, 3)
+                .unwrap_err()
+                .contains("call-uncommitted")
+        );
+        assert!(sequence.has_tool_result("call-earlier"));
+        assert!(!sequence.has_tool_result("call-uncommitted"));
+    }
+
+    #[test]
     fn resumed_knowledge_read_projects_citation_after_pending_receipt() {
         let agent_run_start = agent_run_start();
         let call = ToolCallEnvelope {
@@ -8450,6 +8878,7 @@ mod tests {
             transition_reason: Some("runtime_job_succeeded".to_string()),
         };
         let turn = TurnStepResult {
+            current_assistant_reply: None,
             turn_id: "turn_1".to_string(),
             continuation: centaeris_core::runtime::QueryContinuation::ExecuteTools,
             checkpoint: None,

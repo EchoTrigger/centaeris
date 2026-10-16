@@ -136,6 +136,36 @@ impl ExecutionHostBinding {
         )
     }
 
+    pub(crate) fn recover_command(
+        &self,
+        program: String,
+        args: Vec<String>,
+        env: std::collections::HashMap<String, String>,
+        timeout_ms: u64,
+    ) -> Result<super::ExecutionHostCommandRecovery, ExecutionError> {
+        let stable_env = env.iter().collect::<std::collections::BTreeMap<_, _>>();
+        let operation_id = self
+            .stable_operation_id(
+                "process",
+                &(program.as_str(), args.as_slice(), stable_env, timeout_ms),
+            )
+            .ok_or_else(|| ExecutionError::HostUnavailable {
+                reason: "command recovery requires original operation scope".into(),
+            })?;
+        self.runner.recover_host_command(
+            &operation_id,
+            ExecutionCommandRequest {
+                program,
+                args,
+                cwd: self.cwd.clone(),
+                env,
+                timeout_ms,
+                policy: self.policy.clone(),
+            },
+            self.cancellation_probe.as_deref(),
+        )
+    }
+
     pub(crate) fn with_policy(&self, policy: ExecutionPolicy) -> Self {
         Self {
             mode: self.mode,

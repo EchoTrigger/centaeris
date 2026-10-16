@@ -332,6 +332,7 @@ impl<
         self.session_manager.save_session(&session)?;
         let tool_operations_json = project_tool_operations_json(&tool_results);
         Ok(TurnStepResult {
+            current_assistant_reply: nonempty_current_assistant_reply(&generate_result.content),
             turn_id: turn_id.clone(),
             continuation: if complete_turn {
                 QueryContinuation::CompleteTerminalTool
@@ -402,6 +403,7 @@ impl<
             },
         )?;
         Ok(TurnStepResult {
+            current_assistant_reply: None,
             turn_id: checkpoint.turn_id.clone(),
             continuation: QueryContinuation::ExecuteTools,
             checkpoint: None,
@@ -589,6 +591,7 @@ impl<
         )?;
         let session = self.session_manager.load_or_create_session(session_id)?;
         Ok(TurnStepResult {
+            current_assistant_reply: None,
             turn_id: turn_id.to_string(),
             continuation: QueryContinuation::ExecuteTools,
             checkpoint: None,
@@ -777,6 +780,7 @@ impl<
         }
         if waiting {
             return Ok(TurnStepResult {
+                current_assistant_reply: None,
                 turn_id: checkpoint.turn_id.clone(),
                 continuation: QueryContinuation::AwaitRuntimeJob,
                 checkpoint: Some(checkpoint),
@@ -920,6 +924,7 @@ impl<
             ),
         );
         Ok(TurnStepResult {
+            current_assistant_reply: nonempty_current_assistant_reply(&generate_result.content),
             turn_id: checkpoint.turn_id.clone(),
             continuation: if complete_turn {
                 QueryContinuation::CompleteTerminalTool
@@ -1368,15 +1373,34 @@ impl<
         cancellation_probe: &(dyn Fn() -> Result<Option<String>, String> + Sync),
         tool_safe_point: &mut (dyn FnMut(ToolSafePoint) -> Result<(), String> + Send),
     ) -> Result<AgentRunResult, String> {
+        let mut commit_with_compaction_ack = |point: ToolSafePoint| {
+            let receipt = match &point {
+                ToolSafePoint::ModelRequestStarted(started) => started.prompt_compaction.clone(),
+                _ => None,
+            };
+            let observed_main_request_id = match &point {
+                ToolSafePoint::ModelRequestStarted(started) => started.request_id(),
+                _ => "",
+            };
+            let expected =
+                self.compaction_ack_snapshot(receipt.as_deref(), observed_main_request_id)?;
+            tool_safe_point(point)?;
+            self.acknowledge_compaction_after_safe_point(receipt.as_deref(), expected.as_ref())
+        };
         let tool_safe_point = ToolSafePointDispatcher {
-            sink: Mutex::new(tool_safe_point),
+            sink: Mutex::new(&mut commit_with_compaction_ack),
         };
         let composition_environment = self.agent_composition_environment()?;
+        let source_run_id = req
+            .agent_run_identity
+            .as_ref()
+            .map(|identity| identity.agent_run_id.clone());
         let driver = ModelClientGenerateDriver::new_with_tool_safe_point(
             model_client,
             session_config_store,
             &tool_safe_point,
             &composition_environment,
+            source_run_id.as_deref(),
         );
         self.process_turn_loop_with_async_driver_and_sink_cancellable(
             req,
@@ -1405,7 +1429,7 @@ impl<
             sink: Mutex::new(tool_safe_point),
         };
         let composition_environment = self.agent_composition_environment()?;
-        let driver = ModelClientGenerateDriver::new_with_tool_safe_point(
+        let driver = ModelClientGenerateDriver::new_manual_with_tool_safe_point(
             model_client,
             session_config_store,
             &tool_safe_point,
@@ -1488,7 +1512,21 @@ impl<
                 ToolSafePoint::ModelRequestStarted(started) => Some(started.session_id.clone()),
                 _ => None,
             };
+            let compaction_receipt = match &point {
+                ToolSafePoint::ModelRequestStarted(started) => started.prompt_compaction.clone(),
+                _ => None,
+            };
+            let observed_main_request_id = match &point {
+                ToolSafePoint::ModelRequestStarted(started) => started.request_id(),
+                _ => "",
+            };
+            let compaction_snapshot = self
+                .compaction_ack_snapshot(compaction_receipt.as_deref(), observed_main_request_id)?;
             tool_safe_point(point)?;
+            self.acknowledge_compaction_after_safe_point(
+                compaction_receipt.as_deref(),
+                compaction_snapshot.as_ref(),
+            )?;
             if turn_control.uses_durable_inputs() && !ids.is_empty() {
                 if let (Some(run), Some(session_id)) = (&recovery_run, committed_session) {
                     let mut session = self.session_manager.load_or_create_session(&session_id)?;
@@ -1512,6 +1550,7 @@ impl<
             session_config_store,
             &tool_safe_point,
             &composition_environment,
+            recovery_run.as_deref(),
         );
         self.process_turn_loop_with_async_driver_and_sink_cancellable(
             req,
@@ -1547,18 +1586,39 @@ impl<
             storage_error: Mutex::new(None),
         };
         let result = if let Some(tool_safe_point) = tool_safe_point {
+            let mut commit_with_compaction_ack = |point: ToolSafePoint| {
+                let receipt = match &point {
+                    ToolSafePoint::ModelRequestStarted(started) => {
+                        started.prompt_compaction.clone()
+                    }
+                    _ => None,
+                };
+                let observed_main_request_id = match &point {
+                    ToolSafePoint::ModelRequestStarted(started) => started.request_id(),
+                    _ => "",
+                };
+                let expected =
+                    self.compaction_ack_snapshot(receipt.as_deref(), observed_main_request_id)?;
+                tool_safe_point(point)?;
+                self.acknowledge_compaction_after_safe_point(receipt.as_deref(), expected.as_ref())
+            };
             let tool_safe_point = ToolSafePointDispatcher {
-                sink: Mutex::new(tool_safe_point),
+                sink: Mutex::new(&mut commit_with_compaction_ack),
             };
             let composition_environment = match self.agent_composition_environment() {
                 Ok(environment) => environment,
                 Err(error) => return SubagentWorkerRunOutcome::Failed { error, retry: None },
             };
+            let source_run_id = request
+                .agent_run_identity
+                .as_ref()
+                .map(|identity| identity.agent_run_id.clone());
             let driver = ModelClientGenerateDriver::new_with_tool_safe_point(
                 model_client,
                 session_config_store,
                 &tool_safe_point,
                 &composition_environment,
+                source_run_id.as_deref(),
             );
             self.process_turn_loop_with_async_driver_and_sink_cancellable(
                 request,
@@ -1754,7 +1814,7 @@ impl<
         let _active_agent_run_guard = self.acquire_active_agent_run(session_id.as_str())?;
         let mut turn_control_close_guard = TurnControlCloseGuard::new(turn_control);
 
-        let mut responses = vec![];
+        let mut responses = RunResultCollector::default();
         let mut next_turn_id = initial_turn_id.clone();
         let mut next_turn_supplements = Vec::new();
         let mut next_host_events = Vec::new();
@@ -1795,11 +1855,32 @@ impl<
         let initial_cancellation_reason =
             poll_loop_cancellation_async(cancellation_probe, worker_cancellation).await?;
 
-        let resume_session = self
+        let mut resume_session = self
             .session_manager
             .load_or_create_session(session_id.as_str())?;
         let pending_runtime_wait_turn_id =
             pending_runtime_tool_batch(&resume_session)?.map(|pending| pending.turn_id);
+
+        let mut recovered_prepared_tools = false;
+        if initial_cancellation_reason.is_none()
+            && resume_from_turn_id.is_none()
+            && pending_runtime_wait_turn_id.is_none()
+            && turn_control.is_some_and(TurnControl::uses_durable_inputs)
+        {
+            if let Some(identity) = agent_run_identity.as_ref() {
+                recovered_prepared_tools = self
+                    .recover_prepared_tool_phase(
+                        &session_id,
+                        identity,
+                        &initial_input,
+                        tool_safe_point,
+                    )
+                    .await?;
+                if recovered_prepared_tools {
+                    resume_session = self.session_manager.load_or_create_session(&session_id)?;
+                }
+            }
+        }
 
         let host_input_already_accepted =
             if let AgentRunInitialInput::HostEvent(input) = &initial_input {
@@ -2053,7 +2134,12 @@ impl<
             }
             let mut applied_intervention_events = None;
             let mut input_ids = Vec::new();
-            let mut input = if responses.is_empty() && loop_index == 0 {
+            let mut input = if recovered_prepared_tools {
+                recovered_prepared_tools = false;
+                TurnInput::ToolContinuation {
+                    objective: root_user_message.clone(),
+                }
+            } else if responses.is_empty() && loop_index == 0 {
                 if let Some(id) = initial_input.input_id() {
                     input_ids.push(id.to_owned());
                     exclude_initial_queue_input(
@@ -2737,7 +2823,7 @@ fn merge_user_input_batch(
     }
 }
 
-fn restore_prepared_input(
+pub(super) fn restore_prepared_input(
     session: &SessionStateSnapshot,
     turn_id: &str,
     initial: &AgentRunInitialInput,

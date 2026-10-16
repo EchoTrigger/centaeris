@@ -40,6 +40,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod active_input_tests;
 mod completion_delivery_tests;
 mod host_event_tests;
+mod prompt_compaction_attempt_tests;
+mod prompt_compaction_live_chain_tests;
+mod prompt_compaction_recovery_tests;
+mod recovery_tool_origin_tests;
 mod wait_recovery_tests;
 
 #[tokio::test]
@@ -81,6 +85,10 @@ struct AgentRuntimeTestState {
     checkpoints: Vec<CheckpointRecord>,
     events: Vec<RuntimeEvent>,
     snapshots: HashMap<String, String>,
+    snapshot_load_count: usize,
+    snapshot_load_bytes: usize,
+    snapshot_save_count: usize,
+    snapshot_save_bytes: usize,
     fail_after_input_snapshot: Option<String>,
     lose_creation_reply: bool,
     snapshot_cas_conflict: Option<(String, String, RuntimeJobRecord)>,
@@ -528,6 +536,8 @@ impl AgentRuntimeSnapshotStorePort for AgentRuntimeTestStore {
         if state.snapshots.get(session_id).map(String::as_str) != expected_snapshot {
             return Ok(false);
         }
+        state.snapshot_save_count += 1;
+        state.snapshot_save_bytes += snapshot_json.len();
         state
             .snapshots
             .insert(session_id.into(), snapshot_json.into());
@@ -535,7 +545,11 @@ impl AgentRuntimeSnapshotStorePort for AgentRuntimeTestStore {
     }
 
     fn load_agent_runtime_snapshot(&self, session_id: &str) -> Result<Option<String>, String> {
-        Ok(self.state()?.snapshots.get(session_id).cloned())
+        let mut state = self.state()?;
+        let result = state.snapshots.get(session_id).cloned();
+        state.snapshot_load_count += 1;
+        state.snapshot_load_bytes += result.as_ref().map(String::len).unwrap_or(0);
+        Ok(result)
     }
 
     fn save_agent_runtime_snapshot(
@@ -545,6 +559,8 @@ impl AgentRuntimeSnapshotStorePort for AgentRuntimeTestStore {
         _updated_at_ms: i64,
     ) -> Result<(), String> {
         let mut state = self.state()?;
+        state.snapshot_save_count += 1;
+        state.snapshot_save_bytes += snapshot_json.len();
         state
             .snapshots
             .insert(session_id.to_string(), snapshot_json.to_string());
@@ -2345,6 +2361,7 @@ async fn failed_stream_retracts_tentative_content_before_runtime_error() {
     };
     let driver = ModelClientGenerateDriver::new(&model_client, &config_store);
     let request = GenerateDriverRequest {
+        prompt_compaction: None,
         session_id: "chat-partial-stream".to_string(),
         turn_id: "turn-partial-stream".to_string(),
         loop_index: 0,
@@ -2439,10 +2456,13 @@ async fn output_token_limit_continues_in_a_new_turn_and_preserves_partial_conten
         .expect("output-token recovery must finish");
 
     assert_eq!(model_client.request_count.load(Ordering::SeqCst), 2);
-    assert_eq!(result.turn_responses.len(), 1);
+    assert_eq!(result.turn_receipts.len(), 1);
     assert_eq!(result.stop, AgentRunStop::Finalized);
     assert_eq!(
-        result.turn_responses[0]
+        result
+            .last_turn
+            .as_ref()
+            .unwrap()
             .session_snapshot
             .messages
             .last()
@@ -2450,7 +2470,10 @@ async fn output_token_limit_continues_in_a_new_turn_and_preserves_partial_conten
         Some("part-0done")
     );
     assert_eq!(
-        result.turn_responses[0]
+        result
+            .last_turn
+            .as_ref()
+            .unwrap()
             .agent_run_resource_usage
             .provider_attempts,
         2
@@ -2634,8 +2657,8 @@ async fn truncated_tool_identity_is_a_recovery_observation_without_execution() {
         .expect("truncated tool call must converge");
 
     assert_eq!(model_client.request_count.load(Ordering::SeqCst), 2);
-    assert_eq!(result.turn_responses.len(), 1);
-    assert!(result.turn_responses[0].tool_results.is_empty());
+    assert_eq!(result.turn_receipts.len(), 1);
+    assert!(result.turn_receipts[0].tool_result_ids.is_empty());
     assert_eq!(durable_tool_calls, 0);
     assert_eq!(durable_receipts, 0);
     assert_eq!(completed_turns, 0);
@@ -2643,14 +2666,20 @@ async fn truncated_tool_identity_is_a_recovery_observation_without_execution() {
         .iter()
         .any(|event| matches!(event, TurnUpdate::ToolCallReady { .. })));
     assert_eq!(
-        result.turn_responses[0]
+        result
+            .last_turn
+            .as_ref()
+            .unwrap()
             .session_snapshot
             .messages
             .last()
             .map(|message| message.content.as_str()),
         Some("part-0done")
     );
-    assert!(!result.turn_responses[0]
+    assert!(!result
+        .last_turn
+        .as_ref()
+        .unwrap()
         .session_snapshot
         .messages
         .iter()
@@ -2732,8 +2761,8 @@ async fn incomplete_truncated_tool_identity_uses_protocol_recovery_without_fake_
         .await
         .expect("incomplete tool identity must recover");
 
-    assert_eq!(result.turn_responses.len(), 1);
-    assert!(result.turn_responses[0].tool_results.is_empty());
+    assert_eq!(result.turn_receipts.len(), 1);
+    assert!(result.turn_receipts[0].tool_result_ids.is_empty());
     assert!(!events
         .iter()
         .any(|event| matches!(event, TurnUpdate::ToolCallReady { .. })));
@@ -2806,6 +2835,7 @@ async fn query_loop_preserves_dynamic_description_at_durable_model_request_bound
         &serde_json::to_string(&prepared_prompt.tool_definitions).unwrap(),
     );
     let request = GenerateDriverRequest {
+        prompt_compaction: None,
         session_id: "chat-description".to_string(),
         turn_id: "turn-description".to_string(),
         loop_index: 0,
@@ -2842,6 +2872,7 @@ async fn query_loop_preserves_dynamic_description_at_durable_model_request_bound
         &config,
         &dispatcher,
         &environment,
+        Some("test-agent-run"),
     );
     driver
         .generate_next_async(&request)
@@ -2886,6 +2917,7 @@ async fn query_loop_persistence_failure_prevents_provider_call() {
         &config_store,
         &safe_point,
         &composition_environment,
+        Some("test-agent-run"),
     );
     let prepared_prompt = crate::model::prepared_prompt::PreparedPromptV1::new(
         None,
@@ -2908,6 +2940,7 @@ async fn query_loop_persistence_failure_prevents_provider_call() {
             .as_str(),
     );
     let request = GenerateDriverRequest {
+        prompt_compaction: None,
         session_id: "chat-safe-point".to_string(),
         turn_id: "turn-safe-point".to_string(),
         loop_index: 0,
@@ -3068,6 +3101,7 @@ impl AsyncGenerateDriver for TestPromptCompactionAsyncDriver {
                 1,
             );
             Some(GenerateDriverPromptCompactionOutcome {
+                source_request: None,
                 result: Ok(test_model_compaction_summary(request)),
                 resource_usage,
             })
@@ -8342,12 +8376,12 @@ async fn query_loop_continues_until_natural_final_while_usage_remains_observatio
         .expect("long tool loop must reach its natural final");
 
     assert_eq!(response.stop, AgentRunStop::Finalized);
-    assert_eq!(response.turn_responses.len(), 56);
+    assert_eq!(response.turn_receipts.len(), 56);
     assert_eq!(model_client.request_count.load(Ordering::SeqCst), 56);
     assert_eq!(execution_count.load(Ordering::SeqCst), 55);
     let usage = &response
-        .turn_responses
-        .last()
+        .last_turn
+        .as_ref()
         .expect("long tool loop final response")
         .agent_run_resource_usage;
     assert_eq!(usage.provider_attempts, 56);
@@ -8464,9 +8498,9 @@ async fn query_loop_external_cancel_stops_before_another_provider_request() {
         response.stop,
         AgentRunStop::Cancelled("test_watchdog".to_string())
     );
-    assert_eq!(response.turn_responses.len(), 30);
+    assert_eq!(response.turn_receipts.len(), 30);
     assert!(response
-        .turn_responses
+        .turn_receipts
         .iter()
         .all(|turn| turn.continuation == QueryContinuation::ExecuteTools));
     assert_eq!(model_client.request_count.load(Ordering::SeqCst), 30);
@@ -8476,8 +8510,8 @@ async fn query_loop_external_cancel_stops_before_another_provider_request() {
         .any(|event| matches!(event, TurnUpdate::RuntimeError { .. })));
     assert_eq!(
         response
-            .turn_responses
-            .last()
+            .last_turn
+            .as_ref()
             .expect("last completed cancelled turn")
             .agent_run_resource_usage
             .provider_attempts,
@@ -8702,7 +8736,7 @@ async fn query_loop_tool_executes_only_after_model_response_completes() {
     assert_eq!(response.stop, AgentRunStop::Finalized);
     assert_eq!(model_client.request_count.load(Ordering::SeqCst), 2);
     assert_eq!(execution_count.load(Ordering::SeqCst), 1);
-    assert_eq!(response.turn_responses[0].tool_results.len(), 1);
+    assert_eq!(response.turn_receipts[0].tool_result_ids.len(), 1);
     assert!(stream_events.iter().any(|event| matches!(
         event,
         TurnUpdate::ToolCallReady { call_id, .. } if call_id == "call-stream-boundary"
@@ -8752,12 +8786,12 @@ async fn turn_supplement_waits_for_tool_batch_and_continues_the_same_loop() {
         .expect("same-loop supplement run");
 
     assert_eq!(response.stop, AgentRunStop::Finalized);
-    assert_eq!(response.turn_responses.len(), 2);
+    assert_eq!(response.turn_receipts.len(), 2);
     assert_eq!(execution_count.load(Ordering::SeqCst), 1);
     assert_eq!(model_client.request_count.load(Ordering::SeqCst), 2);
     assert!(response
-        .turn_responses
-        .last()
+        .last_turn
+        .as_ref()
         .expect("final response")
         .session_snapshot
         .messages
@@ -8815,8 +8849,8 @@ async fn turn_supplement_replaces_a_toolless_final_at_the_provider_boundary() {
     assert_eq!(response.stop, AgentRunStop::Finalized);
     assert_eq!(model_client.request_count.load(Ordering::SeqCst), 2);
     assert!(response
-        .turn_responses
-        .last()
+        .last_turn
+        .as_ref()
         .expect("final response")
         .session_snapshot
         .messages
@@ -8942,8 +8976,8 @@ async fn answer_now_waits_for_tool_terminal_then_runs_one_toolless_convergence_r
         .iter()
         .any(|event| matches!(event, TurnUpdate::ReplaceContent { .. })));
     assert!(response
-        .turn_responses
-        .last()
+        .last_turn
+        .as_ref()
         .expect("convergence final")
         .session_snapshot
         .messages
@@ -9013,6 +9047,7 @@ async fn answer_now_requested_fact_recovers_after_memory_loss() {
     let config_store = StaticModelSessionConfigStore {
         config: Some(ModelSessionConfig::default()),
     };
+    let mut observed_events = Vec::new();
     let response = engine
         .process_turn_loop_online_with_model_client_stream_controlled_async(
             AgentRunRequest {
@@ -9032,7 +9067,11 @@ async fn answer_now_requested_fact_recovers_after_memory_loss() {
             },
             &model_client,
             &config_store,
-            &mut |_| {},
+            &mut |update| {
+                if let TurnUpdate::RuntimeEvent { event } = update {
+                    observed_events.push(event);
+                }
+            },
             &|| Ok(None),
             &turn_control,
         )
@@ -9042,10 +9081,8 @@ async fn answer_now_requested_fact_recovers_after_memory_loss() {
     assert_eq!(response.stop, AgentRunStop::Finalized);
     assert_eq!(model_client.request_count.load(Ordering::SeqCst), 2);
     assert_eq!(execution_count.load(Ordering::SeqCst), 1);
-    let projected_interventions = response
-        .turn_responses
+    let projected_interventions = observed_events
         .iter()
-        .flat_map(|turn| turn.runtime_events.iter())
         .filter_map(|event| {
             serde_json::to_value(event)
                 .ok()
@@ -9158,8 +9195,8 @@ async fn query_loop_runtime_job_wait_resumes_once_with_one_terminal_tool_result(
         .expect("enter runtime job wait");
 
     assert_eq!(waiting.stop, AgentRunStop::RuntimeJobWait);
-    assert_eq!(waiting.turn_responses.len(), 1);
-    assert!(waiting.turn_responses[0].tool_results.is_empty());
+    assert_eq!(waiting.turn_receipts.len(), 1);
+    assert!(waiting.turn_receipts[0].tool_result_ids.is_empty());
     assert_eq!(execution_count.load(Ordering::SeqCst), 1);
     assert_eq!(
         engine
@@ -9168,7 +9205,10 @@ async fn query_loop_runtime_job_wait_resumes_once_with_one_terminal_tool_result(
         Some(("turn-runtime-wait".to_string(), agent_run_identity.clone()))
     );
     let wait_checkpoint = serde_json::from_str::<RuntimeAwaitJobCheckpointV1>(
-        waiting.turn_responses[0]
+        waiting
+            .last_turn
+            .as_ref()
+            .unwrap()
             .checkpoint
             .as_ref()
             .expect("runtime wait checkpoint")
@@ -9236,9 +9276,9 @@ async fn query_loop_runtime_job_wait_resumes_once_with_one_terminal_tool_result(
     );
     assert_eq!(
         resumed
-            .turn_responses
+            .turn_receipts
             .iter()
-            .flat_map(|response| response.tool_results.iter())
+            .flat_map(|response| response.tool_result_ids.iter())
             .count(),
         1
     );
@@ -9443,7 +9483,10 @@ async fn answer_now_abandons_only_the_runtime_job_waiter() {
         .expect("enter runtime wait");
     assert_eq!(waiting.stop, AgentRunStop::RuntimeJobWait);
     let wait_checkpoint = serde_json::from_str::<RuntimeAwaitJobCheckpointV1>(
-        waiting.turn_responses[0]
+        waiting
+            .last_turn
+            .as_ref()
+            .unwrap()
             .checkpoint
             .as_ref()
             .expect("runtime wait checkpoint")
@@ -9464,8 +9507,10 @@ async fn answer_now_abandons_only_the_runtime_job_waiter() {
             "test.user",
         )
         .expect("persist answer-now while waiting");
+    let mut observed_events = Vec::new();
+    let mut observed_results = Vec::new();
     let resumed = engine
-        .process_turn_loop_online_with_model_client_async(
+        .process_turn_loop_online_with_model_client_stream_cancellable_and_tool_safe_point_async(
             AgentRunRequest {
                 session_id: "chat-runtime-wait".to_string(),
                 agent_run_identity: Some(agent_run_identity),
@@ -9479,6 +9524,18 @@ async fn answer_now_abandons_only_the_runtime_job_waiter() {
             },
             &model_client,
             &config_store,
+            &mut |update| {
+                if let TurnUpdate::RuntimeEvent { event } = update {
+                    observed_events.push(event);
+                }
+            },
+            &|| Ok(None),
+            &mut |point| {
+                if let ToolSafePoint::CompletedTurn(turn) = point {
+                    observed_results.extend(turn.tool_results);
+                }
+                Ok(())
+            },
         )
         .await
         .expect("abandon waiter and converge");
@@ -9486,15 +9543,10 @@ async fn answer_now_abandons_only_the_runtime_job_waiter() {
     assert_eq!(resumed.stop, AgentRunStop::Finalized);
     assert_eq!(model_client.request_count.load(Ordering::SeqCst), 2);
     assert_eq!(execution_count.load(Ordering::SeqCst), 1);
-    assert_eq!(resumed.turn_responses[0].tool_results.len(), 1);
+    assert_eq!(resumed.turn_receipts[0].tool_result_ids.len(), 1);
+    assert_eq!(observed_results[0].status, "cancelled");
     assert_eq!(
-        resumed.turn_responses[0].tool_results[0].status,
-        "cancelled"
-    );
-    assert_eq!(
-        resumed.turn_responses[0].tool_results[0]
-            .transition_reason
-            .as_deref(),
+        observed_results[0].transition_reason.as_deref(),
         Some("cancelled_by_answer_now")
     );
     assert_eq!(
@@ -9506,19 +9558,16 @@ async fn answer_now_abandons_only_the_runtime_job_waiter() {
         RuntimeJobStatus::Queued,
         "answer-now abandons the waiter without cancelling the shared job"
     );
-    assert!(resumed.turn_responses[0]
-        .runtime_events
-        .iter()
-        .any(|event| {
-            serde_json::to_value(event).ok().is_some_and(|payload| {
-                payload.get("type").and_then(Value::as_str) == Some("RuntimeWaitChanged")
-                    && payload
-                        .get("payload")
-                        .and_then(|value| value.get("status"))
-                        .and_then(Value::as_str)
-                        == Some("abandoned")
-            })
-        }));
+    assert!(observed_events.iter().any(|event| {
+        serde_json::to_value(event).ok().is_some_and(|payload| {
+            payload.get("type").and_then(Value::as_str) == Some("RuntimeWaitChanged")
+                && payload
+                    .get("payload")
+                    .and_then(|value| value.get("status"))
+                    .and_then(Value::as_str)
+                    == Some("abandoned")
+        })
+    }));
     let applied = store
         .list_events("chat-runtime-wait", 100, 0)
         .expect("list runtime-wait intervention events")
@@ -9580,7 +9629,10 @@ async fn agent_run_cancellation_abandons_runtime_job_waiter_before_terminal_comm
         .expect("enter runtime wait");
     assert_eq!(waiting.stop, AgentRunStop::RuntimeJobWait);
     let job_id = serde_json::from_str::<RuntimeAwaitJobCheckpointV1>(
-        waiting.turn_responses[0]
+        waiting
+            .last_turn
+            .as_ref()
+            .unwrap()
             .checkpoint
             .as_ref()
             .expect("runtime wait checkpoint")
@@ -9631,7 +9683,10 @@ async fn agent_run_cancellation_abandons_runtime_job_waiter_before_terminal_comm
         safe_point_results[0].transition_reason.as_deref(),
         Some("agent_run_cancelled")
     );
-    assert!(!cancelled.turn_responses[0]
+    assert!(!cancelled
+        .last_turn
+        .as_ref()
+        .unwrap()
         .session_snapshot
         .metadata
         .contains_key(RUNTIME_PENDING_TOOL_BATCH_META_KEY));
@@ -9729,8 +9784,8 @@ async fn query_loop_answer_now_closes_question_wait_before_toolless_convergence(
 
     assert_eq!(resumed.stop, AgentRunStop::Finalized);
     assert_eq!(model_client.request_count.load(Ordering::SeqCst), 1);
-    assert_eq!(resumed.turn_responses.len(), 2);
-    assert!(resumed.turn_responses[0].checkpoint.is_none());
+    assert_eq!(resumed.turn_receipts.len(), 2);
+    assert!(resumed.turn_receipts[0].checkpoint_ref.is_none());
     assert!(store
         .load_checkpoint_by_turn("chat-answer-now-question", wait_turn_id)
         .expect("load question checkpoint")
@@ -9825,8 +9880,9 @@ async fn runtime_job_wait_rechecks_a_precompleted_job_before_yielding() {
     let config_store = StaticModelSessionConfigStore {
         config: Some(ModelSessionConfig::default()),
     };
+    let mut observed_events = Vec::new();
     let response = engine
-        .process_turn_loop_online_with_model_client_async(
+        .process_turn_loop_online_with_model_client_stream_cancellable_and_tool_safe_point_async(
             AgentRunRequest {
                 session_id: "chat-runtime-wait".to_string(),
                 agent_run_identity: Some(agent_run_identity),
@@ -9840,16 +9896,22 @@ async fn runtime_job_wait_rechecks_a_precompleted_job_before_yielding() {
             },
             &model_client,
             &config_store,
+            &mut |update| {
+                if let TurnUpdate::RuntimeEvent { event } = update {
+                    observed_events.push(event);
+                }
+            },
+            &|| Ok(None),
+            &mut |_| Ok(()),
         )
         .await
         .expect("consume precompleted runtime job without yielding");
 
     assert_eq!(response.stop, AgentRunStop::Finalized);
-    assert_eq!(response.turn_responses.len(), 2);
+    assert_eq!(response.turn_receipts.len(), 2);
     assert_eq!(model_client.request_count.load(Ordering::SeqCst), 2);
     assert_eq!(execution_count.load(Ordering::SeqCst), 1);
-    let wait_statuses = response.turn_responses[0]
-        .runtime_events
+    let wait_statuses = observed_events
         .iter()
         .filter_map(|event| serde_json::to_value(event).ok())
         .filter(|payload| payload.get("type").and_then(Value::as_str) == Some("RuntimeWaitChanged"))
@@ -9913,7 +9975,7 @@ async fn cancellation_discards_queued_supplement_before_another_provider_or_tool
         response.stop,
         AgentRunStop::Cancelled("test_cancel".to_string())
     );
-    assert_eq!(response.turn_responses.len(), 1);
+    assert_eq!(response.turn_receipts.len(), 1);
     assert_eq!(execution_count.load(Ordering::SeqCst), 1);
     assert_eq!(model_client.request_count.load(Ordering::SeqCst), 1);
     assert!(turn_control
@@ -9959,9 +10021,9 @@ async fn four_independent_calls_execute_as_one_batch_before_one_follow_up_reques
         .expect("complete four-tool batch run");
 
     assert_eq!(response.stop, AgentRunStop::Finalized);
-    assert_eq!(response.turn_responses.len(), 2);
-    assert_eq!(response.turn_responses[0].tool_results.len(), 4);
-    assert_eq!(response.turn_responses[1].tool_results.len(), 0);
+    assert_eq!(response.turn_receipts.len(), 2);
+    assert_eq!(response.turn_receipts[0].tool_result_ids.len(), 4);
+    assert_eq!(response.turn_receipts[1].tool_result_ids.len(), 0);
     assert_eq!(model_client.request_count.load(Ordering::SeqCst), 2);
     assert_eq!(
         model_client
@@ -10009,10 +10071,10 @@ async fn complete_turn_tool_success_stops_and_resume_replays_no_side_effects() {
         .expect("complete-turn tool run");
 
     assert_eq!(first.stop, AgentRunStop::TerminalTool);
-    assert_eq!(first.turn_responses.len(), 1);
+    assert_eq!(first.turn_receipts.len(), 1);
     assert_eq!(model_client.request_count.load(Ordering::SeqCst), 1);
     assert_eq!(execution_count.load(Ordering::SeqCst), 1);
-    assert!(first.turn_responses[0].checkpoint.is_none());
+    assert!(first.last_turn.as_ref().unwrap().checkpoint.is_none());
     assert!(store
         .load_checkpoint_by_turn("chat-complete-turn", "turn-complete-turn")
         .expect("load ordinary turn checkpoint")
@@ -10060,11 +10122,11 @@ async fn complete_turn_tool_failure_continues_to_provider() {
         .expect("failed complete-turn tool continues");
 
     assert_eq!(response.stop, AgentRunStop::Finalized);
-    assert_eq!(response.turn_responses.len(), 2);
+    assert_eq!(response.turn_receipts.len(), 2);
     assert_eq!(model_client.request_count.load(Ordering::SeqCst), 2);
     assert_eq!(execution_count.load(Ordering::SeqCst), 1);
     assert_eq!(
-        response.turn_responses[0].continuation,
+        response.turn_receipts[0].continuation,
         QueryContinuation::ExecuteTools
     );
 }
@@ -10246,15 +10308,21 @@ async fn model_prompt_compaction_online_loop_commits_summary_and_continues_main_
         .expect("run online loop with model compaction");
 
     assert_eq!(response.stop, AgentRunStop::Finalized);
-    assert_eq!(response.turn_responses.len(), 1);
+    assert_eq!(response.turn_receipts.len(), 1);
     assert_eq!(
-        response.turn_responses[0]
+        response
+            .last_turn
+            .as_ref()
+            .unwrap()
             .agent_run_resource_usage
             .provider_attempts,
         2
     );
     assert_eq!(
-        response.turn_responses[0]
+        response
+            .last_turn
+            .as_ref()
+            .unwrap()
             .agent_run_resource_usage
             .completed_provider_rounds,
         2,
@@ -10706,10 +10774,9 @@ async fn completed_turn_projection_requires_exact_identity_and_acknowledgement()
     let engine = AgentRuntime::new_for_test(store, AgentRuntimeConfig::default());
     let session_id = "chat-completed-turn-projection";
     let step = process_resume_probe(&engine, session_id).await;
-    let result = AgentRunResult {
-        turn_responses: vec![step],
-        stop: AgentRunStop::Finalized,
-    };
+    let mut collector = RunResultCollector::default();
+    collector.push(step);
+    let result = AgentRunResult::new(collector, AgentRunStop::Finalized);
     let identity = RuntimeAgentRunIdentityV1 {
         agent_run_id: "agent-run-completed-turn-projection".to_string(),
         execution_id: "execution-completed-turn-projection".to_string(),
@@ -11934,6 +12001,7 @@ async fn query_loop_reasoning_commits_before_return_and_persistence_failure_stop
             .as_str(),
     );
     let request = GenerateDriverRequest {
+        prompt_compaction: None,
         session_id: "chat-safe-point".to_string(),
         turn_id: "turn-safe-point".to_string(),
         loop_index: 0,
@@ -12005,6 +12073,7 @@ async fn query_loop_reasoning_commits_before_return_and_persistence_failure_stop
                 &config_store,
                 &safe_point,
                 &composition,
+                Some("test-agent-run"),
             );
             let result = if streaming {
                 driver
@@ -12102,6 +12171,7 @@ async fn query_loop_live_reasoning_seals_failure_cancel_and_retry_without_mixing
             .as_str(),
     );
     let request = GenerateDriverRequest {
+        prompt_compaction: None,
         session_id: "chat-safe-point".to_string(),
         turn_id: "turn-safe-point".to_string(),
         loop_index: 0,
@@ -12152,6 +12222,7 @@ async fn query_loop_live_reasoning_seals_failure_cancel_and_retry_without_mixing
             &config,
             &dispatcher,
             &composition,
+            Some("test-agent-run"),
         );
         let mut updates = Vec::new();
         let mut sink = |event| updates.push(event);
@@ -12186,4 +12257,148 @@ async fn query_loop_live_reasoning_seals_failure_cancel_and_retry_without_mixing
             |event| matches!(event, TurnUpdate::Reasoning { text, .. } if text == "partial first")
         ));
     }
+}
+
+#[derive(Debug)]
+struct CountingToolLoopModelClient {
+    request_count: AtomicUsize,
+    tool_turns: usize,
+}
+impl ModelClient for CountingToolLoopModelClient {
+    fn generate<'a>(
+        &'a self,
+        _request: &'a ModelClientRequest,
+    ) -> ModelClientFuture<'a, ModelClientResponse> {
+        Box::pin(async move {
+            let request_index = self.request_count.fetch_add(1, Ordering::SeqCst);
+            let tool_calls = if request_index < self.tool_turns {
+                vec![ToolCallEnvelope {
+                    id: format!("call-unbounded-{request_index}"),
+                    name: "stream_boundary_test_tool".to_string(),
+                    args_json: json!({ "value": format!("turn-{request_index}") }).to_string(),
+                }]
+            } else {
+                vec![]
+            };
+            Ok(ModelClientResponse {
+                generate_result: GenerateResult {
+                    content: if tool_calls.is_empty() {
+                        "natural final after long tool loop".to_string()
+                    } else {
+                        String::new()
+                    },
+                    tool_calls,
+                    continuation_reasoning_content: None,
+                    reasoning_content: None,
+                    input_tokens: Some(40_000),
+                    total_tokens: Some(40_100),
+                    prompt_cache_hit_tokens: Some(38_000),
+                    prompt_cache_miss_tokens: Some(2_000),
+                },
+                provider_request_id: None,
+                provider_latency_ms: None,
+                provider_attempts: 1,
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn query_loop_compact_results_preserve_real_tool_pairing_and_observe_snapshot_store_work() {
+    for tool_turns in [10, 100] {
+        let store = AgentRuntimeTestStore::new();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let engine = AgentRuntime::new_for_test_with_tools(
+            store.clone(),
+            stream_execution_boundary_tool_layer(executions.clone()),
+            AgentRuntimeConfig::default(),
+        );
+        let model = CountingToolLoopModelClient {
+            request_count: AtomicUsize::new(0),
+            tool_turns,
+        };
+        let config = StaticModelSessionConfigStore {
+            config: Some(ModelSessionConfig::default()),
+        };
+        let mut completed = 0;
+        let result=engine.process_turn_loop_online_with_model_client_stream_cancellable_and_tool_safe_point_async(
+            AgentRunRequest{session_id:"compact-retention".into(),agent_run_identity:Some(RuntimeAgentRunIdentityV1{agent_run_id:"compact-run".into(),execution_id:"compact-execution".into(),authorization_digest:format!("sha256:{}","a".repeat(64))}),initial_turn_id:"compact-start".into(),initial_input:AgentRunInitialInput::UserMessage("execute until complete".into()),runtime_scope:PromptCompactionScopeV1::main(),resume_from_turn_id:None,auto_continue_after_resume_wait:None},
+            &model,&config,&mut |_|{},&||Ok(None),&mut |point|{if let ToolSafePoint::CompletedTurn(_)=point {completed+=1;} Ok(())}).await.unwrap();
+        assert_eq!(result.turn_receipts.len(), tool_turns + 1);
+        assert_eq!(completed, tool_turns);
+        assert_eq!(executions.load(Ordering::SeqCst), tool_turns);
+        for (index, receipt) in result.turn_receipts.iter().take(tool_turns).enumerate() {
+            assert_eq!(
+                receipt.provider_tool_call_ids,
+                vec![format!("call-unbounded-{index}")]
+            );
+            assert_eq!(receipt.tool_result_ids, receipt.provider_tool_call_ids);
+        }
+        assert_eq!(
+            result.final_reply.as_deref(),
+            Some("natural final after long tool loop")
+        );
+        assert_eq!(
+            result
+                .last_turn
+                .as_ref()
+                .unwrap()
+                .agent_run_resource_usage
+                .provider_attempts,
+            (tool_turns + 1) as u32
+        );
+        let state = store.state().unwrap();
+        assert_eq!(state.snapshots.len(), 1);
+        println!(
+            "{}",
+            json!({"realLoopToolTurns":tool_turns,"currentSnapshotBytes":state.snapshots.values().next().unwrap().len(),"snapshotLoadCount":state.snapshot_load_count,"snapshotLoadedStringBytes":state.snapshot_load_bytes,"snapshotSaveCount":state.snapshot_save_count,"snapshotSavedStringBytes":state.snapshot_save_bytes,"measurement":"test store strings, not disk IO; full-history load/save remains"})
+        );
+    }
+}
+
+#[tokio::test]
+async fn query_loop_failed_completed_turn_safe_point_never_returns_success_receipts() {
+    let store = AgentRuntimeTestStore::new();
+    let engine = AgentRuntime::new_for_test_with_tools(
+        store,
+        stream_execution_boundary_tool_layer(Arc::new(AtomicUsize::new(0))),
+        AgentRuntimeConfig::default(),
+    );
+    let model = CountingToolLoopModelClient {
+        request_count: AtomicUsize::new(0),
+        tool_turns: 1,
+    };
+    let config = StaticModelSessionConfigStore {
+        config: Some(ModelSessionConfig::default()),
+    };
+    let result = engine
+        .process_turn_loop_online_with_model_client_stream_cancellable_and_tool_safe_point_async(
+            AgentRunRequest {
+                session_id: "failed-commit".into(),
+                agent_run_identity: Some(RuntimeAgentRunIdentityV1 {
+                    agent_run_id: "failed-run".into(),
+                    execution_id: "failed-execution".into(),
+                    authorization_digest: format!("sha256:{}", "a".repeat(64)),
+                }),
+                initial_turn_id: "failed-commit-turn".into(),
+                initial_input: AgentRunInitialInput::UserMessage("answer".into()),
+                runtime_scope: PromptCompactionScopeV1::main(),
+                resume_from_turn_id: None,
+                auto_continue_after_resume_wait: None,
+            },
+            &model,
+            &config,
+            &mut |_| {},
+            &|| Ok(None),
+            &mut |point| {
+                if matches!(point, ToolSafePoint::CompletedTurn(_)) {
+                    return Err("injected_completed_turn_commit_failed".into());
+                }
+                Ok(())
+            },
+        )
+        .await;
+    assert!(result
+        .unwrap_err()
+        .contains("injected_completed_turn_commit_failed"));
 }

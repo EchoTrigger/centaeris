@@ -530,7 +530,7 @@ fn run_message_runtime_contract(revocation_window: bool) {
             sequence=next;batches.push(records);Ok(())
         })).unwrap();
     assert_eq!(result.stop, AgentRunStop::Finalized);
-    assert_eq!(result.turn_responses.len(), 4);
+    assert_eq!(result.turn_receipts.len(), 4);
     model.assert_context();
     let before_final = if revocation_window {
         assert_eq!(history.status(), 404);
@@ -541,15 +541,10 @@ fn run_message_runtime_contract(revocation_window: bool) {
         assert_eq!(bubbles[1]["body"], fixture.second_body);
         bubbles
     };
-    let last = result.turn_responses.last().unwrap();
-    let markdown = last
-        .session_snapshot
-        .messages
-        .iter()
-        .rev()
-        .find(|message| message.role == centaeris_core::session::state::MessageRole::Assistant)
-        .unwrap()
-        .content
+    let markdown = result
+        .final_reply
+        .as_ref()
+        .expect("current terminal reply")
         .clone();
     let mut text = crate::AssistantTextProjection::default();
     text.begin_model_request(run.clone(), markdown).unwrap();

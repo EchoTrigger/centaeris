@@ -8,6 +8,112 @@ use postgres::{Client, NoTls};
 
 #[test]
 #[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_instance_allocation_precedes_create_and_unknown_creation_keeps_budget() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (url, store) = setup();
+    let fixture = sandbox(&store, &url, "instance-unknown-create", "instance-tenant");
+    let mut db = Client::connect(&url, NoTls).unwrap();
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let binding = crate::environment_authorization::EnvironmentBinding {
+        schema: "workspace.environment_authorization.v1".into(),
+        environment_id: "environment-unknown-create".into(),
+        session_id: format!("session-{}", fixture.run),
+        agent_run_id: fixture.run.clone(),
+        agent_run_authorization_digest: digest.clone(),
+        execution_mode: "perRun".into(),
+        controller: None,
+    };
+    db.batch_execute("ALTER TABLE public.app_core_agentrun ADD COLUMN IF NOT EXISTS environment_id text; CREATE TABLE IF NOT EXISTS public.app_core_agentrunauthorization(agent_run_id text PRIMARY KEY,digest text NOT NULL);").unwrap();
+    db.execute(
+        "UPDATE public.app_core_agentrun SET environment_id=$2 WHERE id=$1",
+        &[&fixture.run, &binding.environment_id],
+    )
+    .unwrap();
+    db.execute("INSERT INTO public.app_core_agentrunauthorization(agent_run_id,digest) VALUES($1,$2) ON CONFLICT(agent_run_id) DO UPDATE SET digest=EXCLUDED.digest", &[&fixture.run,&digest]).unwrap();
+    db.batch_execute("DROP TABLE IF EXISTS public.execution_instance_commit_policy; CREATE TABLE public.execution_instance_commit_policy(execution_id text NOT NULL,commit_policy text NOT NULL); CREATE OR REPLACE FUNCTION public.observe_execution_instance_commit_policy() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO public.execution_instance_commit_policy VALUES(NEW.execution_id,current_setting('synchronous_commit')); RETURN NEW; END $$; CREATE TRIGGER observe_execution_instance_commit_policy AFTER INSERT ON runtime.execution_instances FOR EACH ROW EXECUTE FUNCTION public.observe_execution_instance_commit_policy();").unwrap();
+    let image = format!("sha256:{}", "b".repeat(64));
+    let mut instance = None;
+    let error = store
+        .prepare_resident_sandbox_with_client(
+            "fake-docker-host",
+            &fixture.request(),
+            limits(1, 1),
+            || Ok(Vec::new()),
+            |client| {
+                client
+                    .batch_execute("SET synchronous_commit=off")
+                    .map_err(|e| e.to_string())?;
+                instance = Some(super::super::execution_instances::bind(
+                    client,
+                    &binding,
+                    &fixture.execution,
+                    "fake-docker-host",
+                    &image,
+                )?);
+                // Separate connection sees both acknowledgements before physical work.
+                assert_eq!(count(&url), 1);
+                assert_eq!(db.query_one("SELECT commit_policy FROM public.execution_instance_commit_policy WHERE execution_id=$1", &[&fixture.execution]).unwrap().get::<_,String>(0),"on", "allocation insert must commit synchronously before physical work");
+                assert_eq!(
+                    db.query_one(
+                        "SELECT instance_id FROM runtime.execution_instances WHERE execution_id=$1",
+                        &[&fixture.execution]
+                    )
+                    .unwrap()
+                    .get::<_, String>(0),
+                    *instance.as_ref().unwrap()
+                );
+                assert_eq!(
+                    client
+                        .query_one("SHOW synchronous_commit", &[])
+                        .unwrap()
+                        .get::<_, String>(0),
+                    "off"
+                );
+                Err("unknown daemon outcome".into())
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error, "unknown daemon outcome");
+    assert_eq!(count(&url), 1);
+    assert_eq!(
+        super::super::execution_instances::bind(
+            &mut db,
+            &binding,
+            &fixture.execution,
+            "fake-docker-host",
+            &image
+        )
+        .unwrap(),
+        instance.unwrap()
+    );
+    let mut foreign = binding;
+    foreign.environment_id = "foreign".into();
+    let mut creates = 0;
+    assert!(store
+        .prepare_resident_sandbox_with_client(
+            "fake-docker-host",
+            &fixture.request(),
+            limits(1, 1),
+            || Ok(Vec::new()),
+            |client| {
+                super::super::execution_instances::bind(
+                    client,
+                    &foreign,
+                    &fixture.execution,
+                    "fake-docker-host",
+                    &image,
+                )?;
+                creates += 1;
+                Ok("unexpected".into())
+            }
+        )
+        .is_err());
+    assert_eq!(creates, 0);
+    assert_eq!(count(&url), 1);
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
 fn postgres_resident_recovery_attempt_is_durable_before_create_with_async_connection() {
     use centaeris_core::runtime::contracts::{CheckpointKindV1, CheckpointRecord};
     use centaeris_core::session::AgentRunSessionState;
@@ -395,7 +501,7 @@ fn setup() -> (String, PostgresRuntimeStore) {
     let url = test_url();
     reset_store(&url);
     let mut db = Client::connect(&url, NoTls).unwrap();
-    db.batch_execute("ALTER TABLE public.app_core_agentrun ADD COLUMN IF NOT EXISTS workspace_id text NOT NULL DEFAULT 'resident-test'; ALTER TABLE public.app_core_agentrun ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'running';").unwrap();
+    db.batch_execute("ALTER TABLE public.app_core_agentrun ADD COLUMN IF NOT EXISTS workspace_id text NOT NULL DEFAULT 'resident-test'; ALTER TABLE public.app_core_agentrun ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'running'; ALTER TABLE public.app_core_agentrun ADD COLUMN IF NOT EXISTS environment_id text;").unwrap();
     let store = PostgresRuntimeStore::new(&url).unwrap();
     (url, store)
 }
@@ -850,7 +956,8 @@ fn postgres_resident_forward_migration_preserves_reclaim_budget_and_rejects_bad_
     let first = sandbox(&store, &url, "resident-previous-schema", "tenant-one");
     let before = store.get_runtime_job(&first.job).unwrap();
     let mut db = Client::connect(&url, NoTls).unwrap();
-    db.batch_execute("DROP TABLE runtime.resident_sandboxes; DELETE FROM runtime.schema_migrations WHERE version=7; UPDATE runtime.runtime_jobs SET lease_reclaim_count=2,lease_reclaim_not_before_ms=12345;").unwrap();
+    super::retained_instance_tests::downgrade_to_eight(&mut db);
+    db.batch_execute("DROP TABLE runtime.execution_instances; DROP TABLE runtime.resident_sandboxes; DELETE FROM runtime.schema_migrations WHERE version>=7; UPDATE runtime.runtime_jobs SET lease_reclaim_count=2,lease_reclaim_not_before_ms=12345;").unwrap();
     let history = db
         .query(
             "SELECT version,applied_at_ms FROM runtime.schema_migrations ORDER BY version",

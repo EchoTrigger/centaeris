@@ -1,3 +1,5 @@
 pub mod agent;
 pub mod memory;
 pub mod protocol;
+#[cfg(any(target_os = "linux", test))]
+pub mod task_service;

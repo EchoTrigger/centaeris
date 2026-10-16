@@ -77,10 +77,15 @@ impl Default for PostgresConnectionLimits {
     }
 }
 
+pub(crate) mod cleanup_receipts;
+pub(crate) mod controller_authority;
 mod execution_capacity;
+pub(crate) mod execution_instances;
 mod external_context;
+pub(crate) mod lease_renewal;
+pub(crate) mod pre_admission_failure;
 mod reliability;
-mod residency;
+pub(crate) mod residency;
 mod resource_commit;
 mod runtime;
 pub(crate) use runtime::validate_hosted_native_input;
@@ -277,6 +282,13 @@ impl PostgresRuntimeStore {
         operation: impl FnOnce(&mut Client) -> Result<T, String> + Send,
     ) -> Result<T, String> {
         run_postgres_blocking(|| self.control_connections.with_client(operation))
+    }
+
+    pub(crate) fn with_execution_control_client_error<T: Send, E: From<String> + Send>(
+        &self,
+        operation: impl FnOnce(&mut Client) -> Result<T, E> + Send,
+    ) -> Result<T, E> {
+        run_postgres_blocking_error(|| self.control_connections.with_client_error(operation))
     }
 
     pub(crate) fn with_listener_client<T: Send>(
@@ -520,8 +532,8 @@ fn run_postgres_blocking_error<T: Send, E: From<String> + Send>(
     operation()
 }
 
-pub(crate) use runtime::hydrate_session_wire_values;
 pub use runtime::PostgresSessionLog;
+pub(crate) use runtime::SessionWireHydrator;
 
 #[cfg(test)]
 mod integration_tests;

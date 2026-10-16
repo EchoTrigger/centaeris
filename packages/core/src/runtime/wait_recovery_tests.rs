@@ -397,7 +397,13 @@ async fn query_loop_wait_recovery_two_runtime_results_progress_once_after_both_c
         .await
         .unwrap();
     assert_eq!(first.stop, AgentRunStop::RuntimeJobWait);
-    let checkpoint = first.turn_responses[0].checkpoint.as_ref().unwrap();
+    let checkpoint = first
+        .last_turn
+        .as_ref()
+        .unwrap()
+        .checkpoint
+        .as_ref()
+        .unwrap();
     let waits: RuntimeAwaitJobCheckpointV1 =
         serde_json::from_str(&checkpoint.payload_json).unwrap();
     assert_eq!(waits.waits.len(), 2);

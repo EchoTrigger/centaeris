@@ -11,12 +11,13 @@ fn start() -> AgentRunStart {
     ))
     .unwrap();
     serde_json::from_value(json!({
-        "schema":"workspace.agent_run.start.v2", "initialInput":{"type":"userMessage"}, "agentRunId":authorization["agentRunId"],
+        "schema":"workspace.agent_run.start.v3", "initialInput":{"type":"userMessage"}, "agentRunId":authorization["agentRunId"],
         "turnId":"trigger-turn", "prompt":"Dispatch", "agentInstructions":"",
         "modelContextTokens":1000, "modelMaxOutputTokens":100,
         "authorizationDigest":"synthetic", "authorizationSignature":"synthetic",
         "coordinationSessionId":authorization["sessionId"],
         "nativeCoordinationSessionId":authorization["sessionId"],
+        "environmentAuthorization":crate::environment_authorization::EnvironmentAuthorization::for_test(&serde_json::from_value(authorization.clone()).unwrap(), b"test-run-authorization-signing-key"),
         "tailAction":{"type":"append"}, "authorization":authorization
     }))
     .unwrap()

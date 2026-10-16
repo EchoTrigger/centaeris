@@ -37,6 +37,75 @@ impl<
             + 'static,
     > AgentRuntime<S>
 {
+    pub(super) fn compaction_ack_snapshot(
+        &self,
+        commit: Option<&super::prompt_compaction_commit::PreparedCompactionCommit>,
+        observed_main_request_id: &str,
+    ) -> Result<Option<super::prompt_compaction_commit::CompactionAckSnapshot>, String> {
+        let Some(commit) = commit else {
+            return Ok(None);
+        };
+        if commit.acknowledged {
+            return Ok(None);
+        }
+        let raw = self
+            .runtime_store
+            .load_agent_runtime_snapshot(&commit.event.session_id)?
+            .ok_or_else(|| "compaction acknowledgment snapshot missing".to_string())?;
+        Ok(Some(
+            super::prompt_compaction_commit::CompactionAckSnapshot {
+                raw,
+                observed_main_request_id: observed_main_request_id.into(),
+            },
+        ))
+    }
+
+    pub(super) fn acknowledge_compaction_after_safe_point(
+        &self,
+        commit: Option<&super::prompt_compaction_commit::PreparedCompactionCommit>,
+        expected: Option<&super::prompt_compaction_commit::CompactionAckSnapshot>,
+    ) -> Result<(), String> {
+        let Some(commit) = commit else { return Ok(()) };
+        if commit.acknowledged {
+            return Ok(());
+        }
+        let expected =
+            expected.ok_or("compaction acknowledgment requires its pre-commit snapshot")?;
+        let mut session: SessionStateSnapshot =
+            serde_json::from_str(&expected.raw).map_err(|error| error.to_string())?;
+        if super::prompt_compaction_commit::acknowledge_commit(&mut session, commit)? {
+            let updated = serde_json::to_string(&session).map_err(|error| error.to_string())?;
+            if !self.runtime_store.compare_and_save_agent_runtime_snapshot(
+                &commit.event.session_id,
+                Some(&expected.raw),
+                &updated,
+                now_ms(),
+            )? {
+                // A host may immediately replace the cache with the authoritative
+                // just-committed main observations. Accept that exact projection
+                // without writing old metadata back into the reconstructed state.
+                if let Some(raw) = self
+                    .runtime_store
+                    .load_agent_runtime_snapshot(&commit.event.session_id)?
+                {
+                    let mut current: SessionStateSnapshot =
+                        serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+                    if super::prompt_compaction_commit::active_commit(&current)?.is_none()
+                        && super::prompt_compaction_commit::matches_reconstructed_main_proof(
+                            &mut current,
+                            &expected.observed_main_request_id,
+                            commit,
+                        )?
+                    {
+                        return Ok(());
+                    }
+                }
+                return Err("compaction acknowledgment snapshot changed after safe point".into());
+            }
+        }
+        Ok(())
+    }
+
     pub(super) async fn compact_session_with_async_driver<D: AsyncGenerateDriver>(
         &self,
         session_id: &str,
@@ -44,10 +113,18 @@ impl<
         driver: &D,
     ) -> Result<bool, String> {
         let mut session = self.session_manager.load_or_create_session(session_id)?;
+        if super::prompt_compaction_commit::active_commit(&session)?
+            .is_some_and(|commit| !commit.acknowledged)
+        {
+            return Err(
+                "manual compaction cannot replace an unacknowledged automatic summary".into(),
+            );
+        }
         clear_prompt_compaction_failure_metadata(&mut session);
         refresh_session_context_window(&mut session);
         let candidate_producer = AsyncGenerateDriverPromptCompactionCandidateProducer {
             driver,
+            source_request: Mutex::new(None),
             resource_usage: Mutex::new(AgentRunResourceUsageV1::default()),
         };
         let result = self
@@ -208,6 +285,14 @@ impl<
         intake: Option<&mut MainRequestIntake<'_>>,
     ) -> Result<GenerateDriverRequest, String> {
         let mut session = self.session_manager.load_or_create_session(session_id)?;
+        let pending_compaction = super::prompt_compaction_commit::active_commit(&session)?
+            .filter(|commit| !commit.acknowledged);
+        if let Some(commit) = pending_compaction.as_ref() {
+            if driver.durable_agent_run_id() != Some(commit.source.agent_run_id.as_str()) {
+                return Err("unacknowledged compaction receipt belongs to another AgentRun".into());
+            }
+        }
+
         if input.semantic_kind() == MESSAGE_SEMANTIC_USER_REQUEST {
             clear_prompt_compaction_failure_metadata(&mut session);
         }
@@ -233,6 +318,7 @@ impl<
 
         let candidate_producer = AsyncGenerateDriverPromptCompactionCandidateProducer {
             driver,
+            source_request: Mutex::new(None),
             resource_usage: Mutex::new(
                 agent_run_resource_usage
                     .as_deref()
@@ -240,8 +326,16 @@ impl<
                     .unwrap_or_default(),
             ),
         };
-        let compaction_result = self
-            .apply_prompt_compaction_for_generate_request_async(
+        let compaction_result = if pending_compaction.is_some() {
+            PromptCompactionApplyResult {
+                stats_json: session
+                    .metadata
+                    .get("prompt_compaction_stats_json")
+                    .cloned(),
+                runtime_events: Vec::new(),
+            }
+        } else {
+            self.apply_prompt_compaction_for_generate_request_async(
                 &mut session,
                 turn_id,
                 runtime_scope,
@@ -249,7 +343,8 @@ impl<
                 false,
                 Some(&candidate_producer),
             )
-            .await?;
+            .await?
+        };
         let tracked_resource_usage = candidate_producer
             .resource_usage
             .into_inner()
@@ -257,6 +352,14 @@ impl<
         if let Some(usage) = agent_run_resource_usage {
             *usage = tracked_resource_usage;
         }
+        super::prompt_compaction_commit::remember_commit(
+            &mut session,
+            &compaction_result.runtime_events,
+            candidate_producer
+                .source_request
+                .into_inner()
+                .map_err(|_| "compaction source identity lock poisoned")?,
+        )?;
         self.session_manager.save_session(&session)?;
         let prepared_inputs = if let Some(intake) = intake {
             let prepared = intake(input)?;
@@ -569,6 +672,7 @@ impl<
         }
         Ok((
             GenerateDriverRequest {
+                prompt_compaction: super::prompt_compaction_commit::active_commit(&session)?,
                 session_id: session_id.to_string(),
                 turn_id: turn_id.to_string(),
                 loop_index,
@@ -977,6 +1081,52 @@ impl<
             session_id,
             session_records,
         )?;
+        let origins = session_records
+            .iter()
+            .filter_map(|record| {
+                crate::session::recovery::ToolCallRecoveryOrigin::from_record(record).transpose()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.plan_new_user_turn_closures_with_snapshot(
+            session_id,
+            &snapshot,
+            &origins,
+            (trigger_agent_run_id, trigger_turn_id),
+            expected_session_sequence,
+            now_ms,
+        )
+    }
+
+    /// Admission planning from a streamed, canonical recovery result.
+    pub fn plan_new_user_turn_closures_from_recovery(
+        &self,
+        session_id: &str,
+        recovery: &crate::session::recovery::SessionRecoveryResult,
+        trigger_agent_run_id: &str,
+        trigger_turn_id: &str,
+        expected_session_sequence: u64,
+        now_ms: i64,
+    ) -> Result<crate::runtime::contracts::NewUserTurnClosurePlanV1, String> {
+        self.plan_new_user_turn_closures_with_snapshot(
+            session_id,
+            &recovery.snapshot,
+            &recovery.tool_call_origins,
+            (trigger_agent_run_id, trigger_turn_id),
+            expected_session_sequence,
+            now_ms,
+        )
+    }
+
+    fn plan_new_user_turn_closures_with_snapshot(
+        &self,
+        session_id: &str,
+        snapshot: &crate::session::state::SessionStateSnapshot,
+        tool_call_origins: &[crate::session::recovery::ToolCallRecoveryOrigin],
+        trigger: (&str, &str),
+        expected_session_sequence: u64,
+        now_ms: i64,
+    ) -> Result<crate::runtime::contracts::NewUserTurnClosurePlanV1, String> {
+        let (trigger_agent_run_id, trigger_turn_id) = trigger;
         let open_tool_call_ids =
             crate::runtime::context_window::trailing_unpaired_model_tool_call_ids(
                 snapshot.messages.as_slice(),
@@ -985,12 +1135,12 @@ impl<
         let mut evidence_preconditions = Vec::new();
         let mut closures = Vec::new();
         for tool_call_id in &open_tool_call_ids {
-            let call = find_model_assistant_semantics_tool_call(&snapshot, tool_call_id.as_str())
+            let call = find_model_assistant_semantics_tool_call(snapshot, tool_call_id.as_str())
                 .ok_or_else(|| {
-                format!("trailing unpaired tool call {tool_call_id} has no assistant semantics")
-            })?;
+                    format!("trailing unpaired tool call {tool_call_id} has no assistant semantics")
+                })?;
             let (original_agent_run_id, original_turn_id, call_event_id) =
-                locate_tool_call_record(session_records, tool_call_id.as_str())?;
+                locate_tool_call_record(tool_call_origins, tool_call_id.as_str())?;
             let evidence = self.read_unpaired_tool_call_evidence(session_id, &call)?;
             let effective_call = evidence
                 .as_ref()
@@ -1104,36 +1254,25 @@ fn build_input_user_message(
 }
 
 fn locate_tool_call_record(
-    session_records: &[crate::session::SessionLogRecord],
+    origins: &[crate::session::recovery::ToolCallRecoveryOrigin],
     tool_call_id: &str,
 ) -> Result<(String, String, Option<String>), String> {
-    let mut found: Option<(String, String, String)> = None;
-    for record in session_records {
-        if record.event_type != crate::session::SessionRecordType::ToolCall {
-            continue;
-        }
-        if record.payload.get("callId").and_then(Value::as_str) != Some(tool_call_id) {
-            continue;
-        }
-        let agent_run_id = record
-            .agent_run_id
-            .clone()
-            .ok_or_else(|| format!("tool_call {tool_call_id} record has no agentRunId"))?;
-        let turn_id = record
-            .turn_id
-            .clone()
-            .ok_or_else(|| format!("tool_call {tool_call_id} record has no turnId"))?;
-        if let Some((existing_run, existing_turn, _)) = found.as_ref() {
-            if existing_run != &agent_run_id || existing_turn != &turn_id {
+    let mut found: Option<(&str, &str, &str)> = None;
+    for origin in origins
+        .iter()
+        .filter(|origin| origin.call_id == tool_call_id)
+    {
+        if let Some((run, turn, _)) = found {
+            if run != origin.agent_run_id || turn != origin.turn_id {
                 return Err(format!(
                     "tool_call {tool_call_id} identity is ambiguous across session records"
                 ));
             }
         }
-        found = Some((agent_run_id, turn_id, record.event_id.clone()));
+        found = Some((&origin.agent_run_id, &origin.turn_id, &origin.event_id));
     }
     found
-        .map(|(agent_run_id, turn_id, event_id)| (agent_run_id, turn_id, Some(event_id)))
+        .map(|(run, turn, event)| (run.into(), turn.into(), Some(event.into())))
         .ok_or_else(|| format!("tool_call {tool_call_id} has no durable session record"))
 }
 

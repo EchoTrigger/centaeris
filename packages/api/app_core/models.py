@@ -83,6 +83,10 @@ def new_session_environment_id() -> str:
     return new_id("environment")
 
 
+def new_environment_release_id() -> str:
+    return new_id("environment_release")
+
+
 def new_session_project_id() -> str:
     return new_id("session_project")
 
@@ -1243,6 +1247,7 @@ class Session(models.Model):
     workspaceGeneration = models.PositiveBigIntegerField(default=0)
     workspaceStorageKey = models.CharField(max_length=1000, blank=True, default="")
     workspaceSnapshotSha256 = models.CharField(max_length=71, blank=True, default="")
+    workspaceSnapshotEncoding = models.CharField(max_length=16, default="frameV1")
     workspaceSnapshotSizeBytes = models.PositiveBigIntegerField(default=0)
     workspaceExpandedSizeBytes = models.PositiveBigIntegerField(default=0)
     workspaceFileCount = models.PositiveIntegerField(default=0)
@@ -1287,6 +1292,14 @@ class Session(models.Model):
                     & models.Q(workspaceFileCount__gte=0)
                 ),
                 name="session_workspace_nonnegative",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(workspaceSnapshotEncoding__in=["frameV1", "tarZstdV1"])
+                    & (models.Q(workspaceSnapshotEncoding="frameV1")
+                       | models.Q(workspaceSnapshotSizeBytes__gt=0))
+                ),
+                name="session_workspace_encoding_valid",
             ),
             models.CheckConstraint(
                 condition=(
@@ -1408,17 +1421,52 @@ class Session(models.Model):
 
 
 class SessionEnvironment(models.Model):
-    """A Session's durable business identity; physical execution remains per Run."""
+    """A Session's business identity and monotonically fenced controller authority."""
 
     id = models.CharField(primary_key=True, max_length=64, default=new_session_environment_id)
     session = models.ForeignKey(Session, on_delete=models.PROTECT, related_name="environments")
     created_at = models.DateTimeField(auto_now_add=True)
+    controller_epoch = models.PositiveBigIntegerField(default=0, editable=False)
+    controller_run = models.ForeignKey("AgentRun", on_delete=models.PROTECT,
+        related_name="+", null=True, blank=True, editable=False)
+    controller_lease_owner = models.CharField(max_length=160, blank=True, default="", editable=False)
+    controller_released = models.BooleanField(default=True, editable=False)
+    controller_purpose = models.CharField(max_length=7, default="", editable=False,
+        choices=[("execute", "Execute"), ("cleanup", "Cleanup")])
+
+    class Meta:
+        constraints = [models.CheckConstraint(
+            condition=(models.Q(controller_run__isnull=True, controller_lease_owner="", controller_released=True, controller_purpose="")
+                | (models.Q(controller_run__isnull=False, controller_epoch__gt=0, controller_purpose__in=["execute", "cleanup"])
+                   & ~models.Q(controller_lease_owner=""))),
+            name="environment_controller_complete")]
 
     def save(self, *args, **kwargs):
         if not self._state.adding:
             using = kwargs.get("using") or router.db_for_write(type(self), instance=self)
             if type(self).objects.using(using).values_list("session_id", flat=True).get(pk=self.pk) != self.session_id:
                 raise ValueError("session_environment_identity_immutable")
+        return super().save(*args, **kwargs)
+
+
+class AgentRunEnvironmentRelease(models.Model):
+    """Immutable business release acknowledgement, not physical cleanup evidence."""
+    id = models.CharField(primary_key=True, max_length=64, default=new_environment_release_id)
+    agent_run = models.OneToOneField("AgentRun", on_delete=models.PROTECT, related_name="environment_release")
+    environment = models.ForeignKey(SessionEnvironment, on_delete=models.PROTECT, related_name="releases")
+    authorization_digest = models.CharField(max_length=71)
+    controller_epoch = models.PositiveBigIntegerField()
+    controller_lease_digest = models.CharField(max_length=71)
+    recorded_at = models.DateTimeField(auto_now_add=True)
+    reconstructed = models.BooleanField(default=False)
+
+    class Meta:
+        constraints = [models.CheckConstraint(condition=models.Q(controller_epoch__gt=0),
+            name="environment_release_epoch_positive")]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValueError("environment_release_immutable")
         return super().save(*args, **kwargs)
 
 
@@ -1840,7 +1888,7 @@ class AgentWorkReturn(models.Model):
 
     def save(self, *args, **kwargs):
         require_enum("AgentWorkReturn.fact_kind", self.fact_kind,
-            {"sessionTerminal", "preAdmissionCancellation", "lifecycleFailure"})
+            {"sessionTerminal", "preAdmissionCancellation", "preAdmissionFailure", "lifecycleFailure"})
         if self.work.operation.agentRunId != self.child_run_id or self.child_run.session_id != self.work_id:
             raise ValueError("agent_work_return_identity_mismatch")
         if not self._state.adding:

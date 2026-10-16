@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 pub mod external_context;
 pub mod host_event_input;
 pub mod manager;
+pub mod recovery;
 pub mod reliability;
 pub mod state;
 pub mod store;
@@ -338,6 +339,8 @@ pub struct AgentRunSessionState {
     committed_tool_result_ids: HashSet<String>,
     committed_phase_turn_ids: HashSet<String>,
     agent_composition_digest: Option<String>,
+    compaction_request_identities: HashMap<String, (String, String)>,
+    compaction_record_digests: HashMap<String, String>,
     provider_usages: HashMap<String, Value>,
     committed_supplement_ids: HashSet<String>,
     host_event_inputs: HashMap<String, (String, host_event_input::HostEventInput)>,
@@ -382,6 +385,8 @@ impl AgentRunSessionState {
             committed_tool_result_ids: HashSet::new(),
             committed_phase_turn_ids: HashSet::new(),
             agent_composition_digest: None,
+            compaction_request_identities: HashMap::new(),
+            compaction_record_digests: HashMap::new(),
             provider_usages: HashMap::new(),
             committed_supplement_ids: HashSet::new(),
             host_event_inputs: HashMap::new(),
@@ -400,6 +405,34 @@ impl AgentRunSessionState {
             last_execution_ended_at_ms: None,
             latest_recovery_checkpoint_id: None,
         })
+    }
+
+    pub(crate) fn compaction_source_matches(
+        &self,
+        run: &str,
+        request: &str,
+        turn: &str,
+        prompt: &str,
+    ) -> bool {
+        self.agent_run_id == run
+            && self
+                .compaction_request_identities
+                .get(request)
+                .is_some_and(|identity| identity.0 == turn && identity.1 == prompt)
+    }
+    pub(crate) fn has_identical_compaction_record(
+        &self,
+        event: &SessionLogRecord,
+    ) -> Result<bool, String> {
+        let Some(existing) = self.compaction_record_digests.get(&event.event_id) else {
+            return Ok(false);
+        };
+        if existing
+            != &crate::runtime::canonical_json::sha256("centaeris.compaction_record.v1", event)?
+        {
+            return Err("committed compaction event identity conflict".into());
+        }
+        Ok(true)
     }
 
     pub fn session_id(&self) -> &str {
@@ -922,14 +955,22 @@ impl AgentRunSessionState {
         &mut self,
         checkpoint: &CheckpointRecord,
     ) -> Result<SequencedSessionRecord, String> {
+        self.committed_checkpoint_ref(&crate::runtime::TurnCheckpointRef::from(checkpoint))
+    }
+
+    /// Publish an already committed checkpoint's exact content identity without
+    /// keeping its body alive in a Run's accumulated result.
+    pub fn committed_checkpoint_ref(
+        &mut self,
+        checkpoint: &crate::runtime::TurnCheckpointRef,
+    ) -> Result<SequencedSessionRecord, String> {
         if checkpoint.session_id != self.session_id {
             return Err("checkpoint Session identity mismatch".to_string());
         }
-        let payload_bytes = checkpoint.payload_json.as_bytes();
-        if payload_bytes.is_empty() {
+        if checkpoint.payload_byte_length == 0 {
             return Err("checkpoint payload_json is required".to_string());
         }
-        let payload_sha256 = format!("sha256:{:x}", Sha256::digest(payload_bytes));
+        let payload_sha256 = &checkpoint.payload_sha256;
         self.record(canonical_session_record(
             format!(
                 "evt:checkpoint_ref:{}:{}",
@@ -946,7 +987,7 @@ impl AgentRunSessionState {
                 "objectRef": format!("checkpoint-object:{payload_sha256}"),
                 "status": checkpoint.status,
                 "payloadSha256": payload_sha256,
-                "payloadByteLength": payload_bytes.len(),
+                "payloadByteLength": checkpoint.payload_byte_length,
                 "updatedAtMs": checkpoint.updated_at_ms,
             }),
         )?)
@@ -1129,6 +1170,57 @@ impl AgentRunSessionState {
                     .ok_or_else(|| "phase event turn is missing".to_string())?;
                 if !self.committed_phase_turn_ids.insert(turn_id.to_string()) {
                     return Err(format!("duplicate committed phase event: {turn_id}"));
+                }
+            }
+            SessionRecordType::Compaction => {
+                let digest = crate::runtime::canonical_json::sha256(
+                    "centaeris.compaction_record.v1",
+                    event,
+                )?;
+                if let Some(existing) = self
+                    .compaction_record_digests
+                    .insert(event.event_id.clone(), digest.clone())
+                {
+                    if existing != digest {
+                        return Err("committed compaction event identity conflict".into());
+                    }
+                }
+            }
+            SessionRecordType::ModelRequestStarted
+                if state_payload_string(&event.payload, "purpose")? == "compaction" =>
+            {
+                let request_id = state_payload_string(&event.payload, "requestId")?;
+                let observations = event.payload["observations"]
+                    .as_array()
+                    .ok_or("compaction observations missing")?;
+                let prompts = observations
+                    .iter()
+                    .filter(|observation| observation["kind"] == "compaction_prompt")
+                    .collect::<Vec<_>>();
+                if prompts.len() != 1 {
+                    return Err("compaction request prompt identity missing".into());
+                }
+                let text = prompts[0]
+                    .pointer("/message/content")
+                    .and_then(Value::as_str)
+                    .ok_or("compaction prompt content missing")?;
+                let identity = (
+                    event
+                        .turn_id
+                        .clone()
+                        .ok_or("compaction request turn missing")?,
+                    crate::runtime::canonical_json::sha256(
+                        "centaeris.compaction_prompt.v1",
+                        &text,
+                    )?,
+                );
+                if let Some(existing) = self
+                    .compaction_request_identities
+                    .insert(request_id.into(), identity.clone())
+                {
+                    if existing != identity {
+                        return Err("compaction request identity conflict".into());
+                    }
                 }
             }
             SessionRecordType::ModelRequestStarted
@@ -2293,19 +2385,30 @@ pub fn restore_runtime_snapshot_from_session_records(
     expected_session_id: &str,
     events: &[SessionLogRecord],
 ) -> Result<SessionStateSnapshot, String> {
-    let active = active_session_records(expected_session_id, events)?;
-    let projection = reduce_events(expected_session_id, active.iter())?;
+    let references = events.iter().collect::<Vec<_>>();
+    let inactive = active_tombstone_targets(expected_session_id, &references)?;
+    let mut recovery = recovery::SessionRecoveryAccumulator::new(expected_session_id);
+    for record in events.iter().filter(|record| {
+        record.event_type != SessionRecordType::Tombstone && !inactive.contains(&record.event_id)
+    }) {
+        recovery.push(record.clone())?;
+    }
+    Ok(recovery.finish()?.snapshot)
+}
+
+fn restore_active_runtime_snapshot(
+    expected_session_id: &str,
+    active: &[SessionLogRecord],
+    projection: &SessionProjection,
+    controls: &recovery::ModelControlFacts,
+    sources: &HashMap<String, crate::runtime::prompt_compaction_commit::CompactionSourceRequest>,
+    updated_at_ms: i64,
+) -> Result<SessionStateSnapshot, String> {
     let latest_request_index = active.iter().rposition(|event| {
         event.event_type == SessionRecordType::ModelRequestStarted
             && event.payload.get("purpose").and_then(Value::as_str) == Some("main")
     });
-    let mut snapshot = SessionStateSnapshot::new(
-        expected_session_id.to_string(),
-        active
-            .last()
-            .map(|event| event.created_at_ms)
-            .unwrap_or_default(),
-    );
+    let mut snapshot = SessionStateSnapshot::new(expected_session_id.to_string(), updated_at_ms);
 
     let tail_start = if let Some(request_index) = latest_request_index {
         let request = &active[request_index];
@@ -2360,7 +2463,7 @@ pub fn restore_runtime_snapshot_from_session_records(
             } else {
                 Vec::new()
             };
-            append_observed_model_message(&mut snapshot, message, created_at_ms, &projection)?;
+            append_observed_model_message(&mut snapshot, message, created_at_ms, projection)?;
             for call_id in missing_tool_result_ids {
                 let Some(result_event) = active[..request_index].iter().find(|event| {
                     event.event_type == SessionRecordType::ToolResult
@@ -2388,7 +2491,7 @@ pub fn restore_runtime_snapshot_from_session_records(
                         reasoning_content: None,
                     },
                     result_event.created_at_ms,
-                    &projection,
+                    projection,
                 )?;
             }
         }
@@ -2587,61 +2690,38 @@ pub fn restore_runtime_snapshot_from_session_records(
         &projection.host_event_owning_runs,
     )?;
     let current_request = latest_request_index.map(|index| &active[index]);
-    let mut current_input_ids = Vec::new();
-    for record in &active {
-        if record.event_type != SessionRecordType::ModelRequestStarted
-            || record.payload.get("purpose").and_then(Value::as_str) != Some("main")
-        {
-            continue;
-        }
-        let observations = serde_json::from_value::<Vec<ModelObservationV1>>(
-            record.payload["observations"].clone(),
-        )
-        .map_err(|error| format!("decode Session model observations failed: {error}"))?;
-        for observation in observations {
-            if let ModelObservationV1::RequiredCompletionDelivery { ref state } = observation {
-                crate::runtime::completion_delivery::restore_observation(
-                    &mut snapshot,
-                    state,
-                    required_event_agent_run_id(record)?.as_str(),
-                    record
-                        .turn_id
-                        .as_deref()
-                        .ok_or("completion_tool_delivery_observation_turn_missing")?,
-                )?;
-            }
-            if let ModelObservationV1::InputUptake { input_ids } = observation {
-                if current_request.is_some_and(|current| {
-                    current.agent_run_id == record.agent_run_id && current.turn_id == record.turn_id
-                }) {
-                    for id in &input_ids {
-                        if !current_input_ids.contains(id) {
-                            current_input_ids.push(id.clone());
-                        }
-                    }
-                }
-                turn_input::recovery::record_committed(
-                    &mut snapshot,
-                    required_event_agent_run_id(record)?.as_str(),
-                    &input_ids,
-                )?;
-            }
-        }
-    }
-    if let Some(current) = current_request {
-        // A retry can have no new uptake while retaining its original membership.
-        // Other turns contribute Read history, never the current preparation.
-        turn_input::recovery::freeze_prepared(
-            &mut snapshot,
-            required_event_agent_run_id(current)?.as_str(),
-            current
-                .turn_id
-                .as_deref()
-                .ok_or("model request turn is missing")?,
-            &current_input_ids,
-        )?;
-    }
+    controls.restore_into(&mut snapshot, current_request)?;
     snapshot.context_window = snapshot.messages.clone();
+    if let Some(main_index) = latest_request_index {
+        let main = &active[main_index];
+        let observations = main.payload["observations"]
+            .as_array()
+            .ok_or("restored main observations missing")?;
+        if let Some((_, compaction)) =
+            active[..main_index]
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, event)| {
+                    event.event_type == SessionRecordType::Compaction
+                        && event.agent_run_id == main.agent_run_id
+                        && observations.iter().any(|observation| {
+                            observation["kind"] == "message"
+                                && observation["message"]["role"] == "system"
+                                && observation["message"]["messageId"]
+                                    == event.payload["summaryMessageId"]
+                                && observation["message"]["content"]
+                                    == event.payload["summaryMarkdown"]
+                        })
+                })
+        {
+            if let Some(source) = sources.get(&compaction.event_id) {
+                crate::runtime::prompt_compaction_commit::record_reconstructed_main_proof_from_source(
+                    &mut snapshot, main, compaction, source.clone(),
+                )?;
+            }
+        }
+    }
     Ok(snapshot)
 }
 
@@ -5200,6 +5280,7 @@ fn validate_non_empty_string_array(
 #[cfg(test)]
 mod tests {
     mod reasoning;
+    mod recovery;
     use serde_json::json;
 
     use super::*;
@@ -6728,6 +6809,46 @@ mod tests {
                 .is_none(),
             "a checkpoint used by a started execution is permanently excluded"
         );
+    }
+
+    #[test]
+    fn checkpoint_reference_preserves_body_identity_without_copying_body_into_event() {
+        let mut state = AgentRunSessionState::new("session-1", "agent-run-1").unwrap();
+        let payload = "{\"unresolved\":\"original-tool-identity\"}".repeat(1024);
+        let expected_digest = format!("sha256:{:x}", Sha256::digest(payload.as_bytes()));
+        let expected_len = payload.len();
+        let checkpoint = CheckpointRecord {
+            checkpoint_id: "checkpoint-original".into(),
+            kind: crate::runtime::contracts::CheckpointKindV1::Recovery,
+            session_id: "session-1".into(),
+            turn_id: "turn-original".into(),
+            status: "committed".into(),
+            done_reason: None,
+            updated_at_ms: 123,
+            payload_json: payload,
+        };
+        let compact = crate::runtime::TurnCheckpointRef::from(&checkpoint);
+        let record = state.checkpoint_ref(&checkpoint).unwrap();
+        drop(checkpoint);
+        let compact_record = AgentRunSessionState::new("session-1", "agent-run-1")
+            .unwrap()
+            .committed_checkpoint_ref(&compact)
+            .unwrap();
+        assert_eq!(record, compact_record);
+        assert_eq!(record.event.turn_id.as_deref(), Some("turn-original"));
+        assert_eq!(record.event.agent_run_id.as_deref(), Some("agent-run-1"));
+        assert_eq!(
+            record.event.payload,
+            serde_json::json!({
+                "checkpointId": "checkpoint-original", "kind": "recovery",
+                "objectRef": format!("checkpoint-object:{expected_digest}"),
+                "status": "committed", "payloadSha256": expected_digest,
+                "payloadByteLength": expected_len, "updatedAtMs": 123,
+            })
+        );
+        let mut replay = AgentRunSessionState::new("session-1", "agent-run-1").unwrap();
+        replay.restore(record).unwrap();
+        assert!(replay.has_checkpoint("checkpoint-original"));
     }
 
     #[test]

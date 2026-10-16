@@ -18,13 +18,14 @@ import subprocess
 import sys
 import threading
 import time
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 from urllib.parse import quote
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import close_old_connections, connection, transaction
-from django.test import LiveServerTestCase, override_settings
+from django.test import LiveServerTestCase, SimpleTestCase, override_settings
 
 from .agent_run_authorization_factory import create_agent_run_authorization
 from .model_adapter.common import fake_tool_call, zero_usage
@@ -389,13 +390,13 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
         original_execute = worker.execute_claimed_job
         original_step = worker.agent_run_step_request
 
-        def request(path, body=None):
+        def request(path, body=None, **kwargs):
             nonlocal lifecycle_claims
             if path == "/internal/jobs/claim" and body["jobKind"] == "agent_run.lifecycle":
                 lifecycle_claims += 1
                 self.assertLessEqual(lifecycle_claims, 3, "finite child claim budget exhausted")
                 try:
-                    return original_request(path, body)
+                    return original_request(path, body, **kwargs)
                 except worker.DependencyUnavailable as error:
                     if str(error) == "execution_claim_busy":
                         self.assertEqual(error.http_status, 503)
@@ -403,7 +404,7 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
                             self.child_claim_busy.append(slot)
                         busy_seen.set()
                     raise
-            return original_request(path, body) if body is not None else original_request(path)
+            return original_request(path, body, **kwargs) if body is not None else original_request(path, **kwargs)
 
         def step(body):
             run = children[body["agentRunStart"]["agentRunId"]]
@@ -593,3 +594,52 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
                 "coordinatorRunIds": [first.coordinator_run_id, second.coordinator_run_id],
                 "noticeIds": [first.notice_id, second.notice_id], "sharedCoordinatorRun": True,
                 "attempts": AgentWorkConsumeAttempt.objects.count(), "modelPurpose": "main", "modelLoopIndex": 0}))
+
+
+class ParallelChildWorkerFixtureTests(SimpleTestCase):
+    def test_parallel_worker_preserves_heartbeat_deadline_and_completes_handoff(self):
+        self.live_server_url = "http://api.invalid"
+        worker = NativeConsumptionProductionTests.load_worker(self, "http://runtime.invalid")
+        run = SimpleNamespace(session_id="child-session", status="queued", refresh_from_db=Mock(),
+                              authorization=SimpleNamespace(digest="child-digest"))
+        job = {"jobId": "child-job", "jobKind": "agent_run.lifecycle", "status": "leased",
+               "sessionId": run.session_id}
+        owner = "child-owner"
+        state = {"status": "leased"}
+        heartbeats = []
+        self.parallel_mutex = threading.Lock()
+        self.child_leases = {}
+
+        def request(path, body=None, *, timeout=None):
+            if path == "/internal/jobs/heartbeat":
+                self.assertEqual((body["jobId"], body["leaseOwner"]), (job["jobId"], owner))
+                self.assertIsNotNone(timeout)
+                self.assertGreater(timeout, 0)
+                self.assertLessEqual(timeout, worker.CONTROL_HTTP_TIMEOUT_SECONDS)
+                heartbeats.append(timeout)
+                return {"ok": True}
+            if path == "/internal/jobs/complete":
+                state["status"] = "succeeded"
+                return {"ok": True}
+            self.assertEqual(path, "/internal/jobs/" + job["jobId"])
+            return {"job": {"status": state["status"], "leaseOwner": owner}}
+
+        def execute(claimed, lease_owner):
+            with worker.lease_heartbeats(claimed["jobId"], lease_owner) as healthy:
+                healthy()
+                worker.complete_job(claimed["jobId"], lease_owner, [])
+            run.status = "completed"
+
+        def loop(slot, stopped):
+            worker.execute_claimed_job(job, owner)
+            self.assertTrue(stopped.is_set())
+
+        with patch.object(worker, "runtime_request", side_effect=request), \
+                patch.object(worker, "execute_claimed_job", side_effect=execute), \
+                patch.object(worker, "run_job_loop", side_effect=loop), \
+                patch.object(worker, "agent_run_lifecycle_binding", return_value=("child-run", "child-digest")):
+            NativeConsumptionProductionTests.execute_parallel_child(
+                self, worker, 0, {"child-run": run}, threading.Event())
+        self.assertEqual(len(heartbeats), 1)
+        self.assertEqual(self.child_leases, {"child-run": owner})
+        self.assertEqual((run.status, state["status"]), ("completed", "succeeded"))

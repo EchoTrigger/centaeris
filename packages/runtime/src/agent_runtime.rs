@@ -42,7 +42,7 @@ use centaeris_core::runtime::{
     persist_subagent_result_projection_from_scheduler_events_async, AgentRunRequest,
     AgentRunResumeIntent, AgentRunStop, AgentRuntime, AgentRuntimeConfig,
     AnswerNowEnqueueDisposition, ModelRequestPurposeV1, QueryLifecycleHookRuntime,
-    ToolConcurrencyCoordinator, ToolSafePoint, TurnControl, TurnStepResult, TurnUpdate,
+    ToolConcurrencyCoordinator, ToolSafePoint, TurnCommitReceipt, TurnControl, TurnUpdate,
 };
 use centaeris_core::session::manager::SessionManager;
 use centaeris_core::session::store::RuntimeStoreActor;
@@ -1636,10 +1636,10 @@ fn persist_agent_run_failed(
 fn persist_agent_checkpoint_refs(
     session_id: &str,
     agent_run_id: &str,
-    turn_responses: &[TurnStepResult],
+    turn_receipts: &[TurnCommitReceipt],
 ) -> Result<(), String> {
-    for turn_response in turn_responses {
-        let Some(checkpoint) = turn_response.checkpoint.as_ref() else {
+    for receipt in turn_receipts {
+        let Some(checkpoint) = receipt.checkpoint_ref.as_ref() else {
             continue;
         };
         if checkpoint.session_id != session_id {
@@ -1648,7 +1648,7 @@ fn persist_agent_checkpoint_refs(
                 checkpoint.session_id
             ));
         }
-        message_log::append_checkpoint_ref(checkpoint, agent_run_id)?;
+        message_log::append_committed_checkpoint_ref(checkpoint, agent_run_id)?;
     }
     Ok(())
 }
@@ -2144,10 +2144,10 @@ fn wait_checkpoint_turn_id(
     done_reason: &str,
 ) -> Result<String, String> {
     response
-        .turn_responses
-        .iter()
-        .rev()
-        .filter_map(|step| step.checkpoint.as_ref())
+        .last_turn
+        .as_ref()
+        .and_then(|step| step.checkpoint.as_ref())
+        .into_iter()
         .find(|checkpoint| checkpoint.done_reason.as_deref() == Some(done_reason))
         .map(|checkpoint| checkpoint.turn_id.clone())
         .ok_or_else(|| {
@@ -2163,10 +2163,10 @@ fn runtime_job_wait_checkpoint(
     response: &centaeris_core::runtime::AgentRunResult,
 ) -> Result<(String, RuntimeAwaitJobCheckpointV1), String> {
     let step = response
-        .turn_responses
-        .iter()
-        .rev()
-        .filter_map(|step| step.checkpoint.as_ref())
+        .last_turn
+        .as_ref()
+        .and_then(|step| step.checkpoint.as_ref())
+        .into_iter()
         .find(|checkpoint| checkpoint.done_reason.as_deref() == Some("runtime_job"))
         .ok_or_else(|| "runtime_job_wait response missing runtime_job checkpoint".to_string())?;
     let checkpoint =
@@ -2504,7 +2504,7 @@ async fn run_session_agent_run(
             persist_agent_checkpoint_refs(
                 session_id.as_str(),
                 agent_run_id.as_str(),
-                response.turn_responses.as_slice(),
+                response.turn_receipts.as_slice(),
             )?;
 
             match &response.stop {

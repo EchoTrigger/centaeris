@@ -651,7 +651,13 @@ async fn query_loop_host_event_does_not_resume_another_input_and_recovers_origin
     assert!(error.contains("host_event_input_cannot_resume_unrelated_wait"));
     assert_eq!(store.state().unwrap().snapshots, before);
     assert_eq!(model.request_count.load(Ordering::SeqCst), 1);
-    let checkpoint = waiting.turn_responses[0].checkpoint.as_ref().unwrap();
+    let checkpoint = waiting
+        .last_turn
+        .as_ref()
+        .unwrap()
+        .checkpoint
+        .as_ref()
+        .unwrap();
     let wire: Value = serde_json::from_str(&checkpoint.payload_json).unwrap();
     assert!(wire.get("initialInput").is_none());
     assert!(wire.get("origin").is_none());
@@ -875,7 +881,10 @@ async fn assert_host_event_cannot_resume_another_runs_wait(explicit_resume: bool
         .unwrap();
     assert_eq!(waiting.stop, AgentRunStop::RuntimeJobWait);
     let checkpoint: RuntimeAwaitJobCheckpointV1 = serde_json::from_str(
-        &waiting.turn_responses[0]
+        &waiting
+            .last_turn
+            .as_ref()
+            .unwrap()
             .checkpoint
             .as_ref()
             .unwrap()
@@ -1345,14 +1354,20 @@ async fn query_loop_host_event_actual_compaction_authority_rebuild_recovers_runt
     // Wait routing stays in the existing persisted snapshot metadata. Restore
     // message origin from authoritative records, retaining that unchanged state.
     let persisted_wait_snapshot: SessionStateSnapshot = serde_json::from_str(
-        &serde_json::to_string(&waiting.turn_responses[0].session_snapshot).unwrap(),
+        &serde_json::to_string(&waiting.last_turn.as_ref().unwrap().session_snapshot).unwrap(),
     )
     .unwrap();
     restored.metadata = persisted_wait_snapshot.metadata;
     assert!(restored
         .metadata
         .contains_key(RUNTIME_PENDING_TOOL_BATCH_META_KEY));
-    let checkpoint_before = waiting.turn_responses[0].checkpoint.as_ref().unwrap();
+    let checkpoint_before = waiting
+        .last_turn
+        .as_ref()
+        .unwrap()
+        .checkpoint
+        .as_ref()
+        .unwrap();
     let checkpoint: RuntimeAwaitJobCheckpointV1 =
         serde_json::from_str(&checkpoint_before.payload_json).unwrap();
     complete_runtime_wait_test_job(&store, checkpoint.waits[0].job_id.clone(), session_id);

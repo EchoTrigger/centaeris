@@ -1,3 +1,4 @@
+use super::contracts::CheckpointKindV1;
 use super::*;
 use crate::model::prepared_prompt::{
     estimate_text_tokens, ModelInputImageObservationV1, ModelMessageV1, PreparedPromptV1,
@@ -851,6 +852,8 @@ pub struct ProcessTurnRequest {
 
 #[derive(Debug, Clone)]
 pub struct TurnStepResult {
+    /// Nonempty assistant text produced by this turn, never recovered from history.
+    pub current_assistant_reply: Option<String>,
     pub turn_id: String,
     pub continuation: QueryContinuation,
     pub checkpoint: Option<CheckpointRecord>,
@@ -962,6 +965,8 @@ pub struct ModelRequestStartedV1 {
     pub(super) max_output_tokens: u32,
     pub(super) observations: Vec<ModelObservationV1>,
     pub(super) agent_composition: crate::extension::composition::ResolvedAgentCompositionV1,
+    pub(super) prompt_compaction:
+        Option<Box<super::prompt_compaction_commit::PreparedCompactionCommit>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1172,6 +1177,7 @@ impl ModelRequestStartedV1 {
             max_output_tokens: request.prepared_prompt.max_output_tokens,
             observations,
             agent_composition,
+            prompt_compaction: None,
         })
     }
 
@@ -1398,6 +1404,7 @@ pub struct AgentRunRequest {
 
 #[derive(Debug, Clone)]
 pub struct GenerateDriverRequest {
+    pub prompt_compaction: Option<super::prompt_compaction_commit::PreparedCompactionCommit>,
     pub session_id: String,
     pub turn_id: String,
     pub loop_index: u32,
@@ -1551,6 +1558,7 @@ pub type GenerateDriverFuture<'a, TValue> =
 
 #[derive(Debug)]
 pub struct GenerateDriverPromptCompactionOutcome {
+    pub source_request: Option<super::prompt_compaction_commit::CompactionSourceRequest>,
     pub result: Result<String, PromptCompactionError>,
     pub resource_usage: AgentRunResourceUsageV1,
 }
@@ -1559,6 +1567,9 @@ pub type GenerateDriverPromptCompactionFuture<'a> =
     Pin<Box<dyn Future<Output = Option<GenerateDriverPromptCompactionOutcome>> + Send + 'a>>;
 
 pub trait AsyncGenerateDriver: Send + Sync {
+    fn durable_agent_run_id(&self) -> Option<&str> {
+        None
+    }
     fn generate_next_async<'a>(
         &'a self,
         req: &'a GenerateDriverRequest,
@@ -1583,6 +1594,8 @@ pub trait AsyncGenerateDriver: Send + Sync {
 pub(super) struct AsyncGenerateDriverPromptCompactionCandidateProducer<'a, D: AsyncGenerateDriver> {
     pub(super) driver: &'a D,
     pub(super) resource_usage: Mutex<AgentRunResourceUsageV1>,
+    pub(super) source_request:
+        Mutex<Option<super::prompt_compaction_commit::CompactionSourceRequest>>,
 }
 
 impl<D: AsyncGenerateDriver> AsyncModelCompactionSummaryCandidateProducer
@@ -1598,6 +1611,7 @@ impl<D: AsyncGenerateDriver> AsyncModelCompactionSummaryCandidateProducer
                 .generate_prompt_compaction_summary_async(request)
                 .await
                 .unwrap_or_else(|| GenerateDriverPromptCompactionOutcome {
+                    source_request: None,
                     result: Err(PromptCompactionError::provider(
                         "async generate driver does not support model prompt compaction",
                     )),
@@ -1611,23 +1625,52 @@ impl<D: AsyncGenerateDriver> AsyncModelCompactionSummaryCandidateProducer
                     )
                 })?
                 .merge(&outcome.resource_usage);
+            *self.source_request.lock().map_err(|_| {
+                PromptCompactionError::durability("compaction source identity lock poisoned")
+            })? = outcome.source_request;
             outcome.result
         })
     }
 }
 
+/// Identity-only evidence retained after a short-lived completed turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnCheckpointRef {
+    pub checkpoint_id: String,
+    pub kind: CheckpointKindV1,
+    pub session_id: String,
+    pub turn_id: String,
+    pub status: String,
+    pub done_reason: Option<String>,
+    pub updated_at_ms: i64,
+    pub payload_sha256: String,
+    pub payload_byte_length: u64,
+}
+
+/// Identities of a processed turn whose required persistence callbacks returned.
+/// Never owns a Session snapshot, tool arguments, or result body, and does not
+/// acknowledge delivery to the consuming host.
+#[derive(Debug, Clone)]
+pub struct TurnCommitReceipt {
+    pub turn_id: String,
+    pub continuation: QueryContinuation,
+    pub provider_tool_call_ids: Vec<String>,
+    pub tool_result_ids: Vec<String>,
+    pub checkpoint_ref: Option<TurnCheckpointRef>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentRunResult {
-    pub turn_responses: Vec<TurnStepResult>,
+    /// Nonempty reply from the final effective turn; never an earlier Session message.
+    pub final_reply: Option<String>,
+    pub turn_receipts: Vec<TurnCommitReceipt>,
+    pub last_turn: Option<TurnStepResult>,
     pub stop: AgentRunStop,
 }
 
 impl AgentRunResult {
-    pub(super) fn new(turn_responses: Vec<TurnStepResult>, stop: AgentRunStop) -> Self {
-        Self {
-            turn_responses,
-            stop,
-        }
+    pub(super) fn new(turn_responses: RunResultCollector, stop: AgentRunStop) -> Self {
+        turn_responses.into_result(stop)
     }
 }
 

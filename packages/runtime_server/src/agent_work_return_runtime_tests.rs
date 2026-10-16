@@ -155,7 +155,9 @@ fn django_committed_work_return_facts() {
                             None,
                             &text,
                             &crate::AgentRunResult {
-                                turn_responses: vec![],
+                                turn_receipts: vec![],
+                                last_turn: None,
+                                final_reply: None,
                                 stop: crate::AgentRunStop::Finalized,
                             },
                             &mut sequence,

@@ -1,3 +1,4 @@
+mod prepared_recovery;
 use super::tool_projection::{build_generate_tool_contracts, build_generate_tool_projection};
 use super::*;
 
