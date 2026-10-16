@@ -1,11 +1,23 @@
 """Runtime integration fixtures restore their isolated PostgreSQL namespace."""
 from django.db import connection, DatabaseError
+from django.contrib.contenttypes.models import ContentType
 from django.test import TransactionTestCase
 
 from .test_native_consumption_runtime import isolate_runtime_schema
 
 
 class RuntimeSchemaCleanupTests(TransactionTestCase):
+    serialized_rollback = True
+
+    def test_cleanup_allows_the_next_serialized_initial_data_restore(self):
+        initial_types = list(ContentType.objects.order_by("pk").values_list("pk", "app_label", "model"))
+        self.assertTrue(initial_types)
+        initial_data = connection.creation.serialize_db_to_string()
+        self._fixture_teardown()
+        connection.creation.deserialize_db_from_string(initial_data)
+        self.assertEqual(list(ContentType.objects.order_by("pk").values_list("pk", "app_label", "model")),
+                         initial_types)
+
     def setUp(self):
         self.assertEqual(connection.vendor, "postgresql")
         isolate_runtime_schema(self)
