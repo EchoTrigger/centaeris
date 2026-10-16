@@ -1,0 +1,7 @@
+scenario,finalIntegratedStatus,source
+more-than256-inputs,unrun,data/long-run-1000-final/summary.json#unrun
+near-journal-capacity,unrun,data/long-run-1000-final/summary.json#unrun
+concurrent-run-retirement,unrun,data/long-run-1000-final/summary.json#unrun
+revoked-user-maintenance,unrun,data/long-run-1000-final/summary.json#unrun
+unobservable-docker,unrun,data/long-run-1000-final/summary.json#unrun
+descendant-task-isolation,unrun,data/long-run-1000-final/summary.json#unrun

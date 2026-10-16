@@ -1,0 +1,7 @@
+{
+  "schema": "runtime.environment.retire.result.v1",
+  "operationId": "retire-75507c1b1a8b47debe8519b4772ed6ef",
+  "environmentId": "environment_6eaabd363f0a4b0380326e86d85451f7",
+  "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+  "status": "destroyed"
+}

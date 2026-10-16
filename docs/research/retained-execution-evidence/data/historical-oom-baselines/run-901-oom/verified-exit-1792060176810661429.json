@@ -1,0 +1,43 @@
+{
+  "status": "exact-instance-destroyed-accounted",
+  "containerAbsent": true,
+  "residentHoldingCount": 0,
+  "historyPreserved": true,
+  "operationId": "retire-oom901-61b3bd4-ddb40820",
+  "environmentId": "environment_7edb35cf621043e299d37c7599a1d265",
+  "instanceId": "instance_ddb40820ca645ebccb3fd82c96155e07d7212019206048d0db553805ebe9eb27",
+  "hostId": "f999e2c5-0269-42f6-8820-f1d080a0f6ed",
+  "oldController": [
+    "agent_run_c7e3d07791ce4563aca6f2dfd0b4cc7d",
+    4,
+    "execute",
+    false
+  ],
+  "postMaintenanceController": [
+    "agent_run_c7e3d07791ce4563aca6f2dfd0b4cc7d",
+    4,
+    "execute",
+    false
+  ],
+  "controllerExclusionAuthority": "durable environment_retirements destroyed barrier; no claim of controller epoch increment",
+  "runStatusesPreserved": [
+    [
+      "agent_run_0a6fddcf149844efb47f7cf0e15dead6",
+      "completed"
+    ],
+    [
+      "agent_run_c7e3d07791ce4563aca6f2dfd0b4cc7d",
+      "running"
+    ]
+  ],
+  "failedLongRunAccepted": false,
+  "runtimeMemoryBytes": 536870912,
+  "runtimeStartedAt": "2026-10-15T10:29:35.156539175Z",
+  "responseReplay": {
+    "schema": "runtime.environment.retire.result.v1",
+    "operationId": "retire-oom901-61b3bd4-ddb40820",
+    "environmentId": "environment_7edb35cf621043e299d37c7599a1d265",
+    "instanceId": "instance_ddb40820ca645ebccb3fd82c96155e07d7212019206048d0db553805ebe9eb27",
+    "status": "destroyed"
+  }
+}

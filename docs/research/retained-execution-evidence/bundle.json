@@ -1,0 +1,67 @@
+{
+  "schema": "retained.research.evidence.v1",
+  "status": "draftResearchWithOpenMergeConditions",
+  "implementationPR": "https://github.com/EchoTrigger/centaeris/pull/36",
+  "implementationHead": "25d3a95087a7662eb67610b235440a0b6c6a8264",
+  "implementationTree": "bfaba9fd1eb2868013ac29824ef1175eeef22c6f",
+  "productEvidenceSource": "735b1c2ec651c095f8efb3dccfafb948f2e881c6",
+  "productEvidenceTree": "902e818c1729810937824a0331f9f43567831fcd",
+  "runtimeBinaries": {
+    "runtime_server": "e83196c22b0a0940a9f25c1efe7a6083a827c1ddae0ecfd52640e75f40f1a679",
+    "execution_agent": "b18fca65e18afcabafdb6592d5e693defef8e92f0ada517cfac1551f4642b4f6",
+    "environment_task_service": "748055dfe69cd5b919969d74aa1c7353682f780940bf7b201a2cce50dd2b5546"
+  },
+  "runtimeMemoryLimitBytes": 536870912,
+  "modelContextTokens": 131072,
+  "physicalLongChain": "passed",
+  "crossRunChain": "passed",
+  "strictMemoryGate": "incomplete-or-failed",
+  "pendingIntegratedScenarios": [
+    "more-than256-inputs",
+    "near-journal-capacity",
+    "concurrent-run-retirement",
+    "revoked-user-maintenance",
+    "unobservable-docker",
+    "descendant-task-isolation"
+  ],
+  "experiments": [
+    {
+      "id": "final-long",
+      "classification": "physicalChainPassedStrictMemoryOpen",
+      "commands": 1000
+    },
+    {
+      "id": "final-cross",
+      "classification": "physicalChainPassed",
+      "uses": 100
+    },
+    {
+      "id": "run-901-oom",
+      "classification": "historicalFailureBaseline",
+      "reportedCommands": 901,
+      "availability": "OOM and cleanup snapshots; no memory time series in this export"
+    },
+    {
+      "id": "run-708-c0349f0-oom",
+      "classification": "historicalFailureBaseline",
+      "commands": 708
+    },
+    {
+      "id": "run-708-cb238d0-oom",
+      "classification": "historicalFailureBaseline",
+      "commands": 708
+    },
+    {
+      "id": "run-05555f5-stopped",
+      "classification": "stoppedNonPass",
+      "availability": "interim observation, memory series and exact retirement; approximate 805 count is not promoted to an exact measured value"
+    }
+  ],
+  "excluded": [
+    "credentials and environment configuration",
+    "raw shell command argv",
+    "database dumps",
+    "large binaries and synthetic payloads"
+  ],
+  "sourceComparison": "Recorded digests were computed from git show of implementationHead; verify.py --source-root compares against an available exact checkout."
+}

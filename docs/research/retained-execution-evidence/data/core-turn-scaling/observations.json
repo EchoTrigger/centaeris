@@ -1,0 +1,38 @@
+[
+  {
+    "receiptIdentityBytes": 13560,
+    "retainedFullSnapshots": 1,
+    "retainedSnapshotSerializedBytes": 6716,
+    "rounds": 100
+  },
+  {
+    "retainedCurrentToolAndCheckpointContentBytes": 6155,
+    "retainedToolCallCount": 1,
+    "retainedToolResultCount": 1,
+    "rounds": 100
+  },
+  {
+    "receiptIdentityBytes": 140465,
+    "retainedFullSnapshots": 1,
+    "retainedSnapshotSerializedBytes": 64318,
+    "rounds": 1000
+  },
+  {
+    "retainedCurrentToolAndCheckpointContentBytes": 6155,
+    "retainedToolCallCount": 1,
+    "retainedToolResultCount": 1,
+    "rounds": 1000
+  },
+  {
+    "receiptIdentityBytes": 1454470,
+    "retainedFullSnapshots": 1,
+    "retainedSnapshotSerializedBytes": 640320,
+    "rounds": 10000
+  },
+  {
+    "retainedCurrentToolAndCheckpointContentBytes": 6155,
+    "retainedToolCallCount": 1,
+    "retainedToolResultCount": 1,
+    "rounds": 10000
+  }
+]

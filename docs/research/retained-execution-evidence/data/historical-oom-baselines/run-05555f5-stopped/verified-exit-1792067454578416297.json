@@ -1,0 +1,105 @@
+{
+  "status": "exact-instance-destroyed-accounted",
+  "containerAbsent": true,
+  "residentHoldingCount": 0,
+  "historyPreserved": true,
+  "operationId": "retire-compaction-failed-05555f5",
+  "environmentId": "environment_8faa5743b698443cbfc5dae6ead13ad1",
+  "instanceId": "instance_59cce078ed54ee1f838c22b0a510191c22626bea9f295ebb07d4fddfec25d965",
+  "hostId": "f999e2c5-0269-42f6-8820-f1d080a0f6ed",
+  "oldController": [
+    "agent_run_e8816532ce0a4915bd2f9ccc531bda0b",
+    3,
+    "execute",
+    false
+  ],
+  "postMaintenanceController": [
+    "agent_run_e8816532ce0a4915bd2f9ccc531bda0b",
+    3,
+    "execute",
+    false
+  ],
+  "controllerExclusionAuthority": "durable environment_retirements destroyed barrier; no claim of controller epoch increment",
+  "runStatusesPreserved": [
+    [
+      "agent_run_1b8df15581984b4fb6d11d21d42b8800",
+      "completed"
+    ],
+    [
+      "agent_run_e8816532ce0a4915bd2f9ccc531bda0b",
+      "running"
+    ]
+  ],
+  "failedLongRunAccepted": false,
+  "runtimeMemoryBytes": 536870912,
+  "runtimeStartedAt": "2026-10-15T11:16:58.633990703Z",
+  "responseReplay": {
+    "schema": "runtime.environment.retire.result.v1",
+    "operationId": "retire-compaction-failed-05555f5",
+    "environmentId": "environment_8faa5743b698443cbfc5dae6ead13ad1",
+    "instanceId": "instance_59cce078ed54ee1f838c22b0a510191c22626bea9f295ebb07d4fddfec25d965",
+    "status": "destroyed"
+  },
+  "compactionFailureCount": 0,
+  "failureBasis": "real compaction requests and triggered snapshot stats but zero canonical compaction identity; retained long tail not reduced",
+  "canonicalCompactionCount": 0,
+  "compactionRequestCount": 100,
+  "snapshotCompactionStats": {
+    "schema": "prompt_compact_v1",
+    "turn_id": "turn-18deb3d8ab5b8e5d-1-712",
+    "triggered": true,
+    "reason": "context_pressure_threshold_reached",
+    "decision": {
+      "schema": "prompt_compaction_decision_v1",
+      "action": "compact",
+      "strategy": "model",
+      "reason": "context_pressure_threshold_reached",
+      "pressure": {
+        "mainMaxOutputTokens": 4096,
+        "mainInputLimitTokens": 126976,
+        "estimatedInputTokens": 108009,
+        "triggerHeadroomTokens": 31744,
+        "triggerInputTokens": 95232,
+        "pressureBasisPoints": 8506
+      },
+      "boundary": {
+        "userReplayTokenTarget": 20000,
+        "selectedUserReplayMessages": 2,
+        "selectedUserReplayTokens": 56,
+        "liveTailMessages": 1613,
+        "liveTailTokenEstimate": 104771,
+        "splitIndex": 3,
+        "prefixTokenEstimate": 311,
+        "boundaryReason": "live_turn"
+      }
+    },
+    "before_message_count": 1616,
+    "after_message_count": 1616,
+    "before_token_estimate": 105082,
+    "after_token_estimate": 105016,
+    "compacted_message_count": 3,
+    "main_max_output_tokens": 4096,
+    "compaction_max_output_tokens": 4096,
+    "main_input_limit_tokens": 126976,
+    "compaction_input_limit_tokens": 126976,
+    "trigger_headroom_tokens": 31744,
+    "trigger_input_tokens": 95232,
+    "context_pressure_basis_points": 8506,
+    "prefix_token_estimate": 311,
+    "user_replay_token_target": 20000,
+    "selected_user_replay_messages": 2,
+    "selected_user_replay_tokens": 56,
+    "live_tail_messages": 1613,
+    "live_tail_token_estimate": 104771,
+    "boundary_reason": "live_turn",
+    "summary_max_tokens": 4096,
+    "summary_token_estimate": 189,
+    "recorded_at_ms": 1792067449038
+  },
+  "sourceRevision": "05555f50be772f1b4996baea39c60c89ce1a5b16",
+  "binarySha256": {
+    "runtime_server": "825b593dc006412a960a985f90d99c7c46c5890206a3a64582480b20cc8c4a49",
+    "execution_agent": "615710be25155632c80b3626a792787e0779b1a041725d4224b0f1f28c2a55c0",
+    "environment_task_service": "1e58fb8ec99f6caa6839a0658a5ed7b741f3a2fcf371fb4dea459d52d15a356c"
+  }
+}

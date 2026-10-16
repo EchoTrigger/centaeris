@@ -1,0 +1,9 @@
+{
+  "schema": "runtime.environment.retire.v1",
+  "operationId": "retire-75507c1b1a8b47debe8519b4772ed6ef",
+  "environmentId": "environment_6eaabd363f0a4b0380326e86d85451f7",
+  "instanceId": "instance_578ffaec23e70fc4c6eb93027d36affa2c47e095978c74d33ac25468b3459b5d",
+  "hostId": "d63ba114-5509-4927-8572-04785a93c8bc",
+  "expectedControllerEpoch": 200,
+  "acknowledgeTmpfsLoss": true
+}

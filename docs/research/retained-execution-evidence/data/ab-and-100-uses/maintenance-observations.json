@@ -1,0 +1,15 @@
+[
+  {
+    "sourceFile": "commands-retry-7cd1a5fdd7cb417a92de6090890e8d34.jsonl",
+    "commandSequence": 847,
+    "sourceRecordSha256": "d8b865fbd13c781e65fb96d4450512e3778d5372f5727fce618697f65624a520",
+    "commandSha256": "92a3c2522242e8d38b54adc7ade2665b3932feb62ceb072def519632394a276a",
+    "exitCode": 0,
+    "observation": {
+      "maintenanceReceiptCount": 1,
+      "status": "destroyed",
+      "residentHoldingCount": 0,
+      "historyPreserved": true
+    }
+  }
+]

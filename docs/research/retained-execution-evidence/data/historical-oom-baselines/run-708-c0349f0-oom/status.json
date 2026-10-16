@@ -1,0 +1,27 @@
+{
+  "sourceRevision": "c0349f058378e55cfca98e945bf2edec0e7a4e8f",
+  "status": "failed",
+  "completedCommands": 708,
+  "committedCompactionPresent": true,
+  "compactionFailureCount": 0,
+  "actualRuntimeRestart": true,
+  "postRestartBaselinePresent": false,
+  "firstPositiveOOMUtc": "2026-10-15T14:21:07.748715+00:00",
+  "preLongRestart": {
+    "completedThroughSample": 706,
+    "processAnonPeakBytes": 62062592,
+    "cgroupCurrentPeakBytes": 68177920
+  },
+  "postLongRestart": {
+    "completedThroughSample": 708,
+    "processAnonPeakBytes": 529371136,
+    "cgroupCurrentPeakBytes": 536866816
+  },
+  "driverFailure": "committed summary reuse after restart not proven within7200s",
+  "physicalCleanup": "not-confirmed; fixture and ledger preserved; dedicated daemon later stopped on its6h limit",
+  "crossRun100": "not-run",
+  "faultGate": "not-run",
+  "ci": "not-queried; maintainer provides result",
+  "rootCause": "unattributed restart/recovery memory growth; no independent heap profile yet",
+  "observedAtUtc": "2026-10-16T01:50:16.221133+00:00"
+}

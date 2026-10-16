@@ -1,0 +1,58 @@
+{
+  "schema": "retained.final.compaction.memory.v1",
+  "mode": "interim",
+  "status": "observation-only",
+  "timeUnixNs": 1792066623367259071,
+  "sourceRevision": "05555f50be772f1b4996baea39c60c89ce1a5b16",
+  "sourceTree": "312dea2db834bf4f2c3c48b13de4bf5a3fd5bd15",
+  "fixtureProject": "retainedaccept899f943a41",
+  "fixtureDirectory": "/data/retained-long-05555f5",
+  "daemonId": "f999e2c5-0269-42f6-8820-f1d080a0f6ed",
+  "binarySha256": {
+    "runtime_server": "825b593dc006412a960a985f90d99c7c46c5890206a3a64582480b20cc8c4a49",
+    "execution_agent": "615710be25155632c80b3626a792787e0779b1a041725d4224b0f1f28c2a55c0",
+    "environment_task_service": "1e58fb8ec99f6caa6839a0658a5ed7b741f3a2fcf371fb4dea459d52d15a356c"
+  },
+  "manifestSha256": "7f05288aa342a7acd71f4dfc6a983657c1d762ae228f19efddcff4bf9ee0565b",
+  "scriptsSha256": {
+    "check-final-compaction-memory.py": "2f462aa01eafad8759ce65a06f6ff8abf51038f4a943d974dc1c985a32b97bf4",
+    "collect-compaction-public-facts.py": "8e5fbbc4557846b17298e3e16fdfba9d8a5ad2f4efe5480acb18c68d668f472c",
+    "analyze-runtime-memory.py": "24a04aedb5f7c17ec0af436ca16db26b17f5d32a334a00562c64ba82bf9174ce"
+  },
+  "runtime": {
+    "containerId": "7b85c3a120a0d16cdd118a08a5c67ede5cb7b359fe2625ee0b93534d534d2e7d",
+    "startedAt": "2026-10-15T11:16:58.633990703Z",
+    "pid": 3112020,
+    "memoryLimitBytes": 536870912,
+    "OOMKilled": false,
+    "exitCode": 0
+  },
+  "facts": {
+    "agentRunId": "agent_run_e8816532ce0a4915bd2f9ccc531bda0b",
+    "sessionId": "session_4NJlHhrp6XgouoBb",
+    "environmentId": "environment_8faa5743b698443cbfc5dae6ead13ad1",
+    "controllerEpoch": 3,
+    "runStatus": "running",
+    "completedCommands": 722,
+    "attemptedCommands": 722,
+    "highestSessionSequence": 2906,
+    "recoveryCommand": null,
+    "completedCommandsAtPostRestartBaseline": null,
+    "mainRequests": 722,
+    "compactionRequests": 15,
+    "compactionCommits": 0,
+    "failureCount": 0,
+    "failureIdentities": [],
+    "summaries": [],
+    "terminalEventTypes": [],
+    "latestSnapshotBytes": 965866,
+    "snapshotMessageCount": 1500,
+    "snapshotContextCount": 1448
+  },
+  "limits": [
+    "Source coverage hashes/positions are acceptance-derived from durable observations and persisted tool-result identities, not new production fields.",
+    "No bodies, tokens, environment or provider configuration are exported.",
+    "Interim observations do not establish the complete physical chain or a memory result.",
+    "Complete sampled progress and no recorded OOM are not a mathematical memory bound or a curve-growth verdict; inspect per-process window peaks and slopes separately."
+  ]
+}

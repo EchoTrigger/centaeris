@@ -1,0 +1,131 @@
+{
+  "agentRunId": "agent_run_049de2fde3d9487496b3779b081890b5",
+  "sessionId": "session_XwSWVXXDNs1RwqHE",
+  "environmentId": "environment_ae19c52f734d4efcbde2e2737180c40a",
+  "instanceId": "instance_cd695c38a7c5eea5cd207ed44ba4af85eeb5076c42eaf85cd0d7e593590248ef",
+  "runStatus": "completed",
+  "runPrompt": "ACCEPTANCE_LONG_RUN",
+  "coreTerminal": {
+    "eventId": "evt:agent_run_completed:session_XwSWVXXDNs1RwqHE:agent_run_049de2fde3d9487496b3779b081890b5:1792161748861",
+    "type": "agent_run_completed",
+    "reasonType": null,
+    "atMs": 1792161748861
+  },
+  "coreTerminalCount": 1,
+  "releaseReceiptCount": 1,
+  "cleanupComplete": true,
+  "workloadObservation": {
+    "attemptedCommands": 1000,
+    "completedCommands": 1000,
+    "distinctCallIds": 1000,
+    "agentsInstructions": {
+      "mainRequestsWithAgentsInstructions": 1001,
+      "agentsFileSha256": "b4873e9ea2c12559c798ccc862ed31a5c5b0d67336da57b260d09953124bd0fc",
+      "observationManifestDigests": 1001
+    }
+  },
+  "historySuccessfulCommands": 0,
+  "historyAttemptedCommands": 0,
+  "successfulOrdinaryCommands": 1000,
+  "containerId": "8c314a17ce97129d1f4389290afdd189cb46f27072e09a59067d3edc7ed63914",
+  "resources": [
+    268435456,
+    1000,
+    128,
+    67108864
+  ],
+  "hostId": "a318490c-cfd3-4156-99d9-0bca6e7806ed",
+  "releaseReceiptId": "environment_release_1aac053d4d9a46f68db9ca9bba07301c",
+  "fence": {
+    "environmentInstanceId": "instance_cd695c38a7c5eea5cd207ed44ba4af85eeb5076c42eaf85cd0d7e593590248ef",
+    "controllerId": "agent_run_049de2fde3d9487496b3779b081890b5",
+    "controllerEpoch": 5,
+    "controllerPurpose": "cleanup"
+  },
+  "backgroundTaskIds": [
+    "task-c8bdfde1402282f2d8e96afca2e58794d29a6241d15babeb823093df1650ccbc"
+  ],
+  "taskService": {
+    "status": "success",
+    "schema": "environment.task.v2",
+    "result": {
+      "kind": "listed",
+      "tasks": [
+        {
+          "taskId": "task-c8bdfde1402282f2d8e96afca2e58794d29a6241d15babeb823093df1650ccbc",
+          "operationId": "1:tool-b2df919f03256e07c5db8d4310ff58b7211e2826e7e4c975c6a46cd2197ff310",
+          "scope": {
+            "kind": "environment"
+          },
+          "state": "running",
+          "exitCode": null,
+          "cleanupComplete": false,
+          "outputComplete": false
+        }
+      ]
+    }
+  },
+  "store": {
+    "activeTasks": 1,
+    "controlDirectoryBytes": 2416640,
+    "controllerEpoch": 5,
+    "controllerId": "agent_run_049de2fde3d9487496b3779b081890b5",
+    "hotTasks": 1,
+    "indexedRunTasks": 3004,
+    "indexedTasks": 3005,
+    "instanceId": "instance_cd695c38a7c5eea5cd207ed44ba4af85eeb5076c42eaf85cd0d7e593590248ef",
+    "outputDirectoryBytes": 13493140,
+    "schema": "environment.task.store.inspection.v1"
+  },
+  "retention": {
+    "taskRecords": 1,
+    "controlDirectoryBytes": 2412682,
+    "outputDirectoryBytes": 13553280,
+    "activeTasks": 1,
+    "terminalTasks": 0,
+    "activeRunTasks": 0,
+    "currentRunTerminalTasks": 0
+  },
+  "fileSha256": "66e39569c900254a44a1780699048afbebcd6ce5d6c952448fda495b92f6f709",
+  "agentsFileSha256": "b4873e9ea2c12559c798ccc862ed31a5c5b0d67336da57b260d09953124bd0fc",
+  "runtimeStartup": {
+    "containerId": "47e9c76ae0a6071c8fd4b2b0f01a5cc4b4e1e332441a8d1e669216c255b71aef",
+    "startedAt": "2026-10-16T14:07:05.074326275Z",
+    "hostPid": 2759040
+  },
+  "oldControllerRejected": true,
+  "staleTerminationRejected": true,
+  "currentQueryAfterStaleTermination": {
+    "status": "success",
+    "schema": "environment.task.v2",
+    "result": {
+      "kind": "task",
+      "task": {
+        "taskId": "task-c8bdfde1402282f2d8e96afca2e58794d29a6241d15babeb823093df1650ccbc",
+        "operationId": "1:tool-b2df919f03256e07c5db8d4310ff58b7211e2826e7e4c975c6a46cd2197ff310",
+        "scope": {
+          "kind": "environment"
+        },
+        "state": "running",
+        "exitCode": null,
+        "cleanupComplete": false,
+        "outputComplete": false
+      },
+      "output": [],
+      "earliestCursor": 0,
+      "nextCursor": 0,
+      "gap": false,
+      "hasMore": false
+    }
+  },
+  "staleStartResult": {
+    "status": "error",
+    "schema": "environment.task.v2",
+    "error": "task_controller_fenced"
+  },
+  "staleInputResult": {
+    "status": "error",
+    "schema": "environment.task.v2",
+    "error": "task_controller_fenced"
+  }
+}
