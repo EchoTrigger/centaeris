@@ -1,0 +1,41 @@
+services:
+  workspace-benchmark-monitor:
+    image: centaeris-workspace-benchmark-monitor:local
+    build:
+      context: .
+      dockerfile: workspace_monitor.Dockerfile
+    user: "65534:65534"
+    network_mode: host
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 32
+    mem_limit: 128m
+    cpus: 0.25
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: "${CENTAERIS_BENCHMARK_PROJECTION_DIR:?Set the absolute public projection directory}"
+        target: /job
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -I
+        - -B
+        - -c
+        - "import json,urllib.request; u=urllib.request.build_opener(urllib.request.ProxyHandler({})); r=u.open('http://127.0.0.1:9000/api/state',timeout=2); assert json.load(r)['schema']=='centaeris.workspace_benchmark.monitor.v1'"
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
