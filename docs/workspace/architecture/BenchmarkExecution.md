@@ -31,7 +31,8 @@ Compose sidecars, GPU/TPU, plugin hooks, MCP, external mounts and custom injecte
 task environments require separate support and are rejected before model work.
 The normal retained `environment_task` service is not installed in this profile.
 Shell-created background processes can remain in the task container through
-verification; uncertain command dispatch is not automatically replayed.
+verification after normal completion; uncertain command dispatch is not
+automatically replayed.
 
 ## Setup, verification and cleanup
 
@@ -49,6 +50,17 @@ release its resident allocation. The independent maintainer retires the exact
 instance after verification; physical absence and the zero debit must both be
 observed before the controller releases admission. Unknown Docker outcomes stay
 pending. Maintenance exec does not revive an expired model execution grant.
+
+On timeout or cancellation, Runtime quiesces the one-Run container's processes,
+including detached descendants, while retaining its keeper PID 1 and filesystem.
+The helper first verifies that PID 1 is the same immutable benchmark keeper;
+it refuses the host or an unrelated PID namespace. The keeper reaps adopted
+children. Agent cancellation waits for the original Run's committed terminal
+fact and an independently confirmed quiescence receipt before verifier commands
+or file transfer are admitted. An uncertain handoff blocks verification but
+does not block independently authorized retirement. This does not increase the
+Agent deadline or turn a timeout into successful execution. Verification, when
+available, evaluates only the original task's existing output in that instance.
 
 Task-file transfer uses bounded tar payloads and rejects links, devices, sparse
 entries, traversal and conflicting paths. Transport loss during exec is an

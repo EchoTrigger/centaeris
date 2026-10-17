@@ -141,6 +141,20 @@ class WorkspaceAgent(BaseAgent):
             "normalizedInstructionSha256": state["normalizedInstructionSha256"],
             "usageCoverage": "not_collected"}}
 
+    async def _confirm_cancellation(self, client, environment, binding, state):
+        while True:
+            fact = await asyncio.to_thread(client.run_fact, binding.session_id, state["agentRunId"])
+            if fact is not None and fact["status"] in {"completed", "failed", "cancelled"}:
+                if fact["agentRunId"] != state["agentRunId"]:
+                    raise WorkspaceError("run_fact_identity_invalid")
+                confirm = getattr(environment, "confirm_agent_cancellation", None)
+                if confirm is not None:
+                    await confirm(state["agentRunId"])
+                state["status"] = fact["status"]
+                state["cancellationStatus"] = "terminal"
+                return
+            await asyncio.sleep(max(0.02, min(self.poll_interval, 0.2)))
+
     async def run(self, instruction, environment, context: AgentContext):
         binding, client = self._ports(environment)
         if not isinstance(instruction, str) or not instruction.strip():
@@ -191,6 +205,9 @@ class WorkspaceAgent(BaseAgent):
         self._context(context, binding, state)
         submission = None
         try:
+            if (state.get("cancellationStatus") == "terminal" and state["deadlineAt"] is not None
+                    and time.time() >= state["deadlineAt"]):
+                raise TimeoutError("Workspace agent deadline exceeded")
             if accepted is not None:
                 if state["agentRunId"] not in {None, accepted.agent_run_id}:
                     raise WorkspaceError("submission_binding_mismatch")
@@ -257,13 +274,19 @@ class WorkspaceAgent(BaseAgent):
                     pass
             if state["agentRunId"] and state["status"] not in {"completed", "failed", "cancelled"}:
                 try:
+                    pending = getattr(environment, "mark_agent_cancellation_pending", None)
+                    if pending is not None:
+                        pending(state["agentRunId"])
                     result = await asyncio.to_thread(client.cancel_run, binding.session_id, state["agentRunId"])
                     state["cancellationStatus"] = result["disposition"]
+                    await asyncio.wait_for(self._confirm_cancellation(client, environment, binding, state),
+                                           timeout=min(30, max(2, 2 * client.request_timeout + 2)))
                 except BaseException:
                     state["cancellationStatus"] = "unknown"
             try:
                 _write_state(path, state)
                 self._context(context, binding, state)
+                self._notify(environment, binding, state)
             except Exception:
                 pass
             raise

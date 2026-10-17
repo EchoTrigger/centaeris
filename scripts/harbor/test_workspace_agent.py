@@ -52,6 +52,9 @@ class FakeClient:
         self.calls.append(("cancel", session_id, agent_run_id))
         return {"agentRunId": agent_run_id, "status": "running", "disposition": "requested"}
 
+    def run_fact(self, session_id, agent_run_id):
+        return {"agentRunId": agent_run_id, "status": "cancelled"}
+
 
 @unittest.skipUnless(WorkspaceAgent, "requires Harbor 0.21.0")
 class WorkspaceAgentTests(unittest.IsolatedAsyncioTestCase):
@@ -104,6 +107,29 @@ class WorkspaceAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("cancel", "session", "run"), self.client.calls)
         state = json.loads((Path(self.temporary.name) / "workspace-state.json").read_text())
         self.assertEqual(state["cancellationStatus"], "unknown")
+
+    async def test_timeout_waits_for_original_terminal_fact_and_quiescence_before_returning(self):
+        self.client.failure = TimeoutError("original deadline")
+        observations = iter([{"status": "running"}, {"status": "cancelled"}])
+        order = []
+        def fact(session, run):
+            self.assertEqual((session, run), ("session", "run"))
+            value = next(observations)
+            order.append(value["status"])
+            return {"agentRunId": run, **value}
+        self.client.run_fact = fact
+        self.environment.mark_agent_cancellation_pending = lambda run: order.append("pending")
+        async def confirm(run):
+            self.assertEqual(run, "run")
+            self.assertEqual(order[-1], "cancelled")
+            order.append("quiescent")
+        self.environment.confirm_agent_cancellation = confirm
+        context = AgentContext()
+        with self.assertRaisesRegex(TimeoutError, "original deadline"):
+            await self.agent.run("task", self.environment, context)
+        self.assertEqual(order, ["pending", "running", "cancelled", "quiescent"])
+        self.assertEqual(context.metadata["workspace"]["agentStatus"], "cancelled")
+        self.assertEqual(sum(call[0] == "submit" for call in self.client.calls), 1)
 
     async def test_failed_canonical_run_is_not_reported_as_success(self):
         self.client.statuses = ["failed"]

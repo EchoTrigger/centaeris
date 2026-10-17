@@ -407,30 +407,6 @@ pub(crate) fn remove(id: &str, volumes: bool) -> Result<(), String> {
     crate::observations::timed("dockerRemove", || remove_inner(id, volumes, true))
 }
 
-pub(crate) fn kill_benchmark_container(id: &str) -> Result<(), String> {
-    if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("benchmark stop requires immutable Docker ID".into());
-    }
-    let engine = shared()?;
-    engine.run(MUTATION_TIMEOUT, async {
-        engine
-            .docker
-            .kill_container(
-                id,
-                Some(KillContainerOptions {
-                    signal: "KILL".into(),
-                }),
-            )
-            .await
-            .map_err(|error| error.to_string())
-    })?;
-    if inspect(id)?.is_some_and(|facts| facts["State"]["Running"] == false) {
-        Ok(())
-    } else {
-        Err("benchmark stop unconfirmed; resource debit retained".into())
-    }
-}
-
 pub(crate) fn remove_stopped(id: &str) -> Result<(), String> {
     crate::observations::timed("dockerRemove", || remove_inner(id, false, false))
 }

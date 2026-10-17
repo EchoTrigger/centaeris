@@ -26,9 +26,11 @@ pub fn run_benchmark_filesystem_once() -> Result<(), String> {
 }
 
 pub fn run_benchmark_keeper() -> Result<(), String> {
-    loop {
-        std::thread::park();
-    }
+    benchmark::keeper()
+}
+
+pub fn run_benchmark_quiesce_once() -> Result<(), String> {
+    benchmark::quiesce_once()
 }
 
 use crate::memory::{is_memory_uri, run_memory_file_system_operation};

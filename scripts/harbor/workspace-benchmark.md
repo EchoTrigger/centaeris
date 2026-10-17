@@ -69,6 +69,28 @@ Every batch receives a fresh directory. Existing batches are never resumed,
 overwritten or used as permission to repeat model work. Uncertain calls retain
 their original operation identity and pending cleanup allocation.
 
+Agent timeout remains an `AgentTimeoutError`. Cancellation first waits for that
+same Run's terminal fact, then confirms process quiescence through the existing
+maintenance exec port. The helper stops all other processes in the owned
+benchmark PID namespace, including escaped descendants, and preserves its
+keeper and filesystem for the verifier. Until that receipt is confirmed,
+Environment exec/upload/download operations are blocked. Retirement remains
+available and releases admission only after physical absence and zero debit.
+No tool or benchmark attempt is resubmitted by this handoff.
+
+The focused Docker handoff regression is opt-in and uses two disposable,
+network-disabled 128 MiB containers with a supplied original Python task image
+and static helper. It checks detached-child cleanup, original-file preservation,
+verification in the same live container, unrelated-container survival and exact
+probe removal; it does not run or score a dataset task:
+
+```bash
+export CENTAERIS_BENCHMARK_CANCELLATION_TEST=1
+export CENTAERIS_BENCHMARK_CANCELLATION_IMAGE=sha256:<cached-image-digest>
+export CENTAERIS_BENCHMARK_CANCELLATION_HELPER=/absolute/path/to/execution_agent
+python3 -B scripts/workspace/retained_acceptance/test_benchmark_cancellation.py -v
+```
+
 ## Private controller ports
 
 `BenchmarkRunner` accepts authenticated `client_factory`, independently authorized

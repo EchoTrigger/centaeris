@@ -118,6 +118,7 @@ class WorkspaceEnvironment(BaseEnvironment):
         self._setup_activated = False
         self._setup_prepared = False
         self._setup_terminal_error = None
+        self._agent_cancellation_pending = False
         self._lifecycle_lock = asyncio.Lock()
         super().__init__(*args, **kwargs)
         if (type(poll_interval) not in {int, float} or not math.isfinite(poll_interval) or not 0 <= poll_interval <= 30
@@ -276,7 +277,38 @@ class WorkspaceEnvironment(BaseEnvironment):
             raise WorkspaceError("environment_not_available")
         return self._owned
 
+    def mark_agent_cancellation_pending(self, agent_run_id):
+        if agent_run_id != self._agent_run_id:
+            raise WorkspaceError("workspace_run_binding_mismatch")
+        self._agent_cancellation_pending = True
+
+    async def confirm_agent_cancellation(self, agent_run_id):
+        owned = self._require_owned()
+        if agent_run_id != owned.agent_run_id or not self._agent_cancellation_pending:
+            raise WorkspaceError("workspace_run_binding_mismatch")
+        fact = await asyncio.to_thread(self.workspace_client.run_fact, owned.session_id, agent_run_id)
+        if fact is None or fact.get("agentRunId") != agent_run_id or fact.get("status") not in {"completed", "failed", "cancelled"}:
+            raise WorkspaceError("agent_quiescence_unconfirmed")
+        # An independent maintenance command confirms silence even when the
+        # execute controller's last cancellation acknowledgement was lost.
+        value = await asyncio.to_thread(self.provisioner.exec, owned,
+            command="exec /opt/centaeris/benchmark/execution_agent benchmark-quiesce",
+            cwd="/", env={}, timeout_sec=5, user=self.profile["user"])
+        try:
+            receipt = json.loads(value["stdout"])
+        except (KeyError, TypeError, ValueError):
+            raise WorkspaceError("agent_quiescence_unconfirmed") from None
+        if (value.get("returnCode") != 0 or receipt != {"schema": "runtime.benchmark.quiescence.v1", "quiescent": True}
+                or type(receipt.get("quiescent")) is not bool):
+            raise WorkspaceError("agent_quiescence_unconfirmed")
+        self._agent_cancellation_pending = False
+
+    def _require_verifier_handoff(self):
+        if self._agent_cancellation_pending:
+            raise WorkspaceError("agent_quiescence_unconfirmed")
+
     async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+        self._require_verifier_handoff()
         owned = self._require_owned()
         if not isinstance(command, str) or not command:
             raise ValueError("command must be nonempty text")
@@ -301,21 +333,25 @@ class WorkspaceEnvironment(BaseEnvironment):
         return ExecResult(return_code=value["returnCode"], stdout=value["stdout"], stderr=value["stderr"])
 
     async def upload_file(self, source_path, target_path):
+        self._require_verifier_handoff()
         source = Path(source_path)
         if not source.is_file():
             raise ValueError("upload source must be a file")
         await asyncio.to_thread(self.provisioner.upload_file, self._require_owned(), source, _remote_path(target_path))
 
     async def upload_dir(self, source_dir, target_dir):
+        self._require_verifier_handoff()
         source = Path(source_dir)
         if not source.is_dir():
             raise ValueError("upload source must be a directory")
         await asyncio.to_thread(self.provisioner.upload_dir, self._require_owned(), source, _remote_path(target_dir))
 
     async def download_file(self, source_path, target_path):
+        self._require_verifier_handoff()
         await asyncio.to_thread(self.provisioner.download_file, self._require_owned(), _remote_path(source_path), Path(target_path))
 
     async def download_dir(self, source_dir, target_dir):
+        self._require_verifier_handoff()
         await asyncio.to_thread(self.provisioner.download_dir, self._require_owned(), _remote_path(source_dir), Path(target_dir))
 
     async def stop(self, delete=True):

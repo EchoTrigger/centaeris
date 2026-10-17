@@ -158,6 +158,41 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.provisioner.exec = execute
         return logs
 
+    async def test_cancelled_agent_blocks_verifier_until_process_quiescence_is_confirmed(self):
+        await self.environment.start()
+        await self.environment.activate_workspace_setup()
+        self.environment.mark_agent_cancellation_pending("run")
+        with self.assertRaisesRegex(WorkspaceError, "agent_quiescence_unconfirmed"):
+            await self.environment.exec("verifier")
+        self.client.run_fact = lambda session, run: {"agentRunId": run, "status": "cancelled"}
+        original = self.provisioner.exec
+        def quiesce(owned, **request):
+            if "benchmark-quiesce" in request["command"]:
+                self.assertEqual(request["user"], self.profile["user"])
+                return {"returnCode": 0, "stdout": json.dumps({"schema": "runtime.benchmark.quiescence.v1", "quiescent": True}), "stderr": ""}
+            return original(owned, **request)
+        self.provisioner.exec = quiesce
+        await self.environment.confirm_agent_cancellation("run")
+        self.assertEqual((await self.environment.exec("verifier")).return_code, 0)
+        self.assertFalse(self.allocation.released)
+
+    async def test_uncertain_quiescence_blocks_verifier_but_keeps_retirement_available(self):
+        await self.environment.start()
+        await self.environment.activate_workspace_setup()
+        self.environment.mark_agent_cancellation_pending("run")
+        self.client.run_fact = lambda session, run: {"agentRunId": run, "status": "cancelled"}
+        def unknown(*args, **kwargs):
+            raise WorkspaceError("benchmark_exec_outcome_unknown")
+        self.provisioner.exec = unknown
+        with self.assertRaises(WorkspaceError):
+            await self.environment.confirm_agent_cancellation("run")
+        with self.assertRaisesRegex(WorkspaceError, "agent_quiescence_unconfirmed"):
+            await self.environment.upload_dir(self.root, "/tests")
+        self.assertFalse(self.allocation.released)
+        self.provisioner.physical, self.provisioner.debit = "absent", 0
+        await self.environment.stop()
+        self.assertTrue(self.allocation.released)
+
     async def test_start_prepares_writable_harbor_logs_without_removing_existing_contents(self):
         logs = self.filesystem_provisioner()
         (logs / 'agent').mkdir()

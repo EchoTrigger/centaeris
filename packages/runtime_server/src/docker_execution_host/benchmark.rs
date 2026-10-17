@@ -4,6 +4,18 @@ use crate::agent_run_authorization::{BenchmarkExecutionProfile, BenchmarkNetwork
 
 pub(super) const HELPER_DESTINATION: &str = "/opt/centaeris/benchmark/execution_agent";
 
+fn require_quiescence_receipt(success: bool, bytes: &[u8]) -> Result<(), String> {
+    let receipt: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| "benchmark process quiescence unconfirmed")?;
+    if !success
+        || receipt
+            != serde_json::json!({"schema":"runtime.benchmark.quiescence.v1","quiescent":true})
+    {
+        return Err("benchmark process quiescence unconfirmed".into());
+    }
+    Ok(())
+}
+
 pub(super) fn create_body(
     expected: &ContainerExpectation<'_>,
     profile: &BenchmarkExecutionProfile,
@@ -211,9 +223,25 @@ impl DockerExecutionHostRunner {
 
     pub(super) fn cancel_command_container(&self) -> Result<(), String> {
         if self.is_benchmark() {
-            // This capability is one Run per disposable task container. Stopping
-            // the exact target cannot release its debit or forge Run cleanup.
-            self.with_benchmark_target(crate::docker_engine::kill_benchmark_container)
+            let mut command = self.benchmark_exec_request(vec![
+                HELPER_DESTINATION.into(),
+                "benchmark-quiesce".into(),
+            ])?;
+            command.user = Some(
+                self.benchmark_profile
+                    .as_ref()
+                    .ok_or("benchmark profile missing")?
+                    .user
+                    .clone(),
+            );
+            command.cwd = Some("/".into());
+            self.with_benchmark_target(|id| {
+                if command.container != id {
+                    return Err("benchmark command target mismatch".into());
+                }
+                let output = exec_with_input(&command, &[], 4096)?;
+                require_quiescence_receipt(output.status.success(), &output.stdout)
+            })
         } else {
             self.teardown_owned()
         }
@@ -305,6 +333,21 @@ impl DockerExecutionHostRunner {
 mod tests {
     use super::*;
     use crate::agent_run_authorization::BenchmarkResources;
+
+    #[test]
+    fn cancellation_requires_a_successful_exact_quiescence_receipt() {
+        let valid = br#"{"schema":"runtime.benchmark.quiescence.v1","quiescent":true}"#;
+        assert!(require_quiescence_receipt(true, valid).is_ok());
+        assert!(require_quiescence_receipt(false, valid).is_err());
+        for invalid in [
+            b"".as_slice(),
+            br#"{"schema":"runtime.benchmark.quiescence.v1","quiescent":false}"#,
+            br#"{"schema":"runtime.benchmark.quiescence.v1","quiescent":1}"#,
+            br#"{"schema":"runtime.benchmark.quiescence.v1","quiescent":true,"extra":true}"#,
+        ] {
+            assert!(require_quiescence_receipt(true, invalid).is_err());
+        }
+    }
 
     fn profile() -> BenchmarkExecutionProfile {
         BenchmarkExecutionProfile {
