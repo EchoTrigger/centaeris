@@ -56,7 +56,10 @@ impl RequestCapacity {
         let listener = method == "POST" && path == "/internal/jobs/wait";
         // A step can contain long tools and provider streams. Its lifetime is
         // governed by the execution lease/cancellation protocol, not a short RPC timer.
-        let execution = method == "POST" && path == "/agent-runs/step";
+        // Benchmark exec authenticates maintenance authority, validates its
+        // per-operation deadline, and retains this ordinary slot until it exits.
+        let execution =
+            method == "POST" && matches!(path, "/agent-runs/step" | "/internal/benchmark/exec");
         RequestLane {
             slots: if control {
                 self.control.clone()
@@ -123,5 +126,29 @@ mod tests {
             assert!(control.slots.try_acquire_owned().is_ok());
         }
         assert!(limits.lane("POST", "/agent-runs/step").deadline.is_none());
+    }
+
+    #[test]
+    fn benchmark_verifier_deadline_leaves_cancellation_and_heartbeats_available() {
+        let limits = RequestCapacity::for_http_tests(Duration::from_secs(30));
+        let verifier = limits.lane("POST", "/internal/benchmark/exec");
+        assert!(
+            verifier.deadline.is_none(),
+            "the verified handler owns the per-task deadline"
+        );
+        let _verifier = verifier.slots.try_acquire_owned().unwrap();
+        assert!(limits
+            .lane("POST", "/internal/jobs/heartbeat")
+            .slots
+            .try_acquire_owned()
+            .is_ok());
+        assert!(limits
+            .lane("GET", "/internal/benchmark/exec")
+            .deadline
+            .is_some());
+        assert!(limits
+            .lane("POST", "/internal/benchmark/observe")
+            .deadline
+            .is_some());
     }
 }

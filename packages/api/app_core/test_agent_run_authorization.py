@@ -113,6 +113,7 @@ class AgentRunAuthorizationContractTests(SimpleTestCase):
             workspace_id="ws_1", user_id="user_1", session=session,
             session_id="sess_1", id="agent_run_1", modelConfig_id="model_1",
             thinkingMode="high", workspace=object(), definition_version_id=None,
+            environment=SimpleNamespace(benchmark_profile=None),
         )
         for setting, maximum in [
             ("SANDBOX_CPU_MILLI", 2**32 - 1),

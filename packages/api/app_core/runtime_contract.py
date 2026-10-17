@@ -11,6 +11,7 @@ from .plugin_catalog import plugin_activation_for_workspace, validate_plugin_act
 
 
 AGENT_RUN_AUTHORIZATION_SCHEMA = "workspace.agent_run_authorization.v1"
+BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA = "workspace.agent_run_authorization.v2"
 RESOLVED_INPUT_SCHEMA = "runtime.resolved_input.v1"
 DECLARED_INPUT_SCHEMA = "runtime.declared_input.v1"
 AGENT_RUN_START_SCHEMA = "workspace.agent_run.start.v3"
@@ -115,6 +116,16 @@ def build_agent_run_authorization_payload(
             "dataTmpfsBytes": settings.SANDBOX_DATA_TMPFS_BYTES,
         },
     }
+    environment = agent_run.environment
+    if environment.benchmark_profile is not None:
+        from .benchmark_profile import benchmark_profile_digest
+        profile = environment.benchmark_profile
+        if benchmark_profile_digest(profile) != environment.benchmark_profile_digest:
+            raise ValueError("benchmark_profile_digest_invalid")
+        payload.update(schema=BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA,
+            imageCapability="benchmark_task_v1", imageDigest=profile["imageDigest"],
+            benchmarkProfile=profile, benchmarkProfileDigest=environment.benchmark_profile_digest,
+            resources={key: profile["resources"][key] for key in payload["resources"]})
     validate_agent_run_authorization_payload(payload)
     return payload
 
@@ -145,15 +156,19 @@ def authorization_signature(payload: dict, signing_key: str) -> str:
     if not signing_key:
         raise ValueError("AgentRun authorization signing key is required")
     digest = authorization_digest(payload)
-    return _authorization_signature_for_digest(digest, signing_key)
+    return _authorization_signature_for_digest(digest, signing_key, schema=payload["schema"])
 
 
-def _authorization_signature_for_digest(digest: str, signing_key: str) -> str:
+def _authorization_signature_for_digest(digest: str, signing_key: str, *, schema=AGENT_RUN_AUTHORIZATION_SCHEMA) -> str:
+    domains = {AGENT_RUN_AUTHORIZATION_SCHEMA: "workspace:agent-run-authorization:v1\0",
+               BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA: "workspace:agent-run-authorization:v2\0"}
+    if schema not in domains:
+        raise ValueError("agent_run_authorization_schema_mismatch")
     if not signing_key:
         raise ValueError("AgentRun authorization signing key is required")
     signature = hmac.new(
         signing_key.encode("utf-8"),
-        f"workspace:agent-run-authorization:v1\0{digest}".encode("utf-8"),
+        (domains[schema] + digest).encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
     return f"hmac-sha256:{signature}"
@@ -164,18 +179,25 @@ def verify_agent_run_authorization_signature(
 ) -> None:
     if not signing_key:
         raise ValueError("AgentRun authorization signing key is required")
-    _verify_authorization_digest_signature(authorization_digest(payload), signing_key, signature)
+    _verify_authorization_digest_signature(authorization_digest(payload), signing_key, signature, schema=payload["schema"])
 
 
-def _verify_authorization_digest_signature(digest: str, signing_key: str, signature: str) -> None:
+def _verify_authorization_digest_signature(digest: str, signing_key: str, signature: str, *, schema=AGENT_RUN_AUTHORIZATION_SCHEMA) -> None:
     # Internal consumers pass the digest they just computed from a validated payload,
     # never an unverified digest from a request.
-    if not hmac.compare_digest(_authorization_signature_for_digest(digest, signing_key), signature):
+    if not hmac.compare_digest(_authorization_signature_for_digest(digest, signing_key, schema=schema), signature):
         raise ValueError("AgentRunAuthorization signature mismatch")
 
 
 def agent_run_binding_matches(payload: dict, agent_run, *, session=None) -> bool:
     from .session_environments import agent_run_environment_matches
+    environment = agent_run.environment
+    if payload["schema"] == BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA:
+        if (environment.benchmark_profile != payload["benchmarkProfile"]
+                or environment.benchmark_profile_digest != payload["benchmarkProfileDigest"]):
+            return False
+    elif environment.benchmark_profile is not None:
+        return False
     return (
         payload["agentRunId"] == agent_run.id
         and payload["workspaceId"] == agent_run.workspace_id
@@ -188,8 +210,12 @@ def agent_run_binding_matches(payload: dict, agent_run, *, session=None) -> bool
 
 
 def validate_agent_run_authorization_payload(payload: dict) -> None:
-    require_exact_fields(payload, AGENT_RUN_AUTHORIZATION_FIELDS, "AgentRun authorization")
-    if payload["schema"] != AGENT_RUN_AUTHORIZATION_SCHEMA:
+    if not isinstance(payload, dict):
+        raise ValueError("agent_run_authorization_schema_mismatch")
+    benchmark = payload.get("schema") == BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA
+    fields = AGENT_RUN_AUTHORIZATION_FIELDS | ({"benchmarkProfile", "benchmarkProfileDigest"} if benchmark else set())
+    require_exact_fields(payload, fields, "AgentRun authorization")
+    if payload["schema"] not in {AGENT_RUN_AUTHORIZATION_SCHEMA, BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA}:
         raise ValueError("agent_run_authorization_schema_mismatch")
     for name in [
         "id",
@@ -225,8 +251,9 @@ def validate_agent_run_authorization_payload(payload: dict) -> None:
         or any(input_ref not in set(input_refs) for input_ref in message_asset_refs)
     ):
         raise ValueError("messageAssetRefs must be sorted unique authorized inputRefs")
-    if payload["imageCapability"] != "workspace_general_v1":
-        raise ValueError("imageCapability must be workspace_general_v1")
+    expected_capability = "benchmark_task_v1" if benchmark else "workspace_general_v1"
+    if payload["imageCapability"] != expected_capability:
+        raise ValueError("imageCapability must be benchmark_task_v1" if benchmark else "imageCapability must be workspace_general_v1")
     require_sha256("imageDigest", payload["imageDigest"])
     validate_plugin_activation(payload["pluginActivation"])
     resources = payload["resources"]
@@ -252,6 +279,17 @@ def validate_agent_run_authorization_payload(payload: dict) -> None:
             raise ValueError(f"sandbox resources.{name} exceeds transport range")
     if sum(item["sizeBytes"] for item in asset_refs) > resources["dataTmpfsBytes"] // 2:
         raise ValueError("declared inputs must fit within half of dataTmpfsBytes")
+    if benchmark:
+        from .benchmark_profile import benchmark_profile_digest
+        profile = payload["benchmarkProfile"]
+        if benchmark_profile_digest(profile) != payload["benchmarkProfileDigest"]:
+            raise ValueError("benchmark_profile_digest_invalid")
+        if (profile["imageDigest"] != payload["imageDigest"]
+                or any(profile["resources"][key] != value for key, value in resources.items())):
+            raise ValueError("benchmark_profile_authorization_binding_invalid")
+        if (payload["assetRefs"] or payload["messageAssetRefs"] or payload["pluginActivation"]["packages"]
+                or payload["sessionWorkspace"]["generation"] != 0):
+            raise ValueError("benchmark_profile_combination_unsupported")
 
 
 def validate_session_workspace(payload: dict) -> None:

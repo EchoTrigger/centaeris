@@ -1415,6 +1415,8 @@ class Session(models.Model):
         if self.current_environment_id == stored_scope[3]:
             if stored_scope[4] != self.pk:
                 raise ValueError("session_environment_binding_invalid")
+        elif SessionEnvironment.objects.using(using).filter(pk=stored_scope[3], benchmark_profile__isnull=False).exists():
+            raise ValueError("benchmark_environment_binding_immutable")
         elif not SessionEnvironment.objects.using(using).filter(pk=self.current_environment_id, session_id=self.pk).exists():
             raise ValueError("session_environment_binding_invalid")
         return super().save(*args, **kwargs)
@@ -1426,6 +1428,16 @@ class SessionEnvironment(models.Model):
     id = models.CharField(primary_key=True, max_length=64, default=new_session_environment_id)
     session = models.ForeignKey(Session, on_delete=models.PROTECT, related_name="environments")
     created_at = models.DateTimeField(auto_now_add=True)
+    benchmark_profile = models.JSONField(null=True, default=None, blank=True, editable=False)
+    benchmark_profile_digest = models.CharField(max_length=71, default="", blank=True, editable=False)
+    benchmark_profile_operation_id = models.CharField(max_length=128, default="", blank=True, editable=False)
+    benchmark_profile_bound_at = models.DateTimeField(null=True, default=None, editable=False)
+    benchmark_setup_operation_id = models.CharField(max_length=128, default="", blank=True, editable=False)
+    benchmark_setup_run = models.ForeignKey("AgentRun", on_delete=models.PROTECT,
+        related_name="+", null=True, default=None, editable=False)
+    benchmark_setup_instance_id = models.CharField(max_length=73, default="", blank=True, editable=False)
+    benchmark_setup_container_id = models.CharField(max_length=64, default="", blank=True, editable=False)
+    benchmark_setup_completed_at = models.DateTimeField(null=True, default=None, editable=False)
     controller_epoch = models.PositiveBigIntegerField(default=0, editable=False)
     controller_run = models.ForeignKey("AgentRun", on_delete=models.PROTECT,
         related_name="+", null=True, blank=True, editable=False)
@@ -1439,13 +1451,45 @@ class SessionEnvironment(models.Model):
             condition=(models.Q(controller_run__isnull=True, controller_lease_owner="", controller_released=True, controller_purpose="")
                 | (models.Q(controller_run__isnull=False, controller_epoch__gt=0, controller_purpose__in=["execute", "cleanup"])
                    & ~models.Q(controller_lease_owner=""))),
-            name="environment_controller_complete")]
+            name="environment_controller_complete"), models.CheckConstraint(
+            condition=(models.Q(benchmark_profile__isnull=True, benchmark_profile_digest="",
+                benchmark_profile_operation_id="", benchmark_profile_bound_at__isnull=True)
+                | (models.Q(benchmark_profile__isnull=False, benchmark_profile_bound_at__isnull=False)
+                   & ~models.Q(benchmark_profile_digest="") & ~models.Q(benchmark_profile_operation_id=""))),
+            name="environment_benchmark_profile_complete"), models.CheckConstraint(
+            condition=(models.Q(benchmark_setup_operation_id="", benchmark_setup_run__isnull=True,
+                benchmark_setup_instance_id="", benchmark_setup_container_id="", benchmark_setup_completed_at__isnull=True)
+                | (models.Q(benchmark_profile__isnull=False, benchmark_setup_run__isnull=False,
+                            benchmark_setup_completed_at__isnull=False)
+                   & ~models.Q(benchmark_setup_operation_id="") & ~models.Q(benchmark_setup_instance_id="")
+                   & ~models.Q(benchmark_setup_container_id=""))),
+            name="environment_benchmark_setup_complete")]
 
     def save(self, *args, **kwargs):
+        if self._state.adding and self.benchmark_profile is not None:
+            raise ValueError("benchmark_profile_requires_binding")
         if not self._state.adding:
             using = kwargs.get("using") or router.db_for_write(type(self), instance=self)
-            if type(self).objects.using(using).values_list("session_id", flat=True).get(pk=self.pk) != self.session_id:
+            stored = type(self).objects.using(using).values("session_id", "benchmark_profile",
+                "benchmark_profile_digest", "benchmark_profile_operation_id", "benchmark_profile_bound_at",
+                "benchmark_setup_operation_id", "benchmark_setup_run_id", "benchmark_setup_instance_id",
+                "benchmark_setup_container_id", "benchmark_setup_completed_at").get(pk=self.pk)
+            if stored["session_id"] != self.session_id:
                 raise ValueError("session_environment_identity_immutable")
+            fields = ("benchmark_profile", "benchmark_profile_digest", "benchmark_profile_operation_id", "benchmark_profile_bound_at")
+            if stored["benchmark_profile"] is not None and any(stored[name] != getattr(self, name) for name in fields):
+                raise ValueError("benchmark_profile_binding_immutable")
+            setup_fields = ("benchmark_setup_operation_id", "benchmark_setup_run_id", "benchmark_setup_instance_id",
+                            "benchmark_setup_container_id", "benchmark_setup_completed_at")
+            if stored["benchmark_setup_operation_id"] and any(stored[name] != getattr(self, name) for name in setup_fields):
+                raise ValueError("benchmark_setup_binding_immutable")
+            if (stored["benchmark_profile"] is None and self.benchmark_profile is not None
+                    and AgentRun.objects.using(using).filter(session_id=self.session_id).exists()):
+                raise ValueError("benchmark_profile_requires_unused_session")
+        if self.benchmark_profile is not None:
+            from .benchmark_profile import benchmark_profile_digest
+            if benchmark_profile_digest(self.benchmark_profile) != self.benchmark_profile_digest:
+                raise ValueError("benchmark_profile_digest_invalid")
         return super().save(*args, **kwargs)
 
 
@@ -1774,6 +1818,9 @@ class AgentRun(models.Model):
                 if self.environment_id is not None and self.environment_id != session.current_environment_id:
                     raise ValueError("agent_run_environment_binding_invalid")
                 self.environment = session.current_environment
+                if (self.environment.benchmark_profile is not None
+                        and type(self).objects.using(using).filter(session_id=self.session_id).exists()):
+                    raise ValueError("benchmark_environment_single_run_required")
                 return super().save(*args, **kwargs)
         if stored_snapshot[2:] != (self.session_id, self.environment_id):
             raise ValueError("agent_run_environment_binding_immutable")

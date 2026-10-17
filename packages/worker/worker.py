@@ -42,6 +42,7 @@ except ValueError:
 if not 1 <= WORKER_SLOT_COUNT <= 16:
     raise ValueError("WORKER_SLOT_COUNT must be an integer between 1 and 16")
 AGENT_RUN_WAITING_TRANSITION_REASONS = {
+    "benchmark_setup_required",
     "execution_resident_capacity_wait",
     "execution_recovery_checkpoint_committed",
     "question_wait",
@@ -49,6 +50,10 @@ AGENT_RUN_WAITING_TRANSITION_REASONS = {
     "session_record_commit_unavailable",
     "session_workspace_commit_unavailable",
     "session_workspace_resolve_unavailable",
+}
+AGENT_RUN_SCHEDULED_WAIT_REASONS = {
+    "benchmark_setup_required",
+    "execution_recovery_checkpoint_committed",
 }
 
 
@@ -589,7 +594,7 @@ def execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
         not isinstance(result, dict)
         or set(result)
         != ({"schema", "agentRunId", "disposition", "terminalState", "transitionReason"}
-            | ({"retryAtMs"} if result.get("transitionReason") == "execution_recovery_checkpoint_committed" else set()))
+            | ({"retryAtMs"} if result.get("transitionReason") in AGENT_RUN_SCHEDULED_WAIT_REASONS else set()))
         or result.get("schema") != f"runtime.agent_run.step.result.{version}"
         or result.get("agentRunId") != agent_run_id
         or result.get("disposition") not in {"waiting", "terminal"}
@@ -597,7 +602,7 @@ def execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
         or not result["transitionReason"]
     ):
         raise RuntimeError("agent_run_step_response_invalid")
-    if result["transitionReason"] == "execution_recovery_checkpoint_committed" and (
+    if result["transitionReason"] in AGENT_RUN_SCHEDULED_WAIT_REASONS and (
         result["disposition"] != "waiting"
         or type(result.get("retryAtMs")) is not int
         or result["retryAtMs"] < 0
@@ -612,9 +617,9 @@ def execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
         transition_agent_run(agent_run_id, "running", result["transitionReason"])
         require_healthy_lease()
         yielded_at_ms = now_ms()
-        if result["transitionReason"] == "execution_recovery_checkpoint_committed":
-            # Runtime derives this deadline from durable recovery facts. Waiting
-            # releases the execution slot; retries never sleep inside a worker.
+        if result["transitionReason"] in AGENT_RUN_SCHEDULED_WAIT_REASONS:
+            # Runtime derives this deadline from its setup/recovery boundary.
+            # Waiting releases the slot; retries never sleep inside a worker.
             next_run_at_ms = max(yielded_at_ms, result["retryAtMs"])
         elif result["transitionReason"] == "runtime_job_wait":
             next_run_at_ms = yielded_at_ms + RUNTIME_JOB_WAIT_RECHECK_MS

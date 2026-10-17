@@ -1,5 +1,7 @@
 fn main() {
     let result = match std::env::args().nth(1).as_deref() {
+        Some("benchmark-keeper") => hosted_execution::agent::run_benchmark_keeper(),
+        Some("benchmark-filesystem-once") => hosted_execution::agent::run_benchmark_filesystem_once(),
         #[cfg(target_os = "linux")]
         Some("environment-init") => match (std::env::args().nth(2), std::env::args().nth(3)) {
             (Some(instance), None) => hosted_execution::task_service::serve_instance(&instance),

@@ -104,7 +104,7 @@ def _locked_source(event_id):
     try:
         authorization = run.authorization
         digest = authorization_digest(authorization.payload)
-        _verify_authorization_digest_signature(digest, settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY, authorization.signature)
+        _verify_authorization_digest_signature(digest, settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY, authorization.signature, schema=authorization.payload["schema"])
         if digest != authorization.digest or not agent_run_binding_matches(authorization.payload, run):
             raise ValueError("source authorization mismatch")
     except (ObjectDoesNotExist, ValueError) as error:

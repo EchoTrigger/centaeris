@@ -277,3 +277,6 @@ if PASSWORD_RESET_ENABLED and PASSWORD_RESET_MAIL_SENDER:
         raise RuntimeError(
             "EMAIL_HOST_USER and EMAIL_HOST_PASSWORD must be configured together"
         )
+
+# Optional independent maintenance authority; an unset token disables benchmark binding.
+ENVIRONMENT_MAINTENANCE_TOKEN = os.environ.get("ENVIRONMENT_MAINTENANCE_TOKEN", "")

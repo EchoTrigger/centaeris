@@ -1,3 +1,5 @@
+mod benchmark;
+mod environment;
 mod retained;
 mod retained_commands;
 mod snapshot_capture;
@@ -56,8 +58,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::agent_run_authorization::SandboxResources;
 use crate::agent_run_authorization::SessionWorkspace;
+use crate::agent_run_authorization::{BenchmarkExecutionProfile, SandboxResources};
 use crate::postgres_store::PostgresRuntimeStore;
 use crate::resident_capacity::{
     declared_usage, ObservedResidentSandbox, ResidentCapacity, ResidentSandboxRequest,
@@ -282,6 +284,8 @@ fn plugin_command_path(activation: &PluginActivationSnapshotV1) -> Result<String
 }
 
 pub struct DockerExecutionHostRunner {
+    benchmark_profile: Option<BenchmarkExecutionProfile>,
+    benchmark_helper: Option<String>,
     pub(crate) transcript_capture: Mutex<crate::transcript_capture::CaptureBuffer>,
     pub(crate) transcript_publisher: Arc<crate::transcript_capture::CapturePublisher>,
     recovery_activity: ExecutionActivityWitness,
@@ -493,6 +497,7 @@ fn query_workspace_generation_rpc(
 }
 
 pub struct DockerExecutionHostRequest<'a> {
+    pub benchmark_profile: Option<BenchmarkExecutionProfile>,
     pub workspace_id: String,
     pub lifecycle_job_id: String,
     pub lifecycle_lease_owner: String,
@@ -513,6 +518,8 @@ pub struct DockerExecutionHostRequest<'a> {
 
 #[derive(Clone, Copy)]
 struct ContainerExpectation<'a> {
+    benchmark_profile: Option<&'a BenchmarkExecutionProfile>,
+    benchmark_helper: Option<&'a str>,
     retained: bool,
     profile_digest: Option<&'a str>,
     name: &'a str,
@@ -618,6 +625,7 @@ impl DockerExecutionHostRunner {
             return Ok(runner);
         }
         let DockerExecutionHostRequest {
+            benchmark_profile,
             workspace_id,
             lifecycle_job_id,
             lifecycle_lease_owner,
@@ -647,6 +655,15 @@ impl DockerExecutionHostRunner {
         }
         let environment_binding = &environment_authorization.payload;
         let retained = environment_binding.controller.is_some();
+        if benchmark_profile.is_some() && (!retained || !plugin_activation.packages.is_empty()) {
+            return Err(
+                "benchmark requires an isolated retained allocation without plugins".into(),
+            );
+        }
+        let benchmark_helper = benchmark_profile
+            .as_ref()
+            .map(|_| benchmark::helper_path())
+            .transpose()?;
         let environment_id = environment_binding.environment_id.clone();
         let binding_digest = environment_binding.digest()?;
         let mut instance_id =
@@ -659,13 +676,15 @@ impl DockerExecutionHostRunner {
             agent_id.as_str(),
             docker_volume_name_from_environment(AGENT_MEMORY_VOLUME_NAME_ENV)?,
         )?;
-        if !retained {
+        if !retained && benchmark_profile.is_none() {
             prepare_memory_scope(&memory_mount)?;
         }
         let command_path = plugin_command_path(plugin_activation)?;
         let oci_runtime = OciRuntime::from_environment()?;
         let mut container_name = container_name(execution_id.as_str());
         let expected = ContainerExpectation {
+            benchmark_profile: benchmark_profile.as_ref(),
+            benchmark_helper: benchmark_helper.as_deref(),
             retained,
             profile_digest: None,
             name: container_name.as_str(),
@@ -708,7 +727,7 @@ impl DockerExecutionHostRunner {
                 observed_resident_sandboxes,
                 |client, _| before_create(client),
                 |allocation| {
-                    if !allocation.reused {
+                    if !allocation.reused && benchmark_profile.is_none() {
                         prepare_memory_scope(&memory_mount)?;
                     }
                     let name = self::container_name(&allocation.allocation_execution_id);
@@ -725,7 +744,9 @@ impl DockerExecutionHostRunner {
                     }
                     let fence =
                         retained::fence(&environment_authorization, &allocation.instance_id)?;
-                    retained::takeover(&physical, &facts.id, &fence)?;
+                    if benchmark_profile.is_none() {
+                        retained::takeover(&physical, &facts.id, &fence)?;
+                    }
                     Ok(facts.id)
                 },
             )?;
@@ -767,6 +788,8 @@ impl DockerExecutionHostRunner {
             None
         };
         let runner = Self {
+            benchmark_profile,
+            benchmark_helper,
             transcript_capture: Mutex::new(Default::default()),
             transcript_publisher: Arc::new(Default::default()),
             recovery_activity: ExecutionActivityWitness::for_execution(
@@ -835,6 +858,8 @@ impl DockerExecutionHostRunner {
     fn container_expectation(&self) -> ContainerExpectation<'_> {
         let origin = self.retained_allocation.as_ref();
         ContainerExpectation {
+            benchmark_profile: self.benchmark_profile.as_ref(),
+            benchmark_helper: self.benchmark_helper.as_deref(),
             retained: origin.is_some(),
             profile_digest: origin.map(|a| a.profile_digest.as_str()),
             name: self.container_name.as_str(),
@@ -2093,6 +2118,15 @@ impl DockerExecutionHostRunner {
     }
 
     fn validate_policy(&self, policy: &ExecutionPolicy) -> Result<(), ExecutionError> {
+        if let Some(profile) = &self.benchmark_profile {
+            return if *policy == benchmark::policy(profile) {
+                Ok(())
+            } else {
+                Err(ExecutionError::Denied {
+                    reason: "benchmark command policy differs from signed profile".into(),
+                })
+            };
+        }
         if policy.filesystem.workspace_root != Path::new(WORKSPACE_DATA_ROOT)
             || policy.network != NetworkPolicy::Disabled
         {
@@ -2369,6 +2403,9 @@ impl LifecycleHookRunner for DockerExecutionHostRunner {
 impl ExecutionHostRunner for DockerExecutionHostRunner {
     fn status(&self, policy: &ExecutionPolicy) -> Result<ExecutionHostStatus, ExecutionError> {
         self.validate_policy(policy)?;
+        if self.benchmark_profile.is_some() {
+            return self.benchmark_status();
+        }
         if self.is_retained() {
             let fence = self
                 .environment_task_fence()
@@ -2463,6 +2500,9 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
         &self,
         request: ExecutionFileSystemRequest,
     ) -> Result<ExecutionFileSystemOutput, ExecutionFileSystemError> {
+        if self.benchmark_profile.is_some() {
+            return self.benchmark_filesystem(request);
+        }
         #[cfg(test)]
         if self.container_name.starts_with("native-consume-test:") {
             return Err(ExecutionFileSystemError::new(
@@ -2577,6 +2617,11 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
         request: ExecutionCommandRequest,
         cancellation_probe: Option<&ExecutionCancellationProbe>,
     ) -> Result<ExecutionHostCommandRecovery, ExecutionError> {
+        if self.benchmark_profile.is_some() {
+            return Ok(ExecutionHostCommandRecovery::Unknown {
+                reason: "benchmark command outcome requires its original Core receipt; dispatch is never replayed".into(),
+            });
+        }
         if !self.is_retained() {
             return Ok(ExecutionHostCommandRecovery::Unknown {
                 reason: "command recovery requires the original live retained instance".into(),
@@ -2603,7 +2648,7 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
         request: ExecutionCommandRequest,
         cancellation_probe: Option<&ExecutionCancellationProbe>,
     ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
-        if self.is_retained() {
+        if self.is_retained() && self.benchmark_profile.is_none() {
             self.validate_policy(&request.policy)?;
             let operation_id = operation_id
                 .filter(|id| !id.is_empty())
@@ -2629,19 +2674,31 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
             .invalidate_before_dispatch()
             .map_err(|error| self.unavailable(error))?;
         let input_state_changes = self.refresh_materialized_inputs()?;
-        let mut command = self.exec_request(Vec::new());
-        command.user = Some(AGENT_USER.into());
-        command.cwd = Some(WORKSPACE_DATA_ROOT.into());
+        let mut command = if self.benchmark_profile.is_some() {
+            self.benchmark_exec_request(Vec::new())
+                .map_err(|error| self.unavailable(error))?
+        } else {
+            self.exec_request(Vec::new())
+        };
+        if let Some(profile) = &self.benchmark_profile {
+            command.user = Some(profile.user.clone());
+            command.cwd = Some(profile.workspace_root.clone());
+        } else {
+            command.user = Some(AGENT_USER.into());
+            command.cwd = Some(WORKSPACE_DATA_ROOT.into());
+        }
         for (name, default) in [("LANG", "C.UTF-8"), ("LC_ALL", "C.UTF-8"), ("TERM", "dumb")] {
             let value = request.env.get(name).map(String::as_str).unwrap_or(default);
             command.env.push(format!("{name}={value}"));
         }
-        for (name, value) in [
-            ("HOME", WORKSPACE_HOME),
-            ("PATH", self.command_path.as_str()),
-            ("TMPDIR", "/tmp"),
-        ] {
-            command.env.push(format!("{name}={value}"));
+        if self.benchmark_profile.is_none() {
+            for (name, value) in [
+                ("HOME", WORKSPACE_HOME),
+                ("PATH", self.command_path.as_str()),
+                ("TMPDIR", "/tmp"),
+            ] {
+                command.env.push(format!("{name}={value}"));
+            }
         }
         command.command.extend([
             "/usr/bin/timeout".to_string(),
@@ -2652,8 +2709,8 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
         ]);
         command.command.extend(request.args);
 
-        let mut child = command
-            .spawn()
+        let mut child = self
+            .spawn_command(command)
             .map_err(|error| ExecutionError::CancellationIndeterminate { reason: error })?;
         child.stdin.take();
         let stdout = child
@@ -2677,7 +2734,7 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
                     })?
                     .is_some()
                 {
-                    match self.teardown_owned() {
+                    match self.cancel_command_container() {
                         Ok(()) => {
                             child.disconnect();
                             break (None, false, true);
@@ -2697,7 +2754,7 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
                 Ok(Some(status)) => break (status.code(), false, false),
                 Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
                 Ok(None) => {
-                    let teardown = self.teardown_owned();
+                    let teardown = self.cancel_command_container();
                     child.disconnect();
                     let _ = child.wait();
                     return Err(ExecutionError::CancellationIndeterminate {
@@ -2865,12 +2922,14 @@ fn ensure_container_inner(
             if !facts.running {
                 return Err("execution_environment_lost:container_stopped".to_string());
             }
-            if workspace_execution_sentinel_matches(
-                expected.name,
-                expected.agent_run_id,
-                expected.execution_id,
-                expected.authorization_digest,
-            )? {
+            if expected.benchmark_profile.is_some()
+                || workspace_execution_sentinel_matches(
+                    expected.name,
+                    expected.agent_run_id,
+                    expected.execution_id,
+                    expected.authorization_digest,
+                )?
+            {
                 return Ok(());
             }
             return Err("sandbox workspace identity mismatch; refusing replacement".to_string());
@@ -2895,6 +2954,9 @@ fn ensure_container_inner(
         if !facts.matches(expected) {
             return Err("sandbox container creation verification failed".to_string());
         }
+        if expected.benchmark_profile.is_some() {
+            return Ok(());
+        }
         write_workspace_execution_sentinel(
             &id,
             expected.agent_run_id,
@@ -2915,6 +2977,15 @@ fn ensure_container_inner(
 }
 
 fn container_create_body(expected: &ContainerExpectation<'_>) -> Result<serde_json::Value, String> {
+    if let Some(profile) = expected.benchmark_profile {
+        return benchmark::create_body(
+            expected,
+            profile,
+            expected
+                .benchmark_helper
+                .ok_or("benchmark helper missing")?,
+        );
+    }
     use serde_json::json;
     let cpu_quota = u64::from(expected.resources.cpu_milli)
         .checked_mul(100)
@@ -3164,15 +3235,24 @@ fn observed_resident_sandbox(facts: &ContainerFacts) -> Result<ObservedResidentS
             "managed sandbox has unbounded or unknown resources; resident admission blocked".into(),
         );
     }
-    let tmpfs = facts.raw["HostConfig"]["Tmpfs"][WORKSPACE_DATA_ROOT]
-        .as_str()
-        .and_then(|options| {
-            options
-                .split(',')
-                .find_map(|option| option.strip_prefix("size="))
+    let benchmark_budget = facts
+        .labels
+        .get("centaeris.benchmark_profile_digest")
+        .and_then(|_| facts.labels.get("centaeris.benchmark_data_budget"))
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0);
+    let tmpfs = benchmark_budget
+        .or_else(|| {
+            facts.raw["HostConfig"]["Tmpfs"][WORKSPACE_DATA_ROOT]
+                .as_str()
+                .and_then(|options| {
+                    options
+                        .split(',')
+                        .find_map(|option| option.strip_prefix("size="))
+                })
+                .and_then(|size| size.parse::<u64>().ok())
+                .filter(|value| *value > 0)
         })
-        .and_then(|size| size.parse::<u64>().ok())
-        .filter(|value| *value > 0)
         .ok_or("managed sandbox workspace resource limit unknown; resident admission blocked")?;
     Ok(ObservedResidentSandbox {
         execution_id: label("centaeris.execution_id")?,
@@ -3218,7 +3298,7 @@ struct ContainerMountFacts {
     #[serde(rename = "ReadOnly", default)]
     read_only: bool,
     #[serde(rename = "VolumeOptions")]
-    volume_options: ContainerVolumeOptions,
+    volume_options: Option<ContainerVolumeOptions>,
 }
 
 #[derive(Deserialize)]
@@ -3260,14 +3340,20 @@ impl ContainerFacts {
             && self.cpu_period == 100_000
             && self.cpu_quota == i64::from(expected.resources.cpu_milli) * 100
             && self.pids_limit == Some(i64::from(expected.resources.pids_limit))
-            && self.readonly_rootfs
-            && self.network_mode == SANDBOX_NETWORK_MODE
+            && self.readonly_rootfs == expected.benchmark_profile.is_none()
+            && self.network_mode
+                == expected
+                    .benchmark_profile
+                    .map_or(SANDBOX_NETWORK_MODE, |profile| {
+                        benchmark::network_mode(profile.network)
+                    })
             && plugin_mounts_match(
                 self.mounts.as_slice(),
                 expected.plugin_volume_name,
                 expected.plugin_mounts,
             )
-            && memory_mount_matches(self.mounts.as_slice(), expected.memory_mount)
+            && (expected.benchmark_profile.is_some()
+                || memory_mount_matches(self.mounts.as_slice(), expected.memory_mount))
     }
 }
 
@@ -3291,7 +3377,10 @@ fn plugin_mounts_match(
                     && mount.source == plugin_volume_name
                     && mount.read_only
                     && mount.target == expected.destination
-                    && mount.volume_options.subpath == expected.package_name
+                    && mount
+                        .volume_options
+                        .as_ref()
+                        .is_some_and(|options| options.subpath == expected.package_name)
             })
         })
 }
@@ -3305,7 +3394,10 @@ fn memory_mount_matches(actual: &[ContainerMountFacts], expected: &MemoryMount) 
         && mounts[0].mount_type == "volume"
         && mounts[0].source == expected.volume_name
         && !mounts[0].read_only
-        && mounts[0].volume_options.subpath == expected.scope_key
+        && mounts[0]
+            .volume_options
+            .as_ref()
+            .is_some_and(|options| options.subpath == expected.scope_key)
 }
 
 fn inspect_container(name: &str) -> Result<Option<ContainerFacts>, String> {
@@ -3401,7 +3493,11 @@ fn policy_summary(policy: &ExecutionPolicy) -> ExecutionPolicySummary {
     ExecutionPolicySummary {
         enforced: true,
         network: policy.network.clone(),
-        workspace_root: WORKSPACE_DATA_ROOT.to_string(),
+        workspace_root: policy
+            .filesystem
+            .workspace_root
+            .to_string_lossy()
+            .into_owned(),
         read_only_root_count: policy.filesystem.read_only_roots.len(),
         writable_root_count: policy.filesystem.writable_roots.len(),
         denied_read_path_count: policy.filesystem.denied_read_paths.len(),
@@ -4250,7 +4346,7 @@ enum ProjectedInputState {
 
 #[cfg(test)]
 mod tests {
-    fn retained_test_runner() -> DockerExecutionHostRunner {
+    pub(super) fn retained_test_runner() -> DockerExecutionHostRunner {
         let mut runner = test_docker_execution_host_runner();
         let origin_execution = "execution-origin";
         let allocation = crate::postgres_store::execution_instances::RetainedInstanceAllocation {
@@ -4549,6 +4645,7 @@ mod tests {
              before: &mut (dyn FnMut(&mut Client) -> Result<(), String> + Send)| {
                 DockerExecutionHostRunner::new_with_admitted(
                     DockerExecutionHostRequest {
+                        benchmark_profile: None,
                         workspace_id: "centaeris-recovery-test-tenant".into(),
                         lifecycle_job_id: job.clone(),
                         lifecycle_lease_owner: lease_owner.into(),
@@ -6020,9 +6117,9 @@ mod tests {
                 source: "centaeris-workspace-plugin-data".to_string(),
                 target: mounts[0].destination.clone(),
                 read_only: true,
-                volume_options: ContainerVolumeOptions {
+                volume_options: Some(ContainerVolumeOptions {
                     subpath: "demo".to_string(),
-                },
+                }),
             }],
             "centaeris-workspace-plugin-data",
             mounts.as_slice(),
@@ -6200,9 +6297,9 @@ mod tests {
                 source: mount.volume_name.clone(),
                 target: MEMORY_CONTAINER_ROOT.to_string(),
                 read_only: true,
-                volume_options: ContainerVolumeOptions {
+                volume_options: Some(ContainerVolumeOptions {
                     subpath: mount.scope_key.clone(),
-                },
+                }),
             }],
             &mount,
         ));
@@ -6767,6 +6864,8 @@ mod tests {
             retained_allocation: None,
             environment_authorization: None,
             retained_workspace_id: None,
+            benchmark_profile: None,
+            benchmark_helper: None,
         }
     }
 

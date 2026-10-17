@@ -1,4 +1,5 @@
 //! Local Docker transport. Runtime semantics stay in the execution host.
+pub(crate) mod benchmark_transfer;
 mod exec;
 pub(crate) use exec::{ExecChild, ExecReader, ExecRequest, ExecStatus, ExecWriter};
 use std::future::Future;
@@ -215,6 +216,40 @@ fn contains(actual: &Value, expected: &Value) -> bool {
     }
 }
 
+fn environment_contains(actual: &Value, expected: &Value) -> bool {
+    let Some(expected) = expected.as_array() else {
+        return false;
+    };
+    let mut requested = std::collections::BTreeMap::new();
+    for value in expected {
+        let Some((name, value)) = value.as_str().and_then(|text| text.split_once('=')) else {
+            return false;
+        };
+        if name.is_empty() || requested.insert(name, value).is_some() {
+            return false;
+        }
+    }
+    if actual.is_null() && requested.is_empty() {
+        return true;
+    }
+    let Some(actual) = actual.as_array() else {
+        return false;
+    };
+    let mut matched = std::collections::BTreeSet::new();
+    for entry in actual {
+        let Some(text) = entry.as_str() else {
+            return false;
+        };
+        let (name, value) = text.split_once('=').unwrap_or((text, ""));
+        if let Some(expected) = requested.get(name) {
+            if !text.contains('=') || !matched.insert(name) || value != *expected {
+                return false;
+            }
+        }
+    }
+    matched.len() == requested.len()
+}
+
 pub(crate) fn verify_created(facts: &Value, request: &Value) -> Result<String, String> {
     // Engine omits Mount.ReadOnly when false. Normalize only that documented
     // mount default, never arbitrary missing fields or explicit null values.
@@ -241,7 +276,15 @@ pub(crate) fn verify_created(facts: &Value, request: &Value) -> Result<String, S
         } else {
             &facts["Config"][key]
         };
-        if !contains(actual, expected) {
+        // Docker merges image defaults into Env and need not preserve the
+        // request's ordering. Check requested names and exact values instead;
+        // other arrays (commands, mounts, capabilities) keep their strict check.
+        let matches = if key == "Env" {
+            environment_contains(actual, expected)
+        } else {
+            contains(actual, expected)
+        };
+        if !matches {
             return Err(format!(
                 "Docker container configuration mismatch: {key}; refusing adoption"
             ));
@@ -362,6 +405,30 @@ fn start_inner(id: &str) -> Result<(), String> {
 
 pub(crate) fn remove(id: &str, volumes: bool) -> Result<(), String> {
     crate::observations::timed("dockerRemove", || remove_inner(id, volumes, true))
+}
+
+pub(crate) fn kill_benchmark_container(id: &str) -> Result<(), String> {
+    if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("benchmark stop requires immutable Docker ID".into());
+    }
+    let engine = shared()?;
+    engine.run(MUTATION_TIMEOUT, async {
+        engine
+            .docker
+            .kill_container(
+                id,
+                Some(KillContainerOptions {
+                    signal: "KILL".into(),
+                }),
+            )
+            .await
+            .map_err(|error| error.to_string())
+    })?;
+    if inspect(id)?.is_some_and(|facts| facts["State"]["Running"] == false) {
+        Ok(())
+    } else {
+        Err("benchmark stop unconfirmed; resource debit retained".into())
+    }
 }
 
 pub(crate) fn remove_stopped(id: &str) -> Result<(), String> {
@@ -485,5 +552,72 @@ mod tests {
         let mut foreign = facts;
         foreign["Config"]["Labels"]["owner"] = json!("foreign");
         assert!(verify_created(&foreign, &request).is_err());
+    }
+
+    #[test]
+    fn adoption_accepts_image_environment_and_checks_each_requested_variable() {
+        let request = json!({"Env":["HTTP_PROXY=http://proxy.test:7890", "VALUE=a=b", "EMPTY="], "Cmd":["keeper"], "Labels":{"owner":"ours"}});
+        let facts = json!({"Id":"ours", "Config":{"Env":["PATH=/usr/local/bin:/usr/bin:/bin", "EMPTY=", "VALUE=a=b", "HTTP_PROXY=http://proxy.test:7890"], "Cmd":["keeper"], "Labels":{"owner":"ours"}}});
+        assert_eq!(verify_created(&facts, &request).unwrap(), "ours");
+        for environment in [
+            json!(["PATH=/usr/bin", "VALUE=a=b", "EMPTY="]),
+            json!(["HTTP_PROXY=http://other.test", "VALUE=a=b", "EMPTY="]),
+            json!([
+                "HTTP_PROXY=http://proxy.test:7890",
+                "HTTP_PROXY=http://other.test",
+                "VALUE=a=b",
+                "EMPTY="
+            ]),
+            json!(["HTTP_PROXY=http://proxy.test:7890", "VALUE=a=b", "EMPTY"]),
+        ] {
+            let mut changed = facts.clone();
+            changed["Config"]["Env"] = environment;
+            assert!(verify_created(&changed, &request).is_err());
+        }
+        let mut changed = facts.clone();
+        changed["Config"]["Cmd"] = json!(["keeper", "other"]);
+        assert!(verify_created(&changed, &request).is_err());
+        let mut invalid = request.clone();
+        invalid["Env"] = json!(["EMPTY=", "EMPTY=other"]);
+        assert!(verify_created(&facts, &invalid).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly supplied local original task image and owned disposable Docker containers"]
+    fn original_image_proxy_environment_survives_real_docker_creation_and_exec() {
+        let image =
+            std::env::var("CENTAERIS_DOCKER_TEST_IMAGE").expect("explicit original image required");
+        assert!(
+            image.strip_prefix("sha256:").is_some_and(
+                |value| value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
+            )
+        );
+        let name = format!(
+            "centaeris-env-contract-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let request = serde_json::json!({"Image":image,"Labels":{"centaeris.test.environment":&name},"Entrypoint":["/bin/sh"],"Cmd":["-c","sleep 30"],"Env":["HTTP_PROXY=http://proxy.test:7890","http_proxy=http://proxy.test:7890"],"HostConfig":{"NetworkMode":"none","Memory":134217728,"PidsLimit":64}});
+        let id = ensure_created(&name, request.clone()).unwrap();
+        let result = (|| -> Result<(), String> {
+            let facts = inspect(&id)?.ok_or("test container absent")?;
+            verify_created(&facts, &request)?;
+            assert!(facts["Config"]["Env"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value.as_str().is_some_and(|text| text.starts_with("PATH="))));
+            start(&id)?;
+            let mut child=ExecRequest::new(&id,vec!["/bin/sh".into(),"-c".into(),"test \"$HTTP_PROXY\" = http://proxy.test:7890 && test \"$http_proxy\" = http://proxy.test:7890 && test -n \"$PATH\"".into()]).spawn()?;
+            child.stdin.take();
+            assert_eq!(child.wait().map_err(|e| e.to_string())?.code(), Some(0));
+            Ok(())
+        })();
+        remove(&id, true).unwrap();
+        assert!(inspect(&id).unwrap().is_none());
+        result.unwrap();
     }
 }

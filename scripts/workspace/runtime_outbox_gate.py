@@ -125,6 +125,9 @@ def main():
          f'postgres_store::integration_tests::{name}', '--', '--exact']
         for name in exact_tests
     ])
+    commands.append(['cargo', 'test', '--locked', '-p', 'runtime_server',
+                     'postgres_store::benchmark::tests::postgres_benchmark_observation_setup_and_retirement_remain_exactly_bound',
+                     '--', '--exact'])
     names = []
     for command in commands:
         discovered = subprocess.run([*command, '--ignored', '--list'], cwd=root,
