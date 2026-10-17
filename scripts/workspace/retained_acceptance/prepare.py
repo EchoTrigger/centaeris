@@ -1,6 +1,7 @@
 """Generate an isolated retained-lifecycle Docker project; never start or stop it.
 
-All credentials are synthetic and stay in the generated private directory.
+Generated deployment credentials are synthetic and stay in the private directory.
+Benchmark provider credentials are supplied separately to the one-shot seed process.
 
 The caller must build the exact integrated SHA and supply a reviewed model script.
 
@@ -18,7 +19,7 @@ import hashlib
 
 import re
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import secrets
 
@@ -32,7 +33,12 @@ def main():
 
     parser.add_argument("--bins", required=True, type=Path)
 
-    parser.add_argument("--model-script", required=True, type=Path)
+    parser.add_argument("--model-script", type=Path)
+    parser.add_argument('--benchmark-mode', action='store_true', help='Prepare a real-provider Workspace benchmark stack without a model stub')
+    parser.add_argument('--docker-socket', help='Absolute Linux Unix socket used for every Docker observation and the Runtime bind')
+    parser.add_argument('--benchmark-helper', type=Path)
+    parser.add_argument('--benchmark-helper-sha256')
+    parser.add_argument('--benchmark-helper-manifest', type=Path)
 
     parser.add_argument("--output", required=True, type=Path)
 
@@ -49,7 +55,26 @@ def main():
     parser.add_argument("--tls-dir", type=Path)
     args = parser.parse_args()
 
-    source, bins, model = (p.resolve(strict=True) for p in (args.source, args.bins, args.model_script))
+    if args.benchmark_mode:
+        if not args.docker_socket or args.model_script is not None or args.tls_dir is not None:
+            raise SystemExit('benchmark mode requires an explicit Docker socket and no mock model/TLS configuration')
+        if not all((args.benchmark_helper, args.benchmark_helper_sha256, args.benchmark_helper_manifest)):
+            raise SystemExit('benchmark mode requires the static helper, digest, and matching build manifest')
+        if not (1024 <= args.api_port <= 65535 and 1024 <= args.runtime_port <= 65535
+                and args.api_port != args.runtime_port):
+            raise SystemExit('benchmark loopback ports must be distinct unprivileged TCP ports')
+    elif args.model_script is None:
+        raise SystemExit('deterministic acceptance requires --model-script')
+    elif any((args.benchmark_helper, args.benchmark_helper_sha256, args.benchmark_helper_manifest)):
+        raise SystemExit('benchmark helper arguments require benchmark mode')
+    if args.docker_socket is not None and (not args.docker_socket.startswith('/')
+            or args.docker_socket.startswith('//') or '..' in args.docker_socket.split('/')
+            or any(ord(c) < 33 for c in args.docker_socket) or ':' in args.docker_socket
+            or '\\' in args.docker_socket or str(PurePosixPath(args.docker_socket)) != args.docker_socket):
+        raise SystemExit('Docker socket must be a canonical absolute Linux Unix socket path')
+    docker = ['docker'] + (['--host', 'unix://' + args.docker_socket] if args.docker_socket else [])
+    source, bins = (p.resolve(strict=True) for p in (args.source, args.bins))
+    model = args.model_script.resolve(strict=True) if args.model_script else None
 
     for name in ("runtime_server", "execution_agent", "environment_task_service"):
 
@@ -63,7 +88,7 @@ def main():
 
     # Observe every managed sandbox, including unknown/foreign allocations.
 
-    inventory = subprocess.run(["docker", "ps", "-a", "--filter", "label=centaeris.managed=true", "--format", "{{.ID}}"], check=True, capture_output=True, text=True)
+    inventory = subprocess.run(docker + ["ps", "-a", "--filter", "label=centaeris.managed=true", "--format", "{{.ID}}"], check=True, capture_output=True, text=True)
 
     if inventory.stdout.strip():
 
@@ -71,7 +96,7 @@ def main():
     images={}
     for name in ('api','worker','runtime','general','postgres','redis'):
         reference=getattr(args,name+'_image')
-        inspected=subprocess.run(['docker','image','inspect','--format','{{.Id}}',reference],
+        inspected=subprocess.run(docker + ['image','inspect','--format','{{.Id}}',reference],
                                  check=True,capture_output=True,text=True).stdout.strip()
         if not re.fullmatch(r'sha256:[0-9a-f]{64}',inspected):
             raise SystemExit('image identity unavailable: '+name)
@@ -103,11 +128,32 @@ def main():
     else:
         raise SystemExit('mounted source must be a verifiable clean Git checkout; unverified archive rejected')
 
+    benchmark_helper = None
+    docker_host_id = None
+    if args.benchmark_mode:
+        helper = args.benchmark_helper.resolve(strict=True)
+        if not helper.is_file() or args.benchmark_helper.is_symlink() or helper.stat().st_size > 128 * 1024 * 1024:
+            raise SystemExit('benchmark helper must be a bounded regular file')
+        helper_hash = hashlib.sha256(helper.read_bytes()).hexdigest()
+        helper_build = json.loads(args.benchmark_helper_manifest.read_text(encoding='utf-8'))
+        if (not re.fullmatch('[0-9a-f]{64}', args.benchmark_helper_sha256)
+                or helper_hash != args.benchmark_helper_sha256
+                or helper_build.get('sourceRevision') != sha or helper_build.get('sourceTree') != source_tree
+                or helper_build.get('target') != 'x86_64-unknown-linux-musl'
+                or helper_build.get('binarySha256', {}).get('execution_agent') != helper_hash):
+            raise SystemExit('benchmark helper must match the same source and static musl build proof')
+        benchmark_helper = {'path': str(helper), 'sha256': helper_hash, 'target': helper_build['target'],
+            'sourceRevision': sha, 'sourceTree': source_tree, 'buildManifest': helper_build}
+        docker_host_id = subprocess.run(docker + ['info', '--format', '{{.ID}}'],
+            check=True, capture_output=True, text=True).stdout.strip()
+        if not re.fullmatch('[A-Za-z0-9:_-]{1,128}', docker_host_id):
+            raise SystemExit('selected Docker daemon identity unavailable')
+
     root = args.output.resolve()
 
     root.mkdir(mode=0o700, parents=True)
 
-    project = "retainedaccept" + secrets.token_hex(5)
+    project = ("tbworkspace" if args.benchmark_mode else "retainedaccept") + secrets.token_hex(5)
 
     env = {}
 
@@ -154,6 +200,19 @@ def main():
 
     })
 
+    if args.benchmark_mode:
+        env.update({
+            'POSTGRES_DB': project, 'POSTGRES_USER': project,
+            'CENTAERIS_BENCHMARK_FIXTURE_ID': project,
+            'SANDBOX_PIDS_LIMIT': '4096', 'RESIDENT_GLOBAL_PIDS': '8192', 'RESIDENT_TENANT_PIDS': '8192',
+            'WORKER_SLOT_COUNT': '2', 'EXECUTION_GLOBAL_LIMIT': '2', 'EXECUTION_TENANT_LIMIT': '2',
+            'EXECUTION_GLOBAL_QUEUE_LIMIT': '2', 'EXECUTION_TENANT_QUEUE_LIMIT': '2',
+            'RESIDENT_GLOBAL_MEMORY_BYTES': str(12 * 1024**3), 'RESIDENT_TENANT_MEMORY_BYTES': str(12 * 1024**3),
+            'RESIDENT_GLOBAL_CPU_MILLI': '6000', 'RESIDENT_TENANT_CPU_MILLI': '6000',
+            'BENCHMARK_EXECUTION_HELPER': benchmark_helper['path'],
+            'BENCHMARK_EXECUTION_HELPER_SHA256': benchmark_helper['sha256'],
+        })
+
     env["DATABASE_URL"] = f"postgresql://{env['POSTGRES_USER']}:{env['POSTGRES_PASSWORD']}@postgres:5432/{env['POSTGRES_DB']}"
 
     envpath = root / "synthetic.env"
@@ -181,11 +240,28 @@ def main():
 
         "api": {"image":images['api']['id'], "env_file":[str(service_envpath)], "entrypoint":[], "working_dir":"/app/packages/api", "command":["/app/.venv/bin/uvicorn","api.asgi:application","--host","0.0.0.0","--port","8000"], "volumes":source_mounts+["storage:/var/lib/centaeris-storage","uploads:/var/lib/centaeris-upload-temp","plugins:/opt/centaeris/plugins:ro"], "ports":[f"127.0.0.1:{args.api_port}:8000"]},
 
-        "runtime": {"image":images['runtime']['id'], "env_file":[str(envpath)], "entrypoint":["/usr/local/bin/runtime_server"], "volumes":[f"{bins / 'runtime_server'}:/usr/local/bin/runtime_server:ro","/var/run/docker.sock:/var/run/docker.sock","runtime:/var/lib/centaeris-runtime","memory:/var/lib/centaeris-agent-memory","plugins:/opt/centaeris/plugins:ro"]},
+        "runtime": {"image":images['runtime']['id'], "env_file":[str(envpath)], "entrypoint":["/usr/local/bin/runtime_server"], "volumes":[f"{bins / 'runtime_server'}:/usr/local/bin/runtime_server:ro",(args.docker_socket or "/var/run/docker.sock") + ":/var/run/docker.sock","runtime:/var/lib/centaeris-runtime","memory:/var/lib/centaeris-agent-memory","plugins:/opt/centaeris/plugins:ro"]},
 
         "worker": {"image":images['worker']['id'], "env_file":[str(service_envpath)], "working_dir":"/app/packages/worker", "command":["/app/.venv/bin/python","worker.py","serve"], "volumes":source_mounts, "init":True},
 
     }
+    if args.benchmark_mode:
+        services.pop('model')
+        services['api']['env_file'] = [str(envpath)]
+        services['runtime']['volumes'].append(benchmark_helper['path'] + ':' + benchmark_helper['path'] + ':ro')
+        services['postgres']['healthcheck']['test'] = ['CMD-SHELL', 'pg_isready -U ' + project + ' -d ' + project]
+        identity = root / 'benchmark-fixture.json'
+        identity.write_text(json.dumps({'schema': 'centaeris.workspaceBenchmarkFixture.v1',
+            'fixtureId': project, 'databaseName': project, 'databaseUser': project,
+            'sourceRevision': sha, 'sourceTree': source_tree, 'dockerHostId': docker_host_id,
+            'dockerSocket': args.docker_socket}, indent=2), encoding='utf-8')
+        os.chmod(identity, 0o600)
+        services['api']['volumes'].append(str(identity) + ':/harness/benchmark-fixture.json:ro')
+        seed_script = (source / 'scripts/workspace/retained_acceptance/benchmark_seed.py').resolve(strict=True)
+        services['api']['volumes'].append(str(seed_script) + ':/harness/benchmark_seed.py:ro')
+        model_validator = (source / 'scripts/harbor/workspace_plan.py').resolve(strict=True)
+        services['api']['volumes'].append(str(model_validator) + ':/harness/workspace_plan.py:ro')
+
     services['runtime']['ports'] = [f'127.0.0.1:{args.runtime_port}:9000']
 
     if args.python_deps is not None:
@@ -213,6 +289,8 @@ def main():
             else mount for mount in services['api']['volumes']],
     }
     services['catalog-init'].pop('ports',None)
+    if args.benchmark_mode:
+        services['catalog-init']['env_file'] = [str(service_envpath)]
     for service in services.values():
 
         service.update({"restart":"no", "labels":{"centaeris.acceptance.project":project}, "mem_limit":"512m", "cpus":"1", "pids_limit":128})
@@ -238,6 +316,13 @@ def main():
     hashes = {name: hashlib.sha256((bins / name).read_bytes()).hexdigest() for name in ("runtime_server","execution_agent","environment_task_service")}
 
     (root / "manifest.json").write_text(json.dumps({"project":project,"sourceRevision":sha,"source":str(source),"binaryDirectory":str(bins),"binarySha256":hashes,'images':images,'buildManifest':build,'mountedPackages':['packages/api','packages/worker'],"apiPort":args.api_port,"runtimePort":args.runtime_port,"status":"prepared-not-started"},indent=2),encoding="utf-8")
+
+    if args.benchmark_mode:
+        manifest_path = root / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+        manifest.update(benchmarkMode=True, dockerSocket=args.docker_socket, dockerHostId=docker_host_id,
+                        benchmarkHelper=benchmark_helper, fixtureIdentity='benchmark-fixture.json')
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding='utf-8')
 
     print(json.dumps({"project":project,"directory":str(root),"sourceRevision":sha,"status":"prepared-not-started"}))
 

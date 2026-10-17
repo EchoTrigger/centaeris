@@ -69,7 +69,7 @@ def validate_agent_message(body):
         authorization = run.authorization
         digest = authorization_digest(authorization.payload)
         _verify_authorization_digest_signature(digest, settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY,
-                                               authorization.signature)
+                                               authorization.signature, schema=authorization.payload["schema"])
         if (digest != authorization.digest or digest != body["authorizationDigest"]
                 or not agent_run_binding_matches(authorization.payload, run)
                 or not agent_run_membership_is_current(run)

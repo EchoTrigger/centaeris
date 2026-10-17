@@ -10,11 +10,21 @@ use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
 pub const AGENT_RUN_AUTHORIZATION_SCHEMA: &str = "workspace.agent_run_authorization.v1";
+pub const BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA: &str = "workspace.agent_run_authorization.v2";
 const AGENT_RUN_AUTHORIZATION_SIGNATURE_DOMAIN: &str = "workspace:agent-run-authorization:v1\0";
+const BENCHMARK_AUTHORIZATION_SIGNATURE_DOMAIN: &str = "workspace:agent-run-authorization:v2\0";
 const MAX_DECLARED_INPUTS: usize = 64;
+
+mod benchmark;
+#[cfg(test)]
+pub use benchmark::BenchmarkResources;
+pub use benchmark::{BenchmarkExecutionProfile, BenchmarkNetwork};
 
 #[cfg(test)]
 mod parity;
+
+#[cfg(test)]
+mod benchmark_tests;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -37,6 +47,27 @@ pub struct WorkspaceAgentRunAuthorization {
     pub image_digest: String,
     pub plugin_activation: PluginActivationSnapshotV1,
     pub resources: SandboxResources,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_value"
+    )]
+    pub benchmark_profile: Option<BenchmarkExecutionProfile>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_value"
+    )]
+    pub benchmark_profile_digest: Option<String>,
+}
+
+fn present_value<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    // Missing is allowed for v1; explicit null must not disguise a new field.
+    T::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -60,7 +91,10 @@ pub struct SandboxResources {
 
 impl WorkspaceAgentRunAuthorization {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema != AGENT_RUN_AUTHORIZATION_SCHEMA {
+        if !matches!(
+            self.schema.as_str(),
+            AGENT_RUN_AUTHORIZATION_SCHEMA | BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA
+        ) {
             return Err("workspace_agent_run_authorization_schema_mismatch".to_string());
         }
         for (name, value) in [
@@ -124,8 +158,37 @@ impl WorkspaceAgentRunAuthorization {
             }
             previous_message_input_ref = Some(input_ref.as_str());
         }
-        if self.image_capability != "workspace_general_v1" {
-            return Err("workspace AgentRun imageCapability mismatch".to_string());
+        match self.schema.as_str() {
+            AGENT_RUN_AUTHORIZATION_SCHEMA => {
+                if self.benchmark_profile.is_some() || self.benchmark_profile_digest.is_some() {
+                    return Err("v1 authorization cannot contain benchmark fields".into());
+                }
+                if self.image_capability != "workspace_general_v1" {
+                    return Err("workspace AgentRun imageCapability mismatch".into());
+                }
+            }
+            BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA => {
+                if self.image_capability != "benchmark_task_v1" {
+                    return Err("benchmark AgentRun imageCapability mismatch".into());
+                }
+                let profile = self
+                    .benchmark_profile
+                    .as_ref()
+                    .ok_or("benchmark profile required")?;
+                let digest = self
+                    .benchmark_profile_digest
+                    .as_deref()
+                    .ok_or("benchmark profile digest required")?;
+                profile.validate()?;
+                validate_sha256("benchmarkProfileDigest", digest)?;
+                if profile.digest()? != digest
+                    || profile.image_digest != self.image_digest
+                    || profile.resources.sandbox_resources() != self.resources
+                {
+                    return Err("benchmark profile binding mismatch".into());
+                }
+            }
+            _ => unreachable!("schema checked above"),
         }
         validate_sha256("imageDigest", self.image_digest.as_str())?;
         validate_plugin_activation_snapshot(&self.plugin_activation)?;
@@ -174,7 +237,7 @@ impl WorkspaceAgentRunAuthorization {
         let digest = self.digest()?;
         let mut mac = Hmac::<Sha256>::new_from_slice(signing_key)
             .map_err(|_| "invalid workspace AgentRun authorization signing key".to_string())?;
-        mac.update(AGENT_RUN_AUTHORIZATION_SIGNATURE_DOMAIN.as_bytes());
+        mac.update(self.signature_domain()?.as_bytes());
         mac.update(digest.as_bytes());
         let bytes = mac.finalize().into_bytes();
         Ok(format!(
@@ -190,17 +253,28 @@ impl WorkspaceAgentRunAuthorization {
     pub fn verify_signature(&self, signing_key: &[u8], signature: &str) -> Result<(), String> {
         let bytes = decode_signature(signature)?;
         let digest = self.digest()?;
-        Self::verify_digest_signature(signing_key, &bytes, &digest)
+        Self::verify_digest_signature(signing_key, &bytes, &digest, self.signature_domain()?)
+    }
+
+    fn signature_domain(&self) -> Result<&'static str, String> {
+        match self.schema.as_str() {
+            AGENT_RUN_AUTHORIZATION_SCHEMA => Ok(AGENT_RUN_AUTHORIZATION_SIGNATURE_DOMAIN),
+            BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA => {
+                Ok(BENCHMARK_AUTHORIZATION_SIGNATURE_DOMAIN)
+            }
+            _ => Err("workspace_agent_run_authorization_schema_mismatch".into()),
+        }
     }
 
     fn verify_digest_signature(
         signing_key: &[u8],
         bytes: &[u8],
         digest: &str,
+        domain: &str,
     ) -> Result<(), String> {
         let mut mac = Hmac::<Sha256>::new_from_slice(signing_key)
             .map_err(|_| "invalid workspace AgentRun authorization signing key".to_string())?;
-        mac.update(AGENT_RUN_AUTHORIZATION_SIGNATURE_DOMAIN.as_bytes());
+        mac.update(domain.as_bytes());
         mac.update(digest.as_bytes());
         mac.verify_slice(bytes)
             .map_err(|_| "workspace AgentRun authorization signature mismatch".to_string())
@@ -250,7 +324,12 @@ impl ValidatedAuthorization<'_> {
     ) -> Result<(), String> {
         self.verify_digest_binding(expected_digest)?;
         let bytes = decode_signature(signature)?;
-        WorkspaceAgentRunAuthorization::verify_digest_signature(key, &bytes, expected_digest)
+        WorkspaceAgentRunAuthorization::verify_digest_signature(
+            key,
+            &bytes,
+            expected_digest,
+            self.0.signature_domain()?,
+        )
     }
 }
 

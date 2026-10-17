@@ -33,7 +33,7 @@ use std::time::Duration;
 use super::PostgresRuntimeStore;
 use centaeris_runtime_sqlite::SqliteRuntimeStore;
 
-static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(super) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 mod checkpoint_requests;
 mod cleanup_migration_tests;
@@ -45,7 +45,7 @@ mod execution_instance_tests;
 mod lease_renewal_tests;
 mod owned_database;
 mod residency_tests;
-mod retained_instance_tests;
+pub(super) mod retained_instance_tests;
 mod snapshot_cas_tests;
 mod tool_result_storage_tests;
 mod wait_handoff_tests;

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Workspace benchmark monitor</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+<header><span class="brand">Centaeris / Terminal-Bench</span><span class="muted">Workspace execution</span><span id="connection" role="status">Connecting</span></header>
+<main>
+  <section class="overview" aria-label="Job overview">
+    <div><h1 id="title">No live run</h1><p id="configuration" class="muted">Waiting for an explicit job manifest and observed events.</p></div>
+    <div class="summary"><strong id="counts">No observations</strong></div>
+  </section>
+  <p id="warning" role="status" hidden></p>
+  <div class="progress-label"><span id="progress-label">Completion not observed</span><span id="job-status">Job status: unknown</span></div>
+  <progress id="progress" max="1" value="0" aria-label="Observed trial completion"></progress>
+  <section id="slots" aria-label="Execution slots"></section>
+  <section class="body">
+    <section aria-label="Task queue">
+      <div class="list-head"><h2>Tasks</h2><nav id="pages" aria-label="Task pages"></nav></div>
+      <div class="table-wrap"><table><thead><tr><th>Task / attempt</th><th>Phase</th><th>Agent</th><th>Verifier</th><th>Reward</th></tr></thead><tbody id="tasks"></tbody></table></div>
+      <p id="empty" class="muted">No task observations.</p>
+    </section>
+    <section class="details" aria-label="Selected task details"><h2>Task details</h2><h3 id="selected">Select a task</h3><dl id="facts"></dl>
+      <section id="metrics" aria-label="Optional task metrics" hidden><p id="metrics-note" class="muted">Metrics not observed.</p><div id="metrics-content" hidden><h2>Committed provider usage</h2><dl id="usage-facts" class="metric-facts"></dl><h2>Task and shared Runtime memory</h2><dl id="memory-facts" class="metric-facts"></dl></div></section>
+      <h2>Recent observations</h2><ol id="logs"></ol></section>
+  </section>
+</main>
+<footer><span>Read-only / local listener / bounded event projection</span><span>Closing this page does not stop the job.</span></footer>
+</body>
+</html>

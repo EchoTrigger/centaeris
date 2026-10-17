@@ -1,0 +1,10 @@
+# The build context is scripts/harbor. Only these four application files enter it.
+**
+!.dockerignore
+!workspace_monitor.Dockerfile
+!workspace_monitor.py
+!workspace_monitor/
+workspace_monitor/*
+!workspace_monitor/index.html
+!workspace_monitor/app.js
+!workspace_monitor/style.css

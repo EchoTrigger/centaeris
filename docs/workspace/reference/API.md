@@ -950,12 +950,23 @@ Neither field carries opaque reasoning, encrypted data, or provider signatures.
 Both the ordinary result and `api.model.stream.v1` terminal `result` use these
 exact camelCase names; unknown result fields and non-string, non-null reasoning
 values fail. The stream emits answer `delta`, full-attempt `reasoning` snapshots
-(`schema`, `type`, `text`), and terminal `result` or `error`. Error frames have
-exactly `schema`, `type`, `reasonType`, and nullable `httpStatus`; they carry a
-sanitized failure code, never provider response text or credentials. Runtime
+(`schema`, `type`, `text`), and terminal `result` or `error`. Ordinary error frames
+have exactly `schema`, `type`, `reasonType`, and nullable `httpStatus`. The
+`incomplete_output_token_limit` error additionally requires `truncatedToolCalls`,
+an array of rejected call metadata (`callId`, `toolName`, `argsBytes`,
+`argsSha256`); missing identities are null and unfinished arguments are never
+included. Other failure reasons reject this field. Non-stream model failures
+return HTTP 502 with `error: model_run_failed`, `reasonType`, nullable
+`httpStatus`, and the same output-limit metadata when applicable. These envelopes
+carry sanitized failure facts, never provider response text or credentials. Runtime
 maps these hosted failure facts to Core's model error kinds. Configuration and
 authentication failures stop immediately; transient provider failures retain
-the existing retry behavior. A failure after a delivered result does not emit
+the existing retry behavior. An explicit `length` or `max_tokens` finish becomes
+`incomplete_output_token_limit` before any unfinished tool arguments are parsed;
+Runtime passes it to Core's existing continuation recovery instead of retrying
+the original request. Empty finals without tool calls have the separate
+`empty_final_response` identity and use the bounded model transport retry policy.
+Token usage equalling a configured limit does not imply truncation. A failure after a delivered result does not emit
 a second terminal frame. Runtime submits Core-owned
 `reasoning_block` records on success (`done`), failure, or cancellation
 (`interrupted`), keeping each retry under a separate Core request identity.

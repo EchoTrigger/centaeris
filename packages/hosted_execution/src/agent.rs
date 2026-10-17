@@ -18,7 +18,20 @@ use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
+mod benchmark;
 mod snapshot_capture;
+
+pub fn run_benchmark_filesystem_once() -> Result<(), String> {
+    benchmark::filesystem_once()
+}
+
+pub fn run_benchmark_keeper() -> Result<(), String> {
+    benchmark::keeper()
+}
+
+pub fn run_benchmark_quiesce_once() -> Result<(), String> {
+    benchmark::quiesce_once()
+}
 
 use crate::memory::{is_memory_uri, run_memory_file_system_operation};
 #[cfg(any(target_os = "linux", test))]
@@ -1751,7 +1764,10 @@ fn rename_noreplace(source: &Path, target: &Path) -> Result<(), String> {
     let target = CString::new(target.as_os_str().as_bytes())
         .map_err(|_| "sandbox input path contains NUL".to_string())?;
     if unsafe {
-        libc::renameat2(
+        // musl does not expose a renameat2 wrapper. Invoke the same Linux
+        // operation directly so installation keeps atomic no-replace semantics.
+        libc::syscall(
+            libc::SYS_renameat2,
             libc::AT_FDCWD,
             source.as_ptr(),
             libc::AT_FDCWD,
@@ -1915,6 +1931,32 @@ fn file_version(metadata: &fs::Metadata) -> (u64, u64, u64, u64, i64, i64, i64, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn input_install_rename_never_replaces_an_existing_target() {
+        let root = std::env::temp_dir().join(format!(
+            "input-rename-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::write(&source, b"new input").unwrap();
+        fs::write(&target, b"existing input").unwrap();
+        assert!(rename_noreplace(&source, &target).is_err());
+        assert_eq!(fs::read(&source).unwrap(), b"new input");
+        assert_eq!(fs::read(&target).unwrap(), b"existing input");
+        fs::remove_file(&target).unwrap();
+        rename_noreplace(&source, &target).unwrap();
+        assert!(!source.exists());
+        assert_eq!(fs::read(&target).unwrap(), b"new input");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn virtual_paths_stay_beneath_data_root() {

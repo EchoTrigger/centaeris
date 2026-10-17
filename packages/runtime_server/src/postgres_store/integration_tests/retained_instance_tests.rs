@@ -61,7 +61,7 @@ impl Run {
 fn require_owned_database(db: &mut Client) {
     super::owned_database::require_owned_database(db);
 }
-fn setup() -> (String, PostgresRuntimeStore, Client) {
+pub(in crate::postgres_store) fn setup() -> (String, PostgresRuntimeStore, Client) {
     let url = test_url();
     let mut db = Client::connect(&url, NoTls).unwrap();
     require_owned_database(&mut db);
