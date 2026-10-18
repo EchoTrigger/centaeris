@@ -90,10 +90,11 @@ def bind_benchmark_profile(environment_id, body):
         if AgentRun.objects.filter(session=session).exists() or session.events.exists():
             raise BenchmarkProfileError('benchmark_profile_requires_unused_session')
         environment.benchmark_profile = body['profile']
+        environment.network = body['profile']['network']
         environment.benchmark_profile_digest = digest
         environment.benchmark_profile_operation_id = body['operationId']
         environment.benchmark_profile_bound_at = timezone.now()
-        environment.save(update_fields=['benchmark_profile', 'benchmark_profile_digest',
+        environment.save(update_fields=['network', 'benchmark_profile', 'benchmark_profile_digest',
             'benchmark_profile_operation_id', 'benchmark_profile_bound_at'])
         return _receipt(environment)
 
@@ -132,7 +133,7 @@ def complete_benchmark_setup(environment_id, body):
                 raise BenchmarkProfileError('benchmark_setup_run_not_admissible')
             try:
                 grant = run.authorization
-                if (grant.payload['schema'] != 'workspace.agent_run_authorization.v2'
+                if (grant.payload['imageCapability'] != 'benchmark_task_v1'
                         or authorization_digest(grant.payload) != grant.digest
                         or not agent_run_binding_matches(grant.payload, run)):
                     raise ValueError('binding')

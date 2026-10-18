@@ -34,6 +34,7 @@ from app_core.http.streaming import router as streaming_router
 from app_core.http.trash import router as trash_router
 from app_core.http.workspace_members import router as workspace_members_router
 from app_core.http.workspaces import router as workspaces_router
+from app_core.http.environment_settings import router as environment_settings_router
 
 
 api = NinjaAPI(
@@ -58,6 +59,7 @@ api.add_router("/api", agent_definitions_router)
 api.add_router("/api", assistant_connectors_router)
 api.add_router("/api", jobs_router)
 api.add_router("/api", workspaces_router)
+api.add_router("/api", environment_settings_router)
 api.add_router("/api", workspace_members_router)
 api.add_router("/api", citations_router)
 api.add_router("/api", sources_router)

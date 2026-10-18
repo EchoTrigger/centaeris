@@ -12,6 +12,7 @@ from .plugin_catalog import plugin_activation_for_workspace, validate_plugin_act
 
 AGENT_RUN_AUTHORIZATION_SCHEMA = "workspace.agent_run_authorization.v1"
 BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA = "workspace.agent_run_authorization.v2"
+NETWORK_AGENT_RUN_AUTHORIZATION_SCHEMA = "workspace.agent_run_authorization.v3"
 RESOLVED_INPUT_SCHEMA = "runtime.resolved_input.v1"
 DECLARED_INPUT_SCHEMA = "runtime.declared_input.v1"
 AGENT_RUN_START_SCHEMA = "workspace.agent_run.start.v3"
@@ -89,7 +90,8 @@ def build_agent_run_authorization_payload(
     ):
         raise ValueError("messageAssetRefs must reference authorized session assets")
     payload = {
-        "schema": AGENT_RUN_AUTHORIZATION_SCHEMA,
+        "schema": NETWORK_AGENT_RUN_AUTHORIZATION_SCHEMA,
+        "network": agent_run.environment.network,
         "id": authorization_id,
         "organizationId": "default_org",
         "workspaceId": agent_run.workspace_id,
@@ -122,7 +124,7 @@ def build_agent_run_authorization_payload(
         profile = environment.benchmark_profile
         if benchmark_profile_digest(profile) != environment.benchmark_profile_digest:
             raise ValueError("benchmark_profile_digest_invalid")
-        payload.update(schema=BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA,
+        payload.update(
             imageCapability="benchmark_task_v1", imageDigest=profile["imageDigest"],
             benchmarkProfile=profile, benchmarkProfileDigest=environment.benchmark_profile_digest,
             resources={key: profile["resources"][key] for key in payload["resources"]})
@@ -161,7 +163,8 @@ def authorization_signature(payload: dict, signing_key: str) -> str:
 
 def _authorization_signature_for_digest(digest: str, signing_key: str, *, schema=AGENT_RUN_AUTHORIZATION_SCHEMA) -> str:
     domains = {AGENT_RUN_AUTHORIZATION_SCHEMA: "workspace:agent-run-authorization:v1\0",
-               BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA: "workspace:agent-run-authorization:v2\0"}
+               BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA: "workspace:agent-run-authorization:v2\0",
+               NETWORK_AGENT_RUN_AUTHORIZATION_SCHEMA: "workspace:agent-run-authorization:v3\0"}
     if schema not in domains:
         raise ValueError("agent_run_authorization_schema_mismatch")
     if not signing_key:
@@ -192,11 +195,13 @@ def _verify_authorization_digest_signature(digest: str, signing_key: str, signat
 def agent_run_binding_matches(payload: dict, agent_run, *, session=None) -> bool:
     from .session_environments import agent_run_environment_matches
     environment = agent_run.environment
-    if payload["schema"] == BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA:
+    if payload["imageCapability"] == "benchmark_task_v1":
         if (environment.benchmark_profile != payload["benchmarkProfile"]
                 or environment.benchmark_profile_digest != payload["benchmarkProfileDigest"]):
             return False
     elif environment.benchmark_profile is not None:
+        return False
+    if authorization_network(payload) != environment.network:
         return False
     return (
         payload["agentRunId"] == agent_run.id
@@ -212,11 +217,15 @@ def agent_run_binding_matches(payload: dict, agent_run, *, session=None) -> bool
 def validate_agent_run_authorization_payload(payload: dict) -> None:
     if not isinstance(payload, dict):
         raise ValueError("agent_run_authorization_schema_mismatch")
-    benchmark = payload.get("schema") == BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA
-    fields = AGENT_RUN_AUTHORIZATION_FIELDS | ({"benchmarkProfile", "benchmarkProfileDigest"} if benchmark else set())
+    network_schema = payload.get("schema") == NETWORK_AGENT_RUN_AUTHORIZATION_SCHEMA
+    benchmark = payload.get("schema") == BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA or (
+        network_schema and payload.get("imageCapability") == "benchmark_task_v1")
+    fields = AGENT_RUN_AUTHORIZATION_FIELDS | ({"benchmarkProfile", "benchmarkProfileDigest"} if benchmark else set()) | ({"network"} if network_schema else set())
     require_exact_fields(payload, fields, "AgentRun authorization")
-    if payload["schema"] not in {AGENT_RUN_AUTHORIZATION_SCHEMA, BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA}:
+    if payload["schema"] not in {AGENT_RUN_AUTHORIZATION_SCHEMA, BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA, NETWORK_AGENT_RUN_AUTHORIZATION_SCHEMA}:
         raise ValueError("agent_run_authorization_schema_mismatch")
+    if network_schema and payload["network"] not in ("disabled", "publicInternet"):
+        raise ValueError("environment_network_invalid")
     for name in [
         "id",
         "organizationId",
@@ -285,11 +294,23 @@ def validate_agent_run_authorization_payload(payload: dict) -> None:
         if benchmark_profile_digest(profile) != payload["benchmarkProfileDigest"]:
             raise ValueError("benchmark_profile_digest_invalid")
         if (profile["imageDigest"] != payload["imageDigest"]
+                or (network_schema and profile["network"] != payload["network"])
                 or any(profile["resources"][key] != value for key, value in resources.items())):
             raise ValueError("benchmark_profile_authorization_binding_invalid")
         if (payload["assetRefs"] or payload["messageAssetRefs"] or payload["pluginActivation"]["packages"]
                 or payload["sessionWorkspace"]["generation"] != 0):
             raise ValueError("benchmark_profile_combination_unsupported")
+
+
+def authorization_network(payload: dict) -> str:
+    """Reconstruct historical signed policy without mutating signed payload bytes."""
+    if payload["schema"] == NETWORK_AGENT_RUN_AUTHORIZATION_SCHEMA:
+        return payload["network"]
+    if payload["schema"] == BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA:
+        return payload["benchmarkProfile"]["network"]
+    if payload["schema"] == AGENT_RUN_AUTHORIZATION_SCHEMA:
+        return "disabled"
+    raise ValueError("agent_run_authorization_schema_mismatch")
 
 
 def validate_session_workspace(payload: dict) -> None:

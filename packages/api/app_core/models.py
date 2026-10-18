@@ -296,6 +296,8 @@ class Workspace(models.Model):
     id = models.CharField(primary_key=True, max_length=64, default=new_workspace_id)
     name = models.CharField(max_length=160)
     description = models.TextField(blank=True, default="")
+    execution_network = models.CharField(max_length=14, default="disabled",
+        choices=[("disabled", "Disabled"), ("publicInternet", "Internet")])
     status = models.CharField(max_length=32, default="active")
     createdBy = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -311,8 +313,13 @@ class Workspace(models.Model):
     createdAt = models.DateTimeField(auto_now_add=True)
     updatedAt = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        constraints = [models.CheckConstraint(condition=models.Q(execution_network__in=["disabled", "publicInternet"]),
+            name="workspace_execution_network_valid")]
+
     def save(self, *args, **kwargs):
         require_enum("Workspace.status", self.status, {"active", "archived"})
+        require_enum("Workspace.execution_network", self.execution_network, {"disabled", "publicInternet"})
         return super().save(*args, **kwargs)
 
 
@@ -1428,6 +1435,8 @@ class SessionEnvironment(models.Model):
     id = models.CharField(primary_key=True, max_length=64, default=new_session_environment_id)
     session = models.ForeignKey(Session, on_delete=models.PROTECT, related_name="environments")
     created_at = models.DateTimeField(auto_now_add=True)
+    network = models.CharField(max_length=14, default="disabled", editable=False,
+        choices=[("disabled", "Disabled"), ("publicInternet", "Internet")])
     benchmark_profile = models.JSONField(null=True, default=None, blank=True, editable=False)
     benchmark_profile_digest = models.CharField(max_length=71, default="", blank=True, editable=False)
     benchmark_profile_operation_id = models.CharField(max_length=128, default="", blank=True, editable=False)
@@ -1447,7 +1456,8 @@ class SessionEnvironment(models.Model):
         choices=[("execute", "Execute"), ("cleanup", "Cleanup")])
 
     class Meta:
-        constraints = [models.CheckConstraint(
+        constraints = [models.CheckConstraint(condition=models.Q(network__in=["disabled", "publicInternet"]),
+            name="environment_network_valid"), models.CheckConstraint(
             condition=(models.Q(controller_run__isnull=True, controller_lease_owner="", controller_released=True, controller_purpose="")
                 | (models.Q(controller_run__isnull=False, controller_epoch__gt=0, controller_purpose__in=["execute", "cleanup"])
                    & ~models.Q(controller_lease_owner=""))),
@@ -1468,14 +1478,21 @@ class SessionEnvironment(models.Model):
     def save(self, *args, **kwargs):
         if self._state.adding and self.benchmark_profile is not None:
             raise ValueError("benchmark_profile_requires_binding")
+        using = kwargs.get("using") or router.db_for_write(type(self), instance=self)
+        if self._state.adding:
+            self.network = Workspace.objects.using(using).get(sessions__pk=self.session_id).execution_network
+        require_enum("SessionEnvironment.network", self.network, {"disabled", "publicInternet"})
         if not self._state.adding:
             using = kwargs.get("using") or router.db_for_write(type(self), instance=self)
-            stored = type(self).objects.using(using).values("session_id", "benchmark_profile",
+            stored = type(self).objects.using(using).values("session_id", "network", "benchmark_profile",
                 "benchmark_profile_digest", "benchmark_profile_operation_id", "benchmark_profile_bound_at",
                 "benchmark_setup_operation_id", "benchmark_setup_run_id", "benchmark_setup_instance_id",
                 "benchmark_setup_container_id", "benchmark_setup_completed_at").get(pk=self.pk)
             if stored["session_id"] != self.session_id:
                 raise ValueError("session_environment_identity_immutable")
+            binding_profile = stored["benchmark_profile"] is None and self.benchmark_profile is not None
+            if stored["network"] != self.network and not binding_profile:
+                raise ValueError("environment_network_immutable")
             fields = ("benchmark_profile", "benchmark_profile_digest", "benchmark_profile_operation_id", "benchmark_profile_bound_at")
             if stored["benchmark_profile"] is not None and any(stored[name] != getattr(self, name) for name in fields):
                 raise ValueError("benchmark_profile_binding_immutable")
@@ -1490,7 +1507,15 @@ class SessionEnvironment(models.Model):
             from .benchmark_profile import benchmark_profile_digest
             if benchmark_profile_digest(self.benchmark_profile) != self.benchmark_profile_digest:
                 raise ValueError("benchmark_profile_digest_invalid")
-        return super().save(*args, **kwargs)
+            if self.network != self.benchmark_profile["network"]:
+                raise ValueError("environment_network_profile_mismatch")
+        created = self._state.adding
+        result = super().save(*args, **kwargs)
+        if created:
+            # PostgreSQL snapshots the authoritative default at INSERT time.
+            # A concurrent settings update may have superseded our earlier read.
+            self.refresh_from_db(using=using, fields=["network"])
+        return result
 
 
 class AgentRunEnvironmentRelease(models.Model):

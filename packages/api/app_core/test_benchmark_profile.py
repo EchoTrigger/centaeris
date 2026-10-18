@@ -179,13 +179,14 @@ class BenchmarkProfileHttpTests(OperationFixture, TestCase):
         self.environment.refresh_from_db()
         self.assertIsNone(self.environment.benchmark_profile)
 
-    def test_benchmark_signed_v2_and_ordinary_v1_remain_distinct(self):
+    def test_benchmark_signed_policy_binds_common_network_and_task_profile(self):
         self.assertEqual(self.bind().status_code, 200)
         accepted = self.post(self.create_url + f'/{self.session_id}/messages')
         self.assertEqual(accepted.status_code, 202, accepted.content)
         run = AgentRun.objects.get(pk=accepted.json()['agentRunId'])
         payload = run.authorization.payload
-        self.assertEqual(payload['schema'], 'workspace.agent_run_authorization.v2')
+        self.assertEqual(payload['schema'], 'workspace.agent_run_authorization.v3')
+        self.assertEqual(payload['network'], profile()['network'])
         self.assertEqual(payload['imageCapability'], 'benchmark_task_v1')
         self.assertEqual(payload['imageDigest'], profile()['imageDigest'])
         self.assertEqual(payload['benchmarkProfile'], profile())
@@ -202,20 +203,21 @@ class BenchmarkProfileHttpTests(OperationFixture, TestCase):
         ordinary = self.post(operationId='ordinary')
         self.assertEqual(ordinary.status_code, 202, ordinary.content)
         old = AgentRun.objects.get(pk=ordinary.json()['agentRunId']).authorization.payload
-        self.assertEqual(old['schema'], 'workspace.agent_run_authorization.v1')
+        self.assertEqual(old['schema'], 'workspace.agent_run_authorization.v3')
+        self.assertEqual(old['network'], 'disabled')
         self.assertNotIn('benchmarkProfile', old)
         self.assertEqual(old['imageCapability'], 'workspace_general_v1')
         with self.assertRaises(ValueError):
             validate_agent_run_authorization_payload({**old, 'benchmarkProfile': profile()})
 
-    def test_v2_signature_uses_separate_domain_and_covers_profile(self):
+    def test_v3_signature_uses_separate_domain_and_covers_profile(self):
         import hashlib
         import hmac
         self.assertEqual(self.bind().status_code, 200)
         accepted = self.post(self.create_url + f'/{self.session_id}/messages')
         grant = AgentRun.objects.get(pk=accepted.json()['agentRunId']).authorization
         expected = 'hmac-sha256:' + hmac.new(settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY.encode(),
-            ('workspace:agent-run-authorization:v2\0' + grant.digest).encode(), hashlib.sha256).hexdigest()
+            ('workspace:agent-run-authorization:v3\0' + grant.digest).encode(), hashlib.sha256).hexdigest()
         self.assertEqual(grant.signature, expected)
 
     def test_bound_session_cannot_switch_to_a_new_environment(self):

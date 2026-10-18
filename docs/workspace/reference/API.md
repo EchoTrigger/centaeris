@@ -866,8 +866,13 @@ exact v1 schemas in code.
 
 Nonzero Session stream cursors use the exact `v1.<base64url>` wire prefix with
 payload schema `session.stream.cursor.v1`; `0-0` is the only initial sentinel.
-AgentRun authorization uses schema `workspace.agent_run_authorization.v1` and
-signature domain `workspace:agent-run-authorization:v1`. Knowledge processing
+New AgentRun authorization uses schema `workspace.agent_run_authorization.v3` and
+signature domain `workspace:agent-run-authorization:v3`, binding the environment's
+required `network` policy. Historical v1/v2 signed records retain their original
+schemas and signature domains. Administrators configure defaults through
+`GET/PATCH /api/workspaces/{workspaceId}/environment-settings`; see
+[environment network policy](../architecture/EnvironmentNetwork.md).
+Knowledge processing
 specifications use the immutable Centaeris processor version `1.0.0`.
 
 Secrets never belong in ordinary responses, logs, documentation, or checked-in

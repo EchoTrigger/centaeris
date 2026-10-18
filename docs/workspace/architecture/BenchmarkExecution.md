@@ -3,8 +3,9 @@
 The internal `benchmark_task_v1` capability runs a single Harbor task through the
 normal Workspace API, Worker and Core loop. It requires an explicitly bound
 `runtime.benchmark_execution_profile.v1` and a signed
-`workspace.agent_run_authorization.v2`. Ordinary `workspace_general_v1`
-authorizations retain their v1 bytes and execution policy.
+`workspace.agent_run_authorization.v3`. Its network value must match the shared
+[environment network snapshot](EnvironmentNetwork.md). Historical v1/v2
+authorizations retain their original bytes and execution policy.
 
 The profile binds the original immutable image ID, working directory, numeric
 user, network policy and declared resources before the Session admits its first
@@ -70,8 +71,8 @@ image locks, native verifier evidence and the one-task/pilot/full-run sequence.
 
 ## Upgrade and exit
 
-Install migration `0020_benchmark_execution_profile` and matching v2 readers
-before admitting this capability. The forward migration preserves existing v1
+Install migrations `0020_benchmark_execution_profile` and `0021_environment_network`
+with matching v3 readers before admitting new work. Forward migration preserves existing v1/v2
 authorization and history. Reversal is rejected after benchmark facts exist;
 empty fields are not a compatibility substitute for those facts.
 

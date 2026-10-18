@@ -15,6 +15,7 @@ import WorkspaceGroupsRoute from "./WorkspaceGroupsRoute";
 import WorkspaceMembersRoute from "./WorkspaceMembersRoute";
 import AppDelegations from "./AppDelegations";
 import AgentSettings from "./AgentSettings";
+import EnvironmentSettings from "./EnvironmentSettings";
 import { canOpenPrivateAgentSettings } from "../agent-chat/agentSettingsNavigation";
 
 const ADMIN_ROLES = new Set(["owner", "admin"]);
@@ -24,6 +25,7 @@ const SECTIONS = () => ({
   applications: { label: t("appDelegations.title"), title: t("appDelegations.title"), icon: Boxes, group: "", account: true },
   agents: { label: t("agentSettings.agents"), title: t("agentSettings.agents"), icon: Bot, group: t("settingsRoute.workspace"), privateAgents: true },
   members: { label: t("invitationActivationRoute.member"), title: t("settingsRoute.membersAndPermissions"), icon: Users, group: t("settingsRoute.workspace") },
+  environment: { label: t("environmentSettings.title"), title: t("environmentSettings.title"), icon: Settings2, group: t("settingsRoute.workspace") },
   groups: { label: t("settingsRoute.groups"), title: t("settingsRoute.groups"), icon: UsersRound, group: t("settingsRoute.workspace"), hiddenInNav: true },
   plugins: { label: t("libraryRoute.plugins"), title: t("settingsRoute.workspacePlugins"), icon: Plug, group: t("settingsRoute.workspace") },
   security: { label: t("settingsRoute.security"), title: t("settingsRoute.security"), icon: ShieldCheck, group: t("invitationActivationRoute.administrator"), account: true },
@@ -157,6 +159,7 @@ export default function SettingsPage() {
     : section === "applications" ? <AppDelegations isSuperuser={Boolean(user?.isSuperuser)} />
     : section === "agents" ? <AgentSettings key={`${workspace.id}:${location.search}`} onEditorOpenChange={setAgentEditorOpen} />
     : section === "members" ? <WorkspaceMembersRoute embedded />
+    : section === "environment" ? <EnvironmentSettings key={workspace.id} workspace={workspace} />
       : section === "groups" ? <WorkspaceGroupsRoute embedded />
         : section === "plugins" ? <PluginSettings workspace={workspace} isSuperuser={Boolean(user?.isSuperuser)} />
           : section === "global-plugins" ? <GlobalPluginSettings />

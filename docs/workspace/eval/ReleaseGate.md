@@ -1,13 +1,20 @@
 # Workspace release gate
 
 The opt-in [benchmark execution profile](../architecture/BenchmarkExecution.md)
-additionally requires the focused API profile/forward-migration and v1/v2
+additionally requires the focused API profile/forward-migration and v1/v2/v3
 authorization tests, Runtime benchmark control tests, the required PostgreSQL
 outbox identities, and the Harbor adapter behavior suite. Its physical acceptance
 is one native Harbor task through API → Worker → Runtime → Docker, including
 verification and confirmed retirement. Mock ports and ordinary Workspace CI do
 not establish that physical pass. The controller binds these gate records to the
 exact source, binaries, static helper and service configuration before model work.
+
+Environment network changes additionally require the settings permission and
+immutable snapshot tests, v3 network signature parity, historical network
+reconstruction and raw/bulk update protection on disposable PostgreSQL. Docker
+create/adoption tests must cover ordinary and benchmark network policy without
+granting ordinary environments benchmark filesystem privileges. See
+[environment network policy](../architecture/EnvironmentNetwork.md).
 
 Environment execution binding acceptance requires the unchanged signed v1 grant
 parity vectors, shared environment-authorization signature vector and strict v3

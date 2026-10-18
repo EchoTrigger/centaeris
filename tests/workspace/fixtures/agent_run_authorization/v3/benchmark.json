@@ -1,0 +1,51 @@
+{
+  "schema": "workspace.agent_run_authorization.v3",
+  "id": "authorization_1",
+  "organizationId": "org_1",
+  "workspaceId": "ws_1",
+  "userId": "user_1",
+  "agentId": "centaeris",
+  "sessionId": "sess_1",
+  "agentRunId": "agent_run_1",
+  "sessionWorkspace": {
+    "generation": 0,
+    "snapshotSha256": "",
+    "snapshotSizeBytes": 0,
+    "expandedSizeBytes": 0,
+    "fileCount": 0
+  },
+  "modelConfigRef": "model_1",
+  "thinkingMode": "high",
+  "artifactScopeRef": "artifact_scope_1",
+  "assetRefs": [],
+  "messageAssetRefs": [],
+  "imageCapability": "benchmark_task_v1",
+  "imageDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "pluginActivation": {
+    "schema": "plugin_activation_snapshot_v1",
+    "digest": "sha256:3bf31c5d8d4d6523712c9ef2b194d4b0edb3255155a49e76f44bbe7382e54f75",
+    "packages": []
+  },
+  "resources": {
+    "cpuMilli": 1000,
+    "memoryBytes": 2147483648,
+    "pidsLimit": 512,
+    "dataTmpfsBytes": 67108864
+  },
+  "benchmarkProfile": {
+    "schema": "runtime.benchmark_execution_profile.v1",
+    "imageDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "workspaceRoot": "/app",
+    "user": "0:0",
+    "network": "publicInternet",
+    "resources": {
+      "cpuMilli": 1000,
+      "memoryBytes": 2147483648,
+      "pidsLimit": 512,
+      "dataTmpfsBytes": 67108864,
+      "storageBytes": 10737418240
+    }
+  },
+  "benchmarkProfileDigest": "sha256:38df389d56a94d8d87b1c392abc50f10f84b25faf2be155a5f6e042e25222464",
+  "network": "publicInternet"
+}
