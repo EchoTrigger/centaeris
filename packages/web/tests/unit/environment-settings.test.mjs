@@ -59,3 +59,39 @@ test("successful setting change shows saved policy and scope for new environment
   assert.equal(nodes(subject.tree, node => node.props.role === "status").length, 1);
   subject.unmount();
 });
+
+test("a lost save response reloads committed policy instead of displaying an enabled stale switch", async () => {
+  let stored = "disabled";
+  let reads = 0;
+  const env = environment({ request: async (_url, options) => {
+    if (options?.method === "PATCH") { stored = "publicInternet"; throw new Error("response lost"); }
+    reads++;
+    return { network: stored };
+  } });
+  const subject = renderer(EnvironmentSettings, { workspace: { id: "workspace" } }, env);
+  await subject.settle();
+  await toggle(subject.tree).props.onChange({ target: { checked: true } }); await subject.settle();
+  assert.equal(reads, 2);
+  assert.equal(toggle(subject.tree).props.checked, true);
+  assert.equal(toggle(subject.tree).props.disabled, false);
+  subject.unmount();
+});
+
+test("failed reconciliation keeps the switch disabled until an authoritative retry succeeds", async () => {
+  let reads = 0;
+  const env = environment({ request: async (_url, options) => {
+    if (options?.method === "PATCH") throw new Error("response lost");
+    if (++reads === 2) throw new Error("offline");
+    return { network: reads === 1 ? "disabled" : "publicInternet" };
+  } });
+  const subject = renderer(EnvironmentSettings, { workspace: { id: "workspace" } }, env);
+  await subject.settle();
+  await toggle(subject.tree).props.onChange({ target: { checked: true } }); await subject.settle();
+  assert.equal(toggle(subject.tree).props.disabled, true);
+  const retry = nodes(subject.tree, node => node.type === "button")[0];
+  assert.ok(retry);
+  await retry.props.onClick(); await subject.settle();
+  assert.equal(toggle(subject.tree).props.checked, true);
+  assert.equal(toggle(subject.tree).props.disabled, false);
+  subject.unmount();
+});

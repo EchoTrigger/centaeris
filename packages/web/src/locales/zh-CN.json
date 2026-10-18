@@ -1110,7 +1110,8 @@
   "environmentSettings.internet": "允许访问互联网",
   "environmentSettings.newEnvironmentsOnly": "仅对新建会话生效，已有环境保持当前网络权限。",
   "environmentSettings.loadError": "无法加载环境设置。",
-  "environmentSettings.saveError": "保存失败，当前仍显示原有设置。",
   "environmentSettings.saved": "已保存，新建会话将使用此设置。",
-  "environmentSettings.retry": "重试"
+  "environmentSettings.retry": "重试",
+  "environmentSettings.saveUnconfirmed": "未能确认保存响应，开关已重新读取并显示服务器当前设置。",
+  "environmentSettings.loading": "正在读取当前网络权限…"
 }

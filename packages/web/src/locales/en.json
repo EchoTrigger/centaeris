@@ -1110,7 +1110,8 @@
   "environmentSettings.internet": "Allow internet access",
   "environmentSettings.newEnvironmentsOnly": "Applies to new conversations. Existing environments keep their current network access.",
   "environmentSettings.loadError": "Unable to load environment settings.",
-  "environmentSettings.saveError": "Unable to save. The previous setting is still shown.",
   "environmentSettings.saved": "Saved. New conversations will use this setting.",
-  "environmentSettings.retry": "Retry"
+  "environmentSettings.retry": "Retry",
+  "environmentSettings.saveUnconfirmed": "The save response was unavailable. The switch now shows the current server setting.",
+  "environmentSettings.loading": "Loading current network policy…"
 }

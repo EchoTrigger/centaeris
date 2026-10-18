@@ -20,13 +20,14 @@ export default function EnvironmentSettings({ workspace }) {
   const load = useCallback(async () => {
     requestRef.current?.abort();
     const controller = new AbortController(); requestRef.current = controller;
-    setBusy(true); setError(""); setSaved(false);
+    setNetwork(null); setBusy(true); setError(""); setSaved(false);
     try {
       const value = readPolicy(await apiJson(url, { signal: controller.signal }));
-      if (!controller.signal.aborted) setNetwork(value);
+      if (!controller.signal.aborted) { setNetwork(value); return true; }
     } catch {
       if (!controller.signal.aborted) setError("loadError");
     } finally { if (!controller.signal.aborted) setBusy(false); }
+    return false;
   }, [url]);
   useEffect(() => { void load(); return () => requestRef.current?.abort(); }, [load]);
 
@@ -39,7 +40,7 @@ export default function EnvironmentSettings({ workspace }) {
       const value = readPolicy(await apiJson(url, { ...jsonOptions("PATCH", { network: requested }), signal: controller.signal }));
       if (!controller.signal.aborted) { setNetwork(value); setSaved(true); }
     } catch {
-      if (!controller.signal.aborted) setError("saveError");
+      if (!controller.signal.aborted && await load()) setError("saveUnconfirmed");
     } finally { if (!controller.signal.aborted) setBusy(false); }
   }
 
@@ -50,6 +51,7 @@ export default function EnvironmentSettings({ workspace }) {
         <span><strong>{t("environmentSettings.internet")}</strong><small>{t("environmentSettings.newEnvironmentsOnly")}</small></span>
         <input type="checkbox" role="switch" aria-label={t("environmentSettings.internet")} checked={network === "publicInternet"} disabled={busy || network === null} onChange={update} />
       </label>
+      {busy && network === null ? <p role="status">{t("environmentSettings.loading")}</p> : null}
       {error ? <p role="alert">{t(`environmentSettings.${error}`)}</p> : null}
       {error === "loadError" ? <button type="button" onClick={load} disabled={busy}>{t("environmentSettings.retry")}</button> : null}
       {saved ? <p role="status">{t("environmentSettings.saved")}</p> : null}
