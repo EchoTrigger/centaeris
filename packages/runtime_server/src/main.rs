@@ -1123,7 +1123,8 @@ async fn read_axum_request(request: Request<Body>) -> Result<Request<Bytes>, Res
     if request.method() == hyper::Method::POST
         && request.uri().path() == "/internal/benchmark/upload"
     {
-        http::benchmark::upload_body_authority(&request)?;
+        http::benchmark::upload_body_authority(&request)
+            .map_err(|(status, code)| bounded_json_error_response(status, code))?;
     }
     read_axum_request_body(request).await
 }

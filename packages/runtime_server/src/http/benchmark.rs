@@ -619,12 +619,12 @@ fn upload_metadata<B>(request: &Request<B>) -> Result<TransferRequest, &'static 
     Ok(value)
 }
 
-pub(crate) fn upload_body_authority<B>(request: &Request<B>) -> Result<(), Response<Body>> {
+pub(crate) fn upload_body_authority<B>(request: &Request<B>) -> Result<(), (u16, &'static str)> {
     if ["x-internal-token", "x-environment-maintenance-token"]
         .iter()
         .any(|key| request.headers().get_all(*key).iter().count() > 1)
     {
-        return Err(bounded_json_error_response(400, "request_header_duplicate"));
+        return Err((400, "request_header_duplicate"));
     }
     let internal = env::var("INTERNAL_API_TOKEN").ok();
     if internal.as_ref().is_none_or(|token| {
@@ -635,17 +635,14 @@ pub(crate) fn upload_body_authority<B>(request: &Request<B>) -> Result<(), Respo
                 .and_then(|v| v.to_str().ok())
                 != Some(token.as_str())
     }) {
-        return Err(bounded_json_error_response(401, "unauthorized"));
+        return Err((401, "unauthorized"));
     }
     if !authorized(request) {
-        return Err(bounded_json_error_response(
-            403,
-            "environment_maintenance_authority_required",
-        ));
+        return Err((403, "environment_maintenance_authority_required"));
     }
     upload_metadata(request)
         .map(|_| ())
-        .map_err(|code| bounded_json_error_response(400, code))
+        .map_err(|code| (400, code))
 }
 
 pub(super) fn upload(
