@@ -33,13 +33,13 @@ def stale_operation_id(fence, operation):
 
 def task_rpc(container_id,fence,operation="list",**arguments):
 
-    payload={"schema":"environment.task.v2","request":{"operation":operation,"fence":fence,**arguments}}
+    payload={"schema":"environment.task.v3","request":{"operation":operation,"fence":fence,**arguments}}
 
     result=subprocess.run(["docker","exec","-i","--user","0:0",container_id,"/opt/centaeris/bin/execution_agent","environment-task-rpc"],input=json.dumps(payload),check=True,capture_output=True,text=True)
 
     response=json.loads(result.stdout)
 
-    if response.get("schema")!="environment.task.v2":
+    if response.get("schema")!="environment.task.v3":
 
         raise RuntimeError("task service response schema invalid")
 
@@ -165,7 +165,7 @@ print(json.dumps({'agentRunId':run.id,'sessionId':run.session_id,'environmentId'
   and event.payload['payload'].get('resultState') in ('successWithOutput','successNoOutput') for event in records),
  'containerId':residents[0][0],'resources':residents[0][1:5], 'hostId':residents[0][5], 'releaseReceiptId':release.id,
 
- 'fence':{'environmentInstanceId':instances[0],'controllerId':run.id,'controllerEpoch':env.controller_epoch,'controllerPurpose':'cleanup'}}))
+ 'fence':{'environmentInstanceId':instances[0],'controllerOwner':{'kind':'agentRun','runId':run.id},'controllerEpoch':env.controller_epoch,'controllerPurpose':'cleanup'}}))
 
 '''.replace("RUN_ID_LITERAL",repr(args.run))
 

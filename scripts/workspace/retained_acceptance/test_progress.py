@@ -26,9 +26,9 @@ class LiveObservationTests(unittest.TestCase):
 
 class PrivateInspectionTests(unittest.TestCase):
     def metrics(self):
-        return {'schema':'environment.task.store.inspection.v1','instanceId':'instance',
-            'controllerId':'run','controllerEpoch':7,'hotTasks':64,'activeTasks':1,
-            'indexedTasks':3001,'indexedRunTasks':3000,'controlDirectoryBytes':123456,
+        return {'schema':'environment.task.store.inspection.v2','instanceId':'instance',
+            'controllerOwner':{'kind':'agentRun','runId':'run'},'controllerEpoch':7,'hotTasks':64,'activeTasks':1,
+            'indexedTasks':3001,'indexedOwnerTasks':3000,'controlDirectoryBytes':123456,
             'outputDirectoryBytes':1000}
 
     def invoke(self,metrics):
@@ -41,27 +41,38 @@ class PrivateInspectionTests(unittest.TestCase):
             return SimpleNamespace(stdout=json.dumps(metrics))
         with patch.object(progress.subprocess,'run',side_effect=execute):
             return progress.inspect_store('exact-container',{'environmentInstanceId':'instance',
-                'controllerId':'run','controllerEpoch':7})
+                'controllerOwner':{'kind':'agentRun','runId':'run'},'controllerEpoch':7})
 
     def test_exact_directory_budget_boundary_remains_available(self):
         self.assertEqual(self.invoke(self.metrics()|{'controlDirectoryBytes':8*1024*1024,
             'outputDirectoryBytes':72*1024*1024})['controlDirectoryBytes'],8*1024*1024)
 
     def test_fixed_exact_readonly_target_and_real_index_count(self):
-        self.assertEqual(self.invoke(self.metrics())['indexedRunTasks'],3000)
+        self.assertEqual(self.invoke(self.metrics())['indexedOwnerTasks'],3000)
 
     def test_unknown_schema_identity_invalid_count_and_hot_overflow_reject(self):
         for changes in ({'schema':'old'},{'instanceId':'wrong'},{'controllerEpoch':6},
-                {'hotTasks':65},{'activeTasks':33},{'indexedRunTasks':True},
-                {'indexedRunTasks':4000},{'unknown':1},{'controlDirectoryBytes':8*1024*1024+1},
+                {'schema':'environment.task.store.inspection.v1'},
+                {'controllerOwner':{'kind':'maintenanceOperation','operationId':'run'}},
+                {'controllerId':'run'},
+                {'hotTasks':65},{'activeTasks':33},{'indexedOwnerTasks':True},
+                {'indexedOwnerTasks':4000},{'unknown':1},{'controlDirectoryBytes':8*1024*1024+1},
                 {'outputDirectoryBytes':72*1024*1024+1}):
             with self.subTest(changes=changes),self.assertRaises(RuntimeError):
                 self.invoke(self.metrics()|changes)
 
 class ReclaimedControllerTests(unittest.TestCase):
+    def test_same_named_maintenance_owner_is_rejected_before_any_run_probe(self):
+        from unittest.mock import patch
+        old={'environmentInstanceId':'instance','controllerOwner':{'kind':'maintenanceOperation','operationId':'same-run'},'controllerEpoch':1}
+        with patch.object(progress,'task_rpc') as rpc:
+            with self.assertRaises(RuntimeError):
+                progress.probe_reclaimed_controller('container',old,old|{'controllerEpoch':2},'background')
+            rpc.assert_not_called()
+
     def test_same_run_new_fence_rejects_every_old_mutation_and_preserves_task(self):
         from unittest.mock import patch
-        old={'environmentInstanceId':'instance','controllerId':'same-run','controllerEpoch':1,'controllerPurpose':'execute'}
+        old={'environmentInstanceId':'instance','controllerOwner':{'kind':'agentRun','runId':'same-run'},'controllerEpoch':1,'controllerPurpose':'execute'}
         current=old|{'controllerEpoch':2}
         calls=[]
         def rpc(container,fence,operation='list',**kwargs):
@@ -77,7 +88,7 @@ class ReclaimedControllerTests(unittest.TestCase):
 
     def test_no_mutation_if_same_epoch_or_initial_fence_probe_is_not_rejected(self):
         from unittest.mock import patch
-        old={'environmentInstanceId':'instance','controllerId':'same-run','controllerEpoch':1}
+        old={'environmentInstanceId':'instance','controllerOwner':{'kind':'agentRun','runId':'same-run'},'controllerEpoch':1}
         with patch.object(progress,'task_rpc',return_value={'status':'success'}) as rpc:
             with self.assertRaises(RuntimeError):progress.probe_reclaimed_controller('container',old,old,'background')
             rpc.assert_not_called()
@@ -221,7 +232,7 @@ class DurableCompactionTests(unittest.TestCase):
     def test_recovery_requires_same_summary_request_new_epoch_and_new_main(self):
         events,cursor,_=self.fixture();facts=progress.durable_compaction_facts(events,'session',cursor)
         before={'durableCompaction':facts,'highestSessionSequence':25,'completedCommands':700,
-            'fence':{'controllerId':'same-run','environmentInstanceId':'instance','controllerEpoch':3}}
+            'fence':{'controllerOwner':{'kind':'agentRun','runId':'same-run'},'environmentInstanceId':'instance','controllerEpoch':3}}
         current={'durableCompaction':facts,'completedCommands':701,'fence':before['fence']|{'controllerEpoch':4}}
         baseline={'highestSessionSequence':26,'completedCommands':700,'fence':current['fence']}
         proof=progress.compaction_recovery_proof(before,current,baseline)
@@ -237,7 +248,7 @@ class DurableCompactionTests(unittest.TestCase):
     def test_old_runtime_tail_after_pre_restart_sample_cannot_prove_new_main(self):
         events,cursor,_=self.fixture();facts=progress.durable_compaction_facts(events,'session',cursor)
         before={'durableCompaction':facts,'highestSessionSequence':25,'completedCommands':700,
-            'fence':{'controllerId':'same-run','environmentInstanceId':'instance','controllerEpoch':3}}
+            'fence':{'controllerOwner':{'kind':'agentRun','runId':'same-run'},'environmentInstanceId':'instance','controllerEpoch':3}}
         new_fence=before['fence']|{'controllerEpoch':4}
         # Main sequence30 and old task results can commit between pre-sample25 and restart.
         # They are already visible in the first post-restart read at sequence55.

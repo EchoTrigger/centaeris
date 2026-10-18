@@ -115,7 +115,7 @@ fn seeded_running_journal(root: &Path) -> Vec<u8> {
         .takeover_persist(
             EnvironmentTaskFence {
                 environment_instance_id: "i".into(),
-                controller_id: "r".into(),
+                controller_owner: EnvironmentTaskOwner::AgentRun { run_id: "r".into() },
                 controller_epoch: 3,
                 controller_purpose: EnvironmentTaskControllerPurpose::Execute,
             },
@@ -127,7 +127,8 @@ fn seeded_running_journal(root: &Path) -> Vec<u8> {
         task.clone(),
         Record {
             digest: "d".repeat(64),
-            creator_controller_id: "r".into(),
+            creator_owner: EnvironmentTaskOwner::AgentRun { run_id: "r".into() },
+            identity_version: TaskIdentityVersion::OwnerV3,
             creator_epoch: 3,
             snapshot: EnvironmentTaskSnapshot {
                 task_id: task.clone(),
@@ -342,7 +343,7 @@ fn corrupt_or_removed_output_does_not_prevent_control_restart_and_queries() {
     fs::create_dir(&output).unwrap();
     let fence = EnvironmentTaskFence {
         environment_instance_id: "i".into(),
-        controller_id: "r".into(),
+        controller_owner: EnvironmentTaskOwner::AgentRun { run_id: "r".into() },
         controller_epoch: 1,
         controller_purpose: EnvironmentTaskControllerPurpose::Execute,
     };
@@ -362,7 +363,8 @@ fn corrupt_or_removed_output_does_not_prevent_control_restart_and_queries() {
         task_id.clone(),
         Record {
             digest: "d".repeat(64),
-            creator_controller_id: "r".into(),
+            creator_owner: EnvironmentTaskOwner::AgentRun { run_id: "r".into() },
+            identity_version: TaskIdentityVersion::OwnerV3,
             creator_epoch: 1,
             snapshot: snapshot.clone(),
         },
@@ -414,7 +416,7 @@ fn corrupt_or_removed_output_does_not_prevent_control_restart_and_queries() {
         &manager,
         EnvironmentTaskRequest::Takeover {
             environment_instance_id: "i".into(),
-            controller_id: "r".into(),
+            controller_owner: EnvironmentTaskOwner::AgentRun { run_id: "r".into() },
             controller_epoch: 2,
             controller_purpose: EnvironmentTaskControllerPurpose::Execute,
         },
@@ -470,7 +472,9 @@ impl Fixture {
         fs::create_dir_all("/mnt/data").unwrap();
         let fence = EnvironmentTaskFence {
             environment_instance_id: suffix.clone(),
-            controller_id: "run-one".into(),
+            controller_owner: EnvironmentTaskOwner::AgentRun {
+                run_id: "run-one".into(),
+            },
             controller_epoch: 1,
             controller_purpose: EnvironmentTaskControllerPurpose::Execute,
         };
@@ -487,7 +491,9 @@ impl Fixture {
             &manager,
             EnvironmentTaskRequest::Takeover {
                 environment_instance_id: suffix,
-                controller_id: fence.controller_id.clone(),
+                controller_owner: EnvironmentTaskOwner::AgentRun {
+                    run_id: fence.controller_owner.id().to_owned(),
+                },
                 controller_epoch: 1,
                 controller_purpose: EnvironmentTaskControllerPurpose::Execute,
             },
@@ -589,12 +595,16 @@ fn one_hundred_runs_release_history_without_stopping_environment_task() {
     let mut old_request = None;
     for epoch in 2..=101 {
         f.fence.controller_epoch = epoch;
-        f.fence.controller_id = format!("run-{epoch}");
+        f.fence.controller_owner = EnvironmentTaskOwner::AgentRun {
+            run_id: format!("run-{epoch}"),
+        };
         Manager::handle(
             &f.manager,
             EnvironmentTaskRequest::Takeover {
                 environment_instance_id: f.fence.environment_instance_id.clone(),
-                controller_id: f.fence.controller_id.clone(),
+                controller_owner: EnvironmentTaskOwner::AgentRun {
+                    run_id: f.fence.controller_owner.id().to_owned(),
+                },
                 controller_epoch: epoch,
                 controller_purpose: EnvironmentTaskControllerPurpose::Execute,
             },
@@ -603,7 +613,7 @@ fn one_hundred_runs_release_history_without_stopping_environment_task() {
         let request = f.start(
             "foreground",
             EnvironmentTaskScope::Run {
-                run_id: f.fence.controller_id.clone(),
+                run_id: f.fence.controller_owner.id().to_owned(),
             },
             "printf completed",
         );
@@ -613,7 +623,7 @@ fn one_hundred_runs_release_history_without_stopping_environment_task() {
             &f.manager,
             EnvironmentTaskRequest::EndRun {
                 fence: f.fence.clone(),
-                run_id: f.fence.controller_id.clone(),
+                run_id: f.fence.controller_owner.id().to_owned(),
                 operation_id: f.fence.operation_id("end"),
             },
         )
@@ -678,7 +688,7 @@ fn same_run_history_retirement_keeps_output_and_progress_before_run_close() {
             f.start(
                 &format!("short-{index}"),
                 EnvironmentTaskScope::Run {
-                    run_id: f.fence.controller_id.clone(),
+                    run_id: f.fence.controller_owner.id().to_owned(),
                 },
                 "printf retained-output",
             ),
@@ -690,7 +700,7 @@ fn same_run_history_retirement_keeps_output_and_progress_before_run_close() {
     let overflow = f.start(
         "overflow",
         EnvironmentTaskScope::Run {
-            run_id: f.fence.controller_id.clone(),
+            run_id: f.fence.controller_owner.id().to_owned(),
         },
         "false",
     );
@@ -701,18 +711,22 @@ fn same_run_history_retirement_keeps_output_and_progress_before_run_close() {
         &f.manager,
         EnvironmentTaskRequest::EndRun {
             fence: f.fence.clone(),
-            run_id: f.fence.controller_id.clone(),
+            run_id: f.fence.controller_owner.id().to_owned(),
             operation_id: f.fence.operation_id("end"),
         },
     )
     .unwrap();
-    f.fence.controller_id = "next-run".into();
+    f.fence.controller_owner = EnvironmentTaskOwner::AgentRun {
+        run_id: "next-run".into(),
+    };
     f.fence.controller_epoch = 2;
     Manager::handle(
         &f.manager,
         EnvironmentTaskRequest::Takeover {
             environment_instance_id: f.fence.environment_instance_id.clone(),
-            controller_id: f.fence.controller_id.clone(),
+            controller_owner: EnvironmentTaskOwner::AgentRun {
+                run_id: f.fence.controller_owner.id().to_owned(),
+            },
             controller_epoch: 2,
             controller_purpose: EnvironmentTaskControllerPurpose::Execute,
         },
@@ -723,7 +737,7 @@ fn same_run_history_retirement_keeps_output_and_progress_before_run_close() {
         f.start(
             "after",
             EnvironmentTaskScope::Run {
-                run_id: f.fence.controller_id.clone(),
+                run_id: f.fence.controller_owner.id().to_owned(),
             },
             "true",
         ),
@@ -741,7 +755,7 @@ fn same_run_reconstructed_controller_does_not_repeat_spawn_or_acknowledged_input
     let mut start = f.start(
         "cat",
         EnvironmentTaskScope::Run {
-            run_id: f.fence.controller_id.clone(),
+            run_id: f.fence.controller_owner.id().to_owned(),
         },
         "cat",
     );
@@ -759,7 +773,9 @@ fn same_run_reconstructed_controller_does_not_repeat_spawn_or_acknowledged_input
         &f.manager,
         EnvironmentTaskRequest::Takeover {
             environment_instance_id: f.fence.environment_instance_id.clone(),
-            controller_id: f.fence.controller_id.clone(),
+            controller_owner: EnvironmentTaskOwner::AgentRun {
+                run_id: f.fence.controller_owner.id().to_owned(),
+            },
             controller_epoch: 2,
             controller_purpose: EnvironmentTaskControllerPurpose::Execute,
         },
@@ -801,8 +817,8 @@ fn same_run_reconstructed_controller_does_not_repeat_spawn_or_acknowledged_input
     assert_eq!(m.journal.tasks.len(), 1);
     assert_eq!(m.journal.tasks[&task].creator_epoch, 1);
     assert_eq!(
-        m.journal.tasks[&task].creator_controller_id,
-        f.fence.controller_id
+        m.journal.tasks[&task].creator_owner,
+        f.fence.controller_owner
     );
     let (chunks, _, _, _, _) = m.logs[&task]
         .lock()
@@ -822,7 +838,7 @@ fn input_history_pressure_leaves_termination_and_end_run_reconcilable() {
     let mut start = f.start(
         "cat",
         EnvironmentTaskScope::Run {
-            run_id: f.fence.controller_id.clone(),
+            run_id: f.fence.controller_owner.id().to_owned(),
         },
         "cat",
     );
@@ -866,7 +882,7 @@ fn input_history_pressure_leaves_termination_and_end_run_reconcilable() {
     f.await_cleanup(&task);
     let end = EnvironmentTaskRequest::EndRun {
         fence: f.fence.clone(),
-        run_id: f.fence.controller_id.clone(),
+        run_id: f.fence.controller_owner.id().to_owned(),
         operation_id: f.fence.operation_id("end"),
     };
     assert!(matches!(
@@ -886,7 +902,7 @@ fn task_deadline_exits_before_late_input_and_uncertain_input_is_not_replayed() {
     let mut start = f.start(
         "deadline-cat",
         EnvironmentTaskScope::Run {
-            run_id: f.fence.controller_id.clone(),
+            run_id: f.fence.controller_owner.id().to_owned(),
         },
         "exec cat",
     );
@@ -979,14 +995,16 @@ fn unavailable_worker_threads_reject_before_exec_without_poisoning_resident_task
         let mut manager = f.manager.lock().unwrap();
         assert!(!manager.journal.poisoned);
         assert_eq!(manager.journal.tasks.len(), 1);
-        assert!(manager
-            .live
-            .get_mut(&resident)
-            .unwrap()
-            .child
-            .try_wait()
-            .unwrap()
-            .is_none());
+        assert!(
+            manager
+                .live
+                .get_mut(&resident)
+                .unwrap()
+                .child
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(
             fs::read(manager.storage.control_root.join("history.sqlite")).unwrap(),
             before
@@ -1062,14 +1080,16 @@ fn panicking_supervisor_is_unknown_until_owned_tree_is_empty_and_child_reaped() 
     loop {
         let mut manager = f.manager.lock().unwrap();
         assert!(!manager.journal.poisoned);
-        assert!(manager
-            .live
-            .get_mut(&resident)
-            .unwrap()
-            .child
-            .try_wait()
-            .unwrap()
-            .is_none());
+        assert!(
+            manager
+                .live
+                .get_mut(&resident)
+                .unwrap()
+                .child
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
         let task = &manager.journal.tasks[&failed].snapshot;
         if task.cleanup_complete && !manager.live.contains_key(&failed) {
             assert_eq!(task.state, EnvironmentTaskState::Unknown);
@@ -1132,14 +1152,16 @@ fn worker_delivery_failure_retains_supervision_and_does_not_respawn_unknown_star
     loop {
         let mut manager = f.manager.lock().unwrap();
         assert!(!manager.journal.poisoned);
-        assert!(manager
-            .live
-            .get_mut(&resident)
-            .unwrap()
-            .child
-            .try_wait()
-            .unwrap()
-            .is_none());
+        assert!(
+            manager
+                .live
+                .get_mut(&resident)
+                .unwrap()
+                .child
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
         let snapshot = &manager.journal.tasks[&failed].snapshot;
         if snapshot.cleanup_complete && !manager.live.contains_key(&failed) {
             assert_eq!(snapshot.state, EnvironmentTaskState::Unknown);
@@ -1186,14 +1208,16 @@ fn exec_failure_after_worker_reservation_remains_queryable_without_deadlock_or_r
     let mut manager = f.manager.lock().unwrap();
     assert!(!manager.journal.poisoned);
     assert!(!manager.live.contains_key(&failed));
-    assert!(manager
-        .live
-        .get_mut(&resident)
-        .unwrap()
-        .child
-        .try_wait()
-        .unwrap()
-        .is_none());
+    assert!(
+        manager
+            .live
+            .get_mut(&resident)
+            .unwrap()
+            .child
+            .try_wait()
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -1212,7 +1236,10 @@ fn real_background_tree_survives_controller_takeover_and_drains_both_streams() {
         }
         drop(log);
         drop(m);
-        assert!(Instant::now()<end,"both streams must drain through their completion markers and expose the overwritten prefix");
+        assert!(
+            Instant::now() < end,
+            "both streams must drain through their completion markers and expose the overwritten prefix"
+        );
         thread::sleep(Duration::from_millis(20));
     }
     let mut updated = request;
@@ -1223,7 +1250,9 @@ fn real_background_tree_survives_controller_takeover_and_drains_both_streams() {
         &f.manager,
         EnvironmentTaskRequest::Takeover {
             environment_instance_id: f.fence.environment_instance_id.clone(),
-            controller_id: f.fence.controller_id.clone(),
+            controller_owner: EnvironmentTaskOwner::AgentRun {
+                run_id: f.fence.controller_owner.id().to_owned(),
+            },
             controller_epoch: 2,
             controller_purpose: EnvironmentTaskControllerPurpose::Execute,
         },
@@ -1233,15 +1262,17 @@ fn real_background_tree_survives_controller_takeover_and_drains_both_streams() {
         Manager::handle(&f.manager, updated).unwrap_err(),
         "task_operation_replay_expired"
     );
-    assert!(Manager::handle(
-        &f.manager,
-        EnvironmentTaskRequest::Terminate {
-            fence: f.fence.clone(),
-            task_id: task_id.clone(),
-            operation_id: f.fence.operation_id("stale")
-        }
-    )
-    .is_err());
+    assert!(
+        Manager::handle(
+            &f.manager,
+            EnvironmentTaskRequest::Terminate {
+                fence: f.fence.clone(),
+                task_id: task_id.clone(),
+                operation_id: f.fence.operation_id("stale")
+            }
+        )
+        .is_err()
+    );
     let fence = EnvironmentTaskFence {
         controller_epoch: 2,
         ..f.fence.clone()
@@ -1502,7 +1533,7 @@ fn cross_run_takeover_cleans_only_old_run_tasks_and_is_retryable() {
         f.start(
             "run",
             EnvironmentTaskScope::Run {
-                run_id: f.fence.controller_id.clone(),
+                run_id: f.fence.controller_owner.id().to_owned(),
             },
             "sleep 30 & wait",
         ),
@@ -1519,7 +1550,9 @@ fn cross_run_takeover_cleans_only_old_run_tasks_and_is_retryable() {
     .unwrap());
     let takeover = EnvironmentTaskRequest::Takeover {
         environment_instance_id: f.fence.environment_instance_id.clone(),
-        controller_id: "run-two".into(),
+        controller_owner: EnvironmentTaskOwner::AgentRun {
+            run_id: "run-two".into(),
+        },
         controller_epoch: 2,
         controller_purpose: EnvironmentTaskControllerPurpose::Execute,
     };
@@ -1534,7 +1567,9 @@ fn cross_run_takeover_cleans_only_old_run_tasks_and_is_retryable() {
     f.await_cleanup(&run_id);
     assert!(f.manager.lock().unwrap().live.contains_key(&environment_id));
     let fence = EnvironmentTaskFence {
-        controller_id: "run-two".into(),
+        controller_owner: EnvironmentTaskOwner::AgentRun {
+            run_id: "run-two".into(),
+        },
         controller_epoch: 2,
         ..f.fence.clone()
     };
@@ -1559,7 +1594,7 @@ fn terminal_cleanup_controller_cannot_resume_execution_or_kill_environment_scope
         f.start(
             "run",
             EnvironmentTaskScope::Run {
-                run_id: f.fence.controller_id.clone(),
+                run_id: f.fence.controller_owner.id().to_owned(),
             },
             "sleep 30 & wait",
         ),
@@ -1583,7 +1618,9 @@ fn terminal_cleanup_controller_cannot_resume_execution_or_kill_environment_scope
         &f.manager,
         EnvironmentTaskRequest::Takeover {
             environment_instance_id: fence.environment_instance_id.clone(),
-            controller_id: fence.controller_id.clone(),
+            controller_owner: EnvironmentTaskOwner::AgentRun {
+                run_id: fence.controller_owner.id().to_owned(),
+            },
             controller_epoch: 2,
             controller_purpose: EnvironmentTaskControllerPurpose::Cleanup,
         },
@@ -1594,32 +1631,36 @@ fn terminal_cleanup_controller_cannot_resume_execution_or_kill_environment_scope
         *target = fence.clone();
     }
     assert!(Manager::handle(&f.manager, start).is_err());
-    assert!(Manager::handle(
-        &f.manager,
-        EnvironmentTaskRequest::Input {
-            fence: fence.clone(),
-            task_id: environment_id.clone(),
-            operation_id: f.fence.operation_id("denied"),
-            data: vec![],
-            close: true
-        }
-    )
-    .is_err());
-    assert!(Manager::handle(
-        &f.manager,
-        EnvironmentTaskRequest::Terminate {
-            fence: fence.clone(),
-            task_id: environment_id.clone(),
-            operation_id: f.fence.operation_id("denied")
-        }
-    )
-    .is_err());
+    assert!(
+        Manager::handle(
+            &f.manager,
+            EnvironmentTaskRequest::Input {
+                fence: fence.clone(),
+                task_id: environment_id.clone(),
+                operation_id: f.fence.operation_id("denied"),
+                data: vec![],
+                close: true
+            }
+        )
+        .is_err()
+    );
+    assert!(
+        Manager::handle(
+            &f.manager,
+            EnvironmentTaskRequest::Terminate {
+                fence: fence.clone(),
+                task_id: environment_id.clone(),
+                operation_id: f.fence.operation_id("denied")
+            }
+        )
+        .is_err()
+    );
     assert!(f.manager.lock().unwrap().live.contains_key(&environment_id));
     Manager::handle(
         &f.manager,
         EnvironmentTaskRequest::EndRun {
             fence,
-            run_id: f.fence.controller_id.clone(),
+            run_id: f.fence.controller_owner.id().to_owned(),
             operation_id: "2:end".into(),
         },
     )
@@ -1679,7 +1720,9 @@ fn output_capacity_failure_preserves_existing_process_control_and_allows_cleanup
         &f.manager,
         EnvironmentTaskRequest::Takeover {
             environment_instance_id: fence.environment_instance_id.clone(),
-            controller_id: fence.controller_id.clone(),
+            controller_owner: EnvironmentTaskOwner::AgentRun {
+                run_id: fence.controller_owner.id().to_owned(),
+            },
             controller_epoch: fence.controller_epoch,
             controller_purpose: fence.controller_purpose.clone(),
         },
@@ -1720,10 +1763,12 @@ fn kill_only_domain_cleans_setsid_descendants_without_per_task_controllers() {
             .trim(),
         "domain"
     );
-    assert!(fs::read_to_string(f.cgroups.join("cgroup.subtree_control"))
-        .unwrap()
-        .trim()
-        .is_empty());
+    assert!(
+        fs::read_to_string(f.cgroups.join("cgroup.subtree_control"))
+            .unwrap()
+            .trim()
+            .is_empty()
+    );
     let task_id = id(&Manager::handle(
         &f.manager,
         f.start(

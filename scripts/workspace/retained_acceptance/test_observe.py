@@ -28,37 +28,38 @@ class StaleProbeTests(unittest.TestCase):
             self.assertEqual(execute.call_count,1)
 
     def test_rpc_uses_current_protocol_and_exact_target_and_fence(self):
-        fence={'environmentInstanceId':'instance','controllerId':'run-a',
+        fence={'environmentInstanceId':'instance','controllerOwner':{'kind':'agentRun','runId':'run-a'},
             'controllerEpoch':7,'controllerPurpose':'execute'}
-        response={'schema':'environment.task.v2','status':'success',
+        response={'schema':'environment.task.v3','status':'success',
             'result':{'kind':'listed','tasks':[]}}
         def service(command, **kwargs):
             self.assertEqual(command,['docker','exec','-i','--user','0:0','container-a',
                 '/opt/centaeris/bin/execution_agent','environment-task-rpc'])
-            self.assertEqual(json.loads(kwargs['input']),{'schema':'environment.task.v2',
-                'request':{'operation':'query','fence':fence,'taskId':'task-a','cursor':0,'maxBytes':1024}})
+            self.assertEqual(json.loads(kwargs['input']),{'schema':'environment.task.v3',
+                'request':{'operation':'query','fence':fence,'taskId':'task-a','cursor':0,'maxBytes':4096}})
             return SimpleNamespace(stdout=json.dumps(response))
         with patch.object(observe.subprocess,'run',side_effect=service):
             self.assertEqual(observe.task_rpc('container-a',fence,'query',
-                taskId='task-a',cursor=0,maxBytes=1024),response)
+                taskId='task-a',cursor=0,maxBytes=4096),response)
 
     def test_rpc_rejects_older_response_and_preserves_current_fence_error(self):
-        response={'schema':'environment.task.v1','status':'success','result':{'kind':'listed','tasks':[]}}
-        with patch.object(observe.subprocess,'run',return_value=SimpleNamespace(stdout=json.dumps(response))):
-            with self.assertRaisesRegex(RuntimeError,'response schema invalid'):
-                observe.task_rpc('container-a',{})
-        response={'schema':'environment.task.v2','status':'error','error':'task_controller_fenced'}
+        for schema in ('environment.task.v1','environment.task.v2'):
+            response={'schema':schema,'status':'success','result':{'kind':'listed','tasks':[]}}
+            with self.subTest(schema=schema),patch.object(observe.subprocess,'run',return_value=SimpleNamespace(stdout=json.dumps(response))):
+                with self.assertRaisesRegex(RuntimeError,'response schema invalid'):
+                    observe.task_rpc('container-a',{})
+        response={'schema':'environment.task.v3','status':'error','error':'task_controller_fenced'}
         with patch.object(observe.subprocess,'run',return_value=SimpleNamespace(stdout=json.dumps(response))):
             self.assertEqual(observe.task_rpc('container-a',{}),response)
 
     def test_probe_uses_task_original_epoch_with_valid_operation_identity(self):
-        previous={'fence':{'environmentInstanceId':'instance','controllerId':'run-a',
+        previous={'fence':{'environmentInstanceId':'instance','controllerOwner':{'kind':'agentRun','runId':'run-a'},
             'controllerEpoch':2,'controllerPurpose':'cleanup'},'backgroundTaskIds':['task-a'],
             'taskService':{'result':{'tasks':[{'taskId':'task-a','operationId':'1:tool-start'}]}}}
         fence=observe.stale_execute_fence(previous)
         self.assertEqual(fence['controllerEpoch'],1)
         self.assertEqual(fence['controllerPurpose'],'execute')
-        self.assertEqual(fence['controllerId'],'run-a')
+        self.assertEqual(fence['controllerOwner'],{'kind':'agentRun','runId':'run-a'})
         for action in ('start','input','terminate'):
             operation=observe.stale_operation_id(fence,action)
             self.assertTrue(operation.startswith('1:'))

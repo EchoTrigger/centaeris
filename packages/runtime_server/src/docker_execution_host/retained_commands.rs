@@ -25,10 +25,10 @@ fn cancellation_unknown(reason: impl Into<String>) -> ExecutionError {
 
 fn operation(fence: &EnvironmentTaskFence, id: &str, action: &str) -> String {
     let mut hash = Sha256::new();
-    for part in ["retained-command-v1", &fence.controller_id, id, action] {
-        hash.update((part.len() as u64).to_be_bytes());
-        hash.update(part.as_bytes());
-    }
+    hash.update(b"centaeris:retained-command:v3\0");
+    hash.update(
+        serde_json::to_vec(&(&fence.controller_owner, id, action)).expect("typed command identity"),
+    );
     fence.operation_id(&format!("command_{:x}", hash.finalize()))
 }
 
@@ -214,6 +214,19 @@ fn run_command_with_input(
             reason: "retained command identity required".into(),
         });
     }
+    let scope = match &fence.controller_owner {
+        EnvironmentTaskOwner::AgentRun { run_id } => EnvironmentTaskScope::Run {
+            run_id: run_id.clone(),
+        },
+        EnvironmentTaskOwner::MaintenanceOperation { operation_id } => {
+            EnvironmentTaskScope::Operation {
+                operation_id: operation_id.clone(),
+            }
+        }
+    };
+    fence
+        .authorize_start(&scope)
+        .map_err(|reason| ExecutionError::Denied { reason })?;
     let mut args = vec![
         "-i".into(),
         format!("HOME={WORKSPACE_HOME}"),
@@ -234,9 +247,6 @@ fn run_command_with_input(
         request.program,
     ]);
     args.extend(request.args);
-    let scope = EnvironmentTaskScope::Run {
-        run_id: fence.controller_id.clone(),
-    };
     let start_id = operation(fence, operation_id, "start");
     let first_request = if recovering {
         EnvironmentTaskRequest::Query {
@@ -972,7 +982,9 @@ mod tests {
     fn fence() -> EnvironmentTaskFence {
         EnvironmentTaskFence {
             environment_instance_id: "instance-1".into(),
-            controller_id: "run-a".into(),
+            controller_owner: EnvironmentTaskOwner::AgentRun {
+                run_id: "run-a".into(),
+            },
             controller_epoch: 1,
             controller_purpose: EnvironmentTaskControllerPurpose::Execute,
         }
@@ -1201,7 +1213,7 @@ mod tests {
         let mut identities = Vec::new();
         for (run, epoch) in [("run-a", 1), ("run-a", 3), ("run-b", 4)] {
             let mut current = fence();
-            current.controller_id = run.into();
+            current.controller_owner = EnvironmentTaskOwner::AgentRun { run_id: run.into() };
             current.controller_epoch = epoch;
             run_command(&current, "same-tool-call", command(), None, "/bin", |r| {
                 let EnvironmentTaskRequest::Start {
@@ -1237,6 +1249,62 @@ mod tests {
             ..fence()
         }
         .matches_original_operation_id(&identities[0], &identities[2]));
+    }
+
+    #[test]
+    fn typed_owner_kind_separates_equal_command_identities() {
+        let run = fence();
+        let maintenance = EnvironmentTaskFence {
+            controller_owner: EnvironmentTaskOwner::MaintenanceOperation {
+                operation_id: "run-a".into(),
+            },
+            ..run.clone()
+        };
+        assert_ne!(
+            operation(&run, "same", "start"),
+            operation(&maintenance, "same", "start")
+        );
+    }
+
+    #[test]
+    fn authorized_maintenance_commands_use_operation_scope_without_a_fake_run() {
+        let maintenance = EnvironmentTaskFence {
+            controller_owner: EnvironmentTaskOwner::MaintenanceOperation {
+                operation_id: "maintenance-1".into(),
+            },
+            ..fence()
+        };
+        let result = run_command(&maintenance, "tool-1", command(), None, "/bin", |request| {
+            request.validate_authority()?;
+            let EnvironmentTaskRequest::Start {
+                operation_id,
+                scope,
+                fence,
+                ..
+            } = request
+            else {
+                panic!("completed command must not signal or restart");
+            };
+            assert_eq!(fence.controller_owner, maintenance.controller_owner);
+            assert_eq!(
+                scope,
+                EnvironmentTaskScope::Operation {
+                    operation_id: "maintenance-1".into()
+                }
+            );
+            let mut task = snapshot(true);
+            task.operation_id = operation_id;
+            task.scope = scope;
+            Ok(EnvironmentTaskResult::Task {
+                task,
+                output: Vec::new(),
+                earliest_cursor: 0,
+                next_cursor: 0,
+                gap: false,
+                has_more: false,
+            })
+        });
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[test]

@@ -107,7 +107,21 @@ actual command output; 1000 is a regression sample, not a product limit. Its
 completion and release counts are separate from the default 100-use sequence.
 The driver saves live bounded hot/active task, index and control/output byte
 observations using the root-only read-only `environment-task-store-inspect`
-command. It restarts Runtime after at least 100 actual completions while the Run
+command. Its strict `environment.task.store.inspection.v2` response identifies
+`controllerOwner` and reports `indexedOwnerTasks`. Task RPC uses
+`environment.task.v3` with an explicit `agentRun` or `maintenanceOperation` owner;
+the API's separately signed controller grant is not rewritten by this projection.
+
+Private v2 task journals and v1 SQLite indexes require the service's exclusive
+control lease for forward migration. The importer preserves the original
+`journal.legacy.json` or `history.v1.sqlite`, old task/output/cgroup IDs and receipt
+identities. A legacy owner cannot Start or Input and receives
+`task_owner_upgrade_required`; its tasks remain observable and may be stopped
+through authorized cleanup. Migration does not establish process adoption,
+termination, root-workload isolation or physical deployment acceptance. Confirm
+the old task trees and resource obligations before handing control to a new owner.
+
+The driver restarts Runtime after at least 100 actual completions while the Run
 is still active, requires a newer execute fence while that same Run is running,
 and rejects the old
 fence's Start/Input/Terminate/EndRun before confirming the background survives.

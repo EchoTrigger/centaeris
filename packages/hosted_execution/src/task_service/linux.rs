@@ -13,7 +13,7 @@ use std::{
     },
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
-    sync::{mpsc, Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -297,7 +297,7 @@ impl Manager {
             .journal
             .fence
             .as_ref()
-            .map(|f| f.controller_id.clone())
+            .map(|f| f.controller_owner.clone())
             .ok_or("task_controller_fenced")?;
         let mut after = String::new();
         while let Some((id, _)) = store::next_closed(&self.storage.control_root, &after, &current)?
@@ -327,7 +327,7 @@ impl Manager {
             .iter()
             .filter(|(id, r)| {
                 self.journal.fence.as_ref().is_some_and(|f| {
-                    r.can_retire(epoch, &f.controller_id, self.live.contains_key(*id))
+                    r.can_retire(epoch, &f.controller_owner, self.live.contains_key(*id))
                 }) && self
                     .logs
                     .get(*id)
@@ -388,18 +388,28 @@ impl Manager {
         match request {
             EnvironmentTaskRequest::Takeover {
                 environment_instance_id,
-                controller_id,
+                controller_owner,
                 controller_epoch,
                 controller_purpose,
             } => {
                 let fence = EnvironmentTaskFence {
                     environment_instance_id,
-                    controller_id,
+                    controller_owner,
                     controller_epoch,
                     controller_purpose,
                 };
                 m.journal.takeover(fence.clone())?;
-                let previous_run_tasks: Vec<_> = m.journal.tasks.iter().filter(|(_, r)| !r.snapshot.cleanup_complete && matches!(&r.snapshot.scope, EnvironmentTaskScope::Run { run_id } if run_id != &fence.controller_id)).map(|(id, _)| id.clone()).collect();
+                let previous_run_tasks: Vec<_> = m
+                    .journal
+                    .tasks
+                    .iter()
+                    .filter(|(_, r)| {
+                        !r.snapshot.cleanup_complete
+                            && r.snapshot.scope != EnvironmentTaskScope::Environment
+                            && r.creator_owner != fence.controller_owner
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
                 m.journal.takeover_pending = !previous_run_tasks.is_empty();
                 m.persist()?;
                 let mut clean = true;
@@ -466,18 +476,13 @@ impl Manager {
                 {
                     return Err("task_invalid_start".into());
                 }
-                if let EnvironmentTaskScope::Run { run_id } = &scope {
-                    valid_operation(run_id)?;
-                    if run_id != &fence.controller_id {
-                        return Err("task_run_scope_denied".into());
-                    }
-                }
+                fence.authorize_start(&scope)?;
                 let (_, opaque) = operation_id
                     .split_once(':')
                     .ok_or("task_invalid_operation_id")?;
                 let d = digest(&(
                     &fence.environment_instance_id,
-                    &fence.controller_id,
+                    &fence.controller_owner,
                     &fence.controller_purpose,
                     opaque,
                     &scope,
@@ -507,7 +512,8 @@ impl Manager {
                 };
                 let record = Record {
                     digest: d,
-                    creator_controller_id: fence.controller_id.clone(),
+                    creator_owner: fence.controller_owner.clone(),
+                    identity_version: TaskIdentityVersion::OwnerV3,
                     creator_epoch: fence.controller_epoch,
                     snapshot,
                 };
@@ -716,11 +722,7 @@ impl Manager {
                 if data.len() > CHUNK {
                     return Err("task_input_too_large".into());
                 }
-                if m.journal.closed_run.as_ref() == Some(&fence.controller_id)
-                    || store::closed(&m.storage.control_root, &fence.controller_id)?
-                {
-                    return Err("task_run_closed".into());
-                }
+                m.journal.authorize_task_input(&fence, &task_id)?;
                 let key = input_identity(&fence, &task_id, &operation_id)?;
                 let d = environment_task_input_digest(&data, close)?;
                 if let Some(r) = m.receipt(&key, &d)? {
@@ -745,11 +747,7 @@ impl Manager {
                 request_digest,
             } => {
                 m.journal.check(&fence)?;
-                if m.journal.closed_run.as_ref() == Some(&fence.controller_id)
-                    || store::closed(&m.storage.control_root, &fence.controller_id)?
-                {
-                    return Err("task_run_closed".into());
-                }
+                m.journal.authorize_task_input(&fence, &task_id)?;
                 let key = input_identity(&fence, &task_id, &operation_id)?;
                 store::input_receipt(&m.storage.control_root, &key, &request_digest, &task_id)
             }
@@ -787,32 +785,37 @@ impl Manager {
             }
             EnvironmentTaskRequest::EndRun {
                 fence,
-                run_id,
+                run_id: owner_id,
+                operation_id,
+            }
+            | EnvironmentTaskRequest::EndOperation {
+                fence,
+                owner_operation_id: owner_id,
                 operation_id,
             } => {
                 m.journal.check(&fence)?;
                 valid_operation(&operation_id)?;
-                valid_operation(&run_id)?;
-                if run_id != fence.controller_id {
-                    return Err("task_run_scope_denied".into());
-                }
-                let key = format!("endRun:{run_id}");
-                let d = digest(&run_id)?;
+                valid_operation(&owner_id)?;
+                let scope = owner_scope(&fence.controller_owner);
+                let is_run = matches!(
+                    fence.controller_owner,
+                    EnvironmentTaskOwner::AgentRun { .. }
+                );
+                let key = format!(
+                    "{}:{owner_id}",
+                    if is_run { "endRun" } else { "endOperation" }
+                );
+                let d = digest(&owner_id)?;
                 if let Some(r) = m.receipt(&key, &d)? {
                     return Ok(r);
                 }
-                m.journal.closed_run = Some(run_id.clone());
+                m.journal.closed_owner = Some(fence.controller_owner.clone());
                 m.persist()?;
                 let task_ids: Vec<_> = m
                     .journal
                     .tasks
                     .iter()
-                    .filter(|(_, r)| {
-                        r.snapshot.scope
-                            == (EnvironmentTaskScope::Run {
-                                run_id: run_id.clone(),
-                            })
-                    })
+                    .filter(|(_, r)| r.snapshot.scope == scope)
                     .map(|(id, _)| id.clone())
                     .collect();
                 let mut cleanup_complete = true;
@@ -829,9 +832,16 @@ impl Manager {
                 }
                 m.finish(
                     key,
-                    EnvironmentTaskResult::RunEnded {
-                        task_ids,
-                        cleanup_complete,
+                    if is_run {
+                        EnvironmentTaskResult::RunEnded {
+                            task_ids,
+                            cleanup_complete,
+                        }
+                    } else {
+                        EnvironmentTaskResult::OperationEnded {
+                            task_ids,
+                            cleanup_complete,
+                        }
                     },
                 )
             }

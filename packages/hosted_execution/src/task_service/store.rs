@@ -1,8 +1,8 @@
 //! Instance-private execution index. The caller holds the service's exclusive lock.
 use super::*;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
-const VERSION: i64 = 1;
+const VERSION: i64 = 2;
 fn db(root: &Path, initialize: bool) -> Result<Connection, String> {
     let path = root.join("history.sqlite");
     let exists = path.exists();
@@ -23,8 +23,8 @@ fn db(root: &Path, initialize: bool) -> Result<Connection, String> {
             CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL) WITHOUT ROWID;
             CREATE TABLE tasks(id TEXT PRIMARY KEY,record TEXT NOT NULL,live INTEGER NOT NULL,hot INTEGER NOT NULL) WITHOUT ROWID;
             CREATE TABLE operations(key BLOB PRIMARY KEY,receipt TEXT NOT NULL,task_id BLOB) WITHOUT ROWID;
-            CREATE TABLE closed_runs(id TEXT PRIMARY KEY) WITHOUT ROWID;
-            PRAGMA user_version=1; COMMIT;").map_err(|_|"task_index_unavailable")?;
+            CREATE TABLE owner_barriers(owner TEXT PRIMARY KEY,reason TEXT NOT NULL) WITHOUT ROWID;
+            PRAGMA user_version=2; COMMIT;").map_err(|_|"task_index_unavailable")?;
     }
     validate(&connection)?;
     connection
@@ -34,6 +34,12 @@ fn db(root: &Path, initialize: bool) -> Result<Connection, String> {
 }
 
 fn validate(connection: &Connection) -> Result<(), String> {
+    validate_version(connection, VERSION)
+}
+pub(super) fn validate_version(
+    connection: &Connection,
+    expected_version: i64,
+) -> Result<(), String> {
     let mode: String = connection
         .pragma_query_value(None, "journal_mode", |row| row.get(0))
         .map_err(|_| "task_index_invalid")?;
@@ -43,14 +49,26 @@ fn validate(connection: &Connection) -> Result<(), String> {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .map_err(|_| "task_index_invalid")?;
-    if version != VERSION {
+    if version != expected_version {
         return Err("task_index_unsupported_schema".into());
     }
+    let owner_table = if expected_version == 1 {
+        "closed_runs"
+    } else {
+        "owner_barriers"
+    };
     for (table, expected) in [
         ("metadata", vec!["key", "value"]),
         ("tasks", vec!["id", "record", "live", "hot"]),
         ("operations", vec!["key", "receipt", "task_id"]),
-        ("closed_runs", vec!["id"]),
+        (
+            owner_table,
+            if expected_version == 1 {
+                vec!["id"]
+            } else {
+                vec!["owner", "reason"]
+            },
+        ),
     ] {
         let mut query = connection
             .prepare(&format!("PRAGMA table_info({table})"))
@@ -96,7 +114,9 @@ fn validate(connection: &Connection) -> Result<(), String> {
         .map_err(|_| "task_index_invalid")?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| "task_index_invalid")?;
-    if names != ["closed_runs", "metadata", "operations", "tasks"] {
+    let mut expected_tables = vec![owner_table, "metadata", "operations", "tasks"];
+    expected_tables.sort_unstable();
+    if names != expected_tables {
         return Err("task_index_invalid".into());
     }
     drop(tables);
@@ -112,7 +132,7 @@ fn validate(connection: &Connection) -> Result<(), String> {
         .map_err(|_| "task_index_invalid")?;
     for table in tables {
         let (name, without_rowid) = table.map_err(|_| "task_index_invalid")?;
-        if ["metadata", "tasks", "operations", "closed_runs"].contains(&name.as_str())
+        if ["metadata", "tasks", "operations", owner_table].contains(&name.as_str())
             && without_rowid != 1
         {
             return Err("task_index_invalid".into());
@@ -121,14 +141,36 @@ fn validate(connection: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn closed(root: &Path, run: &str) -> Result<bool, String> {
+pub(super) fn closed(root: &Path, owner: &EnvironmentTaskOwner) -> Result<bool, String> {
     Ok(db(root, false)?
-        .query_row("SELECT 1 FROM closed_runs WHERE id=?1", [run], |r| {
-            r.get::<_, i64>(0)
-        })
+        .query_row(
+            "SELECT 1 FROM owner_barriers WHERE owner=?1 AND reason='ended'",
+            [encode(owner)?],
+            |r| r.get::<_, i64>(0),
+        )
         .optional()
         .map_err(|_| "task_index_unavailable")?
         .is_some())
+}
+pub(super) fn check_execution(root: &Path, owner: &EnvironmentTaskOwner) -> Result<(), String> {
+    let reason: Option<String> = db(root, false)?
+        .query_row(
+            "SELECT reason FROM owner_barriers WHERE owner=?1",
+            [encode(owner)?],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|_| "task_index_unavailable")?;
+    match reason.as_deref() {
+        None => Ok(()),
+        Some("upgradeRequired") => Err("task_owner_upgrade_required".into()),
+        Some("ended") => Err(match owner {
+            EnvironmentTaskOwner::AgentRun { .. } => "task_run_closed",
+            EnvironmentTaskOwner::MaintenanceOperation { .. } => "task_operation_closed",
+        }
+        .into()),
+        _ => Err("task_index_invalid".into()),
+    }
 }
 
 fn encode(value: &impl Serialize) -> Result<String, String> {
@@ -138,23 +180,14 @@ fn decode<T: serde::de::DeserializeOwned>(value: String) -> Result<T, String> {
     serde_json::from_str(&value).map_err(|_| "task_index_invalid".into())
 }
 
-type StoredRecord = (
-    String,
-    String,
-    u64,
-    String,
-    bool,
-    EnvironmentTaskState,
-    Option<i32>,
-    u8,
-);
-fn record_text(record: &Record) -> Result<String, String> {
+pub(super) fn record_text(record: &Record) -> Result<String, String> {
     encode(&(
         &record.digest,
-        &record.creator_controller_id,
+        &record.creator_owner,
+        record.identity_version,
         record.creator_epoch,
         &record.snapshot.operation_id,
-        matches!(record.snapshot.scope, EnvironmentTaskScope::Environment),
+        record.snapshot.scope == EnvironmentTaskScope::Environment,
         &record.snapshot.state,
         record.snapshot.exit_code,
         u8::from(record.snapshot.cleanup_complete)
@@ -164,40 +197,49 @@ fn record_text(record: &Record) -> Result<String, String> {
 fn record_value(instance: &str, id: String, value: String) -> Result<Record, String> {
     let (
         digest,
-        creator_controller_id,
-        creator_epoch,
+        owner,
+        identity_version,
+        epoch,
         operation_id,
-        environment_scope,
+        environment,
         state,
         exit_code,
         flags,
-    ): StoredRecord = decode(value)?;
+    ): (
+        String,
+        EnvironmentTaskOwner,
+        TaskIdentityVersion,
+        u64,
+        String,
+        bool,
+        EnvironmentTaskState,
+        Option<i32>,
+        u8,
+    ) = decode(value)?;
     if flags > 3 {
         return Err("task_index_invalid".into());
     }
-    let cleanup_complete = flags & 1 != 0;
-    let output_complete = flags & 2 != 0;
+    let scope = if environment {
+        EnvironmentTaskScope::Environment
+    } else {
+        owner_scope(&owner)
+    };
     let record = Record {
         digest,
-        creator_controller_id: creator_controller_id.clone(),
-        creator_epoch,
+        creator_owner: owner,
+        identity_version,
+        creator_epoch: epoch,
         snapshot: EnvironmentTaskSnapshot {
-            task_id: id,
+            task_id: id.clone(),
             operation_id,
-            scope: if environment_scope {
-                EnvironmentTaskScope::Environment
-            } else {
-                EnvironmentTaskScope::Run {
-                    run_id: creator_controller_id,
-                }
-            },
+            scope,
             state,
             exit_code,
-            cleanup_complete,
-            output_complete,
+            cleanup_complete: flags & 1 != 0,
+            output_complete: flags & 2 != 0,
         },
     };
-    record.validate(instance, &record.snapshot.task_id)?;
+    record.validate(instance, &id)?;
     Ok(record)
 }
 
@@ -210,7 +252,7 @@ pub(super) fn load(root: &Path) -> Result<Option<Journal>, String> {
         .optional()
         .map_err(|_| "task_index_unavailable")?;
     let Some(value) = value else {
-        let facts:i64=connection.query_row("SELECT (SELECT COUNT(*) FROM tasks)+(SELECT COUNT(*) FROM operations)+(SELECT COUNT(*) FROM closed_runs)",[],|row|row.get(0)).map_err(|_|"task_index_invalid")?;
+        let facts:i64=connection.query_row("SELECT (SELECT COUNT(*) FROM tasks)+(SELECT COUNT(*) FROM operations)+(SELECT COUNT(*) FROM owner_barriers)",[],|row|row.get(0)).map_err(|_|"task_index_invalid")?;
         if facts != 0 {
             return Err("task_index_invalid".into());
         }
@@ -279,6 +321,7 @@ pub(super) fn task(root: &Path, id: &str) -> Result<Option<Record>, String> {
 enum StoredResult {
     Mutated(String, EnvironmentTaskState, Option<i32>, u8),
     RunEnded(Vec<String>, bool),
+    OperationEnded(Vec<String>, bool),
 }
 fn receipt_text(receipt: &Receipt) -> Result<String, String> {
     let result = match &receipt.result {
@@ -293,6 +336,13 @@ fn receipt_text(receipt: &Receipt) -> Result<String, String> {
             task_ids,
             cleanup_complete,
         }) => Some(StoredResult::RunEnded(task_ids.clone(), *cleanup_complete)),
+        Some(EnvironmentTaskResult::OperationEnded {
+            task_ids,
+            cleanup_complete,
+        }) => Some(StoredResult::OperationEnded(
+            task_ids.clone(),
+            *cleanup_complete,
+        )),
         _ => return Err("task_receipt_invalid".into()),
     };
     encode(&(&receipt.digest, result))
@@ -328,6 +378,15 @@ pub(super) fn receipt(root: &Path, key: &str) -> Result<Option<Receipt>, String>
                 return Err("task_receipt_invalid".into());
             }
             Some(EnvironmentTaskResult::RunEnded {
+                task_ids,
+                cleanup_complete,
+            })
+        }
+        Some(StoredResult::OperationEnded(task_ids, cleanup_complete)) => {
+            if task_ids.len() > ENVIRONMENT_TASK_MAX_RECORDS {
+                return Err("task_receipt_invalid".into());
+            }
+            Some(EnvironmentTaskResult::OperationEnded {
                 task_ids,
                 cleanup_complete,
             })
@@ -432,12 +491,37 @@ pub(super) fn save(root: &Path, journal: &Journal) -> Result<(), String> {
         .map_err(|_| "task_index_unavailable")?;
     tx.execute("INSERT INTO metadata VALUES('journal',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[value])
         .map_err(write_error)?;
-    if let Some(run) = &journal.closed_run {
-        tx.execute("INSERT OR IGNORE INTO closed_runs VALUES(?1)", [run])
+    if let Some(owner) = &journal.closed_owner {
+        tx.execute("INSERT INTO owner_barriers VALUES(?1,'ended') ON CONFLICT(owner) DO UPDATE SET reason='ended'", [encode(owner)?])
             .map_err(write_error)?;
+    }
+    for owner in &journal.import_upgrade_owners {
+        tx.execute(
+            "INSERT OR IGNORE INTO owner_barriers VALUES(?1,'upgradeRequired')",
+            [encode(owner)?],
+        )
+        .map_err(write_error)?;
     }
     for (id, record) in &journal.tasks {
         record.validate(&journal.instance, id)?;
+        let previous: Option<String> = tx
+            .query_row("SELECT record FROM tasks WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(|_| "task_index_unavailable")?;
+        if let Some(previous) = previous {
+            let previous = record_value(&journal.instance, id.clone(), previous)?;
+            if previous.digest != record.digest
+                || previous.creator_owner != record.creator_owner
+                || previous.identity_version != record.identity_version
+                || previous.creator_epoch != record.creator_epoch
+                || previous.snapshot.operation_id != record.snapshot.operation_id
+                || previous.snapshot.scope != record.snapshot.scope
+            {
+                return Err("task_index_identity_changed".into());
+            }
+        }
         tx.execute("INSERT INTO tasks VALUES(?1,?2,?3,1) ON CONFLICT(id) DO UPDATE SET record=excluded.record,live=excluded.live,hot=1",params![id,record_text(record)?,!record.snapshot.cleanup_complete])
             .map_err(write_error)?;
     }
@@ -488,13 +572,13 @@ pub(super) fn inspection(root: &Path, output: &Path) -> Result<serde_json::Value
         if journal
             .fence
             .as_ref()
-            .is_some_and(|f| record.creator_controller_id == f.controller_id)
+            .is_some_and(|f| record.creator_owner == f.controller_owner)
         {
             run += 1;
         }
     }
     Ok(
-        serde_json::json!({"schema":"environment.task.store.inspection.v1","instanceId":journal.instance,"controllerId":journal.fence.as_ref().map(|f|&f.controller_id),"controllerEpoch":journal.fence.as_ref().map(|f|f.controller_epoch),"hotTasks":hot,"activeTasks":active,"indexedTasks":indexed,"indexedRunTasks":run,"controlDirectoryBytes":bytes(root)?,"outputDirectoryBytes":bytes(output)?}),
+        serde_json::json!({"schema":"environment.task.store.inspection.v2","instanceId":journal.instance,"controllerOwner":journal.fence.as_ref().map(|f|&f.controller_owner),"controllerEpoch":journal.fence.as_ref().map(|f|f.controller_epoch),"hotTasks":hot,"activeTasks":active,"indexedTasks":indexed,"indexedOwnerTasks":run,"controlDirectoryBytes":bytes(root)?,"outputDirectoryBytes":bytes(output)?}),
     )
 }
 
@@ -503,7 +587,7 @@ pub(super) fn inspection(root: &Path, output: &Path) -> Result<serde_json::Value
 pub(super) fn next_closed(
     root: &Path,
     after: &str,
-    current: &str,
+    current: &EnvironmentTaskOwner,
 ) -> Result<Option<(String, Record)>, String> {
     let connection = db(root, false)?;
     let metadata: String = connection
@@ -526,10 +610,10 @@ pub(super) fn next_closed(
             id.clone(),
             row.get(1).map_err(|_| "task_index_invalid")?,
         )?;
-        let EnvironmentTaskScope::Run { run_id } = &record.snapshot.scope else {
+        if record.snapshot.scope == EnvironmentTaskScope::Environment {
             continue;
-        };
-        if run_id == current || !closed(root, run_id)? {
+        }
+        if &record.creator_owner == current || !closed(root, &record.creator_owner)? {
             continue;
         }
         let mut receipts = connection
@@ -582,7 +666,9 @@ mod tests {
         journal
             .takeover(EnvironmentTaskFence {
                 environment_instance_id: "instance".into(),
-                controller_id: "run".into(),
+                controller_owner: EnvironmentTaskOwner::AgentRun {
+                    run_id: "run".into(),
+                },
                 controller_epoch: 1,
                 controller_purpose: EnvironmentTaskControllerPurpose::Execute,
             })
@@ -596,13 +682,14 @@ mod tests {
         let id = task_identity(fence, &operation).unwrap();
         Record {
             digest: digest(&n).unwrap(),
-            creator_controller_id: fence.controller_id.clone(),
+            creator_owner: fence.controller_owner.clone(),
+            identity_version: TaskIdentityVersion::OwnerV3,
             creator_epoch: 1,
             snapshot: EnvironmentTaskSnapshot {
                 task_id: id,
                 operation_id: operation,
                 scope: EnvironmentTaskScope::Run {
-                    run_id: fence.controller_id.clone(),
+                    run_id: fence.controller_owner.id().to_owned(),
                 },
                 state: EnvironmentTaskState::Exited,
                 exit_code: Some(0),
@@ -782,7 +869,9 @@ mod commit_tests {
         journal
             .takeover(EnvironmentTaskFence {
                 environment_instance_id: "instance".into(),
-                controller_id: "run".into(),
+                controller_owner: EnvironmentTaskOwner::AgentRun {
+                    run_id: "run".into(),
+                },
                 controller_epoch: 1,
                 controller_purpose: EnvironmentTaskControllerPurpose::Execute,
             })
@@ -795,19 +884,25 @@ mod commit_tests {
         let (root, mut journal) = fixture();
         let before = fs::read(root.join("history.sqlite")).unwrap();
         fs::create_dir(root.join("history.sqlite-journal")).unwrap();
-        assert!(journal
-            .reserve_receipt("input:task:rejected", &digest(&"input").unwrap())
-            .is_err());
+        assert!(
+            journal
+                .reserve_receipt("input:task:rejected", &digest(&"input").unwrap())
+                .is_err()
+        );
         assert!(journal.receipts.is_empty());
         assert!(!journal.poisoned);
         fs::remove_dir(root.join("history.sqlite-journal")).unwrap();
         assert_eq!(fs::read(root.join("history.sqlite")).unwrap(), before);
-        assert!(journal
-            .reserve_receipt("terminate:task", &digest(&"stop").unwrap())
-            .is_ok());
-        assert!(journal
-            .reserve_receipt("endRun:run", &digest(&"end").unwrap())
-            .is_ok());
+        assert!(
+            journal
+                .reserve_receipt("terminate:task", &digest(&"stop").unwrap())
+                .is_ok()
+        );
+        assert!(
+            journal
+                .reserve_receipt("endRun:run", &digest(&"end").unwrap())
+                .is_ok()
+        );
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
@@ -828,12 +923,16 @@ mod commit_tests {
         assert_eq!(candidate.persist(&root).unwrap_err(), "task_index_capacity");
         assert!(!candidate.poisoned);
         assert_eq!(fs::read(root.join("history.sqlite")).unwrap(), before);
-        assert!(journal
-            .reserve_receipt("terminate:task", &digest(&"stop").unwrap())
-            .is_ok());
-        assert!(journal
-            .reserve_receipt("endRun:run", &digest(&"end").unwrap())
-            .is_ok());
+        assert!(
+            journal
+                .reserve_receipt("terminate:task", &digest(&"stop").unwrap())
+                .is_ok()
+        );
+        assert!(
+            journal
+                .reserve_receipt("endRun:run", &digest(&"end").unwrap())
+                .is_ok()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

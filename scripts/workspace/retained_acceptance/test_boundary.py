@@ -6,7 +6,7 @@ import boundary
 class BoundaryRestartTests(unittest.TestCase):
  def setUp(self):
   self.cfg=boundary.parse_marker(boundary.marker_for(8,'a'*32,60));self.run={'agentRunId':'run','sessionId':'session'}
-  self.old={'environmentInstanceId':'instance','controllerId':'run','controllerEpoch':3,'controllerPurpose':'execute'}
+  self.old={'environmentInstanceId':'instance','controllerOwner':{'kind':'agentRun','runId':'run'},'controllerEpoch':3,'controllerPurpose':'execute'}
   self.current={**self.old,'controllerEpoch':4};self.calls=[];self.results=[]
   for i in range(5):
    self.calls.append({'callId':boundary.call_id(self.cfg,i),'turnId':'turn-'+str(i),'sequence':10+i*3,'toolName':'bash','normalizedInput':{'command':boundary.command_for(self.cfg,i)}})

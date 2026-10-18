@@ -1,7 +1,7 @@
 //! Physical cleanup orchestration; transport adapters return Core task results.
 use centaeris_core::execution::{
     EnvironmentTaskControllerPurpose, EnvironmentTaskEnvelope, EnvironmentTaskFence,
-    EnvironmentTaskRequest, EnvironmentTaskResult, EnvironmentTaskScope,
+    EnvironmentTaskOwner, EnvironmentTaskRequest, EnvironmentTaskResult, EnvironmentTaskScope,
     ENVIRONMENT_TASK_MAX_RECORDS, ENVIRONMENT_TASK_READ_BYTES, ENVIRONMENT_TASK_SCHEMA,
 };
 use sha2::{Digest, Sha256};
@@ -27,8 +27,11 @@ pub(crate) fn confirm_run_cleanup(
     host: &impl RetainedCleanupHost,
     fence: &EnvironmentTaskFence,
 ) -> Result<(), String> {
+    let EnvironmentTaskOwner::AgentRun { run_id } = &fence.controller_owner else {
+        return Err("retained_cleanup_authority_invalid".into());
+    };
     if fence.controller_purpose != EnvironmentTaskControllerPurpose::Cleanup
-        || fence.controller_epoch == 0
+        || fence.validate().is_err()
     {
         return Err("retained_cleanup_authority_invalid".into());
     }
@@ -43,7 +46,7 @@ pub(crate) fn confirm_run_cleanup(
     };
     match rpc(EnvironmentTaskRequest::Takeover {
         environment_instance_id: fence.environment_instance_id.clone(),
-        controller_id: fence.controller_id.clone(),
+        controller_owner: fence.controller_owner.clone(),
         controller_epoch: fence.controller_epoch,
         controller_purpose: EnvironmentTaskControllerPurpose::Cleanup,
     })? {
@@ -52,10 +55,10 @@ pub(crate) fn confirm_run_cleanup(
     }
     let ids = match rpc(EnvironmentTaskRequest::EndRun {
         fence: fence.clone(),
-        run_id: fence.controller_id.clone(),
+        run_id: run_id.clone(),
         operation_id: fence.operation_id(&format!(
             "run_terminal_cleanup:{:x}",
-            Sha256::digest(fence.controller_id.as_bytes())
+            Sha256::digest(run_id.as_bytes())
         )),
     })? {
         EnvironmentTaskResult::RunEnded { task_ids, .. }
@@ -78,7 +81,7 @@ pub(crate) fn confirm_run_cleanup(
         _ => return Err("retained_cleanup_list_unconfirmed".into()),
     };
     let scope = EnvironmentTaskScope::Run {
-        run_id: fence.controller_id.clone(),
+        run_id: run_id.clone(),
     };
     let listed: Vec<_> = tasks.iter().filter(|task| task.scope == scope).collect();
     let actual: BTreeSet<_> = listed.iter().map(|task| task.task_id.clone()).collect();
@@ -143,7 +146,9 @@ mod tests {
     fn fence() -> EnvironmentTaskFence {
         EnvironmentTaskFence {
             environment_instance_id: "instance-1".into(),
-            controller_id: "run-1".into(),
+            controller_owner: EnvironmentTaskOwner::AgentRun {
+                run_id: "run-1".into(),
+            },
             controller_epoch: 2,
             controller_purpose: EnvironmentTaskControllerPurpose::Cleanup,
         }
@@ -266,7 +271,9 @@ mod tests {
     #[test]
     fn maximum_controller_identity_still_has_a_bounded_cleanup_operation() {
         let f = EnvironmentTaskFence {
-            controller_id: "x".repeat(160),
+            controller_owner: EnvironmentTaskOwner::AgentRun {
+                run_id: "x".repeat(160),
+            },
             ..fence()
         };
         let h = Host {
@@ -281,5 +288,25 @@ mod tests {
             requests: RefCell::new(vec![]),
         };
         assert!(confirm_run_cleanup(&h, &f).is_ok());
+    }
+
+    #[test]
+    fn run_cleanup_rejects_maintenance_owner_before_any_takeover() {
+        let f = EnvironmentTaskFence {
+            controller_owner:
+                centaeris_core::execution::EnvironmentTaskOwner::MaintenanceOperation {
+                    operation_id: "run-1".into(),
+                },
+            ..fence()
+        };
+        let h = Host {
+            replies: RefCell::new(VecDeque::new()),
+            requests: RefCell::new(vec![]),
+        };
+        assert_eq!(
+            confirm_run_cleanup(&h, &f).unwrap_err(),
+            "retained_cleanup_authority_invalid"
+        );
+        assert!(h.requests.borrow().is_empty());
     }
 }

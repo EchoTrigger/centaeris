@@ -2,7 +2,7 @@ use super::*;
 use crate::postgres_store::execution_instances::RetainedInstanceAllocation;
 use centaeris_core::execution::{
     EnvironmentTaskControllerPurpose, EnvironmentTaskEnvelope, EnvironmentTaskFence,
-    EnvironmentTaskRequest, EnvironmentTaskResponse, EnvironmentTaskResult,
+    EnvironmentTaskOwner, EnvironmentTaskRequest, EnvironmentTaskResponse, EnvironmentTaskResult,
     ENVIRONMENT_TASK_SCHEMA,
 };
 
@@ -61,7 +61,9 @@ pub(super) fn fence(
     }
     Ok(EnvironmentTaskFence {
         environment_instance_id: instance.into(),
-        controller_id: c.controller_id.clone(),
+        controller_owner: EnvironmentTaskOwner::AgentRun {
+            run_id: c.controller_id.clone(),
+        },
         controller_epoch: u64::try_from(c.controller_epoch)
             .map_err(|_| "controller epoch invalid")?,
         controller_purpose: EnvironmentTaskControllerPurpose::Execute,
@@ -131,7 +133,7 @@ pub(super) fn takeover(
         id,
         EnvironmentTaskRequest::Takeover {
             environment_instance_id: fence.environment_instance_id.clone(),
-            controller_id: fence.controller_id.clone(),
+            controller_owner: fence.controller_owner.clone(),
             controller_epoch: fence.controller_epoch,
             controller_purpose: fence.controller_purpose.clone(),
         },
@@ -163,7 +165,9 @@ impl DockerExecutionHostRunner {
     ) -> Result<EnvironmentTaskResult, String> {
         let expected_fence = self.environment_task_fence()?;
         let supplied = match &request {
-            EnvironmentTaskRequest::Takeover { .. } | EnvironmentTaskRequest::EndRun { .. } => {
+            EnvironmentTaskRequest::Takeover { .. }
+            | EnvironmentTaskRequest::EndRun { .. }
+            | EnvironmentTaskRequest::EndOperation { .. } => {
                 return Err("retained lifecycle operation denied".into())
             }
             EnvironmentTaskRequest::Start { fence, .. }
@@ -261,7 +265,9 @@ impl crate::http::agent_runs::retained_cleanup::RetainedCleanupHost
         }
         let expected_fence = EnvironmentTaskFence {
             environment_instance_id: instance_id.into(),
-            controller_id: self.cleanup.agent_run_id.clone(),
+            controller_owner: EnvironmentTaskOwner::AgentRun {
+                run_id: self.cleanup.agent_run_id.clone(),
+            },
             controller_epoch: u64::try_from(controller.controller_epoch)
                 .map_err(|_| "cleanup epoch invalid")?,
             controller_purpose: EnvironmentTaskControllerPurpose::Cleanup,
@@ -269,12 +275,12 @@ impl crate::http::agent_runs::retained_cleanup::RetainedCleanupHost
         let supplied = match &envelope.request {
             EnvironmentTaskRequest::Takeover {
                 environment_instance_id,
-                controller_id,
+                controller_owner,
                 controller_epoch,
                 controller_purpose,
             } => EnvironmentTaskFence {
                 environment_instance_id: environment_instance_id.clone(),
-                controller_id: controller_id.clone(),
+                controller_owner: controller_owner.clone(),
                 controller_epoch: *controller_epoch,
                 controller_purpose: controller_purpose.clone(),
             },

@@ -292,7 +292,7 @@ def main():
                     raise RuntimeError('long Run lacks complete work: no committed and observed compaction summary before restart')
                 if (sample['completedCommands']!=1000 or long_restart is None
                         or long_restart['controllerReclaim'] is None or long_restart['compactionRecovery'] is None
-                        or progress_evidence.maxima.get('store.indexedRunTasks',0)<=1000):
+                        or progress_evidence.maxima.get('store.indexedOwnerTasks',0)<=1000):
                     raise RuntimeError('long Run lacks complete work, committed summary reuse, and mid-Run restart evidence')
                 return
             time.sleep(1)
@@ -443,7 +443,7 @@ print(json.dumps({'maintenanceReceiptCount':len(receipt),'status':receipt[0][0],
         'longRunObservation':state.get('workloadObservation') if args.long_run else None,
         'boundaryRunObservation':boundary_proof,
         'longRunObservationCount':progress_evidence.count,'longRunRetainedSamples':len(progress_evidence.samples),'longRunRuntimeRestart':long_restart,
-        'longRunMaxIndexedRunTasks':progress_evidence.maxima.get('store.indexedRunTasks',0),
+        'longRunMaxIndexedOwnerTasks':progress_evidence.maxima.get('store.indexedOwnerTasks',0),
         'longRunMetricMaxima':progress_evidence.maxima,
         'longRunExtraIndexedTasksAreUncategorized':True if args.long_run else None,
         'automaticInstructionsObservation':automatic_instructions,'longSideEffectProof':marker_proof,

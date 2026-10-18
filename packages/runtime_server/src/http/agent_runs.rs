@@ -282,7 +282,9 @@ fn teardown_retained(
     cleanup: crate::contract::AgentRunCleanup,
 ) -> Result<Response<Body>, String> {
     use crate::postgres_store::cleanup_receipts::{CleanupAuthorityRequest, CleanupTarget};
-    use centaeris_core::execution::{EnvironmentTaskControllerPurpose, EnvironmentTaskFence};
+    use centaeris_core::execution::{
+        EnvironmentTaskControllerPurpose, EnvironmentTaskFence, EnvironmentTaskOwner,
+    };
     let signing_key = match env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY") {
         Ok(key) => key,
         Err(_) => return json_error_response(503, "retained_cleanup_unavailable"),
@@ -358,7 +360,9 @@ fn teardown_retained(
                 }
                 let fence = EnvironmentTaskFence {
                     environment_instance_id: allocation.instance_id.clone(),
-                    controller_id: cleanup.agent_run_id.clone(),
+                    controller_owner: EnvironmentTaskOwner::AgentRun {
+                        run_id: cleanup.agent_run_id.clone(),
+                    },
                     controller_epoch: verified
                         .controller_epoch
                         .try_into()

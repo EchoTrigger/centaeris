@@ -27,9 +27,11 @@ fn stable_task_address_matches_existing_index_across_owner_renewal() {
             .task_id(&foreign.operation_id("command-original"))
             .unwrap()
     );
-    assert!(renewed
-        .task_id(&original.operation_id("command-original"))
-        .is_err());
+    assert!(
+        renewed
+            .task_id(&original.operation_id("command-original"))
+            .is_err()
+    );
 }
 pub(super) fn root() -> PathBuf {
     let p = std::env::temp_dir().join(format!(
@@ -198,13 +200,13 @@ fn takeover_fences_stale_controller_and_rejects_instance_mismatch() {
     let mut j = Journal::open(&p, "instance").unwrap();
     let old = EnvironmentTaskFence {
         environment_instance_id: "instance".into(),
-        controller_id: "a".into(),
+        controller_owner: EnvironmentTaskOwner::AgentRun { run_id: "a".into() },
         controller_epoch: 1,
         controller_purpose: EnvironmentTaskControllerPurpose::Execute,
     };
     j.takeover(old.clone()).unwrap();
     let new = EnvironmentTaskFence {
-        controller_id: "b".into(),
+        controller_owner: EnvironmentTaskOwner::AgentRun { run_id: "b".into() },
         controller_epoch: 2,
         ..old.clone()
     };
@@ -221,14 +223,14 @@ fn failed_fence_persistence_refuses_all_subsequent_controller_commands() {
     let mut j = Journal::open(&p, "instance").unwrap();
     let old = EnvironmentTaskFence {
         environment_instance_id: "instance".into(),
-        controller_id: "a".into(),
+        controller_owner: EnvironmentTaskOwner::AgentRun { run_id: "a".into() },
         controller_epoch: 1,
         controller_purpose: EnvironmentTaskControllerPurpose::Execute,
     };
     j.takeover_persist(old.clone(), &p).unwrap();
     fs::create_dir(p.join("history.sqlite-journal")).unwrap();
     let new = EnvironmentTaskFence {
-        controller_id: "b".into(),
+        controller_owner: EnvironmentTaskOwner::AgentRun { run_id: "b".into() },
         controller_epoch: 2,
         ..old.clone()
     };
@@ -266,17 +268,19 @@ fn same_epoch_cannot_upgrade_cleanup_to_execution_and_pending_takeover_refuses_m
     let mut journal = Journal::open(&p, "i").unwrap();
     let fence = EnvironmentTaskFence {
         environment_instance_id: "i".into(),
-        controller_id: "r".into(),
+        controller_owner: EnvironmentTaskOwner::AgentRun { run_id: "r".into() },
         controller_epoch: 1,
         controller_purpose: EnvironmentTaskControllerPurpose::Cleanup,
     };
     journal.takeover_persist(fence.clone(), &p).unwrap();
-    assert!(journal
-        .takeover(EnvironmentTaskFence {
-            controller_purpose: EnvironmentTaskControllerPurpose::Execute,
-            ..fence.clone()
-        })
-        .is_err());
+    assert!(
+        journal
+            .takeover(EnvironmentTaskFence {
+                controller_purpose: EnvironmentTaskControllerPurpose::Execute,
+                ..fence.clone()
+            })
+            .is_err()
+    );
     journal.takeover_pending = true;
     journal.persist(&p).unwrap();
     assert!(journal.check(&fence).is_err());
@@ -290,11 +294,12 @@ fn admission_capacity_failure_does_not_poison_existing_work() {
     let mut journal = Journal {
         poisoned: false,
         index_root: None,
+        import_upgrade_owners: Vec::new(),
         schema: ENVIRONMENT_TASK_SCHEMA.into(),
         instance: "i".into(),
         fence: None,
         takeover_pending: false,
-        closed_run: None,
+        closed_owner: None,
         tasks: BTreeMap::new(),
         receipts: BTreeMap::new(),
     };
@@ -311,7 +316,9 @@ fn admission_capacity_failure_does_not_poison_existing_work() {
 fn fixture_fence(instance: &str, controller: &str, epoch: u64) -> EnvironmentTaskFence {
     EnvironmentTaskFence {
         environment_instance_id: instance.into(),
-        controller_id: controller.into(),
+        controller_owner: EnvironmentTaskOwner::AgentRun {
+            run_id: controller.into(),
+        },
         controller_epoch: epoch,
         controller_purpose: EnvironmentTaskControllerPurpose::Execute,
     }
@@ -321,7 +328,10 @@ fn fixture_record(instance: &str, controller: &str, epoch: u64, alias: &str, liv
     let operation_id = fence.operation_id(alias);
     Record {
         digest: digest(&(instance, controller, alias)).unwrap(),
-        creator_controller_id: controller.into(),
+        creator_owner: EnvironmentTaskOwner::AgentRun {
+            run_id: controller.into(),
+        },
+        identity_version: TaskIdentityVersion::OwnerV3,
         creator_epoch: epoch,
         snapshot: EnvironmentTaskSnapshot {
             task_id: task_identity(&fence, &operation_id).unwrap(),
@@ -346,7 +356,7 @@ fn history_record(alias: &str, epoch: u64, live: bool) -> Record {
 fn same_run_controller_reconstruction_keeps_start_and_input_operation_identity() {
     let original = EnvironmentTaskFence {
         environment_instance_id: "i".into(),
-        controller_id: "r".into(),
+        controller_owner: EnvironmentTaskOwner::AgentRun { run_id: "r".into() },
         controller_epoch: 1,
         controller_purpose: EnvironmentTaskControllerPurpose::Execute,
     };
@@ -418,20 +428,23 @@ fn input_exhaustion_keeps_task_termination_and_run_closure_available() {
         j.reserve_receipt(&key, &input_digest).unwrap();
     }
     assert!(j.receipts.len() <= ENVIRONMENT_TASK_MAX_RECORDS);
-    assert!(j
-        .reserve_receipt("terminate:task", &stop_digest)
-        .unwrap()
-        .is_none());
-    assert!(j
-        .reserve_receipt("endRun:r", &close_digest)
-        .unwrap()
-        .is_none());
+    assert!(
+        j.reserve_receipt("terminate:task", &stop_digest)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        j.reserve_receipt("endRun:r", &close_digest)
+            .unwrap()
+            .is_none()
+    );
     // Lost acknowledgement of an idempotent control remains reconcilable; an
     // unknown input is never delivered again.
-    assert!(j
-        .reserve_receipt("terminate:task", &stop_digest)
-        .unwrap()
-        .is_none());
+    assert!(
+        j.reserve_receipt("terminate:task", &stop_digest)
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
         j.reserve_receipt("input:task:1:0", &input_digest)
             .unwrap_err(),
@@ -451,7 +464,9 @@ fn one_hundred_controller_windows_retire_history_and_keep_environment_task() {
     j.tasks.insert(background_id.clone(), background);
     for epoch in 1..=100 {
         fence.controller_epoch = epoch;
-        fence.controller_id = format!("r{epoch}");
+        fence.controller_owner = EnvironmentTaskOwner::AgentRun {
+            run_id: format!("r{epoch}"),
+        };
         j.takeover(fence.clone()).unwrap();
         let ids: Vec<_> = j.tasks.keys().cloned().collect();
         for id in ids {
@@ -460,7 +475,7 @@ fn one_hundred_controller_windows_retire_history_and_keep_environment_task() {
         assert_eq!(j.tasks.len(), 1);
         // Model closed-Run collection before admitting the next window. The real
         // Manager also verifies physical retirement before calling this store API.
-        while let Some((id, _)) = store::next_closed(&p, "", &fence.controller_id).unwrap() {
+        while let Some((id, _)) = store::next_closed(&p, "", &fence.controller_owner).unwrap() {
             store::forget_closed(&p, &id).unwrap();
         }
         let records = if epoch == 1 {
@@ -472,7 +487,7 @@ fn one_hundred_controller_windows_retire_history_and_keep_environment_task() {
             j.check_admission().unwrap();
             let mut record = history_record(&format!("history-{index}"), epoch, false);
             record.snapshot.scope = EnvironmentTaskScope::Run {
-                run_id: fence.controller_id.clone(),
+                run_id: fence.controller_owner.id().to_owned(),
             };
             j.tasks.insert(record.snapshot.task_id.clone(), record);
         }
@@ -482,7 +497,7 @@ fn one_hundred_controller_windows_retire_history_and_keep_environment_task() {
             j.check_admission().unwrap();
         }
         assert!(!j.poisoned);
-        j.closed_run = Some(fence.controller_id.clone());
+        j.closed_owner = Some(fence.controller_owner.clone());
         assert_eq!(j.check_admission().unwrap_err(), "task_run_closed");
         assert!(!j.retire_task(&background_id, epoch + 1, true));
         j.persist(&p).unwrap();
@@ -524,12 +539,14 @@ fn admission_preflight_preserves_committed_work_and_completion_space() {
     assert_eq!(fs::read(p.join("history.sqlite")).unwrap(), committed);
     assert_eq!(j.tasks[&id].snapshot.state, EnvironmentTaskState::Running);
     // Control receipts remain available while ordinary work is refused.
-    assert!(j
-        .reserve_receipt(&format!("terminate:{id}"), &digest(&id).unwrap())
-        .is_ok());
-    assert!(j
-        .reserve_receipt("endRun:r", &digest(&"r").unwrap())
-        .is_ok());
+    assert!(
+        j.reserve_receipt(&format!("terminate:{id}"), &digest(&id).unwrap())
+            .is_ok()
+    );
+    assert!(
+        j.reserve_receipt("endRun:r", &digest(&"r").unwrap())
+            .is_ok()
+    );
     fs::remove_dir_all(p).unwrap();
 }
 
@@ -551,13 +568,15 @@ fn one_thousand_same_run_terminal_records_keep_original_start_identity() {
     j = Journal::open(&p, "i").unwrap();
     let first = history_record("finished-0", 1, false);
     let last = history_record("finished-999", 1, false);
-    assert!(j
-        .existing(&first.snapshot.task_id, &first.digest)
-        .unwrap()
-        .is_some());
-    assert!(j
-        .existing(&last.snapshot.task_id, &digest(&"changed").unwrap())
-        .is_err());
+    assert!(
+        j.existing(&first.snapshot.task_id, &first.digest)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        j.existing(&last.snapshot.task_id, &digest(&"changed").unwrap())
+            .is_err()
+    );
     assert!(j.tasks.len() <= ENVIRONMENT_TASK_MAX_RECORDS);
     fs::remove_dir_all(p).unwrap();
 }
@@ -587,24 +606,26 @@ fn compact_cold_output_preserves_results_before_consumer_commit_and_ring_gaps() 
 }
 
 #[test]
-fn closed_run_cannot_reopen_after_intervening_controller_and_store_reopen() {
+fn closed_owner_cannot_reopen_after_intervening_controller_and_store_reopen() {
     let p = root();
     let mut j = Journal::open(&p, "i").unwrap();
     let mut fence = EnvironmentTaskFence {
         environment_instance_id: "i".into(),
-        controller_id: "r".into(),
+        controller_owner: EnvironmentTaskOwner::AgentRun { run_id: "r".into() },
         controller_epoch: 1,
         controller_purpose: EnvironmentTaskControllerPurpose::Execute,
     };
     j.takeover(fence.clone()).unwrap();
-    j.closed_run = Some("r".into());
+    j.closed_owner = Some(EnvironmentTaskOwner::AgentRun { run_id: "r".into() });
     j.persist(&p).unwrap();
-    fence.controller_id = "other".into();
+    fence.controller_owner = EnvironmentTaskOwner::AgentRun {
+        run_id: "other".into(),
+    };
     fence.controller_epoch = 2;
     j.takeover(fence.clone()).unwrap();
     j.persist(&p).unwrap();
     j = Journal::open(&p, "i").unwrap();
-    fence.controller_id = "r".into();
+    fence.controller_owner = EnvironmentTaskOwner::AgentRun { run_id: "r".into() };
     fence.controller_epoch = 3;
     j.takeover(fence).unwrap();
     assert_eq!(j.check_admission().unwrap_err(), "task_run_closed");
@@ -632,7 +653,9 @@ fn index_counts_and_memory_stay_bounded_with_three_thousand_realistic_task_ids()
     let mut j = Journal::open(&p, "i").unwrap();
     j.takeover(EnvironmentTaskFence {
         environment_instance_id: "i".into(),
-        controller_id: "agent_run_00000000000000000000000000000000".into(),
+        controller_owner: EnvironmentTaskOwner::AgentRun {
+            run_id: "agent_run_00000000000000000000000000000000".into(),
+        },
         controller_epoch: 1,
         controller_purpose: EnvironmentTaskControllerPurpose::Execute,
     })
@@ -641,12 +664,12 @@ fn index_counts_and_memory_stay_bounded_with_three_thousand_realistic_task_ids()
         let operation = format!("1:command_{}", digest(&("command", n)).unwrap());
         let id = task_identity(j.fence.as_ref().unwrap(), &operation).unwrap();
         let mut record = history_record(&id, 1, false);
-        record.creator_controller_id = j.fence.as_ref().unwrap().controller_id.clone();
+        record.creator_owner = j.fence.as_ref().unwrap().controller_owner.clone();
         record.digest = "d".repeat(64);
         record.snapshot.operation_id = operation;
         record.snapshot.task_id = id.clone();
         record.snapshot.scope = EnvironmentTaskScope::Run {
-            run_id: record.creator_controller_id.clone(),
+            run_id: record.creator_owner.id().to_owned(),
         };
         for input in 0..if n < 2000 { 2 } else { 1 } {
             let key = input_identity(
@@ -708,7 +731,9 @@ fn strict_forward_import_preserves_legacy_journal_and_rejects_invalid_identity()
         let mut j = Journal::open(&p, "i").unwrap();
         let fence = EnvironmentTaskFence {
             environment_instance_id: "i".into(),
-            controller_id: "r1".into(),
+            controller_owner: EnvironmentTaskOwner::AgentRun {
+                run_id: "r1".into(),
+            },
             controller_epoch: 1,
             controller_purpose: EnvironmentTaskControllerPurpose::Execute,
         };
@@ -745,8 +770,8 @@ fn strict_forward_import_preserves_legacy_journal_and_rejects_invalid_identity()
 }
 
 #[test]
-fn closed_history_collection_preserves_environment_and_uncertain_input_and_does_not_resurrect_receipts(
-) {
+fn closed_history_collection_preserves_environment_and_uncertain_input_and_does_not_resurrect_receipts()
+ {
     let p = root();
     let mut j = Journal::open(&p, "i").unwrap();
     let fence = fixture_fence("i", "r1", 1);
@@ -765,19 +790,39 @@ fn closed_history_collection_preserves_environment_and_uncertain_input_and_does_
     }
     let key = input_identity(&fence, &ids["uncertain"], "1:input").unwrap();
     j.reserve_receipt(&key, &digest(&"input").unwrap()).unwrap();
-    j.closed_run = Some("r1".into());
+    j.closed_owner = Some(EnvironmentTaskOwner::AgentRun {
+        run_id: "r1".into(),
+    });
     j.persist(&p).unwrap();
     for id in ids.values() {
         assert!(j.retire_task(id, 1, false));
     }
-    let (id, _) = store::next_closed(&p, "", "r2").unwrap().unwrap();
+    let (id, _) = store::next_closed(
+        &p,
+        "",
+        &EnvironmentTaskOwner::AgentRun {
+            run_id: "r2".into(),
+        },
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(id, ids["complete"]);
     store::forget_closed(&p, &id).unwrap();
     j.persist(&p).unwrap();
     assert!(store::task(&p, &ids["complete"]).unwrap().is_none());
     assert!(store::task(&p, &ids["uncertain"]).unwrap().is_some());
     assert!(store::task(&p, &ids["environment"]).unwrap().is_some());
-    assert!(store::next_closed(&p, "", "r2").unwrap().is_none());
+    assert!(
+        store::next_closed(
+            &p,
+            "",
+            &EnvironmentTaskOwner::AgentRun {
+                run_id: "r2".into()
+            }
+        )
+        .unwrap()
+        .is_none()
+    );
     fs::remove_dir_all(p).unwrap();
 }
 
