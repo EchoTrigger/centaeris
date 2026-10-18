@@ -135,6 +135,25 @@ Add the smallest focused test owned by the changed contract or adapter. Core
 tests runtime semantics; adapter tests cover storage, transport, and platform
 integration.
 
+Hosted Redis live-stream changes also run the ignored `transient_stream` Redis
+tests against a disposable loopback Redis service with `MEMORY USAGE`, a 32 MiB
+`maxmemory` limit, `maxmemory-policy noeviction`, and persistence disabled:
+
+```powershell
+$env:TEST_REASONING_REDIS_URL = 'redis://127.0.0.1:<disposable-port>/0'
+cargo test --locked -p runtime_server transient_stream::tests::redis_ -- --ignored --nocapture --test-threads=1
+```
+
+Never point this fixture at a deployed Redis service. The tests protect exact
+wake retention, latest complete text/reasoning recovery, revision identity,
+expiry and sealing, and two active streams whose retained memory remains
+proportional to their latest snapshots. The shared
+`tests/fixtures/agent-run-transient-signals.json` corpus checks Rust producer/API
+decoder parity. API `test_transient_stream.py` and the existing Session stream,
+reasoning, and authority suites protect SSE snapshots, reconnect, committed
+cursors and durable terminal reconciliation during Redis failure. These bounded
+regressions do not establish a production concurrency limit or benchmark result.
+
 ## Full local gate
 
 ```sh

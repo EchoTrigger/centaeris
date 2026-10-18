@@ -987,13 +987,37 @@ the authorized AgentRun's retained Session and model binding; callers cannot
 override it. Model-setting probes use a stable identity scoped to the ModelConfig.
 Other provider templates retain their SDK headers.
 
-Redis live snapshots and SSE signals carry optional `reasoning` alongside the
+Redis live snapshots and SSE live items carry optional `reasoning` alongside the
 answer under one monotonic revision. Its exact fields are `blockId`, `requestId`,
-and `text`. Atomic Redis writes update the cached snapshot and signal together;
+and `text`. Atomic Redis writes update the cached snapshot and wake together;
 browser restoration reads both body and reasoning from that snapshot. Committed
 seals replace matching live blocks without changing their disclosure identity.
 Runtime restart recovers available cached partial reasoning through Core before
 settling the interrupted run. Missing or expired cache does not fabricate text.
+
+The Redis signal stream retains at most 256 wake records per AgentRun with exact
+trimming. A `live` signal has exactly `schema`, `kind`, `agentRunId`,
+`afterSequence`, `revision`, `turnId`, and `messageId`; `commit_wake` has exactly
+`schema`, `kind`, `agentRunId`, and `highWaterSequence`. Both use
+`agent_run.transient.signal.v1`. Text and reasoning occur only in the current
+cached snapshot, never in the wake history. A reader coalesces wakes and reads
+that complete snapshot atomically; live SSE items retain their existing fields
+and do not advance the committed cursor. Retained Redis data therefore grows
+with the latest snapshot plus bounded wake metadata, rather than 256 copies of
+the generated output. Snapshot content is complete and has no truncation limit;
+the deployment's Redis memory budget still limits aggregate concurrent state.
+
+Runtime producers and API readers must be upgraded together. The strict v1 wake
+decoder rejects the earlier payload-bearing live signals; no compatibility
+alias is supported. Restart active stream readers during the coordinated
+upgrade so they capture a fresh Redis tail and restore the latest snapshot.
+Earlier payload-bearing histories retain their memory until expiry or trimming;
+if Redis is already full under `noeviction`, writes may fail before trimming.
+During the planned upgrade, stop the old producers/readers and allow those
+histories to expire, or have the operator remove only their transient signal
+keys before restart. This cleanup does not remove PostgreSQL history.
+PostgreSQL remains authoritative for durable replay and terminal reconciliation
+when wakes are trimmed, absent, or unavailable.
 
 Workspace, Agent, and Session creation generates `ws_`, `agent_`, and `session_`
 identifiers followed by 16 case-sensitive Base64url characters (`A-Z`, `a-z`,

@@ -1,0 +1,17 @@
+{
+  "live": {
+    "schema": "agent_run.transient.signal.v1",
+    "kind": "live",
+    "agentRunId": "run-1",
+    "afterSequence": 4,
+    "revision": 2,
+    "turnId": "turn-1",
+    "messageId": "message:turn-1:assistant"
+  },
+  "commitWake": {
+    "schema": "agent_run.transient.signal.v1",
+    "kind": "commit_wake",
+    "agentRunId": "run-1",
+    "highWaterSequence": 42
+  }
+}
