@@ -30,6 +30,7 @@ ARCHIVE_LIMIT = _TRANSFER_CONTRACT["archiveBytes"]
 EXPANDED_LIMIT = _TRANSFER_CONTRACT["expandedBytes"]
 MEMBER_LIMIT = _TRANSFER_CONTRACT["members"]
 TRANSFER_BLOCK_BYTES = 64 * 1024
+RETIREMENT_ATTEMPTS = 3
 
 
 class _LimitedWriter:
@@ -274,6 +275,7 @@ class WorkspaceHTTPProvisioner:
         self.api = _MaintenanceHTTP(api_origin, maintenance_token, request_timeout=request_timeout)
         self.runtime = _MaintenanceHTTP(runtime_origin, maintenance_token, internal_token, request_timeout=request_timeout)
         self._retirement_requests = {}
+        self._accepted_retirements = set()
 
     @staticmethod
     def _binding(owned):
@@ -431,29 +433,43 @@ class WorkspaceHTTPProvisioner:
         # Verifier maintenance outlives the model's execute controller. The
         # existing retire API requires the current epoch at first acceptance;
         # retain its exact request thereafter for immutable operation replay.
-        request = self._retirement_requests.get(operation_id)
-        if request is None:
-            observed = self._observe(owned.session_id, owned.environment_id, owned.agent_run_id)
-            if (observed["instanceId"] != owned.instance_id or observed["containerId"] != owned.container_id
-                    or observed["hostId"] != owned.host_id or observed["profileDigest"] != owned.profile_digest
-                    or observed["imageDigest"] != owned.image_digest
-                    or type(observed["controllerEpoch"]) is not int or observed["controllerEpoch"] < 0):
+        for attempt in range(RETIREMENT_ATTEMPTS):
+            request = self._retirement_requests.get(operation_id)
+            if request is None:
+                observed = self._observe(owned.session_id, owned.environment_id, owned.agent_run_id)
+                if (observed["instanceId"] != owned.instance_id or observed["containerId"] != owned.container_id
+                        or observed["hostId"] != owned.host_id or observed["profileDigest"] != owned.profile_digest
+                        or observed["imageDigest"] != owned.image_digest
+                        or type(observed["controllerEpoch"]) is not int or observed["controllerEpoch"] < 0):
+                    raise WorkspaceError("retirement_binding_mismatch")
+                if observed["state"] == "destroyed" and observed["physicalState"] == "absent" and observed["resourceHolding"] == 0:
+                    return "destroyed"
+                request = {"schema": "runtime.environment.retire.v1", "operationId": operation_id,
+                    "environmentId": owned.environment_id, "instanceId": owned.instance_id, "hostId": owned.host_id,
+                    "expectedControllerEpoch": observed["controllerEpoch"], "acknowledgeTmpfsLoss": True}
+                self._retirement_requests[operation_id] = request
+            elif (request["environmentId"] != owned.environment_id or request["instanceId"] != owned.instance_id
+                    or request["hostId"] != owned.host_id):
                 raise WorkspaceError("retirement_binding_mismatch")
-            if observed["state"] == "destroyed" and observed["physicalState"] == "absent" and observed["resourceHolding"] == 0:
-                return "destroyed"
-            request = {"schema": "runtime.environment.retire.v1", "operationId": operation_id,
-                "environmentId": owned.environment_id, "instanceId": owned.instance_id, "hostId": owned.host_id,
-                "expectedControllerEpoch": observed["controllerEpoch"], "acknowledgeTmpfsLoss": True}
-            self._retirement_requests[operation_id] = request
-        elif (request["environmentId"] != owned.environment_id or request["instanceId"] != owned.instance_id
-                or request["hostId"] != owned.host_id):
-            raise WorkspaceError("retirement_binding_mismatch")
-        value = self.runtime.post("/internal/environments/retire", request)
-        _fields(value, "runtime.environment.retire.result.v1", {"operationId", "environmentId", "instanceId", "status"})
-        if (value["operationId"] != operation_id or value["environmentId"] != owned.environment_id
-                or value["instanceId"] != owned.instance_id or value["status"] not in {"pending", "destroyed"}):
-            raise WorkspaceError("retirement_response_invalid")
-        return value["status"]
+            try:
+                value = self.runtime.post("/internal/environments/retire", request)
+            except WorkspaceError as error:
+                if (error.status != 409 or error.code != "environment_retirement_epoch_conflict"
+                        or operation_id in self._accepted_retirements):
+                    raise
+                # Only this response proves no retirement operation was
+                # accepted. Reuse its ID with a newly observed epoch; transport
+                # uncertainty and every other rejection keep the original body.
+                del self._retirement_requests[operation_id]
+                if attempt + 1 == RETIREMENT_ATTEMPTS:
+                    raise
+                continue
+            _fields(value, "runtime.environment.retire.result.v1", {"operationId", "environmentId", "instanceId", "status"})
+            if (value["operationId"] != operation_id or value["environmentId"] != owned.environment_id
+                    or value["instanceId"] != owned.instance_id or value["status"] not in {"pending", "destroyed"}):
+                raise WorkspaceError("retirement_response_invalid")
+            self._accepted_retirements.add(operation_id)
+            return value["status"]
 
     def observe_cleanup(self, owned):
         value = self._observe(owned.session_id, owned.environment_id, owned.agent_run_id)

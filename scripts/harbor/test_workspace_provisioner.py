@@ -103,6 +103,7 @@ class ArchiveTests(unittest.TestCase):
 class HTTPProvisionerTests(unittest.TestCase):
     def setUp(self):
         self.requests = []
+        self.request_bodies = []
         self.lose_ack = False
         self.lose_activation_ack = False
         self.state = "waitingSetup"
@@ -112,6 +113,9 @@ class HTTPProvisionerTests(unittest.TestCase):
         self.downloaded_archive = None
         self.response_transform = None
         self.observation_errors = []
+        self.observation_epochs = []
+        self.retirement_errors = []
+        self.lose_retirement_ack = False
         self.download_error = None
         self.download_content_type = "application/x-tar"
         self.download_declared_bytes = None
@@ -124,6 +128,7 @@ class HTTPProvisionerTests(unittest.TestCase):
                 value = (json.loads(self.headers["X-Benchmark-Transfer"]) if self.path == "/internal/benchmark/upload"
                          and self.headers.get("Content-Type") == "application/x-tar" else json.loads(raw))
                 owner.requests.append((self.path, dict(self.headers), value))
+                owner.request_bodies.append((self.path, raw))
                 if self.path == "/internal/benchmark/download" and owner.download_error:
                     status, code = owner.download_error
                     body = json.dumps({"error": code}).encode()
@@ -144,7 +149,8 @@ class HTTPProvisionerTests(unittest.TestCase):
                         return
                     result = {"schema": "runtime.benchmark.observe.result.v1", "state": owner.state,
                         "sessionId": "session", "environmentId": "environment", "agentRunId": "run",
-                        "instanceId": "instance", "containerId": "container", "hostId": "host", "controllerEpoch": 2,
+                        "instanceId": "instance", "containerId": "container", "hostId": "host",
+                        "controllerEpoch": owner.observation_epochs.pop(0) if owner.observation_epochs else 2,
                         "imageDigest": "sha256:" + "a" * 64, "profileDigest": "sha256:" + "b" * 64,
                         "physicalState": owner.physical, "resourceHolding": owner.debit}
                 elif self.path == "/internal/benchmark/exec":
@@ -155,6 +161,19 @@ class HTTPProvisionerTests(unittest.TestCase):
                     result = {"schema": "runtime.benchmark.exec.result.v1", "exitCode": 0, "stdout": "output",
                               "stderr": "", "timedOut": False, "outcome": "completed"}
                 elif self.path == "/internal/environments/retire":
+                    if owner.retirement_errors:
+                        status, code = owner.retirement_errors.pop(0)
+                        body = json.dumps({"error": code}).encode()
+                        self.send_response(status)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                        return
+                    if owner.lose_retirement_ack:
+                        self.connection.shutdown(socket.SHUT_RDWR)
+                        self.connection.close()
+                        return
                     result = {"schema": "runtime.environment.retire.result.v1", "operationId": value["operationId"],
                               "environmentId": "environment", "instanceId": "instance", "status": "pending"}
                 elif self.path.endswith("/benchmark-setup-complete"):
@@ -406,6 +425,99 @@ class HTTPProvisionerTests(unittest.TestCase):
         self.response_transform = lambda value: {**value, "controllerEpoch": 5} if value["schema"] == "runtime.benchmark.observe.result.v1" else value
         self.provisioner.retire(self.owned, "retire-op")
         self.assertEqual([value for path, _, value in self.requests if path == "/internal/environments/retire"], [first, first])
+
+    def test_retire_reobserves_only_an_explicit_unaccepted_epoch_conflict(self):
+        for conflicts in (1, 2):
+            with self.subTest(conflicts=conflicts):
+                self.requests.clear()
+                self.observation_epochs = list(range(4, 5 + conflicts))
+                self.retirement_errors = [(409, "environment_retirement_epoch_conflict")] * conflicts
+                operation = "retire-op-" + str(conflicts)
+                self.assertEqual(self.provisioner.retire(self.owned, operation), "pending")
+                requests = [value for path, _, value in self.requests if path == "/internal/environments/retire"]
+                self.assertEqual([value["expectedControllerEpoch"] for value in requests], list(range(4, 5 + conflicts)))
+                self.assertEqual({value["operationId"] for value in requests}, {operation})
+                unchanged = [{key: value for key, value in request.items() if key != "expectedControllerEpoch"}
+                             for request in requests]
+                self.assertTrue(all(value == unchanged[0] for value in unchanged))
+                self.assertEqual([path for path, _, _ in self.requests],
+                                 ["/internal/benchmark/observe", "/internal/environments/retire"] * (conflicts + 1))
+
+    def test_retire_stops_after_three_epoch_conflicts_and_preserves_the_error(self):
+        self.observation_epochs = [4, 5, 6, 7]
+        self.retirement_errors = [(409, "environment_retirement_epoch_conflict")] * 3
+        with self.assertRaises(WorkspaceError) as raised:
+            self.provisioner.retire(self.owned, "retire-op")
+        self.assertEqual((raised.exception.code, raised.exception.status),
+                         ("environment_retirement_epoch_conflict", 409))
+        requests = [value for path, _, value in self.requests if path == "/internal/environments/retire"]
+        self.assertEqual([value["expectedControllerEpoch"] for value in requests], [4, 5, 6])
+        self.assertEqual({value["operationId"] for value in requests}, {"retire-op"})
+        self.assertEqual(self.provisioner.retire(self.owned, "retire-op"), "pending")
+        self.assertEqual(self.requests[-1][2]["expectedControllerEpoch"], 7)
+
+    def test_retire_lost_ack_and_pending_keep_exact_request_bytes_without_reobservation(self):
+        self.observation_epochs = [4, 5]
+        self.lose_retirement_ack = True
+        with self.assertRaisesRegex(WorkspaceError, "transport_unavailable"):
+            self.provisioner.retire(self.owned, "retire-op")
+        self.assertEqual([path for path, _, _ in self.requests],
+                         ["/internal/benchmark/observe", "/internal/environments/retire"])
+        self.lose_retirement_ack = False
+        self.assertEqual(self.provisioner.retire(self.owned, "retire-op"), "pending")
+        self.assertEqual(self.provisioner.retire(self.owned, "retire-op"), "pending")
+        bodies = [raw for path, raw in self.request_bodies if path == "/internal/environments/retire"]
+        self.assertEqual(bodies, [bodies[0]] * 3)
+        self.assertEqual(sum(path == "/internal/benchmark/observe" for path, _, _ in self.requests), 1)
+
+    def test_retire_does_not_refresh_on_generic_conflict_or_wrong_status(self):
+        for status, code in [(409, "environment_retirement_rejected"),
+                             (503, "environment_retirement_epoch_conflict"),
+                             (409, "environment_retirement_epoch_conflict_unknown")]:
+            with self.subTest(status=status, code=code):
+                self.requests.clear()
+                self.request_bodies.clear()
+                self.observation_epochs = [4, 5]
+                self.retirement_errors = [(status, code)]
+                operation = "retire-op-" + str(status) + "-" + code
+                with self.assertRaises(WorkspaceError) as raised:
+                    self.provisioner.retire(self.owned, operation)
+                self.assertEqual((raised.exception.status, raised.exception.code), (status, code))
+                self.assertEqual(self.provisioner.retire(self.owned, operation), "pending")
+                self.assertEqual([path for path, _, _ in self.requests],
+                                 ["/internal/benchmark/observe", "/internal/environments/retire", "/internal/environments/retire"])
+                bodies = [raw for path, raw in self.request_bodies if path == "/internal/environments/retire"]
+                self.assertEqual(bodies, [bodies[0]] * 2)
+
+    def test_retire_pending_acceptance_never_refreshes_its_immutable_body(self):
+        self.observation_epochs = [4, 5]
+        self.assertEqual(self.provisioner.retire(self.owned, "retire-op"), "pending")
+        self.retirement_errors = [(409, "environment_retirement_epoch_conflict")]
+        with self.assertRaises(WorkspaceError):
+            self.provisioner.retire(self.owned, "retire-op")
+        self.assertEqual(sum(path == "/internal/benchmark/observe" for path, _, _ in self.requests), 1)
+        bodies = [raw for path, raw in self.request_bodies if path == "/internal/environments/retire"]
+        self.assertEqual(bodies, [bodies[0]] * 2)
+
+    def test_retire_reobservation_rejects_changed_identity_before_second_post(self):
+        for field, changed in [("sessionId", "another"), ("environmentId", "another"),
+                               ("agentRunId", "another"), ("instanceId", "another"),
+                               ("containerId", "another"), ("hostId", "another"),
+                               ("imageDigest", "sha256:" + "c" * 64),
+                               ("profileDigest", "sha256:" + "c" * 64)]:
+            with self.subTest(field=field):
+                self.requests.clear()
+                self.observation_epochs = [4, 5]
+                self.retirement_errors = [(409, "environment_retirement_epoch_conflict")]
+                def transform(value):
+                    if (value["schema"] == "runtime.benchmark.observe.result.v1"
+                            and sum(path == "/internal/benchmark/observe" for path, _, _ in self.requests) == 2):
+                        return {**value, field: changed}
+                    return value
+                self.response_transform = transform
+                with self.assertRaisesRegex(WorkspaceError, "retirement_binding_mismatch|benchmark_observation_invalid"):
+                    self.provisioner.retire(self.owned, "retire-op-" + field)
+                self.assertEqual(sum(path == "/internal/environments/retire" for path, _, _ in self.requests), 1)
 
     def test_lost_activation_ack_queries_exact_owned_readiness_without_second_mutation(self):
         self.lose_activation_ack = True
