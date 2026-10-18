@@ -380,15 +380,23 @@ class WorkspaceEnvironment(BaseEnvironment):
                 if self._owned is None:
                     raise WorkspaceError("cleanup_pending")
             owned = self._require_owned()
+            retirement_error = None
             try:
                 await asyncio.to_thread(self.provisioner.retire, owned, self._operation("retire"))
-            except WorkspaceError:
-                pass
+            except WorkspaceError as error:
+                # Preserve only the bounded protocol diagnostic, never the
+                # original exception text, response body or credential context.
+                code = error.code if (isinstance(error.code, str)
+                    and re.fullmatch(r"[a-z][a-z0-9_]{0,127}", error.code)) else "retirement_failed"
+                status = error.status if type(error.status) is int and 100 <= error.status <= 599 else None
+                retirement_error = WorkspaceError(code, status)
             observation = await asyncio.to_thread(self.provisioner.observe_cleanup, owned)
             if (not isinstance(observation, CleanupObservation) or observation.environment_id != owned.environment_id
                     or observation.instance_id != owned.instance_id or observation.physical_state != "absent"
                     or observation.resource_holding != 0):
                 self._notify(cleanupStatus="pending", resourceHolding=1, phase="cleanup")
+                if retirement_error is not None:
+                    raise retirement_error from None
                 raise WorkspaceError("cleanup_pending")
             await self.allocation.release(cleanup_state="absent")
             self._destroyed = True

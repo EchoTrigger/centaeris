@@ -335,6 +335,45 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(notifications[-1]["cleanupStatus"], "absent")
         self.assertNotIn("status", notifications[-1])
 
+    async def test_retirement_rejection_keeps_safe_code_status_until_cleanup_is_confirmed(self):
+        notifications = []
+        self.environment.workspace_event_callback = notifications.append
+        await self.environment.start(force_build=False)
+        original_retire = self.provisioner.retire
+        rejection = WorkspaceError("environment_retirement_rejected", 409)
+        rejection.args = ("private response body Bearer synthetic-secret",)
+        def reject(owned, operation):
+            raise rejection
+        self.provisioner.retire = reject
+        with self.assertRaises(WorkspaceError) as caught:
+            await self.environment.stop(delete=True)
+        self.assertEqual((caught.exception.code, caught.exception.status),
+                         ("environment_retirement_rejected", 409))
+        self.assertEqual(str(caught.exception), "Workspace environment_retirement_rejected (HTTP 409)")
+        self.assertIsNot(caught.exception, rejection)
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertFalse(self.allocation.released)
+        self.assertEqual(notifications[-1]["cleanupStatus"], "pending")
+        self.assertEqual(notifications[-1]["resourceHolding"], 1)
+        self.provisioner.retire = original_retire
+        self.provisioner.physical, self.provisioner.debit = "absent", 0
+        await self.environment.stop(delete=True)
+        self.assertTrue(self.allocation.released)
+        self.assertEqual(notifications[-1]["cleanupStatus"], "absent")
+
+    async def test_retirement_error_diagnostics_reject_unbounded_or_private_fields(self):
+        await self.environment.start(force_build=False)
+        for code, status in [("Bearer synthetic-secret", "private status"), ("a" * 129, True)]:
+            with self.subTest(code=code, status=status):
+                def reject(owned, operation):
+                    raise WorkspaceError(code, status)
+                self.provisioner.retire = reject
+                with self.assertRaises(WorkspaceError) as caught:
+                    await self.environment.stop(delete=True)
+                self.assertEqual((caught.exception.code, caught.exception.status), ("retirement_failed", None))
+                self.assertEqual(str(caught.exception), "Workspace retirement_failed")
+                self.assertFalse(self.allocation.released)
+
     async def test_absent_container_with_live_debit_stays_pending(self):
         await self.environment.start(force_build=False)
         self.provisioner.physical = "absent"
