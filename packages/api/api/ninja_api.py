@@ -35,6 +35,7 @@ from app_core.http.trash import router as trash_router
 from app_core.http.workspace_members import router as workspace_members_router
 from app_core.http.workspaces import router as workspaces_router
 from app_core.http.environment_settings import router as environment_settings_router
+from app_core.http.environment_maintenance import router as environment_maintenance_router
 
 
 api = NinjaAPI(
@@ -74,6 +75,7 @@ api.add_router("/api", streaming_router)
 api.add_router("/api", trash_router)
 api.add_router("/internal", internal_router)
 api.add_router("/internal", benchmark_profiles_router)
+api.add_router("/internal", environment_maintenance_router)
 api.add_router("/internal", internal_agent_work_validation_router)
 api.add_router("/internal", internal_model_router)
 api.add_router("/internal", internal_mcp_credentials_router)

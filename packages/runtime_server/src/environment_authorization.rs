@@ -4,6 +4,8 @@ use sha2::{Digest, Sha256};
 
 use crate::agent_run_authorization::WorkspaceAgentRunAuthorization;
 
+pub(crate) mod maintenance;
+
 const DOMAIN: &[u8] = b"workspace:environment-authorization:v1\0";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

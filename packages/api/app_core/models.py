@@ -87,6 +87,10 @@ def new_environment_release_id() -> str:
     return new_id("environment_release")
 
 
+def new_environment_maintenance_grant_id() -> str:
+    return new_id("maintenance_grant")
+
+
 def new_session_project_id() -> str:
     return new_id("session_project")
 
@@ -1450,6 +1454,8 @@ class SessionEnvironment(models.Model):
     controller_epoch = models.PositiveBigIntegerField(default=0, editable=False)
     controller_run = models.ForeignKey("AgentRun", on_delete=models.PROTECT,
         related_name="+", null=True, blank=True, editable=False)
+    controller_maintenance_operation = models.ForeignKey("EnvironmentMaintenanceOperation",
+        on_delete=models.PROTECT, related_name="+", null=True, blank=True, editable=False)
     controller_lease_owner = models.CharField(max_length=160, blank=True, default="", editable=False)
     controller_released = models.BooleanField(default=True, editable=False)
     controller_purpose = models.CharField(max_length=7, default="", editable=False,
@@ -1458,8 +1464,11 @@ class SessionEnvironment(models.Model):
     class Meta:
         constraints = [models.CheckConstraint(condition=models.Q(network__in=["disabled", "publicInternet"]),
             name="environment_network_valid"), models.CheckConstraint(
-            condition=(models.Q(controller_run__isnull=True, controller_lease_owner="", controller_released=True, controller_purpose="")
-                | (models.Q(controller_run__isnull=False, controller_epoch__gt=0, controller_purpose__in=["execute", "cleanup"])
+            condition=(models.Q(controller_run__isnull=True, controller_maintenance_operation__isnull=True,
+                               controller_lease_owner="", controller_released=True, controller_purpose="")
+                | (((models.Q(controller_run__isnull=False, controller_maintenance_operation__isnull=True)
+                     | models.Q(controller_run__isnull=True, controller_maintenance_operation__isnull=False))
+                    & models.Q(controller_epoch__gt=0, controller_purpose__in=["execute", "cleanup"]))
                    & ~models.Q(controller_lease_owner=""))),
             name="environment_controller_complete"), models.CheckConstraint(
             condition=(models.Q(benchmark_profile__isnull=True, benchmark_profile_digest="",
@@ -1516,6 +1525,67 @@ class SessionEnvironment(models.Model):
             # A concurrent settings update may have superseded our earlier read.
             self.refresh_from_db(using=using, fields=["network"])
         return result
+
+
+class EnvironmentMaintenanceOperation(models.Model):
+    """One immutable request and physical target, independently owned from a Run."""
+    operation_id = models.CharField(primary_key=True, max_length=160)
+    workspace = models.ForeignKey(Workspace, on_delete=models.PROTECT, related_name="+")
+    session = models.ForeignKey(Session, on_delete=models.PROTECT, related_name="+")
+    environment = models.ForeignKey(SessionEnvironment, on_delete=models.PROTECT, related_name="maintenance_operations")
+    instance_id = models.CharField(max_length=73)
+    container_id = models.CharField(max_length=64)
+    host_id = models.CharField(max_length=160)
+    allocation_execution_id = models.TextField()
+    profile_digest = models.CharField(max_length=71)
+    request = models.JSONField()
+    request_digest = models.CharField(max_length=71)
+    current_grant = models.ForeignKey("EnvironmentMaintenanceGrant", on_delete=models.PROTECT,
+        related_name="+", null=True, editable=False)
+    state = models.CharField(max_length=8, default="active", choices=[("active", "Active"), ("released", "Released")])
+    released_at = models.DateTimeField(null=True, editable=False)
+
+    class Meta:
+        constraints = [models.CheckConstraint(
+            condition=models.Q(state="active", released_at__isnull=True)
+                | models.Q(state="released", released_at__isnull=False), name="maintenance_operation_state_valid")]
+
+    def save(self, *args, **kwargs):
+        if self._state.adding:
+            kwargs['force_insert'] = True
+        else:
+            fields = ("workspace_id", "session_id", "environment_id", "instance_id", "container_id", "host_id",
+                      "allocation_execution_id", "profile_digest", "request", "request_digest")
+            stored = type(self).objects.values(*fields).get(pk=self.pk)
+            if any(stored[name] != getattr(self, name) for name in fields):
+                raise ValueError("maintenance_operation_immutable")
+        return super().save(*args, **kwargs)
+
+
+class EnvironmentMaintenanceGrant(models.Model):
+    """Append-only signatures; cleanup renewal never rewrites execution authority."""
+    id = models.CharField(primary_key=True, max_length=64, default=new_environment_maintenance_grant_id)
+    operation = models.ForeignKey(EnvironmentMaintenanceOperation, on_delete=models.PROTECT, related_name="grants")
+    previous_controller_epoch = models.PositiveBigIntegerField()
+    controller_epoch = models.PositiveBigIntegerField()
+    controller_lease_digest = models.CharField(max_length=71)
+    controller_purpose = models.CharField(max_length=7, choices=[("execute", "Execute"), ("cleanup", "Cleanup")])
+    expires_at_ms = models.PositiveBigIntegerField()
+    payload = models.JSONField()
+    signature = models.CharField(max_length=76)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=("operation", "controller_epoch"), name="maintenance_grant_epoch_unique"),
+            models.UniqueConstraint(fields=("operation", "previous_controller_epoch", "controller_purpose"),
+                                    name="maintenance_grant_request_unique"),
+            models.CheckConstraint(condition=models.Q(controller_epoch__gt=0, expires_at_ms__gt=0,
+                controller_purpose__in=["execute", "cleanup"]), name="maintenance_grant_valid")]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValueError("maintenance_grant_immutable")
+        kwargs['force_insert'] = True
+        return super().save(*args, **kwargs)
 
 
 class AgentRunEnvironmentRelease(models.Model):

@@ -101,6 +101,8 @@ def _acquire_controller(run_id, lease_owner, purpose):
             raise ValueError("environment_controller_run_terminal")
         if purpose == "cleanup" and environment.controller_run_id == run.pk and environment.controller_released:
             raise ValueError("environment_release_history_missing")
+        if not environment.controller_released and environment.controller_maintenance_operation_id is not None:
+            raise ValueError("environment_controller_owned")
         if not environment.controller_released and environment.controller_run_id not in (None, run.pk):
             raise ValueError("environment_controller_owned")
         if (not environment.controller_released and environment.controller_run_id == run.pk
@@ -111,10 +113,12 @@ def _acquire_controller(run_id, lease_owner, purpose):
             raise ValueError("environment_controller_epoch_exhausted")
         environment.controller_epoch += 1
         environment.controller_run = run
+        environment.controller_maintenance_operation = None
         environment.controller_lease_owner = lease_owner
         environment.controller_released = False
         environment.controller_purpose = purpose
-        environment.save(update_fields=["controller_epoch", "controller_run", "controller_lease_owner", "controller_released", "controller_purpose"])
+        environment.save(update_fields=["controller_epoch", "controller_run", "controller_maintenance_operation",
+            "controller_lease_owner", "controller_released", "controller_purpose"])
         return _authority(environment)
     return _translate_contention(acquire)
 
