@@ -1,6 +1,8 @@
 //! Internal maintenance authority is independent of Run execute/cleanup grants.
 use super::*;
-use crate::postgres_store::residency::retirement::{RetirementRequest, RetirementTarget};
+use crate::postgres_store::residency::retirement::{
+    RetirementError, RetirementRequest, RetirementTarget,
+};
 
 fn maintenance_authorized(
     configured: Option<&str>,
@@ -47,8 +49,16 @@ pub(super) fn retire(
             "application/json",
             serde_json::to_vec(&result).map_err(|e| e.to_string())?,
         )),
-        Err(_) => json_error_response(409, "environment_retirement_rejected"),
+        Err(error) => retirement_error_response(error),
     }
+}
+
+fn retirement_error_response(error: RetirementError) -> Result<Response<Body>, String> {
+    let code = match error {
+        RetirementError::ControllerEpochConflict => "environment_retirement_epoch_conflict",
+        RetirementError::Rejected(_) => "environment_retirement_rejected",
+    };
+    json_error_response(409, code)
 }
 
 fn physical_identity(facts: &serde_json::Value, target: &RetirementTarget) -> bool {
@@ -102,6 +112,36 @@ fn retire_observed(
 mod tests {
     use super::*;
     use std::cell::Cell;
+    #[test]
+    fn unaccepted_epoch_conflict_has_a_distinct_bounded_http_error() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            for (error, code) in [
+                (
+                    RetirementError::ControllerEpochConflict,
+                    "environment_retirement_epoch_conflict",
+                ),
+                (
+                    RetirementError::Rejected("environment_retirement_epoch_conflict".into()),
+                    "environment_retirement_rejected",
+                ),
+                (
+                    RetirementError::Rejected("private store diagnostics".into()),
+                    "environment_retirement_rejected",
+                ),
+            ] {
+                let response = retirement_error_response(error).unwrap();
+                assert_eq!(response.status().as_u16(), 409);
+                assert_eq!(response.headers()["content-type"], "application/json");
+                let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                    json!({"error": code})
+                );
+            }
+        });
+    }
+
     fn target() -> RetirementTarget {
         RetirementTarget {
             allocation_execution_id: "execution".into(),

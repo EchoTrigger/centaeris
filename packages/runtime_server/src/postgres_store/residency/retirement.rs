@@ -47,6 +47,40 @@ pub(crate) struct RetirementResult {
     pub status: &'static str,
 }
 
+#[derive(Debug)]
+pub(crate) enum RetirementError {
+    /// No retirement was accepted: the locked Environment epoch had changed.
+    ControllerEpochConflict,
+    Rejected(String),
+}
+
+impl From<String> for RetirementError {
+    fn from(error: String) -> Self {
+        Self::Rejected(error)
+    }
+}
+
+impl From<&str> for RetirementError {
+    fn from(error: &str) -> Self {
+        Self::Rejected(error.into())
+    }
+}
+
+impl std::fmt::Display for RetirementError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ControllerEpochConflict => f.write_str("environment_retirement_epoch_conflict"),
+            Self::Rejected(error) => f.write_str(error),
+        }
+    }
+}
+
+impl From<RetirementError> for String {
+    fn from(error: RetirementError) -> Self {
+        error.to_string()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct RetirementTarget {
     pub allocation_execution_id: String,
@@ -65,10 +99,10 @@ impl PostgresRuntimeStore {
         &self,
         request: &RetirementRequest,
         retire: impl FnOnce(&RetirementTarget) -> Result<bool, String> + Send,
-    ) -> Result<RetirementResult, String> {
+    ) -> Result<RetirementResult, RetirementError> {
         request.validate()?;
         let body = serde_json::to_string(request).map_err(|e| e.to_string())?;
-        self.with_execution_control_client(|client| {
+        self.with_execution_control_client_error(|client| {
             let lock = lock_host(client)?;
             let mut tx = lock.0.transaction().map_err(|e| e.to_string())?;
             super::super::resource_commit::require_durable_resource_commit(&mut tx)?;
@@ -84,7 +118,7 @@ impl PostgresRuntimeStore {
                 }
                 (row.get::<_,String>(2), row.get::<_,String>(3))
             } else {
-                if env.get::<_,i64>(0) != request.expected_controller_epoch { return Err("retirement controller epoch rejected".into()); }
+                if env.get::<_,i64>(0) != request.expected_controller_epoch { return Err(RetirementError::ControllerEpochConflict); }
                 let row = tx.query_opt("SELECT s.execution_id,s.container_id FROM runtime.resident_sandboxes s JOIN runtime.execution_instances i ON i.execution_id=s.execution_id AND i.instance_id=s.instance_id WHERE s.environment_id=$1 AND s.instance_id=$2 AND s.host_id=$3 AND s.allocation_mode='retained' AND i.allocation_mode='retained' FOR UPDATE OF s", &[&request.environment_id,&request.instance_id,&request.host_id]).map_err(|e| e.to_string())?.ok_or("retirement allocation missing or mismatched")?;
                 let execution: String = row.get(0);
                 let container = row.get::<_,Option<String>>(1).ok_or("retirement physical identity unknown")?;

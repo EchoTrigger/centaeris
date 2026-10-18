@@ -8,6 +8,7 @@
   "postgres_store::integration_tests::retained_instance_tests::retirement_tests::postgres_retirement_forward_migration_preserves_existing_allocation_and_release_facts",
   "postgres_store::integration_tests::retained_instance_tests::retirement_tests::postgres_retirement_pending_fences_current_and_new_runs_until_exact_absence",
   "postgres_store::integration_tests::retained_instance_tests::retirement_tests::postgres_retirement_rejects_stale_epoch_conflicting_identity_and_preserves_history",
+  "postgres_store::integration_tests::retained_instance_tests::retirement_tests::postgres_retirement_epoch_conflict_is_unaccepted_and_accepted_replay_is_immutable",
   "postgres_store::integration_tests::retained_instance_tests::retirement_tests::postgres_retirement_uses_reserved_control_pool_when_ordinary_capacity_is_full",
   "postgres_store::integration_tests::cleanup_migration_tests::postgres_cleanup_migration_enforces_complete_exclusive_and_unique_receipts",
   "postgres_store::integration_tests::cleanup_migration_tests::postgres_cleanup_migration_fresh_store_creates_receipt_table",

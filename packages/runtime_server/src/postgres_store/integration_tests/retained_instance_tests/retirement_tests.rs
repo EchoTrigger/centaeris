@@ -1,5 +1,5 @@
 use super::*;
-use crate::postgres_store::residency::retirement::RetirementRequest;
+use crate::postgres_store::residency::retirement::{RetirementError, RetirementRequest};
 
 fn request(a: &RetainedInstanceAllocation, epoch: i64) -> RetirementRequest {
     RetirementRequest {
@@ -162,6 +162,94 @@ fn postgres_retirement_rejects_stale_epoch_conflicting_identity_and_preserves_hi
             &[]
         )
         .is_err());
+}
+
+#[test]
+#[ignore = "requires exclusively owned disposable PostgreSQL"]
+fn postgres_retirement_epoch_conflict_is_unaccepted_and_accepted_replay_is_immutable() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let (_, store, mut db) = setup();
+    let a = run(&store, &mut db, "run-a", 3);
+    let physical = Arc::new(Mutex::new(vec![]));
+    let allocation = prepare(&store, &a, "execution-a", &physical).unwrap();
+    let debit_sql = "SELECT row_to_json(s)::text FROM runtime.resident_sandboxes s";
+    let debit_before = db.query_one(debit_sql, &[]).unwrap().get::<_, String>(0);
+    let mut r = request(&allocation, 2);
+    let error = store
+        .retire_retained_instance(&r, |_| panic!("unaccepted request must not mutate Docker"))
+        .unwrap_err();
+    assert!(matches!(&error, RetirementError::ControllerEpochConflict));
+    assert_eq!(error.to_string(), "environment_retirement_epoch_conflict");
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.environment_retirements", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    assert_eq!(
+        db.query_one(debit_sql, &[]).unwrap().get::<_, String>(0),
+        debit_before
+    );
+
+    // Refreshing an explicitly unaccepted request may keep its operation identity.
+    r.expected_controller_epoch = 3;
+    assert_eq!(
+        store
+            .retire_retained_instance(&r, |_| Ok(false))
+            .unwrap()
+            .status,
+        "pending"
+    );
+    let body_sql = "SELECT request_json FROM runtime.environment_retirements WHERE operation_id=$1";
+    let accepted_body = db
+        .query_one(body_sql, &[&r.operation_id])
+        .unwrap()
+        .get::<_, String>(0);
+    db.execute(
+        "UPDATE public.app_core_sessionenvironment SET controller_epoch=4",
+        &[],
+    )
+    .unwrap();
+    let mut changed = r.clone();
+    changed.expected_controller_epoch = 4;
+    let error = store
+        .retire_retained_instance(&changed, |_| panic!("accepted body cannot change"))
+        .unwrap_err();
+    assert!(matches!(error, RetirementError::Rejected(_)));
+    changed.operation_id = "maintenance-2".into();
+    let error = store
+        .retire_retained_instance(&changed, |_| panic!("accepted identity cannot change"))
+        .unwrap_err();
+    assert!(matches!(error, RetirementError::Rejected(_)));
+    assert_eq!(
+        store
+            .retire_retained_instance(&r, |_| {
+                physical.lock().unwrap().clear();
+                Ok(true)
+            })
+            .unwrap()
+            .status,
+        "destroyed"
+    );
+    assert_eq!(
+        store
+            .retire_retained_instance(&r, |_| panic!("destroyed replay must not mutate Docker"))
+            .unwrap()
+            .status,
+        "destroyed"
+    );
+    assert_eq!(
+        db.query_one(body_sql, &[&r.operation_id])
+            .unwrap()
+            .get::<_, String>(0),
+        accepted_body
+    );
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.resident_sandboxes", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
 }
 
 #[test]
