@@ -305,7 +305,7 @@ fn postgres_retirement_forward_migration_preserves_existing_allocation_and_relea
         .unwrap()
         .get::<_, String>(0);
     let history=db.query("SELECT version,applied_at_ms FROM runtime.schema_migrations WHERE version<=10 ORDER BY version",&[]).unwrap().iter().map(|r|(r.get::<_,i64>(0),r.get::<_,i64>(1))).collect::<Vec<_>>();
-    db.batch_execute("DROP TABLE runtime.environment_retirements; DROP FUNCTION runtime.protect_environment_retirement(); DELETE FROM runtime.schema_migrations WHERE version=11").unwrap();
+    db.batch_execute("DROP TABLE runtime.environment_maintenance_completions; DROP FUNCTION runtime.protect_environment_maintenance_completion(); DROP TABLE runtime.environment_retirements; DROP FUNCTION runtime.protect_environment_retirement(); DELETE FROM runtime.schema_migrations WHERE version>=11").unwrap();
     drop(PostgresRuntimeStore::new(&url).unwrap());
     assert_eq!(
         db.query_one(

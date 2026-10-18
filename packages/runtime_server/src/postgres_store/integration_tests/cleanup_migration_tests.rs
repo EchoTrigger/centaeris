@@ -33,7 +33,9 @@ fn history(db: &mut Client) -> Vec<(i64, i64)> {
 
 fn downgrade_to_nine(db: &mut Client) {
     db.batch_execute(
-        "DROP TABLE IF EXISTS runtime.environment_retirements;
+        "DROP TABLE IF EXISTS runtime.environment_maintenance_completions;
+         DROP FUNCTION IF EXISTS runtime.protect_environment_maintenance_completion();
+         DROP TABLE IF EXISTS runtime.environment_retirements;
          DROP FUNCTION IF EXISTS runtime.protect_environment_retirement();
          DROP TABLE IF EXISTS runtime.agent_run_cleanup_receipts;
          DELETE FROM runtime.schema_migrations WHERE version>=10;",
@@ -116,7 +118,7 @@ fn postgres_cleanup_migration_fresh_store_creates_receipt_table() {
         receipt_table_exists(&mut db),
         "fresh store must persist cleanup receipts"
     );
-    assert_eq!(history(&mut db).last().unwrap().0, 11);
+    assert_eq!(history(&mut db).last().unwrap().0, 12);
 }
 
 #[test]
@@ -137,7 +139,7 @@ fn postgres_cleanup_migration_preserves_allocations_resources_and_receipts_on_re
     assert_eq!(allocation_facts(&mut db), before_facts);
     let migrated_history = history(&mut db);
     assert_eq!(&migrated_history[..9], before_history.as_slice());
-    assert_eq!(migrated_history.len(), 11);
+    assert_eq!(migrated_history.len(), 12);
     assert_eq!(migrated_history[9].0, 10);
 
     insert_receipt(&mut db, serde_json::json!({})).unwrap();

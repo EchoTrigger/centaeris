@@ -84,6 +84,7 @@ mod execution_capacity;
 pub(crate) mod execution_instances;
 mod external_context;
 pub(crate) mod lease_renewal;
+pub(crate) mod maintenance;
 pub(crate) mod pre_admission_failure;
 mod reliability;
 pub(crate) mod residency;

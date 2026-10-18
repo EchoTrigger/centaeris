@@ -43,6 +43,8 @@ mod cold_append_lease_tests;
 mod cold_append_tests;
 mod execution_instance_tests;
 mod lease_renewal_tests;
+mod maintenance_authority_tests;
+mod maintenance_completion_schema_tests;
 mod owned_database;
 mod residency_tests;
 pub(super) mod retained_instance_tests;

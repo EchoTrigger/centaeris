@@ -681,6 +681,9 @@ pub(super) fn downgrade_to_eight(db: &mut Client) {
         .query_one("SELECT max(version) FROM runtime.schema_migrations", &[])
         .unwrap()
         .get::<_, i64>(0);
+    if version >= 12 {
+        db.batch_execute("DROP TABLE runtime.environment_maintenance_completions; DROP FUNCTION runtime.protect_environment_maintenance_completion(); DELETE FROM runtime.schema_migrations WHERE version=12;").unwrap();
+    }
     if version >= 11 {
         db.batch_execute("DROP TABLE runtime.environment_retirements; DROP FUNCTION runtime.protect_environment_retirement(); DELETE FROM runtime.schema_migrations WHERE version=11;").unwrap();
     }
