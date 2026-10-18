@@ -1,9 +1,6 @@
 //! Maintenance reads bind one signed benchmark Run to its recorded incarnation.
 use super::PostgresRuntimeStore;
-use crate::agent_run_authorization::{
-    BenchmarkExecutionProfile, WorkspaceAgentRunAuthorization,
-    BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA,
-};
+use crate::agent_run_authorization::{BenchmarkExecutionProfile, WorkspaceAgentRunAuthorization};
 
 #[derive(Clone, Debug)]
 pub(crate) struct BenchmarkAllocation {
@@ -54,7 +51,7 @@ fn checked_grant(
     grant
         .checked_binding(binding.run)?
         .verify(digest, signing_key, signature)?;
-    if grant.schema != BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA
+    if grant.image_capability != "benchmark_task_v1"
         || grant.session_id != binding.session
         || grant.workspace_id != binding.workspace
         || grant.user_id != binding.user
@@ -230,18 +227,112 @@ mod tests {
     }
 
     #[test]
+    fn benchmark_grant_accepts_signed_v3_profile_and_network() {
+        use crate::agent_run_authorization::ExecutionNetwork;
+
+        for network in [ExecutionNetwork::PublicInternet, ExecutionNetwork::Disabled] {
+            let mut authorization: WorkspaceAgentRunAuthorization = serde_json::from_str(
+                include_str!("../../../../tests/workspace/fixtures/agent_run_authorization/v3/benchmark.json"),
+            )
+            .unwrap();
+            authorization.network = Some(network);
+            let profile = authorization.benchmark_profile.as_mut().unwrap();
+            profile.network = network;
+            authorization.benchmark_profile_digest = Some(profile.digest().unwrap());
+            let profile = serde_json::to_string(profile).unwrap();
+            let binding = GrantBinding {
+                session: "sess_1",
+                run: "agent_run_1",
+                workspace: "ws_1",
+                user: "user_1",
+                model: "model_1",
+                thinking: Some("high"),
+                bound_profile: &profile,
+                bound_digest: authorization.benchmark_profile_digest.as_deref().unwrap(),
+            };
+            assert_eq!(
+                checked_grant(
+                    &serde_json::to_string(&authorization).unwrap(),
+                    &authorization.digest().unwrap(),
+                    &authorization.signature(b"test-key").unwrap(),
+                    b"test-key",
+                    &binding,
+                )
+                .unwrap(),
+                authorization
+            );
+        }
+    }
+
+    #[test]
+    fn benchmark_grant_rejects_signed_ordinary_and_tampered_v3_authority() {
+        let authorization: WorkspaceAgentRunAuthorization = serde_json::from_str(include_str!(
+            "../../../../tests/workspace/fixtures/agent_run_authorization/v3/benchmark.json"
+        ))
+        .unwrap();
+        let profile =
+            serde_json::to_string(authorization.benchmark_profile.as_ref().unwrap()).unwrap();
+        let binding = GrantBinding {
+            session: "sess_1",
+            run: "agent_run_1",
+            workspace: "ws_1",
+            user: "user_1",
+            model: "model_1",
+            thinking: Some("high"),
+            bound_profile: &profile,
+            bound_digest: authorization.benchmark_profile_digest.as_deref().unwrap(),
+        };
+        let ordinary: WorkspaceAgentRunAuthorization = serde_json::from_str(include_str!(
+            "../../../../tests/workspace/fixtures/agent_run_authorization/v3/ordinary.json"
+        ))
+        .unwrap();
+        assert!(checked_grant(
+            &serde_json::to_string(&ordinary).unwrap(),
+            &ordinary.digest().unwrap(),
+            &ordinary.signature(b"test-key").unwrap(),
+            b"test-key",
+            &binding,
+        )
+        .is_err());
+
+        let mut tampered = authorization.clone();
+        tampered.network = Some(crate::agent_run_authorization::ExecutionNetwork::Disabled);
+        let profile = tampered.benchmark_profile.as_mut().unwrap();
+        profile.network = crate::agent_run_authorization::ExecutionNetwork::Disabled;
+        tampered.benchmark_profile_digest = Some(profile.digest().unwrap());
+        assert!(checked_grant(
+            &serde_json::to_string(&tampered).unwrap(),
+            &authorization.digest().unwrap(),
+            &authorization.signature(b"test-key").unwrap(),
+            b"test-key",
+            &binding,
+        )
+        .is_err());
+    }
+
+    #[test]
     #[ignore = "requires the gate-owned disposable PostgreSQL database"]
     fn postgres_benchmark_observation_setup_and_retirement_remain_exactly_bound() {
         let _guard = crate::postgres_store::integration_tests::TEST_LOCK
             .lock()
             .unwrap();
+        for payload in [
+            include_str!(
+                "../../../../tests/workspace/fixtures/agent_run_authorization/v2/valid.json"
+            ),
+            include_str!(
+                "../../../../tests/workspace/fixtures/agent_run_authorization/v3/benchmark.json"
+            ),
+        ] {
+            assert_benchmark_observation_setup_and_retirement(payload);
+        }
+    }
+
+    fn assert_benchmark_observation_setup_and_retirement(payload: &str) {
         let (_url, store, mut db) =
             crate::postgres_store::integration_tests::retained_instance_tests::setup();
         db.batch_execute("ALTER TABLE public.app_core_sessionenvironment ADD COLUMN benchmark_profile jsonb,ADD COLUMN benchmark_profile_digest text NOT NULL DEFAULT '',ADD COLUMN benchmark_setup_completed_at timestamptz,ADD COLUMN benchmark_setup_run_id text,ADD COLUMN benchmark_setup_instance_id text NOT NULL DEFAULT '',ADD COLUMN benchmark_setup_container_id text NOT NULL DEFAULT ''").unwrap();
-        let authorization: WorkspaceAgentRunAuthorization = serde_json::from_str(include_str!(
-            "../../../../tests/workspace/fixtures/agent_run_authorization/v2/valid.json"
-        ))
-        .unwrap();
+        let authorization: WorkspaceAgentRunAuthorization = serde_json::from_str(payload).unwrap();
         let digest = authorization.digest().unwrap();
         let signature = authorization.signature(b"test-key").unwrap();
         let profile = authorization.benchmark_profile.as_ref().unwrap();
