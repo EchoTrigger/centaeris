@@ -2115,6 +2115,7 @@ fn execute_agent_run(
         |admitted| {
             DockerExecutionHostRunner::new_with_admitted(
                 DockerExecutionHostRequest {
+                    network: agent_run_start.authorization.effective_network()?,
                     benchmark_profile: agent_run_start.authorization.benchmark_profile.clone(),
                     workspace_id: agent_run_start.authorization.workspace_id.clone(),
                     lifecycle_job_id: lifecycle_job_id.clone(),

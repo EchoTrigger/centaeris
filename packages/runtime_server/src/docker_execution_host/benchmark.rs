@@ -1,6 +1,6 @@
-//! Benchmark-only Docker policy. Default Workspace policy remains separate.
+//! Benchmark filesystem and image configuration using the shared network policy.
 use super::*;
-use crate::agent_run_authorization::{BenchmarkExecutionProfile, BenchmarkNetwork};
+use crate::agent_run_authorization::BenchmarkExecutionProfile;
 
 pub(super) const HELPER_DESTINATION: &str = "/opt/centaeris/benchmark/execution_agent";
 
@@ -21,10 +21,7 @@ pub(super) fn create_body(
     profile: &BenchmarkExecutionProfile,
     helper_path: &str,
 ) -> Result<serde_json::Value, String> {
-    let proxy_environment = match profile.network {
-        BenchmarkNetwork::PublicInternet => environment::public_internet_proxy_environment()?,
-        BenchmarkNetwork::Disabled => BTreeMap::new(),
-    };
+    let proxy_environment = network::proxy_environment(expected.network)?;
     create_body_with_proxy_environment(expected, profile, helper_path, &proxy_environment)
 }
 
@@ -39,6 +36,7 @@ fn create_body_with_proxy_environment(
         || expected.oci_runtime != OciRuntime::Runc
         || expected.image_digest != profile.image_digest
         || expected.resources != profile.resources.sandbox_resources()
+        || expected.network != profile.network
         || !expected.plugin_mounts.is_empty()
         || !helper_path.starts_with('/')
         || helper_path.chars().any(char::is_control)
@@ -61,7 +59,7 @@ fn create_body_with_proxy_environment(
         "WorkingDir":profile.workspace_root,
         "Entrypoint":[HELPER_DESTINATION], "Cmd":["benchmark-keeper"],
         "HostConfig":{
-            "Runtime":"runc", "NetworkMode":network_mode(profile.network),
+            "Runtime":"runc", "NetworkMode":network::mode(expected.network),
             "ReadonlyRootfs":false, "SecurityOpt":["no-new-privileges"],
             "Memory":profile.resources.memory_bytes, "CpuPeriod":100000,
             "CpuQuota":u64::from(profile.resources.cpu_milli)*100,
@@ -69,22 +67,8 @@ fn create_body_with_proxy_environment(
             "Mounts":[{"Type":"bind","Source":helper_path,"Target":HELPER_DESTINATION,"ReadOnly":true}]
         }
     });
-    if profile.network == BenchmarkNetwork::PublicInternet && !proxy_environment.is_empty() {
-        // Docker exec inherits container defaults for both model tools and
-        // independent verifier commands; per-exec variables can still override.
-        body["Env"] = serde_json::json!(proxy_environment
-            .iter()
-            .map(|(name, value)| format!("{name}={value}"))
-            .collect::<Vec<_>>());
-    }
+    network::apply_proxy_environment(&mut body, expected.network, proxy_environment);
     Ok(body)
-}
-
-pub(super) fn network_mode(network: BenchmarkNetwork) -> &'static str {
-    match network {
-        BenchmarkNetwork::PublicInternet => "bridge",
-        BenchmarkNetwork::Disabled => "none",
-    }
 }
 
 pub(super) fn helper_path() -> Result<String, String> {
@@ -110,14 +94,7 @@ pub(super) fn helper_path() -> Result<String, String> {
 }
 
 pub(super) fn policy(profile: &BenchmarkExecutionProfile) -> ExecutionPolicy {
-    let mut policy = match profile.network {
-        BenchmarkNetwork::PublicInternet => {
-            ExecutionPolicy::workspace_write_public_internet(&profile.workspace_root)
-        }
-        BenchmarkNetwork::Disabled => {
-            ExecutionPolicy::workspace_write_no_network(&profile.workspace_root)
-        }
-    };
+    let mut policy = network::policy(profile.network, &profile.workspace_root);
     policy.filesystem.read_only_roots = vec!["/".into()];
     policy.filesystem.writable_roots = vec!["/".into()];
     policy
@@ -134,13 +111,6 @@ impl DockerExecutionHostRunner {
             .map_or(WORKSPACE_DATA_ROOT, |profile| {
                 profile.workspace_root.as_str()
             })
-    }
-
-    pub(crate) fn execution_policy(&self) -> ExecutionPolicy {
-        self.benchmark_profile.as_ref().map_or_else(
-            || ExecutionPolicy::workspace_write_no_network(WORKSPACE_DATA_ROOT),
-            policy,
-        )
     }
 
     fn with_benchmark_target<T: Send>(
@@ -355,7 +325,7 @@ mod tests {
             image_digest: format!("sha256:{}", "a".repeat(64)),
             workspace_root: "/app".into(),
             user: "0:0".into(),
-            network: BenchmarkNetwork::PublicInternet,
+            network: ExecutionNetwork::PublicInternet,
             resources: BenchmarkResources {
                 memory_bytes: 2 * 1024 * 1024 * 1024,
                 cpu_milli: 1000,
@@ -372,6 +342,7 @@ mod tests {
         let profile = profile();
         runner.image_digest.clone_from(&profile.image_digest);
         runner.resources = profile.resources.sandbox_resources();
+        runner.network = profile.network;
         runner.plugin_mounts.clear();
         let body = create_body(
             &runner.container_expectation(),
@@ -432,6 +403,7 @@ mod tests {
         let profile = profile();
         runner.image_digest.clone_from(&profile.image_digest);
         runner.resources = profile.resources.sandbox_resources();
+        runner.network = profile.network;
         runner.plugin_mounts.clear();
         let proxy = BTreeMap::from([
             ("HTTP_PROXY".into(), "http://172.17.0.1:17890".into()),
@@ -458,9 +430,10 @@ mod tests {
             assert_eq!(actual.get(key.as_str()), Some(&value.as_str()));
         }
         let offline = BenchmarkExecutionProfile {
-            network: BenchmarkNetwork::Disabled,
+            network: ExecutionNetwork::Disabled,
             ..profile
         };
+        runner.network = offline.network;
         let body = create_body_with_proxy_environment(
             &runner.container_expectation(),
             &offline,

@@ -11,20 +11,32 @@ use unicode_normalization::UnicodeNormalization;
 
 pub const AGENT_RUN_AUTHORIZATION_SCHEMA: &str = "workspace.agent_run_authorization.v1";
 pub const BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA: &str = "workspace.agent_run_authorization.v2";
+pub const NETWORK_AGENT_RUN_AUTHORIZATION_SCHEMA: &str = "workspace.agent_run_authorization.v3";
 const AGENT_RUN_AUTHORIZATION_SIGNATURE_DOMAIN: &str = "workspace:agent-run-authorization:v1\0";
 const BENCHMARK_AUTHORIZATION_SIGNATURE_DOMAIN: &str = "workspace:agent-run-authorization:v2\0";
+const NETWORK_AUTHORIZATION_SIGNATURE_DOMAIN: &str = "workspace:agent-run-authorization:v3\0";
 const MAX_DECLARED_INPUTS: usize = 64;
 
 mod benchmark;
+pub use benchmark::BenchmarkExecutionProfile;
 #[cfg(test)]
 pub use benchmark::BenchmarkResources;
-pub use benchmark::{BenchmarkExecutionProfile, BenchmarkNetwork};
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ExecutionNetwork {
+    PublicInternet,
+    Disabled,
+}
 
 #[cfg(test)]
 mod parity;
 
 #[cfg(test)]
 mod benchmark_tests;
+
+#[cfg(test)]
+mod network_tests;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -52,6 +64,12 @@ pub struct WorkspaceAgentRunAuthorization {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "present_value"
     )]
+    pub network: Option<ExecutionNetwork>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_value"
+    )]
     pub benchmark_profile: Option<BenchmarkExecutionProfile>,
     #[serde(
         default,
@@ -66,7 +84,8 @@ where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,
 {
-    // Missing is allowed for v1; explicit null must not disguise a new field.
+    // Historical grants retain their original signed bytes. Explicit null must
+    // not disguise a new field; v3 validation requires network to be present.
     T::deserialize(deserializer).map(Some)
 }
 
@@ -93,7 +112,9 @@ impl WorkspaceAgentRunAuthorization {
     pub fn validate(&self) -> Result<(), String> {
         if !matches!(
             self.schema.as_str(),
-            AGENT_RUN_AUTHORIZATION_SCHEMA | BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA
+            AGENT_RUN_AUTHORIZATION_SCHEMA
+                | BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA
+                | NETWORK_AGENT_RUN_AUTHORIZATION_SCHEMA
         ) {
             return Err("workspace_agent_run_authorization_schema_mismatch".to_string());
         }
@@ -158,16 +179,27 @@ impl WorkspaceAgentRunAuthorization {
             }
             previous_message_input_ref = Some(input_ref.as_str());
         }
-        match self.schema.as_str() {
-            AGENT_RUN_AUTHORIZATION_SCHEMA => {
+        self.effective_network()?;
+        let benchmark = match self.schema.as_str() {
+            AGENT_RUN_AUTHORIZATION_SCHEMA => false,
+            BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA => true,
+            NETWORK_AGENT_RUN_AUTHORIZATION_SCHEMA => match self.image_capability.as_str() {
+                "workspace_general_v1" => false,
+                "benchmark_task_v1" => true,
+                _ => return Err("workspace AgentRun imageCapability mismatch".into()),
+            },
+            _ => unreachable!("schema checked above"),
+        };
+        match benchmark {
+            false => {
                 if self.benchmark_profile.is_some() || self.benchmark_profile_digest.is_some() {
-                    return Err("v1 authorization cannot contain benchmark fields".into());
+                    return Err("ordinary authorization cannot contain benchmark fields".into());
                 }
                 if self.image_capability != "workspace_general_v1" {
                     return Err("workspace AgentRun imageCapability mismatch".into());
                 }
             }
-            BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA => {
+            true => {
                 if self.image_capability != "benchmark_task_v1" {
                     return Err("benchmark AgentRun imageCapability mismatch".into());
                 }
@@ -184,11 +216,11 @@ impl WorkspaceAgentRunAuthorization {
                 if profile.digest()? != digest
                     || profile.image_digest != self.image_digest
                     || profile.resources.sandbox_resources() != self.resources
+                    || profile.network != self.effective_network()?
                 {
                     return Err("benchmark profile binding mismatch".into());
                 }
             }
-            _ => unreachable!("schema checked above"),
         }
         validate_sha256("imageDigest", self.image_digest.as_str())?;
         validate_plugin_activation_snapshot(&self.plugin_activation)?;
@@ -203,6 +235,28 @@ impl WorkspaceAgentRunAuthorization {
             return Err("declared inputs must fit within half of dataTmpfsBytes".to_string());
         }
         Ok(())
+    }
+
+    /// Reconstruct historical execution policy from the original signed facts.
+    /// Do not write the result into old grants: that would alter their digest.
+    pub fn effective_network(&self) -> Result<ExecutionNetwork, String> {
+        match (self.schema.as_str(), self.network) {
+            (AGENT_RUN_AUTHORIZATION_SCHEMA, None) => Ok(ExecutionNetwork::Disabled),
+            (BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA, None) => self
+                .benchmark_profile
+                .as_ref()
+                .map(|profile| profile.network)
+                .ok_or_else(|| "benchmark profile required".into()),
+            (NETWORK_AGENT_RUN_AUTHORIZATION_SCHEMA, Some(network)) => Ok(network),
+            (NETWORK_AGENT_RUN_AUTHORIZATION_SCHEMA, None) => {
+                Err("workspace AgentRun network required".into())
+            }
+            (
+                AGENT_RUN_AUTHORIZATION_SCHEMA | BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA,
+                Some(_),
+            ) => Err("historical authorization cannot contain network".into()),
+            _ => Err("workspace_agent_run_authorization_schema_mismatch".into()),
+        }
     }
 
     pub fn validate_agent_run_binding(&self, agent_run_id: &str) -> Result<(), String> {
@@ -262,6 +316,7 @@ impl WorkspaceAgentRunAuthorization {
             BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA => {
                 Ok(BENCHMARK_AUTHORIZATION_SIGNATURE_DOMAIN)
             }
+            NETWORK_AGENT_RUN_AUTHORIZATION_SCHEMA => Ok(NETWORK_AUTHORIZATION_SIGNATURE_DOMAIN),
             _ => Err("workspace_agent_run_authorization_schema_mismatch".into()),
         }
     }

@@ -1,5 +1,6 @@
 mod benchmark;
 mod environment;
+mod network;
 mod retained;
 mod retained_commands;
 mod snapshot_capture;
@@ -29,6 +30,8 @@ static NEXT_EXECUTION_HOST_INSTANCE: AtomicU64 = AtomicU64::new(1);
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use centaeris_core::execution::NetworkPolicy;
 use centaeris_core::execution::{
     classify_execution_host_failure, ExecutionCancellationProbe, ExecutionFileSystemError,
     ExecutionFileSystemErrorKind, ExecutionFileSystemOperation, ExecutionFileSystemOutput,
@@ -39,7 +42,7 @@ use centaeris_core::execution::{
 };
 use centaeris_core::execution::{
     decode_process_output, ExecutionAttempt, ExecutionCommandRequest, ExecutionError,
-    ExecutionPolicy, ExecutionPolicySummary, ExecutionProcessOutput, NetworkPolicy,
+    ExecutionPolicy, ExecutionPolicySummary, ExecutionProcessOutput,
 };
 use centaeris_core::extension::hooks::{
     LifecycleHookCommandResultV1, LifecycleHookEventV1, LifecycleHookHandlerV1,
@@ -60,7 +63,9 @@ use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::agent_run_authorization::SessionWorkspace;
-use crate::agent_run_authorization::{BenchmarkExecutionProfile, SandboxResources};
+use crate::agent_run_authorization::{
+    BenchmarkExecutionProfile, ExecutionNetwork, SandboxResources,
+};
 use crate::postgres_store::PostgresRuntimeStore;
 use crate::resident_capacity::{
     declared_usage, ObservedResidentSandbox, ResidentCapacity, ResidentSandboxRequest,
@@ -80,7 +85,6 @@ const WORKSPACE_GENERAL_IMAGE_ENV: &str = "WORKSPACE_GENERAL_IMAGE";
 const MEMORY_RUNTIME_VOLUME_ROOT: &str = "/var/lib/centaeris-agent-memory";
 const BASE_COMMAND_PATH: &str =
     "/opt/centaeris/bin:/opt/centaeris/venv/bin:/usr/local/bin:/usr/bin:/bin";
-const SANDBOX_NETWORK_MODE: &str = "none";
 const SESSION_WORKSPACE_RESOLVE_SCHEMA: &str = "runtime.session_workspace.resolve.v1";
 const SESSION_WORKSPACE_RESOLVED_SCHEMA: &str = "runtime.session_workspace.resolved.v1";
 const SESSION_WORKSPACE_DOWNLOAD_SCHEMA: &str = "runtime.session_workspace.download.v1";
@@ -285,6 +289,7 @@ fn plugin_command_path(activation: &PluginActivationSnapshotV1) -> Result<String
 }
 
 pub struct DockerExecutionHostRunner {
+    network: ExecutionNetwork,
     benchmark_profile: Option<BenchmarkExecutionProfile>,
     benchmark_helper: Option<String>,
     pub(crate) transcript_capture: Mutex<crate::transcript_capture::CaptureBuffer>,
@@ -498,6 +503,7 @@ fn query_workspace_generation_rpc(
 }
 
 pub struct DockerExecutionHostRequest<'a> {
+    pub network: ExecutionNetwork,
     pub benchmark_profile: Option<BenchmarkExecutionProfile>,
     pub workspace_id: String,
     pub lifecycle_job_id: String,
@@ -519,6 +525,7 @@ pub struct DockerExecutionHostRequest<'a> {
 
 #[derive(Clone, Copy)]
 struct ContainerExpectation<'a> {
+    network: ExecutionNetwork,
     benchmark_profile: Option<&'a BenchmarkExecutionProfile>,
     benchmark_helper: Option<&'a str>,
     retained: bool,
@@ -589,6 +596,13 @@ impl DockerExecutionHostRunner {
         {
             return Err("Docker environment binding is invalid".into());
         }
+        if request
+            .benchmark_profile
+            .as_ref()
+            .is_some_and(|profile| profile.network != request.network)
+        {
+            return Err("benchmark network differs from signed authorization".into());
+        }
         #[cfg(test)]
         if request
             .environment_authorization
@@ -619,6 +633,7 @@ impl DockerExecutionHostRunner {
             runner.authorization_digest = request.authorization_digest;
             runner.image_digest = request.image_digest;
             runner.resources = request.resources;
+            runner.network = request.network;
             runner.plugin_mounts.clear();
             runner.command_path = "/usr/bin".into();
             runner.api_url = request.api_url;
@@ -626,6 +641,7 @@ impl DockerExecutionHostRunner {
             return Ok(runner);
         }
         let DockerExecutionHostRequest {
+            network,
             benchmark_profile,
             workspace_id,
             lifecycle_job_id,
@@ -684,6 +700,7 @@ impl DockerExecutionHostRunner {
         let oci_runtime = OciRuntime::from_environment()?;
         let mut container_name = container_name(execution_id.as_str());
         let expected = ContainerExpectation {
+            network,
             benchmark_profile: benchmark_profile.as_ref(),
             benchmark_helper: benchmark_helper.as_deref(),
             retained,
@@ -789,6 +806,7 @@ impl DockerExecutionHostRunner {
             None
         };
         let runner = Self {
+            network,
             benchmark_profile,
             benchmark_helper,
             transcript_capture: Mutex::new(Default::default()),
@@ -859,6 +877,7 @@ impl DockerExecutionHostRunner {
     fn container_expectation(&self) -> ContainerExpectation<'_> {
         let origin = self.retained_allocation.as_ref();
         ContainerExpectation {
+            network: self.network,
             benchmark_profile: self.benchmark_profile.as_ref(),
             benchmark_helper: self.benchmark_helper.as_deref(),
             retained: origin.is_some(),
@@ -2129,10 +2148,10 @@ impl DockerExecutionHostRunner {
             };
         }
         if policy.filesystem.workspace_root != Path::new(WORKSPACE_DATA_ROOT)
-            || policy.network != NetworkPolicy::Disabled
+            || policy.network != self.execution_policy().network
         {
             return Err(ExecutionError::Denied {
-                reason: "Docker execution requires /mnt/data and disabled network policy"
+                reason: "Docker execution requires /mnt/data and the authorized network policy"
                     .to_string(),
             });
         }
@@ -2999,6 +3018,13 @@ fn container_create_body(expected: &ContainerExpectation<'_>) -> Result<serde_js
                 .ok_or("benchmark helper missing")?,
         );
     }
+    ordinary_container_create_body(expected, &network::proxy_environment(expected.network)?)
+}
+
+fn ordinary_container_create_body(
+    expected: &ContainerExpectation<'_>,
+    proxy_environment: &BTreeMap<String, String>,
+) -> Result<serde_json::Value, String> {
     use serde_json::json;
     let cpu_quota = u64::from(expected.resources.cpu_milli)
         .checked_mul(100)
@@ -3025,7 +3051,7 @@ fn container_create_body(expected: &ContainerExpectation<'_>) -> Result<serde_js
             "centaeris.environment_authorization_digest":expected.binding_digest,
             "centaeris.execution_id":expected.execution_id},
         "HostConfig":{
-            "Runtime":expected.oci_runtime.docker_runtime_name(), "NetworkMode":SANDBOX_NETWORK_MODE,
+            "Runtime":expected.oci_runtime.docker_runtime_name(), "NetworkMode":network::mode(expected.network),
             "ReadonlyRootfs":true, "CapDrop":["ALL"], "CapAdd":["CHOWN"],
             "SecurityOpt":["no-new-privileges"], "Memory":expected.resources.memory_bytes,
             "CpuPeriod":100000, "CpuQuota":cpu_quota, "PidsLimit":expected.resources.pids_limit,
@@ -3074,6 +3100,7 @@ fn container_create_body(expected: &ContainerExpectation<'_>) -> Result<serde_js
         body["HostConfig"]["Tmpfs"]["/run/centaeris/task-output"] =
             json!("rw,noexec,nosuid,nodev,size=75497472,uid=0,gid=0,mode=0700");
     }
+    network::apply_proxy_environment(&mut body, expected.network, proxy_environment);
     Ok(body)
 }
 
@@ -3354,12 +3381,7 @@ impl ContainerFacts {
             && self.cpu_quota == i64::from(expected.resources.cpu_milli) * 100
             && self.pids_limit == Some(i64::from(expected.resources.pids_limit))
             && self.readonly_rootfs == expected.benchmark_profile.is_none()
-            && self.network_mode
-                == expected
-                    .benchmark_profile
-                    .map_or(SANDBOX_NETWORK_MODE, |profile| {
-                        benchmark::network_mode(profile.network)
-                    })
+            && self.network_mode == network::mode(expected.network)
             && plugin_mounts_match(
                 self.mounts.as_slice(),
                 expected.plugin_volume_name,
@@ -4473,7 +4495,7 @@ mod tests {
             };
             assert!(matches!(
                 runner.run_host_command(Some("policy-check"), request, None),
-                Err(ExecutionError::Denied { reason }) if reason == "Docker execution requires /mnt/data and disabled network policy"
+                Err(ExecutionError::Denied { reason }) if reason == "Docker execution requires /mnt/data and the authorized network policy"
             ));
         }
     }
@@ -4658,6 +4680,7 @@ mod tests {
              before: &mut (dyn FnMut(&mut Client) -> Result<(), String> + Send)| {
                 DockerExecutionHostRunner::new_with_admitted(
                     DockerExecutionHostRequest {
+                        network: ExecutionNetwork::Disabled,
                         benchmark_profile: None,
                         workspace_id: "centaeris-recovery-test-tenant".into(),
                         lifecycle_job_id: job.clone(),
@@ -5617,7 +5640,7 @@ mod tests {
         assert!(summary.enforced);
         assert_eq!(summary.workspace_root, WORKSPACE_DATA_ROOT);
         assert_eq!(summary.network, NetworkPolicy::Disabled);
-        assert_eq!(SANDBOX_NETWORK_MODE, "none");
+        assert_eq!(network::mode(ExecutionNetwork::Disabled), "none");
     }
 
     #[test]
@@ -6408,6 +6431,90 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_network_capability_controls_engine_and_core_policy() {
+        let mut runner = test_docker_execution_host_runner();
+        for (network, mode, policy) in [
+            (ExecutionNetwork::Disabled, "none", NetworkPolicy::Disabled),
+            (
+                ExecutionNetwork::PublicInternet,
+                "bridge",
+                NetworkPolicy::PublicInternet,
+            ),
+        ] {
+            runner.network = network;
+            let body = container_create_body(&runner.container_expectation()).unwrap();
+            assert_eq!(body["HostConfig"]["NetworkMode"], mode);
+            assert_eq!(body["HostConfig"]["ReadonlyRootfs"], true);
+            let execution = runner.execution_policy();
+            assert_eq!(execution.network, policy);
+            assert_eq!(
+                execution.filesystem.workspace_root,
+                Path::new(WORKSPACE_DATA_ROOT)
+            );
+            assert_eq!(
+                execution.filesystem,
+                ExecutionPolicy::workspace_write_no_network(WORKSPACE_DATA_ROOT).filesystem
+            );
+            runner.validate_policy(&execution).unwrap();
+            let mut unauthorized = execution.clone();
+            unauthorized.network = if policy == NetworkPolicy::Disabled {
+                NetworkPolicy::PublicInternet
+            } else {
+                NetworkPolicy::Disabled
+            };
+            assert!(matches!(
+                runner.validate_policy(&unauthorized),
+                Err(ExecutionError::Denied { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn retained_network_change_rejects_container_reuse_and_changes_profile() {
+        let runner = retained_test_runner();
+        let expected = runner.container_expectation();
+        let body = container_create_body(&expected).unwrap();
+        let host = &body["HostConfig"];
+        let mut config = body.clone();
+        config.as_object_mut().unwrap().remove("HostConfig");
+        config.as_object_mut().unwrap().remove("Image");
+        let facts = ContainerFacts {
+            id: "a".repeat(64),
+            raw: serde_json::json!({"Id":"a".repeat(64), "Config":config,
+                "Image":body["Image"], "HostConfig":host, "Mounts":host["Mounts"]}),
+            running: true,
+            image: runner.image_digest.clone(),
+            runtime: "runc".into(),
+            labels: serde_json::from_value(body["Labels"].clone()).unwrap(),
+            memory: host["Memory"].as_u64().unwrap(),
+            cpu_period: host["CpuPeriod"].as_i64().unwrap(),
+            cpu_quota: host["CpuQuota"].as_i64().unwrap(),
+            pids_limit: host["PidsLimit"].as_i64(),
+            readonly_rootfs: true,
+            network_mode: "none".into(),
+            mounts: serde_json::from_value(host["Mounts"].clone()).unwrap(),
+        };
+        assert!(facts.matches(&expected), "original retained configuration");
+        let changed = ContainerExpectation {
+            network: ExecutionNetwork::PublicInternet,
+            ..expected
+        };
+        assert!(
+            !facts.matches(&changed),
+            "a new network grant cannot reuse the old physical mode"
+        );
+        let plugins = PluginActivationSnapshotV1 {
+            schema: "workspace.plugin_activation.v1".into(),
+            digest: "digest-a".into(),
+            packages: Vec::new(),
+        };
+        assert_ne!(
+            retained::profile_digest(&expected, &plugins).unwrap(),
+            retained::profile_digest(&changed, &plugins).unwrap()
+        );
+    }
+
+    #[test]
     fn resident_inventory_counts_declared_limits_and_rejects_unknown_managed_resources() {
         let runner = test_docker_execution_host_runner();
         let body = container_create_body(&runner.container_expectation()).unwrap();
@@ -6832,6 +6939,7 @@ mod tests {
 
     pub(super) fn test_docker_execution_host_runner() -> DockerExecutionHostRunner {
         DockerExecutionHostRunner {
+            network: ExecutionNetwork::Disabled,
             transcript_capture: Mutex::new(Default::default()),
             transcript_publisher: Arc::new(Default::default()),
             recovery_activity: ExecutionActivityWitness::new(

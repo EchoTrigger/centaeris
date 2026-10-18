@@ -1,6 +1,6 @@
 //! Signed host configuration for an explicitly authorized benchmark environment.
 //! Validation binds configuration; resource enforcement remains a host obligation.
-use super::{canonical_json, validate_sha256, SandboxResources};
+use super::{canonical_json, validate_sha256, ExecutionNetwork, SandboxResources};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
@@ -12,15 +12,8 @@ pub struct BenchmarkExecutionProfile {
     pub image_digest: String,
     pub workspace_root: String,
     pub user: String,
-    pub network: BenchmarkNetwork,
+    pub network: ExecutionNetwork,
     pub resources: BenchmarkResources,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum BenchmarkNetwork {
-    PublicInternet,
-    Disabled,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

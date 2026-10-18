@@ -308,6 +308,7 @@ impl crate::http::agent_runs::retained_cleanup::RetainedCleanupHost
         )?;
         let name = container_name(&self.allocation.allocation_execution_id);
         let expected = ContainerExpectation {
+            network: origin.effective_network()?,
             benchmark_profile: None,
             benchmark_helper: None,
             retained: true,
