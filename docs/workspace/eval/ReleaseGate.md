@@ -1,32 +1,36 @@
 # Workspace release gate
 
-The opt-in [benchmark execution profile](../architecture/BenchmarkExecution.md)
-additionally requires the focused API profile/forward-migration and v1/v2/v3
-authorization tests, Runtime benchmark control tests, the required PostgreSQL
-outbox identities, and the Harbor adapter behavior suite. Its physical acceptance
-is one native Harbor task through API → Worker → Runtime → Docker, including
-verification and confirmed retirement. Mock ports and ordinary Workspace CI do
-not establish that physical pass. The controller binds these gate records to the
-exact source, binaries, static helper and service configuration before model work.
+The shared [Session environment](../../development/SessionEnvironments.md)
+requires current v1 Python/Rust signature parity, profile and controller
+authorization tests, typed provision/task ownership, and PostgreSQL forward
+migration tests. Start, step and teardown use the same contract for both physical
+lifetime policies. Cancel and supplement verify the original Run identity without
+requiring environment execution authority.
 
-Environment network changes additionally require the settings permission and
-immutable snapshot tests, v3 network signature parity, historical network
-reconstruction and raw/bulk update protection on disposable PostgreSQL. Docker
-create/adoption tests must cover ordinary and benchmark network policy without
-granting ordinary environments benchmark filesystem privileges. See
+Host acceptance covers Docker/runc identity and incarnation, the profile's user,
+environment and network, private host controls, sealed helpers, output EOF,
+leader exit, task-domain cleanup and lost-ack replay. Commands, filesystem,
+inputs, snapshots, hooks and MCP use the common native supervisor. Native
+filesystem acceptance includes binary transfers larger than the JSON header
+limit, complete length/digest validation and cached result replay.
+
+Provision acceptance starts without an AgentRun: reserve capacity, create and
+register the exact instance, persist the immutable receipt, then release its
+maintenance controller. Unknown create retains resources. Later tasks and Runs
+must match the profile, physical identity and current controller. Per-Run cleanup
+requires exact removal, independent absence, resource release and its durable
+receipt. Retained cleanup keeps the instance and ends only the owner's scope.
+The required PostgreSQL registry lists the persistence and fencing identities.
+
+Network changes also require settings permissions, immutable snapshots, current
+signature vectors, migration reconstruction and direct-write protection.
+Docker creation/adoption covers both network values. See
 [environment network policy](../architecture/EnvironmentNetwork.md).
 
-Environment execution binding acceptance requires the unchanged signed v1 grant
-parity vectors, shared environment-authorization signature vector and strict v3
-start rejection tests. Run the focused API authorization, Session environment and
-forward migration tests against disposable PostgreSQL. The Runtime outbox gate
-includes execution-instance and resident behavior tests: independent-connection
-durability, concurrent replay, authoritative Run/Session/grant checks, host/image
-reassignment rejection, creation uncertainty retaining budgets and schema-v8
-forward migration with prior reservations/history preserved. Actual Docker
-request/adoption fixtures must reject absent or mismatched environment/instance
-labels. Local fixtures do not establish a deployment or real isolation pass; the
-coordinated upgrade still requires the operator's old live/waiting inventory.
+A full Harbor pass is one native task through profile binding, provision, setup,
+the public AgentRun, native verification and confirmed retirement. Focused
+boundary tests and mock transports are recorded separately from that integrated
+result. See [benchmark execution](../architecture/BenchmarkExecution.md).
 
 The prepared Agent input ledger is not an execution-intake or Read gate pass.
 Before integrating this capability, require the following behavioral evidence
@@ -736,7 +740,7 @@ execution. The descriptor is not registered as a model tool for ordinary or
 managed Sessions, and no automatic wake, general retry/progress policy, stop
 cascade or cross-Session waiter change is certified. Accepted is not processed.
 
-Explicit first-consumption acceptance additionally requires strict start v3,
+Explicit first-consumption acceptance additionally requires the current start v1 contract,
 single-notice first-root uniqueness, operation replay/conflict, busy retention,
 original membership and current child read authority, and atomic Run/input/
 authorization/receipt rollback. Use Core's native input factory and real fenced

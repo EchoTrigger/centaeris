@@ -50,7 +50,10 @@ class PortableCITests(unittest.TestCase):
                              or "scripts/workspace/python_test_gate.py" in command for command in calls))
 
     def test_compose_structure_chooses_isolated_capacity_inputs_without_changing_host_environment(self):
-        host_environment = {key: value for key, value in os.environ.items() if not key.startswith("UPLOAD_") and key != "WORK_RETURN_AUDIT_INTERVAL_SECONDS"}
+        host_environment = {key: value for key, value in os.environ.items()
+                            if not key.startswith("UPLOAD_") and key not in (
+                                "WORK_RETURN_AUDIT_INTERVAL_SECONDS", "ENVIRONMENT_EXECUTION_HELPER",
+                                "ENVIRONMENT_EXECUTION_HELPER_SHA256")}
         with patch.dict(os.environ, host_environment, clear=True), \
                 patch.object(ci.subprocess, "check_output", return_value="f" * 40), \
                 patch.object(ci.subprocess, "run") as command:
@@ -60,6 +63,9 @@ class PortableCITests(unittest.TestCase):
             self.assertEqual(environment["UPLOAD_TEMP_MAX_BYTES"], "4194304")
             self.assertEqual(environment["UPLOAD_MAX_CONCURRENT"], "2")
             self.assertEqual(environment["WORK_RETURN_AUDIT_INTERVAL_SECONDS"], "3600")
+            self.assertEqual(environment["ENVIRONMENT_EXECUTION_HELPER"], "/opt/centaeris/host/execution_agent")
+            self.assertEqual(environment["ENVIRONMENT_EXECUTION_HELPER_SHA256"], "0" * 64)
+            self.assertNotIn("ENVIRONMENT_EXECUTION_HELPER_SHA256", os.environ)
             self.assertNotIn("UPLOAD_BODY_MAX_BYTES", os.environ)
 
     def test_web_prepares_rust_and_core_before_parallel_tests(self):

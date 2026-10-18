@@ -310,12 +310,11 @@ class OwnedUsageReader:
     SELECT 1 FROM app_core_agentrun r JOIN app_core_sessionenvironment env ON env.id=r.environment_id
     JOIN app_core_agentrunauthorization a ON a.agent_run_id=r.id
     WHERE r.id={parameter('run_id')} AND r.session_id={parameter('session_id')} AND env.session_id=r.session_id
-    AND env.benchmark_profile IS NOT NULL AND a.payload->>'imageCapability'='benchmark_task_v1'
-    AND env.network=env.benchmark_profile->>'network'
-    AND (a.payload->>'schema'='workspace.agent_run_authorization.v2'
-        OR (a.payload->>'schema'='workspace.agent_run_authorization.v3' AND a.payload->>'network'=env.network))
-    AND a.payload->'benchmarkProfile'=env.benchmark_profile
-    AND a.payload->>'benchmarkProfileDigest'=env.benchmark_profile_digest))"""
+    AND env.environment_profile IS NOT NULL
+    AND env.network=env.environment_profile->>'network'
+    AND a.payload->>'schema'='workspace.agent_run_authorization.v1'
+    AND a.payload->'environmentProfile'=env.environment_profile
+    AND a.payload->>'environmentProfileDigest'=env.environment_profile_digest))"""
 
     def read(self, session_id, agent_run_id, after_sequence):
         _identity(session_id); _identity(agent_run_id); _integer(after_sequence)

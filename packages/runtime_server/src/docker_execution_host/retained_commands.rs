@@ -32,42 +32,6 @@ fn operation(fence: &EnvironmentTaskFence, id: &str, action: &str) -> String {
     fence.operation_id(&format!("command_{:x}", hash.finalize()))
 }
 
-pub(super) fn run_file_helper(
-    fence: &EnvironmentTaskFence,
-    operation_id: &str,
-    input: &[u8],
-    output_limit: usize,
-    path: &str,
-    rpc: impl FnMut(EnvironmentTaskRequest) -> Result<EnvironmentTaskResult, String>,
-) -> Result<Vec<u8>, String> {
-    let request = ExecutionCommandRequest {
-        program: super::AGENT_BINARY.into(),
-        args: vec!["filesystem-once".into()],
-        cwd: WORKSPACE_DATA_ROOT.into(),
-        env: Default::default(),
-        timeout_ms: 30_000,
-        policy: ExecutionPolicy::workspace_write_no_network(WORKSPACE_DATA_ROOT),
-    };
-    let output = run_command_with_input(
-        fence,
-        operation_id,
-        request,
-        None,
-        path,
-        CommandMode::Execute(input),
-        rpc,
-    )
-    .map_err(|e| e.to_string())?;
-    if output.process.exit_code != Some(0)
-        || !output.process.runtime_diagnostics.is_empty()
-        || output.process.stdout_decode.raw_byte_length > output_limit
-        || output.process.stdout.len() > output_limit
-    {
-        return Err("retained filesystem response incomplete or oversized".into());
-    }
-    Ok(output.process.stdout.into_bytes())
-}
-
 #[derive(Default)]
 struct Capture {
     bytes: Vec<u8>,
@@ -101,6 +65,25 @@ pub(super) fn run_command(
         cancellation_probe,
         command_path,
         CommandMode::Execute(&[]),
+        rpc,
+    )
+}
+
+pub(super) fn run_command_with_stdin(
+    fence: &EnvironmentTaskFence,
+    operation_id: &str,
+    request: ExecutionCommandRequest,
+    input: &[u8],
+    command_path: &str,
+    rpc: impl FnMut(EnvironmentTaskRequest) -> Result<EnvironmentTaskResult, String>,
+) -> Result<ExecutionHostCommandOutput, ExecutionError> {
+    run_command_with_input(
+        fence,
+        operation_id,
+        request,
+        None,
+        command_path,
+        CommandMode::Execute(input),
         rpc,
     )
 }
@@ -227,26 +210,15 @@ fn run_command_with_input(
     fence
         .authorize_start(&scope)
         .map_err(|reason| ExecutionError::Denied { reason })?;
-    let mut args = vec![
-        "-i".into(),
-        format!("HOME={WORKSPACE_HOME}"),
-        format!("PATH={command_path}"),
-        "TMPDIR=/tmp".into(),
-    ];
-    for (key, default) in [("LANG", "C.UTF-8"), ("LC_ALL", "C.UTF-8"), ("TERM", "dumb")] {
-        args.push(format!(
-            "{key}={}",
-            request.env.get(key).map(String::as_str).unwrap_or(default)
-        ));
-    }
-    args.extend([
-        "/usr/bin/timeout".into(),
-        "--signal=TERM".into(),
-        "--kill-after=1s".into(),
-        super::coreutils_timeout_duration(request.timeout_ms),
-        request.program,
+    let mut env = std::collections::BTreeMap::from([
+        ("HOME".into(), WORKSPACE_HOME.into()),
+        ("PATH".into(), command_path.into()),
+        ("TMPDIR".into(), "/tmp".into()),
+        ("LANG".into(), "C.UTF-8".into()),
+        ("LC_ALL".into(), "C.UTF-8".into()),
+        ("TERM".into(), "dumb".into()),
     ]);
-    args.extend(request.args);
+    env.extend(request.env.clone());
     let start_id = operation(fence, operation_id, "start");
     let first_request = if recovering {
         EnvironmentTaskRequest::Query {
@@ -260,10 +232,11 @@ fn run_command_with_input(
             fence: fence.clone(),
             operation_id: start_id.clone(),
             scope: scope.clone(),
-            program: "/usr/bin/env".into(),
-            args,
-            cwd: WORKSPACE_DATA_ROOT.into(),
-            timeout_ms: request.timeout_ms.saturating_add(3000),
+            program: request.program,
+            args: request.args,
+            env,
+            cwd: request.cwd.to_string_lossy().into_owned(),
+            timeout_ms: request.timeout_ms,
         }
     };
     let first = rpc(first_request).map_err(|reason| {
@@ -494,6 +467,42 @@ mod tests {
     use super::*;
     use std::collections::{HashMap, VecDeque};
 
+    fn run_stdin_fixture(
+        fence: &EnvironmentTaskFence,
+        operation_id: &str,
+        input: &[u8],
+        output_limit: usize,
+        path: &str,
+        rpc: impl FnMut(EnvironmentTaskRequest) -> Result<EnvironmentTaskResult, String>,
+    ) -> Result<Vec<u8>, String> {
+        let request = ExecutionCommandRequest {
+            program: crate::docker_execution_host::AGENT_BINARY.into(),
+            args: vec!["filesystem-once".into()],
+            cwd: WORKSPACE_DATA_ROOT.into(),
+            env: Default::default(),
+            timeout_ms: 30_000,
+            policy: ExecutionPolicy::workspace_write_no_network(WORKSPACE_DATA_ROOT),
+        };
+        let output = run_command_with_input(
+            fence,
+            operation_id,
+            request,
+            None,
+            path,
+            CommandMode::Execute(input),
+            rpc,
+        )
+        .map_err(|e| e.to_string())?;
+        if output.process.exit_code != Some(0)
+            || !output.process.runtime_diagnostics.is_empty()
+            || output.process.stdout_decode.raw_byte_length > output_limit
+            || output.process.stdout.len() > output_limit
+        {
+            return Err("retained filesystem response incomplete or oversized".into());
+        }
+        Ok(output.process.stdout.into_bytes())
+    }
+
     #[test]
     fn recovery_queries_original_task_without_start_or_input() {
         let mut renewed = fence();
@@ -650,7 +659,7 @@ mod tests {
     #[test]
     fn start_rpc_file_helper_preserves_history_capacity_reason() {
         let mut calls = 0;
-        let error = run_file_helper(
+        let error = run_stdin_fixture(
             &fence(),
             "helper-1",
             b"filesystem request",
@@ -730,7 +739,7 @@ mod tests {
         .unwrap();
         let (mut starts, mut writes, mut receipt_queries, mut closes) = (0, 0, 0, 0);
         let mut original_input = String::new();
-        let result = run_file_helper(&fence(), "tool-1", &frame, 10, "/usr/bin", |r| match r {
+        let result = run_stdin_fixture(&fence(), "tool-1", &frame, 10, "/usr/bin", |r| match r {
             EnvironmentTaskRequest::Start { .. } => {
                 starts += 1;
                 Ok(started())
@@ -791,7 +800,7 @@ mod tests {
     #[test]
     fn helper_lost_eof_ack_reads_its_receipt_without_closing_twice() {
         let (mut writes, mut closes, mut queries) = (0, 0, 0);
-        let result = run_file_helper(&fence(), "tool-1", b"frame", 10, "/usr/bin", |r| match r {
+        let result = run_stdin_fixture(&fence(), "tool-1", b"frame", 10, "/usr/bin", |r| match r {
             EnvironmentTaskRequest::Start { .. } => Ok(started()),
             EnvironmentTaskRequest::Input { close: false, .. } => {
                 writes += 1;
@@ -848,7 +857,7 @@ mod tests {
             let mut starts = 0;
             let mut data_inputs = 0;
             let result =
-                run_file_helper(&fence(), "tool-1", b"frame", 10, "/usr/bin", |r| match r {
+                run_stdin_fixture(&fence(), "tool-1", b"frame", 10, "/usr/bin", |r| match r {
                     EnvironmentTaskRequest::Start { .. } => {
                         starts += 1;
                         Ok(started())
@@ -887,7 +896,7 @@ mod tests {
             let mut data_inputs = 0;
             let mut receipt_queries = 0;
             let result =
-                run_file_helper(&fence(), "tool-1", b"frame", 10, "/usr/bin", |r| match r {
+                run_stdin_fixture(&fence(), "tool-1", b"frame", 10, "/usr/bin", |r| match r {
                     EnvironmentTaskRequest::Start { .. } => Ok(started()),
                     EnvironmentTaskRequest::Input { close: false, .. } => {
                         data_inputs += 1;
@@ -914,7 +923,7 @@ mod tests {
     fn helper_unknown_input_never_rewrites_bytes_or_sends_eof() {
         let mut starts = 0;
         let mut inputs = 0;
-        let result = run_file_helper(&fence(), "tool-1", b"frame", 10, "/usr/bin", |r| match r {
+        let result = run_stdin_fixture(&fence(), "tool-1", b"frame", 10, "/usr/bin", |r| match r {
             EnvironmentTaskRequest::Start { .. } => {
                 starts += 1;
                 Ok(started())
@@ -937,14 +946,14 @@ mod tests {
         let input = vec![b'x'; 5000];
         let mut received = Vec::new();
         let mut closed = false;
-        let result = run_file_helper(&fence(), "tool-1", &input, 10, "/usr/bin", |r| match r {
+        let result = run_stdin_fixture(&fence(), "tool-1", &input, 10, "/usr/bin", |r| match r {
             EnvironmentTaskRequest::Start {
                 program,
                 args,
                 scope,
                 ..
             } => {
-                assert_eq!(program, "/usr/bin/env");
+                assert_eq!(program, super::super::AGENT_BINARY);
                 assert!(args.iter().any(|a| a == "filesystem-once"));
                 assert_eq!(
                     scope,
@@ -970,7 +979,7 @@ mod tests {
         .unwrap();
         assert_eq!(received, input);
         assert_eq!(result, b"hello");
-        let result = run_file_helper(&fence(), "tool-1", b"", 4, "/usr/bin", |_| {
+        let result = run_stdin_fixture(&fence(), "tool-1", b"", 4, "/usr/bin", |_| {
             Ok(finished(false))
         });
         assert!(
@@ -1059,7 +1068,7 @@ mod tests {
         assert_eq!(out.process.stdout_decode.raw_byte_length, 5);
         assert_eq!(out.process.exit_code, Some(0));
         assert!(
-            matches!(&requests[0], EnvironmentTaskRequest::Start { scope:EnvironmentTaskScope::Run {run_id}, program, args, .. } if run_id=="run-a" && program=="/usr/bin/env" && args.iter().any(|a|a=="printf hello"))
+            matches!(&requests[0], EnvironmentTaskRequest::Start { scope:EnvironmentTaskScope::Run {run_id}, program, args, .. } if run_id=="run-a" && program=="/bin/bash" && args.iter().any(|a|a=="printf hello"))
         );
         assert!(
             matches!(&requests[1], EnvironmentTaskRequest::Input {close:true,data,..} if data.is_empty())
@@ -1108,7 +1117,7 @@ mod tests {
     #[test]
     fn input_capacity_does_not_claim_the_command_never_started() {
         let mut calls = 0;
-        let error = run_file_helper(&fence(), "tool-1", b"request", 100, "/bin", |request| {
+        let error = run_stdin_fixture(&fence(), "tool-1", b"request", 100, "/bin", |request| {
             calls += 1;
             match request {
                 EnvironmentTaskRequest::Start { .. } => Ok(started()),

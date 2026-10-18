@@ -68,7 +68,7 @@ def _bind_pending(run, pending, *, initial=None):
             proposed[item["inputRef"]] = item
         from .runtime_contract import MAX_DECLARED_INPUTS
         if (len(proposed) > MAX_DECLARED_INPUTS or sum(item["sizeBytes"] for item in proposed.values())
-                > authorization.payload["resources"]["dataTmpfsBytes"] // 2):
+                > authorization.payload["environmentProfile"]["resources"]["dataTmpfsBytes"] // 2):
             # The accepted carrier remains pending for the next serialized Run;
             # admitting it here would exceed the existing sandbox resource grant.
             break

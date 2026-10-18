@@ -50,7 +50,11 @@ impl RequestCapacity {
         let control = (method == "POST"
             && matches!(
                 path,
-                "/agent-runs/cancel" | "/internal/jobs/heartbeat" | "/internal/environments/retire"
+                "/agent-runs/cancel"
+                    | "/internal/jobs/heartbeat"
+                    | "/internal/environments/retire"
+                    | "/internal/environments/maintenance/task"
+                    | "/internal/environments/observe"
             ))
             || (method == "GET" && path.starts_with("/internal/jobs/"));
         let listener = method == "POST" && path == "/internal/jobs/wait";

@@ -250,6 +250,7 @@ fn execute_task(
             fence,
             scope: EnvironmentTaskScope::Environment,
             program: a.program,
+            env: Default::default(),
             args: a.args,
             cwd: a.cwd,
             timeout_ms: a.timeout_ms,

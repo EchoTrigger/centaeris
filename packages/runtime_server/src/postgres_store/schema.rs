@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use postgres::{Client, GenericClient};
 
-const STORE_SCHEMA_VERSION: i64 = 12;
+const STORE_SCHEMA_VERSION: i64 = 13;
 const MAINTENANCE_COMPLETION_DDL: &str = r#"
 CREATE TABLE runtime.environment_maintenance_completions(
  operation_id text PRIMARY KEY,environment_id text NOT NULL,instance_id text NOT NULL,
@@ -20,6 +20,7 @@ const PREVIOUS_OBSERVATION_KINDS: &str = "'system_prompt'::text, 'message'::text
 const CURRENT_OBSERVATION_KINDS: &str = "'system_prompt'::text, 'message'::text, 'input_image'::text, 'tool_catalog'::text, 'compaction_prompt'::text, 'input_uptake'::text, 'required_completion_delivery'::text";
 
 pub(super) const RUNTIME_TABLES: &[&str] = &[
+    "environment_provision_completions",
     "environment_maintenance_completions",
     "environment_retirements",
     "agent_run_cleanup_receipts",
@@ -74,6 +75,7 @@ const RUNTIME_INDEXES: &[&str] = &[
 ];
 
 const TABLE_SHAPES: &[(&str, &str)] = &[
+    ("environment_provision_completions","operation_id:text:NO,environment_id:text:NO,session_id:text:NO,workspace_id:text:NO,host_id:text:NO,instance_id:text:NO,container_id:text:NO,profile_digest:text:NO,controller_epoch:bigint:NO,controller_lease_digest:text:NO,request_digest:text:NO,completion_json:text:NO,recorded_at_ms:bigint:NO"),
     ("environment_maintenance_completions", "operation_id:text:NO,environment_id:text:NO,instance_id:text:NO,container_id:text:NO,profile_digest:text:NO,controller_epoch:bigint:NO,controller_lease_digest:text:NO,request_digest:text:NO,completion_json:text:NO,recorded_at_ms:bigint:NO"),
     ("environment_retirements", "operation_id:text:NO,environment_id:text:NO,instance_id:text:NO,host_id:text:NO,allocation_execution_id:text:NO,container_id:text:NO,request_json:text:NO,state:text:NO,recorded_at_ms:bigint:NO"),
     ("agent_run_cleanup_receipts", "receipt_id:text:NO,agent_run_id:text:NO,environment_id:text:NO,authorization_digest:text:NO,controller_epoch:bigint:NO,allocation_kind:text:NO,instance_id:text:YES,cleanup_complete:boolean:NO,file_protection:text:NO,recorded_at_ms:bigint:NO"),
@@ -278,6 +280,7 @@ pub(super) fn ensure_schema(client: &mut Client) -> Result<(), String> {
         upgrade_cleanup_receipts(client)?;
         upgrade_environment_retirements(client)?;
         upgrade_maintenance_completions(client)?;
+        upgrade_environment_owners(client)?;
     }
     validate_schema_version(client)?;
     validate_schema(client, CURRENT_OBSERVATION_KINDS)
@@ -367,7 +370,7 @@ const INSTANCE_DDL: &str = "CREATE TABLE runtime.execution_instances(execution_i
 
 // An anchor records immutable allocation provenance, never liveness. The
 // resident row remains the only live resource holding, including uncertainty.
-const RETAINED_ACCOUNTING_DDL: &str = r#"
+pub(super) const RETAINED_ACCOUNTING_DDL: &str = r#"
 ALTER TABLE runtime.execution_instances ADD COLUMN allocation_execution_id text;
 UPDATE runtime.execution_instances SET allocation_execution_id=execution_id;
 ALTER TABLE runtime.execution_instances ALTER COLUMN allocation_execution_id SET NOT NULL;
@@ -460,6 +463,29 @@ fn upgrade_environment_retirements(client: &mut Client) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     tx.execute(
         "INSERT INTO runtime.schema_migrations(version,applied_at_ms) VALUES(11,$1)",
+        &[&now_ms()?],
+    )
+    .map_err(|e| e.to_string())?;
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+fn upgrade_environment_owners(client: &mut Client) -> Result<(), String> {
+    if schema_versions(client)? != (1..=12).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    let mut tx = client.transaction().map_err(|e| e.to_string())?;
+    super::resource_commit::require_durable_resource_commit(&mut tx)?;
+    tx.batch_execute("LOCK TABLE runtime.schema_migrations IN ACCESS EXCLUSIVE MODE")
+        .map_err(|e| e.to_string())?;
+    if schema_versions(&mut tx)? != (1..=12).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.batch_execute(super::environment_owner_schema::DDL)
+        .map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO runtime.schema_migrations(version,applied_at_ms) VALUES(13,$1)",
         &[&now_ms()?],
     )
     .map_err(|e| e.to_string())?;
@@ -583,6 +609,8 @@ fn create_schema(client: &mut Client) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     tx.batch_execute(MAINTENANCE_COMPLETION_DDL)
         .map_err(|e| e.to_string())?;
+    tx.batch_execute(super::environment_owner_schema::DDL)
+        .map_err(|e| e.to_string())?;
     for version in 1..=STORE_SCHEMA_VERSION {
         tx.execute(
             "INSERT INTO runtime.schema_migrations(version, applied_at_ms) VALUES($1, $2)",
@@ -617,6 +645,7 @@ fn validate_schema_with_resource_budgets(
     let cleanup_receipts = retained_accounting && schema_versions(client)?.contains(&10);
     let retirements = cleanup_receipts && schema_versions(client)?.contains(&11);
     let maintenance_completions = retirements && schema_versions(client)?.contains(&12);
+    let typed_owners = maintenance_completions && schema_versions(client)?.contains(&13);
     let tables = object_names(client, "BASE TABLE")?;
     let expected_tables = RUNTIME_TABLES
         .iter()
@@ -627,6 +656,7 @@ fn validate_schema_with_resource_budgets(
                 && (cleanup_receipts || *table != "agent_run_cleanup_receipts")
                 && (retirements || *table != "environment_retirements")
                 && (maintenance_completions || *table != "environment_maintenance_completions")
+                && (typed_owners || *table != "environment_provision_completions")
         })
         .map(str::to_string)
         .collect();
@@ -639,6 +669,7 @@ fn validate_schema_with_resource_budgets(
             || (*table == "agent_run_cleanup_receipts" && !cleanup_receipts)
             || (*table == "environment_retirements" && !retirements)
             || (*table == "environment_maintenance_completions" && !maintenance_completions)
+            || (*table == "environment_provision_completions" && !typed_owners)
         {
             continue;
         }
@@ -654,6 +685,17 @@ fn validate_schema_with_resource_budgets(
             ("resident_sandboxes", true) => format!("{expected},instance_id:text:YES,environment_id:text:YES,allocation_mode:text:NO"),
             _ => expected.to_string(),
         };
+        let expected =
+            if typed_owners && matches!(*table, "execution_instances" | "resident_sandboxes") {
+                format!(
+                    "{},allocation_owner_json:text:NO",
+                    expected.replace("agent_run_id:text:NO", "agent_run_id:text:YES")
+                )
+            } else if typed_owners && *table == "agent_run_cleanup_receipts" {
+                format!("{expected},physical_removed:boolean:NO,removed_container_id:text:YES")
+            } else {
+                expected
+            };
         let actual = client.query(
             "SELECT column_name,data_type,is_nullable FROM information_schema.columns WHERE table_schema='runtime' AND table_name=$1 ORDER BY ordinal_position",
             &[table],
@@ -662,6 +704,22 @@ fn validate_schema_with_resource_budgets(
             return Err(format!(
                 "Postgres runtime table definition mismatch: {table}"
             ));
+        }
+    }
+    if typed_owners {
+        let removal = client.query_opt("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='runtime.agent_run_cleanup_receipts'::regclass AND conname='cleanup_physical_removal_facts' AND contype='c' AND convalidated", &[]).map_err(|e|e.to_string())?.map(|row|row.get::<_,String>(0));
+        if removal.as_deref()!=Some("CHECK ((((NOT physical_removed) AND (removed_container_id IS NULL)) OR (physical_removed AND (allocation_kind = 'instance'::text) AND (removed_container_id IS NOT NULL) AND (removed_container_id ~ '^[0-9a-f]{64}$'::text))))"){return Err("Postgres cleanup physical removal constraint mismatch".into());}
+        let cleanup_trigger=client.query_opt("SELECT tgenabled='O' AND NOT tgisinternal AND tgtype=27 AND tgfoid='runtime.protect_agent_run_cleanup_receipt()'::regprocedure AND tgqual IS NULL AND tgnargs=0 FROM pg_trigger WHERE tgrelid='runtime.agent_run_cleanup_receipts'::regclass AND tgname='agent_run_cleanup_receipt_facts'",&[]).map_err(|e|e.to_string())?;
+        if !cleanup_trigger.is_some_and(|row| row.get::<_, bool>(0)) {
+            return Err("Postgres cleanup receipt trigger mismatch".into());
+        }
+        let keys=client.query_one("SELECT count(*),bool_and(contype='p' AND conkey=ARRAY[1]::smallint[] AND convalidated AND NOT condeferrable) FROM pg_constraint WHERE conrelid='runtime.environment_provision_completions'::regclass AND contype<>'n'",&[]).map_err(|e|e.to_string())?;
+        if keys.get::<_, i64>(0) != 1 || !keys.get::<_, bool>(1) {
+            return Err("Postgres provision completion primary key mismatch".into());
+        }
+        let trigger=client.query_opt("SELECT tgenabled='O' AND NOT tgisinternal AND tgtype=27 AND tgfoid='runtime.protect_environment_provision_completion()'::regprocedure AND tgqual IS NULL AND tgnargs=0 FROM pg_trigger WHERE tgrelid='runtime.environment_provision_completions'::regclass AND tgname='environment_provision_completion_facts'",&[]).map_err(|e|e.to_string())?;
+        if !trigger.is_some_and(|row| row.get::<_, bool>(0)) {
+            return Err("Postgres provision completion trigger mismatch".into());
         }
     }
     if instance_binding {
@@ -882,6 +940,20 @@ fn validate_schema_with_resource_budgets(
         .map(|row| row.get::<_, String>(0))
         .collect::<BTreeSet<_>>();
     let mut expected_functions = BTreeSet::from(["notify_runtime_job_ready_v1".to_string()]);
+    if typed_owners {
+        expected_functions.insert("protect_environment_provision_completion".into());
+        expected_functions.insert("protect_agent_run_cleanup_receipt".into());
+        let body=super::environment_owner_schema::DDL.split_once("CREATE FUNCTION runtime.protect_agent_run_cleanup_receipt() RETURNS trigger LANGUAGE plpgsql AS $$").ok_or("cleanup receipt function missing")?.1.split_once("$$;").ok_or("cleanup receipt body missing")?.0;
+        let actual=client.query_one("SELECT prosrc FROM pg_proc WHERE oid='runtime.protect_agent_run_cleanup_receipt()'::regprocedure",&[]).map_err(|e|e.to_string())?.get::<_,String>(0);
+        if actual != body {
+            return Err("Postgres cleanup receipt function mismatch".into());
+        }
+        let body=super::environment_owner_schema::DDL.split_once("CREATE FUNCTION runtime.protect_environment_provision_completion() RETURNS trigger LANGUAGE plpgsql AS $$").ok_or("provision completion function missing")?.1.split_once("$$;").ok_or("provision completion body missing")?.0;
+        let actual=client.query_one("SELECT prosrc FROM pg_proc WHERE oid='runtime.protect_environment_provision_completion()'::regprocedure",&[]).map_err(|e|e.to_string())?.get::<_,String>(0);
+        if actual != body {
+            return Err("Postgres provision completion function mismatch".into());
+        }
+    }
     if maintenance_completions {
         expected_functions.insert("protect_environment_maintenance_completion".into());
         let expected = MAINTENANCE_COMPLETION_DDL.split_once("CREATE FUNCTION runtime.protect_environment_maintenance_completion() RETURNS trigger LANGUAGE plpgsql AS $$").ok_or("maintenance completion function declaration missing")?.1.split_once("$$;").ok_or("maintenance completion function body missing")?.0;
@@ -903,9 +975,16 @@ fn validate_schema_with_resource_budgets(
     if retained_accounting {
         for name in ["verify_execution_allocation", "verify_resident_allocation"] {
             expected_functions.insert(name.to_string());
-            let prefix =
-                format!("CREATE FUNCTION runtime.{name}() RETURNS trigger LANGUAGE plpgsql AS $$");
-            let expected_body = RETAINED_ACCOUNTING_DDL
+            let prefix = format!(
+                "CREATE {}FUNCTION runtime.{name}() RETURNS trigger LANGUAGE plpgsql AS $$",
+                if typed_owners { "OR REPLACE " } else { "" }
+            );
+            let ddl = if typed_owners {
+                super::environment_owner_schema::DDL
+            } else {
+                RETAINED_ACCOUNTING_DDL
+            };
+            let expected_body = ddl
                 .split_once(&prefix)
                 .ok_or("allocation function declaration missing")?
                 .1
@@ -939,6 +1018,10 @@ fn validate_schema_with_resource_budgets(
         .map(|row| row.get::<_, String>(0))
         .collect::<BTreeSet<_>>();
     let mut expected_triggers = BTreeSet::from(["runtime_jobs_ready_notify_v1".to_string()]);
+    if typed_owners {
+        expected_triggers.insert("environment_provision_completion_facts".into());
+        expected_triggers.insert("agent_run_cleanup_receipt_facts".into());
+    }
     if maintenance_completions {
         expected_triggers.insert("environment_maintenance_completion_facts".into());
     }
@@ -1096,7 +1179,7 @@ mod tests {
 
     #[test]
     fn transcript_read_model_and_wait_handoff_have_explicit_store_schema() {
-        assert_eq!(STORE_SCHEMA_VERSION, 12);
+        assert_eq!(STORE_SCHEMA_VERSION, 13);
         for table in [
             "transcript_projection_heads",
             "transcript_projection_current_generations",

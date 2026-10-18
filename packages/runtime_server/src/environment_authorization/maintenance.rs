@@ -11,6 +11,7 @@ const DOMAIN: &[u8] = b"workspace:environment-maintenance-authorization:v1\0";
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct MaintenanceBinding {
     pub schema: String,
+    pub operation_kind: String,
     pub workspace_id: String,
     pub session_id: String,
     pub environment_id: String,
@@ -40,12 +41,16 @@ fn hex(value: &str) -> bool {
 }
 
 impl MaintenanceBinding {
-    fn digest(&self) -> Result<String, String> {
+    pub(crate) fn digest(&self) -> Result<String, String> {
         let EnvironmentTaskOwner::MaintenanceOperation { operation_id } = &self.controller_owner
         else {
             return Err("maintenance_authorization_owner_invalid".into());
         };
-        if self.schema != SCHEMA || self.controller_epoch <= 0 || self.expires_at_ms <= 0 {
+        if self.schema != SCHEMA
+            || self.operation_kind != "task"
+            || self.controller_epoch <= 0
+            || self.expires_at_ms <= 0
+        {
             return Err("maintenance_authorization_fence_invalid".into());
         }
         for value in [

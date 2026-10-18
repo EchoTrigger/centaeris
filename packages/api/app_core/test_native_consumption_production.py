@@ -32,7 +32,8 @@ from .model_adapter.common import fake_tool_call, zero_usage
 from .models import (Agent, AgentCoordinationSession, AgentInputQueue, AgentRun, AgentWorkConsumeAttempt,
                      AgentWorkReturn, AgentWorkSession, HostedOperationReceipt, ModelConfig,
                      Session, Workspace, WorkspaceMembership)
-from .runtime_client import build_agent_run_start, schedule_agent_run_lifecycle
+from .runtime_client import schedule_agent_run_lifecycle
+from .testing import fenced_start_fixture
 from .test_agent_work import PROFILE
 from . import test_agent_work_consumption as consume_fixture
 from .test_native_consumption_runtime import isolate_runtime_schema
@@ -216,7 +217,7 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
 
         def step(body):
             self.steps.append(deepcopy(body))
-            self.assertEqual(body["agentRunStart"], build_agent_run_start(run))
+            self.assertEqual(body["agentRunStart"], fenced_start_fixture(run))
             result = original_step(body)
             self.assertEqual(result["terminalState"], "completed", self.lifecycle_diagnostic(run, result))
             if replay:
@@ -298,7 +299,7 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
                 response_payload = response.json()
             attempt = AgentWorkConsumeAttempt.objects.select_related("coordinator_run").get()
             run = attempt.coordinator_run
-            start = build_agent_run_start(run)
+            start = fenced_start_fixture(run)
             supplied = start["initialInput"]["input"]
             self.assertEqual(start["initialInput"]["attemptId"], attempt.pk)
             self.assertEqual(start["initialInput"]["noticeId"], returned.pk)
@@ -408,7 +409,7 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
 
         def step(body):
             run = children[body["agentRunStart"]["agentRunId"]]
-            self.assertEqual(body["agentRunStart"], build_agent_run_start(run))
+            self.assertEqual(body["agentRunStart"], fenced_start_fixture(run))
             self.steps.append(deepcopy(body))
             result = original_step(body)
             self.assertEqual(result["terminalState"], "completed", self.lifecycle_diagnostic(run, result))

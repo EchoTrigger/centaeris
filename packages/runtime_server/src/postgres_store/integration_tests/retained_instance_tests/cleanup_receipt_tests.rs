@@ -101,7 +101,9 @@ fn postgres_cleanup_zero_history_failure_requires_fenced_receipt_before_never_al
         .with_cleanup_authority(
             &request,
             || panic!("status-only failure must not inspect physical resources"),
-            |_, _| panic!("status-only failure must not authorize cleanup"),
+            |_, _| -> Result<(), String> {
+                panic!("status-only failure must not authorize cleanup")
+            },
         )
         .is_err());
 
@@ -132,7 +134,7 @@ fn postgres_cleanup_zero_history_failure_requires_fenced_receipt_before_never_al
         .with_cleanup_authority(
             &request,
             || panic!("receipt replay must not reinspect resources"),
-            |_, _| panic!("receipt replay must not repeat cleanup"),
+            |_, _| -> Result<(), String> { panic!("receipt replay must not repeat cleanup") },
         )
         .unwrap();
     assert_eq!(replay, receipt);
@@ -224,13 +226,18 @@ fn postgres_cleanup_cancelled_unallocated_run_checks_existing_environment_anchor
                 else {
                     panic!("existing environment was not confirmed")
                 };
-                assert_eq!(target.allocation_agent_run_id, "run-origin");
-                assert_eq!(target.instance_id, allocation.instance_id);
                 assert_eq!(
-                    origin_authorization.agent_run_id,
-                    origin.original.agent_run_id
+                    target.allocation_agent_run_id.as_deref(),
+                    Some("run-origin")
                 );
-                assert_eq!(origin_authorization.as_ref(), &origin.original);
+                assert_eq!(target.instance_id, allocation.instance_id);
+                assert_eq!(origin_authorization.session_id, origin.original.session_id);
+                assert_eq!(
+                    origin_authorization.as_ref(),
+                    &crate::postgres_store::allocation_origin::AllocationOrigin::from(
+                        origin.original.clone()
+                    )
+                );
                 Ok(())
             },
         )
@@ -324,14 +331,17 @@ fn postgres_cleanup_receipt_replays_after_target_disappears_without_rewriting_fa
         .with_cleanup_authority(
             &request,
             || Err("inventory currently unavailable".into()),
-            |_, _| Err("must not repeat physical cleanup".into()),
+            |_, _| Err::<(), _>("must not repeat physical cleanup".into()),
         )
         .unwrap();
     assert_eq!(replay, original);
-    db.execute("UPDATE runtime.agent_run_cleanup_receipts SET controller_epoch=2 WHERE agent_run_id='run-cleanup'",&[]).unwrap();
-    assert!(store
-        .with_cleanup_authority(&request, || Ok(vec![]), |_, _| Ok(()))
-        .is_err());
+    assert_eq!(db.execute("UPDATE runtime.agent_run_cleanup_receipts SET controller_epoch=2 WHERE agent_run_id='run-cleanup'",&[]).unwrap_err().code(),Some(&postgres::error::SqlState::RAISE_EXCEPTION));
+    assert_eq!(
+        store
+            .with_cleanup_authority(&request, || Ok(vec![]), |_, _| Ok(()))
+            .unwrap(),
+        original
+    );
 }
 
 #[test]
@@ -376,7 +386,7 @@ fn postgres_cleanup_receipt_rejects_historical_execution_unknown_inventory_and_u
         .with_cleanup_authority(
             &request,
             || Ok(vec![]),
-            |_, _| Err("tasks not positively empty".into())
+            |_, _| Err::<(), _>("tasks not positively empty".into())
         )
         .is_err());
     assert_eq!(
@@ -386,6 +396,125 @@ fn postgres_cleanup_receipt_rejects_historical_execution_unknown_inventory_and_u
         )
         .unwrap()
         .get::<_, i64>(0),
+        0
+    );
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL cleanup database"]
+fn postgres_per_run_cleanup_requires_physical_removal_and_allows_fresh_instance_without_retirement()
+{
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_url, store, mut db) = setup();
+    let mut r = run(&store, &mut db, "per-run-physical-cleanup", 1);
+    r.grant.payload.execution_mode = "perRun".into();
+    r.grant = sign(r.grant.payload);
+    let physical = Arc::new(Mutex::new(Vec::new()));
+    let mut first = prepare(&store, &r, "per-run-allocation", &physical).unwrap();
+    // Docker returns its immutable canonical ID, not a name or an alias.
+    let container = "a".repeat(64);
+    db.execute("UPDATE runtime.resident_sandboxes SET container_id=$1 WHERE execution_id='per-run-allocation'", &[&container]).unwrap();
+    physical.lock().unwrap()[0].container_id = container.clone();
+    first.container_id = Some(container);
+    let cleanup = terminal(&mut db, &mut r, false);
+    let request = CleanupAuthorityRequest {
+        cleanup: &cleanup,
+        signing_key: KEY,
+        lease: &r.fence,
+        host_id: "host",
+    };
+    let result = store.with_cleanup_authority(
+        &request,
+        || Ok(physical.lock().unwrap().clone()),
+        |target, _| {
+            assert!(matches!(target, CleanupTarget::Instance { .. }));
+            Ok(())
+        },
+    );
+    assert!(
+        result.is_err(),
+        "EndRun alone cannot acknowledge perRun physical deletion: {result:?}"
+    );
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.resident_sandboxes", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        1
+    );
+    assert_eq!(
+        db.query_one(
+            "SELECT count(*) FROM runtime.agent_run_cleanup_receipts",
+            &[]
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        0
+    );
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.environment_retirements", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    let receipt = store
+        .with_cleanup_authority(
+            &request,
+            || Ok(physical.lock().unwrap().clone()),
+            |target, _| {
+                let CleanupTarget::Instance { allocation, .. } = target else {
+                    panic!("expected exact physical instance");
+                };
+                physical.lock().unwrap().clear();
+                Ok(
+                    crate::postgres_store::cleanup_receipts::CleanupPhysicalResult::Removed {
+                        instance_id: allocation.instance_id.clone(),
+                        container_id: allocation.container_id.clone().unwrap(),
+                    },
+                )
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        receipt.allocation,
+        CleanupAllocation::Instance {
+            instance_id: first.instance_id.clone()
+        }
+    );
+    assert!(receipt.cleanup_complete);
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.resident_sandboxes", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    let historical: String = db.query_one("SELECT row_to_json(i)::text FROM runtime.execution_instances i WHERE execution_id='per-run-allocation'", &[]).unwrap().get(0);
+    db.batch_execute("UPDATE public.app_core_agentrun SET status='failed'; UPDATE public.app_core_sessionenvironment SET controller_released=true").unwrap();
+    let mut next = run(&store, &mut db, "next-per-run", 2);
+    next.grant.payload.execution_mode = "perRun".into();
+    next.grant = sign(next.grant.payload);
+    let fresh = prepare(&store, &next, "fresh-per-run-allocation", &physical).unwrap();
+    assert!(!fresh.reused);
+    assert_ne!(fresh.instance_id, first.instance_id);
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.resident_sandboxes", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        1
+    );
+    assert_eq!(db.query_one("SELECT row_to_json(i)::text FROM runtime.execution_instances i WHERE execution_id='per-run-allocation'", &[]).unwrap().get::<_,String>(0), historical);
+    assert_eq!(
+        db.query_one(
+            "SELECT count(*) FROM runtime.agent_run_cleanup_receipts WHERE receipt_id=$1",
+            &[&receipt.receipt_id]
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        1
+    );
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.environment_retirements", &[])
+            .unwrap()
+            .get::<_, i64>(0),
         0
     );
 }

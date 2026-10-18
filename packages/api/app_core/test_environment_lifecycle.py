@@ -345,23 +345,23 @@ class EnvironmentControllerTests(ExecutionPublicationFixture, TransactionTestCas
 
 
 class EnvironmentControllerGrantTests(SimpleTestCase):
-    def test_v2_exact_fields_integer_range_and_shared_signature(self):
+    def test_exact_fields_integer_range_and_shared_signature(self):
         import json
         from pathlib import Path
-        from .environment_authorization import sign_environment_controller_authorization
+        from .environment_authorization import sign_environment_authorization
         vector = json.loads((Path(__file__).resolve().parents[3] /
-            "tests/workspace/fixtures/environment_authorization/v2/valid.json").read_text())
+            "tests/workspace/fixtures/environment_authorization/v1/retained.json").read_text())
         payload = vector["payload"]
-        self.assertEqual(sign_environment_controller_authorization(payload, "test-key"), vector["signature"])
+        self.assertEqual(sign_environment_authorization(payload, "test-key"), vector["signature"])
         for mutation in ({"controllerEpoch": True}, {"controllerEpoch": 1.0},
                          {"controllerEpoch": 0}, {"controllerEpoch": 2**63},
                          {"controllerId": "foreign"}, {"controllerLeaseDigest": "unknown"},
                          {"controllerPurpose": "unknown"},
-                         {"instanceId": "caller-selected"}, {"executionMode": "perRun"}):
+                         {"instanceId": "caller-selected"}, {"executionMode": "unknown"}):
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
-                sign_environment_controller_authorization(payload | mutation, "test-key")
+                sign_environment_authorization(payload | mutation, "test-key")
         for field in payload:
             missing = payload.copy()
             del missing[field]
             with self.subTest(missing=field), self.assertRaises(ValueError):
-                sign_environment_controller_authorization(missing, "test-key")
+                sign_environment_authorization(missing, "test-key")

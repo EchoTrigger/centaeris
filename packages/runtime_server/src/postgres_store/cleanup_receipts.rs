@@ -19,6 +19,20 @@ pub(crate) struct CleanupAuthorityRequest<'a> {
     pub host_id: &'a str,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CleanupPhysicalResult {
+    Retained,
+    Removed {
+        instance_id: String,
+        container_id: String,
+    },
+}
+impl From<()> for CleanupPhysicalResult {
+    fn from(_: ()) -> Self {
+        Self::Retained
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum CleanupTarget {
     Destroyed {
@@ -27,7 +41,7 @@ pub(crate) enum CleanupTarget {
     Instance {
         allocation: Box<RetainedInstanceAllocation>,
         resources: ResidentResourceUsage,
-        origin_authorization: Box<crate::agent_run_authorization::WorkspaceAgentRunAuthorization>,
+        origin_authorization: Box<super::allocation_origin::AllocationOrigin>,
     },
     NeverAllocated,
 }
@@ -109,11 +123,11 @@ impl PostgresRuntimeStore {
             Ok(Some(receipt))
         })
     }
-    pub(crate) fn with_cleanup_authority(
+    pub(crate) fn with_cleanup_authority<P: Into<CleanupPhysicalResult>>(
         &self,
         request: &CleanupAuthorityRequest<'_>,
         inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String> + Send,
-        cleanup: impl FnOnce(&CleanupTarget, &VerifiedOriginalGrant) -> Result<(), String> + Send,
+        cleanup: impl FnOnce(&CleanupTarget, &VerifiedOriginalGrant) -> Result<P, String> + Send,
     ) -> Result<CleanupReceipt, String> {
         request.cleanup.clone().validate(request.signing_key)?;
         let authority = ControllerAuthorityRequest {
@@ -130,6 +144,7 @@ impl PostgresRuntimeStore {
             let verified=verify_controller_authority(&mut tx,&authority)?;
             if let Some(receipt)=load_receipt(&mut tx,&request.cleanup.agent_run_id)? {
                 validate_replay(&receipt,request,&verified)?;
+                require_physical_replay(&mut tx,request,&receipt)?;
                 tx.commit().map_err(|e|e.to_string())?;
                 return Ok(receipt);
             }
@@ -140,11 +155,30 @@ impl PostgresRuntimeStore {
                 let verified=verify_controller_authority(&mut tx,&authority)?;
                 if let Some(receipt)=load_receipt(&mut tx,&request.cleanup.agent_run_id)? {
                     validate_replay(&receipt,request,&verified)?;
+                require_physical_replay(&mut tx,request,&receipt)?;
                     tx.commit().map_err(|e|e.to_string())?;
                     return Ok(receipt);
                 }
                 let target=resolve_target(&mut tx,request,physical)?;
-                cleanup(&target,&verified)?;
+                let per_run=request.cleanup.environment_authorization.payload.execution_mode=="perRun";
+                if per_run{
+                    if let CleanupTarget::Instance{allocation,..}=&target{
+                        tx.execute("UPDATE runtime.resident_sandboxes SET state='releasing' WHERE host_id=$1 AND execution_id=$2 AND instance_id=$3",&[&request.host_id,&allocation.allocation_execution_id,&allocation.instance_id]).map_err(|e|e.to_string())?;
+                        tx.commit().map_err(|e|e.to_string())?;
+                        tx=client.transaction().map_err(|e|e.to_string())?;super::resource_commit::require_durable_resource_commit(&mut tx)?;
+                        verify_controller_authority(&mut tx,&authority)?;
+                    }
+                }
+                let physical:CleanupPhysicalResult=cleanup(&target,&verified)?.into();
+                let (physical_removed,removed_container)=match(&target,physical){
+                    (CleanupTarget::Instance{allocation,..},CleanupPhysicalResult::Removed{instance_id,container_id}) if per_run&&instance_id==allocation.instance_id&&allocation.container_id.as_deref()==Some(&container_id)=>{
+                        let deleted=tx.execute("DELETE FROM runtime.resident_sandboxes WHERE host_id=$1 AND execution_id=$2 AND instance_id=$3 AND container_id=$4 AND state='releasing'",&[&request.host_id,&allocation.allocation_execution_id,&instance_id,&container_id]).map_err(|e|e.to_string())?;
+                        if deleted!=1{return Err("cleanup_physical_release_unconfirmed".into());}(true,Some(container_id))
+                    }
+                    (CleanupTarget::Instance{..},CleanupPhysicalResult::Retained)if !per_run=>(false,None),
+                    (CleanupTarget::NeverAllocated|CleanupTarget::Destroyed{..},CleanupPhysicalResult::Retained)=>(false,None),
+                    _=>return Err("cleanup_physical_release_unconfirmed".into()),
+                };
                 // Wall-clock lease expiry can occur while physical cleanup runs
                 // even though row locks prevent a competing owner taking over.
                 verify_controller_authority(&mut tx,&authority)?;
@@ -165,8 +199,8 @@ impl PostgresRuntimeStore {
                     CleanupAllocation::Instance {instance_id} => ("instance",Some(instance_id.as_str())),
                     CleanupAllocation::NeverAllocated {} => ("neverAllocated",None),
                 };
-                tx.execute("INSERT INTO runtime.agent_run_cleanup_receipts(receipt_id,agent_run_id,environment_id,authorization_digest,controller_epoch,allocation_kind,instance_id,cleanup_complete,file_protection,recorded_at_ms) VALUES($1,$2,$3,$4,$5,$6,$7,true,'deferred',$8) ON CONFLICT(agent_run_id) DO NOTHING",
-                    &[&receipt.receipt_id,&receipt.agent_run_id,&receipt.environment_id,&receipt.authorization_digest,&receipt.controller_epoch,&kind,&instance,&crate::now_ms()?]).map_err(|e|e.to_string())?;
+                tx.execute("INSERT INTO runtime.agent_run_cleanup_receipts(receipt_id,agent_run_id,environment_id,authorization_digest,controller_epoch,allocation_kind,instance_id,cleanup_complete,file_protection,recorded_at_ms,physical_removed,removed_container_id) VALUES($1,$2,$3,$4,$5,$6,$7,true,'deferred',$8,$9,$10) ON CONFLICT(agent_run_id) DO NOTHING",
+                    &[&receipt.receipt_id,&receipt.agent_run_id,&receipt.environment_id,&receipt.authorization_digest,&receipt.controller_epoch,&kind,&instance,&crate::now_ms()?,&physical_removed,&removed_container]).map_err(|e|e.to_string())?;
                 let stored=load_receipt(&mut tx,&receipt.agent_run_id)?.ok_or("cleanup receipt commit missing")?;
                 if stored!=receipt {return Err("cleanup receipt identity conflict".into());}
                 tx.commit().map_err(|e|e.to_string())?;
@@ -174,6 +208,25 @@ impl PostgresRuntimeStore {
             })
         })
     }
+}
+
+fn require_physical_replay(
+    db: &mut impl GenericClient,
+    r: &CleanupAuthorityRequest<'_>,
+    receipt: &CleanupReceipt,
+) -> Result<(), String> {
+    if r.cleanup.environment_authorization.payload.execution_mode == "perRun"
+        && matches!(receipt.allocation, CleanupAllocation::Instance { .. })
+    {
+        let removed=db.query_one("SELECT physical_removed FROM runtime.agent_run_cleanup_receipts WHERE receipt_id=$1",&[&receipt.receipt_id]).map_err(|e|e.to_string())?.get::<_,bool>(0);
+        if !removed {
+            let retired=db.query_one("SELECT EXISTS(SELECT 1 FROM runtime.environment_retirements WHERE environment_id=$1 AND instance_id=$2 AND state='destroyed')",&[&receipt.environment_id,&match &receipt.allocation{CleanupAllocation::Instance{instance_id}=>Some(instance_id),_=>None}]).map_err(|e|e.to_string())?.get::<_,bool>(0);
+            if !retired {
+                return Err("cleanup_physical_release_unconfirmed".into());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_replay(
@@ -228,7 +281,7 @@ fn resolve_target(
 ) -> Result<CleanupTarget, String> {
     let b = &r.cleanup.environment_authorization.payload;
     // Unknown reservations cannot be silently treated as absent allocations.
-    let unknown=db.query_one("SELECT EXISTS(SELECT 1 FROM runtime.resident_sandboxes WHERE host_id=$1 AND (allocation_mode='unbound' OR environment_id IS NULL OR (environment_id=$2 AND (state<>'resident' OR container_id IS NULL OR instance_id IS NULL))))", &[&r.host_id,&b.environment_id]).map_err(|e|e.to_string())?.get::<_,bool>(0);
+    let unknown=db.query_one("SELECT EXISTS(SELECT 1 FROM runtime.resident_sandboxes WHERE host_id=$1 AND (allocation_mode='unbound' OR environment_id IS NULL OR (environment_id=$2 AND ((state<>'resident' AND NOT($3 AND state='releasing')) OR container_id IS NULL OR instance_id IS NULL))))", &[&r.host_id,&b.environment_id,&(b.execution_mode=="perRun")]).map_err(|e|e.to_string())?.get::<_,bool>(0);
     if unknown {
         return Err("cleanup inventory has unresolved reservation".into());
     }
@@ -281,7 +334,7 @@ fn resolve_target(
     if !anchors.is_empty() && !anchors.contains(&execution) {
         return Err("cleanup execution allocation mismatch".into());
     }
-    let row=db.query_opt("SELECT i.execution_id,i.agent_run_id,i.instance_id,i.environment_id,i.host_id,i.image_digest,i.authorization_digest,i.binding_digest,i.profile_digest,s.container_id,s.workspace_id,s.memory_bytes,s.cpu_milli,s.pids,s.workspace_bytes,s.state FROM runtime.execution_instances i JOIN runtime.resident_sandboxes s ON s.execution_id=i.execution_id AND s.instance_id=i.instance_id WHERE i.execution_id=$1 AND i.allocation_execution_id=i.execution_id AND i.allocation_mode='retained' FOR UPDATE OF s", &[&execution]).map_err(|e|e.to_string())?.ok_or("cleanup allocation anchor missing")?;
+    let row=db.query_opt("SELECT i.execution_id,i.agent_run_id,i.instance_id,i.environment_id,i.host_id,i.image_digest,i.authorization_digest,i.binding_digest,i.profile_digest,s.container_id,s.workspace_id,s.memory_bytes,s.cpu_milli,s.pids,s.workspace_bytes,s.state,i.allocation_owner_json FROM runtime.execution_instances i JOIN runtime.resident_sandboxes s ON s.execution_id=i.execution_id AND s.instance_id=i.instance_id WHERE i.execution_id=$1 AND i.allocation_execution_id=i.execution_id AND i.allocation_mode='retained' FOR UPDATE OF s", &[&execution]).map_err(|e|e.to_string())?.ok_or("cleanup allocation anchor missing")?;
     let resources = ResidentResourceUsage {
         sandbox_count: 1,
         memory_bytes: row
@@ -304,6 +357,8 @@ fn resolve_target(
     let allocation = RetainedInstanceAllocation {
         allocation_execution_id: row.get(0),
         allocation_agent_run_id: row.get(1),
+        allocation_owner: serde_json::from_str(&row.get::<_, String>(16))
+            .map_err(|_| "allocation_owner_invalid")?,
         instance_id: row.get(2),
         environment_id: row.get(3),
         host_id: row.get(4),
@@ -317,45 +372,34 @@ fn resolve_target(
     if allocation.environment_id != b.environment_id
         || allocation.host_id != r.host_id
         || row.get::<_, String>(10) != r.cleanup.authorization.workspace_id
-        || row.get::<_, String>(15) != "resident"
-        || !physical.iter().any(|p| {
-            p.execution_id == execution
-                && p.agent_run_id == allocation.allocation_agent_run_id
-                && Some(&p.container_id) == allocation.container_id.as_ref()
-                && p.resources == resources
-        })
+        || !(row.get::<_, String>(15) == "resident"
+            || (b.execution_mode == "perRun" && row.get::<_, String>(15) == "releasing"))
+        || (!(b.execution_mode == "perRun" && row.get::<_, String>(15) == "releasing")
+            && !physical.iter().any(|p| {
+                p.execution_id == execution
+                    && p.allocation_owner == allocation.allocation_owner
+                    && Some(&p.container_id) == allocation.container_id.as_ref()
+                    && p.resources == resources
+            }))
     {
         return Err("cleanup live environment unconfirmed".into());
     }
     // The container may have been created by a previous Run. Its fixed profile
     // is described only by that immutable signed origin grant, never today's
     // cleanup controller's potentially different plugins or resource request.
-    let origin = db.query_opt("SELECT g.digest,g.payload::text,g.signature,a.environment_id,a.session_id,a.workspace_id,a.user_id::text,a.\"modelConfig_id\",a.\"thinkingMode\" FROM public.app_core_agentrunauthorization g JOIN public.app_core_agentrun a ON a.id=g.agent_run_id WHERE a.id=$1 FOR SHARE OF g,a", &[&allocation.allocation_agent_run_id]).map_err(|_| "cleanup origin grant unavailable")?.ok_or("cleanup origin grant missing")?;
-    let digest: String = origin.get(0);
-    let origin_authorization: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
-        serde_json::from_str(&origin.get::<_, String>(1))
-            .map_err(|_| "cleanup origin grant invalid")?;
-    origin_authorization
-        .checked_binding(&allocation.allocation_agent_run_id)?
-        .verify(&digest, r.signing_key, &origin.get::<_, String>(2))?;
-    if digest != allocation.authorization_digest
-        || origin.get::<_, Option<String>>(3).as_deref() != Some(b.environment_id.as_str())
-        || origin.get::<_, String>(4) != b.session_id
-        || origin.get::<_, String>(5) != r.cleanup.authorization.workspace_id
-        || origin_authorization.workspace_id != r.cleanup.authorization.workspace_id
+    let origin_authorization = super::allocation_origin::load(db, &allocation, r.signing_key)?;
+    if origin_authorization.workspace_id != r.cleanup.authorization.workspace_id
         || origin_authorization.session_id != b.session_id
         || origin_authorization.agent_id != r.cleanup.authorization.agent_id
         || origin_authorization.user_id != r.cleanup.authorization.user_id
-        || origin_authorization.user_id != origin.get::<_, String>(6)
-        || origin_authorization.model_config_ref != origin.get::<_, String>(7)
-        || origin_authorization.thinking_mode
-            != origin
-                .get::<_, Option<String>>(8)
-                .filter(|value| !value.is_empty())
-        || origin_authorization.image_digest != allocation.image_digest
-        || crate::resident_capacity::declared_usage(origin_authorization.resources) != resources
+        || crate::resident_capacity::declared_usage(
+            origin_authorization
+                .environment_profile
+                .resources
+                .sandbox_resources(),
+        ) != resources
     {
-        return Err("cleanup origin grant binding rejected".into());
+        return Err("cleanup_origin_binding_rejected".into());
     }
     Ok(CleanupTarget::Instance {
         allocation: Box::new(allocation),

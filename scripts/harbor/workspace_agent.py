@@ -45,19 +45,6 @@ def message_operation_id(trial_id):
     return "tb-message-" + str(uuid.uuid5(uuid.NAMESPACE_URL, "centaeris-workspace:" + trial_id))
 
 
-@dataclass(frozen=True)
-class WorkspaceSubmission:
-    """The original public acceptance made before setup, not a second prompt."""
-    operation_id: str
-    session_id: str
-    agent_run_id: str
-    turn_id: str
-    instruction_sha256: str
-    normalized_instruction_sha256: str
-    model_config_ref: str
-    thinking_mode: str | None
-
-
 def _sha(value):
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -160,16 +147,11 @@ class WorkspaceAgent(BaseAgent):
         if not isinstance(instruction, str) or not instruction.strip():
             raise ValueError("instruction must be nonempty text")
         await self._verify_session(binding, client)
+        validate_submission = getattr(environment, 'validate_workspace_submission', None)
+        if validate_submission is not None:
+            validate_submission(instruction, self.model_config_ref, self.thinking_mode)
         path = Path(self.logs_dir) / "workspace-state.json"
         operation = message_operation_id(binding.trial_id)
-        accepted = getattr(environment, "workspace_submission", None)
-        if accepted is not None and (not isinstance(accepted, WorkspaceSubmission)
-                or accepted.operation_id != operation or accepted.session_id != binding.session_id
-                or accepted.instruction_sha256 != _sha(instruction)
-                or accepted.normalized_instruction_sha256 != _sha(instruction.strip())
-                or accepted.model_config_ref != self.model_config_ref or accepted.thinking_mode != self.thinking_mode
-                or not accepted.agent_run_id or not accepted.turn_id):
-            raise WorkspaceError("submission_binding_mismatch")
         request_digest = _sha(json.dumps({"binding": binding.public(), "instruction": instruction,
             "modelConfigRef": self.model_config_ref, "thinkingMode": self.thinking_mode}, sort_keys=True, ensure_ascii=False))
         if path.exists():
@@ -208,12 +190,6 @@ class WorkspaceAgent(BaseAgent):
             if (state.get("cancellationStatus") == "terminal" and state["deadlineAt"] is not None
                     and time.time() >= state["deadlineAt"]):
                 raise TimeoutError("Workspace agent deadline exceeded")
-            if accepted is not None:
-                if state["agentRunId"] not in {None, accepted.agent_run_id}:
-                    raise WorkspaceError("submission_binding_mismatch")
-                if state["agentRunId"] is None:
-                    state.update(agentRunId=accepted.agent_run_id, status="running")
-                    _write_state(path, state)
             if state["status"] == "submission_uncertain":
                 receipt = await asyncio.to_thread(client.operation, binding.workspace_id, "submitMessage", operation)
                 if receipt is None:
@@ -240,10 +216,9 @@ class WorkspaceAgent(BaseAgent):
             if (actual.get("sessionId") != binding.session_id or actual.get("agentRunId") != run_id
                     or actual.get("environmentId") != binding.environment_id):
                 raise WorkspaceError("workspace_run_binding_mismatch")
-            activate = getattr(environment, "activate_workspace_setup", None)
-            if accepted is not None and state["status"] not in {"completed", "failed", "cancelled"}:
-                if activate is None or await activate() != "ready":
-                    raise WorkspaceError("workspace_setup_not_ready")
+            bind_run = getattr(environment, "bind_workspace_run", None)
+            if bind_run is not None:
+                bind_run(run_id)
             while state["status"] not in {"completed", "failed", "cancelled"}:
                 if state["deadlineAt"] is not None and time.time() >= state["deadlineAt"]:
                     raise TimeoutError("Workspace agent deadline exceeded")
@@ -274,6 +249,9 @@ class WorkspaceAgent(BaseAgent):
                     pass
             if state["agentRunId"] and state["status"] not in {"completed", "failed", "cancelled"}:
                 try:
+                    bind_run = getattr(environment, "bind_workspace_run", None)
+                    if bind_run is not None:
+                        bind_run(state["agentRunId"])
                     pending = getattr(environment, "mark_agent_cancellation_pending", None)
                     if pending is not None:
                         pending(state["agentRunId"])

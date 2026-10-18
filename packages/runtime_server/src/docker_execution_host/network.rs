@@ -1,5 +1,5 @@
 //! Translate the signed network capability into Docker and Core policy.
-use super::{benchmark, environment, DockerExecutionHostRunner, ExecutionNetwork, ExecutionPolicy};
+use super::{environment, DockerExecutionHostRunner, ExecutionNetwork, ExecutionPolicy};
 use centaeris_core::execution::WORKSPACE_DATA_ROOT;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -37,18 +37,21 @@ pub(super) fn apply_proxy_environment(
     if network == ExecutionNetwork::PublicInternet && !proxy_environment.is_empty() {
         // Container defaults are inherited by ordinary commands, helpers and
         // independent verifier execs. Never inherit control-plane proxy values.
-        body["Env"] = serde_json::json!(proxy_environment
-            .iter()
-            .map(|(name, value)| format!("{name}={value}"))
-            .collect::<Vec<_>>());
+        let mut values = body["Env"].as_array().cloned().unwrap_or_default();
+        values.extend(
+            proxy_environment
+                .iter()
+                .map(|(name, value)| serde_json::json!(format!("{name}={value}"))),
+        );
+        body["Env"] = serde_json::Value::Array(values);
     }
 }
 
 impl DockerExecutionHostRunner {
     pub(crate) fn execution_policy(&self) -> ExecutionPolicy {
-        self.benchmark_profile.as_ref().map_or_else(
+        self.environment_profile.as_ref().map_or_else(
             || policy(self.network, WORKSPACE_DATA_ROOT),
-            benchmark::policy,
+            super::environment_policy,
         )
     }
 }
@@ -67,13 +70,20 @@ mod tests {
         let mut runner = super::super::tests::test_docker_execution_host_runner();
         for network in [ExecutionNetwork::Disabled, ExecutionNetwork::PublicInternet] {
             runner.network = network;
-            let body = super::super::ordinary_container_create_body(
+            runner.environment_profile.as_mut().unwrap().network = network;
+            let body = super::super::environment_container::create_body_with_proxy_environment(
                 &runner.container_expectation(),
+                runner.environment_profile.as_ref().unwrap(),
+                runner.benchmark_helper.as_deref().unwrap(),
                 &proxy,
             )
             .unwrap();
             if network == ExecutionNetwork::Disabled {
-                assert!(body["Env"].is_null());
+                let actual = body["Env"].as_array().unwrap();
+                assert_eq!(actual.len(), 2);
+                assert!(actual
+                    .iter()
+                    .all(|entry| entry.as_str().unwrap().starts_with("CENTAERIS_WORKSPACE_")));
             } else {
                 let actual: BTreeMap<_, _> = body["Env"]
                     .as_array()

@@ -15,7 +15,7 @@ class MaintenanceAuthorizationTests(unittest.TestCase):
 
     def payload(self):
         return {
-            "schema": "workspace.environment_maintenance_authorization.v1",
+            "schema": "workspace.environment_maintenance_authorization.v1", "operationKind": "task",
             "workspaceId": "workspace_test", "sessionId": "session_test",
             "environmentId": "environment_test", "instanceId": "instance_" + "a" * 64,
             "containerId": "b" * 64, "profileDigest": "sha256:" + "c" * 64,

@@ -74,27 +74,14 @@ Every batch receives a fresh directory. Existing batches are never resumed,
 overwritten or used as permission to repeat model work. Uncertain calls retain
 their original operation identity and pending cleanup allocation.
 
-Agent timeout remains an `AgentTimeoutError`. Cancellation first waits for that
-same Run's terminal fact, then confirms process quiescence through the existing
-maintenance exec port. The helper stops all other processes in the owned
-benchmark PID namespace, including escaped descendants, and preserves its
-keeper and filesystem for the verifier. Until that receipt is confirmed,
-Environment exec/upload/download operations are blocked. Retirement remains
-available and releases admission only after physical absence and zero debit.
-No tool or benchmark attempt is resubmitted by this handoff.
-
-The focused Docker handoff regression is opt-in and uses two disposable,
-network-disabled 128 MiB containers with a supplied original Python task image
-and static helper. It checks detached-child cleanup, original-file preservation,
-verification in the same live container, unrelated-container survival and exact
-probe removal; it does not run or score a dataset task:
-
-```bash
-export CENTAERIS_BENCHMARK_CANCELLATION_TEST=1
-export CENTAERIS_BENCHMARK_CANCELLATION_IMAGE=sha256:<cached-image-digest>
-export CENTAERIS_BENCHMARK_CANCELLATION_HELPER=/absolute/path/to/execution_agent
-python3 -B scripts/workspace/retained_acceptance/test_benchmark_cancellation.py -v
-```
+Agent timeout remains an `AgentTimeoutError`. Cancellation waits for that same
+Run's terminal fact and its controller cleanup release before verification may
+acquire independent maintenance authority. Runtime closes only tasks owned by
+that Run; operation-scoped setup and verifier tasks remain governed by their own
+maintenance owner. A no-op maintenance task confirms the handoff without killing
+unrelated processes in the instance. Until this is confirmed, Environment
+exec/upload/download operations remain blocked. Retirement releases admission only
+after physical absence and zero debit. No model attempt is resubmitted.
 
 ## Private controller ports
 
@@ -229,11 +216,19 @@ standard log-directory hints are copied, not mounted from the controller host.
 
 ## Setup and exit
 
-The environment creates a fresh Session, binds the immutable profile and submits
-the task with a stable operation ID. Runtime must attest `waitingSetup` before
-Harbor mutates setup files. Harbor's own canary removal is reused for instruction
-preprocessing. Agent start adopts that original Run receipt, activates readiness
-and observes committed events; it never submits a second prompt.
+The environment creates a fresh Session and binds its immutable generic
+`runtime.environment_profile.v1` snapshot. An independent signed provision
+operation reserves and creates the physical instance before any AgentRun exists.
+Its completion is verified and its maintenance controller released. Harbor setup
+commands and file transfers then use independently signed maintenance operations
+on that same instance. Setup performs no public model submission.
+
+Agent start submits the canonical instruction once through the public Session
+message API, using its stable operation ID. Harbor's own canary removal is reused
+for instruction preprocessing. The Agent validates the original instruction,
+model and thinking mode, binds the resulting Run to the existing instance and
+observes committed events. A lost submission acknowledgement is reconciled by
+its durable operation receipt; it never allocates a second prompt identity.
 
 After verification, the preflight service checks run before destruction so they
 can inspect actual task state. Observation failures do not block exact cleanup.
@@ -247,22 +242,34 @@ The batch remains blocked for review when any infrastructure or cleanup issue
 occurred, even if all other trials completed; it never automatically starts the
 full benchmark.
 
-Exec and transfers are never automatically retried after transport loss.
-Upload/download use raw `application/x-tar` bodies, bounded to 32 MiB archive
-and expanded data and 10,000 members. Upload metadata is strict JSON in
-`X-Benchmark-Transfer`, bounded to 8 KiB; download metadata remains a JSON request.
-The controller streams temporary tar files in 64 KiB blocks; Runtime retains one
-bounded binary archive for validation and Docker dispatch, without base64 copies.
-The shared limits are in `benchmark-transport.json`, with Runtime parity tests.
-Before any task image or Agent starts, every selected task's original verifier
-input is packed through these same limits. Unsupported inputs block the batch.
-Links,
-devices, sparse entries, traversal, duplicate entries and file/parent collisions
-are rejected. Larger artifacts fail explicitly instead of being clipped.
+Exec and transfers are never automatically retried after transport loss. Each
+command has one operation-scoped Core task, bounded output and a signed immutable
+`program`, `args`, `cwd`, and `timeoutMs`. Commands are limited to one hour. The
+server derives its execute lease from the signed timeout plus 30 seconds for
+cleanup, with a five-minute minimum; replay does not extend the deadline. A lost
+Start acknowledgement still closes that operation before release. Failure to
+confirm closure remains pending.
 
-Transfer failures retain stable public codes for missing artifact paths, archive
-limits, rejected ownership/physical identity, unavailable dependencies and unknown
-upload outcomes. Diagnostics never include Docker error bodies or private paths.
+File transfer uses the same Core filesystem helper and framed binary protocol as
+model file operations. Each body starts with a four-byte big-endian JSON-header
+length, followed by small signed metadata and raw file bytes. Metadata binds the
+exact Core request, `contentLength`, and `contentDigest` (`sha256:<hex>`). Write
+content and read bytes are empty arrays in JSON; their bounded raw bytes follow
+the header. Transfers stream in 64 KiB blocks, cap decoded file data at 32 MiB,
+and verify response length and SHA-256 before atomically publishing an artifact.
+API signing accepts only small metadata, not a JSON byte array of file contents.
+Filesystem and provision leases remain five minutes.
+
+Directory collection resolves Core display paths from the signed profile's cwd,
+strips the requested source root, and rejects paths outside that root, links,
+Windows-unsafe names, duplicates and file/parent collisions before artifact
+writes. Both upload and download cap directory entries at 10,000 and total file
+data at 32 MiB. Dataset preflight still packs verifier inputs to check original
+content and these resource limits before admission; archive packing is not a
+second container transfer or execution path. Larger artifacts fail explicitly
+instead of being clipped. Transfer failures retain safe public categories without
+Docker error bodies, private host paths or credentials.
+
 Trial summaries retain independent `agentOutcome`, `verifierOutcome` and
 `cleanupOutcome` facts. Harbor's original first exception remains intact; a later
 verifier failure is still reported as infrastructure failure after Agent timeout.

@@ -14,18 +14,20 @@ from .runtime_contract import authorization_digest, authorization_signature, ver
 
 class NetworkAuthorizationTests(SimpleTestCase):
     def test_cross_language_fixtures_sign_network_and_reject_missing_or_mismatched_policy(self):
-        root = Path(__file__).resolve().parents[3] / "tests/workspace/fixtures/agent_run_authorization/v3"
-        for name in ("ordinary", "benchmark"):
+        root = Path(__file__).resolve().parents[3] / "tests/workspace/fixtures/agent_run_authorization/v1"
+        for name in ("valid", "custom"):
             payload = json.loads((root / f"{name}.json").read_text(encoding="utf-8"))
-            expected = json.loads((root / f"{name}-expected.json").read_text(encoding="utf-8"))
+            expected_name = "expected" if name == "valid" else "custom-expected"
+            expected = json.loads((root / f"{expected_name}.json").read_text(encoding="utf-8"))
             self.assertEqual(authorization_digest(payload), expected["digest"])
             self.assertEqual(authorization_signature(payload, "test-key"), expected["signature"])
             missing = deepcopy(payload)
-            del missing["network"]
+            del missing["environmentProfile"]["network"]
             with self.assertRaises(ValueError):
                 authorization_digest(missing)
-            for value in (None, "host", "disabled"):
-                changed = payload | {"network": value}
+            for value in (None, "host", "publicInternet" if payload["environmentProfile"]["network"] == "disabled" else "disabled"):
+                changed = deepcopy(payload)
+                changed["environmentProfile"]["network"] = value
                 with self.assertRaises(ValueError):
                     verify_agent_run_authorization_signature(changed, "test-key", expected["signature"])
 
@@ -88,7 +90,7 @@ class EnvironmentNetworkTests(OperationFixture, TestCase):
         self.assertEqual(accepted.status_code, 202, accepted.content)
         run = AgentRun.objects.get(pk=accepted.json()["agentRunId"])
         self.assertEqual(run.environment.network, "publicInternet")
-        self.assertEqual(run.authorization.payload["network"], "publicInternet")
+        self.assertEqual(run.authorization.payload["environmentProfile"]["network"], "publicInternet")
         old.current_environment.refresh_from_db()
         self.assertEqual(old.current_environment.network, "disabled")
         run.environment.network = "disabled"

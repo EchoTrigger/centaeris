@@ -1,0 +1,20 @@
+[Unit]
+Description=Centaeris native environment supervisor
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/local/libexec/centaeris/environment_host_supervisor /etc/centaeris/host-supervisor.json
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=5
+KillMode=control-group
+NoNewPrivileges=true
+LimitNOFILE=8192
+
+[Install]
+WantedBy=multi-user.target

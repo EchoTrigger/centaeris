@@ -27,11 +27,9 @@ fn stable_task_address_matches_existing_index_across_owner_renewal() {
             .task_id(&foreign.operation_id("command-original"))
             .unwrap()
     );
-    assert!(
-        renewed
-            .task_id(&original.operation_id("command-original"))
-            .is_err()
-    );
+    assert!(renewed
+        .task_id(&original.operation_id("command-original"))
+        .is_err());
 }
 pub(super) fn root() -> PathBuf {
     let p = std::env::temp_dir().join(format!(
@@ -273,14 +271,12 @@ fn same_epoch_cannot_upgrade_cleanup_to_execution_and_pending_takeover_refuses_m
         controller_purpose: EnvironmentTaskControllerPurpose::Cleanup,
     };
     journal.takeover_persist(fence.clone(), &p).unwrap();
-    assert!(
-        journal
-            .takeover(EnvironmentTaskFence {
-                controller_purpose: EnvironmentTaskControllerPurpose::Execute,
-                ..fence.clone()
-            })
-            .is_err()
-    );
+    assert!(journal
+        .takeover(EnvironmentTaskFence {
+            controller_purpose: EnvironmentTaskControllerPurpose::Execute,
+            ..fence.clone()
+        })
+        .is_err());
     journal.takeover_pending = true;
     journal.persist(&p).unwrap();
     assert!(journal.check(&fence).is_err());
@@ -428,23 +424,20 @@ fn input_exhaustion_keeps_task_termination_and_run_closure_available() {
         j.reserve_receipt(&key, &input_digest).unwrap();
     }
     assert!(j.receipts.len() <= ENVIRONMENT_TASK_MAX_RECORDS);
-    assert!(
-        j.reserve_receipt("terminate:task", &stop_digest)
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        j.reserve_receipt("endRun:r", &close_digest)
-            .unwrap()
-            .is_none()
-    );
+    assert!(j
+        .reserve_receipt("terminate:task", &stop_digest)
+        .unwrap()
+        .is_none());
+    assert!(j
+        .reserve_receipt("endRun:r", &close_digest)
+        .unwrap()
+        .is_none());
     // Lost acknowledgement of an idempotent control remains reconcilable; an
     // unknown input is never delivered again.
-    assert!(
-        j.reserve_receipt("terminate:task", &stop_digest)
-            .unwrap()
-            .is_none()
-    );
+    assert!(j
+        .reserve_receipt("terminate:task", &stop_digest)
+        .unwrap()
+        .is_none());
     assert_eq!(
         j.reserve_receipt("input:task:1:0", &input_digest)
             .unwrap_err(),
@@ -539,14 +532,12 @@ fn admission_preflight_preserves_committed_work_and_completion_space() {
     assert_eq!(fs::read(p.join("history.sqlite")).unwrap(), committed);
     assert_eq!(j.tasks[&id].snapshot.state, EnvironmentTaskState::Running);
     // Control receipts remain available while ordinary work is refused.
-    assert!(
-        j.reserve_receipt(&format!("terminate:{id}"), &digest(&id).unwrap())
-            .is_ok()
-    );
-    assert!(
-        j.reserve_receipt("endRun:r", &digest(&"r").unwrap())
-            .is_ok()
-    );
+    assert!(j
+        .reserve_receipt(&format!("terminate:{id}"), &digest(&id).unwrap())
+        .is_ok());
+    assert!(j
+        .reserve_receipt("endRun:r", &digest(&"r").unwrap())
+        .is_ok());
     fs::remove_dir_all(p).unwrap();
 }
 
@@ -568,15 +559,13 @@ fn one_thousand_same_run_terminal_records_keep_original_start_identity() {
     j = Journal::open(&p, "i").unwrap();
     let first = history_record("finished-0", 1, false);
     let last = history_record("finished-999", 1, false);
-    assert!(
-        j.existing(&first.snapshot.task_id, &first.digest)
-            .unwrap()
-            .is_some()
-    );
-    assert!(
-        j.existing(&last.snapshot.task_id, &digest(&"changed").unwrap())
-            .is_err()
-    );
+    assert!(j
+        .existing(&first.snapshot.task_id, &first.digest)
+        .unwrap()
+        .is_some());
+    assert!(j
+        .existing(&last.snapshot.task_id, &digest(&"changed").unwrap())
+        .is_err());
     assert!(j.tasks.len() <= ENVIRONMENT_TASK_MAX_RECORDS);
     fs::remove_dir_all(p).unwrap();
 }
@@ -770,8 +759,8 @@ fn strict_forward_import_preserves_legacy_journal_and_rejects_invalid_identity()
 }
 
 #[test]
-fn closed_history_collection_preserves_environment_and_uncertain_input_and_does_not_resurrect_receipts()
- {
+fn closed_history_collection_preserves_environment_and_uncertain_input_and_does_not_resurrect_receipts(
+) {
     let p = root();
     let mut j = Journal::open(&p, "i").unwrap();
     let fence = fixture_fence("i", "r1", 1);
@@ -812,17 +801,15 @@ fn closed_history_collection_preserves_environment_and_uncertain_input_and_does_
     assert!(store::task(&p, &ids["complete"]).unwrap().is_none());
     assert!(store::task(&p, &ids["uncertain"]).unwrap().is_some());
     assert!(store::task(&p, &ids["environment"]).unwrap().is_some());
-    assert!(
-        store::next_closed(
-            &p,
-            "",
-            &EnvironmentTaskOwner::AgentRun {
-                run_id: "r2".into()
-            }
-        )
-        .unwrap()
-        .is_none()
-    );
+    assert!(store::next_closed(
+        &p,
+        "",
+        &EnvironmentTaskOwner::AgentRun {
+            run_id: "r2".into()
+        }
+    )
+    .unwrap()
+    .is_none());
     fs::remove_dir_all(p).unwrap();
 }
 

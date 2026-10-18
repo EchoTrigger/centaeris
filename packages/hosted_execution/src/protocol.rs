@@ -4,6 +4,13 @@ use centaeris_core::execution::{
 };
 use serde::{Deserialize, Serialize};
 
+mod filesystem_frame;
+pub use filesystem_frame::{
+    read_filesystem_request, read_filesystem_result, write_filesystem_request,
+    write_filesystem_result, FileSystemFrameMetadata, FileSystemResponseFrameMetadata,
+    FILESYSTEM_FRAME_HEADER_LIMIT,
+};
+
 pub const SANDBOX_INPUT_INVENTORY_SCHEMA: &str = "sandbox.input_inventory.v1";
 pub const SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA: &str = "workspace.snapshot.v1";
 pub const SANDBOX_SNAPSHOT_CAPTURE_SCHEMA: &str = "workspace.snapshot.capture.v1";

@@ -87,7 +87,7 @@ pub(crate) fn verify_controller_authority(
     {
         return Err("retained Session rejected".into());
     }
-    let env=tx.query_opt("SELECT session_id,controller_run_id,controller_epoch,controller_lease_owner,controller_purpose,controller_released FROM public.app_core_sessionenvironment WHERE id=$1 FOR SHARE", &[&b.environment_id]).map_err(|e|e.to_string())?.ok_or("retained environment missing")?;
+    let env=tx.query_opt("SELECT session_id,controller_run_id,controller_epoch,controller_lease_owner,controller_purpose,controller_released,environment_profile::text,environment_profile_digest FROM public.app_core_sessionenvironment WHERE id=$1 FOR SHARE", &[&b.environment_id]).map_err(|e|e.to_string())?.ok_or("retained environment missing")?;
     if env.get::<_, String>(0) != b.session_id
         || env.get::<_, Option<String>>(1).as_deref() != Some(&b.agent_run_id)
         || env.get::<_, i64>(2) != c.controller_epoch
@@ -155,6 +155,17 @@ pub(crate) fn verify_controller_authority(
         || original.thinking_mode != run.get::<_, Option<String>>(7).filter(|s| !s.is_empty())
     {
         return Err("retained original grant binding rejected".into());
+    }
+    let bound_profile: crate::agent_run_authorization::EnvironmentProfile = serde_json::from_str(
+        &env.get::<_, Option<String>>(6)
+            .ok_or("environment_profile_missing")?,
+    )
+    .map_err(|_| "environment_profile_invalid")?;
+    if bound_profile != original.environment_profile
+        || env.get::<_, Option<String>>(7).as_deref() != Some(&original.environment_profile_digest)
+        || bound_profile.digest()? != original.environment_profile_digest
+    {
+        return Err("environment_profile_binding_rejected".into());
     }
     pin_lifecycle_job(tx, &r.lease.job_id)?;
     // This is a separate statement after lock acquisition. A predicate evaluated

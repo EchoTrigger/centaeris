@@ -15,7 +15,7 @@ from . import test_agent_work as work_fixture
 from . import test_agent_work_returns as return_fixture
 from . import test_agent_work_consumption as consume_fixture
 from .models import AgentRun
-from .runtime_client import build_agent_run_start
+from .testing import fenced_start_fixture
 from .runtime_schema_test_helpers import remove_runtime_trigger_functions
 
 
@@ -85,7 +85,7 @@ class NativeConsumptionRuntimeTests(TransactionTestCase):
         url="postgresql://{}:{}@{}:{}/{}".format(quote(config["USER"]),quote(config["PASSWORD"]),
             config["HOST"],config["PORT"],quote(config["NAME"]))
         diagnostic=self.invoke("native_consumption_fenced_record", "CENTAERIS_NATIVE_CONSUME_FIXTURE", {
-            "agentRunStart":build_agent_run_start(run),"databaseUrl":url,"signingKey":settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY})
+            "agentRunStart":fenced_start_fixture(run),"databaseUrl":url,"signingKey":settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY})
         self.assertIn("native-consume-fenced-record-ok:",diagnostic)
         self.assertEqual(list(run.events.order_by("agent_run_sequence").values_list("payload__type",flat=True)),
                          ["agent_run_started","host_event_input"])

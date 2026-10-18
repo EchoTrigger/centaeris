@@ -1,5 +1,5 @@
 use super::*;
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 fn run_owner(id: &str) -> EnvironmentTaskOwner {
     EnvironmentTaskOwner::AgentRun { run_id: id.into() }
@@ -58,11 +58,9 @@ fn maintenance_input_and_cleanup_use_stored_scope_before_accepting_a_receipt() {
         journal.authorize_task_input(&maintenance, &id).unwrap_err(),
         "task_owner_scope_denied"
     );
-    assert!(
-        maintenance
-            .authorize_termination(&journal.tasks[&id].snapshot.scope)
-            .is_err()
-    );
+    assert!(maintenance
+        .authorize_termination(&journal.tasks[&id].snapshot.scope)
+        .is_err());
     let task = record(&maintenance);
     let maintenance_id = task.snapshot.task_id.clone();
     journal.tasks.insert(maintenance_id.clone(), task);

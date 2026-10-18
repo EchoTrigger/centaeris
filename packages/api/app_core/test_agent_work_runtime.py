@@ -18,7 +18,7 @@ from django.utils import timezone
 
 from .agent_run_authorization_factory import create_agent_run_authorization
 from .models import Agent, AgentCoordinationSession, AgentDefinition, AgentDefinitionVersion, AgentRun, AgentWorkSession, BusinessApplication, HostedOperationReceipt, ModelConfig, Session, UserAppDelegation, Workspace, WorkspaceMembership
-from .runtime_client import build_agent_run_start
+from .testing import fenced_start_fixture
 from .runtime_schema_test_helpers import remove_runtime_trigger_functions
 
 
@@ -57,7 +57,7 @@ class AgentWorkRuntimeTests(LiveServerTestCase):
             run = AgentRun.objects.create(workspace=workspace, session=session, user=user,
                 modelConfig=model, prompt="Capture registered tools and finish", status="running", **fields)
             create_agent_run_authorization(run, image_digest="sha256:" + "a" * 64)
-            cases.append({"kind": kind, "agentRunStart": build_agent_run_start(run)})
+            cases.append({"kind": kind, "agentRunStart": fenced_start_fixture(run)})
         fixture = {"liveServerUrl": self.live_server_url, "internalToken": settings.INTERNAL_API_TOKEN,
             "signingKey": settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY, "cases": cases,
             "queryContractDigest": _digest("centaeris.dynamic_tool_contract.v1", json.loads(
@@ -114,7 +114,7 @@ class AgentWorkRuntimeTests(LiveServerTestCase):
                     cursor.execute("DROP SCHEMA IF EXISTS runtime")
         self.addCleanup(cleanup_runtime_tables)
         database = settings.DATABASES["default"]
-        fixture = {"liveServerUrl": self.live_server_url, "agentRunStart": build_agent_run_start(run),
+        fixture = {"liveServerUrl": self.live_server_url, "agentRunStart": fenced_start_fixture(run),
             "internalToken": settings.INTERNAL_API_TOKEN, "failCommit": fail_commit,
             "fastTriggerCase": fast_trigger_case,
             "database": {key: database[key] for key in ("NAME", "USER", "PASSWORD", "HOST", "PORT")}}

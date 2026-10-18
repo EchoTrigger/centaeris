@@ -1,0 +1,42 @@
+{
+  "schema": "workspace.agent_run_authorization.v1",
+  "id": "authorization_1",
+  "organizationId": "org_1",
+  "workspaceId": "ws_1",
+  "userId": "user_1",
+  "agentId": "centaeris",
+  "sessionId": "sess_1",
+  "agentRunId": "agent_run_1",
+  "sessionWorkspace": {
+    "generation": 7,
+    "snapshotSha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "snapshotSizeBytes": 13,
+    "expandedSizeBytes": 7,
+    "fileCount": 1
+  },
+  "modelConfigRef": "model_1",
+  "thinkingMode": "high",
+  "artifactScopeRef": "artifact_scope_1",
+  "assetRefs": [],
+  "messageAssetRefs": [],
+  "pluginActivation": {
+    "schema": "plugin_activation_snapshot_v1",
+    "digest": "sha256:3bf31c5d8d4d6523712c9ef2b194d4b0edb3255155a49e76f44bbe7382e54f75",
+    "packages": []
+  },
+  "environmentProfile": {
+    "schema": "runtime.environment_profile.v1",
+    "imageDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "workspaceRoot": "/app",
+    "user": "0:0",
+    "network": "publicInternet",
+    "resources": {
+      "cpuMilli": 1000,
+      "memoryBytes": 2147483648,
+      "pidsLimit": 512,
+      "dataTmpfsBytes": 67108864,
+      "storageBytes": 10737418240
+    }
+  },
+  "environmentProfileDigest": "sha256:002ce0c3f62ff192b630fef336d994812674e939332a7cc16f7f01c1f314024f"
+}

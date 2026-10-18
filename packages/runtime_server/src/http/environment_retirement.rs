@@ -4,7 +4,7 @@ use crate::postgres_store::residency::retirement::{
     RetirementError, RetirementRequest, RetirementTarget,
 };
 
-fn maintenance_authorized(
+pub(super) fn maintenance_authorized(
     configured: Option<&str>,
     internal: Option<&str>,
     supplied: Option<&str>,
@@ -63,7 +63,15 @@ fn retirement_error_response(error: RetirementError) -> Result<Response<Body>, S
 
 fn physical_identity(facts: &serde_json::Value, target: &RetirementTarget) -> bool {
     let labels = &facts["Config"]["Labels"];
-    facts["Id"].as_str() == Some(target.container_id.as_str())
+    labels["centaeris.allocation_owner"]
+        .as_str()
+        .and_then(|v| {
+            serde_json::from_str::<centaeris_core::execution::EnvironmentTaskOwner>(v).ok()
+        })
+        .as_ref()
+        == Some(&target.allocation_owner)
+        && labels["centaeris.agent_run_id"].as_str() == target.allocation_agent_run_id.as_deref()
+        && facts["Id"].as_str() == Some(target.container_id.as_str())
         && facts["Image"].as_str() == Some(target.image_digest.as_str())
         && [
             ("centaeris.managed", "true"),
@@ -72,10 +80,6 @@ fn physical_identity(facts: &serde_json::Value, target: &RetirementTarget) -> bo
             (
                 "centaeris.execution_id",
                 target.allocation_execution_id.as_str(),
-            ),
-            (
-                "centaeris.agent_run_id",
-                target.allocation_agent_run_id.as_str(),
             ),
             (
                 "centaeris.environment_authorization_digest",
@@ -145,7 +149,10 @@ mod tests {
     fn target() -> RetirementTarget {
         RetirementTarget {
             allocation_execution_id: "execution".into(),
-            allocation_agent_run_id: "origin".into(),
+            allocation_agent_run_id: Some("origin".into()),
+            allocation_owner: centaeris_core::execution::EnvironmentTaskOwner::AgentRun {
+                run_id: "origin".into(),
+            },
             environment_id: "environment".into(),
             instance_id: "instance".into(),
             container_id: "physical".into(),
@@ -154,7 +161,7 @@ mod tests {
         }
     }
     fn facts(t: &RetirementTarget) -> serde_json::Value {
-        json!({"Id":t.container_id,"Image":t.image_digest,"Config":{"Labels":{"centaeris.managed":"true","centaeris.environment_id":t.environment_id,"centaeris.instance_id":t.instance_id,"centaeris.execution_id":t.allocation_execution_id,"centaeris.agent_run_id":t.allocation_agent_run_id,"centaeris.environment_authorization_digest":t.binding_digest}}})
+        json!({"Id":t.container_id,"Image":t.image_digest,"Config":{"Labels":{"centaeris.managed":"true","centaeris.environment_id":t.environment_id,"centaeris.instance_id":t.instance_id,"centaeris.execution_id":t.allocation_execution_id,"centaeris.agent_run_id":t.allocation_agent_run_id,"centaeris.allocation_owner":serde_json::to_string(&t.allocation_owner).unwrap(),"centaeris.environment_authorization_digest":t.binding_digest}}})
     }
     #[test]
     fn run_token_never_confers_maintenance_authority() {

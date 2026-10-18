@@ -27,8 +27,8 @@ fn sign(payload: MaintenanceBinding) -> MaintenanceAuthorization {
 
 fn save_grant(db: &mut Client, auth: &MaintenanceAuthorization) {
     db.execute(
-        "UPDATE public.app_core_environmentmaintenancegrant SET payload=$1::text::jsonb,signature=$2 WHERE id='maintenance-grant'",
-        &[&serde_json::to_string(&auth.payload).unwrap(), &auth.signature],
+        "UPDATE public.app_core_environmentmaintenancegrant SET payload=$1::text::jsonb,signature=$2,digest=$3 WHERE id='maintenance-grant'",
+        &[&serde_json::to_string(&auth.payload).unwrap(), &auth.signature, &auth.payload.digest().unwrap()],
     )
     .unwrap();
 }
@@ -42,30 +42,42 @@ fn setup() -> (
     let (url, store, mut db) = retained_instance_tests::setup();
     // Match the API's varchar/JSONB types, including the nullable current grant.
     // The historical AgentRun below is allocation provenance, never maintenance authority.
+    let original: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
+        serde_json::from_str(include_str!(
+            "../../../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+        ))
+        .unwrap();
+    let profile = original.environment_profile.digest().unwrap();
     db.batch_execute(
-        "DROP TABLE IF EXISTS public.app_core_environmentmaintenancegrant,public.app_core_environmentmaintenanceoperation CASCADE;
+        &"DROP TABLE IF EXISTS public.app_core_environmentmaintenancegrant,public.app_core_environmentmaintenanceoperation CASCADE;
         ALTER TABLE public.app_core_sessionenvironment ADD COLUMN controller_maintenance_operation_id varchar(160);
         CREATE TABLE public.app_core_environmentmaintenanceoperation(
             operation_id varchar(160) PRIMARY KEY,workspace_id varchar(64),session_id varchar(64),
             environment_id varchar(64),instance_id varchar(73),container_id varchar(64),host_id varchar(160),
             allocation_execution_id text,profile_digest varchar(71),request_digest varchar(71),
-            current_grant_id varchar(64),state varchar(8));
+            current_grant_id varchar(64),state varchar(8),operation_kind text);
         CREATE TABLE public.app_core_environmentmaintenancegrant(
-            id varchar(64) PRIMARY KEY,operation_id varchar(160),payload jsonb,signature varchar(76));
+            id varchar(64) PRIMARY KEY,operation_id varchar(160),payload jsonb,signature varchar(76),digest text);
         INSERT INTO public.app_core_environmentmaintenanceoperation VALUES(
             'maintenance-operation','ws_1','sess_1','environment','instance_'||repeat('a',64),repeat('c',64),
-            'host','origin-execution','sha256:'||repeat('b',64),'sha256:'||repeat('d',64),'maintenance-grant','active');
-        INSERT INTO public.app_core_environmentmaintenancegrant VALUES('maintenance-grant','maintenance-operation','{}','');
+            'host','origin-execution','sha256:'||repeat('b',64),'sha256:'||repeat('d',64),'maintenance-grant','active','task');
+        INSERT INTO public.app_core_environmentmaintenancegrant VALUES('maintenance-grant','maintenance-operation','{}','','');
         UPDATE public.app_core_sessionenvironment SET controller_maintenance_operation_id='maintenance-operation',
             controller_epoch=2,controller_lease_owner='maintenance-integration-test-lease',controller_purpose='execute',controller_released=false;
         INSERT INTO runtime.execution_instances(execution_id,instance_id,environment_id,session_id,agent_run_id,host_id,
             authorization_digest,binding_digest,image_digest,allocation_execution_id,allocation_mode,profile_digest)
         VALUES('origin-execution','instance_'||repeat('a',64),'environment','sess_1','historical-origin-run','host',
-            'origin-authorization','origin-binding','origin-image','origin-execution','retained','sha256:'||repeat('b',64));
+            'origin-authorization','origin-binding','origin-image','origin-execution','retained','PROFILE_DIGEST_PLACEHOLDER');
         INSERT INTO runtime.resident_sandboxes(host_id,execution_id,agent_run_id,workspace_id,container_id,state,
             memory_bytes,cpu_milli,pids,workspace_bytes,created_at_ms,updated_at_ms,instance_id,environment_id,allocation_mode)
         VALUES('host','origin-execution','historical-origin-run','ws_1',repeat('c',64),'resident',1,1,1,1,0,0,
-            'instance_'||repeat('a',64),'environment','retained');",
+            'instance_'||repeat('a',64),'environment','retained');".replace("PROFILE_DIGEST_PLACEHOLDER", &profile),
+    )
+    .unwrap();
+    db.execute("UPDATE public.app_core_sessionenvironment SET environment_profile=$1::text::jsonb,environment_profile_digest=$2", &[&serde_json::to_string(&original.environment_profile).unwrap(), &profile]).unwrap();
+    db.execute(
+        "UPDATE public.app_core_environmentmaintenanceoperation SET profile_digest=$1",
+        &[&profile],
     )
     .unwrap();
     let mut hash = Sha256::new();
@@ -80,12 +92,13 @@ fn setup() -> (
         .get(0);
     let auth = sign(MaintenanceBinding {
         schema: "workspace.environment_maintenance_authorization.v1".into(),
+        operation_kind: "task".into(),
         workspace_id: "ws_1".into(),
         session_id: "sess_1".into(),
         environment_id: "environment".into(),
         instance_id: format!("instance_{}", "a".repeat(64)),
         container_id: "c".repeat(64),
-        profile_digest: format!("sha256:{}", "b".repeat(64)),
+        profile_digest: profile,
         controller_owner: EnvironmentTaskOwner::MaintenanceOperation {
             operation_id: "maintenance-operation".into(),
         },
@@ -140,8 +153,7 @@ fn postgres_maintenance_current_authority_pins_exact_target_and_rows_through_dis
             assert_eq!(target.container_id, auth.payload.container_id);
             assert_eq!(target.host_id, "host");
             assert_eq!(target.allocation_execution_id, "origin-execution");
-            assert_eq!(target.allocation_agent_run_id, "historical-origin-run");
-            assert_eq!(target.authorization_digest, "origin-authorization");
+            assert_eq!(target.allocation_agent_run_id.as_deref(), Some("historical-origin-run"));
             assert_eq!(target.binding_digest, "origin-binding");
             assert_eq!(target.image_digest, "origin-image");
             assert_eq!(target.profile_digest, auth.payload.profile_digest);

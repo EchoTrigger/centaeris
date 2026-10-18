@@ -1,5 +1,4 @@
 //! Internal diagnostics never include raw tool, provider, or helper output.
-use centaeris_core::execution::ExecutionError;
 use centaeris_core::tool::layer::EXECUTION_CANCELLATION_INDETERMINATE;
 use sha2::{Digest, Sha256};
 
@@ -68,41 +67,6 @@ pub(crate) fn observe<T>(
     operation().inspect_err(|error| report(agent_run_id, stage, error))
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum ExecutionCommandFailureStage {
-    Spawn,
-    Cancel,
-    Deadline,
-    Poll,
-    Output,
-}
-
-impl ExecutionCommandFailureStage {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Spawn => "execution_command_spawn",
-            Self::Cancel => "execution_command_cancel",
-            Self::Deadline => "execution_command_deadline",
-            Self::Poll => "execution_command_poll",
-            Self::Output => "execution_command_output",
-        }
-    }
-}
-
-pub(crate) fn cancellation_indeterminate(
-    agent_run_id: &str,
-    stage: ExecutionCommandFailureStage,
-    reason: String,
-) -> ExecutionError {
-    let error = ExecutionError::CancellationIndeterminate { reason };
-    report(
-        agent_run_id,
-        stage.as_str(),
-        &error.internal_debug_message(),
-    );
-    error
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,25 +123,6 @@ mod tests {
             );
             assert_eq!(value["reason"], "execution_cancellation_indeterminate");
             assert_eq!(value["stage"], stage);
-            assert!(!value.to_string().contains("SECRET_TOKEN"));
-            assert!(!value.to_string().contains("private tool output"));
-        }
-    }
-
-    #[test]
-    fn cancellation_diagnostics_preserve_the_original_execution_error() {
-        for stage in [
-            ExecutionCommandFailureStage::Spawn,
-            ExecutionCommandFailureStage::Cancel,
-            ExecutionCommandFailureStage::Deadline,
-            ExecutionCommandFailureStage::Poll,
-            ExecutionCommandFailureStage::Output,
-        ] {
-            let reason = "SECRET_TOKEN private tool output".to_string();
-            let error = cancellation_indeterminate("run", stage, reason.clone());
-            assert_eq!(error, ExecutionError::CancellationIndeterminate { reason });
-            let value = record("run", stage.as_str(), &error.internal_debug_message());
-            assert_eq!(value["reason"], "execution_cancellation_indeterminate");
             assert!(!value.to_string().contains("SECRET_TOKEN"));
             assert!(!value.to_string().contains("private tool output"));
         }

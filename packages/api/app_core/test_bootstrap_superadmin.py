@@ -1,3 +1,4 @@
+from .testing import fenced_start_fixture
 import os
 from unittest.mock import patch
 
@@ -266,7 +267,7 @@ class WorkspaceAccessTests(TestCase):
 
         self.assertFalse(agent_run_membership_is_current(agent_run))
         with self.assertRaisesRegex(RuntimeError, "no longer current"):
-            build_agent_run_start(agent_run)
+            fenced_start_fixture(agent_run)
 
     def test_membership_role_and_single_owner_are_database_invariants(self):
         invalid = WorkspaceMembership(

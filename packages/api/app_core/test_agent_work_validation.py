@@ -17,7 +17,7 @@ from .assets import captured_input_fields
 from .models import (Agent, AgentCoordinationSession, AgentDefinition, AgentDefinitionVersion,
     AgentRun, AgentWorkSession, Artifact, BusinessApplication, HostedOperationReceipt,
     ModelConfig, Session, SessionAssetLink, SessionEvent, UserAppDelegation, UserLibraryObject, Workspace, WorkspaceMembership)
-from .runtime_client import build_agent_run_start
+from .testing import fenced_start_fixture
 
 
 class AgentWorkValidationTests(TestCase):
@@ -64,12 +64,12 @@ class AgentWorkValidationTests(TestCase):
             "inputDigest": "sha256:" + hashlib.sha256(b"workspace.agent_work.input.v1\0" + encoded).hexdigest()})
         self.assert_no_work()
         self.assertFalse(SessionEvent.objects.exists())
-        self.assertEqual(build_agent_run_start(self.run)["nativeCoordinationSessionId"], self.source.id)
+        self.assertEqual(fenced_start_fixture(self.run)["nativeCoordinationSessionId"], self.source.id)
 
     def test_ordinary_session_has_no_native_tool_registration_identity_and_cannot_validate(self):
         ordinary = Session.objects.create(workspace=self.workspace, owner=self.user, agent=self.agent)
         run = self.new_run(ordinary)
-        self.assertNotIn("nativeCoordinationSessionId", build_agent_run_start(run))
+        self.assertNotIn("nativeCoordinationSessionId", fenced_start_fixture(run))
         self.assertEqual(self.validate(run).status_code, 403)
         self.assert_no_work(2, 2)
 
@@ -83,7 +83,7 @@ class AgentWorkValidationTests(TestCase):
         Agent.objects.filter(pk=self.agent.pk).update(definition=definition)
         self.source.refresh_from_db()
         run = self.new_run(definition_version=version)
-        self.assertNotIn("nativeCoordinationSessionId", build_agent_run_start(run))
+        self.assertNotIn("nativeCoordinationSessionId", fenced_start_fixture(run))
         self.assertEqual(self.validate(run).status_code, 403)
         self.assert_no_work(1, 2)
 
@@ -117,7 +117,7 @@ class AgentWorkValidationTests(TestCase):
             scopes=["assistant:use", "messages:submit", "sessions:read"],
             token_digest="sha256:" + "b" * 64, expires_at=timezone.now() + timedelta(hours=1))
         run = self.new_run(definition_version=version, acting_app=app, app_delegation=grant)
-        self.assertNotIn("nativeCoordinationSessionId", build_agent_run_start(run))
+        self.assertNotIn("nativeCoordinationSessionId", fenced_start_fixture(run))
         self.assertEqual(self.validate(run).status_code, 403)
         self.assert_no_work(1, 2)
 

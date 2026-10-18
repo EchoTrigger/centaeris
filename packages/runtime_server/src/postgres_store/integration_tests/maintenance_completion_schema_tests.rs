@@ -22,6 +22,7 @@ fn history(db: &mut Client) -> Vec<(i64, i64)> {
 }
 
 fn downgrade_to_eleven(db: &mut Client) {
+    super::super::environment_owner_schema::restore_previous_fixture(db);
     db.batch_execute(
         "DROP TABLE IF EXISTS runtime.environment_maintenance_completions;
         DROP FUNCTION IF EXISTS runtime.protect_environment_maintenance_completion();
@@ -98,7 +99,7 @@ fn postgres_maintenance_completion_v11_migration_preserves_existing_facts_and_hi
     drop(PostgresRuntimeStore::new(&url).unwrap());
     assert_eq!(
         history(&mut db).iter().map(|row| row.0).collect::<Vec<_>>(),
-        (1..=12).collect::<Vec<_>>()
+        (1..=13).collect::<Vec<_>>()
     );
     assert_eq!(&history(&mut db)[..11], previous.as_slice());
     assert_eq!(

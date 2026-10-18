@@ -19,7 +19,7 @@ from django.test import LiveServerTestCase, override_settings
 from .agent_messages import message_contract_digest, validate_agent_message
 from .agent_run_authorization_factory import create_agent_run_authorization
 from .models import Agent, AgentRun, ModelConfig, Session, SessionAssetLink, SessionEvent, UserLibraryObject, Workspace, WorkspaceMembership
-from .runtime_client import build_agent_run_start
+from .testing import fenced_start_fixture
 from .runtime_schema_test_helpers import remove_runtime_trigger_functions
 
 
@@ -83,7 +83,7 @@ class AgentMessageRuntimeTests(LiveServerTestCase):
                     cursor.execute("DROP SCHEMA IF EXISTS runtime")
 
         self.addCleanup(remove_created_runtime_tables)
-        fixture = {"liveServerUrl": self.live_server_url, "agentRunStart": build_agent_run_start(run),
+        fixture = {"liveServerUrl": self.live_server_url, "agentRunStart": fenced_start_fixture(run),
             "internalToken": settings.INTERNAL_API_TOKEN, "cookieName": settings.SESSION_COOKIE_NAME,
             "cookieValue": self.client.cookies[settings.SESSION_COOKIE_NAME].value,
             "workSessionId": work.id, "fileRef": link.id, "libraryObjectId": library.id,

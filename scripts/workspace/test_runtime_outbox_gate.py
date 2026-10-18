@@ -56,6 +56,29 @@ class OutboxGateTests(unittest.TestCase):
             "postgres_store::integration_tests::cold_append_tests::postgres_cold_append_bounds_overlapping_model_observations",
         }.issubset(filters), filters)
 
+    def test_owner_and_provision_pg_groups_are_required_and_discovered_before_database_creation(self):
+        owner = 'postgres_store::integration_tests::environment_owner_schema_tests'
+        provision = 'postgres_store::integration_tests::provision_authority_tests'
+        expected = {
+            owner + '::postgres_environment_owner_accepts_maintenance_origin_without_a_fake_run',
+            owner + '::postgres_environment_provision_receipt_is_immutable_and_reopen_checks_authority_facts',
+            owner + '::postgres_environment_owner_v12_upgrade_preserves_run_facts_and_migration_history',
+            provision + '::postgres_provision_pins_real_authority_and_commits_holding_before_host_without_a_run',
+            provision + '::postgres_provision_lost_ack_retains_reservation_and_recovers_exact_instance',
+            provision + '::postgres_provision_stale_or_changed_authority_never_enters_host',
+        }
+        self.assertTrue(expected.issubset(set(gate.required_tests())))
+        discovered = set()
+        def discover(command, **kwargs):
+            output = discovery_output(command)
+            discovered.update(gate.discovered_tests(output.stdout))
+            return output
+        driver = SimpleNamespace(connect=lambda **kwargs: (_ for _ in ()).throw(RuntimeError('discovery complete')), sql=SimpleNamespace())
+        with patch.dict(sys.modules, {'psycopg': driver}), patch.object(gate.subprocess, 'run', discover):
+            with self.assertRaisesRegex(RuntimeError, 'discovery complete'):
+                gate.main()
+        self.assertTrue(expected.issubset(discovered))
+
     def test_database_target_ignores_deployment_settings(self):
         with patch.dict(os.environ, {'DATABASE_URL': 'postgresql://production', 'POSTGRES_PASSWORD': 'production', 'CENTAERIS_TEST_POSTGRES_URL': 'postgresql://production'}, clear=True):
             self.assertEqual(gate.database_settings(), {'host': 'localhost', 'port': '55432', 'dbname': 'centaeris', 'user': 'centaeris', 'password': 'centaeris'})

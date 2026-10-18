@@ -29,11 +29,15 @@ class EnvironmentMaintenanceTests(TransactionTestCase):
         self.session = create_session(workspace=self.workspace, owner=user)
         self.environment = self.session.current_environment
         self.instance, self.container = 'instance_' + 'a' * 64, 'b' * 64
-        self.profile = 'sha256:' + 'c' * 64
+        from .environment_profile import bind_environment_profile
+        from .test_unified_environment_profile import profile
+        bound = bind_environment_profile(self.environment.pk, {'schema': 'workspace.environment_profile.bind.v1',
+            'operationId': 'maintenance-profile', 'sessionId': self.session.pk, 'profile': profile()})
+        self.profile = bound['profileDigest']
         self.url = f'/internal/environments/{self.environment.pk}/maintenance-authorizations'
         self.body = {'schema': 'workspace.environment_maintenance.issue.v1',
             'operationId': 'prepare', 'controllerPurpose': 'execute', 'expectedControllerEpoch': 0,
-            'request': {'operation': 'exec', 'program': '/bin/true', 'args': []}}
+            'request': {'program': '/bin/true', 'args': [], 'cwd': '/app', 'timeoutMs': 1000}}
         with connection.cursor() as cursor:
             cursor.execute('CREATE SCHEMA IF NOT EXISTS runtime')
             cursor.execute('CREATE TABLE runtime.execution_instances(execution_id text PRIMARY KEY, '
@@ -116,6 +120,25 @@ class EnvironmentMaintenanceTests(TransactionTestCase):
         self.assertEqual(self.environment.controller_maintenance_operation_id, 'prepare')
         self.assertFalse(self.environment.controller_released)
 
+    def test_command_deadline_covers_timeout_and_cleanup_without_extending_exact_replay(self):
+        request = self.body | {'request': self.body['request'] | {'timeoutMs': 3_600_000}}
+        with patch('app_core.environment_maintenance._now_ms', return_value=1000):
+            response = self.issue(request)
+        self.assertEqual(response.status_code, 200, response.content)
+        grant = response.json()
+        self.assertEqual(grant['payload']['expiresAtMs'], 1000 + 3_600_000 + 30_000)
+        with patch('app_core.environment_maintenance._now_ms', return_value=9_999_999):
+            self.assertEqual(self.issue(request).json(), grant)
+
+    def test_invalid_command_timeout_or_caller_deadline_does_not_acquire(self):
+        for timeout in (0, -1, True, 1.5, 3_600_001, None):
+            with self.subTest(timeout=timeout):
+                request = self.body | {'request': self.body['request'] | {'timeoutMs': timeout}}
+                self.assertEqual(self.issue(request).status_code, 400)
+        self.assertEqual(self.issue(self.body | {'expiresAtMs': 99999999}).status_code, 400)
+        self.environment.refresh_from_db()
+        self.assertEqual(self.environment.controller_epoch, 0)
+
     def test_unknown_missing_or_retiring_allocation_never_gets_a_grant(self):
         with connection.cursor() as cursor:
             cursor.execute("UPDATE runtime.resident_sandboxes SET state='reserved'")
@@ -128,6 +151,13 @@ class EnvironmentMaintenanceTests(TransactionTestCase):
             cursor.execute('UPDATE runtime.resident_sandboxes SET container_id=%s', [self.container])
             cursor.execute("INSERT INTO runtime.environment_retirements VALUES(%s,'pending')", [self.environment.pk])
         self.assertEqual(self.issue().status_code, 409)
+
+    def test_physical_instance_with_a_different_profile_is_never_reauthorized(self):
+        with connection.cursor() as cursor:
+            cursor.execute('UPDATE runtime.execution_instances SET profile_digest=%s', ['sha256:' + 'c' * 64])
+        response = self.issue()
+        self.assertEqual(response.status_code, 409, response.content)
+        self.assertEqual(response.json()['error'], 'maintenance_allocation_profile_mismatch')
 
     def test_ambiguous_allocation_origins_are_not_signed(self):
         with connection.cursor() as cursor:
@@ -237,7 +267,7 @@ class EnvironmentMaintenanceTests(TransactionTestCase):
         grant = create_agent_run_authorization(run, image_digest='sha256:' + 'e' * 64)
         job = f'agent_run.lifecycle:{run.pk}'
         with connection.cursor() as cursor:
-            cursor.execute('CREATE TABLE runtime.runtime_jobs(job_id text PRIMARY KEY,job_kind text,status text,'
+            cursor.execute('CREATE TABLE IF NOT EXISTS runtime.runtime_jobs(job_id text PRIMARY KEY,job_kind text,status text,'
                 'lease_owner text,lease_expires_at_ms bigint,idempotency_key text,session_id text,payload_ref text)')
             cursor.execute('INSERT INTO runtime.runtime_jobs VALUES(%s,%s,%s,%s,'
                 '(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint+60000,%s,%s,%s)',
@@ -245,7 +275,7 @@ class EnvironmentMaintenanceTests(TransactionTestCase):
                  self.session.pk, f'record:agent_run:{run.pk}'])
         def cleanup():
             with connection.cursor() as cursor:
-                cursor.execute('DROP TABLE runtime.runtime_jobs')
+                cursor.execute('DELETE FROM runtime.runtime_jobs WHERE job_id=%s', [job])
         self.addCleanup(cleanup)
         return run
 
@@ -267,27 +297,38 @@ class EnvironmentMaintenanceTests(TransactionTestCase):
             'expectedControllerEpoch': authority['controllerEpoch']}).status_code, 409)
 
     def test_forward_migration_preserves_existing_run_controller(self):
-        run = self.run_fixture()
-        executor = MigrationExecutor(connection)
+        from .migration_testing import isolated_migration_database
+        from .test_environment_network_migration import EnvironmentNetworkMigrationTests
+        helper = EnvironmentNetworkMigrationTests()
         previous = [('app_core', '0021_environment_network')]
         current = [('app_core', '0022_environment_maintenance_authority')]
-        try:
-            executor.migrate(previous)
-            old = executor.loader.project_state(previous).apps.get_model('app_core', 'SessionEnvironment')
-            old.objects.filter(pk=self.environment.pk).update(controller_run_id=run.pk, controller_epoch=7,
-                controller_lease_owner='worker-original', controller_purpose='execute', controller_released=False)
-        finally:
-            MigrationExecutor(connection).migrate(current)
-        self.environment.refresh_from_db()
-        self.assertEqual((self.environment.controller_run_id, self.environment.controller_epoch,
-            self.environment.controller_lease_owner, self.environment.controller_purpose, self.environment.controller_released),
-            (run.pk, 7, 'worker-original', 'execute', False))
-        self.assertIsNone(self.environment.controller_maintenance_operation_id)
+        with isolated_migration_database(previous) as database:
+            fixture = helper.fixture(database, previous)
+            session, environment = helper.session(database, fixture)
+            run, _ = helper.run_and_grant(fixture, session, environment, 1)
+            fixture.manager('SessionEnvironment').filter(pk=environment.pk).update(controller_run_id=run.pk,
+                controller_epoch=7, controller_lease_owner='worker-original', controller_purpose='execute', controller_released=False)
+            MigrationExecutor(database).migrate(current)
+            state = MigrationExecutor(database).loader.project_state(current).apps
+            converted = state.get_model('app_core', 'SessionEnvironment').objects.using(database.alias).get(pk=environment.pk)
+            self.assertEqual((converted.controller_run_id, converted.controller_epoch, converted.controller_lease_owner,
+                converted.controller_purpose, converted.controller_released), (run.pk, 7, 'worker-original', 'execute', False))
+            self.assertIsNone(converted.controller_maintenance_operation_id)
 
     def test_authority_history_prevents_reverse_migration(self):
-        self.assertEqual(self.issue().status_code, 200)
-        with self.assertRaisesRegex(RuntimeError, 'requires_forward_migration'):
-            MigrationExecutor(connection).migrate([('app_core', '0021_environment_network')])
+        from .migration_testing import isolated_migration_database
+        from .test_environment_network_migration import EnvironmentNetworkMigrationTests
+        current = [('app_core', '0022_environment_maintenance_authority')]
+        helper = EnvironmentNetworkMigrationTests()
+        with isolated_migration_database(current) as database:
+            fixture = helper.fixture(database, current)
+            session, environment = helper.session(database, fixture)
+            fixture.manager('EnvironmentMaintenanceOperation').create(operation_id='historical', workspace_id=fixture.workspace.pk,
+                session_id=session.pk, environment_id=environment.pk, instance_id=self.instance, container_id=self.container,
+                host_id='host', allocation_execution_id='origin', profile_digest=self.profile,
+                request={'program': '/bin/true'}, request_digest='sha256:' + 'a' * 64)
+            with self.assertRaisesRegex(RuntimeError, 'requires_forward_migration'):
+                MigrationExecutor(database).migrate([('app_core', '0021_environment_network')])
 
     def test_original_request_and_grants_cannot_be_replaced(self):
         original = self.issue().json()

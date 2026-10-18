@@ -14,7 +14,7 @@ from django.test import LiveServerTestCase
 from . import test_agent_work_consumption as fixture
 from . import test_native_consumption_runtime as native
 from .agent_work_confirmation import committed_confirmation
-from .runtime_client import build_agent_run_start
+from .testing import fenced_start_fixture
 from .models import WorkspaceMembership
 
 
@@ -54,7 +54,7 @@ class WorkReturnConfirmationRuntimeTests(LiveServerTestCase):
         config = connection.settings_dict
         url = "postgresql://{}:{}@{}:{}/{}".format(quote(config["USER"]), quote(config["PASSWORD"]),
             config["HOST"], config["PORT"], quote(config["NAME"]))
-        payload = {"agentRunStart": build_agent_run_start(run), "databaseUrl": url,
+        payload = {"agentRunStart": fenced_start_fixture(run), "databaseUrl": url,
             "signingKey": settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY,
             "liveServerUrl": self.live_server_url, "internalToken": settings.INTERNAL_API_TOKEN,
             "notice": notice, "attemptId": attempt.pk, "case": case}

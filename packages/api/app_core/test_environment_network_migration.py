@@ -9,10 +9,10 @@ from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 from django.utils import timezone
 
-from .benchmark_profile import benchmark_profile_digest
+from .migration_authorization_fixtures import historical_profile_digest as benchmark_profile_digest
 from .migration_testing import isolated_migration_database
-from .runtime_contract import authorization_digest, authorization_signature
-from .test_benchmark_profile import profile
+from .migration_authorization_fixtures import historical_digest as authorization_digest, historical_signature as authorization_signature
+from .migration_authorization_fixtures import historical_profile as profile
 
 
 class EnvironmentNetworkMigrationTests(TransactionTestCase):
@@ -51,7 +51,7 @@ class EnvironmentNetworkMigrationTests(TransactionTestCase):
         environment.refresh_from_db(using=database.alias)
 
     def run_and_grant(self, fixture, session, environment, version, *, corrupt_network=False):
-        root = Path(__file__).resolve().parents[3] / "tests/workspace/fixtures/agent_run_authorization"
+        root = Path(__file__).resolve().parents[3] / "tests/workspace/fixtures/historical_agent_run_authorization"
         name = "benchmark.json" if version == 3 and environment.benchmark_profile else "ordinary.json" if version == 3 else "valid.json"
         payload = json.loads((root / f"v{version}" / name).read_text(encoding="utf-8"))
         run = fixture.manager("AgentRun").create(workspace_id=fixture.workspace.pk, user_id=fixture.user.pk,

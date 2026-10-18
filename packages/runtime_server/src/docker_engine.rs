@@ -1,7 +1,6 @@
 //! Local Docker transport. Runtime semantics stay in the execution host.
-pub(crate) mod benchmark_transfer;
 mod exec;
-pub(crate) use exec::{ExecChild, ExecReader, ExecRequest, ExecStatus, ExecWriter};
+pub(crate) use exec::{ExecChild, ExecReader, ExecStatus, ExecWriter};
 use std::future::Future;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -587,9 +586,19 @@ mod tests {
                 .iter()
                 .any(|value| value.as_str().is_some_and(|text| text.starts_with("PATH="))));
             start(&id)?;
-            let mut child=ExecRequest::new(&id,vec!["/bin/sh".into(),"-c".into(),"test \"$HTTP_PROXY\" = http://proxy.test:7890 && test \"$http_proxy\" = http://proxy.test:7890 && test -n \"$PATH\"".into()]).spawn()?;
-            child.stdin.take();
-            assert_eq!(child.wait().map_err(|e| e.to_string())?.code(), Some(0));
+            let current = inspect(&id)?.ok_or("test container absent before observation")?;
+            verify_created(&current, &request)?;
+            if current["Config"]["Labels"]["centaeris.test.environment"].as_str()
+                != Some(name.as_str())
+            {
+                return Err("test container owner mismatch".into());
+            }
+            let status = std::process::Command::new("docker")
+                .args(["exec", &id, "/bin/sh", "-c", "test \"$HTTP_PROXY\" = http://proxy.test:7890 && test \"$http_proxy\" = http://proxy.test:7890 && test -n \"$PATH\""])
+                .stdin(std::process::Stdio::null())
+                .status()
+                .map_err(|error| error.to_string())?;
+            assert!(status.success());
             Ok(())
         })();
         remove(&id, true).unwrap();

@@ -6,9 +6,7 @@ use postgres::{Client, GenericClient};
 use super::PostgresRuntimeStore;
 mod retained;
 pub(crate) mod retirement;
-use crate::resident_capacity::{
-    ObservedResidentSandbox, ResidentCapacity, ResidentSandboxRequest, RESIDENT_CAPACITY_WAIT,
-};
+use crate::resident_capacity::{ObservedResidentSandbox, ResidentCapacity, RESIDENT_CAPACITY_WAIT};
 
 // This session lock spans a committed reservation and the bounded Docker
 // mutation. A SQL transaction alone could roll back after Docker committed.
@@ -47,33 +45,6 @@ pub(super) fn with_host_inventory<T>(
 }
 
 impl PostgresRuntimeStore {
-    pub(crate) fn with_resident_execution_restore<T: Send>(
-        &self,
-        host_id: &str,
-        agent_run_id: &str,
-        execution_id: &str,
-        fence: &RuntimeJobLeaseFence,
-        restore: impl FnOnce() -> T + Send,
-    ) -> Result<T, String> {
-        self.with_client(|client| {
-            let mut tx = client.transaction().map_err(|error| error.to_string())?;
-            reject_retained_legacy(&mut tx, agent_run_id, Some(execution_id))?;
-            // Pin the current owner throughout the bounded physical restore.
-            // Lease reclaimers skip this row until the operation has finished.
-            verify_removal_fence(&mut tx, agent_run_id, fence)?;
-            let resident = tx.query_opt(
-                "SELECT 1 FROM resident_sandboxes s JOIN execution_job_tenants t ON t.job_id=$4 JOIN app_core_agentrun a ON a.id=s.agent_run_id WHERE s.host_id=$1 AND s.agent_run_id=$2 AND s.execution_id=$3 AND s.state='resident' AND s.container_id IS NOT NULL AND s.workspace_id=t.workspace_id AND a.workspace_id=t.workspace_id AND a.status IN('queued','running') FOR UPDATE OF s",
-                &[&host_id, &agent_run_id, &execution_id, &fence.job_id],
-            ).map_err(|error| format!("verify resident restore binding failed: {error}"))?;
-            if resident.is_none() {
-                return Err("resident restore binding rejected".into());
-            }
-            let restored = restore();
-            tx.commit().map_err(|error| format!("release resident restore lease fence failed: {error}"))?;
-            Ok(restored)
-        })
-    }
-
     pub(crate) fn reconcile_resident_sandboxes(
         &self,
         host_id: &str,
@@ -82,82 +53,6 @@ impl PostgresRuntimeStore {
         self.with_client(|client| {
             let lock = lock_host(client)?;
             reconcile(lock.0, host_id, &inventory()?)
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn prepare_resident_sandbox(
-        &self,
-        host_id: &str,
-        request: &ResidentSandboxRequest<'_>,
-        limits: ResidentCapacity,
-        inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String> + Send,
-        prepare: impl FnOnce() -> Result<String, String> + Send,
-    ) -> Result<(), String> {
-        self.prepare_resident_sandbox_with_client(host_id, request, limits, inventory, |_| {
-            prepare()
-        })
-    }
-
-    pub(crate) fn prepare_resident_sandbox_with_client(
-        &self,
-        host_id: &str,
-        request: &ResidentSandboxRequest<'_>,
-        limits: ResidentCapacity,
-        inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String> + Send,
-        prepare: impl FnOnce(&mut Client) -> Result<String, String> + Send,
-    ) -> Result<(), String> {
-        if host_id.trim().is_empty()
-            || request.execution_id.trim().is_empty()
-            || request.lifecycle_job_id != agent_run_lifecycle_job_id(request.agent_run_id)?
-        {
-            return Err("resident sandbox identity invalid".into());
-        }
-        self.with_client(|client| {
-            let lock = lock_host(client)?;
-            let inventory = inventory()?;
-            reconcile(lock.0, host_id, &inventory)?;
-            if request.must_exist && !inventory.iter().any(|sandbox| sandbox.execution_id == request.execution_id && sandbox.agent_run_id == request.agent_run_id) {
-                return Err("execution_environment_lost:container_missing".into());
-            }
-            let mut tx = lock.0.transaction().map_err(|error| error.to_string())?;
-            super::resource_commit::require_durable_resource_commit(&mut tx)?;
-            reject_retained_legacy(&mut tx, request.agent_run_id, Some(request.execution_id))?;
-            // Signed authorization supplies the workspace. Its durable job
-            // binding and live lease must agree before physical creation.
-            let admitted = tx.query_opt("SELECT t.workspace_id,a.environment_id FROM runtime_jobs j JOIN execution_job_tenants t ON t.job_id=j.job_id JOIN app_core_agentrun a ON a.id=$4 WHERE j.job_id=$1 AND j.job_kind='agent_run.lifecycle' AND j.status IN('leased','running') AND j.lease_owner=$2 AND j.lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint AND t.workspace_id=$3 AND a.workspace_id=t.workspace_id AND a.status IN('queued','running')", &[&request.lifecycle_job_id, &request.lifecycle_lease_owner, &request.workspace_id, &request.agent_run_id])
-                .map_err(|error| format!("verify resident admission owner failed: {error}"))?;
-            let Some(admitted) = admitted.filter(|row| row.get::<_, String>(0) == request.workspace_id) else {
-                return Err("resident sandbox lease or tenant binding rejected".into());
-            };
-            if let Some(environment_id) = admitted.get::<_, Option<String>>(1) {
-                super::execution_instances::require_per_run_environment(&mut tx, &environment_id)?;
-            }
-            let existing = tx.query_opt("SELECT workspace_id,agent_run_id,state,memory_bytes,cpu_milli,pids,workspace_bytes FROM resident_sandboxes WHERE host_id=$1 AND execution_id=$2 FOR UPDATE", &[&host_id, &request.execution_id])
-                .map_err(|error| error.to_string())?;
-            if let Some(row) = existing {
-                if row.get::<_, String>(0) != request.workspace_id || row.get::<_, String>(1) != request.agent_run_id
-                    || usage(&row, 3)? != request.resources {
-                    return Err("resident reservation identity or resources mismatch".into());
-                }
-                if row.get::<_, String>(2) == "releasing" { return Err(RESIDENT_CAPACITY_WAIT.into()); }
-            } else {
-                if !request.resources.fits(limits.global) || !request.resources.fits(limits.tenant) || !request.resources.fits(limits.host) {
-                    return Err(RESIDENT_CAPACITY_WAIT.into());
-                }
-                let (global_used, tenant_used, host_used) = used(&mut tx, host_id, request.workspace_id)?;
-                if !admit_resident_resources(global_used, tenant_used, request.resources, limits.global, limits.tenant)?
-                    || !host_used.checked_add(request.resources)?.fits(limits.host) {
-                    return Err(RESIDENT_CAPACITY_WAIT.into());
-                }
-                insert(&mut tx, host_id, request.execution_id, request.agent_run_id, request.workspace_id, None, "reserved", request.resources)?;
-            }
-            tx.commit().map_err(|error| error.to_string())?;
-            // Unknown creation outcomes keep the reservation across restart.
-            let container_id = prepare(lock.0)?;
-            lock.0.execute("UPDATE resident_sandboxes SET state='resident',container_id=$3,updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE host_id=$1 AND execution_id=$2", &[&host_id, &request.execution_id, &container_id])
-                .map_err(|error| format!("confirm resident sandbox failed: {error}"))?;
-            Ok(())
         })
     }
 
@@ -244,7 +139,7 @@ impl PostgresRuntimeStore {
             tx.execute("UPDATE resident_sandboxes SET state='releasing',updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE host_id=$1 AND agent_run_id=$2 AND ($3::text IS NULL OR execution_id=$3)", &[&host_id, &agent_run_id, &execution_id])
                 .map_err(|error| error.to_string())?;
             remove(&mut tx)?;
-            if inventory()?.iter().any(|sandbox| sandbox.agent_run_id == agent_run_id && execution_id.is_none_or(|id| sandbox.execution_id == id)) {
+            if inventory()?.iter().any(|sandbox| sandbox.allocation_owner == (centaeris_core::execution::EnvironmentTaskOwner::AgentRun{run_id:agent_run_id.into()}) && execution_id.is_none_or(|id| sandbox.execution_id == id)) {
                 return Err("resident sandbox removal was not confirmed".into());
             }
             tx.execute("DELETE FROM resident_sandboxes WHERE host_id=$1 AND agent_run_id=$2 AND ($3::text IS NULL OR execution_id=$3)", &[&host_id, &agent_run_id, &execution_id])
@@ -300,7 +195,7 @@ fn usage(row: &postgres::Row, offset: usize) -> Result<ResidentResourceUsage, St
     })
 }
 
-fn used(
+pub(super) fn used(
     client: &mut impl GenericClient,
     host_id: &str,
     tenant: &str,
@@ -331,11 +226,11 @@ fn used(
 
 // Persist the complete ownership and resource declaration in one reservation.
 #[allow(clippy::too_many_arguments)]
-fn insert(
+pub(super) fn insert(
     client: &mut impl GenericClient,
     host_id: &str,
     execution_id: &str,
-    agent_run_id: &str,
+    agent_run_id: Option<&str>,
     workspace_id: &str,
     container_id: Option<&str>,
     state: &str,
@@ -358,18 +253,31 @@ fn reconcile(
     let mut tx = client.transaction().map_err(|error| error.to_string())?;
     super::resource_commit::require_durable_resource_commit(&mut tx)?;
     for sandbox in inventory {
-        let tenant = tx
-            .query_opt(
+        let run_id = match &sandbox.allocation_owner {
+            centaeris_core::execution::EnvironmentTaskOwner::AgentRun { run_id } => {
+                Some(run_id.as_str())
+            }
+            centaeris_core::execution::EnvironmentTaskOwner::MaintenanceOperation { .. } => None,
+        };
+        let tenant = if let Some(run) = run_id {
+            tx.query_opt(
                 "SELECT workspace_id FROM execution_job_tenants WHERE job_id=$1",
-                &[&agent_run_lifecycle_job_id(&sandbox.agent_run_id)?],
+                &[&agent_run_lifecycle_job_id(run)?],
             )
-            .map_err(|error| error.to_string())?
+            .map_err(|e| e.to_string())?
             .ok_or("managed resident sandbox has unknown tenant; admission blocked")?
-            .get::<_, String>(0);
-        let existing = tx.query_opt("SELECT agent_run_id,workspace_id,container_id,memory_bytes,cpu_milli,pids,workspace_bytes FROM resident_sandboxes WHERE host_id=$1 AND execution_id=$2", &[&host_id, &sandbox.execution_id])
-            .map_err(|error| error.to_string())?;
+            .get::<_, String>(0)
+        } else {
+            tx.query_opt("SELECT s.workspace_id FROM runtime.execution_instances i JOIN runtime.resident_sandboxes s ON s.execution_id=i.execution_id WHERE i.execution_id=$1 AND i.agent_run_id IS NULL AND i.allocation_owner_json::jsonb=$2::text::jsonb AND i.allocation_execution_id=i.execution_id FOR SHARE OF i,s",&[&sandbox.execution_id,&serde_json::to_string(&sandbox.allocation_owner).map_err(|_|"allocation_owner_invalid")?]).map_err(|e|e.to_string())?.ok_or("managed maintenance sandbox has no durable reservation")?.get(0)
+        };
+        let existing = tx.query_opt("SELECT agent_run_id,workspace_id,container_id,memory_bytes,cpu_milli,pids,workspace_bytes,allocation_owner_json FROM resident_sandboxes WHERE host_id=$1 AND execution_id=$2", &[&host_id, &sandbox.execution_id]).map_err(|error| error.to_string())?;
         if let Some(row) = existing {
-            if row.get::<_, String>(0) != sandbox.agent_run_id
+            if row.get::<_, Option<String>>(0).as_deref() != run_id
+                || serde_json::from_str::<centaeris_core::execution::EnvironmentTaskOwner>(
+                    &row.get::<_, String>(7),
+                )
+                .map_err(|_| "allocation_owner_invalid")?
+                    != sandbox.allocation_owner
                 || row.get::<_, String>(1) != tenant
                 || row
                     .get::<_, Option<String>>(2)
@@ -386,7 +294,7 @@ fn reconcile(
                 &mut tx,
                 host_id,
                 &sandbox.execution_id,
-                &sandbox.agent_run_id,
+                run_id,
                 &tenant,
                 Some(&sandbox.container_id),
                 "resident",

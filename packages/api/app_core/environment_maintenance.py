@@ -14,10 +14,12 @@ from django.db import connection
 from django.utils import timezone
 
 from .environment_lifecycle import MAX_CONTROLLER_EPOCH, _translate_contention, controller_lease_digest
-from .environment_maintenance_authorization import SCHEMA, sign_maintenance_authorization
+from .environment_maintenance_authorization import SCHEMA, sign_maintenance_authorization, sign_provision_authorization
 from .models import EnvironmentMaintenanceGrant, EnvironmentMaintenanceOperation, Session, SessionEnvironment, Workspace
 
 LEASE_MS = 5 * 60 * 1000
+MAX_COMMAND_TIMEOUT_MS = 3_600_000
+CLEANUP_GRACE_MS = 30_000
 
 
 class MaintenanceError(ValueError):
@@ -42,6 +44,26 @@ def _digest(request):
     if len(encoded) > 64 * 1024:
         raise MaintenanceError('maintenance_request_invalid', 400)
     return 'sha256:' + hashlib.sha256(encoded).hexdigest()
+
+
+def _maintenance_lease_ms(request):
+    # Command duration is part of the immutable signed request. The server sets
+    # the lease once; replay returns its original deadline without extension.
+    if isinstance(request, dict) and set(request) == {'program', 'args', 'cwd', 'timeoutMs'}:
+        if (type(request['timeoutMs']) is not int or not 0 < request['timeoutMs'] <= MAX_COMMAND_TIMEOUT_MS
+                or any(not isinstance(request[name], str) or not request[name] or '\x00' in request[name]
+                    for name in ('program', 'cwd'))
+                or not isinstance(request['args'], list)
+                or any(not isinstance(arg, str) or '\x00' in arg for arg in request['args'])):
+            raise MaintenanceError('maintenance_request_invalid', 400)
+        return max(LEASE_MS, request['timeoutMs'] + CLEANUP_GRACE_MS)
+    if (isinstance(request, dict) and set(request) == {'request', 'contentLength', 'contentDigest'}
+            and isinstance(request['request'], dict) and type(request['contentLength']) is int
+            and 0 <= request['contentLength'] <= 32 * 1024 * 1024
+            and isinstance(request['contentDigest'], str)
+            and re.fullmatch(r'sha256:[0-9a-f]{64}', request['contentDigest'])):
+        return LEASE_MS
+    raise MaintenanceError('maintenance_request_invalid', 400)
 
 
 def _locked_environment(environment_id):
@@ -80,6 +102,11 @@ def _allocation(workspace, session, environment):
         if cursor.fetchone() is not None:
             raise MaintenanceError('maintenance_environment_retiring')
     instance, container, host, execution, profile = rows[0]
+    from .environment_profile import environment_profile_digest
+    if (environment.environment_profile is None
+            or environment_profile_digest(environment.environment_profile) != environment.environment_profile_digest
+            or profile != environment.environment_profile_digest):
+        raise MaintenanceError('maintenance_allocation_profile_mismatch')
     if (not isinstance(instance, str) or not re.fullmatch(r'instance_[0-9a-f]{64}', instance)
             or not isinstance(container, str) or not re.fullmatch(r'[0-9a-f]{64}', container)
             or not isinstance(profile, str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', profile)
@@ -90,11 +117,22 @@ def _allocation(workspace, session, environment):
 
 
 def _grant_result(grant):
+    signer = sign_provision_authorization if grant.operation.operation_kind == 'provision' else sign_maintenance_authorization
+    try:
+        valid = (_digest(grant.payload) == grant.digest
+            and secrets.compare_digest(signer(grant.payload, settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY), grant.signature))
+    except (ValueError, TypeError, KeyError):
+        valid = False
+    if not valid:
+        raise MaintenanceError('maintenance_grant_invalid')
     return {'payload': grant.payload, 'signature': grant.signature}
 
 
 def _completion_matches(operation, grant):
     """None means no record; false is conflicting or malformed immutable evidence."""
+    if operation.operation_kind == 'provision':
+        from .environment_provision import provision_completion_matches
+        return provision_completion_matches(operation, grant)
     with connection.cursor() as cursor:
         cursor.execute('SELECT environment_id,instance_id,container_id,profile_digest,controller_epoch,'
             'controller_lease_digest,request_digest,completion_json FROM runtime.environment_maintenance_completions '
@@ -128,13 +166,14 @@ def issue_maintenance_authorization(environment_id, body):
             or not 0 <= body['expectedControllerEpoch'] < MAX_CONTROLLER_EPOCH):
         raise MaintenanceError('maintenance_request_invalid', 400)
     request_digest = _digest(body['request'])
+    lease_ms = _maintenance_lease_ms(body['request'])
     expected, purpose = body['expectedControllerEpoch'], body['controllerPurpose']
 
     def issue():
         workspace, session, environment = _locked_environment(environment_id)
         operation = EnvironmentMaintenanceOperation.objects.select_for_update().filter(pk=body['operationId']).first()
         if operation is not None:
-            if (operation.environment_id != environment.pk or operation.workspace_id != workspace.pk
+            if (operation.operation_kind != 'task' or operation.environment_id != environment.pk or operation.workspace_id != workspace.pk
                     or operation.session_id != session.pk or operation.request_digest != request_digest
                     or operation.request != body['request']):
                 raise MaintenanceError('maintenance_operation_conflict')
@@ -171,8 +210,8 @@ def issue_maintenance_authorization(environment_id, body):
             raise MaintenanceError('maintenance_operation_target_changed')
         lease_owner = 'maintenance:' + secrets.token_hex(32)
         lease_digest = controller_lease_digest(lease_owner)
-        epoch, deadline = environment.controller_epoch + 1, _now_ms() + LEASE_MS
-        payload = {'schema': SCHEMA, 'workspaceId': workspace.pk, 'sessionId': session.pk,
+        epoch, deadline = environment.controller_epoch + 1, _now_ms() + (lease_ms if purpose == 'execute' else LEASE_MS)
+        payload = {'schema': SCHEMA, 'operationKind': 'task', 'workspaceId': workspace.pk, 'sessionId': session.pk,
             'environmentId': environment.pk, 'instanceId': operation.instance_id,
             'containerId': operation.container_id, 'profileDigest': operation.profile_digest,
             'controllerOwner': {'kind': 'maintenanceOperation', 'operationId': operation.pk},
@@ -210,6 +249,7 @@ def release_maintenance_operation(environment_id, operation_id, body):
         if operation is None or operation.current_grant_id is None:
             raise MaintenanceError('maintenance_operation_missing', 404)
         grant = EnvironmentMaintenanceGrant.objects.select_for_update().get(pk=operation.current_grant_id)
+        _grant_result(grant)
         if grant.controller_epoch != body['controllerEpoch'] or grant.controller_lease_digest != body['controllerLeaseDigest']:
             raise MaintenanceError('maintenance_release_rejected')
         receipt = {'environmentId': environment.pk,

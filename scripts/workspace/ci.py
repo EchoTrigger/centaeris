@@ -24,6 +24,8 @@ def run(label, args, capture=False):
         env.setdefault("UPLOAD_TEMP_MAX_BYTES", "4194304")
         env.setdefault("UPLOAD_MAX_CONCURRENT", "2")
         env.setdefault("WORK_RETURN_AUDIT_INTERVAL_SECONDS", "3600")
+        env.setdefault("ENVIRONMENT_EXECUTION_HELPER", "/opt/centaeris/host/execution_agent")
+        env.setdefault("ENVIRONMENT_EXECUTION_HELPER_SHA256", "0" * 64)
     if os.name == "nt":
         bash = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe"
         if not bash.is_file():

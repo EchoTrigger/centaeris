@@ -20,7 +20,7 @@ pub(crate) struct DockerCleanupHost<'a> {
     pub lease: &'a centaeris_core::session::RuntimeJobLeaseFence,
     pub allocation: &'a crate::postgres_store::execution_instances::RetainedInstanceAllocation,
     pub resources: centaeris_core::execution::ResidentResourceUsage,
-    pub origin_authorization: &'a crate::agent_run_authorization::WorkspaceAgentRunAuthorization,
+    pub origin_authorization: &'a crate::postgres_store::allocation_origin::AllocationOrigin,
 }
 
 pub(crate) fn confirm_run_cleanup(

@@ -14,7 +14,7 @@ from django.utils import timezone
 from app_core.models import Agent, AgentRun, HostedOperationReceipt, ModelConfig, Session, Workspace, WorkspaceMembership
 
 
-PROFILE = {"schema": "runtime.execution_profile.v1", "imageCapability": "workspace_general_v1",
+PROFILE = {"schema": "runtime.execution_profile.v1",
            "imageDigest": "sha256:" + "a" * 64}
 
 

@@ -42,6 +42,13 @@ def issue_environment_maintenance_authorization(request, environment_id: str):
     return _response(request, lambda body: issue_maintenance_authorization(environment_id, body))
 
 
+@router.post('/environments/{environment_id}/provision-authorizations', auth=None,
+             response=None, include_in_schema=False)
+def issue_environment_provision_authorization(request, environment_id: str):
+    from app_core.environment_provision import issue_provision_authorization
+    return _response(request, lambda body: issue_provision_authorization(environment_id, body))
+
+
 @router.post('/environments/{environment_id}/maintenance-operations/{operation_id}/release', auth=None,
              response=None, include_in_schema=False)
 def release_environment_maintenance_operation(request, environment_id: str, operation_id: str):

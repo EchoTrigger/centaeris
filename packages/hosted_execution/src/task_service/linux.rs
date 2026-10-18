@@ -1,21 +1,25 @@
 use super::*;
 use std::{
     ffi::CString,
-    io::{BufRead, BufReader},
     os::{
         fd::AsRawFd,
-        unix::{
-            ffi::OsStrExt,
-            fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
-            net::{UnixListener, UnixStream},
-            process::CommandExt,
-        },
+        unix::{ffi::OsStrExt, fs::OpenOptionsExt},
     },
     path::PathBuf,
-    process::{Child, ChildStdin, Command, Stdio},
-    sync::{Arc, Mutex, mpsc},
+    process::{ChildStdin, Command, Stdio},
+    sync::{mpsc, Arc, Mutex},
     thread,
     time::{Duration, Instant},
+};
+#[cfg(test)]
+use std::{
+    io::{BufRead, BufReader},
+    os::unix::{
+        fs::{MetadataExt, PermissionsExt},
+        net::{UnixListener, UnixStream},
+        process::CommandExt,
+    },
+    process::Child,
 };
 
 fn verify_domain(path: &Path) -> Result<(), String> {
@@ -42,6 +46,7 @@ fn verify_domain(path: &Path) -> Result<(), String> {
 }
 
 /// Called before exec using only async-signal-safe syscalls and stack storage.
+#[cfg(test)]
 fn assign_self(fd: i32) -> std::io::Result<()> {
     let mut bytes = [0u8; 64];
     // SAFETY: fd belongs to the pre-opened task cgroup.procs, and bytes is a valid buffer.
@@ -72,19 +77,22 @@ fn assign_self(fd: i32) -> std::io::Result<()> {
     Err(std::io::Error::from_raw_os_error(libc::EIO))
 }
 
-const SOCKET: &str = "/run/centaeris/tasks.sock";
-const CONTROL_ROOT: &str = "/run/centaeris/task-control";
-const OUTPUT_ROOT: &str = "/run/centaeris/task-output";
 const OUTPUT_BUDGET_BYTES: u64 = (ENVIRONMENT_TASK_MAX_RECORDS
     * (ENVIRONMENT_TASK_OUTPUT_BYTES / CHUNK)
     * (HEADER + CHUNK)) as u64;
-const MAX_REQUEST: usize = 128 * 1024;
+#[cfg(test)]
 const MAX_RESPONSE: usize = 512 * 1024;
+pub(crate) mod launcher;
+mod trusted;
+use launcher::{RuncTarget, Spawned, TaskChild};
+pub(crate) use trusted::HelperBinary;
+use trusted::{HelperCapture, ReservedInput, TrustedLaunch};
 struct Live {
-    child: Child,
+    child: TaskChild,
     input: Option<ChildStdin>,
     cgroup: PathBuf,
     supervisor: thread::JoinHandle<()>,
+    input_worker: Option<thread::JoinHandle<bool>>,
 }
 struct ControlLease {
     _file: File,
@@ -114,11 +122,13 @@ impl ControlLease {
         Ok(Self { _file: file })
     }
 }
+#[cfg(test)]
 struct ServiceControl {
     lease: ControlLease,
     listener: UnixListener,
     journal: Journal,
 }
+#[cfg(test)]
 fn prepare_control(root: &Path, socket: &Path, instance: &str) -> Result<ServiceControl, String> {
     let lease = ControlLease::acquire(root)?;
     let listener = UnixListener::bind(socket).map_err(|_| "task_socket_bind_failed")?;
@@ -135,6 +145,8 @@ struct Manager {
     _control_lease: ControlLease,
     storage: TaskStorage,
     cgroups: PathBuf,
+    launcher: Option<RuncTarget>,
+    helper_root: Option<PathBuf>,
     journal: Journal,
     live: BTreeMap<String, Live>,
     logs: BTreeMap<String, Arc<Mutex<OutputLog>>>,
@@ -189,6 +201,8 @@ impl Manager {
             _control_lease: lease,
             storage,
             cgroups,
+            launcher: None,
+            helper_root: None,
             journal,
             live: BTreeMap::new(),
             logs,
@@ -307,6 +321,14 @@ impl Manager {
                 continue;
             }
             self.logs.remove(&id);
+            if let Some(root) = &self.helper_root {
+                for suffix in ["stdout", "stderr"] {
+                    let path = root.join(format!("{id}.{suffix}"));
+                    if path.exists() {
+                        fs::remove_file(path).map_err(|_| "task_history_retirement_pending")?;
+                    }
+                }
+            }
             match fs::remove_file(self.storage.output_root.join(format!("{id}.output"))) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -383,7 +405,22 @@ impl Manager {
         manager: &Arc<Mutex<Self>>,
         request: EnvironmentTaskRequest,
     ) -> Result<EnvironmentTaskResult, String> {
+        Self::handle_with_helper(manager, request, None)
+    }
+    fn handle_with_helper(
+        manager: &Arc<Mutex<Self>>,
+        request: EnvironmentTaskRequest,
+        trusted: Option<&TrustedLaunch>,
+    ) -> Result<EnvironmentTaskResult, String> {
         request.validate_authority()?;
+        let start_digest = if matches!(&request, EnvironmentTaskRequest::Start { .. }) {
+            Some(task_start_digest(
+                &request,
+                trusted.map(TrustedLaunch::identity).transpose()?,
+            )?)
+        } else {
+            None
+        };
         let mut m = manager.lock().map_err(|_| "task_service_failed")?;
         match request {
             EnvironmentTaskRequest::Takeover {
@@ -463,6 +500,7 @@ impl Manager {
                 scope,
                 program,
                 args,
+                env,
                 cwd,
                 timeout_ms,
             } => {
@@ -477,26 +515,12 @@ impl Manager {
                     return Err("task_invalid_start".into());
                 }
                 fence.authorize_start(&scope)?;
-                let (_, opaque) = operation_id
-                    .split_once(':')
-                    .ok_or("task_invalid_operation_id")?;
-                let d = digest(&(
-                    &fence.environment_instance_id,
-                    &fence.controller_owner,
-                    &fence.controller_purpose,
-                    opaque,
-                    &scope,
-                    &program,
-                    &args,
-                    &cwd,
-                    timeout_ms,
-                ))?;
+                let d = start_digest.expect("validated Start digest");
                 let id = task_identity(&fence, &operation_id)?;
                 if m.journal.existing(&id, &d)?.is_some() {
                     return m.query(&id, 0, ENVIRONMENT_TASK_READ_BYTES);
                 }
-                let cwd = fs::canonicalize(cwd).map_err(|_| "task_invalid_cwd")?;
-                if !cwd.starts_with("/mnt/data") && !cwd.starts_with("/home/agent") {
+                if !crate::host_supervisor::absolute_path(&cwd) {
                     return Err("task_invalid_cwd".into());
                 }
                 m.retire_history(fence.controller_epoch)?;
@@ -527,6 +551,15 @@ impl Manager {
                 #[cfg(not(test))]
                 let failure = None;
                 let mut workers = ReservedWorkers::new(failure)?;
+                let mut feeder = trusted
+                    .map(|launch| {
+                        launch
+                            .input
+                            .try_clone()
+                            .map_err(|_| "host_helper_input_incomplete".to_owned())
+                            .and_then(|input| ReservedInput::new(input, launch.input_guard.clone()))
+                    })
+                    .transpose()?;
                 let cgroup = m.cgroups.join(&id);
                 verify_domain(&m.cgroups)?;
                 fs::create_dir(&cgroup).map_err(|_| "task_cgroup_create_failed")?;
@@ -550,6 +583,13 @@ impl Manager {
                     }
                 };
                 m.logs.insert(id.clone(), log.clone());
+                if let Some(launch) = trusted {
+                    launch
+                        .capture
+                        .lock()
+                        .map_err(|_| "task_service_failed")?
+                        .retained = true;
+                }
                 m.journal.tasks.insert(id.clone(), record);
                 if let Err(error) = m.persist() {
                     if error == "task_index_capacity" {
@@ -557,6 +597,13 @@ impl Manager {
                         // tasks supervised and discard only this unaccepted task.
                         m.journal.tasks.remove(&id);
                         m.logs.remove(&id);
+                        if let Some(launch) = trusted {
+                            launch
+                                .capture
+                                .lock()
+                                .map_err(|_| "task_service_failed")?
+                                .retained = false;
+                        }
                         drop(log);
                         drop(procs);
                         let _ = fs::remove_file(m.storage.output_root.join(format!("{id}.output")));
@@ -589,42 +636,50 @@ impl Manager {
                     drop(receive);
                     workers.err = Some(send);
                 }
-                let fd = procs.as_raw_fd();
-                let mut command = Command::new(program);
-                command
-                    .args(args)
-                    .current_dir(cwd)
-                    .env_clear()
-                    .env(
-                        "PATH",
-                        "/opt/centaeris/bin:/opt/centaeris/venv/bin:/usr/local/bin:/usr/bin:/bin",
+                let spawned = if let Some(target) = &m.launcher {
+                    target.spawn(
+                        &id,
+                        launcher::TaskProcess {
+                            program: &program,
+                            args: &args,
+                            cwd: &cwd,
+                            env: &env,
+                        },
+                        &cgroup,
+                        trusted,
                     )
-                    .env("HOME", "/home/agent")
-                    .env("LANG", "C.UTF-8")
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped());
-                // SAFETY: pre_exec only calls async-signal-safe syscalls. Parent retains the cgroup fd through spawn.
-                unsafe {
-                    command.pre_exec(move || {
-                        assign_self(fd)?;
-                        if libc::setpgid(0, 0) != 0
-                            || libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
-                            || libc::setgroups(0, std::ptr::null()) != 0
-                            || libc::setgid(10001) != 0
-                            || libc::setuid(10001) != 0
-                        {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        Ok(())
-                    });
-                }
-                match command.spawn() {
-                    Ok(mut child) => {
-                        let stdout = child.stdout.take().expect("piped stdout");
-                        let stderr = child.stderr.take().expect("piped stderr");
-                        let input = child.stdin.take();
+                } else {
+                    #[cfg(test)]
+                    {
+                        spawn_local(&program, &args, &cwd, &env, procs.as_raw_fd())
+                    }
+                    #[cfg(not(test))]
+                    {
+                        Err("task_native_launcher_required".into())
+                    }
+                };
+                match spawned {
+                    Ok(Spawned {
+                        child,
+                        mut input,
+                        stdout,
+                        stderr,
+                    }) => {
                         let mut input_failed = false;
+                        let input_worker = match feeder.take() {
+                            Some(feeder) => match input
+                                .take()
+                                .ok_or_else(|| "task_input_configuration_failed".to_owned())
+                                .and_then(|input| feeder.deliver(input))
+                            {
+                                Ok(worker) => Some(worker),
+                                Err(_) => {
+                                    input_failed = true;
+                                    None
+                                }
+                            },
+                            None => None,
+                        };
                         if let Some(stdin) = &input {
                             // SAFETY: stdin is a valid pipe fd, made nonblocking to bound controller requests.
                             unsafe {
@@ -647,6 +702,7 @@ impl Manager {
                                 input,
                                 cgroup: cgroup.clone(),
                                 supervisor,
+                                input_worker,
                             },
                         );
                         m.journal
@@ -661,11 +717,13 @@ impl Manager {
                                     reader: Box::new(stdout),
                                     log: log.clone(),
                                     stream: EnvironmentTaskStream::Stdout,
+                                    capture: trusted.map(|launch| launch.capture.clone()),
                                 },
                                 DrainWork {
                                     reader: Box::new(stderr),
                                     log,
                                     stream: EnvironmentTaskStream::Stderr,
+                                    capture: trusted.map(|launch| launch.capture.clone()),
                                 },
                             )
                             .is_err()
@@ -848,10 +906,45 @@ impl Manager {
         }
     }
 }
+fn task_start_digest(
+    request: &EnvironmentTaskRequest,
+    trusted_identity: Option<String>,
+) -> Result<String, String> {
+    let EnvironmentTaskRequest::Start {
+        fence,
+        operation_id,
+        scope,
+        program,
+        args,
+        env,
+        cwd,
+        timeout_ms,
+    } = request
+    else {
+        return Err("task_invalid_start".into());
+    };
+    let (_, opaque) = operation_id
+        .split_once(':')
+        .ok_or("task_invalid_operation_id")?;
+    digest(&(
+        &fence.environment_instance_id,
+        &fence.controller_owner,
+        &fence.controller_purpose,
+        opaque,
+        scope,
+        program,
+        args,
+        env,
+        cwd,
+        timeout_ms,
+        trusted_identity,
+    ))
+}
 struct DrainWork {
     reader: Box<dyn Read + Send>,
     log: Arc<Mutex<OutputLog>>,
     stream: EnvironmentTaskStream,
+    capture: Option<Arc<Mutex<HelperCapture>>>,
 }
 struct Supervision {
     manager: Arc<Mutex<Manager>>,
@@ -964,13 +1057,21 @@ fn drain(work: DrainWork) -> bool {
         mut reader,
         log,
         stream,
+        capture,
     } = work;
     let mut buf = [0; CHUNK];
     let mut okay = true;
     loop {
         match reader.read(&mut buf) {
-            Ok(0) => return okay,
+            Ok(0) => break,
             Ok(n) => {
+                if let Some(capture) = &capture {
+                    if capture.lock().map_or(true, |mut capture| {
+                        capture.append(&stream, &buf[..n]).is_err()
+                    }) {
+                        okay = false;
+                    }
+                }
                 if log.lock().map_or(true, |mut log| {
                     log.append(stream.clone(), &buf[..n]).is_err()
                 }) {
@@ -978,9 +1079,21 @@ fn drain(work: DrainWork) -> bool {
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => return false,
+            Err(_) => {
+                okay = false;
+                break;
+            }
         }
     }
+    if let Some(capture) = capture {
+        if capture
+            .lock()
+            .map_or(true, |mut capture| capture.finish(&stream).is_err())
+        {
+            okay = false;
+        }
+    }
+    okay
 }
 fn supervise(
     manager: Arc<Mutex<Manager>>,
@@ -990,37 +1103,72 @@ fn supervise(
     err: thread::JoinHandle<bool>,
 ) {
     let began = Instant::now();
+    let mut workers = [Some(out), Some(err)];
+    let mut eof = [None, None];
     loop {
+        for (worker, result) in workers.iter_mut().zip(eof.iter_mut()) {
+            if worker.as_ref().is_some_and(|w| w.is_finished()) {
+                *result = Some(
+                    worker
+                        .take()
+                        .expect("finished drain")
+                        .join()
+                        .unwrap_or(false),
+                );
+            }
+        }
         let finished = {
             let mut m = manager.lock().expect("task manager");
-            let poisoned = m.journal.poisoned;
-            let unknown = m
+            let before = m
                 .journal
                 .tasks
                 .get(&id)
-                .is_some_and(|record| record.snapshot.state == EnvironmentTaskState::Unknown);
+                .expect("task record")
+                .snapshot
+                .clone();
+            let poisoned = m.journal.poisoned;
+            let unknown = before.state == EnvironmentTaskState::Unknown;
+            let input_failed = {
+                let Some(live) = m.live.get_mut(&id) else {
+                    break;
+                };
+                if live
+                    .input_worker
+                    .as_ref()
+                    .is_some_and(|worker| worker.is_finished())
+                {
+                    !live
+                        .input_worker
+                        .take()
+                        .expect("finished input")
+                        .join()
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
+            };
+            if input_failed {
+                m.journal
+                    .tasks
+                    .get_mut(&id)
+                    .expect("task record")
+                    .snapshot
+                    .state = EnvironmentTaskState::Unknown;
+            }
             let Some(live) = m.live.get_mut(&id) else {
                 break;
             };
             if poisoned
                 || unknown
+                || input_failed
                 || (timeout_ms > 0 && began.elapsed() >= Duration::from_millis(timeout_ms))
             {
                 let _ = cgroup_kill(&live.cgroup);
             }
-            match live.child.try_wait() {
-                Ok(Some(status)) => {
-                    let clean = cgroup_kill(&live.cgroup).unwrap_or(false);
-                    let snapshot = &mut m.journal.tasks.get_mut(&id).expect("task record").snapshot;
-                    if !unknown {
-                        snapshot.state = EnvironmentTaskState::Exited;
-                    }
-                    snapshot.exit_code = status.code();
-                    snapshot.cleanup_complete = clean;
-                    let _ = m.persist();
-                    true
-                }
-                Ok(None) => false,
+            let input_pending = live.input_worker.is_some();
+            let leader = match live.child.try_wait() {
+                Ok(Some(status)) => Some(status.code()),
+                Ok(None) => None,
                 Err(_) => {
                     let _ = cgroup_kill(&live.cgroup);
                     m.journal
@@ -1029,103 +1177,152 @@ fn supervise(
                         .expect("task record")
                         .snapshot
                         .state = EnvironmentTaskState::Unknown;
-                    false
+                    None
                 }
+            };
+            let empty = fs::read_to_string(m.cgroups.join(&id).join("cgroup.events"))
+                .is_ok_and(|s| s.lines().any(|line| line == "populated 0"));
+            let snapshot = &mut m.journal.tasks.get_mut(&id).expect("task record").snapshot;
+            crate::host_supervisor::physical_snapshot(
+                snapshot,
+                leader,
+                eof == [Some(true), Some(true)],
+                empty,
+            );
+            if *snapshot != before {
+                let _ = m.persist();
             }
+            leader.is_some() && empty && !input_pending && eof.iter().all(Option::is_some)
         };
         if finished {
             break;
         }
         thread::sleep(Duration::from_millis(25));
     }
-    let output_complete = out.join().unwrap_or(false) & err.join().unwrap_or(false);
+    for worker in workers.into_iter().flatten() {
+        let _ = worker.join();
+    }
     let mut m = manager.lock().expect("task manager");
-    if let Some(live) = m.live.remove(&id) {
-        let clean = cgroup_kill(&live.cgroup).unwrap_or(false);
-        if let Some(r) = m.journal.tasks.get_mut(&id) {
-            r.snapshot.cleanup_complete = clean;
-            r.snapshot.output_complete = output_complete;
+    m.live.remove(&id);
+}
+
+/// A manager is always bound to a physically attested native target.
+pub(crate) struct NativeManager {
+    manager: Arc<Mutex<Manager>>,
+    control: PathBuf,
+    output: PathBuf,
+    helper_root: PathBuf,
+    helper_binary: Option<Arc<HelperBinary>>,
+    workspace_root: String,
+    helper_admission: Mutex<()>,
+}
+impl NativeManager {
+    pub(crate) fn open(
+        control: PathBuf,
+        output: PathBuf,
+        cgroups: PathBuf,
+        instance: &str,
+        launcher: RuncTarget,
+        helper_root: PathBuf,
+        helper_binary: Option<Arc<HelperBinary>>,
+    ) -> Result<Self, String> {
+        let parent = cgroups.parent().ok_or("task_cgroup_path_invalid")?;
+        verify_domain(parent)?;
+        if !cgroups.exists() {
+            fs::create_dir(&cgroups).map_err(|_| "task_cgroup_create_failed")?;
         }
-    }
-    let _ = m.persist();
-}
-
-pub fn serve(instance: &str, cgroups: &Path) -> Result<(), String> {
-    // SAFETY: geteuid has no arguments or side effects.
-    if unsafe { libc::geteuid() } != 0 {
-        return Err("task_service_requires_root".into());
-    }
-    if instance.is_empty() || instance.len() > 128 {
-        return Err("task_tree_supervision_unavailable".into());
-    }
-    verify_domain(cgroups)?;
-    let control_root = PathBuf::from(CONTROL_ROOT);
-    fs::create_dir_all(&control_root).map_err(|_| "task_state_create_failed")?;
-    fs::set_permissions(&control_root, fs::Permissions::from_mode(0o700))
-        .map_err(|_| "task_state_protection_failed")?;
-    let control = prepare_control(&control_root, Path::new(SOCKET), instance)?;
-    let output_root = PathBuf::from(OUTPUT_ROOT);
-    let _ = fs::create_dir_all(&output_root);
-    if output_root.exists() {
-        let _ = fs::set_permissions(&output_root, fs::Permissions::from_mode(0o700));
-    }
-    let storage = TaskStorage::new(control_root, output_root, OUTPUT_BUDGET_BYTES)?;
-    let manager = Arc::new(Mutex::new(Manager::from_journal(
-        storage,
-        cgroups.into(),
-        control.journal,
-        control.lease,
-    )?));
-    start_reaper(&manager)?;
-    let listener = control.listener;
-    for stream in listener.incoming() {
-        let stream = stream.map_err(|_| "task_socket_accept_failed")?;
-        let result = request(
-            &manager,
-            stream.try_clone().map_err(|_| "task_socket_clone_failed")?,
-        );
-        let response = EnvironmentTaskResponse::from_result(result);
-        let mut stream = stream;
-        stream
-            .set_write_timeout(Some(Duration::from_secs(2)))
-            .map_err(|_| "task_socket_timeout_failed")?;
-        let _ = serde_json::to_writer(&mut stream, &response);
-        let _ = stream.write_all(b"\n");
-    }
-    Ok(())
-}
-
-/// Docker starts this trusted supervisor as PID 1. It owns the instance, while
-/// Runtime connections may come and go. Never adopt a second initialization.
-pub fn serve_instance(instance: &str) -> Result<(), String> {
-    // SAFETY: identity syscalls have no arguments or side effects.
-    if unsafe { libc::geteuid() } != 0 || unsafe { libc::getpid() } != 1 {
-        return Err("task_instance_requires_root_init".into());
-    }
-    let id = instance
-        .strip_prefix("instance_")
-        .ok_or("task_instance_identity_invalid")?;
-    if id.len() != 64
-        || !id
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    {
-        return Err("task_instance_identity_invalid".into());
-    }
-    let tasks = super::instance::task_domain(
-        Path::new("/run/centaeris/instance-cgroups"),
-        1,
-        verify_domain,
-    )?;
-    thread::Builder::new()
-        .name("workspace-watch".into())
-        .spawn(|| {
-            if let Err(error) = crate::agent::run_workspace_watch() {
-                eprintln!("workspace watcher unavailable; generation is Unknown: {error}");
-            }
+        verify_domain(&cgroups)?;
+        let lease = ControlLease::acquire(&control)?;
+        let journal = Journal::open(&control, instance)?;
+        let storage = TaskStorage::new(control.clone(), output.clone(), OUTPUT_BUDGET_BYTES)?;
+        let mut manager = Manager::from_journal(storage, cgroups, journal, lease)?;
+        let (workspace_root, _) = crate::host_supervisor::workspace_context(&launcher.process)?;
+        manager.helper_root = Some(helper_root.clone());
+        manager.launcher = Some(launcher);
+        let manager = Arc::new(Mutex::new(manager));
+        start_reaper(&manager)?;
+        Ok(Self {
+            manager,
+            control,
+            output,
+            helper_root,
+            helper_binary,
+            workspace_root,
+            helper_admission: Mutex::new(()),
         })
-        .map_err(|_| "workspace_watcher_start_failed")?;
-    serve(instance, &tasks)
+    }
+    pub(crate) fn handle(
+        &self,
+        request: EnvironmentTaskRequest,
+    ) -> Result<EnvironmentTaskResult, String> {
+        Manager::handle(&self.manager, request)
+    }
+    pub(crate) fn inspection(&self) -> Result<serde_json::Value, String> {
+        let _guard = self.manager.lock().map_err(|_| "task_service_failed")?;
+        store::inspection(&self.control, &self.output)
+    }
+}
+/// Workload PID 1 has no controller socket, state or elevated host authority.
+pub fn workload_keeper() -> Result<(), String> {
+    // SAFETY: getpid has no arguments or side effects.
+    if unsafe { libc::getpid() } != 1 {
+        return Err("workload_keeper_requires_init".into());
+    }
+    loop {
+        // SAFETY: the workload init only reaps its own orphaned descendants.
+        while unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) } > 0 {}
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+#[cfg(test)]
+fn spawn_local(
+    program: &str,
+    args: &[String],
+    cwd: &str,
+    env: &BTreeMap<String, String>,
+    fd: i32,
+) -> Result<Spawned, String> {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .current_dir(cwd)
+        .env_clear()
+        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+        .env("HOME", "/home/agent")
+        .env("LANG", "C.UTF-8")
+        .envs(env)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // SAFETY: only async-signal-safe syscalls run between fork and exec.
+    unsafe {
+        command.pre_exec(move || {
+            assign_self(fd)?;
+            if libc::setpgid(0, 0) != 0
+                || libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+                || libc::setgroups(0, std::ptr::null()) != 0
+                || libc::setgid(10001) != 0
+                || libc::setuid(10001) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().map_err(|_| "task_launch_unknown")?;
+    let input = child.stdin.take();
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    crate::host_supervisor::linux::MANAGED_PIDS
+        .lock()
+        .map_err(|_| "task_service_failed")?
+        .insert(child.id());
+    Ok(Spawned {
+        child: TaskChild::Local(child),
+        input,
+        stdout,
+        stderr,
+    })
 }
 
 fn start_reaper(manager: &Arc<Mutex<Manager>>) -> Result<(), String> {
@@ -1169,35 +1366,45 @@ fn start_reaper(manager: &Arc<Mutex<Manager>>) -> Result<(), String> {
                             let _ = m.persist();
                         }
                     }
-                    let direct: std::collections::BTreeSet<_> =
-                        m.live.values().map(|live| live.child.id()).collect();
-                    if let Ok(entries) = fs::read_dir("/proc") {
-                        for entry in entries.flatten() {
-                            let Some(pid) = entry
-                                .file_name()
-                                .to_str()
-                                .and_then(|s| s.parse::<u32>().ok())
-                            else {
-                                continue;
-                            };
-                            if direct.contains(&pid) {
-                                continue;
-                            }
-                            let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
-                                continue;
-                            };
-                            let Some((_, fields)) = stat.rsplit_once(')') else {
-                                continue;
-                            };
-                            if fields
-                                .split_whitespace()
-                                .nth(1)
-                                .and_then(|s| s.parse::<u32>().ok())
-                                == Some(std::process::id())
-                            {
-                                // SAFETY: only reap our adopted children; direct Child handles retain exclusive wait ownership.
-                                unsafe {
-                                    libc::waitpid(pid as i32, std::ptr::null_mut(), libc::WNOHANG);
+                    // All managers share one wait registry. A reaper cannot steal
+                    // another task's leader or a host control-command child.
+                    if let Ok(_commands) = crate::host_supervisor::linux::COMMAND_LOCK.try_lock() {
+                        let direct = crate::host_supervisor::linux::MANAGED_PIDS
+                            .lock()
+                            .expect("managed pid registry")
+                            .clone();
+                        if let Ok(entries) = fs::read_dir("/proc") {
+                            for entry in entries.flatten() {
+                                let Some(pid) = entry
+                                    .file_name()
+                                    .to_str()
+                                    .and_then(|s| s.parse::<u32>().ok())
+                                else {
+                                    continue;
+                                };
+                                if direct.contains(&pid) {
+                                    continue;
+                                }
+                                let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
+                                    continue;
+                                };
+                                let Some((_, fields)) = stat.rsplit_once(')') else {
+                                    continue;
+                                };
+                                if fields
+                                    .split_whitespace()
+                                    .nth(1)
+                                    .and_then(|s| s.parse::<u32>().ok())
+                                    == Some(std::process::id())
+                                {
+                                    // SAFETY: only reap our adopted children; direct Child handles retain exclusive wait ownership.
+                                    unsafe {
+                                        libc::waitpid(
+                                            pid as i32,
+                                            std::ptr::null_mut(),
+                                            libc::WNOHANG,
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -1210,72 +1417,7 @@ fn start_reaper(manager: &Arc<Mutex<Manager>>) -> Result<(), String> {
         .map_err(|_| "task_reaper_start_failed")?;
     Ok(())
 }
-fn request(
-    manager: &Arc<Mutex<Manager>>,
-    stream: UnixStream,
-) -> Result<EnvironmentTaskResult, String> {
-    // SO_PEERCRED is the actual transport authority, never request-provided identity.
-    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
-    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    // SAFETY: valid socket fd and correctly sized output buffer.
-    if unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&mut cred as *mut libc::ucred).cast(),
-            &mut len,
-        )
-    } != 0
-        || cred.uid != 0
-    {
-        return Err("task_controller_unauthorized".into());
-    }
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .map_err(|_| "task_socket_timeout_failed")?;
-    let mut bytes = Vec::new();
-    BufReader::new(stream)
-        .take((MAX_REQUEST + 1) as u64)
-        .read_until(b'\n', &mut bytes)
-        .map_err(|_| "task_request_read_failed")?;
-    if bytes.len() > MAX_REQUEST || bytes.last() != Some(&b'\n') {
-        return Err("task_request_too_large".into());
-    }
-    let envelope: EnvironmentTaskEnvelope =
-        serde_json::from_slice(&bytes).map_err(|_| "task_request_invalid")?;
-    envelope.validate()?;
-    Manager::handle(manager, envelope.request)
-}
-pub fn relay_once() -> Result<(), String> {
-    let metadata = fs::metadata(SOCKET).map_err(|_| "task_service_unavailable")?;
-    if metadata.uid() != 0 || metadata.mode() & 0o777 != 0o600 {
-        return Err("task_socket_untrusted".into());
-    }
-    let mut bytes = Vec::new();
-    std::io::stdin()
-        .take((MAX_REQUEST + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "task_relay_input_failed")?;
-    if bytes.len() > MAX_REQUEST {
-        return Err("task_request_too_large".into());
-    }
-    let envelope: EnvironmentTaskEnvelope =
-        serde_json::from_slice(&bytes).map_err(|_| "task_request_invalid")?;
-    envelope.validate()?;
-    let mut stream = UnixStream::connect(SOCKET).map_err(|_| "task_service_unavailable")?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|_| "task_relay_timeout_failed")?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .map_err(|_| "task_relay_timeout_failed")?;
-    let output = relay_exchange(&mut stream, &bytes)?;
-    std::io::stdout()
-        .write_all(&output)
-        .map_err(|_| "task_relay_output_unknown".into())
-}
-
+#[cfg(test)]
 fn relay_exchange(stream: &mut (impl Read + Write), bytes: &[u8]) -> Result<Vec<u8>, String> {
     stream
         .write_all(bytes)

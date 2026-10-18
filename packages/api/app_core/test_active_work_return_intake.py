@@ -14,7 +14,7 @@ from django.test import TransactionTestCase
 from . import test_agent_work_consumption as fixture
 from . import test_native_consumption_runtime as native
 from .models import AgentInput, AgentInputDelivery, AgentInputQueue, AgentRun, AgentWorkConsumeAttempt, ModelConfig
-from .runtime_client import build_agent_run_start
+from .testing import fenced_start_fixture
 
 
 class ActiveWorkReturnIntakeTests(TransactionTestCase):
@@ -50,14 +50,14 @@ class ActiveWorkReturnIntakeTests(TransactionTestCase):
 
     def test_active_run_accepts_multiple_notices_without_changing_initial_or_authorization(self):
         notices = [self.notice(call, idle=False) for call in ("one", "two")]
-        before = build_agent_run_start(self.run)
+        before = fenced_start_fixture(self.run)
         self.agent.model_config = None
         self.agent.save(update_fields=["model_config"])
         with self.runtime() as (_, schedules):
             responses = [self.consume(notice, "consume-" + str(i)) for i, notice in enumerate(notices)]
         self.assertEqual([r.status_code for r in responses], [201, 201])
         self.assertEqual(set(self.attempts().values_list("coordinator_run_id", flat=True)), {self.run.pk})
-        self.assertEqual(build_agent_run_start(self.run), before)
+        self.assertEqual(fenced_start_fixture(self.run), before)
         self.assertEqual(schedules, [], "active intake does not schedule another lifecycle")
 
     def test_closed_active_queue_retains_acceptance_and_scanner_binds_one_successor(self):
@@ -138,7 +138,7 @@ class ActiveWorkReturnIntakeTests(TransactionTestCase):
         queue = AgentInputQueue.objects.get(agent_run=attempt.coordinator_run)
         self.assertEqual(queue.initial_input_id, user.pk)
         self.assertIsNone(queue.initial_host_id)
-        self.assertEqual(build_agent_run_start(attempt.coordinator_run)["initialInput"],
+        self.assertEqual(fenced_start_fixture(attempt.coordinator_run)["initialInput"],
             {"type": "userInput", "inputId": user.input_id, "message": user.body, "attachmentRefs": []})
         self.assertEqual(attempt.delivery_sequence, 1)
 
@@ -176,7 +176,7 @@ class ActiveWorkReturnIntakeTests(TransactionTestCase):
         database = connection.settings_dict
         url = "postgresql://{}:{}@{}:{}/{}".format(quote(database["USER"]), quote(database["PASSWORD"]),
             database["HOST"], database["PORT"], quote(database["NAME"]))
-        payload = {"agentRunStart": build_agent_run_start(run), "databaseUrl": url,
+        payload = {"agentRunStart": fenced_start_fixture(run), "databaseUrl": url,
                    "signingKey": settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY,
                    "expected": expected, "commitNative": active, "modelMain": main,
                    "nativeInputs": [a.input_binding["initialInput"]["input"] for a in attempts]}

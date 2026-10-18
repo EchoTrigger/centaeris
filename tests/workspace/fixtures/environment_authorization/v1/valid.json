@@ -4,8 +4,12 @@
     "environmentId": "environment_1",
     "sessionId": "sess_1",
     "agentRunId": "agent_run_1",
-    "agentRunAuthorizationDigest": "sha256:bd93e8ba466c0d9851e805dd2a8c8a5962b351065c4d982ae961ea0cdb0a6a9f",
-    "executionMode": "perRun"
+    "agentRunAuthorizationDigest": "sha256:31a6abff1f44a1fa289bbda702f444e91e066bcda782b73118220bb9db7a3492",
+    "executionMode": "perRun",
+    "controllerId": "agent_run_1",
+    "controllerEpoch": 1,
+    "controllerLeaseDigest": "sha256:ef00f99d10396558287dfcbfe0571f0f933d86e2c58a130fee0853388652726b",
+    "controllerPurpose": "execute"
   },
-  "signature": "hmac-sha256:7d374f10962bd1b4347cba92dbf0b64666e1e8e3c976d4332cc8c093cc782a90"
+  "signature": "hmac-sha256:b5b899f88f62fd48bc5550f5730bf44aa07386fd5ac2cd9e0886ed97055e0973"
 }

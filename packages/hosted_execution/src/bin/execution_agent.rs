@@ -1,18 +1,9 @@
 fn main() {
     let result = match std::env::args().nth(1).as_deref() {
-        Some("benchmark-keeper") => hosted_execution::agent::run_benchmark_keeper(),
-        Some("benchmark-quiesce") => hosted_execution::agent::run_benchmark_quiesce_once(),
-        Some("benchmark-filesystem-once") => hosted_execution::agent::run_benchmark_filesystem_once(),
         #[cfg(target_os = "linux")]
-        Some("environment-init") => match (std::env::args().nth(2), std::env::args().nth(3)) {
-            (Some(instance), None) => hosted_execution::task_service::serve_instance(&instance),
-            _ => Err("environment-init requires exactly one instanceId".into()),
-        },
-        #[cfg(target_os = "linux")]
-        Some("environment-task-store-inspect") => hosted_execution::task_service::inspect_history(),
-        #[cfg(target_os = "linux")]
-        Some("environment-task-rpc") => hosted_execution::task_service::relay_once(),
+        Some("environment-keeper") => hosted_execution::task_service::workload_keeper(),
         Some("filesystem-once") => hosted_execution::agent::run_filesystem_once(),
+        Some("prepare-workspace") => hosted_execution::agent::run_prepare_workspace_once(),
         Some("agent-process-state") => hosted_execution::agent::run_agent_process_state_once(),
         Some("input-inventory") => hosted_execution::agent::run_input_inventory_once(),
         Some("materialize-input") => hosted_execution::agent::run_materialize_input_once(),

@@ -14,6 +14,8 @@ mod deferred_input_resolver;
 mod docker_engine;
 mod docker_execution_host;
 mod environment_authorization;
+mod environment_stdio;
+mod environment_supervisor;
 mod execution_capacity;
 mod execution_recovery_coordinator;
 mod execution_recovery_policy;
@@ -126,7 +128,7 @@ use centaeris_core::tool::{DynamicToolRegistry, ToolErrorInfo, ToolFailureKind};
 use centaeris_model_catalog::model_catalog;
 use contract::{
     AgentRunCancelRequest, AgentRunStart, AgentRunStartInitialInput, AgentRunStepRequest,
-    AgentRunSupplementRequest, AgentRunTailAction, AgentRunTeardownRequest, HostEventInputRequest,
+    AgentRunSupplementRequest, AgentRunTailAction, HostEventInputRequest,
 };
 use deferred_input_resolver::{ApiDeferredInputResolver, ApiModelInputImageResolver};
 use docker_execution_host::{
@@ -148,6 +150,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::Semaphore;
 
 const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
+const MAX_FILESYSTEM_BODY_BYTES: usize = 32 * 1024 * 1024 + 64 * 1024 + 4;
 const MAX_HTTP_CONNECTIONS: usize = 128;
 const HTTP_HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_BODY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -160,7 +163,6 @@ const AGENT_RUN_WAITING_TRANSITION_REASONS: &[&str] = &[
     "session_record_commit_unavailable",
     "session_workspace_commit_unavailable",
     "session_workspace_resolve_unavailable",
-    "benchmark_setup_required",
 ];
 use workspace_tools::{workspace_tool_contracts, WorkspaceArtifactToolProvider};
 
@@ -402,7 +404,6 @@ fn main() -> Result<(), String> {
     DockerExecutionHostRunner::validate_host()?;
     let execution_profile = Arc::new(RuntimeExecutionProfile {
         schema: RUNTIME_EXECUTION_PROFILE_SCHEMA,
-        image_capability: "workspace_general_v1",
         image_digest: resolve_workspace_image_digest()?,
     });
     let bind_address = env::var("RUNTIME_BIND_ADDRESS")
@@ -1076,7 +1077,6 @@ const RUNTIME_EXECUTION_PROFILE_SCHEMA: &str = "runtime.execution_profile.v1";
 #[serde(rename_all = "camelCase")]
 struct RuntimeExecutionProfile {
     schema: &'static str,
-    image_capability: &'static str,
     image_digest: String,
 }
 
@@ -1121,9 +1121,15 @@ fn runtime_http1_builder(header_timeout: Duration) -> http1::Builder {
 
 async fn read_axum_request(request: Request<Body>) -> Result<Request<Bytes>, Response<Body>> {
     if request.method() == hyper::Method::POST
-        && request.uri().path() == "/internal/benchmark/upload"
+        && matches!(
+            request.uri().path(),
+            "/internal/environments/maintenance/task"
+                | "/internal/environments/maintenance/filesystem"
+                | "/internal/environments/provision"
+                | "/internal/environments/observe"
+        )
     {
-        http::benchmark::upload_body_authority(&request)
+        http::environment_maintenance::body_authority(&request)
             .map_err(|(status, code)| bounded_json_error_response(status, code))?;
     }
     read_axum_request_body(request).await
@@ -1132,9 +1138,9 @@ async fn read_axum_request(request: Request<Body>) -> Result<Request<Bytes>, Res
 async fn read_axum_request_body(request: Request<Body>) -> Result<Request<Bytes>, Response<Body>> {
     let (parts, body) = request.into_parts();
     let body_limit = if parts.method == hyper::Method::POST
-        && parts.uri.path() == "/internal/benchmark/upload"
+        && parts.uri.path() == "/internal/environments/maintenance/filesystem"
     {
-        http::benchmark::ARCHIVE_LIMIT
+        MAX_FILESYSTEM_BODY_BYTES
     } else {
         MAX_HTTP_BODY_BYTES
     };
@@ -1288,11 +1294,9 @@ fn workspace_tool_layer(
 
 fn register_retained_task_provider(
     layer: &mut ToolLayer,
-    retained: bool,
-    benchmark: bool,
     port: Arc<dyn retained_tasks::EnvironmentTaskPort>,
 ) -> Result<(), String> {
-    if retained && !benchmark {
+    {
         layer.register_dynamic_tool_provider(Arc::new(
             retained_tasks::RetainedTaskToolProvider::new(port),
         ))?;
@@ -1374,7 +1378,7 @@ impl AgentRunStepOutcome {
     fn validate(&self) -> Result<(), String> {
         if matches!(
             self.transition_reason.as_str(),
-            "execution_recovery_checkpoint_committed" | "benchmark_setup_required"
+            "execution_recovery_checkpoint_committed"
         ) != self.retry_at_ms.is_some()
             || self.retry_at_ms.is_some_and(|deadline| deadline < 0)
         {
@@ -1950,7 +1954,11 @@ fn execute_agent_run(
                 authorization_digest: &agent_run_start.authorization_digest,
                 lease: &recovery_workspace_lease,
                 checkpoint_id: &checkpoint.checkpoint_id,
-                data_tmpfs_bytes: agent_run_start.authorization.resources.data_tmpfs_bytes,
+                data_tmpfs_bytes: agent_run_start
+                    .authorization
+                    .environment_profile
+                    .resources
+                    .data_tmpfs_bytes,
                 input_upper_bound_bytes,
             },
             &checkpoint.workspace_snapshot,
@@ -2116,7 +2124,9 @@ fn execute_agent_run(
             DockerExecutionHostRunner::new_with_admitted(
                 DockerExecutionHostRequest {
                     network: agent_run_start.authorization.effective_network()?,
-                    benchmark_profile: agent_run_start.authorization.benchmark_profile.clone(),
+                    environment_profile: Some(
+                        agent_run_start.authorization.environment_profile.clone(),
+                    ),
                     workspace_id: agent_run_start.authorization.workspace_id.clone(),
                     lifecycle_job_id: lifecycle_job_id.clone(),
                     lifecycle_lease_owner: lifecycle_lease_owner.clone(),
@@ -2127,8 +2137,16 @@ fn execute_agent_run(
                     agent_id: agent_run_start.authorization.agent_id.clone(),
                     authorization_digest: agent_run_start.authorization_digest.clone(),
                     environment_authorization: agent_run_start.environment_authorization.clone(),
-                    image_digest: agent_run_start.authorization.image_digest.clone(),
-                    resources: agent_run_start.authorization.resources,
+                    image_digest: agent_run_start
+                        .authorization
+                        .environment_profile
+                        .image_digest
+                        .clone(),
+                    resources: agent_run_start
+                        .authorization
+                        .environment_profile
+                        .resources
+                        .sandbox_resources(),
                     has_execution_fact,
                     api_url: api_url.clone(),
                     api_token: token.clone(),
@@ -2394,9 +2412,7 @@ fn execute_agent_run(
         }
     };
     let mut dynamic_tool_contracts = workspace_agent_tool_contracts(&agent_run_start);
-    if docker_execution.is_retained() && !docker_execution.is_benchmark() {
-        dynamic_tool_contracts.extend(retained_tasks::retained_task_contracts());
-    }
+    dynamic_tool_contracts.extend(retained_tasks::retained_task_contracts());
     if let Some(provider) = &platform_materials {
         dynamic_tool_contracts.extend(provider.contracts.clone());
     }
@@ -2432,12 +2448,7 @@ fn execute_agent_run(
         artifact_publication,
     )))?;
     register_workspace_agent_tool_providers(&mut tool_layer, &agent_run_start, &api_url, &token)?;
-    register_retained_task_provider(
-        &mut tool_layer,
-        docker_execution.is_retained(),
-        docker_execution.is_benchmark(),
-        docker_execution.clone(),
-    )?;
+    register_retained_task_provider(&mut tool_layer, docker_execution.clone())?;
     for provider in mcp_bindings.providers {
         tool_layer.register_dynamic_tool_provider(provider)?;
     }
@@ -2836,14 +2847,7 @@ fn execute_agent_run(
         *sequence_guard(&session_record_sequence)? = committed_sequence;
         session_start_commit_ms = session_start_commit_started.elapsed().as_millis();
     }
-    if !docker_execution.benchmark_setup_ready(&agent_run_start.authorization.session_id)? {
-        return Ok(AgentRunStepOutcome {
-            disposition: "waiting",
-            terminal_state: None,
-            transition_reason: "benchmark_setup_required".into(),
-            retry_at_ms: Some(now_ms()?.saturating_add(1_000)),
-        });
-    }
+
     eprintln!(
         "agent_run_startup_profile: agentRunId={}; serverCount={}; credentialCount={}; mcpConnectionCount={}; runtimePreludeMs={}; sandboxEnsureMs={}; mcpCredentialResolveMs={}; mcpDiscoveryMs={}; workspaceRestoreMs={}; sessionStartCommitMs={}; startupTotalMs={}",
         agent_run_start.agent_run_id,
@@ -3103,7 +3107,7 @@ fn execute_agent_run(
                             "recovery checkpoint requires an empty in-flight tool set".to_string()
                         );
                     }
-                    if docker_execution.is_retained() {
+                    if docker_execution.keeps_instance() {
                         // Live tasks may still write. Preserve the model fact without
                         // claiming an uncoordinated file image is a recovery checkpoint.
                         break 'checkpoint events;
@@ -3397,9 +3401,16 @@ fn execute_agent_run(
                     usize::try_from(
                         agent_run_start
                             .authorization
+                            .environment_profile
                             .resources
                             .memory_bytes
-                            .min(agent_run_start.authorization.resources.data_tmpfs_bytes),
+                            .min(
+                                agent_run_start
+                                    .authorization
+                                    .environment_profile
+                                    .resources
+                                    .data_tmpfs_bytes,
+                            ),
                     )
                     .unwrap_or(usize::MAX),
                 );
@@ -5688,17 +5699,31 @@ fn load_existing_terminal_state(
     store: &PostgresRuntimeStore,
     agent_run_start: &AgentRunStart,
 ) -> Result<Option<&'static str>, String> {
+    load_terminal_state_for_binding(
+        store,
+        &agent_run_start.agent_run_id,
+        &agent_run_start.authorization,
+        &agent_run_start.authorization_digest,
+    )
+}
+
+fn load_terminal_state_for_binding(
+    store: &PostgresRuntimeStore,
+    agent_run_id: &str,
+    authorization: &crate::agent_run_authorization::WorkspaceAgentRunAuthorization,
+    authorization_digest: &str,
+) -> Result<Option<&'static str>, String> {
     let terminal = store.with_client(|client| {
     let rows = client
         .query(
             "SELECT payload->>'type', session_id FROM app_core_sessionevent WHERE agent_run_id=$1 AND payload->>'type' IN ('agent_run_completed','agent_run_failed','agent_run_interrupted') ORDER BY sequence",
-            &[&agent_run_start.agent_run_id],
+            &[&agent_run_id],
         )
         .map_err(|error| format!("query existing terminal state failed: {error}"))?;
     if rows.len() > 1
         || rows
             .iter()
-            .any(|row| row.get::<_, String>(1) != agent_run_start.authorization.session_id)
+            .any(|row| row.get::<_, String>(1) != authorization.session_id)
     {
         return Err("existing terminal state identity conflict".to_string());
     }
@@ -5712,15 +5737,12 @@ fn load_existing_terminal_state(
         }))
     })?;
     if terminal.is_some() {
-        store.repair_terminal_runtime_job_waits(
-            &agent_run_start.authorization.session_id,
-            &agent_run_start.agent_run_id,
-        )?;
+        store.repair_terminal_runtime_job_waits(&authorization.session_id, agent_run_id)?;
     } else {
         let cancelled = store.with_client(|client| {
             client.query_opt(
                 "SELECT 1 FROM app_core_agentrun WHERE id=$1 AND session_id=$2 AND \"preAdmissionCancelledAt\" IS NOT NULL",
-                &[&agent_run_start.agent_run_id, &agent_run_start.authorization.session_id],
+                &[&agent_run_id, &authorization.session_id],
             ).map(|row| row.is_some()).map_err(|e| e.to_string())
         })?;
         if cancelled {
@@ -5729,10 +5751,10 @@ fn load_existing_terminal_state(
         let failed = store.with_client(|client| {
             postgres_store::pre_admission_failure::has_pre_admission_failure(
                 client,
-                &agent_run_start.authorization.workspace_id,
-                &agent_run_start.authorization.session_id,
-                &agent_run_start.agent_run_id,
-                &agent_run_start.authorization_digest,
+                &authorization.workspace_id,
+                &authorization.session_id,
+                agent_run_id,
+                authorization_digest,
             )
         })?;
         if failed {
@@ -6071,8 +6093,8 @@ mod tests {
                 panic!("tool assembly must not dispatch");
             }
         }
-        for (retained, benchmark) in [(true, true), (false, false), (true, false)] {
-            let enabled = retained && !benchmark;
+        for _lifecycle in ["perRun", "retained"] {
+            let enabled = true;
             let contracts = if enabled {
                 retained_tasks::retained_task_contracts()
             } else {
@@ -6082,7 +6104,7 @@ mod tests {
             let mut layer = hosted_context()
                 .tool_layer
                 .with_dynamic_tool_registry(registry);
-            register_retained_task_provider(&mut layer, retained, benchmark, Arc::new(NoDispatch))
+            register_retained_task_provider(&mut layer, Arc::new(NoDispatch))
                 .expect("host tool assembly must match its authorized contracts");
             for contract in retained_tasks::retained_task_contracts() {
                 assert_eq!(layer.can_handle(&contract.name), enabled);
@@ -6320,14 +6342,12 @@ mod tests {
     fn execution_profile_response_uses_exact_runtime_v1_contract() {
         let profile = RuntimeExecutionProfile {
             schema: RUNTIME_EXECUTION_PROFILE_SCHEMA,
-            image_capability: "workspace_general_v1",
             image_digest: format!("sha256:{}", "a".repeat(64)),
         };
         assert_eq!(
             serde_json::to_value(profile).expect("execution profile"),
             json!({
                 "schema": "runtime.execution_profile.v1",
-                "imageCapability": "workspace_general_v1",
                 "imageDigest": format!("sha256:{}", "a".repeat(64)),
             })
         );
@@ -6506,19 +6526,19 @@ mod tests {
     }
 
     #[test]
-    fn benchmark_setup_wait_requires_its_exact_retry_deadline() {
+    fn recovery_checkpoint_wait_requires_its_retry_deadline() {
         let outcome = |reason: &str, deadline| AgentRunStepOutcome {
             disposition: "waiting",
             terminal_state: None,
             transition_reason: reason.into(),
             retry_at_ms: deadline,
         };
-        outcome("benchmark_setup_required", Some(1234))
+        outcome("execution_recovery_checkpoint_committed", Some(1234))
             .validate()
-            .expect("setup remains waiting");
+            .expect("checkpoint remains waiting");
         for (reason, deadline) in [
-            ("benchmark_setup_required", None),
-            ("benchmark_setup_required", Some(-1)),
+            ("execution_recovery_checkpoint_committed", None),
+            ("execution_recovery_checkpoint_committed", Some(-1)),
             ("question_wait", Some(1234)),
             ("runtime_job_wait", Some(1234)),
         ] {
@@ -6532,7 +6552,7 @@ mod tests {
             AgentRunStepOutcome {
                 retry_at_ms: matches!(
                     *transition_reason,
-                    "execution_recovery_checkpoint_committed" | "benchmark_setup_required"
+                    "execution_recovery_checkpoint_committed"
                 )
                 .then_some(1),
                 disposition: "waiting",
@@ -6646,33 +6666,40 @@ mod tests {
     }
 
     #[test]
-    fn runtime_http_benchmark_upload_rejects_unauthorized_without_consuming_body() {
+    fn runtime_http_maintenance_task_rejects_unauthorized_without_consuming_body() {
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
         runtime.block_on(async {
-            let request = Request::builder()
-                .method("POST")
-                .uri("/internal/benchmark/upload")
-                .body(Body::from_stream(futures::stream::pending::<
-                    Result<Bytes, std::io::Error>,
-                >()))
-                .unwrap();
-            let rejected =
-                tokio::time::timeout(Duration::from_millis(100), read_axum_request(request))
-                    .await
-                    .expect("authorization must precede body consumption")
-                    .unwrap_err();
-            assert_eq!(rejected.status(), 401);
+            for path in [
+                "/internal/environments/maintenance/task",
+                "/internal/environments/maintenance/filesystem",
+                "/internal/environments/provision",
+                "/internal/environments/observe",
+            ] {
+                let request = Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .body(Body::from_stream(futures::stream::pending::<
+                        Result<Bytes, std::io::Error>,
+                    >()))
+                    .unwrap();
+                let rejected =
+                    tokio::time::timeout(Duration::from_millis(100), read_axum_request(request))
+                        .await
+                        .expect("maintenance authorization must precede body consumption")
+                        .unwrap_err();
+                assert_eq!(rejected.status(), 401);
+            }
         });
     }
 
     #[test]
-    fn runtime_http_benchmark_upload_has_its_own_bounded_body_limit() {
+    fn runtime_http_filesystem_transfer_has_its_own_bounded_body_limit() {
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
         runtime.block_on(async {
             let accepted = read_axum_request_body(
                 Request::builder()
                     .method("POST")
-                    .uri("/internal/benchmark/upload")
+                    .uri("/internal/environments/maintenance/filesystem")
                     .body(Body::from(vec![0; 11_508_561 + 65536]))
                     .unwrap(),
             )
@@ -6681,8 +6708,8 @@ mod tests {
             let rejected = read_axum_request_body(
                 Request::builder()
                     .method("POST")
-                    .uri("/internal/benchmark/upload")
-                    .body(Body::from(vec![0; http::benchmark::ARCHIVE_LIMIT + 1]))
+                    .uri("/internal/environments/maintenance/filesystem")
+                    .body(Body::from(vec![0; MAX_FILESYSTEM_BODY_BYTES + 1]))
                     .unwrap(),
             )
             .await;
@@ -6690,7 +6717,7 @@ mod tests {
             let other_method = read_axum_request(
                 Request::builder()
                     .method("GET")
-                    .uri("/internal/benchmark/upload")
+                    .uri("/internal/environments/maintenance/filesystem")
                     .body(Body::from(vec![0; MAX_HTTP_BODY_BYTES + 1]))
                     .unwrap(),
             )
@@ -6959,7 +6986,7 @@ mod tests {
         .digest()
         .expect("authorization digest");
         serde_json::from_value::<AgentRunStart>(serde_json::json!({
-            "schema": "workspace.agent_run.start.v3",
+            "schema": "workspace.agent_run.start.v1",
             "initialInput": {"type":"userMessage"},
             "agentRunId": "agent_run_1",
             "turnId": "turn_1",

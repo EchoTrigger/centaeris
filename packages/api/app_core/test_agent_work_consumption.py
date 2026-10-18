@@ -15,7 +15,7 @@ from django.test import Client, TransactionTestCase
 from . import test_agent_work as work_fixture
 from . import test_agent_work_returns as return_fixture
 from .models import AgentRun, AgentRunAuthorization, HostedOperationReceipt, WorkspaceMembership
-from .runtime_client import build_agent_run_start
+from .testing import fenced_start_fixture
 
 
 class AgentWorkConsumptionTests(TransactionTestCase):
@@ -130,8 +130,8 @@ class AgentWorkConsumptionTests(TransactionTestCase):
         self.assertEqual(len(inputs), 1)
         self.assertEqual(inputs[0]["inputId"], attempt.pk)
         self.assertEqual(json.loads(inputs[0]["content"]), notice)
-        start = build_agent_run_start(run)
-        self.assertEqual(start["schema"], "workspace.agent_run.start.v3")
+        start = fenced_start_fixture(run)
+        self.assertEqual(start["schema"], "workspace.agent_run.start.v1")
         self.assertEqual(start["initialInput"], {"type": "hostEvent", "attemptId": attempt.pk,
                          "noticeId": notice["noticeId"], "input": inputs[0]})
         self.assertEqual(attempt.input_binding["initialInput"], start["initialInput"])
@@ -336,7 +336,7 @@ class AgentWorkConsumptionTests(TransactionTestCase):
             HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN)
         self.assertEqual(response.status_code, 200, response.content)
         start = response.json()["agentRunStart"]
-        self.assertEqual(start["schema"], "workspace.agent_run.start.v3")
+        self.assertEqual(start["schema"], "workspace.agent_run.start.v1")
         self.assertEqual(start["initialInput"], {"type": "userMessage"})
         self.assertEqual((start["agentRunId"], start["turnId"], start["authorizationDigest"],
                           start["authorizationSignature"], self.run.membership_ref), before)

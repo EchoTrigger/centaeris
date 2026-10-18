@@ -4,7 +4,7 @@
 //! cannot Start or Input under v3; they require authorized recovery or cleanup.
 //! Running records remain uncertain and retain their cleanup/resource obligations.
 use super::*;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{params, Connection, OptionalExtension};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

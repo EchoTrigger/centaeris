@@ -8,11 +8,12 @@ use sha2::{Digest, Sha256};
 
 pub(crate) struct MaintenanceTarget {
     pub fence: EnvironmentTaskFence,
+    pub profile: crate::agent_run_authorization::EnvironmentProfile,
     pub host_id: String,
     pub container_id: String,
     pub allocation_execution_id: String,
-    pub allocation_agent_run_id: String,
-    pub authorization_digest: String,
+    pub allocation_agent_run_id: Option<String>,
+    pub allocation_owner: centaeris_core::execution::EnvironmentTaskOwner,
     pub binding_digest: String,
     pub image_digest: String,
     pub profile_digest: String,
@@ -57,8 +58,19 @@ fn locked_target(
     {
         return Err("maintenance_session_rejected".into());
     }
-    let environment = tx.query_opt("SELECT session_id,controller_run_id,controller_maintenance_operation_id,controller_epoch,controller_lease_owner,controller_purpose,controller_released FROM public.app_core_sessionenvironment WHERE id=$1 FOR SHARE", &[&b.environment_id])
+    let environment = tx.query_opt("SELECT session_id,controller_run_id,controller_maintenance_operation_id,controller_epoch,controller_lease_owner,controller_purpose,controller_released,environment_profile::text,environment_profile_digest FROM public.app_core_sessionenvironment WHERE id=$1 FOR SHARE", &[&b.environment_id])
         .map_err(|_| "maintenance_store_unavailable")?.ok_or("maintenance_environment_missing")?;
+    let profile: crate::agent_run_authorization::EnvironmentProfile = serde_json::from_str(
+        &environment
+            .get::<_, Option<String>>(7)
+            .ok_or("maintenance_profile_missing")?,
+    )
+    .map_err(|_| "maintenance_profile_invalid")?;
+    if profile.digest()? != b.profile_digest
+        || environment.get::<_, Option<String>>(8).as_deref() != Some(&b.profile_digest)
+    {
+        return Err("maintenance_profile_rejected".into());
+    }
     let mut lease_hash = Sha256::new();
     lease_hash.update(b"workspace:environment-controller-lease:v1\0");
     lease_hash.update(environment.get::<_, String>(4).as_bytes());
@@ -73,7 +85,7 @@ fn locked_target(
     {
         return Err("maintenance_controller_rejected".into());
     }
-    let record = tx.query_opt("SELECT workspace_id,session_id,environment_id,instance_id,container_id,host_id,allocation_execution_id,profile_digest,request_digest,current_grant_id,state FROM public.app_core_environmentmaintenanceoperation WHERE operation_id=$1 FOR SHARE", &[&operation])
+    let record = tx.query_opt("SELECT workspace_id,session_id,environment_id,instance_id,container_id,host_id,allocation_execution_id,profile_digest,request_digest,current_grant_id,state,operation_kind FROM public.app_core_environmentmaintenanceoperation WHERE operation_id=$1 FOR SHARE", &[&operation])
         .map_err(|_| "maintenance_store_unavailable")?.ok_or("maintenance_operation_missing")?;
     if record.get::<_, String>(0) != b.workspace_id
         || record.get::<_, String>(1) != b.session_id
@@ -83,22 +95,26 @@ fn locked_target(
         || record.get::<_, String>(7) != b.profile_digest
         || record.get::<_, String>(8) != b.request_digest
         || record.get::<_, String>(10) != "active"
+        || record.get::<_, String>(11) != "task"
     {
         return Err("maintenance_operation_rejected".into());
     }
     let grant_id: String = record
         .get::<_, Option<String>>(9)
         .ok_or("maintenance_grant_missing")?;
-    let grant = tx.query_opt("SELECT operation_id,payload::text,signature FROM public.app_core_environmentmaintenancegrant WHERE id=$1 FOR SHARE", &[&grant_id])
+    let grant = tx.query_opt("SELECT operation_id,payload::text,signature,digest FROM public.app_core_environmentmaintenancegrant WHERE id=$1 FOR SHARE", &[&grant_id])
         .map_err(|_| "maintenance_store_unavailable")?.ok_or("maintenance_grant_missing")?;
     let current: MaintenanceBinding = serde_json::from_str(&grant.get::<_, String>(1))
         .map_err(|_| "maintenance_grant_invalid")?;
-    if grant.get::<_, String>(0) != operation || grant.get::<_, String>(2) != auth.signature {
+    if grant.get::<_, String>(0) != operation
+        || grant.get::<_, String>(2) != auth.signature
+        || grant.get::<_, String>(3) != auth.payload.digest()?
+    {
         return Err("maintenance_grant_rejected".into());
     }
     let origin: String = record.get(6);
     let host: String = record.get(5);
-    let allocation = tx.query_opt("SELECT i.instance_id,i.environment_id,i.session_id,i.host_id,i.agent_run_id,i.authorization_digest,i.binding_digest,i.image_digest,i.profile_digest,s.container_id,s.workspace_id,s.state FROM runtime.execution_instances i JOIN runtime.resident_sandboxes s ON s.execution_id=i.execution_id AND s.host_id=i.host_id AND s.instance_id=i.instance_id AND s.environment_id=i.environment_id WHERE i.execution_id=$1 AND i.allocation_execution_id=i.execution_id AND i.allocation_mode='retained' AND s.allocation_mode='retained' FOR SHARE OF i,s NOWAIT", &[&origin])
+    let allocation = tx.query_opt("SELECT i.instance_id,i.environment_id,i.session_id,i.host_id,i.agent_run_id,i.authorization_digest,i.binding_digest,i.image_digest,i.profile_digest,s.container_id,s.workspace_id,s.state,i.allocation_owner_json FROM runtime.execution_instances i JOIN runtime.resident_sandboxes s ON s.execution_id=i.execution_id AND s.host_id=i.host_id AND s.instance_id=i.instance_id AND s.environment_id=i.environment_id WHERE i.execution_id=$1 AND i.allocation_execution_id=i.execution_id AND i.allocation_mode='retained' AND s.allocation_mode='retained' FOR SHARE OF i,s NOWAIT", &[&origin])
         .map_err(|_| "maintenance_allocation_unavailable")?.ok_or("maintenance_allocation_missing")?;
     if allocation.get::<_, String>(0) != b.instance_id
         || allocation.get::<_, String>(1) != b.environment_id
@@ -126,11 +142,13 @@ fn locked_target(
     let fence = auth.verify_current(&current, now, key)?;
     Ok(MaintenanceTarget {
         fence,
+        profile,
         host_id: host,
         container_id: b.container_id.clone(),
         allocation_execution_id: origin,
         allocation_agent_run_id: allocation.get(4),
-        authorization_digest: allocation.get(5),
+        allocation_owner: serde_json::from_str(&allocation.get::<_, String>(12))
+            .map_err(|_| "allocation_owner_invalid")?,
         binding_digest: allocation.get(6),
         image_digest: allocation.get(7),
         profile_digest: b.profile_digest.clone(),
@@ -157,6 +175,26 @@ impl PostgresRuntimeStore {
         })
     }
 
+    pub(crate) fn with_maintenance_completion<T: Send>(
+        &self,
+        auth: &MaintenanceAuthorization,
+        key: &[u8],
+        action: impl FnOnce(&MaintenanceTarget) -> Result<(T, EnvironmentTaskResult), String> + Send,
+    ) -> Result<T, String> {
+        self.with_client(|client| {
+            let mut tx = client
+                .transaction()
+                .map_err(|_| "maintenance_store_unavailable")?;
+            super::resource_commit::require_durable_resource_commit(&mut tx)?;
+            let target = locked_target(&mut tx, auth, key)?;
+            let (output, result) = action(&target)?;
+            write_completion(&mut tx, auth, &result)?;
+            tx.commit()
+                .map_err(|_| "maintenance_completion_unavailable")?;
+            Ok(output)
+        })
+    }
+
     /// Called only with a confirmed EndOperation result from the trusted service.
     /// An HTTP caller cannot upload a completion or release authority by assertion.
     pub(crate) fn record_maintenance_completion(
@@ -165,22 +203,47 @@ impl PostgresRuntimeStore {
         key: &[u8],
         result: &EnvironmentTaskResult,
     ) -> Result<(), String> {
-        let completion = completed_operation(result)?;
+        completed_operation(result)?;
         self.with_client(|client| {
-            let mut tx = client.transaction().map_err(|_| "maintenance_store_unavailable")?;
+            let mut tx = client
+                .transaction()
+                .map_err(|_| "maintenance_store_unavailable")?;
             super::resource_commit::require_durable_resource_commit(&mut tx)?;
             locked_target(&mut tx, auth, key)?;
-            let b = &auth.payload;
-            let operation = operation_id(b)?;
-            let values: &[&(dyn postgres::types::ToSql + Sync)] = &[&operation, &b.environment_id, &b.instance_id, &b.container_id, &b.profile_digest, &b.controller_epoch, &b.controller_lease_digest, &b.request_digest, &completion];
-            tx.execute("INSERT INTO runtime.environment_maintenance_completions(operation_id,environment_id,instance_id,container_id,profile_digest,controller_epoch,controller_lease_digest,request_digest,completion_json,recorded_at_ms) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint) ON CONFLICT(operation_id) DO NOTHING", values)
-                .map_err(|_| "maintenance_completion_unavailable")?;
-            let matched: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM runtime.environment_maintenance_completions WHERE operation_id=$1 AND environment_id=$2 AND instance_id=$3 AND container_id=$4 AND profile_digest=$5 AND controller_epoch=$6 AND controller_lease_digest=$7 AND request_digest=$8 AND completion_json=$9)", values)
-                .map_err(|_| "maintenance_completion_unavailable")?.get(0);
-            if !matched { return Err("maintenance_completion_conflict".into()); }
-            tx.commit().map_err(|_| "maintenance_completion_unavailable".to_string())
+            write_completion(&mut tx, auth, result)?;
+            tx.commit()
+                .map_err(|_| "maintenance_completion_unavailable".to_string())
         })
     }
+}
+
+fn write_completion(
+    tx: &mut postgres::Transaction<'_>,
+    auth: &MaintenanceAuthorization,
+    result: &EnvironmentTaskResult,
+) -> Result<(), String> {
+    let completion = completed_operation(result)?;
+    let b = &auth.payload;
+    let operation = operation_id(b)?;
+    let values: &[&(dyn postgres::types::ToSql + Sync)] = &[
+        &operation,
+        &b.environment_id,
+        &b.instance_id,
+        &b.container_id,
+        &b.profile_digest,
+        &b.controller_epoch,
+        &b.controller_lease_digest,
+        &b.request_digest,
+        &completion,
+    ];
+    tx.execute("INSERT INTO runtime.environment_maintenance_completions(operation_id,environment_id,instance_id,container_id,profile_digest,controller_epoch,controller_lease_digest,request_digest,completion_json,recorded_at_ms) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint) ON CONFLICT(operation_id) DO NOTHING", values)
+        .map_err(|_| "maintenance_completion_unavailable")?;
+    let matched: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM runtime.environment_maintenance_completions WHERE operation_id=$1 AND environment_id=$2 AND instance_id=$3 AND container_id=$4 AND profile_digest=$5 AND controller_epoch=$6 AND controller_lease_digest=$7 AND request_digest=$8 AND completion_json=$9)", values)
+        .map_err(|_| "maintenance_completion_unavailable")?.get(0);
+    if !matched {
+        return Err("maintenance_completion_conflict".into());
+    }
+    Ok(())
 }
 
 fn completed_operation(result: &EnvironmentTaskResult) -> Result<String, String> {

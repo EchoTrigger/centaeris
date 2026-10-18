@@ -1,6 +1,6 @@
 //! Instance-private execution index. The caller holds the service's exclusive lock.
 use super::*;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{params, Connection, OptionalExtension};
 
 const VERSION: i64 = 2;
 fn db(root: &Path, initialize: bool) -> Result<Connection, String> {
@@ -884,25 +884,19 @@ mod commit_tests {
         let (root, mut journal) = fixture();
         let before = fs::read(root.join("history.sqlite")).unwrap();
         fs::create_dir(root.join("history.sqlite-journal")).unwrap();
-        assert!(
-            journal
-                .reserve_receipt("input:task:rejected", &digest(&"input").unwrap())
-                .is_err()
-        );
+        assert!(journal
+            .reserve_receipt("input:task:rejected", &digest(&"input").unwrap())
+            .is_err());
         assert!(journal.receipts.is_empty());
         assert!(!journal.poisoned);
         fs::remove_dir(root.join("history.sqlite-journal")).unwrap();
         assert_eq!(fs::read(root.join("history.sqlite")).unwrap(), before);
-        assert!(
-            journal
-                .reserve_receipt("terminate:task", &digest(&"stop").unwrap())
-                .is_ok()
-        );
-        assert!(
-            journal
-                .reserve_receipt("endRun:run", &digest(&"end").unwrap())
-                .is_ok()
-        );
+        assert!(journal
+            .reserve_receipt("terminate:task", &digest(&"stop").unwrap())
+            .is_ok());
+        assert!(journal
+            .reserve_receipt("endRun:run", &digest(&"end").unwrap())
+            .is_ok());
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
@@ -923,16 +917,12 @@ mod commit_tests {
         assert_eq!(candidate.persist(&root).unwrap_err(), "task_index_capacity");
         assert!(!candidate.poisoned);
         assert_eq!(fs::read(root.join("history.sqlite")).unwrap(), before);
-        assert!(
-            journal
-                .reserve_receipt("terminate:task", &digest(&"stop").unwrap())
-                .is_ok()
-        );
-        assert!(
-            journal
-                .reserve_receipt("endRun:run", &digest(&"end").unwrap())
-                .is_ok()
-        );
+        assert!(journal
+            .reserve_receipt("terminate:task", &digest(&"stop").unwrap())
+            .is_ok());
+        assert!(journal
+            .reserve_receipt("endRun:run", &digest(&"end").unwrap())
+            .is_ok());
         fs::remove_dir_all(root).unwrap();
     }
 }

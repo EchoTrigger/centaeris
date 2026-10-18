@@ -1,0 +1,220 @@
+use super::*;
+use serde_json::json;
+
+fn target() -> HostLaunchTarget {
+    HostLaunchTarget {
+        environment_instance_id: format!("instance_{}", "1".repeat(64)),
+        container_id: "2".repeat(64),
+        environment_id: "environment-a".into(),
+        profile_digest: format!("sha256:{}", "3".repeat(64)),
+        image_digest: format!("sha256:{}", "4".repeat(64)),
+    }
+}
+
+#[test]
+fn trusted_registration_is_strict_and_task_requests_cannot_choose_host_paths() {
+    let envelope: HostSupervisorEnvelope = serde_json::from_value(json!({
+        "schema":HOST_SUPERVISOR_SCHEMA,"request":{"operation":"register","target":target()}
+    }))
+    .unwrap();
+    envelope.validate().unwrap();
+    for field in ["runcRoot", "controlRoot", "capabilities", "process"] {
+        let mut value = serde_json::to_value(&envelope).unwrap();
+        value["request"]["target"][field] = json!("/host");
+        assert!(serde_json::from_value::<HostSupervisorEnvelope>(value).is_err());
+    }
+    let mut wrong = envelope;
+    wrong.schema = "environment.host.v0".into();
+    assert_eq!(wrong.validate().unwrap_err(), "host_schema_unsupported");
+}
+
+#[test]
+fn host_target_rejects_path_identifiers_and_mutable_image_tags() {
+    target().validate().unwrap();
+    let mut value = target();
+    value.container_id = "../another-container".into();
+    assert!(value.validate().is_err());
+    value = target();
+    value.image_digest = "ubuntu:latest".into();
+    assert!(value.validate().is_err());
+    value = target();
+    value.environment_instance_id = "../control".into();
+    assert!(value.validate().is_err());
+}
+
+#[test]
+fn host_configuration_keeps_all_control_roots_outside_each_other() {
+    let mut config = HostSupervisorConfig {
+        schema: HOST_SUPERVISOR_SCHEMA.into(),
+        socket_path: "/run/centaeris-host/control.sock".into(),
+        control_root: "/var/lib/centaeris-host/control".into(),
+        output_root: "/var/lib/centaeris-host/output".into(),
+        runc_path: "/usr/bin/runc".into(),
+        runc_root: "/run/docker/runtime-runc/moby".into(),
+        docker_path: "/usr/bin/docker".into(),
+        docker_socket: "/var/run/docker.sock".into(),
+        controller_uid: 0,
+        helper_path: None,
+        helper_sha256: None,
+    };
+    config.validate().unwrap();
+    config.output_root = format!("{}/output", config.control_root);
+    assert_eq!(config.validate().unwrap_err(), "host_control_paths_overlap");
+}
+
+#[test]
+fn deployment_example_uses_the_current_strict_host_contract() {
+    let config: HostSupervisorConfig =
+        serde_json::from_str(include_str!("../../deploy/host-supervisor.example.json")).unwrap();
+    config.validate().unwrap();
+}
+
+#[test]
+fn task_process_preserves_root_identity_and_all_oci_process_security() {
+    let baseline = json!({"terminal":false,"user":{"uid":0,"gid":0,"additionalGids":[5]},
+        "args":["/keeper"],"cwd":"/app","env":["PATH=/bin","HOME=/root"],
+        "noNewPrivileges":true,"apparmorProfile":"docker-default","selinuxLabel":"label",
+        "capabilities":{"bounding":["CAP_CHOWN"],"effective":["CAP_CHOWN"]},
+        "rlimits":[{"type":"RLIMIT_NOFILE","hard":1024,"soft":1024}]});
+    let mut expected = baseline.clone();
+    expected["args"] = json!(["/bin/sh", "-c", "echo ready"]);
+    expected["cwd"] = json!("/project");
+    assert_eq!(
+        task_process(
+            &baseline,
+            "/bin/sh",
+            &["-c".into(), "echo ready".into()],
+            "/project",
+            &Default::default()
+        )
+        .unwrap(),
+        expected
+    );
+    assert!(task_process(&baseline, "/bin/true", &[], "relative", &Default::default()).is_err());
+    let mut unsafe_base = baseline;
+    unsafe_base["noNewPrivileges"] = json!(false);
+    assert!(task_process(&unsafe_base, "/bin/true", &[], "/", &Default::default()).is_err());
+}
+
+#[test]
+fn oci_default_terminal_is_non_interactive_without_dropping_security() {
+    let baseline = json!({"user":{"uid":0,"gid":0},"args":["/keeper"],"cwd":"/","env":[],"noNewPrivileges":true});
+    let process = task_process(&baseline, "/bin/true", &[], "/", &Default::default()).unwrap();
+    assert_eq!(process["user"], baseline["user"]);
+    assert_eq!(process["noNewPrivileges"], true);
+    assert_ne!(process["terminal"], true);
+}
+
+#[test]
+fn native_task_environment_overrides_values_without_wrapping_the_program_or_identity() {
+    let baseline = json!({"user":{"uid":10001,"gid":10001},"args":["/keeper"],"cwd":"/workspace","env":["PATH=/bin","PROFILE=kept"],"noNewPrivileges":true,"apparmorProfile":"docker-default"});
+    let env = [
+        ("PATH".into(), "/custom/bin".into()),
+        ("MCP_SECRET".into(), "value with spaces".into()),
+    ]
+    .into();
+    let process = task_process(
+        &baseline,
+        "/app/stdio",
+        &["argument".into()],
+        "/workspace",
+        &env,
+    )
+    .unwrap();
+    assert_eq!(process["args"], json!(["/app/stdio", "argument"]));
+    assert_eq!(
+        process["env"],
+        json!([
+            "MCP_SECRET=value with spaces",
+            "PATH=/custom/bin",
+            "PROFILE=kept"
+        ])
+    );
+    assert_eq!(process["user"], baseline["user"]);
+    assert_eq!(process["apparmorProfile"], baseline["apparmorProfile"]);
+    assert_eq!(process["noNewPrivileges"], baseline["noNewPrivileges"]);
+}
+
+#[test]
+fn bare_program_is_resolved_only_by_the_container_process_path() {
+    let baseline = json!({"user":{"uid":10001,"gid":10001},"cwd":"/","env":["PATH=/custom/bin"],"noNewPrivileges":true});
+    let process = task_process(
+        &baseline,
+        "node",
+        &["literal ; argument".into()],
+        "/workspace",
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(process["args"], json!(["node", "literal ; argument"]));
+    assert_eq!(process["env"], baseline["env"]);
+    for invalid in [
+        "",
+        "../node",
+        "./node",
+        "bin/node",
+        "bad\nprogram",
+        "node\0",
+    ] {
+        assert!(task_process(&baseline, invalid, &[], "/workspace", &Default::default()).is_err());
+    }
+    assert!(task_process(
+        &baseline,
+        &"x".repeat(4097),
+        &[],
+        "/workspace",
+        &Default::default()
+    )
+    .is_err());
+}
+
+#[test]
+fn workspace_helper_context_is_bound_to_profile_identity_and_independent_of_keeper_cwd() {
+    let mut baseline = json!({"cwd":"/", "user":{"uid":10001,"gid":10001}, "env":["CENTAERIS_WORKSPACE_ROOT=/workspace","CENTAERIS_WORKSPACE_USER=10001:10001"]});
+    assert_eq!(
+        workspace_context(&baseline).unwrap(),
+        ("/workspace".into(), "10001:10001".into())
+    );
+    baseline["env"][1] = json!("CENTAERIS_WORKSPACE_USER=0:0");
+    assert!(workspace_context(&baseline).is_err());
+    baseline["env"] = json!([
+        "CENTAERIS_WORKSPACE_ROOT=/workspace",
+        "CENTAERIS_WORKSPACE_ROOT=/escape",
+        "CENTAERIS_WORKSPACE_USER=10001:10001"
+    ]);
+    assert!(workspace_context(&baseline).is_err());
+}
+
+#[test]
+fn task_routing_rejects_path_identifiers_before_reading_registration() {
+    let value = json!({"schema":HOST_SUPERVISOR_SCHEMA,"request":{"operation":"task","envelope":{
+        "schema":centaeris_core::execution::ENVIRONMENT_TASK_SCHEMA,"request":{"operation":"list","fence":{
+            "environmentInstanceId":"../elsewhere","controllerOwner":{"kind":"agentRun","runId":"run"},
+            "controllerEpoch":1,"controllerPurpose":"execute"}}}}});
+    let envelope: HostSupervisorEnvelope = serde_json::from_value(value).unwrap();
+    assert_eq!(envelope.validate().unwrap_err(), "host_target_invalid");
+}
+
+#[test]
+fn leader_exit_does_not_destroy_a_background_task_domain() {
+    use centaeris_core::execution::*;
+    let mut task = EnvironmentTaskSnapshot {
+        task_id: "task".into(),
+        operation_id: "1:start".into(),
+        scope: EnvironmentTaskScope::Environment,
+        state: EnvironmentTaskState::Running,
+        exit_code: None,
+        cleanup_complete: false,
+        output_complete: false,
+    };
+    physical_snapshot(&mut task, Some(Some(0)), false, false);
+    assert_eq!(task.state, EnvironmentTaskState::Exited);
+    assert_eq!(task.exit_code, Some(0));
+    assert!(!task.cleanup_complete);
+    assert!(!task.output_complete);
+    physical_snapshot(&mut task, Some(Some(0)), true, false);
+    assert!(task.output_complete);
+    assert!(!task.cleanup_complete);
+    physical_snapshot(&mut task, Some(Some(0)), true, true);
+    assert!(task.cleanup_complete);
+}

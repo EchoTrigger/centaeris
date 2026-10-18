@@ -32,7 +32,7 @@ fn postgres_retirement_pending_fences_current_and_new_runs_until_exact_absence()
             .get::<_, String>(0),
         "releasing"
     );
-    let profile = format!("sha256:{}", "b".repeat(64));
+    let profile = a.original.environment_profile.digest().unwrap();
     assert!(store
         .with_retained_instance_operation(&a.request("execution-a", &profile), &allocation, |_| Ok(
             ()
@@ -266,7 +266,7 @@ fn postgres_retirement_committed_barrier_is_visible_before_physical_mutation() {
             let reopened = PostgresRuntimeStore::new(&url)?;
             let b = run(&reopened, &mut db, "run-b", 2);
             assert!(prepare(&reopened, &b, "execution-b", &physical).is_err());
-            let profile = format!("sha256:{}", "b".repeat(64));
+            let profile = a.original.environment_profile.digest().unwrap();
             assert!(reopened
                 .with_retained_instance_operation(
                     &a.request("execution-a", &profile),
@@ -305,6 +305,7 @@ fn postgres_retirement_forward_migration_preserves_existing_allocation_and_relea
         .unwrap()
         .get::<_, String>(0);
     let history=db.query("SELECT version,applied_at_ms FROM runtime.schema_migrations WHERE version<=10 ORDER BY version",&[]).unwrap().iter().map(|r|(r.get::<_,i64>(0),r.get::<_,i64>(1))).collect::<Vec<_>>();
+    crate::postgres_store::environment_owner_schema::restore_previous_fixture(&mut db);
     db.batch_execute("DROP TABLE runtime.environment_maintenance_completions; DROP FUNCTION runtime.protect_environment_maintenance_completion(); DROP TABLE runtime.environment_retirements; DROP FUNCTION runtime.protect_environment_retirement(); DELETE FROM runtime.schema_migrations WHERE version>=11").unwrap();
     drop(PostgresRuntimeStore::new(&url).unwrap());
     assert_eq!(
@@ -452,10 +453,12 @@ fn postgres_retirement_pending_other_environment_does_not_block_healthy_run_clea
     binding.environment_id = "environment-b".into();
     binding.agent_run_authorization_digest = digest;
     b.grant = sign(binding);
-    let two = declared_usage(b.original.resources)
-        .checked_add(declared_usage(b.original.resources))
+    let two = declared_usage(b.original.environment_profile.resources.sandbox_resources())
+        .checked_add(declared_usage(
+            b.original.environment_profile.resources.sandbox_resources(),
+        ))
         .unwrap();
-    let profile = format!("sha256:{}", "b".repeat(64));
+    let profile = b.original.environment_profile.digest().unwrap();
     let second = store
         .prepare_retained_instance(
             &b.request("execution-b", &profile),
@@ -469,9 +472,13 @@ fn postgres_retirement_pending_other_environment_does_not_block_healthy_run_clea
             |allocation| {
                 physical.lock().unwrap().push(ObservedResidentSandbox {
                     execution_id: allocation.allocation_execution_id.clone(),
-                    agent_run_id: "run-b".into(),
+                    allocation_owner: centaeris_core::execution::EnvironmentTaskOwner::AgentRun {
+                        run_id: "run-b".into(),
+                    },
                     container_id: "container-b".into(),
-                    resources: declared_usage(b.original.resources),
+                    resources: declared_usage(
+                        b.original.environment_profile.resources.sandbox_resources(),
+                    ),
                 });
                 Ok("container-b".into())
             },

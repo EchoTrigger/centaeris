@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(test)]
 mod instance;
 #[cfg(any(target_os = "linux", test))]
 mod migration;
@@ -121,30 +121,9 @@ impl TaskStorage {
 }
 
 #[cfg(target_os = "linux")]
-mod linux;
+pub(crate) mod linux;
 #[cfg(target_os = "linux")]
-pub use linux::{relay_once, serve, serve_instance};
-
-#[cfg(target_os = "linux")]
-pub fn inspect_history() -> Result<(), String> {
-    // The private index is unavailable to the ordinary agent UID.
-    // SAFETY: geteuid has no arguments or side effects.
-    if unsafe { libc::geteuid() } != 0 {
-        return Err("task_inspection_denied".into());
-    }
-    if std::env::args().len() != 2 {
-        return Err("task_inspection_arguments_invalid".into());
-    }
-    let inspection = store::inspection(
-        Path::new("/run/centaeris/task-control"),
-        Path::new("/run/centaeris/task-output"),
-    )?;
-    println!(
-        "{}",
-        serde_json::to_string(&inspection).map_err(|_| "task_encoding_failed")?
-    );
-    Ok(())
-}
+pub use linux::workload_keeper;
 
 #[cfg(any(target_os = "linux", test))]
 fn digest(value: &impl Serialize) -> Result<String, String> {

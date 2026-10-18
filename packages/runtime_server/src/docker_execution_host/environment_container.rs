@@ -1,0 +1,230 @@
+//! Container configuration for the current Session environment profile.
+use super::*;
+use crate::agent_run_authorization::EnvironmentProfile;
+
+pub(super) const HELPER_DESTINATION: &str = super::AGENT_BINARY;
+
+pub(super) fn create_body(
+    expected: &ContainerExpectation<'_>,
+    profile: &EnvironmentProfile,
+    helper_path: &str,
+) -> Result<serde_json::Value, String> {
+    let proxy_environment = network::proxy_environment(expected.network)?;
+    create_body_with_proxy_environment(expected, profile, helper_path, &proxy_environment)
+}
+
+pub(super) fn create_body_with_proxy_environment(
+    expected: &ContainerExpectation<'_>,
+    profile: &EnvironmentProfile,
+    helper_path: &str,
+    proxy_environment: &BTreeMap<String, String>,
+) -> Result<serde_json::Value, String> {
+    profile.validate()?;
+    if expected.oci_runtime != OciRuntime::Runc
+        || expected.image_digest != profile.image_digest
+        || expected.resources != profile.resources.sandbox_resources()
+        || expected.network != profile.network
+        || !helper_path.starts_with('/')
+        || helper_path.chars().any(char::is_control)
+    {
+        return Err("environment signed host profile mismatch".into());
+    }
+    let owner = expected.allocation_owner.cloned().unwrap_or(
+        centaeris_core::execution::EnvironmentTaskOwner::AgentRun {
+            run_id: expected.agent_run_id.into(),
+        },
+    );
+    let mut labels = serde_json::json!({
+        "centaeris.managed":"true", "centaeris.allocation_owner":serde_json::to_string(&owner).map_err(|_|"environment_owner_invalid")?,
+        "centaeris.environment_id":expected.environment_id, "centaeris.instance_id":expected.instance_id,
+        "centaeris.environment_authorization_digest":expected.binding_digest,
+        "centaeris.execution_id":expected.execution_id,
+        "centaeris.environment_profile_digest":profile.digest()?,
+        "centaeris.data_budget":profile.resources.data_tmpfs_bytes.to_string(),
+    });
+    if let centaeris_core::execution::EnvironmentTaskOwner::AgentRun { run_id } = &owner {
+        labels["centaeris.agent_run_id"] = serde_json::json!(run_id);
+    }
+    let mut mounts=expected.plugin_mounts.iter().map(|mount|serde_json::json!({"Type":"volume","Source":expected.plugin_volume_name,"Target":mount.destination,"ReadOnly":true,"VolumeOptions":{"Subpath":mount.package_name}})).collect::<Vec<_>>();
+    mounts.push(serde_json::json!({"Type":"bind","Source":helper_path,"Target":HELPER_DESTINATION,"ReadOnly":true}));
+    let mut body = serde_json::json!({
+        "Image":profile.image_digest, "Labels":labels, "User":profile.user,
+        "WorkingDir":"/","Entrypoint":[],
+        "Cmd":[HELPER_DESTINATION,"environment-keeper"],
+        "Env":[format!("CENTAERIS_WORKSPACE_ROOT={}",profile.workspace_root),format!("CENTAERIS_WORKSPACE_USER={}",profile.user)],
+        "HostConfig":{
+            "Runtime":"runc", "NetworkMode":network::mode(expected.network),
+            "ReadonlyRootfs":false,"CapDrop":["ALL"],"CapAdd":[],"SecurityOpt":["no-new-privileges"],
+            "Memory":profile.resources.memory_bytes, "CpuPeriod":100000,
+            "CpuQuota":u64::from(profile.resources.cpu_milli)*100,
+            "PidsLimit":profile.resources.pids_limit,"Mounts":mounts
+        }
+    });
+    network::apply_proxy_environment(&mut body, expected.network, proxy_environment);
+    Ok(body)
+}
+
+pub(super) fn helper_path() -> Result<String, String> {
+    let source = env::var("ENVIRONMENT_EXECUTION_HELPER")
+        .map_err(|_| "environment execution helper not configured")?;
+    let expected_hash = env::var("ENVIRONMENT_EXECUTION_HELPER_SHA256")
+        .map_err(|_| "environment execution helper digest not configured")?;
+    if !source.starts_with('/') || source.chars().any(char::is_control) {
+        return Err("environment execution helper path invalid".into());
+    }
+    let metadata = fs::symlink_metadata(&source).map_err(|_| "environment helper unavailable")?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > 128 * 1024 * 1024
+    {
+        return Err("environment helper is not a bounded regular file".into());
+    }
+    let bytes = fs::read(&source).map_err(|_| "environment helper read failed")?;
+    if expected_hash != format!("{:x}", Sha256::digest(bytes)) {
+        return Err("environment helper digest mismatch".into());
+    }
+    Ok(source)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_run_authorization::EnvironmentResources;
+
+    fn profile() -> EnvironmentProfile {
+        EnvironmentProfile {
+            schema: "runtime.environment_profile.v1".into(),
+            image_digest: format!("sha256:{}", "a".repeat(64)),
+            workspace_root: "/app".into(),
+            user: "0:0".into(),
+            network: ExecutionNetwork::PublicInternet,
+            resources: EnvironmentResources {
+                memory_bytes: 2 * 1024 * 1024 * 1024,
+                cpu_milli: 1000,
+                pids_limit: 512,
+                data_tmpfs_bytes: 64 * 1024 * 1024,
+                storage_bytes: 10 * 1024 * 1024 * 1024,
+            },
+        }
+    }
+
+    #[test]
+    fn original_image_paths_user_and_download_policy_are_applied_without_private_volumes() {
+        let mut runner = super::super::tests::retained_test_runner();
+        let profile = profile();
+        runner.image_digest.clone_from(&profile.image_digest);
+        runner.resources = profile.resources.sandbox_resources();
+        runner.network = profile.network;
+        runner.plugin_mounts.clear();
+        let body = create_body(
+            &runner.container_expectation(),
+            &profile,
+            "/srv/helpers/execution_agent",
+        )
+        .unwrap();
+        assert_eq!(body["Image"], profile.image_digest);
+        assert_eq!(body["WorkingDir"], "/");
+        assert_eq!(body["Env"][0], "CENTAERIS_WORKSPACE_ROOT=/app");
+        assert_eq!(body["Env"][1], "CENTAERIS_WORKSPACE_USER=0:0");
+        assert_eq!(body["User"], "0:0");
+        assert_eq!(body["HostConfig"]["NetworkMode"], "bridge");
+        assert_eq!(body["HostConfig"]["ReadonlyRootfs"], false);
+        assert_eq!(body["HostConfig"]["Memory"], 2_u64 * 1024 * 1024 * 1024);
+        assert_eq!(body["HostConfig"]["CpuQuota"], 100_000);
+        assert_eq!(body["Entrypoint"], serde_json::json!([]));
+        assert_eq!(
+            body["Cmd"],
+            serde_json::json!([HELPER_DESTINATION, "environment-keeper"])
+        );
+        let mounts = body["HostConfig"]["Mounts"].as_array().unwrap();
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0]["Source"], "/srv/helpers/execution_agent");
+        assert_eq!(mounts[0]["Target"], HELPER_DESTINATION);
+        assert_eq!(mounts[0]["ReadOnly"], true);
+        assert!(body["HostConfig"]["Tmpfs"].is_null());
+    }
+
+    #[test]
+    fn docker_helper_bind_inspection_does_not_require_volume_options() {
+        let runner = super::super::tests::retained_test_runner();
+        let helper: super::super::ContainerMountFacts = serde_json::from_value(serde_json::json!({
+            "Type": "bind", "Source": "/srv/helpers/execution_agent",
+            "Target": HELPER_DESTINATION, "ReadOnly": true,
+        }))
+        .expect("Docker bind mount omits volume-only options");
+        assert_eq!(helper.target, HELPER_DESTINATION);
+        assert!(!super::super::memory_mount_matches(
+            &[helper],
+            &runner.memory_mount
+        ));
+        let missing_scope: super::super::ContainerMountFacts =
+            serde_json::from_value(serde_json::json!({
+                "Type": "volume", "Source": runner.memory_mount.volume_name,
+                "Target": super::super::MEMORY_CONTAINER_ROOT,
+            }))
+            .expect("volume facts can be observed without granting a scope match");
+        assert!(!super::super::memory_mount_matches(
+            &[missing_scope],
+            &runner.memory_mount
+        ));
+    }
+
+    #[test]
+    fn environment_profile_cannot_change_signed_image_or_resource_envelope() {
+        let runner = super::super::tests::retained_test_runner();
+        assert!(create_body(&runner.container_expectation(), &profile(), "/srv/helper").is_err());
+    }
+
+    #[test]
+    fn public_task_and_verifier_inherit_the_same_host_proxy_defaults() {
+        let mut runner = super::super::tests::retained_test_runner();
+        let profile = profile();
+        runner.image_digest.clone_from(&profile.image_digest);
+        runner.resources = profile.resources.sandbox_resources();
+        runner.network = profile.network;
+        runner.plugin_mounts.clear();
+        let proxy = BTreeMap::from([
+            ("HTTP_PROXY".into(), "http://172.17.0.1:17890".into()),
+            ("http_proxy".into(), "http://172.17.0.1:17890".into()),
+            ("HTTPS_PROXY".into(), "http://172.17.0.1:17890".into()),
+            ("https_proxy".into(), "http://172.17.0.1:17890".into()),
+            ("NO_PROXY".into(), "localhost,127.0.0.1,::1".into()),
+            ("no_proxy".into(), "localhost,127.0.0.1,::1".into()),
+        ]);
+        let body = create_body_with_proxy_environment(
+            &runner.container_expectation(),
+            &profile,
+            "/srv/helper",
+            &proxy,
+        )
+        .unwrap();
+        let actual: BTreeMap<_, _> = body["Env"]
+            .as_array()
+            .expect("container defaults shared by all execs")
+            .iter()
+            .map(|value| value.as_str().unwrap().split_once('=').unwrap())
+            .collect();
+        for (key, value) in &proxy {
+            assert_eq!(actual.get(key.as_str()), Some(&value.as_str()));
+        }
+        let offline = EnvironmentProfile {
+            network: ExecutionNetwork::Disabled,
+            ..profile
+        };
+        runner.network = offline.network;
+        let body = create_body_with_proxy_environment(
+            &runner.container_expectation(),
+            &offline,
+            "/srv/helper",
+            &proxy,
+        )
+        .unwrap();
+        assert_eq!(body["HostConfig"]["NetworkMode"], "none");
+        let actual = body["Env"]
+            .as_array()
+            .expect("trusted workspace configuration");
+        assert_eq!(actual.len(), 2);
+        assert_eq!(actual[0], "CENTAERIS_WORKSPACE_ROOT=/app");
+        assert_eq!(actual[1], "CENTAERIS_WORKSPACE_USER=0:0");
+    }
+}

@@ -104,7 +104,8 @@ from .deferred_input import resolve_deferred_input
 from .agent_run_authorization_factory import (
     create_agent_run_authorization as create_agent_run_authorization_with_image,
 )
-from .runtime_client import TranscriptRuntimeError, build_agent_run_start
+from .runtime_client import TranscriptRuntimeError
+from .testing import fenced_start_fixture
 from .session_event import (
     project_committed_agent_run,
     rebuild_agent_run_citation_projection,
@@ -116,8 +117,7 @@ from . import agent_run_stream
 TEST_EXECUTION_IMAGE_DIGEST = f"sha256:{'a' * 64}"
 TEST_EXECUTION_PROFILE = {
     "schema": "runtime.execution_profile.v1",
-    "imageCapability": "workspace_general_v1",
-    "imageDigest": TEST_EXECUTION_IMAGE_DIGEST,
+        "imageDigest": TEST_EXECUTION_IMAGE_DIGEST,
 }
 _execution_profile_patcher = None
 
@@ -1105,7 +1105,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
                 "schema": "runtime.agent_run_lifecycle.resolved.v1",
                 "disposition": "terminal",
                 "terminalState": "completed",
-                "agentRunStart": build_agent_run_start(agent_run),
+                "agentRunStart": fenced_start_fixture(agent_run),
             },
         )
         agent_run.refresh_from_db()
@@ -2822,7 +2822,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
         model = ModelConfig.objects.create(
             id="fake-model", displayName="Fake"
         )
-        from .runtime_client import build_agent_run_start
+        from .testing import fenced_start_fixture
 
         session = create_session(workspace=workspace, owner=user)
         agent_run = AgentRun.objects.create(
@@ -2834,8 +2834,8 @@ class ApiVerticalSliceTests(TransactionTestCase):
             agent_instructions="Prefer primary sources.",
         )
         authorization = create_agent_run_authorization(agent_run)
-        agentRunStart = build_agent_run_start(agent_run)
-        self.assertEqual(agentRunStart["schema"], "workspace.agent_run.start.v3")
+        agentRunStart = fenced_start_fixture(agent_run)
+        self.assertEqual(agentRunStart["schema"], "workspace.agent_run.start.v1")
         self.assertEqual(agentRunStart["initialInput"], {"type": "userMessage"})
         self.assertEqual(agentRunStart["agentInstructions"], "Prefer primary sources.")
         self.assertEqual(agentRunStart["authorization"], authorization.payload)

@@ -23,50 +23,21 @@ class RetainedLifecycleTests(unittest.TestCase):
             worker.execute_agent_run_lifecycle_job(job, 'worker:test-owner', lambda: None)
             self.assertEqual(execute.call_args.args[0]['agentRunStart'], start)
 
-    def test_unsupported_configuration_fails_before_running_or_runtime_dispatch(self):
-        cases = [
-            {'authorization': {'assetRefs': [{'inputRef': 'library:input'}]}},
-            {'authorization': {'messageAssetRefs': ['attachment:input']}},
-            {'initialInput': {'type': 'userInput', 'attachmentRefs': ['attachment:input']}},
-            {'authorization': {'pluginActivation': {'packages': [{'mcpServers': [{'path': 'mcp.json'}]}]}}},
-            {'authorization': {'pluginActivation': {'packages': [{'hooks': [{'path': 'hooks.json'}]}]}}},
-        ]
-        for configuration in cases:
-            with self.subTest(configuration=configuration):
-                _, start = lifecycle_fixture()
-                start.update(configuration)
-                start['schema'] = 'workspace.agent_run.start.v4'
-                start['environmentAuthorization'] = {'payload': {'controllerPurpose': 'execute'}}
-                resolved = {'schema': 'runtime.agent_run_lifecycle.resolved.v2',
-                    'disposition': 'ready', 'agentRunStart': start}
-                job, _ = lifecycle_fixture()
-                with patch.object(worker, 'AGENT_RUN_EXECUTION_MODE', 'retained'), \
-                        patch.object(worker, 'api_request', return_value=resolved), \
-                        patch.object(worker, 'transition_agent_run') as transition, \
-                        patch.object(worker, 'agent_run_step_request') as execute:
-                    with self.assertRaisesRegex(RuntimeError, 'retained_configuration_unsupported'):
-                        worker.execute_agent_run_lifecycle_job(job, 'worker:test-owner', lambda: None)
-                    transition.assert_not_called()
-                    execute.assert_not_called()
-
-    def test_retained_reconciler_pages_terminal_cleanup_without_requeue(self):
-        next_cursor = {'createdAt': '2026-10-14T00:00:00+00:00', 'id': 'run-1'}
-        def api(path, body, reason):
-            if body['schema'] == 'runtime.agent_run_lifecycle.reconcile.v1':
-                return {'activeNext': None, 'deadLetterNext': None}
-            self.assertEqual(body['schema'], 'runtime.agent_run_lifecycle.reconcile.v2')
-            self.assertIsNone(body['after'])
-            return {'schema': 'runtime.agent_run_lifecycle.reconciled.v2', 'checked': 1,
-                'pending': [{'agentRunId': 'run-1', 'authorizationDigest': 'sha256:' + 'a' * 64,
-                    'terminalState': 'completed', 'jobStatus': 'dead_lettered'}], 'next': next_cursor}
-        with patch.object(worker, 'AGENT_RUN_EXECUTION_MODE', 'retained', create=True), \
-                patch.object(worker, 'api_request', side_effect=api) as requests, \
-                patch.object(worker, 'runtime_request', side_effect=[{}, {'disposition': 'reconciled', 'checked': 0, 'waiters': [], 'next': None}]):
-            reconciler = worker.LifecycleReconciler()
-            response = reconciler()
-            self.assertEqual(requests.call_count, 2)
-            self.assertEqual(reconciler.cleanup_after, next_cursor)
-            self.assertEqual(response['cleanupPending']['pending'][0]['jobStatus'], 'dead_lettered')
+    def test_retained_keeps_attachment_and_extension_dispatch(self):
+        job, start = lifecycle_fixture()
+        start['authorization'] = {'assetRefs': [{'inputRef': 'library:input'}],
+            'pluginActivation': {'packages': [{'mcpServers': [{'path': 'mcp.json'}],
+                'hooks': [{'path': 'hooks.json'}]}]}}
+        resolved = {'schema': 'runtime.agent_run_lifecycle.resolved.v1',
+            'disposition': 'ready', 'agentRunStart': start}
+        step = {'schema': 'runtime.agent_run.step.result.v1', 'agentRunId': 'agent_run_1',
+            'disposition': 'waiting', 'terminalState': None, 'transitionReason': 'runtime_job_wait'}
+        with patch.object(worker, 'AGENT_RUN_EXECUTION_MODE', 'retained'), \
+                patch.object(worker, 'api_request', return_value=resolved), \
+                patch.object(worker, 'transition_agent_run'), patch.object(worker, 'yield_job'), \
+                patch.object(worker, 'agent_run_step_request', return_value=step) as execute:
+            worker.execute_agent_run_lifecycle_job(job, 'worker:test-owner', lambda: None)
+        self.assertEqual(execute.call_args.args[0]['agentRunStart'], start)
 
     def test_cleanup_failure_retries_same_job_without_projecting_another_terminal(self):
         job, _ = lifecycle_fixture()
@@ -92,7 +63,7 @@ class RetainedLifecycleTests(unittest.TestCase):
         def api(path, body, reason):
             calls.append((path, body))
             if path.endswith('/resolve'):
-                self.assertEqual(body['schema'], 'runtime.agent_run_lifecycle.resolve.v2')
+                self.assertEqual(body['schema'], 'runtime.agent_run_lifecycle.resolve.v1')
                 self.assertEqual(body['leaseOwner'], 'worker:test-owner')
                 return resolved.pop(0)
             if path.endswith('/release'):
@@ -109,17 +80,17 @@ class RetainedLifecycleTests(unittest.TestCase):
 
     def terminal(self):
         _, start = lifecycle_fixture()
-        cleanup = {'schema': 'workspace.agent_run.cleanup.v1', **start,
+        cleanup = {**start, 'schema': 'workspace.agent_run.cleanup.v1',
             'authorizationSignature': 'signature', 'authorization': {},
             'environmentAuthorization': {'payload': {'controllerPurpose': 'cleanup',
                 'controllerEpoch': 2}, 'signature': 'signature'}}
         cleanup.pop('turnId')
-        return {'schema': 'runtime.agent_run_lifecycle.resolved.v2',
+        return {'schema': 'runtime.agent_run_lifecycle.resolved.v1',
             'disposition': 'terminal', 'terminalState': 'completed', 'agentRunCleanup': cleanup}
 
     def test_released_replay_completes_without_acquiring_or_touching_runtime(self):
         calls, transition, execute, cleanup, complete = self.execute([{
-            'schema': 'runtime.agent_run_lifecycle.resolved.v2', 'disposition': 'released',
+            'schema': 'runtime.agent_run_lifecycle.resolved.v1', 'disposition': 'released',
             'terminalState': 'completed', 'releaseReceiptId': 'release-1'}])
         self.assertEqual(len(calls), 1)
         transition.assert_not_called()
@@ -129,12 +100,12 @@ class RetainedLifecycleTests(unittest.TestCase):
 
     def test_terminal_cleanup_receipt_is_released_before_job_completion(self):
         calls, _, execute, cleanup, complete = self.execute([self.terminal()],
-            teardown={'schema': 'runtime.agent_run.teardown.result.v2', 'agentRunId': 'agent_run_1',
-                'status': 'retained', 'cleanupReceiptId': 'cleanup-1'},
+            teardown={'schema': 'runtime.agent_run.teardown.result.v1', 'agentRunId': 'agent_run_1',
+                'status': 'cleanupConfirmed', 'cleanupReceiptId': 'cleanup-1'},
             release={'schema': 'runtime.agent_run_lifecycle.released.v1',
                 'agentRunId': 'agent_run_1', 'releaseReceiptId': 'release-1'})
         execute.assert_not_called()
-        self.assertEqual(cleanup.call_args.args[0]['schema'], 'runtime.agent_run.teardown.v2')
+        self.assertEqual(cleanup.call_args.args[0]['schema'], 'runtime.agent_run.teardown.v1')
         self.assertNotIn('agentRunStart', cleanup.call_args.args[0])
         self.assertEqual(calls[-1][1]['cleanupReceiptId'], 'cleanup-1')
         self.assertEqual(calls[-1][1]['controllerEpoch'], 2)
@@ -142,22 +113,22 @@ class RetainedLifecycleTests(unittest.TestCase):
 
     def test_invalid_cleanup_receipt_never_releases_or_completes(self):
         with self.assertRaisesRegex(RuntimeError, 'runtime_teardown_response_invalid'):
-            self.execute([self.terminal()], teardown={'schema': 'runtime.agent_run.teardown.result.v2',
-                'agentRunId': 'agent_run_1', 'status': 'retained', 'cleanupReceiptId': ''})
+            self.execute([self.terminal()], teardown={'schema': 'runtime.agent_run.teardown.result.v1',
+                'agentRunId': 'agent_run_1', 'status': 'cleanupConfirmed', 'cleanupReceiptId': ''})
 
     def test_step_terminal_resolves_new_cleanup_authority(self):
         _, start = lifecycle_fixture()
-        start['schema'] = 'workspace.agent_run.start.v4'
+        start['schema'] = 'workspace.agent_run.start.v1'
         start['environmentAuthorization'] = {'payload': {'controllerPurpose': 'execute'}}
         calls, _, execute, cleanup, complete = self.execute([
-            {'schema': 'runtime.agent_run_lifecycle.resolved.v2', 'disposition': 'ready', 'agentRunStart': start},
-            self.terminal()], step={'schema': 'runtime.agent_run.step.result.v2', 'agentRunId': 'agent_run_1',
+            {'schema': 'runtime.agent_run_lifecycle.resolved.v1', 'disposition': 'ready', 'agentRunStart': start},
+            self.terminal()], step={'schema': 'runtime.agent_run.step.result.v1', 'agentRunId': 'agent_run_1',
                 'disposition': 'terminal', 'terminalState': 'completed', 'transitionReason': 'runtime_session_terminal_committed'},
-            teardown={'schema': 'runtime.agent_run.teardown.result.v2', 'agentRunId': 'agent_run_1',
-                'status': 'retained', 'cleanupReceiptId': 'cleanup-1'},
+            teardown={'schema': 'runtime.agent_run.teardown.result.v1', 'agentRunId': 'agent_run_1',
+                'status': 'cleanupConfirmed', 'cleanupReceiptId': 'cleanup-1'},
             release={'schema': 'runtime.agent_run_lifecycle.released.v1',
                 'agentRunId': 'agent_run_1', 'releaseReceiptId': 'release-1'})
         self.assertEqual(len([call for call in calls if call[0].endswith('/resolve')]), 2)
-        self.assertEqual(execute.call_args.args[0]['schema'], 'runtime.agent_run.step.v2')
+        self.assertEqual(execute.call_args.args[0]['schema'], 'runtime.agent_run.step.v1')
         self.assertEqual(cleanup.call_args.args[0]['agentRunCleanup']['environmentAuthorization']['payload']['controllerPurpose'], 'cleanup')
         complete.assert_called_once()

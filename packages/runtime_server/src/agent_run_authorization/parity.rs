@@ -223,7 +223,8 @@ fn resource_u64_overflow_is_rejected_on_the_wire() {
     for field in ["memoryBytes", "dataTmpfsBytes"] {
         let mut value = serde_json::to_value(super::tests::authorization()).expect("fixture");
         // Preserve the out-of-range integer as JSON text, without a floating-point conversion.
-        value["resources"][field] = Value::String("18446744073709551616".into());
+        value["environmentProfile"]["resources"][field] =
+            Value::String("18446744073709551616".into());
         let wire = serde_json::to_string(&value)
             .expect("wire")
             .replace("\"18446744073709551616\"", "18446744073709551616");

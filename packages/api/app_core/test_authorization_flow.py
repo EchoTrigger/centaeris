@@ -15,7 +15,8 @@ class AuthorizationFlowTests(SimpleTestCase):
             session_id=payload["sessionId"], user_id=payload["userId"], modelConfig_id=payload["modelConfigRef"],
             thinkingMode=payload["thinkingMode"], session=SimpleNamespace(id=payload["sessionId"], agent_id=payload["agentId"]),
             environment_id="environment-test", environment=SimpleNamespace(
-                id="environment-test", session_id=payload["sessionId"], benchmark_profile=None, network="disabled"))
+                id="environment-test", session_id=payload["sessionId"], environment_profile=payload["environmentProfile"],
+                environment_profile_digest=payload["environmentProfileDigest"], network="disabled"))
         self.run.authorization = SimpleNamespace(payload=payload, digest=authorization_digest(payload),
             signature=authorization_signature(payload, KEY))
         self.digest = self.run.authorization.digest

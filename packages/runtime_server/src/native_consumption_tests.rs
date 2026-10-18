@@ -57,7 +57,6 @@ fn native_consumption_production_server() {
         tool_layers: Arc::new(Mutex::new(HashMap::new())),
         execution_profile: Arc::new(RuntimeExecutionProfile {
             schema: RUNTIME_EXECUTION_PROFILE_SCHEMA,
-            image_capability: "workspace_general_v1",
             image_digest: format!("sha256:{}", "a".repeat(64)),
         }),
         request_capacity: request_capacity::RequestCapacity::from_env().unwrap(),

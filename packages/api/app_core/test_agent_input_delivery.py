@@ -12,7 +12,7 @@ from django.test.utils import CaptureQueriesContext
 from django.db import connection
 
 from . import models, test_agent_inputs, test_agent_messages
-from .runtime_client import build_agent_run_start
+from .testing import fenced_start_fixture
 from .test_agent_work import PROFILE
 
 
@@ -71,7 +71,7 @@ class AgentInputDeliveryTests(TransactionTestCase):
         self.assertEqual((run.session_id, run.modelConfig_id, run.thinkingMode),
             (self.session.pk, self.selected.pk, "low"))
         self.assertEqual(run.authorization.payload["thinkingMode"], "low")
-        self.assertEqual(build_agent_run_start(run)["initialInput"],
+        self.assertEqual(fenced_start_fixture(run)["initialInput"],
             {"type": "userInput", "inputId": "initial-one", "message": body, "attachmentRefs": []})
         self.assertEqual(delivered.queue.initial_input_id, delivered.input_id)
         self.assertEqual(delivered.input.body, body)
@@ -94,7 +94,7 @@ class AgentInputDeliveryTests(TransactionTestCase):
         run.refresh_from_db()
         run.authorization.refresh_from_db()
         self.assertEqual((run.authorization.payload, run.authorization.digest, run.authorization.signature), proof)
-        self.assertEqual(build_agent_run_start(run)["initialInput"]["inputId"], "initial-one")
+        self.assertEqual(fenced_start_fixture(run)["initialInput"]["inputId"], "initial-one")
         self.assertIsNone(self.read("active-two"))
 
     def test_replay_and_lost_schedule_response_keep_one_fact_one_binding_and_one_run(self):
@@ -146,8 +146,8 @@ class AgentInputDeliveryTests(TransactionTestCase):
         second = self.delivery("late-two")
         self.assertNotEqual(second.queue.agent_run_id, run.pk)
         self.assertEqual(models.AgentRun.objects.filter(status__in=["queued", "running"]).count(), 1)
-        self.assertEqual(build_agent_run_start(second.queue.agent_run)["initialInput"]["inputId"], "late-two")
-        self.assertEqual(build_agent_run_start(run)["initialInput"]["inputId"], "initial-one")
+        self.assertEqual(fenced_start_fixture(second.queue.agent_run)["initialInput"]["inputId"], "late-two")
+        self.assertEqual(fenced_start_fixture(run)["initialInput"]["inputId"], "initial-one")
 
     def test_current_membership_cannot_launder_a_revoked_original_pending_input(self):
         with self.runtime(profile=OSError("preserve pending input")):

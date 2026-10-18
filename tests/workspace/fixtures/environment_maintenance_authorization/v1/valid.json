@@ -15,7 +15,8 @@
     "controllerLeaseDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
     "controllerPurpose": "execute",
     "requestDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-    "expiresAtMs": 1800000000000
+    "expiresAtMs": 1800000000000,
+    "operationKind": "task"
   },
-  "signature": "hmac-sha256:649931ca521ef0487bc289e97cd01775aae786a8e56a583882d63a3b945ec961"
+  "signature": "hmac-sha256:551f1546c58e0782c27286ddaee91c9b7161311d091fcd31e7b5737173407201"
 }

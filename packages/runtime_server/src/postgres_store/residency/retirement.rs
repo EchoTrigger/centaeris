@@ -84,7 +84,8 @@ impl From<RetirementError> for String {
 #[derive(Clone, Debug)]
 pub(crate) struct RetirementTarget {
     pub allocation_execution_id: String,
-    pub allocation_agent_run_id: String,
+    pub allocation_agent_run_id: Option<String>,
+    pub allocation_owner: centaeris_core::execution::EnvironmentTaskOwner,
     pub environment_id: String,
     pub instance_id: String,
     pub container_id: String,
@@ -125,8 +126,8 @@ impl PostgresRuntimeStore {
                 tx.execute("INSERT INTO runtime.environment_retirements(operation_id,environment_id,instance_id,host_id,allocation_execution_id,container_id,request_json,state,recorded_at_ms) VALUES($1,$2,$3,$4,$5,$6,$7,'pending',(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint)", &[&request.operation_id,&request.environment_id,&request.instance_id,&request.host_id,&execution,&container,&body]).map_err(|e| e.to_string())?;
                 (execution, container)
             };
-            let row = tx.query_one("SELECT agent_run_id,image_digest,binding_digest FROM runtime.execution_instances WHERE execution_id=$1 AND allocation_execution_id=execution_id AND environment_id=$2 AND instance_id=$3 AND host_id=$4 AND allocation_mode='retained'", &[&execution,&request.environment_id,&request.instance_id,&request.host_id]).map_err(|e| e.to_string())?;
-            let target = RetirementTarget { allocation_execution_id: execution.clone(), allocation_agent_run_id: row.get(0), environment_id: request.environment_id.clone(), instance_id: request.instance_id.clone(), container_id: container, image_digest: row.get(1), binding_digest: row.get(2) };
+            let row = tx.query_one("SELECT agent_run_id,image_digest,binding_digest,allocation_owner_json FROM runtime.execution_instances WHERE execution_id=$1 AND allocation_execution_id=execution_id AND environment_id=$2 AND instance_id=$3 AND host_id=$4 AND allocation_mode='retained'", &[&execution,&request.environment_id,&request.instance_id,&request.host_id]).map_err(|e| e.to_string())?;
+            let target = RetirementTarget { allocation_execution_id: execution.clone(), allocation_agent_run_id: row.get(0), allocation_owner: serde_json::from_str(&row.get::<_,String>(3)).map_err(|_|"allocation_owner_invalid")?, environment_id: request.environment_id.clone(), instance_id: request.instance_id.clone(), container_id: container, image_digest: row.get(1), binding_digest: row.get(2) };
             tx.execute("UPDATE runtime.resident_sandboxes SET state='releasing' WHERE execution_id=$1 AND host_id=$2 AND instance_id=$3", &[&execution,&request.host_id,&request.instance_id]).map_err(|e| e.to_string())?;
             // No physical mutation before this synchronous resource commit.
             tx.commit().map_err(|e| e.to_string())?;

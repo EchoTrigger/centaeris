@@ -1,12 +1,35 @@
 //! Persistent environment task contracts. Hosts translate these contracts.
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
-pub const ENVIRONMENT_TASK_SCHEMA: &str = "environment.task.v3";
+pub const ENVIRONMENT_TASK_SCHEMA: &str = "environment.task.v1";
 pub const ENVIRONMENT_TASK_MAX_ACTIVE: usize = 32;
 pub const ENVIRONMENT_TASK_MAX_RECORDS: usize = 64;
 pub const ENVIRONMENT_TASK_OUTPUT_BYTES: usize = 1024 * 1024;
 pub const ENVIRONMENT_TASK_READ_BYTES: usize = 64 * 1024;
+
+/// Environment additions are native process inputs, independent of image tools.
+pub fn validate_environment_task_env(env: &BTreeMap<String, String>) -> Result<(), String> {
+    if env.len() > 128
+        || env.iter().any(|(key, value)| {
+            key.is_empty()
+                || key.len() > 256
+                || !key.bytes().enumerate().all(|(i, byte)| {
+                    byte == b'_' || byte.is_ascii_alphabetic() || (i > 0 && byte.is_ascii_digit())
+                })
+                || value.contains('\0')
+        })
+        || env
+            .iter()
+            .map(|(key, value)| key.len().saturating_add(value.len()).saturating_add(2))
+            .sum::<usize>()
+            > 64 * 1024
+    {
+        return Err("task_invalid_environment".into());
+    }
+    Ok(())
+}
 
 /// Identity of one original stdin mutation, including its EOF flag.
 pub fn environment_task_input_digest(data: &[u8], close: bool) -> Result<String, String> {
@@ -289,6 +312,8 @@ pub enum EnvironmentTaskRequest {
         scope: EnvironmentTaskScope,
         program: String,
         args: Vec<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        env: BTreeMap<String, String>,
         cwd: String,
         timeout_ms: u64,
     },
@@ -396,29 +421,26 @@ impl EnvironmentTaskRequest {
             Self::Input { fence, .. } | Self::QueryInputReceipt { fence, .. } => {
                 fence.authorize_execution()?;
             }
-            Self::EndRun { fence, run_id, .. } => {
+            Self::EndRun { fence, run_id, .. }
                 if !fence
                     .controller_owner
                     .owns_scope(&EnvironmentTaskScope::Run {
                         run_id: run_id.clone(),
-                    })
-                {
-                    return Err("task_run_scope_denied".into());
-                }
+                    }) =>
+            {
+                return Err("task_run_scope_denied".into());
             }
             Self::EndOperation {
                 fence,
                 owner_operation_id,
                 ..
-            } => {
-                if !fence
-                    .controller_owner
-                    .owns_scope(&EnvironmentTaskScope::Operation {
-                        operation_id: owner_operation_id.clone(),
-                    })
-                {
-                    return Err("task_operation_scope_denied".into());
-                }
+            } if !fence
+                .controller_owner
+                .owns_scope(&EnvironmentTaskScope::Operation {
+                    operation_id: owner_operation_id.clone(),
+                }) =>
+            {
+                return Err("task_operation_scope_denied".into());
             }
             _ => {}
         }
@@ -430,6 +452,9 @@ impl EnvironmentTaskRequest {
             {
                 return Err("task_invalid_input_digest".into());
             }
+        }
+        if let Self::Start { env, .. } = self {
+            validate_environment_task_env(env)?;
         }
         Ok(())
     }
@@ -537,6 +562,39 @@ impl EnvironmentTaskResponse {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn start_environment_is_native_bounded_and_cannot_contain_invalid_names_or_nul() {
+        let make = |env: serde_json::Value| {
+            serde_json::from_value::<super::EnvironmentTaskRequest>(serde_json::json!({
+                "operation":"start","fence":{"environmentInstanceId":"i","controllerOwner":{"kind":"agentRun","runId":"r"},"controllerEpoch":1,"controllerPurpose":"execute"},
+                "operationId":"1:env","scope":{"kind":"environment"},"program":"/app/tool","args":[],"cwd":"/project","timeoutMs":0,"env":env
+            }))
+        };
+        make(
+            serde_json::json!({"PATH":"/custom/bin","TOKEN_VALUE":"line one\nline two","EMPTY":""}),
+        )
+        .unwrap()
+        .validate_authority()
+        .unwrap();
+        for env in [
+            serde_json::json!({"":"x"}),
+            serde_json::json!({"A=B":"x"}),
+            serde_json::json!({"1INVALID":"x"}),
+            serde_json::json!({"VALID":"bad\u{0}value"}),
+            serde_json::json!({"LONG":"x".repeat(65536)}),
+        ] {
+            assert_eq!(
+                make(env).unwrap().validate_authority().unwrap_err(),
+                "task_invalid_environment"
+            );
+        }
+        let excessive: std::collections::BTreeMap<_, _> =
+            (0..129).map(|i| (format!("K{i}"), "v")).collect();
+        assert!(make(serde_json::to_value(excessive).unwrap())
+            .unwrap()
+            .validate_authority()
+            .is_err());
+    }
     use super::*;
 
     fn owner_fence(kind: &str, id: &str, epoch: u64, purpose: &str) -> serde_json::Value {
@@ -786,8 +844,8 @@ mod tests {
     }
 
     #[test]
-    fn owner_contract_requires_v3_and_rejects_ambiguous_owner_or_scope_fields() {
-        assert_eq!(ENVIRONMENT_TASK_SCHEMA, "environment.task.v3");
+    fn owner_contract_requires_generic_schema_and_rejects_ambiguous_owner_or_scope_fields() {
+        assert_eq!(ENVIRONMENT_TASK_SCHEMA, "environment.task.v1");
         let mut fence = owner_fence("maintenanceOperation", "prepare", 2, "execute");
         fence["controllerId"] = serde_json::json!("prepare");
         assert!(serde_json::from_value::<EnvironmentTaskFence>(fence).is_err());
@@ -799,15 +857,6 @@ mod tests {
                 "kind": "operation", "operationId": "prepare", "runId": "prepare"
             }))
             .is_err()
-        );
-        let legacy = serde_json::json!({
-            "schema": "environment.task.v2",
-            "request": {"operation": "takeover", "environmentInstanceId": "instance",
-                "controllerId": "run", "controllerEpoch": 2, "controllerPurpose": "execute"}
-        });
-        assert!(
-            serde_json::from_value::<EnvironmentTaskEnvelope>(legacy)
-                .map_or(true, |envelope| envelope.validate().is_err())
         );
     }
 
@@ -861,41 +910,6 @@ mod tests {
     }
 
     #[test]
-    fn older_task_service_cannot_accept_current_owner_protocol() {
-        let old = EnvironmentTaskEnvelope {
-            schema: "environment.task.v1".into(),
-            request: EnvironmentTaskRequest::Takeover {
-                environment_instance_id: "instance".into(),
-                controller_owner: EnvironmentTaskOwner::AgentRun {
-                    run_id: "run".into(),
-                },
-                controller_epoch: 1,
-                controller_purpose: EnvironmentTaskControllerPurpose::Execute,
-            },
-        };
-        for schema in ["environment.task.v1", "environment.task.v2"] {
-            let old = EnvironmentTaskEnvelope {
-                schema: schema.into(),
-                ..old.clone()
-            };
-            assert_eq!(old.validate().unwrap_err(), "task_schema_unsupported");
-            assert_eq!(
-                EnvironmentTaskResponse::Error {
-                    schema: schema.into(),
-                    error: "denied".into()
-                }
-                .validate()
-                .unwrap_err(),
-                "task_schema_unsupported"
-            );
-        }
-        let current = EnvironmentTaskEnvelope {
-            schema: ENVIRONMENT_TASK_SCHEMA.into(),
-            ..old
-        };
-        current.validate().unwrap();
-    }
-    #[test]
     fn operation_identity_is_canonical_bounded_and_keeps_original_epoch() {
         let fence = EnvironmentTaskFence {
             environment_instance_id: "i".into(),
@@ -909,11 +923,9 @@ mod tests {
         for invalid in ["legacy", "01:start", "+1:start", "0:start", "1:", "1:bad\n"] {
             assert!(fence.validate_operation_id(invalid).is_err());
         }
-        assert!(
-            fence
-                .validate_operation_id(&fence.operation_id(&"x".repeat(129)))
-                .is_err()
-        );
+        assert!(fence
+            .validate_operation_id(&fence.operation_id(&"x".repeat(129)))
+            .is_err());
         let future = EnvironmentTaskFence {
             controller_epoch: 2,
             ..fence
@@ -945,6 +957,7 @@ mod tests {
             scope: EnvironmentTaskScope::Environment,
             program: "sh".into(),
             args: vec![],
+            env: BTreeMap::new(),
             cwd: "/mnt/data".into(),
             timeout_ms: 0,
         };
@@ -963,16 +976,14 @@ mod tests {
     #[test]
     fn envelope_requires_supported_schema_and_response_has_exclusive_outcome() {
         let json = r#"{"schema":"obsolete","request":{"operation":"takeover","environmentInstanceId":"i","controllerOwner":{"kind":"agentRun","runId":"r"},"controllerEpoch":1,"controllerPurpose":"execute"}}"#;
-        assert!(
-            serde_json::from_str::<EnvironmentTaskEnvelope>(json)
-                .unwrap()
-                .validate()
-                .is_err()
-        );
-        assert!(
-            serde_json::from_str::<EnvironmentTaskEnvelope>(r#"{"operation":"list","fence":{}}"#)
-                .is_err()
-        );
+        assert!(serde_json::from_str::<EnvironmentTaskEnvelope>(json)
+            .unwrap()
+            .validate()
+            .is_err());
+        assert!(serde_json::from_str::<EnvironmentTaskEnvelope>(
+            r#"{"operation":"list","fence":{}}"#
+        )
+        .is_err());
         assert!(serde_json::from_str::<EnvironmentTaskResponse>(r#"{"status":"error","schema":"environment.task.v1","error":"denied","result":{"kind":"runEnded","taskIds":[]}}"#).is_err());
     }
     #[test]
@@ -991,48 +1002,39 @@ mod tests {
             scope: EnvironmentTaskScope::Environment,
             program: "sh".into(),
             args: vec![],
+            env: BTreeMap::new(),
             cwd: "/mnt/data".into(),
             timeout_ms: 0,
         };
         assert!(request.validate_authority().is_err());
-        assert!(
-            EnvironmentTaskRequest::Input {
-                fence: fence.clone(),
-                task_id: "task".into(),
-                operation_id: "2:op".into(),
-                data: vec![],
-                close: true
-            }
-            .validate_authority()
-            .is_err()
-        );
-        assert!(
-            fence
-                .authorize_termination(&EnvironmentTaskScope::Environment)
-                .is_err()
-        );
-        assert!(
-            fence
-                .authorize_termination(&EnvironmentTaskScope::Run {
-                    run_id: "other".into()
-                })
-                .is_err()
-        );
-        assert!(
-            fence
-                .authorize_termination(&EnvironmentTaskScope::Run {
-                    run_id: "run".into()
-                })
-                .is_ok()
-        );
-        assert!(
-            EnvironmentTaskRequest::EndRun {
-                fence,
-                run_id: "run".into(),
-                operation_id: "2:op".into()
-            }
-            .validate_authority()
-            .is_ok()
-        );
+        assert!(EnvironmentTaskRequest::Input {
+            fence: fence.clone(),
+            task_id: "task".into(),
+            operation_id: "2:op".into(),
+            data: vec![],
+            close: true
+        }
+        .validate_authority()
+        .is_err());
+        assert!(fence
+            .authorize_termination(&EnvironmentTaskScope::Environment)
+            .is_err());
+        assert!(fence
+            .authorize_termination(&EnvironmentTaskScope::Run {
+                run_id: "other".into()
+            })
+            .is_err());
+        assert!(fence
+            .authorize_termination(&EnvironmentTaskScope::Run {
+                run_id: "run".into()
+            })
+            .is_ok());
+        assert!(EnvironmentTaskRequest::EndRun {
+            fence,
+            run_id: "run".into(),
+            operation_id: "2:op".into()
+        }
+        .validate_authority()
+        .is_ok());
     }
 }

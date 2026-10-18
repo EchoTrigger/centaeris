@@ -9,107 +9,69 @@ use postgres::{Client, NoTls};
 #[test]
 #[ignore = "requires destructive dedicated Postgres test database"]
 fn postgres_instance_allocation_precedes_create_and_unknown_creation_keeps_budget() {
+    use super::retained_instance_tests as fixture;
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let (url, store) = setup();
-    let fixture = sandbox(&store, &url, "instance-unknown-create", "instance-tenant");
-    let mut db = Client::connect(&url, NoTls).unwrap();
-    let digest = format!("sha256:{}", "a".repeat(64));
-    let binding = crate::environment_authorization::EnvironmentBinding {
-        schema: "workspace.environment_authorization.v1".into(),
-        environment_id: "environment-unknown-create".into(),
-        session_id: format!("session-{}", fixture.run),
-        agent_run_id: fixture.run.clone(),
-        agent_run_authorization_digest: digest.clone(),
-        execution_mode: "perRun".into(),
-        controller: None,
-    };
-    db.batch_execute("ALTER TABLE public.app_core_agentrun ADD COLUMN IF NOT EXISTS environment_id text; CREATE TABLE IF NOT EXISTS public.app_core_agentrunauthorization(agent_run_id text PRIMARY KEY,digest text NOT NULL);").unwrap();
-    db.execute(
-        "UPDATE public.app_core_agentrun SET environment_id=$2 WHERE id=$1",
-        &[&fixture.run, &binding.environment_id],
+    let (url, initial, mut db) = fixture::setup();
+    let a = fixture::run(&initial, &mut db, "instance-unknown-create", 1);
+    drop(initial);
+    let async_url = format!(
+        "{url}{}options=-c%20synchronous_commit%3Doff",
+        if url.contains('?') { "&" } else { "?" }
+    );
+    let store = PostgresRuntimeStore::new_with_pool_limits(
+        &async_url,
+        1,
+        std::time::Duration::from_millis(100),
     )
     .unwrap();
-    db.execute("INSERT INTO public.app_core_agentrunauthorization(agent_run_id,digest) VALUES($1,$2) ON CONFLICT(agent_run_id) DO UPDATE SET digest=EXCLUDED.digest", &[&fixture.run,&digest]).unwrap();
     db.batch_execute("DROP TABLE IF EXISTS public.execution_instance_commit_policy; CREATE TABLE public.execution_instance_commit_policy(execution_id text NOT NULL,commit_policy text NOT NULL); CREATE OR REPLACE FUNCTION public.observe_execution_instance_commit_policy() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO public.execution_instance_commit_policy VALUES(NEW.execution_id,current_setting('synchronous_commit')); RETURN NEW; END $$; CREATE TRIGGER observe_execution_instance_commit_policy AFTER INSERT ON runtime.execution_instances FOR EACH ROW EXECUTE FUNCTION public.observe_execution_instance_commit_policy();").unwrap();
-    let image = format!("sha256:{}", "b".repeat(64));
-    let mut instance = None;
-    let error = store
-        .prepare_resident_sandbox_with_client(
-            "fake-docker-host",
-            &fixture.request(),
-            limits(1, 1),
-            || Ok(Vec::new()),
-            |client| {
-                client
-                    .batch_execute("SET synchronous_commit=off")
-                    .map_err(|e| e.to_string())?;
-                instance = Some(super::super::execution_instances::bind(
-                    client,
-                    &binding,
-                    &fixture.execution,
-                    "fake-docker-host",
-                    &image,
-                )?);
-                // Separate connection sees both acknowledgements before physical work.
-                assert_eq!(count(&url), 1);
-                assert_eq!(db.query_one("SELECT commit_policy FROM public.execution_instance_commit_policy WHERE execution_id=$1", &[&fixture.execution]).unwrap().get::<_,String>(0),"on", "allocation insert must commit synchronously before physical work");
-                assert_eq!(
-                    db.query_one(
-                        "SELECT instance_id FROM runtime.execution_instances WHERE execution_id=$1",
-                        &[&fixture.execution]
-                    )
-                    .unwrap()
-                    .get::<_, String>(0),
-                    *instance.as_ref().unwrap()
-                );
-                assert_eq!(
-                    client
-                        .query_one("SHOW synchronous_commit", &[])
-                        .unwrap()
-                        .get::<_, String>(0),
-                    "off"
-                );
-                Err("unknown daemon outcome".into())
-            },
-        )
-        .unwrap_err();
+    let profile = a.original.environment_profile.digest().unwrap();
+    let request = a.request("unknown-physical", &profile);
+    let error = store.prepare_retained_instance(&request, fixture::limits(&a), || Ok(vec![]), |client, allocation| {
+        assert_eq!(db.query_one("SELECT count(*) FROM runtime.resident_sandboxes", &[]).unwrap().get::<_,i64>(0), 1);
+        assert_eq!(db.query_one("SELECT commit_policy FROM public.execution_instance_commit_policy WHERE execution_id='unknown-physical'", &[]).unwrap().get::<_,String>(0), "on");
+        assert_eq!(db.query_one("SELECT instance_id FROM runtime.execution_instances WHERE execution_id='unknown-physical'", &[]).unwrap().get::<_,String>(0), allocation.instance_id);
+        assert_eq!(client.query_one("SHOW synchronous_commit", &[]).unwrap().get::<_,String>(0), "off");
+        Ok(())
+    }, |_| Err("unknown daemon outcome".into())).unwrap_err();
     assert_eq!(error, "unknown daemon outcome");
-    assert_eq!(count(&url), 1);
     assert_eq!(
-        super::super::execution_instances::bind(
-            &mut db,
-            &binding,
-            &fixture.execution,
-            "fake-docker-host",
-            &image
-        )
-        .unwrap(),
-        instance.unwrap()
+        db.query_one("SELECT count(*) FROM runtime.resident_sandboxes", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        1
     );
-    let mut foreign = binding;
-    foreign.environment_id = "foreign".into();
-    let mut creates = 0;
-    assert!(store
-        .prepare_resident_sandbox_with_client(
-            "fake-docker-host",
-            &fixture.request(),
-            limits(1, 1),
-            || Ok(Vec::new()),
-            |client| {
-                super::super::execution_instances::bind(
-                    client,
-                    &foreign,
-                    &fixture.execution,
-                    "fake-docker-host",
-                    &image,
-                )?;
-                creates += 1;
-                Ok("unexpected".into())
-            }
+    drop(store);
+    db.batch_execute("DROP TRIGGER observe_execution_instance_commit_policy ON runtime.execution_instances; DROP FUNCTION public.observe_execution_instance_commit_policy(); DROP TABLE public.execution_instance_commit_policy;").unwrap();
+    let reopened = PostgresRuntimeStore::new(&url).unwrap();
+    assert!(reopened
+        .prepare_retained_instance(
+            &request,
+            fixture::limits(&a),
+            || Ok(vec![]),
+            |_, _| panic!("uncertain allocation repeated acceptance"),
+            |_| panic!("uncertain allocation repeated physical create")
         )
         .is_err());
-    assert_eq!(creates, 0);
-    assert_eq!(count(&url), 1);
+    let physical = Arc::new(Mutex::new(vec![
+        crate::resident_capacity::ObservedResidentSandbox {
+            execution_id: "unknown-physical".into(),
+            allocation_owner: centaeris_core::execution::EnvironmentTaskOwner::AgentRun {
+                run_id: a.original.agent_run_id.clone(),
+            },
+            container_id: "late-physical".into(),
+            resources: request.resources,
+        },
+    ]));
+    let adopted = fixture::prepare(&reopened, &a, "unknown-physical", &physical).unwrap();
+    assert!(adopted.reused);
+    assert_eq!(adopted.container_id.as_deref(), Some("late-physical"));
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.resident_sandboxes", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        1
+    );
 }
 
 #[test]
@@ -143,13 +105,7 @@ fn postgres_resident_recovery_attempt_is_durable_before_create_with_async_connec
             &[&fixture.job, &session],
         )
         .unwrap();
-    observer.batch_execute("DROP TABLE IF EXISTS public.app_core_sessionevent; DROP TABLE IF EXISTS public.app_core_session CASCADE; CREATE TABLE public.app_core_session(id text PRIMARY KEY,workspace_id text NOT NULL); CREATE TABLE public.app_core_sessionevent(\"eventId\" text PRIMARY KEY,workspace_id text NOT NULL,session_id text NOT NULL,agent_run_id text NOT NULL,sequence integer NOT NULL,agent_run_sequence integer,session_level boolean NOT NULL DEFAULT false,projects_to_agent_run_stream boolean NOT NULL,payload jsonb NOT NULL,\"createdAtMs\" bigint NOT NULL,\"insertedAt\" timestamptz NOT NULL DEFAULT clock_timestamp(),UNIQUE(session_id,sequence),UNIQUE(agent_run_id,agent_run_sequence));").unwrap();
-    observer
-        .execute(
-            "INSERT INTO public.app_core_session VALUES($1,$2)",
-            &[&session, &fixture.tenant],
-        )
-        .unwrap();
+    observer.batch_execute("DROP TABLE IF EXISTS public.app_core_sessionevent; CREATE TABLE public.app_core_sessionevent(\"eventId\" text PRIMARY KEY,workspace_id text NOT NULL,session_id text NOT NULL,agent_run_id text NOT NULL,sequence integer NOT NULL,agent_run_sequence integer,session_level boolean NOT NULL DEFAULT false,projects_to_agent_run_stream boolean NOT NULL,payload jsonb NOT NULL,\"createdAtMs\" bigint NOT NULL,\"insertedAt\" timestamptz NOT NULL DEFAULT clock_timestamp(),UNIQUE(session_id,sequence),UNIQUE(agent_run_id,agent_run_sequence));").unwrap();
     observer.batch_execute("DROP TABLE IF EXISTS public.recovery_commit_policy; CREATE TABLE public.recovery_commit_policy(event_type text NOT NULL,commit_policy text NOT NULL); CREATE OR REPLACE FUNCTION public.observe_recovery_commit_policy() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO public.recovery_commit_policy VALUES(NEW.payload->>'type',current_setting('synchronous_commit')); RETURN NEW; END $$; CREATE TRIGGER observe_recovery_commit_policy AFTER INSERT ON public.app_core_sessionevent FOR EACH ROW EXECUTE FUNCTION public.observe_recovery_commit_policy();").unwrap();
     let log = store.session_log(
         fixture.tenant.clone(),
@@ -210,7 +166,7 @@ fn postgres_resident_recovery_attempt_is_durable_before_create_with_async_connec
         .unwrap();
     let mut receipt = None;
     let mut created = false;
-    store.prepare_resident_sandbox_with_client("durable-recovery-host", &fixture.request(), limits(1, 1),
+    prepare_with_client(&store, "durable-recovery-host", &fixture, limits(1, 1),
         || Ok(Vec::new()),
         |client| {
             let before: String = client.query_one("SHOW synchronous_commit", &[]).map_err(|error| error.to_string())?.get(0);
@@ -221,8 +177,8 @@ fn postgres_resident_recovery_attempt_is_durable_before_create_with_async_connec
             let after: String = client.query_one("SHOW synchronous_commit", &[]).map_err(|error| error.to_string())?.get(0);
             assert_eq!(after, "off", "recovery append must not change ordinary connection policy");
             created = true;
-            Ok(fixture.observed().container_id)
-        }).unwrap();
+            Ok(())
+        }, |_| Ok(fixture.observed().container_id)).unwrap();
     log.catch_up_transcript_projection_after_append(receipt.as_ref().unwrap());
     assert!(created);
     assert_eq!(count(&url), 1);
@@ -260,13 +216,7 @@ fn postgres_resident_recovery_append_reuses_one_pool_connection_before_create() 
             &[&fixture.job, &session],
         )
         .unwrap();
-    observer.batch_execute("DROP TABLE IF EXISTS public.app_core_sessionevent; DROP TABLE IF EXISTS public.app_core_session CASCADE; CREATE TABLE public.app_core_session(id text PRIMARY KEY,workspace_id text NOT NULL); CREATE TABLE public.app_core_sessionevent(\"eventId\" text PRIMARY KEY,workspace_id text NOT NULL,session_id text NOT NULL,agent_run_id text NOT NULL,sequence integer NOT NULL,agent_run_sequence integer,session_level boolean NOT NULL DEFAULT false,projects_to_agent_run_stream boolean NOT NULL,payload jsonb NOT NULL,\"createdAtMs\" bigint NOT NULL,\"insertedAt\" timestamptz NOT NULL DEFAULT clock_timestamp(),UNIQUE(session_id,sequence),UNIQUE(agent_run_id,agent_run_sequence));").unwrap();
-    observer
-        .execute(
-            "INSERT INTO public.app_core_session VALUES($1,$2)",
-            &[&session, &fixture.tenant],
-        )
-        .unwrap();
+    observer.batch_execute("DROP TABLE IF EXISTS public.app_core_sessionevent; CREATE TABLE public.app_core_sessionevent(\"eventId\" text PRIMARY KEY,workspace_id text NOT NULL,session_id text NOT NULL,agent_run_id text NOT NULL,sequence integer NOT NULL,agent_run_sequence integer,session_level boolean NOT NULL DEFAULT false,projects_to_agent_run_stream boolean NOT NULL,payload jsonb NOT NULL,\"createdAtMs\" bigint NOT NULL,\"insertedAt\" timestamptz NOT NULL DEFAULT clock_timestamp(),UNIQUE(session_id,sequence),UNIQUE(agent_run_id,agent_run_sequence));").unwrap();
     let log = store.session_log(
         fixture.tenant.clone(),
         session.clone(),
@@ -297,35 +247,36 @@ fn postgres_resident_recovery_append_reuses_one_pool_connection_before_create() 
     let mut receipt = None;
     let created = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let create_flag = created.clone();
-    store
-        .prepare_resident_sandbox_with_client(
-            "one-pool-host",
-            &fixture.request(),
-            limits(1, 1),
-            || Ok(Vec::new()),
-            |client| {
-                receipt = Some(log.append_session_records_with_runtime_job_lease_on_client(
-                    client,
-                    &fixture.run,
-                    &[second],
-                    &fixture.fence(),
-                )?);
-                let source_count: i64 = client
-                    .query_one(
-                        "SELECT count(*) FROM app_core_sessionevent WHERE agent_run_id=$1",
-                        &[&fixture.run],
-                    )
-                    .map_err(|error| error.to_string())?
-                    .get(0);
-                assert_eq!(
-                    source_count, 2,
-                    "source commit must precede physical creation"
-                );
-                create_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                Ok(fixture.observed().container_id)
-            },
-        )
-        .unwrap();
+    prepare_with_client(
+        &store,
+        "one-pool-host",
+        &fixture,
+        limits(1, 1),
+        || Ok(Vec::new()),
+        |client| {
+            receipt = Some(log.append_session_records_with_runtime_job_lease_on_client(
+                client,
+                &fixture.run,
+                &[second],
+                &fixture.fence(),
+            )?);
+            let source_count: i64 = client
+                .query_one(
+                    "SELECT count(*) FROM app_core_sessionevent WHERE agent_run_id=$1",
+                    &[&fixture.run],
+                )
+                .map_err(|error| error.to_string())?
+                .get(0);
+            assert_eq!(
+                source_count, 2,
+                "source commit must precede physical creation"
+            );
+            create_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        },
+        |_| Ok(fixture.observed().container_id),
+    )
+    .unwrap();
     log.catch_up_transcript_projection_after_append(receipt.as_ref().unwrap());
     assert!(created.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(count(&url), 1);
@@ -373,7 +324,7 @@ fn postgres_resident_removal_serializes_lease_takeover_until_physical_absence() 
         "removal-tenant",
     );
     let host = Arc::new(Mutex::new(Vec::new()));
-    prepare(&store, &fixture, &host, limits(1, 1)).unwrap();
+    seed_historical_resident(&url, &fixture, &host);
     let expiry: i64 = Client::connect(&url, NoTls)
         .unwrap()
         .query_one(
@@ -428,11 +379,18 @@ fn postgres_resident_removal_serializes_lease_takeover_until_physical_absence() 
     );
 }
 
-use super::{job, reset_store, test_url, TEST_LOCK};
-use crate::postgres_store::PostgresRuntimeStore;
-use crate::resident_capacity::{
-    ObservedResidentSandbox, ResidentCapacity, ResidentSandboxRequest, RESIDENT_CAPACITY_WAIT,
+use super::retained_instance_tests::{sign, KEY};
+use super::{job, TEST_LOCK};
+use crate::agent_run_authorization::WorkspaceAgentRunAuthorization;
+use crate::environment_authorization::{
+    ControllerBinding, EnvironmentAuthorization, EnvironmentBinding,
 };
+use crate::postgres_store::execution_instances::{
+    RetainedInstanceAllocation, RetainedInstanceRequest,
+};
+use crate::postgres_store::PostgresRuntimeStore;
+use crate::resident_capacity::{ObservedResidentSandbox, ResidentCapacity, RESIDENT_CAPACITY_WAIT};
+use sha2::{Digest, Sha256};
 
 #[derive(Clone)]
 struct SandboxFixture {
@@ -441,6 +399,8 @@ struct SandboxFixture {
     execution: String,
     tenant: String,
     owner: String,
+    original: WorkspaceAgentRunAuthorization,
+    grant: EnvironmentAuthorization,
 }
 
 fn resources() -> ResidentResourceUsage {
@@ -476,46 +436,146 @@ impl SandboxFixture {
             lease_owner: self.owner.clone(),
         }
     }
-    fn request(&self) -> ResidentSandboxRequest<'_> {
-        ResidentSandboxRequest {
+    fn resources(&self) -> ResidentResourceUsage {
+        crate::resident_capacity::declared_usage(
+            self.original
+                .environment_profile
+                .resources
+                .sandbox_resources(),
+        )
+    }
+    fn request<'a>(
+        &'a self,
+        host_id: &'a str,
+        fence: &'a centaeris_core::session::RuntimeJobLeaseFence,
+    ) -> RetainedInstanceRequest<'a> {
+        RetainedInstanceRequest {
+            environment_authorization: &self.grant,
+            signing_key: KEY,
             execution_id: &self.execution,
-            agent_run_id: &self.run,
             workspace_id: &self.tenant,
-            lifecycle_job_id: &self.job,
-            lifecycle_lease_owner: &self.owner,
-            must_exist: false,
-            resources: resources(),
+            host_id,
+            image_digest: &self.original.environment_profile.image_digest,
+            profile_digest: &self.original.environment_profile_digest,
+            resources: self.resources(),
+            lease: fence,
         }
+    }
+    fn take_controller(&mut self, url: &str) {
+        let mut db = Client::connect(url, NoTls).unwrap();
+        let epoch: i64 = db.query_one("UPDATE public.app_core_sessionenvironment SET controller_epoch=controller_epoch+1,controller_lease_owner=$2 WHERE id=$1 RETURNING controller_epoch", &[&self.grant.payload.environment_id,&self.owner]).unwrap().get(0);
+        self.grant.payload.controller = Some(ControllerBinding {
+            controller_id: self.run.clone(),
+            controller_epoch: epoch,
+            controller_lease_digest: controller_lease_digest(&self.owner),
+            controller_purpose: "execute".into(),
+        });
+        self.grant = sign(self.grant.payload.clone());
     }
     fn observed(&self) -> ObservedResidentSandbox {
         ObservedResidentSandbox {
             execution_id: self.execution.clone(),
-            agent_run_id: self.run.clone(),
-            container_id: format!("container-{}", self.execution),
-            resources: resources(),
+            allocation_owner: centaeris_core::execution::EnvironmentTaskOwner::AgentRun {
+                run_id: self.run.clone(),
+            },
+            container_id: format!(
+                "{:x}",
+                Sha256::digest(format!("residency-container:{}", self.execution).as_bytes())
+            ),
+            resources: self.resources(),
         }
     }
 }
 
 fn setup() -> (String, PostgresRuntimeStore) {
-    let url = test_url();
-    reset_store(&url);
-    let mut db = Client::connect(&url, NoTls).unwrap();
-    db.batch_execute("ALTER TABLE public.app_core_agentrun ADD COLUMN IF NOT EXISTS workspace_id text NOT NULL DEFAULT 'resident-test'; ALTER TABLE public.app_core_agentrun ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'running'; ALTER TABLE public.app_core_agentrun ADD COLUMN IF NOT EXISTS environment_id text;").unwrap();
-    let store = PostgresRuntimeStore::new(&url).unwrap();
+    let (url, store, _) = super::retained_instance_tests::setup();
     (url, store)
 }
 
 fn sandbox(store: &PostgresRuntimeStore, url: &str, id: &str, tenant: &str) -> SandboxFixture {
+    sandbox_with_resources(store, url, id, tenant, resources())
+}
+
+fn controller_lease_digest(owner: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"workspace:environment-controller-lease:v1\0");
+    hash.update(owner.as_bytes());
+    format!("sha256:{:x}", hash.finalize())
+}
+
+fn sandbox_with_resources(
+    store: &PostgresRuntimeStore,
+    url: &str,
+    id: &str,
+    tenant: &str,
+    usage: ResidentResourceUsage,
+) -> SandboxFixture {
+    let mut original: WorkspaceAgentRunAuthorization = serde_json::from_str(include_str!(
+        "../../../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+    ))
+    .unwrap();
+    original.agent_run_id = id.into();
+    original.id = format!("authorization-{id}");
+    original.workspace_id = tenant.into();
+    original.session_id = format!("session-{id}");
+    let profile = &mut original.environment_profile.resources;
+    profile.memory_bytes = usage.memory_bytes;
+    profile.cpu_milli = usage.cpu_milli.try_into().unwrap();
+    profile.pids_limit = usage.pids.try_into().unwrap();
+    profile.data_tmpfs_bytes = usage.workspace_bytes;
+    profile.storage_bytes = usage.workspace_bytes;
+    original.environment_profile_digest = original.environment_profile.digest().unwrap();
+    let digest = original.digest().unwrap();
+    let owner = format!("lease-owner-{id}");
+    let environment = format!("environment-{id}");
+    let grant = sign(EnvironmentBinding {
+        schema: "workspace.environment_authorization.v1".into(),
+        environment_id: environment.clone(),
+        session_id: original.session_id.clone(),
+        agent_run_id: id.into(),
+        agent_run_authorization_digest: digest.clone(),
+        execution_mode: "perRun".into(),
+        controller: Some(ControllerBinding {
+            controller_id: id.into(),
+            controller_epoch: 1,
+            controller_lease_digest: controller_lease_digest(&owner),
+            controller_purpose: "execute".into(),
+        }),
+    });
     let fixture = SandboxFixture {
         run: id.into(),
         job: format!("agent_run.lifecycle:{id}"),
         execution: format!("execution-{id}"),
         tenant: tenant.into(),
-        owner: format!("lease-owner-{id}"),
+        owner,
+        original,
+        grant,
     };
     let mut db = Client::connect(url, NoTls).unwrap();
-    db.execute("INSERT INTO public.app_core_agentrun(id,session_id,workspace_id,status) VALUES($1,$2,$3,'running')", &[&fixture.run, &format!("session-{id}"), &tenant]).unwrap();
+    let member = format!("member-{tenant}");
+    db.execute(
+        "INSERT INTO public.app_core_workspace VALUES($1,'active') ON CONFLICT DO NOTHING",
+        &[&tenant],
+    )
+    .unwrap();
+    db.execute("INSERT INTO public.app_core_workspacemembership VALUES($1,$2,'user_1','member') ON CONFLICT DO NOTHING", &[&member,&tenant]).unwrap();
+    db.execute(
+        "INSERT INTO public.app_core_session VALUES($1,$2,'user_1','centaeris',$3,NULL)",
+        &[&fixture.original.session_id, &tenant, &environment],
+    )
+    .unwrap();
+    db.execute("INSERT INTO public.app_core_sessionenvironment VALUES($1,$2,$3,1,$4,'execute',false,$5::text::jsonb,$6)", &[&environment,&fixture.original.session_id,&id,&fixture.owner,&serde_json::to_string(&fixture.original.environment_profile).unwrap(),&fixture.original.environment_profile_digest]).unwrap();
+    db.execute("INSERT INTO public.app_core_agentrun(id,session_id,environment_id,workspace_id,user_id,membership_ref,status,\"modelConfig_id\",\"thinkingMode\") VALUES($1,$2,$3,$4,'user_1',$5,'running','model_1','high')", &[&id,&fixture.original.session_id,&environment,&tenant,&member]).unwrap();
+    db.execute(
+        "INSERT INTO public.app_core_agentrunauthorization VALUES($1,$2,$3::text::jsonb,$4)",
+        &[
+            &id,
+            &digest,
+            &serde_json::to_string(&fixture.original).unwrap(),
+            &fixture.original.signature(KEY).unwrap(),
+        ],
+    )
+    .unwrap();
     let now = db
         .query_one(
             "SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint",
@@ -523,11 +583,13 @@ fn sandbox(store: &PostgresRuntimeStore, url: &str, id: &str, tenant: &str) -> S
         )
         .unwrap()
         .get::<_, i64>(0);
-    let mut record = job(&fixture.job, &fixture.job);
+    let mut record = job(&fixture.job, &format!("{}:{digest}", fixture.job));
     record.job_kind = "agent_run.lifecycle".into();
     record.status = RuntimeJobStatus::Running;
     record.lease_owner = Some(fixture.owner.clone());
     record.lease_expires_at_ms = Some(now + 600_000);
+    record.session_id = Some(fixture.original.session_id.clone());
+    record.payload_ref = Some(format!("record:agent_run:{id}"));
     store
         .schedule_worker_job(ScheduleRuntimeJobRequest { job: record }, Some(tenant))
         .unwrap();
@@ -540,12 +602,26 @@ fn prepare(
     host: &Arc<Mutex<Vec<ObservedResidentSandbox>>>,
     capacity: ResidentCapacity,
 ) -> Result<(), String> {
-    store.prepare_resident_sandbox(
+    prepare_allocation(store, fixture, host, capacity).map(|_| ())
+}
+
+fn prepare_allocation(
+    store: &PostgresRuntimeStore,
+    fixture: &SandboxFixture,
+    host: &Arc<Mutex<Vec<ObservedResidentSandbox>>>,
+    capacity: ResidentCapacity,
+) -> Result<RetainedInstanceAllocation, String> {
+    prepare_with_client(
+        store,
         "fake-docker-host",
-        &fixture.request(),
+        fixture,
         capacity,
         || Ok(host.lock().unwrap().clone()),
-        || {
+        |_| Ok(()),
+        |allocation| {
+            if allocation.reused {
+                return Ok(allocation.container_id.clone().unwrap());
+            }
             let mut host = host.lock().unwrap();
             if !host
                 .iter()
@@ -556,6 +632,42 @@ fn prepare(
             Ok(fixture.observed().container_id)
         },
     )
+}
+
+fn prepare_with_client(
+    store: &PostgresRuntimeStore,
+    host_id: &str,
+    fixture: &SandboxFixture,
+    capacity: ResidentCapacity,
+    inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String> + Send,
+    before_create: impl FnOnce(&mut Client) -> Result<(), String> + Send,
+    create: impl FnOnce(&RetainedInstanceAllocation) -> Result<String, String> + Send,
+) -> Result<RetainedInstanceAllocation, String> {
+    let fence = fixture.fence();
+    store.prepare_retained_instance(
+        &fixture.request(host_id, &fence),
+        capacity,
+        inventory,
+        |client, _| before_create(client),
+        create,
+    )
+}
+
+// These facts characterize the still-supported removal/restore fence for an
+// already persisted historical resident. They do not exercise current creation
+// or claim that cold recovery can allocate a new unified environment instance.
+fn seed_historical_resident(
+    url: &str,
+    fixture: &SandboxFixture,
+    host: &Arc<Mutex<Vec<ObservedResidentSandbox>>>,
+) {
+    let observed = fixture.observed();
+    let usage = observed.resources;
+    let mut db = Client::connect(url, NoTls).unwrap();
+    super::owned_database::require_owned_database(&mut db);
+    db.execute("INSERT INTO runtime.execution_instances(execution_id,instance_id,environment_id,session_id,agent_run_id,host_id,authorization_digest,binding_digest,image_digest,allocation_execution_id,allocation_mode,profile_digest) VALUES($1,$2,$3,$4,$5,'fake-docker-host',$6,$7,$8,$1,'perRun',$9)", &[&fixture.execution,&crate::postgres_store::execution_instances::instance_id(&fixture.execution),&fixture.grant.payload.environment_id,&fixture.original.session_id,&fixture.run,&fixture.original.digest().unwrap(),&fixture.grant.payload.digest().unwrap(),&fixture.original.environment_profile.image_digest,&fixture.original.environment_profile_digest]).unwrap();
+    db.execute("INSERT INTO runtime.resident_sandboxes(host_id,execution_id,agent_run_id,workspace_id,container_id,state,memory_bytes,cpu_milli,pids,workspace_bytes,created_at_ms,updated_at_ms) VALUES('fake-docker-host',$1,$2,$3,$4,'resident',$5,$6,$7,$8,1,1)", &[&fixture.execution,&fixture.run,&fixture.tenant,&observed.container_id,&(usage.memory_bytes as i64),&(usage.cpu_milli as i64),&(usage.pids as i64),&(usage.workspace_bytes as i64)]).unwrap();
+    host.lock().unwrap().push(observed);
 }
 
 fn count(url: &str) -> i64 {
@@ -575,7 +687,7 @@ fn postgres_resident_waits_consume_host_and_tenant_resources_until_confirmed_rem
     let mut first = sandbox(&store, &url, "resident-first", "tenant-one");
     let same_tenant = sandbox(&store, &url, "resident-same-tenant", "tenant-one");
     let other_tenant = sandbox(&store, &url, "resident-other-tenant", "tenant-two");
-    prepare(&store, &first, &host, limits(2, 1)).unwrap();
+    seed_historical_resident(&url, &first, &host);
     let now = Client::connect(&url, NoTls)
         .unwrap()
         .query_one(
@@ -656,9 +768,12 @@ fn postgres_resident_waits_consume_host_and_tenant_resources_until_confirmed_rem
             &first.run,
             &first.fence(),
             || {
-                host.lock()
-                    .unwrap()
-                    .retain(|resident| resident.agent_run_id != first.run);
+                host.lock().unwrap().retain(|resident| {
+                    resident.allocation_owner
+                        != (centaeris_core::execution::EnvironmentTaskOwner::AgentRun {
+                            run_id: first.run.clone(),
+                        })
+                });
                 Ok(())
             },
             || Ok(host.lock().unwrap().clone()),
@@ -711,15 +826,16 @@ fn postgres_resident_unknown_creation_outcome_keeps_charge_and_adopts_after_rest
     let host = Arc::new(Mutex::new(Vec::new()));
     let first = sandbox(&store, &url, "uncertain-resident", "tenant-one");
     let second = sandbox(&store, &url, "next-resident", "tenant-two");
-    assert!(store
-        .prepare_resident_sandbox(
-            "fake-docker-host",
-            &first.request(),
-            limits(1, 1),
-            || Ok(Vec::new()),
-            || Err("create response lost".into())
-        )
-        .is_err());
+    assert!(prepare_with_client(
+        &store,
+        "fake-docker-host",
+        &first,
+        limits(1, 1),
+        || Ok(Vec::new()),
+        |_| Ok(()),
+        |_| Err("create response lost".into())
+    )
+    .is_err());
     assert_eq!(count(&url), 1);
     let restarted = PostgresRuntimeStore::new(&url).unwrap();
     assert_eq!(
@@ -747,13 +863,14 @@ fn postgres_preexisting_residents_are_charged_and_unknown_tenants_block_admissio
         .reconcile_resident_sandboxes("fake-docker-host", || Ok(host.lock().unwrap().clone()))
         .unwrap();
     assert_eq!(count(&url), 1);
-    assert_eq!(
-        prepare(&store, &next, &host, limits(1, 1)).unwrap_err(),
-        RESIDENT_CAPACITY_WAIT
-    );
+    assert!(prepare(&store, &next, &host, limits(1, 1))
+        .unwrap_err()
+        .contains("unresolved reservation"));
     let mut unknown = first.observed();
     unknown.execution_id = "unknown-execution".into();
-    unknown.agent_run_id = "unknown-owner".into();
+    unknown.allocation_owner = centaeris_core::execution::EnvironmentTaskOwner::AgentRun {
+        run_id: "unknown-owner".into(),
+    };
     unknown.container_id = "unknown-container".into();
     host.lock().unwrap().push(unknown);
     assert!(prepare(&store, &next, &host, limits(3, 3))
@@ -796,7 +913,7 @@ fn postgres_resident_late_owner_cannot_remove_a_reclaimed_sandbox() {
     let (url, store) = setup();
     let first = sandbox(&store, &url, "removal-fenced", "tenant-one");
     let host = Arc::new(Mutex::new(Vec::new()));
-    prepare(&store, &first, &host, limits(1, 1)).unwrap();
+    seed_historical_resident(&url, &first, &host);
     Client::connect(&url, NoTls)
         .unwrap()
         .execute(
@@ -830,8 +947,6 @@ fn postgres_resident_late_owner_cannot_remove_a_reclaimed_sandbox() {
 fn postgres_shipped_resource_profile_allows_serial_child_progress_after_confirmed_parent_release() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let (url, store) = setup();
-    let parent = sandbox(&store, &url, "default-parent", "default-tenant");
-    let child = sandbox(&store, &url, "default-child", "default-tenant");
     let example = include_str!("../../../../../.env.example");
     let configured = |name: &str| {
         example
@@ -851,16 +966,18 @@ fn postgres_shipped_resource_profile_allows_serial_child_progress_after_confirme
     let capacity = ResidentCapacity::default()
         .bound_to_host(64 * 1024 * 1024 * 1024, 16, 8 * 1024 * 1024 * 1024, 1600)
         .unwrap();
+    let parent = sandbox_with_resources(&store, &url, "default-parent", "default-tenant", shipped);
+    let child = sandbox_with_resources(&store, &url, "default-child", "default-tenant", shipped);
     let host = Arc::new(Mutex::new(Vec::new()));
     let admit = |fixture: &SandboxFixture| {
-        let mut request = fixture.request();
-        request.resources = shipped;
-        store.prepare_resident_sandbox(
+        prepare_with_client(
+            &store,
             "fake-docker-host",
-            &request,
+            fixture,
             capacity,
             || Ok(host.lock().unwrap().clone()),
-            || {
+            |_| Ok(()),
+            |_| {
                 let mut observed = fixture.observed();
                 observed.resources = shipped;
                 let id = observed.container_id.clone();
@@ -869,7 +986,7 @@ fn postgres_shipped_resource_profile_allows_serial_child_progress_after_confirme
             },
         )
     };
-    admit(&parent).unwrap();
+    seed_historical_resident(&url, &parent, &host);
     assert_eq!(admit(&child).unwrap_err(), RESIDENT_CAPACITY_WAIT);
     assert_eq!(host.lock().unwrap().len(), 1);
     Client::connect(&url, NoTls)
@@ -893,7 +1010,12 @@ fn postgres_shipped_resource_profile_allows_serial_child_progress_after_confirme
         .unwrap();
     admit(&child).unwrap();
     assert_eq!(host.lock().unwrap().len(), 1);
-    assert_eq!(host.lock().unwrap()[0].agent_run_id, child.run);
+    assert_eq!(
+        host.lock().unwrap()[0].allocation_owner,
+        centaeris_core::execution::EnvironmentTaskOwner::AgentRun {
+            run_id: child.run.clone()
+        }
+    );
     assert_eq!(count(&url), 1);
 }
 
@@ -908,42 +1030,47 @@ fn postgres_resident_new_daemon_identity_does_not_reset_tenant_or_global_budget(
     let other_tenant = sandbox(&store, &url, "host-two-other-tenant", "tenant-two");
     prepare(&store, &first, &host, limits(2, 1)).unwrap();
     let mut creates = 0;
-    let denied = store.prepare_resident_sandbox(
+    let denied = prepare_with_client(
+        &store,
         "other-fake-docker-host",
-        &same_tenant.request(),
+        &same_tenant,
         limits(2, 1),
         || Ok(Vec::new()),
-        || {
+        |_| Ok(()),
+        |_| {
             creates += 1;
             Ok("unexpected-container".into())
         },
     );
     assert_eq!(denied.unwrap_err(), RESIDENT_CAPACITY_WAIT);
     assert_eq!(creates, 0);
-    let denied = store.prepare_resident_sandbox(
+    let denied = prepare_with_client(
+        &store,
         "other-fake-docker-host",
-        &other_tenant.request(),
+        &other_tenant,
         limits(1, 1),
         || Ok(Vec::new()),
-        || {
+        |_| Ok(()),
+        |_| {
             creates += 1;
             Ok("unexpected-container".into())
         },
     );
     assert_eq!(denied.unwrap_err(), RESIDENT_CAPACITY_WAIT);
     assert_eq!(creates, 0);
-    store
-        .prepare_resident_sandbox(
-            "other-fake-docker-host",
-            &other_tenant.request(),
-            limits(2, 1),
-            || Ok(Vec::new()),
-            || {
-                creates += 1;
-                Ok("host-two-container".into())
-            },
-        )
-        .unwrap();
+    prepare_with_client(
+        &store,
+        "other-fake-docker-host",
+        &other_tenant,
+        limits(2, 1),
+        || Ok(Vec::new()),
+        |_| Ok(()),
+        |_| {
+            creates += 1;
+            Ok("host-two-container".into())
+        },
+    )
+    .unwrap();
     assert_eq!(creates, 1);
     assert_eq!(count(&url), 2);
 }
@@ -1042,53 +1169,20 @@ fn postgres_resident_checkpoint_recovery_retires_old_execution_before_single_slo
             )
             .unwrap(),
     );
-    let example = include_str!("../../../../../.env.example");
-    let configured = |name: &str| {
-        example
-            .lines()
-            .find_map(|line| line.strip_prefix(&format!("{name}=")))
-            .unwrap()
-            .parse::<u64>()
-            .unwrap()
-    };
-    let shipped = ResidentResourceUsage {
-        sandbox_count: 1,
-        memory_bytes: configured("SANDBOX_MEMORY_BYTES"),
-        cpu_milli: configured("SANDBOX_CPU_MILLI"),
-        pids: configured("SANDBOX_PIDS_LIMIT"),
-        workspace_bytes: configured("SANDBOX_DATA_TMPFS_BYTES"),
-    };
-    let capacity = ResidentCapacity::default()
-        .bound_to_host(64 * 1024 * 1024 * 1024, 16, 8 * 1024 * 1024 * 1024, 1600)
-        .unwrap();
     let host = Arc::new(Mutex::new(Vec::new()));
     let events = Mutex::new(Vec::new());
     let admit = |fixture: &SandboxFixture,
                  before: &mut (dyn FnMut(Option<&mut postgres::Client>) -> Result<(), String>
-                           + Send)| {
-        let mut request = fixture.request();
-        request.resources = shipped;
-        store.prepare_resident_sandbox_with_client(
-            "fake-docker-host",
-            &request,
-            capacity,
-            || Ok(host.lock().unwrap().clone()),
-            |client| {
-                before(Some(client))?;
-                let mut observed = fixture.observed();
-                observed.resources = shipped;
-                observed.container_id = format!("container-{}", fixture.execution);
-                let id = observed.container_id.clone();
-                host.lock().unwrap().push(observed);
-                Ok(id)
-            },
-        )
+                           + Send)|
+     -> Result<(), String> {
+        // Historical callback-order characterization only. Current admission
+        // must reject this old incarnation; it cannot authorize cold recovery.
+        store.with_client(|client| before(Some(client)))?;
+        seed_historical_resident(&url, fixture, &host);
+        Ok(())
     };
-    admit(&old, &mut |_| Ok(())).unwrap();
-    assert_eq!(
-        admit(&replacement, &mut |_| Ok(())).unwrap_err(),
-        RESIDENT_CAPACITY_WAIT
-    );
+    seed_historical_resident(&url, &old, &host);
+    assert!(prepare(&store, &replacement, &host, limits(1, 1)).is_err());
     crate::prepare_execution_host_with_recovery(
         || {
             store.remove_resident_execution(
@@ -1159,7 +1253,7 @@ fn postgres_resident_recovery_removal_failure_or_unknown_inventory_keeps_charge_
     let (url, store) = setup();
     let old = sandbox(&store, &url, "recovery-remove-failure", "recovery-tenant");
     let host = Arc::new(Mutex::new(Vec::new()));
-    prepare(&store, &old, &host, limits(1, 1)).unwrap();
+    seed_historical_resident(&url, &old, &host);
     for failure in [
         "remove unavailable",
         "inventory unavailable",
@@ -1217,8 +1311,8 @@ fn postgres_resident_exact_recovery_retirement_fences_old_worker_and_preserves_r
     let mut replacement = old.clone();
     replacement.execution = "already-created-replacement".into();
     let host = Arc::new(Mutex::new(Vec::new()));
-    prepare(&store, &old, &host, limits(2, 2)).unwrap();
-    prepare(&store, &replacement, &host, limits(2, 2)).unwrap();
+    seed_historical_resident(&url, &old, &host);
+    seed_historical_resident(&url, &replacement, &host);
     let mut db = Client::connect(&url, NoTls).unwrap();
     db.execute(
         "UPDATE runtime.runtime_jobs SET lease_owner='replacement-worker' WHERE job_id=$1",
@@ -1353,17 +1447,23 @@ fn postgres_resident_legal_question_and_runtime_job_waits_reuse_their_live_execu
             .remove(0);
         let mut resumed = fixture.clone();
         resumed.owner = claimed.lease_owner.unwrap();
-        let mut request = resumed.request();
-        request.must_exist = true;
-        store
-            .prepare_resident_sandbox(
-                "fake-docker-host",
-                &request,
-                limits(2, 1),
-                || Ok(host.lock().unwrap().clone()),
-                || Ok(resumed.observed().container_id),
-            )
-            .unwrap();
+        resumed.take_controller(&url);
+        prepare_with_client(
+            &store,
+            "fake-docker-host",
+            &resumed,
+            limits(2, 1),
+            || Ok(host.lock().unwrap().clone()),
+            |_| Ok(()),
+            |allocation| {
+                assert!(
+                    allocation.reused,
+                    "a wait resumes the same physical instance"
+                );
+                Ok(allocation.container_id.clone().unwrap())
+            },
+        )
+        .unwrap();
         assert_eq!(host.lock().unwrap().len(), index + 1);
     }
     assert_eq!(count(&url), 2);
@@ -1455,7 +1555,7 @@ fn postgres_resident_restore_pins_owner_until_physical_completion_and_rejects_st
     let (url, store) = setup();
     let fixture = sandbox(&store, &url, "restore-owner-fence", "restore-owner-tenant");
     let host = Arc::new(Mutex::new(Vec::new()));
-    prepare(&store, &fixture, &host, limits(1, 1)).unwrap();
+    let allocation = prepare_allocation(&store, &fixture, &host, limits(1, 1)).unwrap();
     let expiry = Client::connect(&url, NoTls)
         .unwrap()
         .query_one(
@@ -1468,13 +1568,13 @@ fn postgres_resident_restore_pins_owner_until_physical_completion_and_rejects_st
     let (resume_tx, resume_rx) = mpsc::sync_channel(1);
     let restoring = store.clone();
     let owned = fixture.clone();
+    let expected = allocation.clone();
     let task = std::thread::spawn(move || {
-        restoring.with_resident_execution_restore(
-            "fake-docker-host",
-            &owned.run,
-            &owned.execution,
-            &owned.fence(),
-            move || {
+        let fence = owned.fence();
+        restoring.with_retained_instance_operation(
+            &owned.request("fake-docker-host", &fence),
+            &expected,
+            move |_| {
                 entered_tx.send(()).unwrap();
                 resume_rx
                     .recv_timeout(Duration::from_secs(5))
@@ -1487,7 +1587,7 @@ fn postgres_resident_restore_pins_owner_until_physical_completion_and_rejects_st
         .reclaim_expired_runtime_job_leases(expiry + 1)
         .unwrap();
     resume_tx.send(()).unwrap();
-    task.join().unwrap().unwrap().unwrap();
+    task.join().unwrap().unwrap();
     assert_eq!(
         reclaimed, 0,
         "lease takeover must skip the owner pinned across physical restore"
@@ -1499,13 +1599,15 @@ fn postgres_resident_restore_pins_owner_until_physical_completion_and_rejects_st
         1
     );
     let dispatched = AtomicBool::new(false);
+    let fence = fixture.fence();
     assert!(store
-        .with_resident_execution_restore(
-            "fake-docker-host",
-            &fixture.run,
-            &fixture.execution,
-            &fixture.fence(),
-            || dispatched.store(true, Ordering::SeqCst)
+        .with_retained_instance_operation(
+            &fixture.request("fake-docker-host", &fence),
+            &allocation,
+            |_| {
+                dispatched.store(true, Ordering::SeqCst);
+                Ok(())
+            }
         )
         .is_err());
     assert!(

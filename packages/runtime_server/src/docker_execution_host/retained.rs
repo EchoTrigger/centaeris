@@ -2,7 +2,7 @@ use super::*;
 use crate::postgres_store::execution_instances::RetainedInstanceAllocation;
 use centaeris_core::execution::{
     EnvironmentTaskControllerPurpose, EnvironmentTaskEnvelope, EnvironmentTaskFence,
-    EnvironmentTaskOwner, EnvironmentTaskRequest, EnvironmentTaskResponse, EnvironmentTaskResult,
+    EnvironmentTaskOwner, EnvironmentTaskRequest, EnvironmentTaskResult, EnvironmentTaskSnapshot,
     ENVIRONMENT_TASK_SCHEMA,
 };
 
@@ -18,12 +18,11 @@ pub(super) fn origin_expectation<'a>(
     name: &'a str,
 ) -> ContainerExpectation<'a> {
     ContainerExpectation {
-        retained: true,
+        allocation_owner: Some(&a.allocation_owner),
         profile_digest: Some(&a.profile_digest),
         name,
-        agent_run_id: &a.allocation_agent_run_id,
+        agent_run_id: a.allocation_agent_run_id.as_deref().unwrap_or(""),
         execution_id: &a.allocation_execution_id,
-        authorization_digest: &a.authorization_digest,
         environment_id: &a.environment_id,
         instance_id: &a.instance_id,
         binding_digest: &a.binding_digest,
@@ -35,17 +34,11 @@ pub(super) fn profile_digest(
     expected: &ContainerExpectation<'_>,
     plugins: &PluginActivationSnapshotV1,
 ) -> Result<String, String> {
-    use sha2::{Digest, Sha256};
-    let normalized = crate::postgres_store::execution_instances::instance_id("retained-profile");
-    let mut profile = *expected;
-    profile.instance_id = &normalized;
-    let mut body = container_create_body(&profile)?;
-    body.as_object_mut()
-        .ok_or("container profile invalid")?
-        .remove("Labels");
-    let input = serde_json::json!({"schema":"workspace.retained_profile.v1","container":body,"plugins":plugins});
-    let canonical = crate::agent_run_authorization::canonical_json(input)?;
-    Ok(format!("sha256:{:x}", Sha256::digest(canonical.as_bytes())))
+    validate_plugin_activation_snapshot(plugins)?;
+    expected
+        .environment_profile
+        .ok_or("environment_profile_required")?
+        .digest()
 }
 pub(super) fn fence(
     auth: &crate::environment_authorization::EnvironmentAuthorization,
@@ -69,59 +62,32 @@ pub(super) fn fence(
         controller_purpose: EnvironmentTaskControllerPurpose::Execute,
     })
 }
-fn relay(
+pub(super) fn relay(
     expected: &ContainerExpectation<'_>,
     id: &str,
     request: EnvironmentTaskRequest,
 ) -> Result<EnvironmentTaskResult, String> {
     let facts = inspect_container(id)?.ok_or("retained container missing")?;
-    if facts.id != id
-        || !facts.matches(expected)
-        || !workspace_execution_sentinel_matches(
-            id,
-            expected.agent_run_id,
-            expected.execution_id,
-            expected.authorization_digest,
-        )?
-    {
+    if facts.id != id || !facts.matches(expected) {
         return Err("retained physical identity rejected".into());
     }
     let envelope = EnvironmentTaskEnvelope {
         schema: ENVIRONMENT_TASK_SCHEMA.into(),
         request,
     };
-    let mut exec = ExecRequest::owned(
-        id,
-        expected.agent_run_id,
-        expected.execution_id,
-        vec![
-            "/usr/bin/timeout".into(),
-            "--signal=TERM".into(),
-            "--kill-after=1s".into(),
-            "10s".into(),
-            AGENT_BINARY.into(),
-            "environment-task-rpc".into(),
-        ],
-    );
-    exec.user = Some("0:0".into());
-    let output = exec_with_input(
-        &exec,
-        &serde_json::to_vec(&envelope).map_err(|e| e.to_string())?,
-        HELPER_JSON_LIMIT,
-    )?;
-    if !output.status.success() {
-        return Err(format!(
-            "retained task relay failed: {}",
-            bounded_diagnostic(&output.stderr)
-        ));
-    }
-    let response: EnvironmentTaskResponse = serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("retained task response invalid: {e}"))?;
-    response.validate()?;
-    match response {
-        EnvironmentTaskResponse::Success { result, .. } => Ok(result),
-        EnvironmentTaskResponse::Error { error, .. } => Err(error),
-    }
+    crate::environment_supervisor::task(
+        hosted_execution::host_supervisor::HostLaunchTarget {
+            environment_instance_id: expected.instance_id.into(),
+            container_id: id.into(),
+            environment_id: expected.environment_id.into(),
+            profile_digest: expected
+                .profile_digest
+                .ok_or("environment profile digest missing")?
+                .into(),
+            image_digest: expected.image_digest.into(),
+        },
+        envelope,
+    )
 }
 pub(super) fn takeover(
     expected: &ContainerExpectation<'_>,
@@ -139,15 +105,59 @@ pub(super) fn takeover(
         },
     )?;
     if matches!(result,EnvironmentTaskResult::TakenOver{fence:ref actual} if actual==fence) {
-        Ok(())
+        use hosted_execution::host_supervisor::{
+            HostHelperRequest, HostLaunchTarget, TrustedHelperKind,
+        };
+        let scope = match &fence.controller_owner {
+            EnvironmentTaskOwner::AgentRun { run_id } => {
+                centaeris_core::execution::EnvironmentTaskScope::Run {
+                    run_id: run_id.clone(),
+                }
+            }
+            EnvironmentTaskOwner::MaintenanceOperation { operation_id } => {
+                centaeris_core::execution::EnvironmentTaskScope::Operation {
+                    operation_id: operation_id.clone(),
+                }
+            }
+        };
+        let request = HostHelperRequest {
+            fence: fence.clone(),
+            operation_id: fence.operation_id("prepare-workspace"),
+            scope,
+            kind: TrustedHelperKind::PrepareWorkspace,
+            input_digest: format!("sha256:{:x}", Sha256::digest([])),
+            input_length: 0,
+        };
+        let target = HostLaunchTarget {
+            environment_instance_id: expected.instance_id.into(),
+            container_id: id.into(),
+            environment_id: expected.environment_id.into(),
+            profile_digest: expected
+                .profile_digest
+                .ok_or("environment_profile_required")?
+                .into(),
+            image_digest: expected.image_digest.into(),
+        };
+        let mut error = "environment_workspace_preparation_unknown".to_owned();
+        for _ in 0..2 {
+            match crate::environment_supervisor::helper(
+                &target,
+                request.clone(),
+                &mut std::io::empty(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+            ) {
+                Ok(task) if task.exit_code == Some(0) => return Ok(()),
+                Ok(_) => return Err("environment_workspace_preparation_failed".into()),
+                Err(e) => error = e,
+            }
+        }
+        Err(error)
     } else {
         Err("retained takeover acknowledgement mismatch".into())
     }
 }
 impl DockerExecutionHostRunner {
-    pub(crate) fn is_retained(&self) -> bool {
-        self.retained_allocation.is_some()
-    }
     pub(crate) fn is_hot_reuse(&self) -> bool {
         self.retained_allocation.as_ref().is_some_and(|a| a.reused)
     }
@@ -181,6 +191,21 @@ impl DockerExecutionHostRunner {
             return Err("retained task fence mismatch".into());
         }
         request.validate_authority()?;
+        self.with_supervisor_target(|target| {
+            crate::environment_supervisor::task(
+                target.clone(),
+                EnvironmentTaskEnvelope {
+                    schema: ENVIRONMENT_TASK_SCHEMA.into(),
+                    request,
+                },
+            )
+        })
+    }
+    pub(super) fn with_supervisor_target<T: Send>(
+        &self,
+        action: impl FnOnce(&hosted_execution::host_supervisor::HostLaunchTarget) -> Result<T, String>
+            + Send,
+    ) -> Result<T, String> {
         let a = self
             .retained_allocation
             .as_ref()
@@ -217,8 +242,164 @@ impl DockerExecutionHostRunner {
                     .container_id
                     .as_deref()
                     .ok_or("retained operation container unknown")?;
-                relay(&self.container_expectation(), id, request)
+                let expected = self.container_expectation();
+                let facts = inspect_container(id)?.ok_or("environment_container_missing")?;
+                if facts.id != id || !facts.matches(&expected) {
+                    return Err("environment_physical_identity_rejected".into());
+                }
+                action(&hosted_execution::host_supervisor::HostLaunchTarget {
+                    environment_instance_id: actual.instance_id.clone(),
+                    container_id: id.into(),
+                    environment_id: actual.environment_id.clone(),
+                    profile_digest: actual.profile_digest.clone(),
+                    image_digest: actual.image_digest.clone(),
+                })
             })
+    }
+    fn start_helper_current(
+        &self,
+        request: &hosted_execution::host_supervisor::HostHelperRequest,
+        input: &mut (impl Read + Seek + Send),
+    ) -> Result<EnvironmentTaskSnapshot, String> {
+        let mut error = "environment_helper_start_unknown".to_owned();
+        for _ in 0..2 {
+            input
+                .rewind()
+                .map_err(|_| "environment_helper_input_unavailable")?;
+            match self.with_supervisor_target(|target| {
+                crate::environment_supervisor::helper_start(target, request.clone(), input)
+            }) {
+                Ok(task) => return Ok(task),
+                Err(e) => error = e,
+            }
+        }
+        Err(error)
+    }
+    fn finish_helper_current(
+        &self,
+        request: &hosted_execution::host_supervisor::HostHelperRequest,
+        mut task: EnvironmentTaskSnapshot,
+    ) -> Result<crate::environment_supervisor::HelperOutput, String> {
+        let started = Instant::now();
+        loop {
+            if task.state == centaeris_core::execution::EnvironmentTaskState::Unknown {
+                return Err("environment_helper_outcome_unknown".into());
+            }
+            if task.state == centaeris_core::execution::EnvironmentTaskState::Exited
+                && task.cleanup_complete
+                && task.output_complete
+            {
+                break;
+            }
+            if started.elapsed()
+                > Duration::from_millis(request.kind.timeout_ms().saturating_add(5000))
+            {
+                let _ = self.environment_task_rpc(EnvironmentTaskRequest::Terminate {
+                    fence: request.fence.clone(),
+                    task_id: task.task_id.clone(),
+                    operation_id: request
+                        .fence
+                        .operation_id(&format!("helper-timeout:{}", task.task_id)),
+                });
+                return Err("environment_helper_outcome_unknown".into());
+            }
+            thread::sleep(Duration::from_millis(10));
+            let response = self.environment_task_rpc(EnvironmentTaskRequest::Query {
+                fence: request.fence.clone(),
+                task_id: task.task_id.clone(),
+                cursor: 0,
+                max_bytes: centaeris_core::execution::ENVIRONMENT_TASK_READ_BYTES as u32,
+            })?;
+            let EnvironmentTaskResult::Task { task: current, .. } = response else {
+                return Err("environment_helper_outcome_unknown".into());
+            };
+            if current.task_id != task.task_id
+                || current.scope != request.scope
+                || current.operation_id != request.operation_id
+            {
+                return Err("environment_helper_outcome_unknown".into());
+            }
+            task = current;
+        }
+        // Authorize the bounded response header, then release DB pins before raw I/O.
+        self.with_supervisor_target(|target| {
+            crate::environment_supervisor::prepare_helper_output(
+                target,
+                request.clone(),
+                &task.task_id,
+            )
+        })
+    }
+    fn helper_request(
+        &self,
+        kind: hosted_execution::host_supervisor::TrustedHelperKind,
+        length: u64,
+        digest: &str,
+    ) -> Result<hosted_execution::host_supervisor::HostHelperRequest, String> {
+        let fence = self.environment_task_fence()?;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "environment_helper_identity_invalid")?
+            .as_nanos();
+        let request = hosted_execution::host_supervisor::HostHelperRequest {
+            operation_id: fence.operation_id(&format!("helper:{}:{stamp}", std::process::id())),
+            scope: centaeris_core::execution::EnvironmentTaskScope::Run {
+                run_id: self.agent_run_id.clone(),
+            },
+            kind,
+            input_digest: digest.into(),
+            input_length: length,
+            fence,
+        };
+        request.validate()?;
+        Ok(request)
+    }
+    pub(super) fn supervised_helper(
+        &self,
+        kind: hosted_execution::host_supervisor::TrustedHelperKind,
+        input: &[u8],
+        output_limit: usize,
+    ) -> Result<Vec<u8>, String> {
+        if output_limit as u64 > kind.output_limit() {
+            return Err("environment_helper_budget_invalid".into());
+        }
+        let request = self.helper_request(
+            kind,
+            input.len() as u64,
+            &format!("sha256:{:x}", Sha256::digest(input)),
+        )?;
+        let task = self.start_helper_current(&request, &mut Cursor::new(input))?;
+        let output = self.finish_helper_current(&request, task)?;
+        if output.task.exit_code != Some(0) {
+            return Err("environment_helper_failed".into());
+        }
+        let mut stdout = Vec::new();
+        let mut stderr = BoundedDiagnosticWriter(Vec::new());
+        output.copy_to(&mut stdout, &mut stderr)?;
+        if stdout.len() > output_limit {
+            return Err("environment_helper_output_too_large".into());
+        }
+        Ok(stdout)
+    }
+    pub(super) fn supervised_helper_file(
+        &self,
+        kind: hosted_execution::host_supervisor::TrustedHelperKind,
+        input: &mut fs::File,
+        input_length: u64,
+        input_digest: &str,
+    ) -> Result<(fs::File, Vec<u8>, Option<i32>), String> {
+        let request = self.helper_request(kind, input_length, input_digest)?;
+        let task = self.start_helper_current(&request, input)?;
+        let output = self.finish_helper_current(&request, task)?;
+        let exit = output.task.exit_code;
+        let mut stdout =
+            tempfile::tempfile().map_err(|_| "environment_helper_spool_unavailable")?;
+        let mut stderr = BoundedDiagnosticWriter(Vec::new());
+        output.copy_to(&mut stdout, &mut stderr)?;
+        stdout
+            .rewind()
+            .map_err(|_| "environment_helper_spool_unavailable")?;
+        Ok((stdout, stderr.0, exit))
     }
 }
 
@@ -296,42 +477,40 @@ impl crate::http::agent_runs::retained_cleanup::RetainedCleanupHost
         let origin = self.origin_authorization;
         // resolve_target verifies this immutable origin grant's digest and
         // signature against the allocation while the cleanup guard is held.
-        origin.checked_binding(&self.allocation.allocation_agent_run_id)?;
-        if origin.image_digest != self.allocation.image_digest
+        if origin.environment_profile.image_digest != self.allocation.image_digest
             || origin.session_id != authorization.payload.session_id
             || origin.workspace_id != self.cleanup.authorization.workspace_id
-            || declared_usage(origin.resources) != self.resources
+            || declared_usage(origin.environment_profile.resources.sandbox_resources())
+                != self.resources
         {
             return Err("retained cleanup origin grant rejected".into());
         }
         validate_plugin_activation_snapshot(&origin.plugin_activation)?;
         let plugin_volume_name = docker_volume_name_from_environment(PLUGIN_VOLUME_NAME_ENV)?;
         let mounts = plugin_mounts(&origin.plugin_activation);
-        let memory = memory_mount(
-            &origin.user_id,
-            &origin.agent_id,
-            docker_volume_name_from_environment(AGENT_MEMORY_VOLUME_NAME_ENV)?,
-        )?;
         let name = container_name(&self.allocation.allocation_execution_id);
+        let helper = environment_container::helper_path()?;
         let expected = ContainerExpectation {
             network: origin.effective_network()?,
-            benchmark_profile: None,
-            benchmark_helper: None,
-            retained: true,
+            environment_profile: Some(&origin.environment_profile),
+            benchmark_helper: Some(&helper),
             profile_digest: Some(&self.allocation.profile_digest),
             name: &name,
-            agent_run_id: &self.allocation.allocation_agent_run_id,
+            agent_run_id: self
+                .allocation
+                .allocation_agent_run_id
+                .as_deref()
+                .unwrap_or(""),
+            allocation_owner: Some(&self.allocation.allocation_owner),
             execution_id: &self.allocation.allocation_execution_id,
-            authorization_digest: &self.allocation.authorization_digest,
             environment_id: &self.allocation.environment_id,
             instance_id: &self.allocation.instance_id,
             binding_digest: &self.allocation.binding_digest,
             image_digest: &self.allocation.image_digest,
             oci_runtime: OciRuntime::from_environment()?,
-            resources: origin.resources,
+            resources: origin.environment_profile.resources.sandbox_resources(),
             plugin_volume_name: &plugin_volume_name,
             plugin_mounts: &mounts,
-            memory_mount: &memory,
         };
         if profile_digest(&expected, &origin.plugin_activation)? != self.allocation.profile_digest {
             return Err("retained cleanup profile rejected".into());
@@ -342,5 +521,19 @@ impl crate::http::agent_runs::retained_cleanup::RetainedCleanupHost
             .as_deref()
             .ok_or("retained cleanup container outcome unknown")?;
         relay(&expected, id, envelope.request.clone())
+    }
+}
+
+struct BoundedDiagnosticWriter(Vec<u8>);
+impl Write for BoundedDiagnosticWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let keep = bytes
+            .len()
+            .min(DOCKER_DIAGNOSTIC_LIMIT.saturating_sub(self.0.len()));
+        self.0.extend_from_slice(&bytes[..keep]);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }

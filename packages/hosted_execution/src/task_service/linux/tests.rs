@@ -109,6 +109,93 @@ fn lock_root() -> PathBuf {
     fs::create_dir_all(&root).unwrap();
     root
 }
+
+#[test]
+fn supervisor_commits_eof_before_domain_cleanup_without_rewriting_unchanged_facts() {
+    let root = lock_root();
+    let control = root.join("control");
+    let output = root.join("output");
+    let groups = root.join("groups");
+    for path in [&control, &output, &groups] {
+        fs::create_dir(path).unwrap();
+    }
+    seeded_running_journal(&control);
+    let storage = TaskStorage::new(control.clone(), output, OUTPUT_BUDGET_BYTES).unwrap();
+    let mut manager = Manager::open(storage, groups.clone(), "i").unwrap();
+    let id = manager.journal.tasks.keys().next().unwrap().clone();
+    manager.journal.tasks.get_mut(&id).unwrap().snapshot.state = EnvironmentTaskState::Running;
+    fs::create_dir(groups.join(&id)).unwrap();
+    fs::write(groups.join(&id).join("cgroup.events"), "populated 1\n").unwrap();
+    let child = Command::new("/bin/sh")
+        .args(["-c", "exec sleep 5"])
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let manager = Arc::new(Mutex::new(manager));
+    let mut guard = manager.lock().unwrap();
+    let worker_manager = manager.clone();
+    let worker_id = id.clone();
+    let worker = thread::spawn(move || {
+        supervise(
+            worker_manager,
+            worker_id,
+            0,
+            thread::spawn(|| true),
+            thread::spawn(|| true),
+        )
+    });
+    guard.live.insert(
+        id.clone(),
+        Live {
+            child: TaskChild::Local(child),
+            input: None,
+            cgroup: groups.join(&id),
+            supervisor: worker,
+            input_worker: None,
+        },
+    );
+    drop(guard);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let observed_eof = loop {
+        if manager.lock().unwrap().journal.tasks[&id]
+            .snapshot
+            .output_complete
+        {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    let before = fs::read(control.join("history.sqlite")).unwrap();
+    thread::sleep(Duration::from_millis(120));
+    let unchanged = before == fs::read(control.join("history.sqlite")).unwrap();
+    let before_cleanup = manager.lock().unwrap().journal.tasks[&id].snapshot.clone();
+    // The fake observation seam never owns a real cgroup. Cleanup this exact
+    // direct child before asserting so a failing test cannot leave it running.
+    unsafe {
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
+    fs::write(groups.join(&id).join("cgroup.events"), "populated 0\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while manager.lock().unwrap().live.contains_key(&id) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        observed_eof,
+        "stdout/stderr EOF must commit while the domain remains populated"
+    );
+    assert!(
+        unchanged,
+        "polling unchanged physical facts must not rewrite the durable index"
+    );
+    assert!(!before_cleanup.cleanup_complete);
+    assert_eq!(before_cleanup.state, EnvironmentTaskState::Running);
+    assert!(manager.lock().unwrap().live.is_empty());
+    drop(manager);
+    fs::remove_dir_all(root).unwrap();
+}
 fn seeded_running_journal(root: &Path) -> Vec<u8> {
     let mut journal = Journal::open(root, "i").unwrap();
     journal
@@ -518,6 +605,7 @@ impl Fixture {
             scope,
             program: "/bin/sh".into(),
             args: vec!["-c".into(), script.into()],
+            env: BTreeMap::new(),
             cwd: "/mnt/data".into(),
             timeout_ms: 10_000,
         }
@@ -995,16 +1083,14 @@ fn unavailable_worker_threads_reject_before_exec_without_poisoning_resident_task
         let mut manager = f.manager.lock().unwrap();
         assert!(!manager.journal.poisoned);
         assert_eq!(manager.journal.tasks.len(), 1);
-        assert!(
-            manager
-                .live
-                .get_mut(&resident)
-                .unwrap()
-                .child
-                .try_wait()
-                .unwrap()
-                .is_none()
-        );
+        assert!(manager
+            .live
+            .get_mut(&resident)
+            .unwrap()
+            .child
+            .try_wait()
+            .unwrap()
+            .is_none());
         assert_eq!(
             fs::read(manager.storage.control_root.join("history.sqlite")).unwrap(),
             before
@@ -1080,16 +1166,14 @@ fn panicking_supervisor_is_unknown_until_owned_tree_is_empty_and_child_reaped() 
     loop {
         let mut manager = f.manager.lock().unwrap();
         assert!(!manager.journal.poisoned);
-        assert!(
-            manager
-                .live
-                .get_mut(&resident)
-                .unwrap()
-                .child
-                .try_wait()
-                .unwrap()
-                .is_none()
-        );
+        assert!(manager
+            .live
+            .get_mut(&resident)
+            .unwrap()
+            .child
+            .try_wait()
+            .unwrap()
+            .is_none());
         let task = &manager.journal.tasks[&failed].snapshot;
         if task.cleanup_complete && !manager.live.contains_key(&failed) {
             assert_eq!(task.state, EnvironmentTaskState::Unknown);
@@ -1152,16 +1236,14 @@ fn worker_delivery_failure_retains_supervision_and_does_not_respawn_unknown_star
     loop {
         let mut manager = f.manager.lock().unwrap();
         assert!(!manager.journal.poisoned);
-        assert!(
-            manager
-                .live
-                .get_mut(&resident)
-                .unwrap()
-                .child
-                .try_wait()
-                .unwrap()
-                .is_none()
-        );
+        assert!(manager
+            .live
+            .get_mut(&resident)
+            .unwrap()
+            .child
+            .try_wait()
+            .unwrap()
+            .is_none());
         let snapshot = &manager.journal.tasks[&failed].snapshot;
         if snapshot.cleanup_complete && !manager.live.contains_key(&failed) {
             assert_eq!(snapshot.state, EnvironmentTaskState::Unknown);
@@ -1208,16 +1290,14 @@ fn exec_failure_after_worker_reservation_remains_queryable_without_deadlock_or_r
     let mut manager = f.manager.lock().unwrap();
     assert!(!manager.journal.poisoned);
     assert!(!manager.live.contains_key(&failed));
-    assert!(
-        manager
-            .live
-            .get_mut(&resident)
-            .unwrap()
-            .child
-            .try_wait()
-            .unwrap()
-            .is_none()
-    );
+    assert!(manager
+        .live
+        .get_mut(&resident)
+        .unwrap()
+        .child
+        .try_wait()
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -1262,17 +1342,15 @@ fn real_background_tree_survives_controller_takeover_and_drains_both_streams() {
         Manager::handle(&f.manager, updated).unwrap_err(),
         "task_operation_replay_expired"
     );
-    assert!(
-        Manager::handle(
-            &f.manager,
-            EnvironmentTaskRequest::Terminate {
-                fence: f.fence.clone(),
-                task_id: task_id.clone(),
-                operation_id: f.fence.operation_id("stale")
-            }
-        )
-        .is_err()
-    );
+    assert!(Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Terminate {
+            fence: f.fence.clone(),
+            task_id: task_id.clone(),
+            operation_id: f.fence.operation_id("stale")
+        }
+    )
+    .is_err());
     let fence = EnvironmentTaskFence {
         controller_epoch: 2,
         ..f.fence.clone()
@@ -1631,30 +1709,26 @@ fn terminal_cleanup_controller_cannot_resume_execution_or_kill_environment_scope
         *target = fence.clone();
     }
     assert!(Manager::handle(&f.manager, start).is_err());
-    assert!(
-        Manager::handle(
-            &f.manager,
-            EnvironmentTaskRequest::Input {
-                fence: fence.clone(),
-                task_id: environment_id.clone(),
-                operation_id: f.fence.operation_id("denied"),
-                data: vec![],
-                close: true
-            }
-        )
-        .is_err()
-    );
-    assert!(
-        Manager::handle(
-            &f.manager,
-            EnvironmentTaskRequest::Terminate {
-                fence: fence.clone(),
-                task_id: environment_id.clone(),
-                operation_id: f.fence.operation_id("denied")
-            }
-        )
-        .is_err()
-    );
+    assert!(Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Input {
+            fence: fence.clone(),
+            task_id: environment_id.clone(),
+            operation_id: f.fence.operation_id("denied"),
+            data: vec![],
+            close: true
+        }
+    )
+    .is_err());
+    assert!(Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Terminate {
+            fence: fence.clone(),
+            task_id: environment_id.clone(),
+            operation_id: f.fence.operation_id("denied")
+        }
+    )
+    .is_err());
     assert!(f.manager.lock().unwrap().live.contains_key(&environment_id));
     Manager::handle(
         &f.manager,
@@ -1763,12 +1837,10 @@ fn kill_only_domain_cleans_setsid_descendants_without_per_task_controllers() {
             .trim(),
         "domain"
     );
-    assert!(
-        fs::read_to_string(f.cgroups.join("cgroup.subtree_control"))
-            .unwrap()
-            .trim()
-            .is_empty()
-    );
+    assert!(fs::read_to_string(f.cgroups.join("cgroup.subtree_control"))
+        .unwrap()
+        .trim()
+        .is_empty());
     let task_id = id(&Manager::handle(
         &f.manager,
         f.start(

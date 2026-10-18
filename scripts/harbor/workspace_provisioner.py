@@ -14,8 +14,11 @@ from pathlib import Path, PurePosixPath
 import re
 import shlex
 import shutil
+import struct
 import tarfile
 import tempfile
+import time
+import uuid
 from urllib.error import HTTPError, URLError
 
 from workspace_client import WorkspaceClient, WorkspaceError, _segment
@@ -31,6 +34,68 @@ EXPANDED_LIMIT = _TRANSFER_CONTRACT["expandedBytes"]
 MEMBER_LIMIT = _TRANSFER_CONTRACT["members"]
 TRANSFER_BLOCK_BYTES = 64 * 1024
 RETIREMENT_ATTEMPTS = 3
+FRAME_HEADER_LIMIT = 1024 * 1024
+
+
+def _content_digest(source):
+    digest = hashlib.sha256()
+    with Path(source).open('rb') as stream:
+        for block in iter(lambda: stream.read(TRANSFER_BLOCK_BYTES), b''):
+            digest.update(block)
+    return 'sha256:' + digest.hexdigest()
+
+
+def _read_exact(source, count):
+    parts = bytearray()
+    while len(parts) < count:
+        block = source.read(count - len(parts))
+        if not block:
+            raise WorkspaceError('transfer_response_incomplete')
+        parts.extend(block)
+    return bytes(parts)
+
+
+def _read_frame(response, destination):
+    if response.headers.get('Content-Type') != 'application/octet-stream':
+        raise WorkspaceError('transfer_response_invalid')
+    size = struct.unpack('!I', _read_exact(response, 4))[0]
+    if not 0 < size <= FRAME_HEADER_LIMIT:
+        raise WorkspaceError('transfer_metadata_limit_exceeded')
+    metadata = json.loads(_read_exact(response, size))
+    if not isinstance(metadata, dict) or set(metadata) != {'result', 'contentLength', 'contentDigest'}:
+        raise WorkspaceError('transfer_response_invalid')
+    length = metadata['contentLength']
+    if type(length) is not int or not 0 <= length <= EXPANDED_LIMIT:
+        raise WorkspaceError('transfer_expanded_limit_exceeded')
+    result = metadata['result']
+    if not isinstance(result, dict) or set(result) != {'output', 'error'}:
+        raise WorkspaceError('transfer_response_invalid')
+    output = result['output']
+    if ((output is None) == (result['error'] is None)
+            or output is not None and (not isinstance(output, dict) or len(output) != 1
+                or not set(output) <= {'read_file', 'write_file', 'list_directory'})):
+        raise WorkspaceError('transfer_response_invalid')
+    read = output.get('read_file') if isinstance(output, dict) else None
+    if (read is not None and (not isinstance(read, dict) or read.get('bytes') != [])
+            or read is None and length != 0 or length and destination is None):
+        raise WorkspaceError('transfer_response_invalid')
+    digest = hashlib.sha256()
+    stream = Path(destination).open('wb') if destination is not None else None
+    try:
+        remaining = length
+        while remaining:
+            block = _read_exact(response, min(TRANSFER_BLOCK_BYTES, remaining))
+            digest.update(block)
+            if stream is not None:
+                stream.write(block)
+            remaining -= len(block)
+        if (metadata['contentDigest'] != 'sha256:' + digest.hexdigest() or response.read(1)
+                or read is not None and read.get('fileHash') != 'sha256:' + digest.hexdigest()):
+            raise WorkspaceError('transfer_response_digest_mismatch')
+    finally:
+        if stream is not None:
+            stream.close()
+    return result
 
 
 class _LimitedWriter:
@@ -196,44 +261,30 @@ class _MaintenanceHTTP(WorkspaceClient):
             raise WorkspaceError("control_request_too_large")
         return self._send(request, timeout=timeout)
 
-    def upload_archive(self, path, metadata, archive):
-        header = json.dumps(metadata, ensure_ascii=True, separators=(",", ":"))
-        if len(header) > _TRANSFER_CONTRACT["metadataBytes"]:
-            raise WorkspaceError("transfer_metadata_limit_exceeded")
-        with Path(archive).open("rb") as source:
-            request = self._request("POST", path, headers={"Content-Type": "application/x-tar",
-                "X-Benchmark-Transfer": header})
-            request.data = iter(lambda: source.read(TRANSFER_BLOCK_BYTES), b"")
-            request.add_header("Content-Length", str(os.fstat(source.fileno()).st_size))
-            return self._send(request)
+    def filesystem(self, value, *, source=None, destination=None):
+        header = json.dumps(value, ensure_ascii=False, separators=(',', ':')).encode()
+        if len(header) > FRAME_HEADER_LIMIT:
+            raise WorkspaceError('transfer_metadata_limit_exceeded')
+        prefix = struct.pack('!I', len(header)) + header
+        def chunks():
+            yield prefix
+            if source is not None:
+                with Path(source).open('rb') as stream:
+                    yield from iter(lambda: stream.read(TRANSFER_BLOCK_BYTES), b'')
+        request = self._request('POST', '/internal/environments/maintenance/filesystem',
+            headers={'Content-Type': 'application/octet-stream'})
+        request.data = chunks()
+        request.add_header('Content-Length', str(len(prefix) + value['request']['contentLength']))
+        return self._send(request, frame_destination=destination, framed=True)
 
-    def download_archive(self, path, value, archive):
-        request = self._request("POST", path, value, headers={"Accept": "application/x-tar"})
-        return self._send(request, archive=archive)
-
-    def _send(self, request, *, timeout=None, archive=None):
+    def _send(self, request, *, timeout=None, frame_destination=None, framed=False):
         request.add_header("X-Environment-Maintenance-Token", self.__maintenance_token)
         if self.__internal_token is not None:
             request.add_header("X-Internal-Token", self.__internal_token)
         try:
             with self.opener.open(request, timeout=timeout or self.request_timeout) as response:
-                if archive is not None:
-                    if response.headers.get("Content-Type") != "application/x-tar":
-                        raise WorkspaceError("transfer_response_invalid")
-                    declared = response.headers.get("Content-Length")
-                    if declared is not None:
-                        if not declared.isdecimal():
-                            raise WorkspaceError("transfer_response_invalid")
-                        declared = int(declared)
-                        if declared > ARCHIVE_LIMIT:
-                            raise WorkspaceError("transfer_archive_limit_exceeded")
-                    with Path(archive).open("wb") as output:
-                        bounded = _LimitedWriter(output, ARCHIVE_LIMIT)
-                        while block := response.read(TRANSFER_BLOCK_BYTES):
-                            bounded.write(block)
-                        if declared is not None and bounded.written != declared:
-                            raise WorkspaceError("transfer_response_incomplete")
-                    return
+                if framed:
+                    return _read_frame(response, frame_destination)
                 body = response.read(12 * 1024 * 1024 + 1)
                 if len(body) > 12 * 1024 * 1024:
                     raise WorkspaceError("control_response_too_large")
@@ -276,158 +327,325 @@ class WorkspaceHTTPProvisioner:
         self.runtime = _MaintenanceHTTP(runtime_origin, maintenance_token, internal_token, request_timeout=request_timeout)
         self._retirement_requests = {}
         self._accepted_retirements = set()
-
-    @staticmethod
-    def _binding(owned):
-        if not isinstance(owned, OwnedEnvironment):
-            raise WorkspaceError("owned_environment_required")
-        return {"sessionId": owned.session_id, "environmentId": owned.environment_id,
-                "agentRunId": owned.agent_run_id, "instanceId": owned.instance_id,
-                "profileDigest": owned.profile_digest}
+        self._profiles = {}
+        self._provision_requests = {}
 
     def bind_profile(self, session_id, environment_id, profile, operation_id):
-        request = {"schema": "workspace.benchmark_profile.bind.v1", "operationId": operation_id,
+        request = {"schema": "workspace.environment_profile.bind.v1", "operationId": operation_id,
                    "sessionId": session_id, "profile": profile}
-        path = f"/internal/environments/{_segment(environment_id)}/benchmark-profile"
-        # Only immutable metadata with the same operation and body may be
-        # repeated. A dropped exec or transfer is never retried this way.
+        path = f"/internal/environments/{_segment(environment_id)}/environment-profile"
         try:
             value = self.api.post(path, request)
         except WorkspaceError as error:
             if error.code != "transport_unavailable":
                 raise
             value = self.api.post(path, request)
-        _fields(value, "workspace.benchmark_profile.bound.v1",
+        _fields(value, "workspace.environment_profile.bound.v1",
                 {"operationId", "sessionId", "environmentId", "profileDigest", "profile"})
-        expected_digest = "sha256:" + hashlib.sha256(json.dumps(profile, sort_keys=True, ensure_ascii=False,
-            separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+        expected_digest = self._digest(profile)
         if (value["operationId"] != operation_id or value["sessionId"] != session_id
                 or value["environmentId"] != environment_id or value["profileDigest"] != expected_digest
                 or value["profile"] != profile):
-            raise WorkspaceError("benchmark_profile_binding_mismatch")
+            raise WorkspaceError("environment_profile_binding_mismatch")
+        self._profiles[environment_id] = profile
         return value
 
-    def _observe(self, session_id, environment_id, agent_run_id):
-        request = {"schema": "runtime.benchmark.observe.v1", "sessionId": session_id,
-                   "environmentId": environment_id, "agentRunId": agent_run_id}
-        value = self.runtime.post("/internal/benchmark/observe", request)
-        _fields(value, "runtime.benchmark.observe.result.v1", {"state", "sessionId", "environmentId", "agentRunId",
-            "instanceId", "containerId", "hostId", "controllerEpoch", "imageDigest", "profileDigest",
-            "resourceHolding", "physicalState"})
-        if (any(value[key] != request[key] for key in ("sessionId", "environmentId", "agentRunId"))
-                or value["state"] not in {"allocationPending", "waitingSetup", "ready", "destroyed", "unknown"}
-                or value["physicalState"] not in {"present", "absent", "unknown"}
-                or (value["resourceHolding"] is not None and (type(value["resourceHolding"]) is not int
-                    or value["resourceHolding"] not in {0, 1}))):
-            raise WorkspaceError("benchmark_observation_invalid")
+    @staticmethod
+    def _digest(value):
+        return "sha256:" + hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
+            separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+    def _observe(self, session_id, environment_id):
+        value = self.runtime.post("/internal/environments/observe", {
+            "schema": "runtime.environment.observe.v1", "sessionId": session_id, "environmentId": environment_id})
+        _fields(value, "runtime.environment.observe.result.v1", {"state", "sessionId", "environmentId",
+            "instanceId", "containerId", "hostId", "controllerEpoch", "controllerOwner", "profile", "profileDigest", "resourceHolding"})
+        if (value["sessionId"] != session_id or value["environmentId"] != environment_id
+                or value["state"] not in {"unallocated", "allocationPending", "resident", "destroyed", "unknown"}
+                or type(value["controllerEpoch"]) is not int or value["controllerEpoch"] < 0
+                or not isinstance(value["profile"], dict) or self._digest(value["profile"]) != value["profileDigest"]
+                or value["resourceHolding"] is not None and (type(value["resourceHolding"]) is not int
+                    or value["resourceHolding"] not in {0, 1})):
+            raise WorkspaceError("environment_observation_invalid")
+        if environment_id in self._profiles and self._profiles[environment_id] != value["profile"]:
+            raise WorkspaceError("environment_profile_binding_mismatch")
+        self._profiles[environment_id] = value["profile"]
+        # These are local projections of authoritative state, never extra wire fields.
+        value["physicalState"] = "present" if value["state"] == "resident" else "absent" if value["state"] == "destroyed" else "unknown"
+        value["imageDigest"] = value["profile"]["imageDigest"]
         return value
 
-    def observe_setup(self, session_id, environment_id, agent_run_id):
-        try:
-            value = self._observe(session_id, environment_id, agent_run_id)
-        except WorkspaceError as error:
-            # Setup's existing deadline controls re-observation. Only the
-            # explicit read-only store-unavailable response is pending; never
-            # reinterpret an identity conflict or uncertain mutation as retryable.
-            if error.status == 503 and error.code == "benchmark_observation_unavailable":
-                return None
-            raise
-        if value["state"] in {"allocationPending", "unknown"}:
-            return None
-        if (value["state"] == "waitingSetup" and value["physicalState"] == "unknown"
-                and value["resourceHolding"] == 0
-                and all(value[key] is None for key in ("instanceId", "containerId", "hostId"))):
-            return None
+    def observe_setup(self, session_id, environment_id, agent_run_id=None):
+        value = self._observe(session_id, environment_id)
         if value["state"] == "destroyed":
             raise WorkspaceError("environment_destroyed")
-        if value["physicalState"] != "present" or value["resourceHolding"] != 1:
-            raise WorkspaceError("benchmark_observation_invalid")
+        if value["state"] != "resident":
+            return None
         try:
             return OwnedEnvironment(session_id, environment_id, agent_run_id, value["instanceId"],
                 value["containerId"], value["hostId"], value["controllerEpoch"], value["imageDigest"],
-                value["profileDigest"], value["state"], value["resourceHolding"])
+                value["profileDigest"], "resident", value["resourceHolding"])
         except ValueError:
-            raise WorkspaceError("benchmark_observation_invalid") from None
+            raise WorkspaceError("environment_observation_invalid") from None
 
-    def activate_setup(self, owned, operation_id):
-        request = {"schema": "workspace.benchmark_setup.complete.v1", "operationId": operation_id,
-            "sessionId": owned.session_id, "agentRunId": owned.agent_run_id, "instanceId": owned.instance_id,
-            "containerId": owned.container_id}
-        path = f"/internal/environments/{_segment(owned.environment_id)}/benchmark-setup-complete"
-        try:
-            value = self.api.post(path, request)
-        except WorkspaceError as error:
-            if error.code != "transport_unavailable":
-                raise
-            observed = self._observe(owned.session_id, owned.environment_id, owned.agent_run_id)
-            if observed["state"] == "ready" and observed["instanceId"] == owned.instance_id and observed["containerId"] == owned.container_id:
-                return "ready"
-            raise WorkspaceError("benchmark_activation_uncertain") from None
-        _fields(value, "workspace.benchmark_setup.completed.v1",
-                {"operationId", "sessionId", "environmentId", "agentRunId", "instanceId", "containerId"})
-        if (any(value[key] != item for key, item in request.items() if key != "schema")
-                or value["environmentId"] != owned.environment_id):
-            raise WorkspaceError("benchmark_activation_binding_mismatch")
-        return "ready"
+    def provision(self, session_id, environment_id, operation_id):
+        observed = self._observe(session_id, environment_id)
+        if observed["state"] == "resident" and observed["controllerOwner"] is None:
+            return self.observe_setup(session_id, environment_id)
+        request = self._provision_requests.get(operation_id)
+        if request is None:
+            previous = observed["controllerEpoch"]
+            if observed["controllerOwner"] == {"kind": "maintenanceOperation", "operationId": operation_id}:
+                previous -= 1
+            request = {"schema": "workspace.environment_provision.issue.v1", "operationId": operation_id,
+                "sessionId": session_id, "expectedControllerEpoch": previous}
+            self._provision_requests[operation_id] = request
+        grant = self.api.post(f"/internal/environments/{_segment(environment_id)}/provision-authorizations", request)
+        self._check_grant(grant, environment_id, operation_id, 'provision')
+        payload = grant['payload']
+        logical = {'kind': 'provisionEnvironment', **{name: payload[name] for name in
+            ('environmentProfile', 'environmentProfileDigest', 'userId', 'agentId', 'pluginActivation')}}
+        if self._digest(logical) != payload['requestDigest']:
+            raise WorkspaceError('provision_request_binding_mismatch')
+        result = self.runtime.post('/internal/environments/provision', {'authorization': grant, 'request': logical})
+        _fields(result, 'runtime.environment.provision.result.v1',
+            {'operationId', 'environmentId', 'instanceId', 'containerId', 'profileDigest', 'status'})
+        if (result['operationId'] != operation_id or result['environmentId'] != environment_id
+                or result['profileDigest'] != payload['environmentProfileDigest'] or result['status'] != 'resident'):
+            raise WorkspaceError('provision_response_binding_mismatch')
+        self._release(grant)
+        owned = self.observe_setup(session_id, environment_id)
+        if owned is None or owned.instance_id != result['instanceId'] or owned.container_id != result['containerId']:
+            raise WorkspaceError('provision_response_binding_mismatch')
+        return owned
+
+    @staticmethod
+    def _check_grant(grant, environment_id, operation_id, kind):
+        if (not isinstance(grant, dict) or set(grant) != {'payload', 'signature'}
+                or not isinstance(grant['payload'], dict) or not isinstance(grant['signature'], str)
+                or grant['payload'].get('operationKind') != kind
+                or grant['payload'].get('environmentId') != environment_id
+                or grant['payload'].get('controllerOwner') != {'kind': 'maintenanceOperation', 'operationId': operation_id}
+                or grant['payload'].get('controllerPurpose') != 'execute'):
+            raise WorkspaceError('maintenance_grant_binding_mismatch')
+
+    def _issue(self, owned, request, operation_id):
+        observed = self._observe(owned.session_id, owned.environment_id)
+        if (observed['instanceId'] != owned.instance_id or observed['containerId'] != owned.container_id
+                or observed['hostId'] != owned.host_id or observed['profileDigest'] != owned.profile_digest):
+            raise WorkspaceError('maintenance_instance_mismatch')
+        grant = self.api.post(f'/internal/environments/{_segment(owned.environment_id)}/maintenance-authorizations',
+            {'schema': 'workspace.environment_maintenance.issue.v1', 'operationId': operation_id,
+                'controllerPurpose': 'execute', 'expectedControllerEpoch': observed['controllerEpoch'], 'request': request})
+        self._check_grant(grant, owned.environment_id, operation_id, 'task')
+        payload = grant['payload']
+        if (payload.get('instanceId') != owned.instance_id or payload.get('containerId') != owned.container_id
+                or payload.get('profileDigest') != owned.profile_digest or payload.get('requestDigest') != self._digest(request)):
+            raise WorkspaceError('maintenance_grant_binding_mismatch')
+        return grant
+
+    def _release(self, grant):
+        payload = grant['payload']
+        operation = payload['controllerOwner']['operationId']
+        result = self.api.post(f"/internal/environments/{_segment(payload['environmentId'])}/maintenance-operations/{_segment(operation)}/release",
+            {'schema': 'workspace.environment_maintenance.release.v1', 'controllerEpoch': payload['controllerEpoch'],
+                'controllerLeaseDigest': payload['controllerLeaseDigest']})
+        expected = {'environmentId': payload['environmentId'], 'controllerOwner': payload['controllerOwner'],
+            'controllerEpoch': payload['controllerEpoch'], 'controllerLeaseDigest': payload['controllerLeaseDigest'], 'released': True}
+        if result != expected:
+            raise WorkspaceError('maintenance_release_response_invalid')
+
+    def _task(self, grant, command, request):
+        value = self.runtime.post('/internal/environments/maintenance/task', {'authorization': grant,
+            'request': command, 'task': {'schema': 'environment.task.v1', 'request': request}})
+        if (not isinstance(value, dict) or set(value) != {'schema', 'status', 'result'}
+                or value['schema'] != 'environment.task.v1' or value['status'] != 'success'
+                or not isinstance(value['result'], dict)):
+            raise WorkspaceError('maintenance_task_unconfirmed')
+        return value['result']
 
     def exec(self, owned, *, command, cwd=None, env=None, timeout_sec=None, user=None):
         timeout_sec = 3600 if timeout_sec is None else timeout_sec
         if type(timeout_sec) not in {int, float} or not math.isfinite(timeout_sec) or not 0 < timeout_sec <= 3600:
-            raise ValueError("maintenance exec timeout must be between zero and 3600 seconds")
-        request = {"schema": "runtime.benchmark.exec.v1", **self._binding(owned),
-            "command": ["/bin/bash", "-lc", command], "cwd": cwd, "env": env or {},
-            "user": str(user) if user is not None else None, "timeoutMs": math.ceil(timeout_sec * 1000)}
-        value = self.runtime.post("/internal/benchmark/exec", request, timeout=timeout_sec + 10)
-        _fields(value, "runtime.benchmark.exec.result.v1", {"exitCode", "stdout", "stderr", "timedOut", "outcome"})
-        if (value["outcome"] not in {"completed", "unknown"} or type(value["timedOut"]) is not bool
-                or any(not isinstance(value[key], str) for key in ("stdout", "stderr"))):
-            raise WorkspaceError("benchmark_exec_response_invalid")
-        if value["outcome"] == "unknown":
-            raise WorkspaceError("benchmark_exec_outcome_unknown")
-        if value["timedOut"]:
-            raise WorkspaceError("benchmark_exec_timeout")
-        if type(value["exitCode"]) is not int:
-            raise WorkspaceError("benchmark_exec_response_invalid")
-        return {"returnCode": value["exitCode"], "stdout": value["stdout"], "stderr": value["stderr"]}
+            raise ValueError('maintenance exec timeout must be between zero and 3600 seconds')
+        if not isinstance(command, str) or not command:
+            raise ValueError('maintenance command must be nonempty text')
+        profile = self._profiles.get(owned.environment_id)
+        if profile is None:
+            self._observe(owned.session_id, owned.environment_id)
+            profile = self._profiles[owned.environment_id]
+        if user is not None and str(user) not in {profile['user'], profile['user'].split(':')[0]}:
+            raise WorkspaceError('maintenance_user_profile_mismatch')
+        environment = env or {}
+        if (not isinstance(environment, dict) or any(not isinstance(k, str) or not k or '=' in k or '\x00' in k
+                or not isinstance(v, str) or '\x00' in v for k, v in environment.items())):
+            raise ValueError('invalid maintenance environment')
+        argv = ['/bin/bash', '-lc', command]
+        if environment:
+            argv = ['/usr/bin/env', '--', *[f'{k}={v}' for k, v in sorted(environment.items())], *argv]
+        logical = {'program': argv[0], 'args': argv[1:], 'cwd': cwd or profile['workspaceRoot'],
+            'timeoutMs': math.ceil(timeout_sec * 1000)}
+        operation = 'maintenance-' + uuid.uuid4().hex
+        grant = self._issue(owned, logical, operation)
+        payload = grant['payload']
+        fence = {'environmentInstanceId': owned.instance_id, 'controllerOwner': payload['controllerOwner'],
+            'controllerEpoch': payload['controllerEpoch'], 'controllerPurpose': payload['controllerPurpose']}
+        prefix = str(payload['controllerEpoch']) + ':'
+        ended = False
+        try:
+            self._task(grant, logical, {'kind': 'takeover', **fence})
+            result = self._task(grant, logical, {'kind': 'start', 'fence': fence, 'operationId': prefix + 'execute',
+                'scope': {'kind': 'operation', 'operationId': operation}, **logical})
+            if result.get('kind') != 'mutated' or not isinstance(result.get('task'), dict):
+                raise WorkspaceError('maintenance_task_unconfirmed')
+            task_id = result['task']['taskId']
+            cursor = 0
+            streams = {'stdout': bytearray(), 'stderr': bytearray()}
+            deadline = time.monotonic() + timeout_sec + 10
+            while time.monotonic() < deadline:
+                result = self._task(grant, logical, {'kind': 'query', 'fence': fence, 'taskId': task_id,
+                    'cursor': cursor, 'maxBytes': TRANSFER_BLOCK_BYTES})
+                if result.get('kind') != 'task' or result.get('gap') is not False:
+                    raise WorkspaceError('maintenance_task_output_unconfirmed')
+                for chunk in result['output']:
+                    stream, data = chunk['stream'], chunk['data']
+                    if stream not in streams or not isinstance(data, list) or any(type(b) is not int or not 0 <= b <= 255 for b in data):
+                        raise WorkspaceError('maintenance_task_output_invalid')
+                    streams[stream].extend(data)
+                if sum(map(len, streams.values())) > 8 * 1024 * 1024:
+                    raise WorkspaceError('maintenance_task_output_limit_exceeded')
+                cursor = result['nextCursor']
+                snapshot = result['task']
+                if (not result['hasMore'] and snapshot.get('state') == 'exited'
+                        and snapshot.get('cleanupComplete') is True and snapshot.get('outputComplete') is True):
+                    if type(snapshot.get('exitCode')) is not int:
+                        raise WorkspaceError('maintenance_task_outcome_unknown')
+                    return {'returnCode': snapshot['exitCode'], **{k: v.decode('utf-8', errors='replace') for k, v in streams.items()}}
+                time.sleep(0.05)
+            raise WorkspaceError('maintenance_task_timeout')
+        finally:
+            # EndOperation closes its journal before accepting any later Start;
+            # this is safe even when Start's acknowledgement was lost.
+            result = self._task(grant, logical, {'kind': 'endOperation', 'fence': fence,
+                'ownerOperationId': operation, 'operationId': prefix + 'close'})
+            if result.get('kind') != 'operationEnded' or result.get('cleanupComplete') is not True:
+                raise WorkspaceError('maintenance_cleanup_unconfirmed')
+            self._release(grant)
 
-    def _upload(self, owned, source, target, *, directory):
-        remote = PurePosixPath(target)
-        if not remote.is_absolute() or ".." in remote.parts or "\\" in target or "\x00" in target:
-            raise ValueError("upload target must be an absolute task path")
-        destination = str(remote if directory else remote.parent)
-        with tempfile.TemporaryDirectory(prefix="workspace-upload-") as temporary:
-            archive = Path(temporary) / "payload.tar"
-            pack_upload(source, archive, directory=directory, archive_name=remote.name)
-            # Dispatch each mutation once; uncertainty never replays an upload.
-            self.exec(owned, command=shlex.join(["mkdir", "-p", "--", destination]), cwd="/",
-                      env={}, timeout_sec=30, user="0")
-            value = self.runtime.upload_archive("/internal/benchmark/upload", {"schema": "runtime.benchmark.upload.v1",
-                **self._binding(owned), "path": destination}, archive)
-            _fields(value, "runtime.benchmark.upload.result.v1", {"uploadedBytes"})
-            if type(value["uploadedBytes"]) is not int or value["uploadedBytes"] != archive.stat().st_size:
-                raise WorkspaceError("benchmark_upload_response_invalid")
+    def _filesystem(self, owned, path, operation, *, source=None, destination=None):
+        profile = self._profiles.get(owned.environment_id)
+        if profile is None:
+            self._observe(owned.session_id, owned.environment_id)
+            profile = self._profiles[owned.environment_id]
+        operation_id = 'filesystem-' + uuid.uuid4().hex
+        request = {'operationId': operation_id, 'cwd': profile['workspaceRoot'], 'modelPath': str(path),
+            'policy': {'filesystem': {'workspaceRoot': profile['workspaceRoot'], 'readOnlyRoots': ['/'],
+                'writableRoots': ['/'], 'deniedReadPaths': ['/run/centaeris', '/run/centaeris-host'],
+                'deniedWritePaths': ['/run/centaeris', '/run/centaeris-host'], 'tmpRoot': None},
+                'network': {'mode': profile['network']}}, 'operation': operation}
+        length = Path(source).stat().st_size if source is not None else 0
+        if length > EXPANDED_LIMIT:
+            raise WorkspaceError('transfer_expanded_limit_exceeded')
+        metadata = {'request': request, 'contentLength': length,
+            'contentDigest': _content_digest(source) if source is not None else 'sha256:' + hashlib.sha256(b'').hexdigest()}
+        grant = self._issue(owned, metadata, operation_id)
+        try:
+            result = self.runtime.filesystem({'authorization': grant, 'request': metadata}, source=source, destination=destination)
+        finally:
+            self._release(grant)
+        if result['error'] is not None or result['output'] is None:
+            raise WorkspaceError('maintenance_filesystem_failed')
+        return result['output']
 
     def upload_file(self, owned, source, target):
-        self._upload(owned, source, target, directory=False)
+        source = _safe_local(source)
+        remote = _safe_name(str(PurePosixPath(target).relative_to('/')))
+        if not source.is_file() or source.stat().st_size > EXPANDED_LIMIT:
+            raise WorkspaceError('transfer_expanded_limit_exceeded')
+        self._filesystem(owned, '/' + str(remote), {'type': 'writeFile', 'content': [],
+            'observedFileHash': None, 'createOnly': False}, source=source)
 
     def upload_dir(self, owned, source, target):
-        self._upload(owned, source, target, directory=True)
-
-    def _download(self, owned, source, target, *, directory):
-        remote = PurePosixPath(source)
-        if not remote.is_absolute() or ".." in remote.parts or "\\" in source or "\x00" in source:
-            raise ValueError("download source must be an absolute task path")
-        with tempfile.TemporaryDirectory(prefix="workspace-download-") as temporary:
-            archive = Path(temporary) / "payload.tar"
-            self.runtime.download_archive("/internal/benchmark/download", {"schema": "runtime.benchmark.download.v1",
-                **self._binding(owned), "path": source}, archive)
-            unpack_download(archive, target, directory=directory, strip_root=remote.name if directory else None)
+        source = _safe_local(source)
+        remote = _safe_name(str(PurePosixPath(target).relative_to('/')))
+        entries, total = [], 0
+        if not source.is_dir():
+            raise WorkspaceError('transfer_source_directory_required')
+        for current, directories, files in os.walk(source, followlinks=False):
+            for name in sorted(directories + files):
+                item = _safe_local(Path(current) / name)
+                relative = _safe_name(item.relative_to(source).as_posix())
+                if not item.is_dir() and not item.is_file():
+                    raise WorkspaceError('transfer_archive_entry_rejected')
+                total += item.stat().st_size if item.is_file() else 0
+                entries.append((item, '/' + str(remote / relative)))
+                if len(entries) > MEMBER_LIMIT or total > EXPANDED_LIMIT:
+                    raise WorkspaceError('transfer_expanded_limit_exceeded')
+        directories = ['/' + str(remote)]
+        directories += [path for item, path in entries if item.is_dir()]
+        self.exec(owned, command=shlex.join(['mkdir', '-p', '--', *directories]), timeout_sec=30)
+        for item, path in entries:
+            if item.is_file():
+                self.upload_file(owned, item, path)
+                self.exec(owned, command=shlex.join(['chmod', oct(item.stat().st_mode & 0o777)[2:], '--', path]), timeout_sec=30)
 
     def download_file(self, owned, source, target):
-        self._download(owned, source, target, directory=False)
+        remote = _safe_name(str(PurePosixPath(source).relative_to('/')))
+        target = _safe_local(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(prefix='.workspace-transfer-', dir=target.parent)
+        os.close(descriptor)
+        try:
+            self._filesystem(owned, '/' + str(remote), {'type': 'readFile', 'maxBytes': EXPANDED_LIMIT}, destination=temporary)
+            _safe_local(target)
+            os.replace(temporary, target)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
 
     def download_dir(self, owned, source, target):
-        self._download(owned, source, target, directory=True)
+        remote = _safe_name(str(PurePosixPath(source).relative_to('/')))
+        target = _safe_local(target)
+        output = self._filesystem(owned, '/' + str(remote), {'type': 'listDirectory', 'recursive': True, 'maxEntries': MEMBER_LIMIT})
+        if not isinstance(output, dict) or set(output) != {'list_directory'}:
+            raise WorkspaceError('transfer_response_invalid')
+        listed = output['list_directory']
+        if not isinstance(listed, dict) or not isinstance(listed.get('entries'), list):
+            raise WorkspaceError('transfer_response_invalid')
+        profile = self._profiles[owned.environment_id]
+        source_root = PurePosixPath('/') / remote
+        entries, total, names = [], 0, {}
+        for entry in listed['entries']:
+            if not isinstance(entry, dict) or not {'path', 'kind', 'sizeBytes'} <= set(entry):
+                raise WorkspaceError('transfer_response_invalid')
+            path = entry['path']
+            # Core display paths are cwd-relative inside cwd, otherwise absolute.
+            # Resolve that representation before stripping the requested root.
+            clean = _safe_name(path.removeprefix('/') if isinstance(path, str) else path)
+            absolute = PurePosixPath('/') / clean if path.startswith('/') else PurePosixPath(profile['workspaceRoot']) / clean
+            try:
+                relative = _safe_name(absolute.relative_to(source_root).as_posix())
+            except ValueError:
+                raise WorkspaceError('transfer_response_path_outside_root') from None
+            size, kind = entry['sizeBytes'], entry['kind']
+            if kind not in {'file', 'directory'} or kind == 'file' and (type(size) is not int or size < 0):
+                raise WorkspaceError('transfer_response_invalid')
+            key = relative.as_posix().casefold()
+            if (key in names or any(names.get(parent.as_posix().casefold()) == 'file' for parent in relative.parents)
+                    or kind == 'file' and any(name.startswith(key + '/') for name in names)):
+                raise WorkspaceError('transfer_response_path_collision')
+            names[key] = kind
+            total += size if kind == 'file' else 0
+            entries.append((relative, kind))
+            _safe_local(target.joinpath(*relative.parts))
+            if len(entries) > MEMBER_LIMIT or total > EXPANDED_LIMIT:
+                raise WorkspaceError('transfer_expanded_limit_exceeded')
+        target.mkdir(parents=True, exist_ok=True)
+        for relative, kind in entries:
+            destination = target.joinpath(*relative.parts)
+            if kind == 'directory':
+                destination.mkdir(parents=True, exist_ok=True)
+            else:
+                self.download_file(owned, '/' + str(remote / relative), destination)
 
     def retire(self, owned, operation_id):
         # Verifier maintenance outlives the model's execute controller. The
@@ -436,7 +654,7 @@ class WorkspaceHTTPProvisioner:
         for attempt in range(RETIREMENT_ATTEMPTS):
             request = self._retirement_requests.get(operation_id)
             if request is None:
-                observed = self._observe(owned.session_id, owned.environment_id, owned.agent_run_id)
+                observed = self._observe(owned.session_id, owned.environment_id)
                 if (observed["instanceId"] != owned.instance_id or observed["containerId"] != owned.container_id
                         or observed["hostId"] != owned.host_id or observed["profileDigest"] != owned.profile_digest
                         or observed["imageDigest"] != owned.image_digest
@@ -472,7 +690,7 @@ class WorkspaceHTTPProvisioner:
             return value["status"]
 
     def observe_cleanup(self, owned):
-        value = self._observe(owned.session_id, owned.environment_id, owned.agent_run_id)
+        value = self._observe(owned.session_id, owned.environment_id)
         if value["instanceId"] not in {None, owned.instance_id} or value["containerId"] not in {None, owned.container_id}:
             raise WorkspaceError("cleanup_instance_mismatch")
         if value["physicalState"] == "absent" and value["state"] != "destroyed":

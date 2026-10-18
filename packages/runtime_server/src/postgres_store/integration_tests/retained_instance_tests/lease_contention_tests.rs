@@ -38,7 +38,7 @@ fn query_during_renewal(change: &str) {
     let host_calls = calls.clone();
     let (result_tx, result_rx) = mpsc::sync_channel(1);
     let query = std::thread::spawn(move || {
-        let profile = format!("sha256:{}", "b".repeat(64));
+        let profile = current.original.environment_profile.digest().unwrap();
         let result = query_store.with_retained_instance_operation(
             &current.request("execution-renewal-query", &profile),
             &allocation,
@@ -176,7 +176,7 @@ fn postgres_retained_query_exhausted_lease_lock_budget_releases_upstream_pins() 
         let _deadline = crate::postgres_store::RequestDeadline::enter(Some(
             Instant::now() + Duration::from_millis(800),
         ));
-        let profile = format!("sha256:{}", "b".repeat(64));
+        let profile = current.original.environment_profile.digest().unwrap();
         let result = query_store.with_retained_instance_operation(
             &current.request("execution-renewal-budget", &profile),
             &allocation,

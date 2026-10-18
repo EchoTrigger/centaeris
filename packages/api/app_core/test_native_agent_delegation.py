@@ -15,7 +15,7 @@ from . import models, test_agent_messages, test_agent_previews
 from .agent_input_delivery import dispatch_agent_inputs
 from .app_delegations import token_digest
 from .assets import captured_input_fields
-from .runtime_client import build_agent_run_start
+from .testing import fenced_start_fixture
 from .test_agent_work import PROFILE
 
 
@@ -302,7 +302,7 @@ class NativeAgentDelegationTests(TransactionTestCase):
         run = dispatch_agent_inputs(self.agent.pk)
         self.assertIsNotNone(run)
         self.assertEqual((run.user_id, run.acting_app_id, run.app_delegation_id), (self.user.pk, None, None))
-        start = build_agent_run_start(run)
+        start = fenced_start_fixture(run)
         self.assertEqual(start["nativeCoordinationSessionId"], self.session.pk)
         self.assertEqual(start["initialInput"], {"type": "userInput",
             "inputId": "stable-business-input", "message": accepted.json()["input"]["body"], "attachmentRefs": []})

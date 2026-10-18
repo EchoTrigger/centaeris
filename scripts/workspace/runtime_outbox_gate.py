@@ -78,7 +78,11 @@ def main():
                 ['cargo', 'test', '--locked', '-p', 'runtime_server',
                  'postgres_store::integration_tests::maintenance_completion_schema_tests', '--'],
                 ['cargo', 'test', '--locked', '-p', 'runtime_server',
-                 'postgres_store::integration_tests::maintenance_authority_tests', '--']]
+                 'postgres_store::integration_tests::maintenance_authority_tests', '--'],
+                ['cargo', 'test', '--locked', '-p', 'runtime_server',
+                 'postgres_store::integration_tests::environment_owner_schema_tests', '--'],
+                ['cargo', 'test', '--locked', '-p', 'runtime_server',
+                 'postgres_store::integration_tests::provision_authority_tests', '--']]
     exact_tests = [
         'checkpoint_requests::postgres_direct_store_validates_checkpoint_requests_before_transactions',
         'snapshot_cas_tests::postgres_snapshot_cas_rejects_stale_writers_and_preserves_concurrent_results',
@@ -131,8 +135,8 @@ def main():
         for name in exact_tests
     ])
     commands.append(['cargo', 'test', '--locked', '-p', 'runtime_server',
-                     'postgres_store::benchmark::tests::postgres_benchmark_observation_setup_and_retirement_remain_exactly_bound',
-                     '--', '--exact'])
+                     'postgres_store::integration_tests::environment_observation_tests',
+                     '--'])
     names = []
     for command in commands:
         discovered = subprocess.run([*command, '--ignored', '--list'], cwd=root,

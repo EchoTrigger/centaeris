@@ -1,4 +1,4 @@
-//! Signed host configuration for an explicitly authorized benchmark environment.
+//! One signed host configuration for every environment.
 //! Validation binds configuration; resource enforcement remains a host obligation.
 use super::{canonical_json, validate_sha256, ExecutionNetwork, SandboxResources};
 use serde::{Deserialize, Serialize};
@@ -7,18 +7,18 @@ use unicode_normalization::UnicodeNormalization;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct BenchmarkExecutionProfile {
+pub struct EnvironmentProfile {
     pub schema: String,
     pub image_digest: String,
     pub workspace_root: String,
     pub user: String,
     pub network: ExecutionNetwork,
-    pub resources: BenchmarkResources,
+    pub resources: EnvironmentResources,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct BenchmarkResources {
+pub struct EnvironmentResources {
     pub cpu_milli: u32,
     pub memory_bytes: u64,
     pub pids_limit: u32,
@@ -26,7 +26,7 @@ pub struct BenchmarkResources {
     pub storage_bytes: u64,
 }
 
-impl BenchmarkResources {
+impl EnvironmentResources {
     pub fn sandbox_resources(self) -> SandboxResources {
         SandboxResources {
             cpu_milli: self.cpu_milli,
@@ -37,12 +37,12 @@ impl BenchmarkResources {
     }
 }
 
-impl BenchmarkExecutionProfile {
+impl EnvironmentProfile {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema != "runtime.benchmark_execution_profile.v1" {
-            return Err("benchmark_profile_schema_invalid".into());
+        if self.schema != "runtime.environment_profile.v1" {
+            return Err("environment_profile_schema_invalid".into());
         }
-        validate_sha256("benchmarkProfile.imageDigest", &self.image_digest)?;
+        validate_sha256("environmentProfile.imageDigest", &self.image_digest)?;
         let root = &self.workspace_root;
         if !root.starts_with('/')
             || root.len() > 4096
@@ -57,7 +57,7 @@ impl BenchmarkExecutionProfile {
             || root == "/run/centaeris"
             || root.starts_with("/run/centaeris/")
         {
-            return Err("benchmark_profile_workspace_root_invalid".into());
+            return Err("environment_profile_workspace_root_invalid".into());
         }
         let valid_id = |value: &str| {
             !value.is_empty()
@@ -70,7 +70,7 @@ impl BenchmarkExecutionProfile {
             .split_once(':')
             .is_some_and(|(uid, gid)| valid_id(uid) && valid_id(gid))
         {
-            return Err("benchmark_profile_user_invalid".into());
+            return Err("environment_profile_user_invalid".into());
         }
         if self.resources.cpu_milli == 0
             || self.resources.memory_bytes == 0
@@ -78,7 +78,7 @@ impl BenchmarkExecutionProfile {
             || self.resources.data_tmpfs_bytes == 0
             || self.resources.storage_bytes == 0
         {
-            return Err("benchmark_profile_resources_invalid".into());
+            return Err("environment_profile_resources_invalid".into());
         }
         Ok(())
     }
