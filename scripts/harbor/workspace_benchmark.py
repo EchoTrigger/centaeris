@@ -26,7 +26,7 @@ from harbor.trial.trial import Trial
 
 from workspace_environment import WorkspaceEnvironment
 from workspace_events import FailOpenProjection, JobEvents
-from workspace_plan import DATASET_COMMIT, Admission, Resources, canonical_digest, evaluate_pilot, require_full_review, validate_plan
+from workspace_plan import DATASET_COMMIT, Admission, Resources, canonical_digest, evaluate_pilot, require_full_review, validate_plan, validate_pilot_selection
 from workspace_provisioner import pack_upload
 
 _REGISTRY = {}
@@ -501,8 +501,6 @@ class BenchmarkRunner:
                  workspace_id, agent_id, model_ref, client_factory, provisioner, image_preparer,
                  physical_gate, sink_factory=None, batch_started=None, metrics_factory=None):
         validate_plan(plan, runnable=True)
-        if (len(plan["taskIds"]), plan["attempts"]) not in {(20, 1), (89, 1), (89, 5)}:
-            raise ValueError("unsupported benchmark batch size")
         self.plan = json.loads(json.dumps(plan))
         self.dataset_root, self.output_root = Path(dataset_root).resolve(), Path(output_root)
         self.sources = freeze_tasks(self.dataset_root, plan["taskIds"])
@@ -519,8 +517,8 @@ class BenchmarkRunner:
         self.metrics_factory = metrics_factory
 
     async def run_preflight(self, task_id="kv-store-grpc", *, service_checks):
-        if (len(self.plan["taskIds"]) != 20 or self.plan.get("attempts", 1) != 1
-                or task_id not in self.plan["taskIds"] or service_checks is None):
+        validate_pilot_selection(self.plan["taskIds"], self.plan.get("attempts", 1))
+        if task_id not in self.plan["taskIds"] or service_checks is None:
             raise ValueError("preflight requires a selected task and actual service checks")
         report = await self._run_batch("preflight", [task_id], service_checks=service_checks)
         report["status"] = "passed" if _preflight_passed(report) else "blocked"
@@ -530,8 +528,7 @@ class BenchmarkRunner:
         return report
 
     async def run_pilot(self, preflight=None, *, approval=None):
-        if len(self.plan["taskIds"]) != 20 or self.plan.get("attempts", 1) != 1:
-            raise ValueError("pilot requires twenty tasks and one attempt")
+        validate_pilot_selection(self.plan["taskIds"], self.plan.get("attempts", 1))
         if approval is not None:
             expected = {'schema': 'centaeris.workspaceBenchmarkPilotApproval.v1', 'authorized': True,
                         'admission': 'directPilot', 'candidateDigest': self.candidate_digest,
@@ -585,7 +582,14 @@ class BenchmarkRunner:
         return await self._run_batch("full", list(self.plan["taskIds"]), attempts=self.plan['attempts'])
 
     async def _run_batch(self, stage, task_ids, service_checks=None, attempts=1):
-        if (stage, len(task_ids), attempts) not in {("preflight", 1, 1), ("pilot", 20, 1), ("full", 89, 1), ("full", 89, 5)}:
+        if stage == 'pilot':
+            try:
+                validate_pilot_selection(task_ids, attempts)
+            except ValueError:
+                raise ValueError("batch shape differs from its authorized entrypoint") from None
+            if task_ids != self.plan['taskIds']:
+                raise ValueError("batch shape differs from its authorized entrypoint")
+        elif (stage, len(task_ids), attempts) not in {("preflight", 1, 1), ("full", 89, 1), ("full", 89, 5)}:
             raise ValueError("batch shape differs from its authorized entrypoint")
         if platform.system() != "Linux":
             raise ValueError("the real controller must run on the validated Linux host")

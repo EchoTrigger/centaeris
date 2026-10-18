@@ -29,23 +29,28 @@ setup, verification and artifact transfer use the same recorded physical instanc
    Record application-file hashes, exact instance identities and the live server
    observation after verification and before retirement; do not add task hints or
    synthesize missing outputs.
-4. Pass that exact preflight report to `run_pilot()` to run twenty distinct tasks
-   once each. Root then inspects the actual logs and evidence. Under the
-   maintainer's conditional authorization, Root may write the candidate-bound
+4. Pass that exact preflight report to `run_pilot()` to run the plan's one through
+   twenty distinct tasks once each. Root then inspects the actual logs and evidence.
+   Escalation through pilot review still requires twenty distinct completed task
+   results; a shorter pilot only establishes readiness for its selected task set.
+   Under the maintainer's conditional authorization, Root may write the candidate-bound
    review artifact and call `run_full()` for the configured full task set and
    attempt count. A single-pass full plan contains 89 tasks × 1 attempt.
    Normal model rewards of zero are reported separately from infrastructure or
    severe anomalies. Any anomaly blocks escalation and requires a targeted
    proposal for maintainer judgment; the runner does not repair or retry it.
 
-An explicit maintainer instruction may authorize a direct twenty-task pilot.
+An explicit maintainer instruction may authorize a direct pilot of one through
+twenty distinct tasks, each attempted once.
 Record it as `centaeris.workspaceBenchmarkPilotApproval.v1` with
 `authorized: true`, `admission: "directPilot"`, the exact `candidateDigest`,
-`sourceDigest`, and ordered twenty `taskIds`. Supply that artifact with
+`sourceDigest`, and the exact ordered selected `taskIds`. Supply that artifact with
 `--stage pilot --approval <path>` instead of a preflight report. This preserves
 failed preflight evidence and does not claim that preflight passed. Physical,
 database, source, resource, verification and cleanup gates still apply; the
-full-run authorization remains separate.
+full-run authorization remains separate. A continuation requires a new plan and
+approval bound to only its selected tasks; it does not replay earlier tasks or
+combine earlier batch results into a full-review certificate.
 
 An explicit maintainer instruction may instead authorize a direct 89-task single
 pass, without claiming that preflight or pilot passed. Use the pinned task list
@@ -261,6 +266,10 @@ upload outcomes. Diagnostics never include Docker error bodies or private paths.
 Trial summaries retain independent `agentOutcome`, `verifierOutcome` and
 `cleanupOutcome` facts. Harbor's original first exception remains intact; a later
 verifier failure is still reported as infrastructure failure after Agent timeout.
+Pilot review validates these canonical Outcome objects and their agreement with
+the final verifier and cleanup state. An Agent timeout alone does not invalidate
+a completed verifier reward when cleanup confirms absence and zero resource debit.
+An earlier cleanup error may remain recorded after confirmed absence.
 
 ## Monitoring and evidence
 
@@ -273,8 +282,10 @@ Agent completion and cleanup completion do not imply a verifier reward. Final
 trial status combines the native Harbor result and confirmed cleanup. Retain
 native config/lock/result files, source and image bindings, verifier output,
 service-check evidence, Workspace identities and the compact batch result.
-Only the fixed twenty-task results count toward the pilot review; the service
-preflight remains a separate experiment.
+Only one result for every exact selected task counts toward that pilot's review;
+missing, duplicate or additional results block readiness. A full-run review still
+requires twenty distinct completed pilot results. The service preflight remains
+a separate experiment.
 
 Local contract tests use fake services and are not physical acceptance evidence.
 The real one-task preflight and pilot must remain unstarted until the private

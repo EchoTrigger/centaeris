@@ -50,6 +50,13 @@ def _task_ids(ids: Any) -> list[str]:
     return ids
 
 
+def validate_pilot_selection(task_ids: Any, attempts: Any) -> list[str]:
+    ids = _task_ids(task_ids)
+    if not 1 <= len(ids) <= 20 or type(attempts) is not int or attempts != 1:
+        raise ValueError('pilot requires one through twenty distinct tasks and one attempt')
+    return ids
+
+
 def validate_plan(value: dict, *, runnable: bool = False) -> dict:
     _keys(value, {'schema', 'name', 'dataset', 'taskIds', 'attempts',
                   'maxConcurrentTrials', 'exclusiveMemoryMiB', 'maxRetries',
@@ -62,8 +69,8 @@ def validate_plan(value: dict, *, runnable: bool = False) -> dict:
     if value['dataset'] != {'gitUrl': DATASET_URL, 'commit': DATASET_COMMIT}:
         raise ValueError('unsupported dataset pin')
     ids = _task_ids(value['taskIds'])
-    if type(value['attempts']) is not int or (len(ids), value['attempts']) not in ((20, 1), (89, 1), (89, 5)):
-        raise ValueError('requires twenty pilot tasks once or eighty-nine full tasks once or five times')
+    if not (len(ids) == 89 and type(value['attempts']) is int and value['attempts'] in (1, 5)):
+        validate_pilot_selection(ids, value['attempts'])
     if (type(value['maxConcurrentTrials']) is not int or value['maxConcurrentTrials'] != 2
             or type(value['exclusiveMemoryMiB']) is not int or value['exclusiveMemoryMiB'] != 8192
             or type(value['maxRetries']) is not int or value['maxRetries'] != 0
@@ -329,20 +336,35 @@ def make_binding(product_commit: str, adapter_files: dict[str, Path], plan: dict
                                 name: resource.to_dict() for name, resource in task_resources.items()}}))
 
 
+def _validate_outcome(value: Any, phase: str) -> None:
+    _keys(value, {'status', 'error'}, phase + 'Outcome')
+    statuses = {'absent', 'pending'} if phase == 'cleanup' else {'completed', 'failed', 'unknown'}
+    if not isinstance(value['status'], str) or value['status'] not in statuses:
+        raise ValueError(f'invalid {phase} outcome status')
+    error = value['error']
+    if error is not None and (not isinstance(error, str) or not error or len(error) > 256
+            or error != error.strip() or any(unicodedata.category(c).startswith('C') for c in error)):
+        raise ValueError(f'invalid {phase} outcome error')
+    if phase != 'cleanup' and (value['status'] == 'failed') != (error is not None):
+        raise ValueError(f'inconsistent {phase} outcome error')
+
+
 def evaluate_pilot(plan: dict, candidate: CandidateBinding, results: list[dict]) -> dict:
     validate_plan(plan)
-    if len(plan['taskIds']) != 20 or plan['attempts'] != 1:
-        raise ValueError('pilot review requires the twenty-task pilot plan')
+    validate_pilot_selection(plan['taskIds'], plan['attempts'])
     issues = []
     if candidate.config_sha256 != canonical_digest(plan):
         issues.append('candidate configuration digest differs from pilot')
     expected = set(plan['taskIds'])
     seen_tasks, seen_trials = set(), set()
     fields = {'trialId', 'taskId', 'attempt', 'verifierCompleted', 'reward',
-              'infrastructureError', 'severeIssue', 'cleanupState', 'resourceDebit'}
+              'infrastructureError', 'severeIssue', 'cleanupState', 'resourceDebit',
+              'agentOutcome', 'verifierOutcome', 'cleanupOutcome'}
     for result in results:
         try:
             _keys(result, fields, 'result')
+            for phase in ('agent', 'verifier', 'cleanup'):
+                _validate_outcome(result[phase + 'Outcome'], phase)
         except ValueError as error:
             issues.append(str(error))
             continue
@@ -362,12 +384,15 @@ def evaluate_pilot(plan: dict, candidate: CandidateBinding, results: list[dict])
         if (result['verifierCompleted'] is not True or isinstance(reward, bool)
                 or not isinstance(reward, (int, float)) or not math.isfinite(reward) or not 0 <= reward <= 1):
             issues.append(f'{task}: actual verifier reward missing or invalid')
+        if result['verifierOutcome']['status'] != 'completed':
+            issues.append(f'{task}: verifier outcome is incomplete')
         if result['infrastructureError'] is not None or result['severeIssue'] is not None:
             issues.append(f'{task}: unresolved infrastructure or severe issue')
-        if result['cleanupState'] != 'absent' or type(result['resourceDebit']) is not int or result['resourceDebit'] != 0:
+        if (result['cleanupState'] != 'absent' or result['cleanupOutcome']['status'] != result['cleanupState']
+                or type(result['resourceDebit']) is not int or result['resourceDebit'] != 0):
             issues.append(f'{task}: cleanup or resource reconciliation incomplete')
-    if seen_tasks != expected or len(results) != 20:
-        issues.append('twenty distinct completed task results required')
+    if seen_tasks != expected or len(results) != len(plan['taskIds']):
+        issues.append('one completed result for every selected pilot task required')
     report = {'schema': 'centaeris.workspacePilotReview.v1', 'candidate': candidate.to_dict(),
               'pilotConfigSha256': canonical_digest(plan), 'results': results,
               'status': 'blocked' if issues else 'readyForReview', 'issues': issues}
@@ -388,6 +413,13 @@ def require_full_review(candidate: CandidateBinding, report: dict, approval: dic
     payload = {key: value for key, value in report.items() if key != 'evidenceSha256'}
     if canonical_digest(payload) != report.get('evidenceSha256'):
         raise ValueError('pilot report digest does not match content')
+    results = report.get('results')
+    if not isinstance(results, list) or len(results) != 20:
+        raise ValueError('full review requires twenty distinct completed pilot task results')
+    try:
+        _task_ids([row.get('taskId') if isinstance(row, dict) else None for row in results])
+    except ValueError:
+        raise ValueError('full review requires twenty distinct completed pilot task results') from None
     pilot_candidate = report.get('candidate', {})
     if (pilot_candidate.get('productCommit') != candidate.product_commit
             or pilot_candidate.get('adapterSha256') != candidate.adapter_sha256):

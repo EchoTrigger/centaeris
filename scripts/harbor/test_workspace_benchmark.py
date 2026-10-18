@@ -12,12 +12,46 @@ import unittest
 from unittest.mock import patch
 
 from workspace_benchmark import freeze_tasks, task_profile, native_trial_config, BenchmarkRunner, DockerImagePreparer, _REGISTRY, _acquire_or_halt, _TrialProjection, RegisteredWorkspaceEnvironment
-from workspace_plan import Admission, Resources, CandidateBinding, canonical_digest, evaluate_pilot
+from workspace_plan import Admission, Resources, CandidateBinding, canonical_digest, evaluate_pilot, require_full_review
 from harbor.trial.trial import Trial
 from harbor.models.task.task import Task
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_runner_freezes_the_exact_bounded_pilot_plan(self):
+        for count in (1, 17, 20):
+            with self.subTest(count=count):
+                plan = json.loads(Path(__file__).with_name('workspace-pilot-tasks.json').read_text())
+                plan['taskIds'] = plan['taskIds'][:count]
+                candidate = CandidateBinding('a' * 40, 'b' * 64, canonical_digest(plan), 'd' * 64)
+                with patch('workspace_benchmark.freeze_tasks', return_value={}) as freeze:
+                    runner = BenchmarkRunner(plan=plan, dataset_root=self.dataset, output_root=self.root,
+                        candidate=candidate, admission=object(), workspace_id='workspace', agent_id='agent',
+                        model_ref='model', client_factory=object(), provisioner=object(),
+                        image_preparer=object(), physical_gate=object())
+                self.assertEqual(runner.plan['taskIds'], plan['taskIds'])
+                freeze.assert_called_once_with(self.dataset.resolve(), plan['taskIds'])
+
+    def test_real_summary_outcomes_are_reviewable_without_hiding_agent_timeout(self):
+        plan = json.loads(Path(__file__).with_name('workspace-pilot-tasks.json').read_text())
+        candidate = CandidateBinding('a' * 40, 'b' * 64, canonical_digest(plan), 'd' * 64)
+        for timeout in (False, True):
+            with self.subTest(timeout=timeout):
+                outcomes = {'errors': {'agent': 'AgentTimeoutError', 'cleanup': 'environment_retirement_pending'}
+                            if timeout else {}, 'started': {'agent', 'verifier'},
+                            'finished': {'agent', 'verifier'}}
+                result = SimpleNamespace(verifier_result=SimpleNamespace(rewards={'reward': 0}),
+                    exception_info=SimpleNamespace(exception_type='AgentTimeoutError') if timeout else None)
+                rows = [BenchmarkRunner._summary(task, f'trial-{i}', result,
+                    SimpleNamespace(released=True), None, outcomes=outcomes)
+                    for i, task in enumerate(plan['taskIds'])]
+                report = evaluate_pilot(plan, candidate, rows)
+                self.assertEqual(report['status'], 'readyForReview', report['issues'])
+                full = CandidateBinding('a' * 40, 'b' * 64, 'e' * 64, 'f' * 64)
+                require_full_review(full, report, {'schema': 'centaeris.workspaceFullReview.v1',
+                    'decision': 'approveFull', 'reviewer': 'maintainer', 'candidate': full.to_dict(),
+                    'pilotEvidenceSha256': report['evidenceSha256']})
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -79,6 +113,83 @@ class BenchmarkTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_bounded_pilot_batch_executes_exact_selection_once(self):
+        for count in (1, 17):
+            with self.subTest(count=count):
+                report, started, _, held = await self._run_failure_batch(task_count=count, disk_free=[200000])
+                self.assertEqual(set(started), {f'task-{i}' for i in range(count)})
+                self.assertEqual(len(started), count)
+                self.assertEqual(len(report['results']), count)
+                self.assertEqual({row['attempt'] for row in report['results']}, {1})
+                self.assertEqual(report['status'], 'finished')
+                self.assertEqual(held, 0)
+                plan = json.loads(Path(__file__).with_name('workspace-pilot-tasks.json').read_text())
+                plan['taskIds'] = report['taskIds']
+                candidate = CandidateBinding('a' * 40, 'b' * 64, canonical_digest(plan), 'd' * 64)
+                review = evaluate_pilot(plan, candidate, report['results'])
+                self.assertEqual(review['status'], 'readyForReview', review['issues'])
+
+    async def test_invalid_pilot_selection_is_rejected_before_dispatch(self):
+        from unittest.mock import AsyncMock
+        runner = object.__new__(BenchmarkRunner)
+        runner._run_batch = AsyncMock()
+        for ids, attempts in (([], 1), ([f'task-{i}' for i in range(21)], 1),
+                              (['task-one', 'task-one'], 1), (['task-one'], 2), (['task-one'], True)):
+            with self.subTest(ids=ids, attempts=attempts):
+                runner.plan = {'taskIds': ids, 'attempts': attempts}
+                with self.assertRaises(ValueError):
+                    await runner.run_pilot(approval={})
+                with self.assertRaises(ValueError):
+                    await runner.run_preflight('task-one', service_checks=object())
+                runner._run_batch.assert_not_awaited()
+
+    async def test_pilot_batch_cannot_expand_reorder_or_duplicate_selected_tasks(self):
+        from unittest.mock import AsyncMock
+        runner = object.__new__(BenchmarkRunner)
+        selected = [f'task-{i}' for i in range(17)]
+        runner.plan = {'taskIds': selected, 'attempts': 1}
+        runner.physical_gate = AsyncMock(return_value=False)
+        for ids in (selected[:-1], list(reversed(selected)), selected + ['extra'],
+                    selected + ['extra-1', 'extra-2', 'extra-3'], [selected[0]] * 17):
+            with self.subTest(ids=ids), patch('workspace_benchmark.platform.system', return_value='Linux'):
+                with self.assertRaisesRegex(ValueError, 'batch shape'):
+                    await runner._run_batch('pilot', ids)
+                runner.physical_gate.assert_not_awaited()
+
+    async def test_short_pilot_preflight_and_direct_approval_preserve_exact_bindings(self):
+        from unittest.mock import AsyncMock
+        for count in (1, 17):
+            with self.subTest(count=count), tempfile.TemporaryDirectory() as temporary:
+                runner = object.__new__(BenchmarkRunner)
+                tasks = [f'task-{i}' for i in range(count)]
+                runner.plan = {'taskIds': tasks, 'attempts': 1}
+                runner.source_digest, runner.candidate_digest = 'source', 'candidate'
+                runner.candidate = object()
+                runner.image_preparer = SimpleNamespace(snapshot_locks=lambda: {'tasks': {name: {} for name in tasks}})
+                runner._run_batch = AsyncMock(return_value={'stage': 'preflight', 'batchDir': temporary,
+                    'sourceDigest': 'source', 'candidateDigest': 'candidate', 'results': [
+                        {'verifierCompleted': True, 'reward': 1, 'infrastructureError': None,
+                         'severeIssue': None, 'cleanupState': 'absent', 'resourceDebit': 0}],
+                    'serviceChecks': {'actualToolEffects': True, 'artifactDownload': True, 'backgroundContinuity': True}})
+                preflight = await runner.run_preflight(tasks[0], service_checks=object())
+                self.assertEqual(preflight['status'], 'passed')
+                runner._run_batch.reset_mock()
+                approval = {'schema': 'centaeris.workspaceBenchmarkPilotApproval.v1', 'authorized': True,
+                    'admission': 'directPilot', 'candidateDigest': 'candidate', 'sourceDigest': 'source', 'taskIds': tasks}
+                for change in ({'taskIds': tasks + ['extra']}, {'candidateDigest': 'other'},
+                               {'sourceDigest': 'other'}, {'authorized': False}):
+                    with self.assertRaises(ValueError):
+                        await runner.run_pilot(approval={**approval, **change})
+                    runner._run_batch.assert_not_awaited()
+                with patch('workspace_benchmark.evaluate_pilot', return_value={'status': 'readyForReview', 'issues': []}):
+                    await runner.run_pilot(preflight)
+                runner._run_batch.assert_awaited_once_with('pilot', tasks)
+                runner._run_batch.reset_mock()
+                with patch('workspace_benchmark.evaluate_pilot', return_value={'status': 'readyForReview', 'issues': []}):
+                    report = await runner.run_pilot(approval=approval)
+                runner._run_batch.assert_awaited_once_with('pilot', tasks)
+                self.assertEqual(report['admission'], approval)
+
     async def test_pinned_harbor_first_exception_policy_preserves_independent_phase_failures(self):
         from unittest.mock import AsyncMock
         from harbor.trial.errors import AgentTimeoutError
@@ -748,6 +859,9 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         pilot_candidate = CandidateBinding("1" * 40, "2" * 64, canonical_digest(plan), "3" * 64)
         results = [{"trialId": "trial-" + str(index), "taskId": task, "attempt": 1,
             "verifierCompleted": True, "reward": 0, "infrastructureError": None, "severeIssue": None,
+            "agentOutcome": {"status": "completed", "error": None},
+            "verifierOutcome": {"status": "completed", "error": None},
+            "cleanupOutcome": {"status": "absent", "error": None},
             "cleanupState": "absent", "resourceDebit": 0} for index, task in enumerate(plan["taskIds"])]
         review = evaluate_pilot(plan, pilot_candidate, results)
         images = {task: {"imageDigest": "sha256:" + "a" * 64} for task in plan["taskIds"]}

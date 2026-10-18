@@ -26,11 +26,82 @@ def binding():
 def results():
     return [dict(trialId=f'trial-{i}', taskId=task, attempt=1,
                  verifierCompleted=True, reward=0, infrastructureError=None,
+                 agentOutcome={'status': 'completed', 'error': None},
+                 verifierOutcome={'status': 'completed', 'error': None},
+                 cleanupOutcome={'status': 'absent', 'error': None},
                  severeIssue=None, cleanupState='absent', resourceDebit=0)
             for i, task in enumerate(plan()['taskIds'])]
 
 
 class PlanTests(unittest.TestCase):
+    def test_bounded_pilot_accepts_one_through_twenty_unique_tasks_once(self):
+        for count in (1, 17, 20):
+            with self.subTest(count=count):
+                value = plan()
+                value['taskIds'] = value['taskIds'][:count]
+                self.assertIs(validate_plan(value, runnable=True), value)
+        for count, attempts in ((0, 1), (21, 1), (17, 2), (17, True)):
+            with self.subTest(count=count, attempts=attempts):
+                value = plan()
+                value.update(taskIds=[f'task-{i}' for i in range(count)], attempts=attempts)
+                with self.assertRaises(ValueError):
+                    validate_plan(value)
+
+    def test_bounded_review_requires_every_exact_selected_task_once(self):
+        for count in (1, 17, 20):
+            with self.subTest(count=count):
+                value = plan()
+                value['taskIds'] = value['taskIds'][:count]
+                candidate = CandidateBinding('a' * 40, 'b' * 64, canonical_digest(value), 'd' * 64)
+                batch = results()[:count]
+                self.assertEqual(evaluate_pilot(value, candidate, batch)['status'], 'readyForReview')
+                for broken in (batch[:-1], batch + batch[:1],
+                               [{**row, 'taskId': 'unselected'} if i == 0 else row
+                                for i, row in enumerate(batch)]):
+                    self.assertEqual(evaluate_pilot(value, candidate, broken)['status'], 'blocked')
+
+    def test_full_review_requires_twenty_distinct_results_even_with_matching_approval(self):
+        full = CandidateBinding('a' * 40, 'b' * 64, 'e' * 64, 'f' * 64)
+        for count in (1, 17, 20):
+            with self.subTest(count=count):
+                report = evaluate_pilot(plan(), binding(), results())
+                report['status'], report['issues'] = 'readyForReview', []
+                report['results'] = results()[:count]
+                if count == 20:
+                    report['results'][-1]['taskId'] = report['results'][0]['taskId']
+                report['evidenceSha256'] = canonical_digest({key: value for key, value in report.items()
+                                                            if key != 'evidenceSha256'})
+                approval = dict(schema='centaeris.workspaceFullReview.v1', decision='approveFull',
+                                reviewer='maintainer', candidate=full.to_dict(),
+                                pilotEvidenceSha256=report['evidenceSha256'])
+                with self.assertRaisesRegex(ValueError, 'twenty distinct'):
+                    require_full_review(full, report, approval)
+
+    def test_outcome_structure_and_final_state_must_agree_with_result(self):
+        changes = [
+            ('agentOutcome', {'status': 'unknown', 'error': 'AgentTimeoutError'}),
+            ('agentOutcome', {'status': 'failed', 'error': None}),
+            ('agentOutcome', {'status': 'completed', 'error': 'AgentTimeoutError'}),
+            ('agentOutcome', {'status': 'failed', 'error': 42}),
+            ('agentOutcome', {'status': 'failed', 'error': 'x' * 257}),
+            ('agentOutcome', {'status': 'failed', 'error': 'unsafe\nerror'}),
+            ('verifierOutcome', {'status': 'unknown', 'error': None}),
+            ('verifierOutcome', {'status': 'failed', 'error': 'downloadFailed'}),
+            ('cleanupOutcome', {'status': 'pending', 'error': None}),
+            ('cleanupOutcome', {'status': 'absent', 'error': None, 'unknown': True}),
+        ]
+        for field, outcome in changes:
+            with self.subTest(field=field, outcome=outcome):
+                batch = results()
+                batch[0][field] = outcome
+                self.assertEqual(evaluate_pilot(plan(), binding(), batch)['status'], 'blocked')
+        batch = results()
+        batch[0]['agentOutcome'] = {'status': 'failed', 'error': 'AgentTimeoutError'}
+        batch[0]['cleanupOutcome']['error'] = 'environment_retirement_pending'
+        self.assertEqual(evaluate_pilot(plan(), binding(), batch)['status'], 'readyForReview')
+        del batch[0]['agentOutcome']
+        self.assertEqual(evaluate_pilot(plan(), binding(), batch)['status'], 'blocked')
+
     def test_pilot_is_twenty_distinct_tasks_once_without_auto_full_run(self):
         value = plan()
         self.assertEqual(len(set(value['taskIds'])), 20)
