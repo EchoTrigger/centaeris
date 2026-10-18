@@ -10,6 +10,7 @@ use crate::execution_recovery_policy::{
     ExecutionActivityWitness, HostFailureEvidence, SnapshotActivityGuard, SnapshotCaptureError,
     WorkspaceReuseEvidence,
 };
+use crate::failure_diagnostics::{self, ExecutionCommandFailureStage};
 use crate::observations::{
     MeasuredWriter, ProtectionMetric, ProtectionTrigger, WorkspaceProtection,
 };
@@ -2709,9 +2710,13 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
         ]);
         command.command.extend(request.args);
 
-        let mut child = self
-            .spawn_command(command)
-            .map_err(|error| ExecutionError::CancellationIndeterminate { reason: error })?;
+        let mut child = self.spawn_command(command).map_err(|error| {
+            failure_diagnostics::cancellation_indeterminate(
+                &self.agent_run_id,
+                ExecutionCommandFailureStage::Spawn,
+                error,
+            )
+        })?;
         child.stdin.take();
         let stdout = child
             .stdout
@@ -2742,9 +2747,11 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
                         Err(error) => {
                             child.disconnect();
                             let _ = child.wait();
-                            return Err(ExecutionError::CancellationIndeterminate {
-                                reason: error,
-                            });
+                            return Err(failure_diagnostics::cancellation_indeterminate(
+                                &self.agent_run_id,
+                                ExecutionCommandFailureStage::Cancel,
+                                error,
+                            ));
                         }
                     }
                 }
@@ -2757,18 +2764,22 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
                     let teardown = self.cancel_command_container();
                     child.disconnect();
                     let _ = child.wait();
-                    return Err(ExecutionError::CancellationIndeterminate {
-                        reason: teardown.err().unwrap_or_else(|| {
+                    return Err(failure_diagnostics::cancellation_indeterminate(
+                        &self.agent_run_id,
+                        ExecutionCommandFailureStage::Deadline,
+                        teardown.err().unwrap_or_else(|| {
                             "docker exec exceeded its confirmed deadline".to_string()
                         }),
-                    });
+                    ));
                 }
                 Err(error) => {
                     child.disconnect();
                     let _ = child.wait();
-                    return Err(ExecutionError::CancellationIndeterminate {
-                        reason: format!("poll docker exec failed: {error}"),
-                    });
+                    return Err(failure_diagnostics::cancellation_indeterminate(
+                        &self.agent_run_id,
+                        ExecutionCommandFailureStage::Poll,
+                        format!("poll docker exec failed: {error}"),
+                    ));
                 }
             }
         };
@@ -2780,9 +2791,11 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
             .map_err(|_| self.unavailable("exec stderr reader panicked"))?;
         if !cancelled {
             if let Some(error) = stdout.error.as_ref().or(stderr.error.as_ref()) {
-                return Err(ExecutionError::CancellationIndeterminate {
-                    reason: error.clone(),
-                });
+                return Err(failure_diagnostics::cancellation_indeterminate(
+                    &self.agent_run_id,
+                    ExecutionCommandFailureStage::Output,
+                    error.clone(),
+                ));
             }
         }
         let stdout = stdout.output;
