@@ -648,11 +648,9 @@ mod tests {
     fn start_requires_current_environment_authorization_without_legacy_aliases() {
         let valid = valid_agent_run_start_value();
         let mut cases = Vec::new();
-        for schema in ["unsupported"] {
-            let mut changed = valid.clone();
-            changed["schema"] = schema.into();
-            cases.push(changed);
-        }
+        let mut unsupported = valid.clone();
+        unsupported["schema"] = "unsupported".into();
+        cases.push(unsupported);
         let mut missing = valid.clone();
         missing
             .as_object_mut()

@@ -2145,11 +2145,11 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
             fence,
         })
         .map_err(|error| self.unavailable(error))?;
-        return Ok(ExecutionHostStatus::remote(
+        Ok(ExecutionHostStatus::remote(
             true,
             ExecutionHostHealth::Ready,
             None,
-        ));
+        ))
     }
 
     fn workspace_generation(&self) -> ExecutionWorkspaceGeneration {

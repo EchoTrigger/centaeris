@@ -374,13 +374,12 @@ fn resolve_target(
         || row.get::<_, String>(10) != r.cleanup.authorization.workspace_id
         || !(row.get::<_, String>(15) == "resident"
             || (b.execution_mode == "perRun" && row.get::<_, String>(15) == "releasing"))
-        || (!(b.execution_mode == "perRun" && row.get::<_, String>(15) == "releasing")
-            && !physical.iter().any(|p| {
-                p.execution_id == execution
-                    && p.allocation_owner == allocation.allocation_owner
-                    && Some(&p.container_id) == allocation.container_id.as_ref()
-                    && p.resources == resources
-            }))
+        || !(physical.iter().any(|p| {
+            p.execution_id == execution
+                && p.allocation_owner == allocation.allocation_owner
+                && Some(&p.container_id) == allocation.container_id.as_ref()
+                && p.resources == resources
+        }) || (b.execution_mode == "perRun" && row.get::<_, String>(15) == "releasing"))
     {
         return Err("cleanup live environment unconfirmed".into());
     }
