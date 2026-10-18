@@ -17,6 +17,19 @@ def manifest():
 
 
 class EventsTests(unittest.TestCase):
+    def test_verifier_phase_facts_reach_projection_without_inventing_a_reward(self):
+        with JobEvents.create(self.root, manifest()) as writer:
+            for status in ('notStarted', 'running', 'failed', 'unknown', 'completed'):
+                writer.trial('trial-1', taskId='regex-log', attempt=1, status='running',
+                    phase='verifier' if status == 'running' else 'finished',
+                    agentStatus='failed', verifierStatus=status,
+                    reward=0 if status == 'completed' else None, cleanupStatus='absent', resourceHolding=0)
+                row = JobProjection(self.root).snapshot()['trials'][0]
+                self.assertEqual(row['verifierStatus'], status)
+                self.assertEqual(row['reward'], 0 if status == 'completed' else None)
+                self.assertEqual(row['agentStatus'], 'failed')
+                self.assertEqual(row['cleanupStatus'], 'absent')
+
     def setUp(self):
         temporary_root = Path(__file__).resolve().parents[2] / ".tmp"
         temporary_root.mkdir(exist_ok=True)

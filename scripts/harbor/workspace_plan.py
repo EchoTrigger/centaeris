@@ -339,6 +339,8 @@ def make_binding(product_commit: str, adapter_files: dict[str, Path], plan: dict
 def _validate_outcome(value: Any, phase: str) -> None:
     _keys(value, {'status', 'error'}, phase + 'Outcome')
     statuses = {'absent', 'pending'} if phase == 'cleanup' else {'completed', 'failed', 'unknown'}
+    if phase == 'verifier':
+        statuses |= {'notStarted', 'running'}
     if not isinstance(value['status'], str) or value['status'] not in statuses:
         raise ValueError(f'invalid {phase} outcome status')
     error = value['error']

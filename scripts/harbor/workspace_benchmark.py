@@ -676,9 +676,11 @@ class BenchmarkRunner:
                 controller_ref = uuid.uuid4().hex
                 entry, trial, result = None, None, None
                 restore_trial_observer = None
-                outcomes = {"phase": "setup", "errors": {}, "started": set(), "finished": set()}
+                outcomes = {"phase": "setup", "errors": {}, "started": set(), "finished": set(),
+                            "phaseObservationComplete": True}
                 capacity_deferred = False
-                phase = {"taskId": task_id, "attempt": attempt, "status": "running", "phase": "preparing", "slot": slot, "resourceHolding": 1}
+                phase = {"taskId": task_id, "attempt": attempt, "status": "running", "phase": "preparing",
+                         "slot": slot, "resourceHolding": 1, "verifierStatus": "notStarted"}
                 projection = _TrialProjection(sink, trial_id, phase, getattr(self, "metrics_factory", None))
                 project = projection.project
                 project({})
@@ -715,7 +717,10 @@ class BenchmarkRunner:
                             return
                         outcomes["phase"] = "verifier" if event.event == TrialEvent.VERIFICATION_START else "agent"
                         outcomes["started"].add(outcomes["phase"])
-                        project({"phase": outcomes["phase"]})
+                        update = {"phase": outcomes["phase"]}
+                        if outcomes["phase"] == "verifier":
+                            update["verifierStatus"] = "running"
+                        project(update)
                     trial.add_hook(TrialEvent.AGENT_START, hook)
                     trial.add_hook(TrialEvent.AGENT_END, hook)
                     trial.add_hook(TrialEvent.VERIFICATION_START, hook)
@@ -760,7 +765,8 @@ class BenchmarkRunner:
                         project({"phase": "finished" if allocation.released else "cleanup",
                             "status": "completed" if summary["infrastructureError"] is None and summary["severeIssue"] is None else "failed",
                             "cleanupStatus": summary["cleanupState"], "resourceHolding": summary["resourceDebit"],
-                            "verifierStatus": "completed" if summary["verifierCompleted"] else "unknown", "reward": summary["reward"]})
+                            "agentStatus": summary["agentOutcome"]["status"],
+                            "verifierStatus": summary["verifierOutcome"]["status"], "reward": summary["reward"]})
                     if allocation.released:
                         with _REGISTRY_LOCK:
                             _REGISTRY.pop(controller_ref, None)
@@ -797,6 +803,26 @@ class BenchmarkRunner:
         model_errors = {"AgentTimeoutError", "NonZeroAgentExitCodeError"}
         agent_error = errors.get("agent") or (exception if exception in model_errors else None)
         verifier_error = errors.get("verifier")
+        native_verifier = getattr(result, "verifier", None)
+        if verifier_error:
+            verifier_status = "failed"
+        elif reward is not None:
+            verifier_status = "completed"
+        elif ("verifier" in outcomes["started"] or native_verifier is not None
+                or (result is not None and result.verifier_result is not None)):
+            # A final observation after entry without a score or phase error is
+            # indeterminate. Only the live start hook establishes "running".
+            verifier_status = "unknown"
+        elif outcomes.get("phaseObservationComplete") is True:
+            verifier_status = "notStarted"
+        elif (result is not None and hasattr(result, "verifier") and result.verifier is None
+                and getattr(result, "finished_at", None) is not None
+                and getattr(getattr(result, "agent_execution", None), "finished_at", None) is not None):
+            # A complete native trial records an explicitly absent verifier
+            # phase. A missing field or a null result alone is not this evidence.
+            verifier_status = "notStarted"
+        else:
+            verifier_status = "unknown"
         infrastructure = error or verifier_error or errors.get("setup") or (
             agent_error if agent_error not in model_errors else None) or (
             exception if exception not in {None, *model_errors} else None)
@@ -804,7 +830,7 @@ class BenchmarkRunner:
         return {"trialId": trial_id, "taskId": task_id, "attempt": attempt, "verifierCompleted": reward is not None,
             "reward": reward, "infrastructureError": infrastructure,
             "agentOutcome": {"status": "failed" if agent_error else "completed" if "agent" in outcomes["finished"] else "unknown", "error": agent_error},
-            "verifierOutcome": {"status": "failed" if verifier_error else "completed" if reward is not None else "unknown", "error": verifier_error},
+            "verifierOutcome": {"status": verifier_status, "error": verifier_error},
             "cleanupOutcome": {"status": "absent" if allocation.released else "pending", "error": errors.get("cleanup")},
             "severeIssue": None if allocation.released else "cleanupUnconfirmed",
             "cleanupState": "absent" if allocation.released else "pending", "resourceDebit": 0 if allocation.released else 1}

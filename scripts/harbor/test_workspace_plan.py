@@ -34,6 +34,38 @@ def results():
 
 
 class PlanTests(unittest.TestCase):
+    def test_verifier_outcomes_accept_exact_live_and_historical_states_without_rewriting(self):
+        for status, error in (('notStarted', None), ('running', None), ('unknown', None),
+                              ('completed', None), ('failed', 'benchmark_download_path_missing')):
+            with self.subTest(status=status):
+                outcome = {'status': status, 'error': error}
+                batch = results()
+                batch[0]['verifierOutcome'] = outcome
+                if status != 'completed':
+                    batch[0]['verifierCompleted'], batch[0]['reward'] = False, None
+                original = copy.deepcopy(batch)
+                report = evaluate_pilot(plan(), binding(), batch)
+                self.assertEqual(report['status'], 'readyForReview' if status == 'completed' else 'blocked')
+                self.assertNotIn('invalid verifier outcome status', report['issues'])
+                self.assertEqual(batch, original)
+                self.assertEqual(report['results'], original)
+                if status != 'completed':
+                    approval = dict(schema='centaeris.workspaceFullReview.v1', decision='approveFull',
+                        reviewer='maintainer', candidate=binding().to_dict(),
+                        pilotEvidenceSha256=report['evidenceSha256'])
+                    with self.assertRaisesRegex(ValueError, 'not ready'):
+                        require_full_review(binding(), report, approval)
+        for status in ('not_started', 'notstarted', 'passed', 'NotStarted'):
+            with self.subTest(status=status):
+                batch = results()
+                batch[0]['verifierOutcome']['status'] = status
+                self.assertIn('invalid verifier outcome status', evaluate_pilot(plan(), binding(), batch)['issues'])
+        for phase in ('agent', 'cleanup'):
+            with self.subTest(phase=phase):
+                batch = results()
+                batch[0][phase + 'Outcome']['status'] = 'notStarted'
+                self.assertIn(f'invalid {phase} outcome status', evaluate_pilot(plan(), binding(), batch)['issues'])
+
     def test_bounded_pilot_accepts_one_through_twenty_unique_tasks_once(self):
         for count in (1, 17, 20):
             with self.subTest(count=count):

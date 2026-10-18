@@ -270,6 +270,21 @@ Pilot review validates these canonical Outcome objects and their agreement with
 the final verifier and cleanup state. An Agent timeout alone does not invalidate
 a completed verifier reward when cleanup confirms absence and zero resource debit.
 An earlier cleanup error may remain recorded after confirmed absence.
+Verifier outcomes use exact `notStarted`, `running`, `completed`, `failed` and
+`unknown` statuses. A complete controller hook observation without verifier entry
+establishes `notStarted`; its start hook projects `running`. Final `completed`
+requires a valid native reward, including zero; an observed verifier error is
+`failed`. Entry without a reward or phase error ends as `unknown`, not a guessed
+failure or a zero score. The terminal monitor fact uses the same verifier outcome.
+Agent failure and confirmed cleanup remain independent of these verifier facts.
+
+Historical `completed`, `failed` and `unknown` outcomes retain their exact meaning
+when reviewed; no status aliases or inferred scores are accepted. Reconstruction
+from a native result may establish `notStarted` only when the complete trial and
+Agent timing explicitly record no verifier phase. Missing phase fields or a null
+result alone remain `unknown`. Reading or reviewing evidence never rewrites the
+original result files. Every outcome except a completed verifier with a valid
+reward still blocks pilot readiness and the reviewed full-run gate.
 
 ## Monitoring and evidence
 

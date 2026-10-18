@@ -18,6 +18,40 @@ from harbor.models.task.task import Task
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_observed_agent_failure_leaves_verifier_not_started_without_a_reward(self):
+        outcomes = {'errors': {'agent': 'agent_run_failed'}, 'started': {'agent'},
+                    'finished': {'agent'}, 'phaseObservationComplete': True}
+        result = SimpleNamespace(verifier_result=None, verifier=None,
+                                 exception_info=SimpleNamespace(exception_type='WorkspaceError'))
+        summary = BenchmarkRunner._summary('task-one', 'trial-one', result,
+            SimpleNamespace(released=True), None, outcomes=outcomes)
+        self.assertEqual(summary['verifierOutcome'], {'status': 'notStarted', 'error': None})
+        self.assertFalse(summary['verifierCompleted'])
+        self.assertIsNone(summary['reward'])
+        self.assertEqual(summary['agentOutcome'], {'status': 'failed', 'error': 'agent_run_failed'})
+        self.assertEqual(summary['cleanupOutcome'], {'status': 'absent', 'error': None})
+
+    def test_missing_historical_phase_evidence_remains_unknown_and_native_timing_is_used(self):
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        for native, expected in (
+                ({}, 'unknown'),
+                ({'verifier': None}, 'unknown'),
+                ({'verifier': None, 'finished_at': now,
+                  'agent_execution': SimpleNamespace(finished_at=now)}, 'notStarted'),
+                ({'verifier': SimpleNamespace(started_at=now, finished_at=now)}, 'unknown')):
+            with self.subTest(native=native):
+                result = SimpleNamespace(verifier_result=None, exception_info=None, **native)
+                summary = BenchmarkRunner._summary('task-one', 'trial-one', result,
+                    SimpleNamespace(released=True), None)
+                self.assertEqual(summary['verifierOutcome'], {'status': expected, 'error': None})
+                self.assertIsNone(summary['reward'])
+        outcomes = {'errors': {}, 'started': {'agent', 'verifier'}, 'finished': {'agent'},
+                    'phaseObservationComplete': True}
+        summary = BenchmarkRunner._summary('task-one', 'trial-one', None,
+            SimpleNamespace(released=True), None, outcomes=outcomes)
+        self.assertEqual(summary['verifierOutcome'], {'status': 'unknown', 'error': None})
+
     def test_runner_freezes_the_exact_bounded_pilot_plan(self):
         for count in (1, 17, 20):
             with self.subTest(count=count):
@@ -113,6 +147,30 @@ class BenchmarkTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_real_batch_projects_independent_verifier_lifecycle_without_invented_scores(self):
+        for scenario, expected in (('agentFailed', 'notStarted'), ('verifierInterrupted', 'unknown'),
+                                   ('verifierFailed', 'failed'), ('verifierCompleted', 'completed')):
+            with self.subTest(scenario=scenario):
+                report, started, _, held = await self._run_failure_batch(
+                    task_count=1, disk_free=[200000], phase_scenario=scenario)
+                summary = report['results'][0]
+                self.assertEqual(summary['verifierOutcome']['status'], expected)
+                self.assertEqual(summary['reward'], 0 if scenario == 'verifierCompleted' else None)
+                self.assertEqual(summary['verifierCompleted'], scenario == 'verifierCompleted')
+                self.assertEqual(len(started), 1)
+                self.assertEqual(held, 0)
+                observations = report['projectedTrials']
+                agent = next(row for row in observations if row['phase'] == 'agent')
+                self.assertEqual(agent['verifierStatus'], 'notStarted')
+                if scenario != 'agentFailed':
+                    verifier = next(row for row in observations if row['phase'] == 'verifier')
+                    self.assertEqual(verifier['verifierStatus'], 'running')
+                final = observations[-1]
+                self.assertEqual(final['verifierStatus'], expected)
+                self.assertEqual(final['agentStatus'], summary['agentOutcome']['status'])
+                self.assertEqual(final['cleanupStatus'], 'absent')
+                self.assertEqual(final['reward'], summary['reward'])
+
     async def test_bounded_pilot_batch_executes_exact_selection_once(self):
         for count in (1, 17):
             with self.subTest(count=count):
@@ -270,7 +328,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await runner.run_full(approval=approval)
 
-    async def _run_failure_batch(self, *, cleanup_pending=False, task_count=20, stage='pilot', disk_free=None, after_pull_free=None, invalid_verifier=False, masked_verifier_error=False):
+    async def _run_failure_batch(self, *, cleanup_pending=False, task_count=20, stage='pilot', disk_free=None, after_pull_free=None, invalid_verifier=False, masked_verifier_error=False, phase_scenario=None):
         with tempfile.TemporaryDirectory() as temporary:
             task_ids = [f"task-{index}" for index in range(task_count)]
             for task_id in task_ids:
@@ -306,7 +364,12 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 runner.image_preparer = CapacityCheckedImages(runner.image_preparer, Path(temporary),
                     8192, lambda: admission.active_storage_mib)
             runner.physical_gate = gate
-            runner.sink_factory = lambda *args: SimpleNamespace(submit=lambda *args, **kwargs: True, close=lambda: None)
+            projected = []
+            def submit(kind, payload, **kwargs):
+                if kind == 'trial':
+                    projected.append(copy.deepcopy(payload))
+                return True
+            runner.sink_factory = lambda *args: SimpleNamespace(submit=submit, close=lambda: None)
             runner.batch_started = None
             def task(path):
                 memory = 8192 if cleanup_pending and path.name == "task-2" else 2048
@@ -337,6 +400,20 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                         started.append(task_id)
                         started_trial_ids.append(config.trial_id)
                         active_counts.append(admission.active_count)
+                        if phase_scenario:
+                            from harbor.trial.hooks import TrialEvent
+                            from workspace_client import WorkspaceError
+                            await self.hooks[TrialEvent.AGENT_START](SimpleNamespace(event=TrialEvent.AGENT_START))
+                            await self.hooks[TrialEvent.AGENT_END](SimpleNamespace(event=TrialEvent.AGENT_END))
+                            if phase_scenario == 'agentFailed':
+                                self._record_exception(WorkspaceError('agent_run_failed', 500))
+                            else:
+                                await self.hooks[TrialEvent.VERIFICATION_START](SimpleNamespace(event=TrialEvent.VERIFICATION_START))
+                                if phase_scenario == 'verifierFailed':
+                                    self._record_exception(WorkspaceError('benchmark_download_path_missing', 404))
+                                if phase_scenario == 'verifierCompleted':
+                                    self.result.verifier_result = SimpleNamespace(rewards={'reward': 0})
+                            return self.result
                         if masked_verifier_error:
                             from harbor.trial.errors import AgentTimeoutError
                             from harbor.trial.hooks import TrialEvent
@@ -375,6 +452,8 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(admission.active_count, 0)
                         return
                     report = await asyncio.wait_for(runner._run_batch(stage, task_ids), 3)
+                if phase_scenario:
+                    report['projectedTrials'] = projected
                 if disk_free is not None:
                     report['preparedTaskIds'] = image_calls
                     observations = Path(report['batchDir']) / 'capacity-observations.jsonl'
