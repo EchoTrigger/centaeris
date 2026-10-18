@@ -4,6 +4,25 @@ from ci_scope import select_products, aggregate_result, PRODUCTS, JOBS
 
 
 class ScopeTests(unittest.TestCase):
+    def test_workspace_harbor_inputs_run_python_and_preserve_local_coverage(self):
+        for path in (
+                "scripts/harbor/workspace_plan.py", "scripts/harbor/workspace_benchmark.py",
+                "scripts/harbor/test_workspace_plan.py", "scripts/harbor/workspace-pilot-tasks.json",
+                "scripts/harbor/workspace_monitor/app.js", "scripts/harbor/workspace_monitor.compose.yml",
+                "scripts/harbor/workspace-benchmark.md", "scripts/harbor/workspace-monitor.md",
+                "scripts/harbor/benchmark-transport.json", "scripts/harbor/full-tasks.json",
+                "scripts\\harbor\\test_workspace_provisioner.py"):
+            with self.subTest(path=path):
+                selected = select_products([path])
+                self.assertEqual({key for key, value in selected.items() if value},
+                                 {"coreRust", "localNode", "workspacePython"})
+
+    def test_legacy_harbor_runner_keeps_its_existing_product_selection(self):
+        for path in ("scripts/harbor/runner.py", "scripts/harbor/test_runner.py", "scripts/harbor/run.ps1"):
+            with self.subTest(path=path):
+                selected = select_products([path])
+                self.assertEqual({key for key, value in selected.items() if value}, {"coreRust", "localNode"})
+
     def test_shared_core_locks_and_unknown_inputs_expand_to_all_products(self):
         for path in ("packages/core/src/lib.rs", "Cargo.lock", "pnpm-lock.yaml", "pnpm-workspace.yaml", "uv.lock", "new-build-input"):
             self.assertTrue(all(select_products([path]).values()), path)
