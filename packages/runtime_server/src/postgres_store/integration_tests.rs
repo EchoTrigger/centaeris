@@ -3022,7 +3022,8 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
             started_at_ms: now_ms,
         })
         .expect("start old lease");
-    let pooled_sessions_before_log = postgres_peer_session_count(&url);
+    let mut observer = Client::connect(&url, NoTls).expect("connect session observer");
+    let pooled_sessions_before_log = postgres_peer_backend_ids(&mut observer);
     let session_log = store.session_log(
         "workspace_fenced_terminal".to_string(),
         session_id.to_string(),
@@ -3056,10 +3057,13 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
             ],
         ))
         .expect("append started records");
-    assert_eq!(
-        postgres_peer_session_count(&url),
-        pooled_sessions_before_log,
-        "SessionLog append must borrow briefly from the Store pool instead of retaining a per-run connection"
+    let peers_after_log = postgres_peer_backend_ids(&mut observer);
+    let added_peers = peers_after_log
+        .difference(&pooled_sessions_before_log)
+        .collect::<Vec<_>>();
+    assert!(
+        added_peers.is_empty(),
+        "SessionLog append must borrow from the Store pool without opening per-run connections; new backends: {added_peers:?}"
     );
     store
         .reclaim_expired_runtime_job_leases(now_ms + 11)
@@ -3368,15 +3372,58 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
     );
 }
 
-fn postgres_peer_session_count(url: &str) -> i64 {
-    let mut observer = Client::connect(url, NoTls).expect("connect session observer");
+fn postgres_peer_backend_ids(observer: &mut Client) -> std::collections::BTreeSet<i32> {
     observer
-        .query_one(
-            "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()",
+        .query(
+            "SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()",
             &[],
         )
-        .expect("count peer Postgres sessions")
-        .get(0)
+        .expect("observe peer Postgres sessions")
+        .iter()
+        .map(|row| row.get(0))
+        .collect()
+}
+
+#[test]
+#[ignore = "requires exclusively owned disposable PostgreSQL"]
+fn postgres_peer_observation_reuses_one_observer_and_detects_live_clients() {
+    let _guard = TEST_LOCK.lock().expect("Postgres test lock");
+    let url = test_url();
+    let mut observer = Client::connect(&url, NoTls).expect("connect persistent observer");
+    owned_database::require_owned_database(&mut observer);
+    let observer_id: i32 = observer
+        .query_one("SELECT pg_backend_pid()", &[])
+        .unwrap()
+        .get(0);
+    let baseline = postgres_peer_backend_ids(&mut observer);
+    assert!(!baseline.contains(&observer_id));
+    for _ in 0..3 {
+        let peers = postgres_peer_backend_ids(&mut observer);
+        assert!(peers.difference(&baseline).next().is_none());
+    }
+
+    // Holding the prior observer deterministically models delayed server-side
+    // teardown: a fresh observer counts it as a new peer of the application.
+    let mut fresh_observer = Client::connect(&url, NoTls).expect("connect fresh observer");
+    let fresh_id: i32 = fresh_observer
+        .query_one("SELECT pg_backend_pid()", &[])
+        .unwrap()
+        .get(0);
+    let fresh_peers = postgres_peer_backend_ids(&mut fresh_observer);
+    assert_eq!(
+        fresh_peers
+            .difference(&baseline)
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![observer_id]
+    );
+
+    // The persistent observer still detects a real additional live client.
+    let peers = postgres_peer_backend_ids(&mut observer);
+    assert_eq!(
+        peers.difference(&baseline).copied().collect::<Vec<_>>(),
+        vec![fresh_id]
+    );
 }
 
 #[test]
