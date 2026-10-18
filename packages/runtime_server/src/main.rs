@@ -1120,11 +1120,20 @@ fn runtime_http1_builder(header_timeout: Duration) -> http1::Builder {
 }
 
 async fn read_axum_request(request: Request<Body>) -> Result<Request<Bytes>, Response<Body>> {
+    if request.method() == hyper::Method::POST
+        && request.uri().path() == "/internal/benchmark/upload"
+    {
+        http::benchmark::upload_body_authority(&request)?;
+    }
+    read_axum_request_body(request).await
+}
+
+async fn read_axum_request_body(request: Request<Body>) -> Result<Request<Bytes>, Response<Body>> {
     let (parts, body) = request.into_parts();
     let body_limit = if parts.method == hyper::Method::POST
         && parts.uri.path() == "/internal/benchmark/upload"
     {
-        12 * 1024 * 1024
+        http::benchmark::ARCHIVE_LIMIT
     } else {
         MAX_HTTP_BODY_BYTES
     };
@@ -6635,23 +6644,43 @@ mod tests {
     }
 
     #[test]
+    fn runtime_http_benchmark_upload_rejects_unauthorized_without_consuming_body() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime.block_on(async {
+            let request = Request::builder()
+                .method("POST")
+                .uri("/internal/benchmark/upload")
+                .body(Body::from_stream(futures::stream::pending::<
+                    Result<Bytes, std::io::Error>,
+                >()))
+                .unwrap();
+            let rejected =
+                tokio::time::timeout(Duration::from_millis(100), read_axum_request(request))
+                    .await
+                    .expect("authorization must precede body consumption")
+                    .unwrap_err();
+            assert_eq!(rejected.status(), 401);
+        });
+    }
+
+    #[test]
     fn runtime_http_benchmark_upload_has_its_own_bounded_body_limit() {
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
         runtime.block_on(async {
-            let accepted = read_axum_request(
+            let accepted = read_axum_request_body(
                 Request::builder()
                     .method("POST")
                     .uri("/internal/benchmark/upload")
-                    .body(Body::from(vec![0; MAX_HTTP_BODY_BYTES + 1]))
+                    .body(Body::from(vec![0; 11_508_561 + 65536]))
                     .unwrap(),
             )
             .await;
             assert!(accepted.is_ok());
-            let rejected = read_axum_request(
+            let rejected = read_axum_request_body(
                 Request::builder()
                     .method("POST")
                     .uri("/internal/benchmark/upload")
-                    .body(Body::from(vec![0; 12 * 1024 * 1024 + 1]))
+                    .body(Body::from(vec![0; http::benchmark::ARCHIVE_LIMIT + 1]))
                     .unwrap(),
             )
             .await;

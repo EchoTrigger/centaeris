@@ -16,6 +16,7 @@ import re
 import subprocess
 import tarfile
 import threading
+import tempfile
 import uuid
 
 from harbor.models.task.task import Task
@@ -26,6 +27,7 @@ from harbor.trial.trial import Trial
 from workspace_environment import WorkspaceEnvironment
 from workspace_events import FailOpenProjection, JobEvents
 from workspace_plan import DATASET_COMMIT, Admission, Resources, canonical_digest, evaluate_pilot, require_full_review, validate_plan
+from workspace_provisioner import pack_upload
 
 _REGISTRY = {}
 _REGISTRY_LOCK = threading.Lock()
@@ -87,6 +89,14 @@ def freeze_tasks(dataset_root, task_ids):
             raise ValueError("task source is incomplete")
         frozen[task_id] = {"files": files, "digest": canonical_digest(files)}
     return frozen
+
+
+def validate_verifier_inputs(dataset_root, task_ids):
+    """Exercise the actual bounded packer for every input before any model run."""
+    with tempfile.TemporaryDirectory(prefix="workspace-verifier-preflight-") as temporary:
+        archive = Path(temporary) / "tests.tar"
+        for task_id in task_ids:
+            pack_upload(Path(dataset_root) / "tasks" / task_id / "tests", archive, directory=True)
 
 
 def task_profile(task, image):
@@ -557,6 +567,7 @@ class BenchmarkRunner:
             raise ValueError("physical host and database gates have not passed")
         if freeze_tasks(self.dataset_root, self.plan["taskIds"]) != self.sources:
             raise ValueError("task source changed after candidate freezing")
+        await asyncio.to_thread(validate_verifier_inputs, self.dataset_root, self.plan["taskIds"])
         root = self.output_root / (stage + "-" + uuid.uuid4().hex)
         root.mkdir(parents=True, exist_ok=False)
         manifest = {"schema": "centaeris.workspace_benchmark.job.v1", "jobId": root.name,

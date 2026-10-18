@@ -7,6 +7,7 @@ import tarfile
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from workspace_provisioner import WorkspaceHTTPProvisioner, pack_upload, unpack_download
@@ -111,13 +112,26 @@ class HTTPProvisionerTests(unittest.TestCase):
         self.downloaded_archive = None
         self.response_transform = None
         self.observation_errors = []
+        self.download_error = None
+        self.download_content_type = "application/x-tar"
+        self.download_declared_bytes = None
         owner = self
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
                 pass
             def do_POST(self):
-                value = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                raw = self.rfile.read(int(self.headers["Content-Length"]))
+                value = (json.loads(self.headers["X-Benchmark-Transfer"]) if self.path == "/internal/benchmark/upload"
+                         and self.headers.get("Content-Type") == "application/x-tar" else json.loads(raw))
                 owner.requests.append((self.path, dict(self.headers), value))
+                if self.path == "/internal/benchmark/download" and owner.download_error:
+                    status, code = owner.download_error
+                    body = json.dumps({"error": code}).encode()
+                    self.send_response(status)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 if self.path == "/internal/benchmark/observe":
                     if owner.observation_errors:
                         status, code = owner.observation_errors.pop(0)
@@ -151,13 +165,16 @@ class HTTPProvisionerTests(unittest.TestCase):
                         return
                     result = {**value, "schema": "workspace.benchmark_setup.completed.v1", "environmentId": "environment"}
                 elif self.path == "/internal/benchmark/upload":
-                    import base64
-                    owner.uploaded = base64.b64decode(value["archiveBase64"], validate=True)
+                    owner.uploaded = raw
                     result = {"schema": "runtime.benchmark.upload.result.v1", "uploadedBytes": len(owner.uploaded)}
                 elif self.path == "/internal/benchmark/download":
-                    import base64
-                    result = {"schema": "runtime.benchmark.download.result.v1",
-                              "archiveBase64": base64.b64encode(owner.downloaded_archive or owner.uploaded).decode()}
+                    body = owner.downloaded_archive or owner.uploaded
+                    self.send_response(200)
+                    self.send_header("Content-Type", owner.download_content_type)
+                    self.send_header("Content-Length", str(owner.download_declared_bytes or len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 else:
                     import hashlib
                     digest = "sha256:" + hashlib.sha256(json.dumps(value["profile"], sort_keys=True,
@@ -182,6 +199,62 @@ class HTTPProvisionerTests(unittest.TestCase):
             maintenance_token="fake-maintenance-" + "m" * 32, internal_token="fake-internal-" + "i" * 32)
         self.owned = OwnedEnvironment("session", "environment", "run", "instance", "container", "host", 2,
                                       "sha256:" + "a" * 64, "sha256:" + "b" * 64, "waitingSetup", 1)
+
+    def test_large_verifier_payload_roundtrips_as_bounded_raw_tar(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "private_test.tar.gz"
+            source.write_bytes(b"x" * 11_506_423)
+            expected = hashlib.sha256(source.read_bytes()).hexdigest()
+            # Archive transfer must stream its file; reading the entire tar in
+            # Python would add a second archive-sized allocation.
+            with patch.object(Path, "read_bytes", side_effect=AssertionError("whole-file read")):
+                self.provisioner.upload_file(self.owned, source, "/tests/private_test.tar.gz")
+                self.provisioner.download_file(self.owned, "/tests/private_test.tar.gz", root / "download")
+            self.assertEqual(hashlib.sha256((root / "download").read_bytes()).hexdigest(), expected)
+            upload = next(item for item in self.requests if item[0] == "/internal/benchmark/upload")
+            self.assertEqual(upload[1]["Content-Type"], "application/x-tar")
+            self.assertEqual(set(upload[2]), {"schema", "sessionId", "environmentId", "agentRunId",
+                "instanceId", "profileDigest", "path"})
+            self.assertLess(len(upload[1]["X-Benchmark-Transfer"]), 8192)
+
+    def test_upload_over_cap_fails_before_remote_mutations(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "large"
+            with source.open("wb") as output:
+                output.truncate(32 * 1024 * 1024 + 1)
+            with self.assertRaisesRegex(WorkspaceError, "transfer_expanded_limit_exceeded"):
+                self.provisioner.upload_file(self.owned, source, "/tests/large")
+        self.assertEqual(self.requests, [])
+
+    def test_download_categories_propagate_without_retries_or_artifact_writes(self):
+        for status, code in [(404, 'benchmark_download_path_missing'), (413, 'benchmark_archive_limit_exceeded'),
+                (409, 'benchmark_transfer_identity_rejected'), (409, 'benchmark_transfer_outcome_unknown')]:
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as temporary:
+                self.download_error = (status, code)
+                target = Path(temporary) / 'download'
+                before = len(self.requests)
+                with self.assertRaises(WorkspaceError) as caught:
+                    self.provisioner.download_file(self.owned, '/logs/verifier/reward.txt', target)
+                self.assertEqual((caught.exception.status, caught.exception.code), (status, code))
+                self.assertEqual(len(self.requests) - before, 1)
+                self.assertFalse(target.exists())
+
+    def test_download_rejects_incomplete_or_over_cap_body_before_extraction(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'input'
+            source.write_text('data')
+            archive = root / 'input.tar'
+            pack_upload(source, archive, directory=False)
+            self.downloaded_archive = archive.read_bytes()
+            for length, code in [(len(self.downloaded_archive) + 1, 'transfer_response_incomplete'),
+                    (32 * 1024 * 1024 + 1, 'transfer_archive_limit_exceeded')]:
+                self.download_declared_bytes = length
+                with self.subTest(length=length), self.assertRaisesRegex(WorkspaceError, code):
+                    self.provisioner.download_file(self.owned, '/input', root / 'download')
+                self.assertFalse((root / 'download').exists())
 
     def test_observation_returns_owned_instance_and_unknown_is_not_ready(self):
         self.assertEqual(self.provisioner.observe_setup("session", "environment", "run"), self.owned)

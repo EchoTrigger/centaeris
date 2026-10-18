@@ -5,7 +5,6 @@ containers. Exec is dispatched once; uncertain external effects are not retried.
 """
 from __future__ import annotations
 
-import base64
 import hashlib
 import http.client
 import json
@@ -22,8 +21,15 @@ from urllib.error import HTTPError, URLError
 from workspace_client import WorkspaceClient, WorkspaceError, _segment
 from workspace_environment import CleanupObservation, OwnedEnvironment
 
-ARCHIVE_LIMIT = 8 * 1024 * 1024
-MEMBER_LIMIT = 10000
+_TRANSFER_CONTRACT = json.loads(Path(__file__).with_name("benchmark-transport.json").read_text(encoding="utf-8"))
+if (set(_TRANSFER_CONTRACT) != {"schema", "archiveBytes", "expandedBytes", "members", "metadataBytes"}
+        or _TRANSFER_CONTRACT["schema"] != "centaeris.benchmarkTransport.v1"
+        or any(type(value) is not int or value <= 0 for key, value in _TRANSFER_CONTRACT.items() if key != "schema")):
+    raise ValueError("benchmark transport contract invalid")
+ARCHIVE_LIMIT = _TRANSFER_CONTRACT["archiveBytes"]
+EXPANDED_LIMIT = _TRANSFER_CONTRACT["expandedBytes"]
+MEMBER_LIMIT = _TRANSFER_CONTRACT["members"]
+TRANSFER_BLOCK_BYTES = 64 * 1024
 
 
 class _LimitedWriter:
@@ -88,7 +94,7 @@ def _archive_members(archive, *, max_members, max_expanded_bytes):
 
 
 def pack_upload(source, archive_path, *, directory, archive_name=None,
-                max_archive_bytes=ARCHIVE_LIMIT, max_expanded_bytes=ARCHIVE_LIMIT, max_members=MEMBER_LIMIT):
+                max_archive_bytes=ARCHIVE_LIMIT, max_expanded_bytes=EXPANDED_LIMIT, max_members=MEMBER_LIMIT):
     source = _safe_local(source)
     if source.is_symlink() or (directory and not source.is_dir()) or (not directory and not source.is_file()):
         raise WorkspaceError("transfer_upload_source_invalid")
@@ -133,7 +139,7 @@ def pack_upload(source, archive_path, *, directory, archive_name=None,
 
 
 def unpack_download(archive_path, target, *, directory, strip_root=None,
-                    max_archive_bytes=ARCHIVE_LIMIT, max_expanded_bytes=ARCHIVE_LIMIT, max_members=MEMBER_LIMIT):
+                    max_archive_bytes=ARCHIVE_LIMIT, max_expanded_bytes=EXPANDED_LIMIT, max_members=MEMBER_LIMIT):
     archive_path, target = _safe_local(archive_path), _safe_local(target)
     if archive_path.stat().st_size > max_archive_bytes:
         raise WorkspaceError("transfer_archive_limit_exceeded")
@@ -185,13 +191,48 @@ class _MaintenanceHTTP(WorkspaceClient):
 
     def post(self, path, value, *, timeout=None):
         request = self._request("POST", path, value)
+        if len(request.data) > 12 * 1024 * 1024:
+            raise WorkspaceError("control_request_too_large")
+        return self._send(request, timeout=timeout)
+
+    def upload_archive(self, path, metadata, archive):
+        header = json.dumps(metadata, ensure_ascii=True, separators=(",", ":"))
+        if len(header) > _TRANSFER_CONTRACT["metadataBytes"]:
+            raise WorkspaceError("transfer_metadata_limit_exceeded")
+        with Path(archive).open("rb") as source:
+            request = self._request("POST", path, headers={"Content-Type": "application/x-tar",
+                "X-Benchmark-Transfer": header})
+            request.data = iter(lambda: source.read(TRANSFER_BLOCK_BYTES), b"")
+            request.add_header("Content-Length", str(os.fstat(source.fileno()).st_size))
+            return self._send(request)
+
+    def download_archive(self, path, value, archive):
+        request = self._request("POST", path, value, headers={"Accept": "application/x-tar"})
+        return self._send(request, archive=archive)
+
+    def _send(self, request, *, timeout=None, archive=None):
         request.add_header("X-Environment-Maintenance-Token", self.__maintenance_token)
         if self.__internal_token is not None:
             request.add_header("X-Internal-Token", self.__internal_token)
-        if len(request.data) > 12 * 1024 * 1024:
-            raise WorkspaceError("control_request_too_large")
         try:
             with self.opener.open(request, timeout=timeout or self.request_timeout) as response:
+                if archive is not None:
+                    if response.headers.get("Content-Type") != "application/x-tar":
+                        raise WorkspaceError("transfer_response_invalid")
+                    declared = response.headers.get("Content-Length")
+                    if declared is not None:
+                        if not declared.isdecimal():
+                            raise WorkspaceError("transfer_response_invalid")
+                        declared = int(declared)
+                        if declared > ARCHIVE_LIMIT:
+                            raise WorkspaceError("transfer_archive_limit_exceeded")
+                    with Path(archive).open("wb") as output:
+                        bounded = _LimitedWriter(output, ARCHIVE_LIMIT)
+                        while block := response.read(TRANSFER_BLOCK_BYTES):
+                            bounded.write(block)
+                        if declared is not None and bounded.written != declared:
+                            raise WorkspaceError("transfer_response_incomplete")
+                    return
                 body = response.read(12 * 1024 * 1024 + 1)
                 if len(body) > 12 * 1024 * 1024:
                     raise WorkspaceError("control_response_too_large")
@@ -355,16 +396,14 @@ class WorkspaceHTTPProvisioner:
         with tempfile.TemporaryDirectory(prefix="workspace-upload-") as temporary:
             archive = Path(temporary) / "payload.tar"
             pack_upload(source, archive, directory=directory, archive_name=remote.name)
-            body = archive.read_bytes()
-        # Docker's archive endpoint requires an existing destination directory.
-        # Dispatch once and stop on an unknown result before any upload.
-        self.exec(owned, command=shlex.join(["mkdir", "-p", "--", destination]), cwd="/",
-                  env={}, timeout_sec=30, user="0")
-        value = self.runtime.post("/internal/benchmark/upload", {"schema": "runtime.benchmark.upload.v1",
-            **self._binding(owned), "path": destination, "archiveBase64": base64.b64encode(body).decode("ascii")})
-        _fields(value, "runtime.benchmark.upload.result.v1", {"uploadedBytes"})
-        if type(value["uploadedBytes"]) is not int or value["uploadedBytes"] != len(body):
-            raise WorkspaceError("benchmark_upload_response_invalid")
+            # Dispatch each mutation once; uncertainty never replays an upload.
+            self.exec(owned, command=shlex.join(["mkdir", "-p", "--", destination]), cwd="/",
+                      env={}, timeout_sec=30, user="0")
+            value = self.runtime.upload_archive("/internal/benchmark/upload", {"schema": "runtime.benchmark.upload.v1",
+                **self._binding(owned), "path": destination}, archive)
+            _fields(value, "runtime.benchmark.upload.result.v1", {"uploadedBytes"})
+            if type(value["uploadedBytes"]) is not int or value["uploadedBytes"] != archive.stat().st_size:
+                raise WorkspaceError("benchmark_upload_response_invalid")
 
     def upload_file(self, owned, source, target):
         self._upload(owned, source, target, directory=False)
@@ -376,21 +415,10 @@ class WorkspaceHTTPProvisioner:
         remote = PurePosixPath(source)
         if not remote.is_absolute() or ".." in remote.parts or "\\" in source or "\x00" in source:
             raise ValueError("download source must be an absolute task path")
-        value = self.runtime.post("/internal/benchmark/download", {"schema": "runtime.benchmark.download.v1",
-            **self._binding(owned), "path": source})
-        _fields(value, "runtime.benchmark.download.result.v1", {"archiveBase64"})
-        encoded = value["archiveBase64"]
-        if not isinstance(encoded, str) or len(encoded) > 4 * ((ARCHIVE_LIMIT + 2) // 3):
-            raise WorkspaceError("transfer_archive_limit_exceeded")
-        try:
-            body = base64.b64decode(encoded, validate=True)
-        except (ValueError, UnicodeError):
-            raise WorkspaceError("transfer_encoding_invalid") from None
-        if len(body) > ARCHIVE_LIMIT:
-            raise WorkspaceError("transfer_archive_limit_exceeded")
         with tempfile.TemporaryDirectory(prefix="workspace-download-") as temporary:
             archive = Path(temporary) / "payload.tar"
-            archive.write_bytes(body)
+            self.runtime.download_archive("/internal/benchmark/download", {"schema": "runtime.benchmark.download.v1",
+                **self._binding(owned), "path": source}, archive)
             unpack_download(archive, target, directory=directory, strip_root=remote.name if directory else None)
 
     def download_file(self, owned, source, target):

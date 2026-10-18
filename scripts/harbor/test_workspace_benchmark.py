@@ -105,9 +105,16 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await runner.run_full(approval=approval)
 
-    async def _run_failure_batch(self, *, cleanup_pending=False, task_count=20, stage='pilot', disk_free=None, after_pull_free=None):
+    async def _run_failure_batch(self, *, cleanup_pending=False, task_count=20, stage='pilot', disk_free=None, after_pull_free=None, invalid_verifier=False):
         with tempfile.TemporaryDirectory() as temporary:
             task_ids = [f"task-{index}" for index in range(task_count)]
+            for task_id in task_ids:
+                tests = Path(temporary) / 'tasks' / task_id / 'tests'
+                tests.mkdir(parents=True)
+                (tests / 'test.sh').write_text('exit 0\n')
+            if invalid_verifier:
+                with (tests / 'private_test.tar.gz').open('wb') as output:
+                    output.truncate(32 * 1024 * 1024 + 1)
             admission = Admission(Resources(12000, 8, 100000), Resources(1000, 1, 1000))
             first_started, second_started = asyncio.Event(), asyncio.Event()
             started, active_counts, started_trial_ids = [], [], []
@@ -180,6 +187,14 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                         patch("workspace_benchmark.native_trial_config", side_effect=config), \
                         patch("workspace_benchmark.Trial.create", side_effect=create), \
                         patch("workspace_launch.shutil.disk_usage", side_effect=lambda path: SimpleNamespace(free=disk_free[0] * 1024**2) if disk_free is not None else None):
+                    if invalid_verifier:
+                        from workspace_client import WorkspaceError
+                        with self.assertRaisesRegex(WorkspaceError, 'transfer_expanded_limit_exceeded'):
+                            await runner._run_batch(stage, task_ids)
+                        self.assertEqual(started, [])
+                        self.assertEqual(image_calls, [])
+                        self.assertEqual(admission.active_count, 0)
+                        return
                     report = await asyncio.wait_for(runner._run_batch(stage, task_ids), 3)
                 if disk_free is not None:
                     report['preparedTaskIds'] = image_calls
@@ -194,6 +209,9 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                         allocation = entry["ports"]["allocation"]
                         if not allocation.released:
                             await allocation.release(cleanup_state="absent")
+
+    async def test_all_selected_verifier_inputs_are_checked_before_the_first_agent(self):
+        await self._run_failure_batch(invalid_verifier=True)
 
     async def test_live_disk_shortfall_reduces_concurrency_without_consuming_attempts(self):
         report, started, counts, held = await self._run_failure_batch(disk_free=[24576])

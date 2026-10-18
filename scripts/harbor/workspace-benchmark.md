@@ -242,10 +242,22 @@ The batch remains blocked for review when any infrastructure or cleanup issue
 occurred, even if all other trials completed; it never automatically starts the
 full benchmark.
 
-Exec is never automatically retried after transport loss. Upload/download tar
-payloads are limited to 8 MiB encoded and expanded data and 10,000 members. Links,
+Exec and transfers are never automatically retried after transport loss.
+Upload/download use raw `application/x-tar` bodies, bounded to 32 MiB archive
+and expanded data and 10,000 members. Upload metadata is strict JSON in
+`X-Benchmark-Transfer`, bounded to 8 KiB; download metadata remains a JSON request.
+The controller streams temporary tar files in 64 KiB blocks; Runtime retains one
+bounded binary archive for validation and Docker dispatch, without base64 copies.
+The shared limits are in `benchmark-transport.json`, with Runtime parity tests.
+Before any task image or Agent starts, every selected task's original verifier
+input is packed through these same limits. Unsupported inputs block the batch.
+Links,
 devices, sparse entries, traversal, duplicate entries and file/parent collisions
 are rejected. Larger artifacts fail explicitly instead of being clipped.
+
+Transfer failures retain stable public codes for missing artifact paths, archive
+limits, rejected ownership/physical identity, unavailable dependencies and unknown
+upload outcomes. Diagnostics never include Docker error bodies or private paths.
 
 ## Monitoring and evidence
 

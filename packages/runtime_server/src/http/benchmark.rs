@@ -1,14 +1,16 @@
 //! Independently authorized benchmark setup, verification and artifact transfer.
 use super::*;
 use crate::postgres_store::benchmark::BenchmarkTarget;
-use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::Read;
 use unicode_normalization::UnicodeNormalization;
 
-pub(crate) const ARCHIVE_LIMIT: usize = 8 * 1024 * 1024;
+pub(crate) const ARCHIVE_LIMIT: usize = 32 * 1024 * 1024;
+const EXPANDED_LIMIT: u64 = 32 * 1024 * 1024;
+const MEMBER_LIMIT: usize = 10000;
+const METADATA_LIMIT: usize = 8192;
 const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -120,7 +122,10 @@ fn validate_exec_user(user: &str) -> Result<(), String> {
 }
 
 fn validate_archive(bytes: &[u8]) -> Result<(), String> {
-    if bytes.len() > ARCHIVE_LIMIT || bytes.len() < 512 {
+    if bytes.len() > ARCHIVE_LIMIT {
+        return Err("benchmark_archive_limit_exceeded".into());
+    }
+    if bytes.len() < 512 {
         return Err("benchmark_archive_limit_or_format_invalid".into());
     }
     let mut archive = tar::Archive::new(bytes);
@@ -144,7 +149,7 @@ fn validate_archive(bytes: &[u8]) -> Result<(), String> {
                 }
             }
         }
-        if names.len() >= 10000 || (kind.is_dir() && entry.size() != 0) {
+        if names.len() >= MEMBER_LIMIT || (kind.is_dir() && entry.size() != 0) {
             return Err("benchmark_archive_limit_or_format_invalid".into());
         }
         let raw = entry.path_bytes();
@@ -165,7 +170,7 @@ fn validate_archive(bytes: &[u8]) -> Result<(), String> {
                 .split('/')
                 .any(|part| part.is_empty() || part == "." || part == "..")
             || path.len() > 4096
-            || names.len() >= 10000
+            || names.len() >= MEMBER_LIMIT
             || names.contains_key(path)
         {
             return Err("benchmark_archive_path_invalid".into());
@@ -194,7 +199,7 @@ fn validate_archive(bytes: &[u8]) -> Result<(), String> {
         expanded = expanded
             .checked_add(entry.size())
             .ok_or("benchmark_archive_limit_exceeded")?;
-        if expanded > ARCHIVE_LIMIT as u64 {
+        if expanded > EXPANDED_LIMIT {
             return Err("benchmark_archive_limit_exceeded".into());
         }
         std::io::copy(&mut entry, &mut std::io::sink()).map_err(|_| "benchmark_archive_invalid")?;
@@ -256,7 +261,7 @@ fn validate_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn authorized(request: &Request<Bytes>) -> bool {
+fn authorized<B>(request: &Request<B>) -> bool {
     independent_authority(
         env::var("ENVIRONMENT_MAINTENANCE_TOKEN").ok().as_deref(),
         env::var("INTERNAL_API_TOKEN").ok().as_deref(),
@@ -564,13 +569,6 @@ struct TransferRequest {
     instance_id: String,
     profile_digest: String,
     path: String,
-    #[serde(default, deserialize_with = "present_archive")]
-    archive_base64: Option<String>,
-}
-fn present_archive<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<String>, D::Error> {
-    String::deserialize(deserializer).map(Some)
 }
 impl TransferRequest {
     fn binding(&self) -> TargetBinding<'_> {
@@ -584,6 +582,72 @@ impl TransferRequest {
     }
 }
 
+fn upload_metadata<B>(request: &Request<B>) -> Result<TransferRequest, &'static str> {
+    if request.headers().get_all("content-type").iter().count() != 1
+        || request
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            != Some("application/x-tar")
+    {
+        return Err("benchmark_transfer_content_type_invalid");
+    }
+    if request
+        .headers()
+        .get_all("x-benchmark-transfer")
+        .iter()
+        .count()
+        != 1
+    {
+        return Err("benchmark_transfer_metadata_invalid");
+    }
+    let raw = request
+        .headers()
+        .get("x-benchmark-transfer")
+        .ok_or("benchmark_transfer_metadata_invalid")?;
+    if raw.len() > METADATA_LIMIT {
+        return Err("benchmark_transfer_metadata_invalid");
+    }
+    let value: TransferRequest = serde_json::from_slice(raw.as_bytes())
+        .map_err(|_| "benchmark_transfer_metadata_invalid")?;
+    if value.schema != "runtime.benchmark.upload.v1"
+        || value.binding().validate().is_err()
+        || validate_path(&value.path).is_err()
+    {
+        return Err("benchmark_request_invalid");
+    }
+    Ok(value)
+}
+
+pub(crate) fn upload_body_authority<B>(request: &Request<B>) -> Result<(), Response<Body>> {
+    if ["x-internal-token", "x-environment-maintenance-token"]
+        .iter()
+        .any(|key| request.headers().get_all(*key).iter().count() > 1)
+    {
+        return Err(bounded_json_error_response(400, "request_header_duplicate"));
+    }
+    let internal = env::var("INTERNAL_API_TOKEN").ok();
+    if internal.as_ref().is_none_or(|token| {
+        token.is_empty()
+            || request
+                .headers()
+                .get("x-internal-token")
+                .and_then(|v| v.to_str().ok())
+                != Some(token.as_str())
+    }) {
+        return Err(bounded_json_error_response(401, "unauthorized"));
+    }
+    if !authorized(request) {
+        return Err(bounded_json_error_response(
+            403,
+            "environment_maintenance_authority_required",
+        ));
+    }
+    upload_metadata(request)
+        .map(|_| ())
+        .map_err(|code| bounded_json_error_response(400, code))
+}
+
 pub(super) fn upload(
     state: HttpServerState,
     request: Request<Bytes>,
@@ -591,9 +655,9 @@ pub(super) fn upload(
     if !authorized(&request) {
         return json_error_response(403, "environment_maintenance_authority_required");
     }
-    let value: TransferRequest = match serde_json::from_slice(request.body()) {
+    let value = match upload_metadata(&request) {
         Ok(value) => value,
-        Err(_) => return json_error_response(400, "benchmark_request_invalid"),
+        Err(code) => return json_error_response(400, code),
     };
     if value.schema != "runtime.benchmark.upload.v1"
         || value.binding().validate().is_err()
@@ -601,15 +665,11 @@ pub(super) fn upload(
     {
         return json_error_response(400, "benchmark_request_invalid");
     }
-    let wire = match value.archive_base64.as_deref() {
-        Some(value) if value.len() <= ARCHIVE_LIMIT.div_ceil(3) * 4 => value,
-        _ => return json_error_response(413, "benchmark_archive_limit_exceeded"),
-    };
-    let bytes = match STANDARD.decode(wire) {
-        Ok(bytes) => bytes,
-        Err(_) => return json_error_response(400, "benchmark_archive_invalid"),
-    };
-    if validate_archive(&bytes).is_err() {
+    let bytes = request.into_body();
+    if let Err(error) = validate_archive(&bytes) {
+        if error == "benchmark_archive_limit_exceeded" {
+            return json_error_response(413, "benchmark_archive_limit_exceeded");
+        }
         return json_error_response(400, "benchmark_archive_invalid");
     }
     let count = bytes.len();
@@ -619,7 +679,7 @@ pub(super) fn upload(
         Ok(()) => {
             response(json!({"schema":"runtime.benchmark.upload.result.v1","uploadedBytes":count}))
         }
-        Err(_) => json_error_response(409, "benchmark_upload_outcome_unknown"),
+        Err(error) => transfer_error_response(&error),
     }
 }
 
@@ -637,28 +697,181 @@ pub(super) fn download(
     if value.schema != "runtime.benchmark.download.v1"
         || value.binding().validate().is_err()
         || validate_path(&value.path).is_err()
-        || value.archive_base64.is_some()
     {
         return json_error_response(400, "benchmark_request_invalid");
     }
-    match owned_operation(&state, &value.binding(), |_, id| {
+    download_response(owned_operation(&state, &value.binding(), |_, id| {
         crate::docker_engine::benchmark_transfer::download(id, &value.path, ARCHIVE_LIMIT)
-    }) {
+    }))
+}
+
+fn download_response(result: Result<Vec<u8>, String>) -> Result<Response<Body>, String> {
+    match result {
         Ok(bytes) => {
-            if validate_archive(&bytes).is_err() {
+            if let Err(error) = validate_archive(&bytes) {
+                if error == "benchmark_archive_limit_exceeded" {
+                    return json_error_response(413, "benchmark_archive_limit_exceeded");
+                }
                 return json_error_response(409, "benchmark_download_archive_unsupported");
             }
-            response(
-                json!({"schema":"runtime.benchmark.download.result.v1","archiveBase64":STANDARD.encode(bytes)}),
-            )
+            Ok(http_response(200, "application/x-tar", bytes))
         }
-        Err(_) => json_error_response(409, "benchmark_download_unavailable"),
+        Err(error) => transfer_error_response(&error),
     }
+}
+
+fn transfer_error_response(error: &str) -> Result<Response<Body>, String> {
+    let (status, code) = match error {
+        "benchmark_archive_limit_exceeded" => (413, "benchmark_archive_limit_exceeded"),
+        "benchmark_download_path_missing" => (404, "benchmark_download_path_missing"),
+        "benchmark_upload_outcome_unknown" | "benchmark_dispatch_commit_unknown" => {
+            (409, "benchmark_transfer_outcome_unknown")
+        }
+        "benchmark_allocation_pending"
+        | "benchmark_container_pending"
+        | "benchmark_container_missing"
+        | "benchmark_transfer_target_unavailable" => (409, "benchmark_transfer_target_unavailable"),
+        "benchmark_target_rejected"
+        | "benchmark_physical_identity_rejected"
+        | "benchmark_session_missing"
+        | "benchmark_environment_missing"
+        | "benchmark_run_missing"
+        | "benchmark_session_environment_rejected"
+        | "benchmark_run_binding_rejected"
+        | "benchmark_agent_binding_rejected"
+        | "benchmark_grant_invalid"
+        | "benchmark_grant_binding_rejected"
+        | "benchmark_profile_binding_rejected"
+        | "benchmark_profile_missing"
+        | "benchmark_profile_invalid"
+        | "benchmark_allocation_binding_rejected"
+        | "benchmark_allocation_missing"
+        | "benchmark_incarnation_ambiguous"
+        | "benchmark_resource_binding_rejected"
+        | "benchmark_resources_invalid"
+        | "benchmark_retirement_binding_rejected"
+        | "benchmark_setup_binding_rejected"
+        | "benchmark_setup_instance_rejected"
+        | "benchmark_unbound_resource_holding" => (409, "benchmark_transfer_identity_rejected"),
+        _ => (503, "benchmark_transfer_dependency_unavailable"),
+    };
+    json_error_response(status, code)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transfer_limits_match_the_controller_contract() {
+        let value: Value = serde_json::from_str(include_str!(
+            "../../../../scripts/harbor/benchmark-transport.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            value,
+            json!({"schema":"centaeris.benchmarkTransport.v1", "archiveBytes":ARCHIVE_LIMIT,
+            "expandedBytes":EXPANDED_LIMIT, "members":MEMBER_LIMIT, "metadataBytes":METADATA_LIMIT})
+        );
+    }
+
+    #[test]
+    fn raw_upload_metadata_is_strict_bounded_and_does_not_take_identity_from_tar_content() {
+        let metadata = json!({"schema":"runtime.benchmark.upload.v1", "sessionId":"session", "environmentId":"environment",
+            "agentRunId":"run", "instanceId":"instance", "profileDigest":format!("sha256:{}", "b".repeat(64)), "path":"/tests"});
+        let request = |value: &Value, content_type: &str| {
+            Request::builder()
+                .header("content-type", content_type)
+                .header(
+                    "x-benchmark-transfer",
+                    serde_json::to_string(value).unwrap(),
+                )
+                .body(Bytes::from_static(b"arbitrary tar data"))
+                .unwrap()
+        };
+        assert_eq!(
+            upload_metadata(&request(&metadata, "application/x-tar"))
+                .unwrap()
+                .instance_id,
+            "instance"
+        );
+        assert!(upload_metadata(&request(&metadata, "application/json")).is_err());
+        for extra in ["archiveBase64", "containerId", "unknown"] {
+            let mut value = metadata.clone();
+            value[extra] = "untrusted".into();
+            assert!(upload_metadata(&request(&value, "application/x-tar")).is_err());
+        }
+        let mut missing = request(&metadata, "application/x-tar");
+        missing.headers_mut().remove("x-benchmark-transfer");
+        assert!(upload_metadata(&missing).is_err());
+        let mut duplicate = request(&metadata, "application/x-tar");
+        duplicate
+            .headers_mut()
+            .append("x-benchmark-transfer", "{}".parse().unwrap());
+        assert!(upload_metadata(&duplicate).is_err());
+        for path in [
+            "../foreign".into(),
+            "/tests/../foreign".into(),
+            "/tests\nforeign".into(),
+            format!("/{}", "x".repeat(METADATA_LIMIT)),
+        ] {
+            let mut value = metadata.clone();
+            value["path"] = path.into();
+            assert!(upload_metadata(&request(&value, "application/x-tar")).is_err());
+        }
+    }
+
+    #[test]
+    fn download_errors_distinguish_missing_limit_identity_and_uncertain_outcomes_without_details() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for (error, status, code) in [
+            (
+                "benchmark_download_path_missing",
+                404,
+                "benchmark_download_path_missing",
+            ),
+            (
+                "benchmark_archive_limit_exceeded",
+                413,
+                "benchmark_archive_limit_exceeded",
+            ),
+            (
+                "benchmark_physical_identity_rejected",
+                409,
+                "benchmark_transfer_identity_rejected",
+            ),
+            (
+                "benchmark_run_binding_rejected",
+                409,
+                "benchmark_transfer_identity_rejected",
+            ),
+            (
+                "benchmark_dispatch_commit_unknown",
+                409,
+                "benchmark_transfer_outcome_unknown",
+            ),
+            (
+                "benchmark_store_unavailable",
+                503,
+                "benchmark_transfer_dependency_unavailable",
+            ),
+            (
+                "Docker error secret=/private/path",
+                503,
+                "benchmark_transfer_dependency_unavailable",
+            ),
+        ] {
+            let response = download_response(Err(error.into())).unwrap();
+            assert_eq!(response.status(), status, "{error}");
+            let body = runtime
+                .block_on(axum::body::to_bytes(response.into_body(), 4096))
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap(),
+                json!({"error":code})
+            );
+        }
+    }
 
     #[test]
     fn observation_store_unavailable_is_temporary_but_binding_errors_are_conflicts() {
@@ -806,6 +1019,23 @@ mod tests {
             mutate(&mut request);
             assert!(request.validate().is_err());
         }
+    }
+
+    #[test]
+    fn verifier_archive_above_eight_mib_is_accepted_within_the_bounded_transfer_cap() {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o644);
+        header.set_size(11_506_423);
+        header.set_cksum();
+        builder
+            .append_data(
+                &mut header,
+                "private_test.tar.gz",
+                std::io::repeat(b'x').take(11_506_423),
+            )
+            .unwrap();
+        validate_archive(&builder.into_inner().unwrap()).unwrap();
     }
 
     #[test]
