@@ -1,4 +1,6 @@
 [
+  "postgres_store::integration_tests::postgres_peer_observation_reuses_one_observer_and_detects_live_clients",
+  "postgres_store::benchmark::tests::postgres_benchmark_observation_setup_and_retirement_remain_exactly_bound",
   "postgres_store::integration_tests::retained_instance_tests::retirement_tests::postgres_retirement_pending_other_environment_does_not_block_healthy_run_cleanup",
   "postgres_store::integration_tests::retained_instance_tests::retirement_tests::postgres_retirement_rejects_disabled_predicate_history_trigger_on_reopen",
   "postgres_store::integration_tests::retained_instance_tests::retirement_tests::postgres_retirement_committed_barrier_is_visible_before_physical_mutation",

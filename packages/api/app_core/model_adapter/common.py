@@ -63,11 +63,14 @@ def model_database_call(operation):
 
 
 class ModelProviderError(RuntimeError):
-    def __init__(self, reason_type: str, http_status: int | None = None, retry_after: str | None = None):
+    def __init__(self, reason_type: str, http_status: int | None = None, retry_after: str | None = None, *, truncated_tool_calls: list[dict] | None = None):
         super().__init__(reason_type)
         self.reasonType = reason_type
         self.httpStatus = http_status
         self.retryAfter = retry_after
+        # Only output-limit failures carry rejected identities and argument digests.
+        # Raw unfinished arguments must never cross the hosted failure boundary.
+        self.truncatedToolCalls = truncated_tool_calls
 
 
 def safe_model_error_reason(error: Exception) -> str:

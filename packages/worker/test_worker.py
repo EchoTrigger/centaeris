@@ -553,7 +553,7 @@ class WorkerContractTests(unittest.TestCase):
                     "terminalState": None,
                     "transitionReason": transition_reason,
                 }
-                if transition_reason == "execution_recovery_checkpoint_committed":
+                if transition_reason in {"execution_recovery_checkpoint_committed", "benchmark_setup_required"}:
                     waiting["retryAtMs"] = 1_001_200
 
                 def api_request(path, *_args):
@@ -571,7 +571,7 @@ class WorkerContractTests(unittest.TestCase):
                     patch.object(worker, "yield_job") as yield_job,
                     patch.object(worker, "complete_job") as complete_job,
                 ):
-                    if transition_reason == "execution_recovery_checkpoint_committed":
+                    if transition_reason in {"execution_recovery_checkpoint_committed", "benchmark_setup_required"}:
                         deadline = waiting.pop("retryAtMs")
                         with self.assertRaisesRegex(RuntimeError, "agent_run_step_response_invalid"):
                             worker.execute_agent_run_lifecycle_job(job, "worker:test-owner", lambda: None)
@@ -649,6 +649,41 @@ class WorkerContractTests(unittest.TestCase):
                         self.assertEqual(calls[-3:], [("running", reason), "lease", ("yield", yielded.call_args.args)])
                     finish.assert_not_called()
                     self.assertEqual(lease_checks, 3)
+
+    def test_benchmark_setup_wait_yields_without_finishing_or_readmitting_the_run(self):
+        job, start = lifecycle_fixture("agent_run_benchmark_setup")
+        reason = "benchmark_setup_required"
+        response = {
+            "schema": "runtime.agent_run.step.result.v1",
+            "agentRunId": start["agentRunId"],
+            "disposition": "waiting",
+            "terminalState": None,
+            "transitionReason": reason,
+            "retryAtMs": 1_001_000,
+        }
+        with (
+            patch.object(worker, "api_request", return_value={
+                "schema": "runtime.agent_run_lifecycle.resolved.v1",
+                "disposition": "ready", "agentRunStart": start,
+            }),
+            patch.object(worker, "agent_run_step_request", return_value=response) as step,
+            patch.object(worker, "transition_agent_run"),
+            patch.object(worker, "yield_job") as yielded,
+            patch.object(worker, "finish_agent_run_lifecycle") as finish,
+            patch.object(worker, "now_ms", return_value=1_000_000),
+        ):
+            self.assertFalse(worker.execute_agent_run_lifecycle_job(job, "worker:test-owner", lambda: None))
+            yielded.assert_called_once_with(job["jobId"], "worker:test-owner", 1_001_000, reason)
+            step.assert_called_once()
+            finish.assert_not_called()
+            for invalid in (None, True, -1):
+                response["retryAtMs"] = invalid
+                with self.assertRaisesRegex(RuntimeError, "agent_run_step_response_invalid"):
+                    worker.execute_agent_run_lifecycle_job(job, "worker:test-owner", lambda: None)
+            response.pop("retryAtMs")
+            with self.assertRaisesRegex(RuntimeError, "agent_run_step_response_invalid"):
+                worker.execute_agent_run_lifecycle_job(job, "worker:test-owner", lambda: None)
+            self.assertEqual(yielded.call_count, 1)
 
     def test_terminal_projects_and_tears_down_before_completing_job(self):
         job, agentRunStart = lifecycle_fixture("agent_run_terminal")

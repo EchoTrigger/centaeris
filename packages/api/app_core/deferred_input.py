@@ -60,6 +60,7 @@ def _current_input(agent_run, input_ref: str, expected_authorization_digest: str
                 digest,
                 settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY,
                 authorization.signature,
+                schema=authorization.payload["schema"],
             )
         except ValueError as error:
             raise DeferredInputBindingError("AgentRun authorization signature mismatch") from error

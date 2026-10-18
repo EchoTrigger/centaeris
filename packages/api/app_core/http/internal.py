@@ -593,6 +593,7 @@ def _locked_session_workspace_agent_run(body: dict) -> tuple[AgentRun, Session, 
             digest,
             settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY,
             authorization.signature,
+            schema=authorization.payload["schema"],
         )
         if (
             digest != authorization.digest

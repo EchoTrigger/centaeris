@@ -44,6 +44,8 @@ def main(skip_frontend_tests=False, stage="All"):
     api = ["uv", "run", "--frozen", "--package", "api", "python"]
     gates = [
         ("Portable CI behavior", [py, "-B", "scripts/workspace/test_ci.py"]),
+        ("Workspace Harbor adapter regressions", ["uv", "run", "--no-project", "--with", "harbor==0.21.0", "python", "-B",
+            "-m", "unittest", "discover", "-s", "scripts/harbor", "-p", "test_workspace*.py"]),
         ("Product version parity", [py, "-B", "scripts/workspace/test_product_version.py"]),
         ("Core source resolution", ["node", "--test", "scripts/workspace/core-source.test.mjs"]),
         ("Monorepo Core source", ["node", "--test", "scripts/workspace/source-revision.test.mjs"]),
@@ -91,7 +93,7 @@ def main(skip_frontend_tests=False, stage="All"):
     elif stage == "Python":
         gates = [gate for gate in gates if gate[0] not in rust_labels | web_labels]
     else:
-        gates = gates[:4] + rust_gates + gates[4:]
+        gates = gates[:5] + rust_gates + gates[5:]
     for label, args in gates:
         run(label, args)
     config = json.loads(run("Compose structure", ["docker", "compose", "--env-file", ".env.example", "config", "--format", "json"], capture=True))

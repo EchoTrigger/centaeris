@@ -14,6 +14,41 @@ spec.loader.exec_module(ci)
 
 
 class PortableCITests(unittest.TestCase):
+    def test_workspace_harbor_runs_with_pinned_dependency_early_in_python_stage(self):
+        harbor = ["uv", "run", "--no-project", "--with", "harbor==0.21.0", "python", "-B",
+                  "-m", "unittest", "discover", "-s", "scripts/harbor", "-p", "test_workspace*.py"]
+        config = {"services": {"document-processor": {}, "workspace-general": {},
+                  "runtime": {"depends_on": {"workspace-general": {"condition": "service_completed_successfully"}}},
+                  "material-worker": {"depends_on": {"document-processor": {"condition": "service_completed_successfully"}}}}}
+        for stage in ("Python", "All", "Rust", "Web"):
+            with self.subTest(stage=stage):
+                calls = []
+                def record(label, args, **kwargs):
+                    calls.append(args)
+                    return json.dumps(config)
+                with patch.object(ci, "run", record):
+                    ci.main(stage=stage)
+                self.assertEqual(calls.count(harbor), 1 if stage in ("Python", "All") else 0)
+                if stage in ("Python", "All"):
+                    adapter = calls.index(harbor)
+                    for script in ("scripts/workspace/runtime_outbox_gate.py", "scripts/workspace/python_test_gate.py"):
+                        self.assertLess(adapter, next(i for i, command in enumerate(calls) if script in command))
+
+    def test_workspace_harbor_failure_stops_before_database_and_api_gates(self):
+        calls = []
+        def fail_adapter(label, args, **kwargs):
+            calls.append(args)
+            if "harbor==0.21.0" in args:
+                raise RuntimeError("adapter regression")
+            return json.dumps({"services": {"document-processor": {}, "workspace-general": {},
+                "runtime": {"depends_on": {"workspace-general": {"condition": "service_completed_successfully"}}},
+                "material-worker": {"depends_on": {"document-processor": {"condition": "service_completed_successfully"}}}}})
+        with patch.object(ci, "run", fail_adapter):
+            with self.assertRaisesRegex(RuntimeError, "adapter regression"):
+                ci.main(stage="Python")
+        self.assertFalse(any("scripts/workspace/runtime_outbox_gate.py" in command
+                             or "scripts/workspace/python_test_gate.py" in command for command in calls))
+
     def test_compose_structure_chooses_isolated_capacity_inputs_without_changing_host_environment(self):
         host_environment = {key: value for key, value in os.environ.items() if not key.startswith("UPLOAD_") and key != "WORK_RETURN_AUDIT_INTERVAL_SECONDS"}
         with patch.dict(os.environ, host_environment, clear=True), \

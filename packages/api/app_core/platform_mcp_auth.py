@@ -36,7 +36,7 @@ def authorize_context(context: MaterialAccessContext):
         access = authorize_material_access(context)
         run = access.agent_run
         payload = run.authorization.payload
-        _verify_authorization_digest_signature(access.authorization_digest, signing_key(), run.authorization.signature)
+        _verify_authorization_digest_signature(access.authorization_digest, signing_key(), run.authorization.signature, schema=payload["schema"])
         if not agent_run_binding_matches(payload, run):
             raise CredentialRejected()
         return access

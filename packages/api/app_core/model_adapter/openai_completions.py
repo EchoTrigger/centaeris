@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import json
+import re
 
 from asgiref.sync import sync_to_async
 from django.conf import settings
@@ -157,7 +159,7 @@ async def stream_open_ai_completions(
     reasoning_field = None
     tool_calls = {}
     usage = {}
-    saw_finish = False
+    finish_reason = None
     client = await async_open_ai_completions_client(model, request_body)
     try:
         request, gemini = await sync_to_async(_completion_request, thread_sensitive=True)(model, request_body)
@@ -172,7 +174,8 @@ async def stream_open_ai_completions(
             if not choices:
                 continue
             choice = choices[0]
-            saw_finish |= choice.get("finish_reason") is not None
+            if choice.get("finish_reason") is not None:
+                finish_reason = choice["finish_reason"]
             delta = choice.get("delta") or {}
             chunk_reasoning_field, chunk_reasoning = _openai_reasoning(delta)
             if chunk_reasoning_field is not None:
@@ -213,8 +216,9 @@ async def stream_open_ai_completions(
         raise
     finally:
         await client.close()
-    if not saw_finish:
+    if finish_reason is None:
         raise ModelProviderError("provider_stream_interrupted")
+    _reject_incomplete_finish(finish_reason, [tool_calls[index] for index in sorted(tool_calls)])
     parsed_calls = []
     raw_calls = []
     for index in sorted(tool_calls):
@@ -228,6 +232,7 @@ async def stream_open_ai_completions(
         raw_calls.append(call)
         parsed_calls.append({key: call[key] for key in ("id", "name", "argsJson")})
     gemini_continuation = _gemini_tool_continuation(raw_calls) if gemini and raw_calls else None
+    _reject_empty_final("".join(text_parts), parsed_calls)
     result_holder["result"] = {
         "text": "".join(text_parts),
         "reasoningContent": "".join(reasoning_parts) if reasoning_field is not None else None,
@@ -245,6 +250,11 @@ def parse_open_ai_completions_response(payload: dict, *, gemini: bool = False) -
         raise ModelProviderError("provider_response_invalid")
     _, reasoning_content = _openai_reasoning(message)
     raw_calls = message.get("tool_calls") or []
+    _reject_incomplete_finish(choice.get("finish_reason"), [{
+        "id": call.get("id"), "name": (call.get("function") or {}).get("name"),
+        "argsJson": (call.get("function") or {}).get("arguments") or "",
+    } for call in raw_calls])
+    _reject_empty_final(text, raw_calls)
     gemini_continuation = _gemini_tool_continuation(raw_calls) if gemini and raw_calls else None
     return {
         "text": text,
@@ -253,6 +263,29 @@ def parse_open_ai_completions_response(payload: dict, *, gemini: bool = False) -
         "toolCalls": parse_tool_calls(raw_calls),
         "usage": validated_usage(payload.get("usage")),
     }
+
+
+def _reject_incomplete_finish(finish_reason, calls: list[dict]) -> None:
+    if finish_reason in {"length", "max_tokens"}:
+        rejected = []
+        for call in calls:
+            args = call.get("argsJson")
+            if not isinstance(args, str):
+                raise ModelProviderError("provider_response_invalid")
+            call_id, name = call.get("id"), call.get("name")
+            rejected.append({
+                "callId": call_id if isinstance(call_id, str) and call_id and call_id == call_id.strip() else None,
+                "toolName": name if isinstance(name, str) and len(name.encode("utf-8")) <= 128
+                    and re.fullmatch(r"[a-z0-9]+(?:_[a-z0-9]+)*", name) else None,
+                "argsBytes": len(args.encode("utf-8")),
+                "argsSha256": "sha256:" + hashlib.sha256(args.encode("utf-8")).hexdigest(),
+            })
+        raise ModelProviderError("incomplete_output_token_limit", truncated_tool_calls=rejected)
+
+
+def _reject_empty_final(text: str, calls: list) -> None:
+    if not text.strip() and not calls:
+        raise ModelProviderError("empty_final_response")
 
 
 def _openai_reasoning(payload: dict) -> tuple[str | None, str | None]:

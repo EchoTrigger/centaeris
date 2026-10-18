@@ -17,6 +17,8 @@ def select_products(paths):
               "rust-toolchain.toml", ".node-version", ".python-version", ".gitignore", ".dockerignore", "biome.json"}
     rules = [
         (("packages/core/", "packages/model-catalog/", "packages/mcp/", "packages/runtime_sqlite/"), PRODUCTS),
+        (("scripts/harbor/workspace", "scripts/harbor/test_workspace", "scripts/harbor/benchmark-transport.json",
+          "scripts/harbor/full-tasks.json"), ("coreRust", "localNode", "workspacePython")),
         (("packages/runtime/", "packages/tui/", "system-skills/", "scripts/harbor/"), ("coreRust", "localNode")),
         (("packages/desktop/",), ("localNode",)),
         (("packages/ui/",), ("localNode", "web")),

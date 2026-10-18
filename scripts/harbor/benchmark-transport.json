@@ -1,0 +1,7 @@
+{
+  "schema": "centaeris.benchmarkTransport.v1",
+  "archiveBytes": 33554432,
+  "expandedBytes": 33554432,
+  "members": 10000,
+  "metadataBytes": 8192
+}

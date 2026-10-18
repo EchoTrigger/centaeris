@@ -68,7 +68,7 @@ use bytes::Bytes;
 use centaeris_core::execution::ExecutionWorkspaceGenerationV1;
 use centaeris_core::execution::{
     ExecutionCancellationProbe, ExecutionHostBinding, ExecutionHostMode, ExecutionHostRunner,
-    ExecutionWorkspaceGeneration, WORKSPACE_DATA_ROOT,
+    ExecutionWorkspaceGeneration,
 };
 use centaeris_core::extension::skills::{SkillEntryV1, SkillIndex};
 use centaeris_core::extension::{
@@ -160,6 +160,7 @@ const AGENT_RUN_WAITING_TRANSITION_REASONS: &[&str] = &[
     "session_record_commit_unavailable",
     "session_workspace_commit_unavailable",
     "session_workspace_resolve_unavailable",
+    "benchmark_setup_required",
 ];
 use workspace_tools::{workspace_tool_contracts, WorkspaceArtifactToolProvider};
 
@@ -1119,13 +1120,29 @@ fn runtime_http1_builder(header_timeout: Duration) -> http1::Builder {
 }
 
 async fn read_axum_request(request: Request<Body>) -> Result<Request<Bytes>, Response<Body>> {
+    if request.method() == hyper::Method::POST
+        && request.uri().path() == "/internal/benchmark/upload"
+    {
+        http::benchmark::upload_body_authority(&request)
+            .map_err(|(status, code)| bounded_json_error_response(status, code))?;
+    }
+    read_axum_request_body(request).await
+}
+
+async fn read_axum_request_body(request: Request<Body>) -> Result<Request<Bytes>, Response<Body>> {
     let (parts, body) = request.into_parts();
-    let body =
-        match tokio::time::timeout(HTTP_BODY_TIMEOUT, to_bytes(body, MAX_HTTP_BODY_BYTES)).await {
-            Ok(Ok(body)) => body,
-            Ok(Err(_)) => return Err(bounded_json_error_response(413, "request_body_too_large")),
-            Err(_) => return Err(bounded_json_error_response(408, "request_body_timeout")),
-        };
+    let body_limit = if parts.method == hyper::Method::POST
+        && parts.uri.path() == "/internal/benchmark/upload"
+    {
+        http::benchmark::ARCHIVE_LIMIT
+    } else {
+        MAX_HTTP_BODY_BYTES
+    };
+    let body = match tokio::time::timeout(HTTP_BODY_TIMEOUT, to_bytes(body, body_limit)).await {
+        Ok(Ok(body)) => body,
+        Ok(Err(_)) => return Err(bounded_json_error_response(413, "request_body_too_large")),
+        Err(_) => return Err(bounded_json_error_response(408, "request_body_timeout")),
+    };
     let mut seen = HashSet::new();
     for (name, value) in &parts.headers {
         value
@@ -1258,6 +1275,31 @@ fn workspace_skill_index(activation: &PluginActivationSnapshotV1) -> Result<Skil
     SkillIndex::load(workspace_skill_catalog_config(activation)?)
 }
 
+fn workspace_tool_layer(
+    catalog: centaeris_core::extension::skills::SkillCatalogLoadConfig,
+    binding: Arc<ExecutionHostBinding>,
+    registry: Arc<DynamicToolRegistry>,
+) -> Result<ToolLayer, String> {
+    Ok(
+        ToolLayer::try_new_with_skill_catalog_config_and_execution_host_binding(catalog, binding)?
+            .with_dynamic_tool_registry(registry),
+    )
+}
+
+fn register_retained_task_provider(
+    layer: &mut ToolLayer,
+    retained: bool,
+    benchmark: bool,
+    port: Arc<dyn retained_tasks::EnvironmentTaskPort>,
+) -> Result<(), String> {
+    if retained && !benchmark {
+        layer.register_dynamic_tool_provider(Arc::new(
+            retained_tasks::RetainedTaskToolProvider::new(port),
+        ))?;
+    }
+    Ok(())
+}
+
 fn workspace_skill_catalog(
     activation: &PluginActivationSnapshotV1,
 ) -> Result<WorkspaceSkillCatalogResult, String> {
@@ -1330,8 +1372,10 @@ struct AgentRunStepOutcome {
 
 impl AgentRunStepOutcome {
     fn validate(&self) -> Result<(), String> {
-        if (self.transition_reason == "execution_recovery_checkpoint_committed")
-            != self.retry_at_ms.is_some()
+        if matches!(
+            self.transition_reason.as_str(),
+            "execution_recovery_checkpoint_committed" | "benchmark_setup_required"
+        ) != self.retry_at_ms.is_some()
             || self.retry_at_ms.is_some_and(|deadline| deadline < 0)
         {
             return Err("runtime AgentRun retry deadline is invalid".to_string());
@@ -2071,6 +2115,7 @@ fn execute_agent_run(
         |admitted| {
             DockerExecutionHostRunner::new_with_admitted(
                 DockerExecutionHostRequest {
+                    benchmark_profile: agent_run_start.authorization.benchmark_profile.clone(),
                     workspace_id: agent_run_start.authorization.workspace_id.clone(),
                     lifecycle_job_id: lifecycle_job_id.clone(),
                     lifecycle_lease_owner: lifecycle_lease_owner.clone(),
@@ -2279,7 +2324,7 @@ fn execute_agent_run(
         agent_run_start.agent_run_id.clone(),
         agent_run_start.authorization_digest.clone(),
     )?);
-    let workspace_root = PathBuf::from(WORKSPACE_DATA_ROOT);
+    let workspace_root = PathBuf::from(docker_execution.workspace_root());
     #[cfg(test)]
     let workspace_root = if native_consumption_tests::owns_run(&agent_run_start.agent_run_id) {
         std::env::temp_dir()
@@ -2290,9 +2335,7 @@ fn execute_agent_run(
         ExecutionHostMode::Remote,
         docker_execution.clone(),
         workspace_root.clone(),
-        centaeris_core::execution::ExecutionPolicy::workspace_write_no_network(
-            workspace_root.as_path(),
-        ),
+        docker_execution.execution_policy(),
     )?);
     let resolved_input_manifest = ResolvedInputManifest {
         schema: centaeris_core::tool::inputs::RESOLVED_INPUT_MANIFEST_SCHEMA.to_string(),
@@ -2350,7 +2393,7 @@ fn execute_agent_run(
         }
     };
     let mut dynamic_tool_contracts = workspace_agent_tool_contracts(&agent_run_start);
-    if docker_execution.is_retained() {
+    if docker_execution.is_retained() && !docker_execution.is_benchmark() {
         dynamic_tool_contracts.extend(retained_tasks::retained_task_contracts());
     }
     if let Some(provider) = &platform_materials {
@@ -2374,12 +2417,11 @@ fn execute_agent_run(
         }
         Err(error) => return Err(error),
     };
-    let mut tool_layer = ToolLayer::try_new_with_skill_catalog_config_and_execution_host_binding(
+    let mut tool_layer = workspace_tool_layer(
         workspace_skill_catalog_config,
         execution_host_binding,
+        dynamic_tool_registry,
     )?
-    .with_dynamic_tool_registry(dynamic_tool_registry)
-    .with_network_policy(centaeris_core::execution::NetworkPolicy::Disabled)
     .with_execution_cancellation_probe(cancellation_probe.clone())
     .with_session_id(agent_run_start.authorization.session_id.clone())
     .with_execution_owner(agent_run_start.agent_run_id.clone())
@@ -2389,11 +2431,12 @@ fn execute_agent_run(
         artifact_publication,
     )))?;
     register_workspace_agent_tool_providers(&mut tool_layer, &agent_run_start, &api_url, &token)?;
-    if docker_execution.is_retained() {
-        tool_layer.register_dynamic_tool_provider(Arc::new(
-            retained_tasks::RetainedTaskToolProvider::new(docker_execution.clone()),
-        ))?;
-    }
+    register_retained_task_provider(
+        &mut tool_layer,
+        docker_execution.is_retained(),
+        docker_execution.is_benchmark(),
+        docker_execution.clone(),
+    )?;
     for provider in mcp_bindings.providers {
         tool_layer.register_dynamic_tool_provider(provider)?;
     }
@@ -2791,6 +2834,14 @@ fn execute_agent_run(
         )?;
         *sequence_guard(&session_record_sequence)? = committed_sequence;
         session_start_commit_ms = session_start_commit_started.elapsed().as_millis();
+    }
+    if !docker_execution.benchmark_setup_ready(&agent_run_start.authorization.session_id)? {
+        return Ok(AgentRunStepOutcome {
+            disposition: "waiting",
+            terminal_state: None,
+            transition_reason: "benchmark_setup_required".into(),
+            retry_at_ms: Some(now_ms()?.saturating_add(1_000)),
+        });
     }
     eprintln!(
         "agent_run_startup_profile: agentRunId={}; serverCount={}; credentialCount={}; mcpConnectionCount={}; runtimePreludeMs={}; sandboxEnsureMs={}; mcpCredentialResolveMs={}; mcpDiscoveryMs={}; workspaceRestoreMs={}; sessionStartCommitMs={}; startupTotalMs={}",
@@ -6002,6 +6053,41 @@ fn agent_run_step_failure_response(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retained_task_provider_matches_the_host_tool_contracts() {
+        use super::*;
+        struct NoDispatch;
+        impl retained_tasks::EnvironmentTaskPort for NoDispatch {
+            fn environment_task_fence(
+                &self,
+            ) -> Result<centaeris_core::execution::EnvironmentTaskFence, String> {
+                panic!("tool assembly must not dispatch");
+            }
+            fn environment_task_rpc(
+                &self,
+                _: centaeris_core::execution::EnvironmentTaskRequest,
+            ) -> Result<centaeris_core::execution::EnvironmentTaskResult, String> {
+                panic!("tool assembly must not dispatch");
+            }
+        }
+        for (retained, benchmark) in [(true, true), (false, false), (true, false)] {
+            let enabled = retained && !benchmark;
+            let contracts = if enabled {
+                retained_tasks::retained_task_contracts()
+            } else {
+                Vec::new()
+            };
+            let registry = Arc::new(DynamicToolRegistry::from_contracts(contracts).unwrap());
+            let mut layer = hosted_context()
+                .tool_layer
+                .with_dynamic_tool_registry(registry);
+            register_retained_task_provider(&mut layer, retained, benchmark, Arc::new(NoDispatch))
+                .expect("host tool assembly must match its authorized contracts");
+            for contract in retained_tasks::retained_task_contracts() {
+                assert_eq!(layer.can_handle(&contract.name), enabled);
+            }
+        }
+    }
     use super::*;
 
     fn recovery_preparation_state() -> (AgentRunSessionState, Vec<SequencedSessionRecord>) {
@@ -6329,11 +6415,125 @@ mod tests {
     }
 
     #[test]
+    fn workspace_tools_preserve_host_network_policy_for_bash_and_filesystem() {
+        use centaeris_core::execution::{
+            ExecutionCommandRequest, ExecutionError, ExecutionFileSystemError,
+            ExecutionFileSystemErrorKind, ExecutionFileSystemOutput, ExecutionFileSystemRequest,
+            ExecutionHostCommandOutput, ExecutionHostStatus, ExecutionPolicy,
+        };
+        use centaeris_core::tool::layer::ToolInvocationRequest;
+        struct Capture(Mutex<Vec<(&'static str, ExecutionPolicy)>>);
+        impl ExecutionHostRunner for Capture {
+            fn status(&self, _: &ExecutionPolicy) -> Result<ExecutionHostStatus, ExecutionError> {
+                Ok(ExecutionHostStatus::remote(
+                    true,
+                    centaeris_core::execution::ExecutionHostHealth::Ready,
+                    None,
+                ))
+            }
+            fn run_file_system_operation(
+                &self,
+                request: ExecutionFileSystemRequest,
+            ) -> Result<ExecutionFileSystemOutput, ExecutionFileSystemError> {
+                self.0.lock().unwrap().push(("filesystem", request.policy));
+                Err(ExecutionFileSystemError::new(
+                    ExecutionFileSystemErrorKind::NotFound,
+                    "fixture not found",
+                ))
+            }
+            fn run_host_command(
+                &self,
+                _: Option<&str>,
+                request: ExecutionCommandRequest,
+                _: Option<&ExecutionCancellationProbe>,
+            ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
+                self.0.lock().unwrap().push(("bash", request.policy));
+                Err(ExecutionError::HostUnavailable {
+                    reason: "fixture captured".into(),
+                })
+            }
+        }
+        let root = std::env::temp_dir();
+        let activation = build_plugin_activation_snapshot(&[]).unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for policy in [
+            ExecutionPolicy::workspace_write_no_network(&root),
+            ExecutionPolicy::workspace_write_public_internet(&root),
+        ] {
+            let capture = Arc::new(Capture(Mutex::new(Vec::new())));
+            let binding = Arc::new(
+                ExecutionHostBinding::new(
+                    ExecutionHostMode::Remote,
+                    capture.clone(),
+                    root.clone(),
+                    policy.clone(),
+                )
+                .unwrap(),
+            );
+            let layer = workspace_tool_layer(
+                workspace_skill_catalog_config(&activation).unwrap(),
+                binding,
+                Arc::new(DynamicToolRegistry::empty()),
+            )
+            .unwrap();
+            for (name, args) in [
+                ("bash", r#"{"command":"printf fixture"}"#),
+                ("read", r#"{"path":"AGENTS.md"}"#),
+            ] {
+                runtime.block_on(layer.execute_async(ToolInvocationRequest {
+                    tool_call_id: format!("capture-{name}"),
+                    tool_name: name.into(),
+                    args_json: args.into(),
+                }));
+            }
+            let observed = capture.0.lock().unwrap();
+            assert!(
+                observed.iter().any(|(kind, _)| *kind == "bash"),
+                "actual Bash did not reach the host"
+            );
+            assert!(
+                observed.iter().any(|(kind, _)| *kind == "filesystem"),
+                "actual read did not reach the host"
+            );
+            for (kind, actual) in observed.iter() {
+                assert_eq!(
+                    actual, &policy,
+                    "{kind} changed the host's signed execution policy"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn benchmark_setup_wait_requires_its_exact_retry_deadline() {
+        let outcome = |reason: &str, deadline| AgentRunStepOutcome {
+            disposition: "waiting",
+            terminal_state: None,
+            transition_reason: reason.into(),
+            retry_at_ms: deadline,
+        };
+        outcome("benchmark_setup_required", Some(1234))
+            .validate()
+            .expect("setup remains waiting");
+        for (reason, deadline) in [
+            ("benchmark_setup_required", None),
+            ("benchmark_setup_required", Some(-1)),
+            ("question_wait", Some(1234)),
+            ("runtime_job_wait", Some(1234)),
+        ] {
+            assert!(outcome(reason, deadline).validate().is_err());
+        }
+    }
+
+    #[test]
     fn agent_run_step_outcome_accepts_only_canonical_waiting_reasons() {
         for transition_reason in AGENT_RUN_WAITING_TRANSITION_REASONS {
             AgentRunStepOutcome {
-                retry_at_ms: (*transition_reason == "execution_recovery_checkpoint_committed")
-                    .then_some(1),
+                retry_at_ms: matches!(
+                    *transition_reason,
+                    "execution_recovery_checkpoint_committed" | "benchmark_setup_required"
+                )
+                .then_some(1),
                 disposition: "waiting",
                 terminal_state: None,
                 transition_reason: (*transition_reason).to_string(),
@@ -6442,6 +6642,60 @@ mod tests {
             .expect_err("oversized body must fail")
         });
         assert_eq!(response.status(), 413);
+    }
+
+    #[test]
+    fn runtime_http_benchmark_upload_rejects_unauthorized_without_consuming_body() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime.block_on(async {
+            let request = Request::builder()
+                .method("POST")
+                .uri("/internal/benchmark/upload")
+                .body(Body::from_stream(futures::stream::pending::<
+                    Result<Bytes, std::io::Error>,
+                >()))
+                .unwrap();
+            let rejected =
+                tokio::time::timeout(Duration::from_millis(100), read_axum_request(request))
+                    .await
+                    .expect("authorization must precede body consumption")
+                    .unwrap_err();
+            assert_eq!(rejected.status(), 401);
+        });
+    }
+
+    #[test]
+    fn runtime_http_benchmark_upload_has_its_own_bounded_body_limit() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime.block_on(async {
+            let accepted = read_axum_request_body(
+                Request::builder()
+                    .method("POST")
+                    .uri("/internal/benchmark/upload")
+                    .body(Body::from(vec![0; 11_508_561 + 65536]))
+                    .unwrap(),
+            )
+            .await;
+            assert!(accepted.is_ok());
+            let rejected = read_axum_request_body(
+                Request::builder()
+                    .method("POST")
+                    .uri("/internal/benchmark/upload")
+                    .body(Body::from(vec![0; http::benchmark::ARCHIVE_LIMIT + 1]))
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(rejected.unwrap_err().status(), 413);
+            let other_method = read_axum_request(
+                Request::builder()
+                    .method("GET")
+                    .uri("/internal/benchmark/upload")
+                    .body(Body::from(vec![0; MAX_HTTP_BODY_BYTES + 1]))
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(other_method.unwrap_err().status(), 413);
+        });
     }
 
     #[test]

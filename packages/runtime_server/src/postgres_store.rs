@@ -77,6 +77,7 @@ impl Default for PostgresConnectionLimits {
     }
 }
 
+pub(crate) mod benchmark;
 pub(crate) mod cleanup_receipts;
 pub(crate) mod controller_authority;
 mod execution_capacity;

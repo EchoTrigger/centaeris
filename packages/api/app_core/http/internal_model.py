@@ -47,10 +47,13 @@ async def _model_stream_response(source):
         reason = safe_model_error_reason(error)
         if not re.fullmatch(r"[a-z][a-z0-9_]{0,127}", reason):
             reason = "model_adapter_failed"
-        yield encode_model_stream_event("error", {
+        failure = {
             "reasonType": reason,
             "httpStatus": error.httpStatus if isinstance(error, ModelProviderError) else None,
-        })
+        }
+        if isinstance(error, ModelProviderError) and reason == "incomplete_output_token_limit":
+            failure["truncatedToolCalls"] = error.truncatedToolCalls or []
+        yield encode_model_stream_event("error", failure)
     finally:
         await source.aclose()
 
@@ -95,11 +98,15 @@ async def model_runs(request):
     except ModelConfig.DoesNotExist:
         return JsonResponse({"error": "model_not_found"}, status=404)
     except Exception as error:
+        failure = {
+            "error": "model_run_failed",
+            "reasonType": safe_model_error_reason(error),
+            "httpStatus": error.httpStatus if isinstance(error, ModelProviderError) else None,
+        }
+        if isinstance(error, ModelProviderError) and error.reasonType == "incomplete_output_token_limit":
+            failure["truncatedToolCalls"] = error.truncatedToolCalls or []
         return JsonResponse(
-            {
-                "error": "model_run_failed",
-                "reasonType": safe_model_error_reason(error),
-            },
+            failure,
             status=502,
         )
     finally:

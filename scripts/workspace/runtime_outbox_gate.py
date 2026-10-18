@@ -112,6 +112,7 @@ def main():
         'postgres_control_and_listener_connections_do_not_consume_the_ordinary_pool',
         'postgres_runtime_job_wait_is_notified_and_closes_lost_wakeups',
         'postgres_session_terminal_append_fences_reclaimed_lease_owner',
+        'postgres_peer_observation_reuses_one_observer_and_detects_live_clients',
         'postgres_fenced_rewrite_tombstones_completed_dispatch_request',
         'postgres_pre_admission_cancellation_is_durable_fenced_and_history_free',
         'recovery_orchestration_releases_capacity_before_followup_store_work',
@@ -125,6 +126,9 @@ def main():
          f'postgres_store::integration_tests::{name}', '--', '--exact']
         for name in exact_tests
     ])
+    commands.append(['cargo', 'test', '--locked', '-p', 'runtime_server',
+                     'postgres_store::benchmark::tests::postgres_benchmark_observation_setup_and_retirement_remain_exactly_bound',
+                     '--', '--exact'])
     names = []
     for command in commands:
         discovered = subprocess.run([*command, '--ignored', '--list'], cwd=root,

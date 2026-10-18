@@ -187,3 +187,86 @@ No physical success is asserted by this README or its Python helper tests. Recor
 fresh source/binary/image hashes, exact commands, successful and unrun identities,
 and raw observations for the final candidate. Remote CI for that exact head is a
 separate result. No local full API discovery or production changes are required.
+
+
+## Real-provider Workspace benchmark preparation
+
+`prepare.py --benchmark-mode` reuses the source/build checks and private Compose
+fixture for the separate Workspace benchmark adapter. It does not run the retained
+acceptance driver. Existing deterministic preparation and `seed.py` are unchanged.
+This mode omits the model stub and its TLS service. It generates a new random
+`tbworkspace...` project, PostgreSQL database/user, storage volumes, and synthetic
+account configuration. API and Runtime receive independent maintenance authority;
+Worker and catalog initialization do not. Runtime remains limited to 512 MiB.
+
+Select the existing authorized Docker socket explicitly. The complete inventory
+check still refuses any managed execution instance, including stopped or foreign
+ones. Ordinary deployment Compose containers can remain running. The generator
+never stops those services, creates another daemon, or changes global networking.
+If new managed work appears, stop preparation and reconcile ownership rather than
+removing it to pass the check.
+
+Build the clean candidate using `build.py`. Separately build the execution helper
+for `x86_64-unknown-linux-musl`, retaining the exact command and compiler evidence.
+Provide a helper manifest containing the same `sourceRevision` and `sourceTree`,
+`target: "x86_64-unknown-linux-musl"`, and
+`binarySha256: {"execution_agent": "<actual SHA-256>"}`. Additional build evidence
+can be included. The generator verifies these identities against the actual
+helper and the GNU Runtime build; it does not infer static linkage from a filename.
+Record actual ELF/linkage inspection with the build evidence.
+
+Supply the same image arguments and fixed GNU build manifest as deterministic
+preparation, replacing `--model-script`/`--tls-dir` with:
+
+```sh
+--benchmark-mode --docker-socket /var/run/docker.sock \
+--benchmark-helper "$STATIC_HELPER" \
+--benchmark-helper-sha256 "$STATIC_HELPER_SHA256" \
+--benchmark-helper-manifest "$STATIC_HELPER_MANIFEST"
+```
+
+Choose verified free loopback API/Runtime ports before invoking preparation. All
+Docker observations and the Runtime socket bind use that selected endpoint. The
+helper is mounted at the same absolute path inside Runtime because Docker also
+resolves it on the host. The private manifest records `benchmarkMode`, daemon
+identity, socket, and helper source/build hashes. PID capacity permits two tasks
+of up to 4096 PIDs; outer benchmark admission still makes 8 GiB tasks exclusive.
+
+Start PostgreSQL/Redis, run `manage.py migrate`, initialize the catalog, then run
+one API setup process with the seed script already mounted read-only:
+
+```sh
+/app/.venv/bin/python manage.py shell -c \
+  "import runpy; runpy.run_path('/harness/benchmark_seed.py', run_name='__main__')"
+```
+
+Its stdin is exactly an object containing `schema`, `credential`, and `model`.
+The schema is `centaeris.workspaceBenchmarkSeedInput.v1`; `model` is the exact
+six-field descriptor from the private benchmark plan (`apiBase`, `credentialEnv`,
+`id`, `thinking`, `contextTokens`, `outputTokens`). The private controller obtains
+`credential` from the environment variable named by `credentialEnv`; the adapter
+has no dependency on a particular vendor or variable name. The example plan uses
+`https://api.example.com/v1`, `vendor/example-model`, and `BENCHMARK_MODEL_KEY`.
+Stream the JSON directly to the one-shot process. Do not put the key in command
+arguments, Compose environment files, persistent service environment, terminal
+output, or job/projection files. Do not use the model key as an internal or
+maintenance token.
+
+`benchmark_seed.py` requires the matching generated fixture identity, actual
+PostgreSQL database/user, the benchmark migration, and empty user/business tables.
+The shared descriptor validator is mounted as `/harness/workspace_plan.py`.
+It creates a random account, Workspace, Agent, encrypted ProviderCredential, and
+ModelConfig from the supplied descriptor using `openai-completions`. It makes no
+model request and creates no Session, Run, execution, receipt, or terminal facts.
+The seed records `model` and `modelSha256` (the canonical JSON SHA-256 used by
+`workspace_plan.canonical_digest`); launch checks both against the plan before any
+model admission. Null thinking creates an empty configured mode and no supported
+modes; a configured mode is passed explicitly through both Agent and setup paths.
+
+The resulting `benchmark-seed.json` is mode 0600 in the private storage volume;
+it contains account credentials and business IDs, never the provider key.
+Copy it only into the owner's private controller directory outside job artifacts.
+The script refuses an existing output or existing business state. If a seed
+process loses its commit acknowledgement, preserve that file and reconcile the
+account/database; do not seed again or erase the database to hide uncertainty.
+Starting this stack does not authorize or start the 20-task pilot or the full run.

@@ -1,4 +1,5 @@
 use centaeris_core::model::prepared_prompt::PreparedPromptV1;
+use centaeris_core::model::TruncatedToolCall;
 use centaeris_core::model::{
     validate_provider_tool_call_arguments, ModelClient, ModelClientError, ModelClientErrorKind,
     ModelClientFuture, ModelClientRequest, ModelClientResponse, ModelClientStreamEvent,
@@ -177,9 +178,22 @@ impl ApiModelClient {
             )
         })?;
         if !status.is_success() {
+            if status == reqwest::StatusCode::BAD_GATEWAY {
+                if let Ok(failure) = serde_json::from_str::<ModelHttpFailure>(&body) {
+                    if failure.error == "model_run_failed" {
+                        return Err(hosted_model_error(ModelStreamFailure {
+                            schema: "api.model.stream.v1".to_string(),
+                            event_type: "error".to_string(),
+                            reason_type: failure.reason_type,
+                            http_status: failure.http_status,
+                            truncated_tool_calls: failure.truncated_tool_calls,
+                        })?);
+                    }
+                }
+            }
             return Err(ModelClientError::new(
                 ModelClientErrorKind::Provider,
-                format!("api model run returned {}: {body}", status.as_u16()),
+                format!("api model run returned {}", status.as_u16()),
                 false,
             ));
         }
@@ -296,13 +310,6 @@ impl ApiModelClient {
                 }
                 match event.get("type").and_then(serde_json::Value::as_str) {
                     Some("error") => {
-                        if event.as_object().is_none_or(|fields| fields.len() != 4) {
-                            return Err(ModelClientError::new(
-                                ModelClientErrorKind::Provider,
-                                "api model failure fields mismatch",
-                                false,
-                            ));
-                        }
                         let failure = serde_json::from_value::<ModelStreamFailure>(event).map_err(
                             |error| {
                                 ModelClientError::new(
@@ -520,7 +527,44 @@ struct ModelStreamFailure {
     #[serde(rename = "type")]
     event_type: String,
     reason_type: String,
+    #[serde(deserialize_with = "required_optional_http_status")]
     http_status: Option<u16>,
+    #[serde(default, deserialize_with = "present_truncated_tool_calls")]
+    truncated_tool_calls: Option<Vec<ModelTruncatedToolCall>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ModelHttpFailure {
+    error: String,
+    reason_type: String,
+    #[serde(deserialize_with = "required_optional_http_status")]
+    http_status: Option<u16>,
+    #[serde(default, deserialize_with = "present_truncated_tool_calls")]
+    truncated_tool_calls: Option<Vec<ModelTruncatedToolCall>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ModelTruncatedToolCall {
+    #[serde(deserialize_with = "required_optional_string")]
+    call_id: Option<String>,
+    #[serde(deserialize_with = "required_optional_string")]
+    tool_name: Option<String>,
+    args_bytes: usize,
+    args_sha256: String,
+}
+
+fn required_optional_string<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer)
+}
+
+fn present_truncated_tool_calls<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<ModelTruncatedToolCall>>, D::Error> {
+    Vec::<ModelTruncatedToolCall>::deserialize(deserializer).map(Some)
 }
 
 fn canonical_failure_reason(reason: &str) -> bool {
@@ -635,6 +679,34 @@ fn hosted_model_error(failure: ModelStreamFailure) -> Result<ModelClientError, M
         || failure
             .http_status
             .is_some_and(|status| !(400..=599).contains(&status))
+        || (failure.reason_type == "incomplete_output_token_limit")
+            != failure.truncated_tool_calls.is_some()
+        || failure.truncated_tool_calls.as_ref().is_some_and(|calls| {
+            calls.iter().any(|call| {
+                call.call_id
+                    .as_ref()
+                    .is_some_and(|id| id.is_empty() || id.trim() != id)
+                    || call.tool_name.as_ref().is_some_and(|name| {
+                        name.is_empty()
+                            || name.len() > 128
+                            || name.starts_with('_')
+                            || name.ends_with('_')
+                            || name.contains("__")
+                            || !name.bytes().all(|byte| {
+                                byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+                            })
+                    })
+                    || call
+                        .args_sha256
+                        .strip_prefix("sha256:")
+                        .is_none_or(|digest| {
+                            digest.len() != 64
+                                || !digest.bytes().all(|byte| {
+                                    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+                                })
+                        })
+            })
+        })
     {
         return Err(ModelClientError::new(
             ModelClientErrorKind::Provider,
@@ -643,7 +715,10 @@ fn hosted_model_error(failure: ModelStreamFailure) -> Result<ModelClientError, M
         ));
     }
     let (kind, retryable) = match failure.reason_type.as_str() {
-        "provider_stream_interrupted" | "provider_response_invalid" => {
+        "incomplete_output_token_limit" => {
+            (ModelClientErrorKind::ProviderResponseInterrupted, false)
+        }
+        "provider_stream_interrupted" | "provider_response_invalid" | "empty_final_response" => {
             (ModelClientErrorKind::ProviderResponseInterrupted, true)
         }
         "provider_timeout" => (ModelClientErrorKind::Timeout, true),
@@ -682,6 +757,17 @@ fn hosted_model_error(failure: ModelStreamFailure) -> Result<ModelClientError, M
         retryable,
     );
     error.provider_code = Some(failure.reason_type);
+    error.truncated_tool_calls = failure
+        .truncated_tool_calls
+        .unwrap_or_default()
+        .into_iter()
+        .map(|call| TruncatedToolCall {
+            call_id: call.call_id,
+            tool_name: call.tool_name,
+            args_bytes: call.args_bytes,
+            args_sha256: call.args_sha256,
+        })
+        .collect();
     Ok(error)
 }
 
@@ -769,13 +855,369 @@ mod tests {
     use centaeris_core::tool::ModelToolChoice;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    async fn read_http_request(stream: &mut tokio::net::TcpStream) {
+    #[tokio::test]
+    async fn api_output_limit_reaches_core_recovery_without_transport_retry_or_ready_tool() {
+        for streaming in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                read_http_request(&mut stream).await;
+                let mut failure = serde_json::json!({
+                    "reasonType": "incomplete_output_token_limit", "httpStatus": null,
+                    "truncatedToolCalls": [{"callId":"original-call", "toolName":"bash",
+                        "argsBytes": 23, "argsSha256": format!("sha256:{}", "a".repeat(64))}],
+                });
+                let (status, content_type, body) = if streaming {
+                    failure["schema"] = "api.model.stream.v1".into();
+                    failure["type"] = "error".into();
+                    ("200 OK", "text/event-stream", format!(
+                        "data: {{\"schema\":\"api.model.stream.v1\",\"type\":\"delta\",\"delta\":\"partial answer\"}}\n\ndata: {failure}\n\n"
+                    ))
+                } else {
+                    failure["error"] = "model_run_failed".into();
+                    ("502 Bad Gateway", "application/json", failure.to_string())
+                };
+                stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                assert!(tokio::time::timeout(std::time::Duration::from_millis(100), listener.accept()).await.is_err(),
+                    "output truncation must continue through Core, never retry the original request");
+            });
+            let client = model_client(format!("http://{address}"), None, 1_024);
+            let mut request = model_request();
+            request.session_config.max_retries = 2;
+            request.session_config.retry_backoff_ms = 0;
+            let mut events = vec![];
+            let error = if streaming {
+                client
+                    .generate_stream(&request, &mut |event| events.push(event))
+                    .await
+                    .unwrap_err()
+            } else {
+                client.generate(&request).await.unwrap_err()
+            };
+            assert_eq!(error.provider_attempts, 1);
+            assert_eq!(
+                error.provider_code.as_deref(),
+                Some("incomplete_output_token_limit")
+            );
+            assert!(!error.retryable);
+            assert_eq!(
+                error.truncated_tool_calls[0].call_id.as_deref(),
+                Some("original-call")
+            );
+            assert!(events
+                .iter()
+                .all(|event| !matches!(event, ModelClientStreamEvent::ToolCallReady { .. })));
+            let partial = events
+                .iter()
+                .filter_map(|event| match event {
+                    ModelClientStreamEvent::Token { content } => Some(content.as_str()),
+                    _ => None,
+                })
+                .collect::<String>();
+            let core_error =
+                centaeris_core::runtime::GenerateDriverError::from_model_client(error, partial);
+            assert!(core_error.is_output_token_limit());
+            assert_eq!(
+                core_error.partial_content,
+                if streaming { "partial answer" } else { "" }
+            );
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn api_empty_final_retries_the_original_request_and_stops_at_existing_limit() {
+        for streaming in [false, true] {
+            for recover in [false, true] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = tokio::spawn(async move {
+                    for attempt in 0..2 {
+                        let (mut stream, _) = listener.accept().await.unwrap();
+                        read_http_request(&mut stream).await;
+                        let success = recover && attempt == 1;
+                        let (status, content_type, body) = if streaming {
+                            (
+                                "200 OK",
+                                "text/event-stream",
+                                if success {
+                                    "data: {\"schema\":\"api.model.stream.v1\",\"type\":\"delta\",\"delta\":\"answer\"}\n\ndata: {\"schema\":\"api.model.stream.v1\",\"type\":\"result\",\"text\":\"answer\",\"toolCalls\":[],\"usage\":null}\n\n".to_string()
+                                } else {
+                                    "data: {\"schema\":\"api.model.stream.v1\",\"type\":\"error\",\"reasonType\":\"empty_final_response\",\"httpStatus\":null}\n\n".to_string()
+                                },
+                            )
+                        } else if success {
+                            (
+                                "200 OK",
+                                "application/json",
+                                "{\"text\":\"answer\",\"toolCalls\":[],\"usage\":null}".to_string(),
+                            )
+                        } else {
+                            ("502 Bad Gateway", "application/json", "{\"error\":\"model_run_failed\",\"reasonType\":\"empty_final_response\",\"httpStatus\":null}".to_string())
+                        };
+                        stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                    }
+                });
+                let client = model_client(format!("http://{address}"), None, 1_024);
+                let mut request = model_request();
+                request.session_config.max_retries = 1;
+                request.session_config.retry_backoff_ms = 0;
+                let result = if streaming {
+                    client.generate_stream(&request, &mut |_| {}).await
+                } else {
+                    client.generate(&request).await
+                };
+                if recover {
+                    let response = result.unwrap();
+                    assert_eq!(response.generate_result.content, "answer");
+                    assert_eq!(response.provider_attempts, 2);
+                } else {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.provider_code.as_deref(), Some("empty_final_response"));
+                    assert_eq!(error.provider_attempts, 2);
+                    assert!(!error.retryable);
+                }
+                server.await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn api_output_limit_continues_through_the_real_core_loop_and_pairs_rejected_call() {
+        use centaeris_core::execution::*;
+        use centaeris_core::runtime::ToolConcurrencyCoordinator;
+        use centaeris_core::runtime::{
+            AgentRunInitialInput, AgentRunRequest, AgentRunStop, AgentRuntime, AgentRuntimeConfig,
+            TurnUpdate,
+        };
+        use centaeris_core::tool::layer::ToolLayer;
+        use centaeris_runtime_sqlite::SqliteRuntimeStore;
+        struct RecoveryHost;
+        impl ExecutionHostRunner for RecoveryHost {
+            fn status(&self, _: &ExecutionPolicy) -> Result<ExecutionHostStatus, ExecutionError> {
+                Ok(ExecutionHostStatus::transient_ready(false))
+            }
+            fn run_file_system_operation(
+                &self,
+                _: ExecutionFileSystemRequest,
+            ) -> Result<ExecutionFileSystemOutput, ExecutionFileSystemError> {
+                Err(ExecutionFileSystemError::new(
+                    ExecutionFileSystemErrorKind::NotFound,
+                    "no instruction file in recovery fixture",
+                ))
+            }
+            fn run_host_command(
+                &self,
+                _: Option<&str>,
+                _: ExecutionCommandRequest,
+                _: Option<&ExecutionCancellationProbe>,
+            ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
+                panic!("a truncated tool call must never execute")
+            }
+        }
+        for incomplete_identity in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let mut requests = vec![];
+                for attempt in 0..2 {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    requests.push(read_http_request(&mut stream).await);
+                    let body = if attempt == 0 {
+                        let failure = serde_json::json!({"schema":"api.model.stream.v1", "type":"error",
+                            "reasonType":"incomplete_output_token_limit", "httpStatus":null,
+                            "truncatedToolCalls":[{"callId":if incomplete_identity {None} else {Some("original-call")},
+                                "toolName":"bash", "argsBytes":23, "argsSha256":format!("sha256:{}", "a".repeat(64))}]});
+                        format!("data: {{\"schema\":\"api.model.stream.v1\",\"type\":\"delta\",\"delta\":\"partial answer\"}}\n\ndata: {failure}\n\n")
+                    } else {
+                        "data: {\"schema\":\"api.model.stream.v1\",\"type\":\"delta\",\"delta\":\" done\"}\n\ndata: {\"schema\":\"api.model.stream.v1\",\"type\":\"result\",\"text\":\" done\",\"toolCalls\":[],\"usage\":null}\n\n".to_string()
+                    };
+                    stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+                }
+                requests
+            });
+            let root = tempfile::tempdir().unwrap();
+            let store = SqliteRuntimeStore::new(root.path().join("runtime.sqlite")).unwrap();
+            let jobs = std::sync::Arc::new(store.job_store(129).unwrap());
+            let binding = std::sync::Arc::new(
+                ExecutionHostBinding::new(
+                    ExecutionHostMode::Remote,
+                    std::sync::Arc::new(RecoveryHost),
+                    root.path().to_path_buf(),
+                    ExecutionPolicy::workspace_write_no_network(root.path()),
+                )
+                .unwrap(),
+            );
+            let tools = ToolLayer::try_new_with_skill_catalog_config_and_execution_host_binding(
+                centaeris_core::extension::skills::SkillCatalogLoadConfig::default(),
+                binding,
+            )
+            .unwrap();
+            let engine = AgentRuntime::new(
+                jobs,
+                store,
+                tools,
+                AgentRuntimeConfig {
+                    enable_prompt_compaction: false,
+                    model_max_output_tokens: 1_024,
+                    ..Default::default()
+                },
+                ToolConcurrencyCoordinator::new(1),
+            );
+            let client = model_client(format!("http://{address}"), None, 1_024);
+            let mut events = vec![];
+            let result = engine
+                .process_turn_loop_online_with_model_client_stream_cancellable_and_tool_safe_point_async(
+                    AgentRunRequest {
+                        session_id: "hosted-output-recovery".into(),
+                        initial_turn_id: "original-turn".into(),
+                        initial_input: AgentRunInitialInput::UserMessage("finish the task".into()),
+                        agent_run_identity: None,
+                        runtime_scope: centaeris_core::model::prompt::PromptCompactionScopeV1::main(
+                        ),
+                        resume_from_turn_id: None,
+                        auto_continue_after_resume_wait: None,
+                    },
+                    &client,
+                    &centaeris_core::model::EmptyModelSessionConfigStore::new(),
+                    &mut |event| events.push(event),
+                    &|| Ok(None),
+                    &mut |_| Ok(()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.stop, AgentRunStop::Finalized);
+            assert_eq!(
+                result
+                    .last_turn
+                    .as_ref()
+                    .unwrap()
+                    .session_snapshot
+                    .messages
+                    .last()
+                    .unwrap()
+                    .content,
+                "partial answer done"
+            );
+            assert!(result
+                .turn_receipts
+                .iter()
+                .all(|turn| turn.tool_result_ids.is_empty()));
+            assert!(events
+                .iter()
+                .all(|event| !matches!(event, TurnUpdate::ToolCallReady { .. })));
+            let requests = server.await.unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0]["turnId"], serde_json::Value::Null,
+                "the hosted API only receives the canonical prepared prompt and existing Run binding");
+            let turn_ids: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    TurnUpdate::ModelRequestStart { turn_id, .. } => Some(turn_id),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(turn_ids.len(), 2);
+            assert_ne!(turn_ids[0], turn_ids[1]);
+            let messages = requests[1]["preparedPrompt"]["messages"]
+                .as_array()
+                .unwrap();
+            let calls: Vec<_> = messages
+                .iter()
+                .filter(|message| {
+                    message
+                        .get("toolCalls")
+                        .and_then(|calls| calls.as_array())
+                        .is_some_and(|calls| !calls.is_empty())
+                })
+                .collect();
+            if incomplete_identity {
+                assert!(calls.is_empty());
+                assert!(messages.last().unwrap()["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("fresh valid identity"));
+            } else {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0]["toolCalls"][0]["id"], "original-call");
+                assert_eq!(calls[0]["toolCalls"][0]["argsJson"], "{}");
+                let paired: Vec<_> = messages
+                    .iter()
+                    .filter(|message| message["toolCallId"] == "original-call")
+                    .collect();
+                assert_eq!(paired.len(), 1);
+                assert!(paired[0]["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("was not executed"));
+            }
+        }
+    }
+
+    #[test]
+    fn api_output_limit_rejects_malformed_recovery_metadata_and_wrong_failure_kind() {
+        let valid = serde_json::json!({"schema":"api.model.stream.v1", "type":"error",
+            "reasonType":"incomplete_output_token_limit", "httpStatus":null,
+            "truncatedToolCalls":[{"callId":"call", "toolName":"bash", "argsBytes":5,
+                "argsSha256":format!("sha256:{}", "a".repeat(64))}]});
+        for change in [
+            "digest",
+            "name",
+            "wrongReason",
+            "missingMetadata",
+            "secretBody",
+            "nullMetadata",
+            "missingStatus",
+            "missingCallId",
+            "missingToolName",
+        ] {
+            let mut value = valid.clone();
+            match change {
+                "digest" => value["truncatedToolCalls"][0]["argsSha256"] = "not-a-digest".into(),
+                "name" => value["truncatedToolCalls"][0]["toolName"] = "badTool".into(),
+                "wrongReason" => value["reasonType"] = "empty_final_response".into(),
+                "missingMetadata" => {
+                    value.as_object_mut().unwrap().remove("truncatedToolCalls");
+                }
+                "secretBody" => {
+                    value["truncatedToolCalls"][0]["argsJson"] = "private arguments".into()
+                }
+                "nullMetadata" => value["truncatedToolCalls"] = serde_json::Value::Null,
+                "missingStatus" => {
+                    value.as_object_mut().unwrap().remove("httpStatus");
+                }
+                "missingCallId" => {
+                    value["truncatedToolCalls"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("callId");
+                }
+                "missingToolName" => {
+                    value["truncatedToolCalls"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("toolName");
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                match serde_json::from_value::<ModelStreamFailure>(value) {
+                    Ok(failure) => hosted_model_error(failure).is_err(),
+                    Err(_) => true,
+                },
+                "{change}"
+            );
+        }
+    }
+
+    async fn read_http_request(stream: &mut tokio::net::TcpStream) -> serde_json::Value {
         let mut request = Vec::new();
         let mut buffer = [0_u8; 4_096];
         loop {
             let read = stream.read(&mut buffer).await.expect("read request");
             if read == 0 {
-                return;
+                return serde_json::Value::Null;
             }
             request.extend_from_slice(&buffer[..read]);
             let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
@@ -794,7 +1236,10 @@ mod tests {
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or_default();
             if request.len() >= header_end + 4 + content_length {
-                return;
+                return serde_json::from_slice(
+                    &request[header_end + 4..header_end + 4 + content_length],
+                )
+                .unwrap();
             }
         }
     }

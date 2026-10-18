@@ -24,7 +24,7 @@ def _signed_native_run(run):
     authorization = run.authorization
     digest = authorization_digest(authorization.payload)
     _verify_authorization_digest_signature(digest, settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY,
-                                           authorization.signature)
+                                           authorization.signature, schema=authorization.payload["schema"])
     if (digest != authorization.digest or not agent_run_binding_matches(authorization.payload, run)
             or run.session.agent.definition_id or run.definition_version_id
             or run.acting_app_id or run.app_delegation_id):

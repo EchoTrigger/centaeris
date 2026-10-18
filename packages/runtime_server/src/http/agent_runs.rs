@@ -351,6 +351,11 @@ fn teardown_retained(
                 resources,
                 origin_authorization,
             } => {
+                if cleanup.authorization.benchmark_profile.is_some() {
+                    return Err(
+                        "benchmark cleanup waits for verifier and physical retirement".into(),
+                    );
+                }
                 let fence = EnvironmentTaskFence {
                     environment_instance_id: allocation.instance_id.clone(),
                     controller_id: cleanup.agent_run_id.clone(),

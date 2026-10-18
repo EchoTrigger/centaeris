@@ -1,0 +1,30 @@
+{
+  "schema": "centaeris.workspaceBenchmarkPlan.v1",
+  "name": "20-task pilot",
+  "dataset": {
+    "gitUrl": "https://github.com/harbor-framework/terminal-bench-2-1.git",
+    "commit": "7131e4375048a0e408a8fb404b5f499d726b695b"
+  },
+  "taskIds": [
+    "regex-log", "log-summary-date-ranges", "openssl-selfsigned-cert",
+    "large-scale-text-editing", "kv-store-grpc", "nginx-request-logging",
+    "pypi-server", "configure-git-webserver", "count-dataset-tokens",
+    "hf-model-inference", "train-fasttext", "build-pmars", "build-cython-ext",
+    "sqlite-with-gcov", "modernize-scientific-stack", "write-compressor",
+    "db-wal-recovery", "git-multibranch", "multi-source-data-merger", "cancel-async-tasks"
+  ],
+  "attempts": 1,
+  "maxConcurrentTrials": 2,
+  "exclusiveMemoryMiB": 8192,
+  "maxRetries": 0,
+  "timeoutMultiplier": 1,
+  "fullRunAuthorized": false,
+  "model": {
+    "apiBase": "https://api.example.com/v1",
+    "credentialEnv": "BENCHMARK_MODEL_KEY",
+    "id": "vendor/example-model",
+    "thinking": "high",
+    "contextTokens": 500000,
+    "outputTokens": 64000
+  }
+}
