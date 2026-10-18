@@ -258,6 +258,9 @@ are rejected. Larger artifacts fail explicitly instead of being clipped.
 Transfer failures retain stable public codes for missing artifact paths, archive
 limits, rejected ownership/physical identity, unavailable dependencies and unknown
 upload outcomes. Diagnostics never include Docker error bodies or private paths.
+Trial summaries retain independent `agentOutcome`, `verifierOutcome` and
+`cleanupOutcome` facts. Harbor's original first exception remains intact; a later
+verifier failure is still reported as infrastructure failure after Agent timeout.
 
 ## Monitoring and evidence
 

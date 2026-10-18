@@ -99,6 +99,30 @@ def validate_verifier_inputs(dataset_root, task_ids):
             pack_upload(Path(dataset_root) / "tasks" / task_id / "tests", archive, directory=True)
 
 
+def _failure_code(error):
+    """Keep stable codes/types, never exception messages or server bodies."""
+    from workspace_client import WorkspaceError
+    current = error
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, WorkspaceError) and re.fullmatch(r"[a-z][a-z0-9_]{0,127}", current.code):
+            return current.code
+        current = current.__cause__
+    return type(error).__name__
+
+
+def _observe_trial_failures(trial, outcomes):
+    # Harbor 0.21 intentionally retains only its first exception_info. Observe
+    # every attempted record before that policy suppresses later phase failures.
+    original = trial._record_exception
+    def record(error):
+        outcomes["errors"].setdefault(outcomes["phase"], _failure_code(error))
+        original(error)
+    trial._record_exception = record
+    return lambda: setattr(trial, "_record_exception", original)
+
+
 def task_profile(task, image):
     config = task.config
     if (config.steps or config.environment.env or config.verifier.env or config.verifier.environment is not None
@@ -204,6 +228,8 @@ class RegisteredWorkspaceEnvironment(WorkspaceEnvironment):
 
     async def stop(self, delete=True):
         entry = self._controller_entry
+        if "outcomes" in entry:
+            entry["outcomes"]["phase"] = "cleanup"
         callback = entry.get("preDestroyCheck")
         if delete and callback is not None and not entry.get("serviceChecksRun"):
             entry["serviceChecksRun"] = True
@@ -645,6 +671,8 @@ class BenchmarkRunner:
                 slot = await slots.get()
                 controller_ref = uuid.uuid4().hex
                 entry, trial, result = None, None, None
+                restore_trial_observer = None
+                outcomes = {"phase": "setup", "errors": {}, "started": set(), "finished": set()}
                 capacity_deferred = False
                 phase = {"taskId": task_id, "attempt": attempt, "status": "running", "phase": "preparing", "slot": slot, "resourceHolding": 1}
                 projection = _TrialProjection(sink, trial_id, phase, getattr(self, "metrics_factory", None))
@@ -666,7 +694,8 @@ class BenchmarkRunner:
                         "ports": {"workspace_client": client, "provisioner": self.provisioner, "allocation": allocation,
                             "workspace_id": self.workspace_id, "agent_id": self.agent_id, "trial_id": trial_id,
                             "profile": profile, "model_config_ref": self.model_ref, "thinking_mode": self.plan["model"]["thinking"],
-                            "workspace_event_callback": project}, "environment": None, "metricsProjection": projection}
+                            "workspace_event_callback": project}, "environment": None, "metricsProjection": projection,
+                        "outcomes": outcomes}
                     with _REGISTRY_LOCK:
                         _REGISTRY[controller_ref] = entry
                     if service_checks is not None:
@@ -675,11 +704,23 @@ class BenchmarkRunner:
                         entry["preDestroyCheck"] = before_destroy
                     config = native_trial_config(task.paths.task_dir, root, trial_id, controller_ref, self.model_ref, self.plan["model"])
                     trial = await Trial.create(config)
+                    restore_trial_observer = _observe_trial_failures(trial, outcomes)
                     async def hook(event):
-                        project({"phase": "verifier" if event.event == TrialEvent.VERIFICATION_START else "agent"})
+                        if event.event == TrialEvent.AGENT_END:
+                            outcomes["finished"].add("agent")
+                            return
+                        outcomes["phase"] = "verifier" if event.event == TrialEvent.VERIFICATION_START else "agent"
+                        outcomes["started"].add(outcomes["phase"])
+                        project({"phase": outcomes["phase"]})
                     trial.add_hook(TrialEvent.AGENT_START, hook)
+                    trial.add_hook(TrialEvent.AGENT_END, hook)
                     trial.add_hook(TrialEvent.VERIFICATION_START, hook)
-                    result = await trial.run()
+                    try:
+                        result = await trial.run()
+                    finally:
+                        if restore_trial_observer is not None:
+                            restore_trial_observer()
+                            restore_trial_observer = None
                 except DiskCapacityInsufficient as error:
                     # Only image preparation can defer: never replay an admitted
                     # Workspace create, model request, or uncertain side effect.
@@ -691,21 +732,23 @@ class BenchmarkRunner:
                         observations.write(json.dumps({'taskId': task_id, 'trialId': trial_id,
                             'attempt': attempt, **error.diagnostic()}) + '\n')
                 except Exception as error:
-                    project({"error": type(error).__name__})
+                    project({"error": _failure_code(error)})
                 finally:
                     environment = entry["environment"] if entry else None
                     if environment is not None and not allocation.released:
                         try:
                             await environment.stop(delete=True)
-                        except Exception:
-                            pass  # Its allocation remains held until physical absence.
+                        except Exception as error:
+                            outcomes["errors"].setdefault("cleanup", _failure_code(error))
                     if environment is None and not allocation.creation_started and not allocation.released:
                         await allocation.release(cleanup_state="neverCreated")
+                    if restore_trial_observer is not None:
+                        restore_trial_observer()
                     projection.close()
                     if capacity_deferred:
                         project({"phase": "queued", "status": "queued", "resourceHolding": 0})
                     else:
-                        summary = self._summary(task_id, trial_id, result, allocation, phase.get("error"), attempt=attempt)
+                        summary = self._summary(task_id, trial_id, result, allocation, phase.get("error"), attempt=attempt, outcomes=outcomes)
                         if entry and entry.get("serviceCheckError"):
                             summary["infrastructureError"] = entry["serviceCheckError"]
                         results.append(summary)
@@ -739,15 +782,25 @@ class BenchmarkRunner:
         return report
 
     @staticmethod
-    def _summary(task_id, trial_id, result, allocation, error, *, attempt=1):
+    def _summary(task_id, trial_id, result, allocation, error, *, attempt=1, outcomes=None):
         rewards = result.verifier_result.rewards if result and result.verifier_result else None
         reward = rewards.get("reward") if isinstance(rewards, dict) else None
         if type(reward) not in {int, float} or not 0 <= reward <= 1:
             reward = None
         exception = result.exception_info.exception_type if result and result.exception_info else None
-        infrastructure = error or (exception if exception not in {None, "AgentTimeoutError", "NonZeroAgentExitCodeError"} else None)
+        outcomes = outcomes or {"errors": {}, "started": set(), "finished": set()}
+        errors = outcomes["errors"]
+        model_errors = {"AgentTimeoutError", "NonZeroAgentExitCodeError"}
+        agent_error = errors.get("agent") or (exception if exception in model_errors else None)
+        verifier_error = errors.get("verifier")
+        infrastructure = error or verifier_error or errors.get("setup") or (
+            agent_error if agent_error not in model_errors else None) or (
+            exception if exception not in {None, *model_errors} else None)
         infrastructure = infrastructure or ("verifierResultMissing" if reward is None else None)
         return {"trialId": trial_id, "taskId": task_id, "attempt": attempt, "verifierCompleted": reward is not None,
             "reward": reward, "infrastructureError": infrastructure,
+            "agentOutcome": {"status": "failed" if agent_error else "completed" if "agent" in outcomes["finished"] else "unknown", "error": agent_error},
+            "verifierOutcome": {"status": "failed" if verifier_error else "completed" if reward is not None else "unknown", "error": verifier_error},
+            "cleanupOutcome": {"status": "absent" if allocation.released else "pending", "error": errors.get("cleanup")},
             "severeIssue": None if allocation.released else "cleanupUnconfirmed",
             "cleanupState": "absent" if allocation.released else "pending", "resourceDebit": 0 if allocation.released else 1}

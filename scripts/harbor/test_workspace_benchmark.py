@@ -79,6 +79,60 @@ class BenchmarkTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pinned_harbor_first_exception_policy_preserves_independent_phase_failures(self):
+        from unittest.mock import AsyncMock
+        from harbor.trial.errors import AgentTimeoutError
+        from harbor.trial.hooks import TrialEvent
+        from harbor.verifier.verifier import DownloadVerifierDirError
+        from workspace_client import WorkspaceError
+        from workspace_benchmark import _observe_trial_failures
+        fixture = BenchmarkTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        task = fixture.dataset / 'tasks/task-one'
+        admission = Admission(Resources(10000, 8, 100000), Resources(1000, 1, 1000))
+        allocation = await admission.acquire('observed', Resources(2048, 1, 10240))
+        profile = task_profile(Task(task), {'imageDigest': 'sha256:' + 'a' * 64, 'workspaceRoot': '/app', 'user': '0:0'})
+        _REGISTRY['observed'] = {'environmentDir': (task / 'environment').resolve(), 'trialId': 'observed',
+            'environment': None, 'ports': {'workspace_client': object(), 'provisioner': object(),
+                'allocation': allocation, 'workspace_id': 'workspace', 'agent_id': 'agent', 'trial_id': 'observed',
+                'profile': profile, 'model_config_ref': 'model', 'thinking_mode': 'low'}}
+        self.addCleanup(_REGISTRY.pop, 'observed', None)
+        trial = await Trial.create(native_trial_config(task, fixture.root / 'job', 'observed', 'observed', 'model',
+            {'id': 'fixture', 'thinking': 'low'}))
+        original = trial._record_exception
+        outcomes = {'phase': 'setup', 'errors': {}, 'started': set(), 'finished': set()}
+        restore = _observe_trial_failures(trial, outcomes)
+        async def hook(event):
+            outcomes['phase'] = 'agent' if event.event == TrialEvent.AGENT_START else 'verifier'
+        trial.add_hook(TrialEvent.AGENT_START, hook)
+        trial.add_hook(TrialEvent.VERIFICATION_START, hook)
+        async def run():
+            await trial._emit(TrialEvent.AGENT_START)
+            trial._record_exception(AgentTimeoutError('private agent text'))
+            await trial._emit(TrialEvent.VERIFICATION_START)
+            try:
+                raise WorkspaceError('benchmark_download_path_missing', 404)
+            except WorkspaceError as cause:
+                raise DownloadVerifierDirError('private verifier text') from cause
+        trial._run = run
+        trial._prepare, trial._recover_outputs, trial._finalize = AsyncMock(), AsyncMock(), AsyncMock()
+        trial._scrub_jobs_dir = lambda: None
+        try:
+            result = await trial.run()
+        finally:
+            restore()
+        self.assertEqual(trial._record_exception, original)
+        self.assertEqual(result.exception_info.exception_type, 'AgentTimeoutError')
+        summary = BenchmarkRunner._summary('task-one', 'observed', result, SimpleNamespace(released=True), None, outcomes=outcomes)
+        self.assertEqual(summary['agentOutcome']['error'], 'AgentTimeoutError')
+        self.assertEqual(summary['verifierOutcome'], {'status': 'failed', 'error': 'benchmark_download_path_missing'})
+        self.assertEqual(summary['infrastructureError'], 'benchmark_download_path_missing')
+        self.assertFalse(summary['verifierCompleted'])
+        self.assertNotIn('private agent text', json.dumps(summary))
+        self.assertNotIn('private verifier text', json.dumps(summary))
+        await allocation.release(cleanup_state='neverCreated')
+
     async def test_direct_full_requires_exact_approval_and_runs_eighty_nine_tasks_once(self):
         from unittest.mock import AsyncMock
         with tempfile.TemporaryDirectory() as temporary:
@@ -105,7 +159,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await runner.run_full(approval=approval)
 
-    async def _run_failure_batch(self, *, cleanup_pending=False, task_count=20, stage='pilot', disk_free=None, after_pull_free=None, invalid_verifier=False):
+    async def _run_failure_batch(self, *, cleanup_pending=False, task_count=20, stage='pilot', disk_free=None, after_pull_free=None, invalid_verifier=False, masked_verifier_error=False):
         with tempfile.TemporaryDirectory() as temporary:
             task_ids = [f"task-{index}" for index in range(task_count)]
             for task_id in task_ids:
@@ -160,13 +214,27 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                             await allocation.release(cleanup_state="absent")
                 entry["environment"] = Environment()
                 class FakeTrial:
-                    def add_hook(self, *args):
-                        pass
+                    result = SimpleNamespace(verifier_result=None, exception_info=None)
+                    hooks = {}
+                    def add_hook(self, event, callback):
+                        self.hooks[event] = callback
+                    def _record_exception(self, error):
+                        if self.result.exception_info is None:
+                            self.result.exception_info = SimpleNamespace(exception_type=type(error).__name__)
                     async def run(self):
                         allocation.mark_creation_started()
                         started.append(task_id)
                         started_trial_ids.append(config.trial_id)
                         active_counts.append(admission.active_count)
+                        if masked_verifier_error:
+                            from harbor.trial.errors import AgentTimeoutError
+                            from harbor.trial.hooks import TrialEvent
+                            from workspace_client import WorkspaceError
+                            await self.hooks[TrialEvent.AGENT_START](SimpleNamespace(event=TrialEvent.AGENT_START))
+                            self._record_exception(AgentTimeoutError('synthetic deadline'))
+                            await self.hooks[TrialEvent.VERIFICATION_START](SimpleNamespace(event=TrialEvent.VERIFICATION_START))
+                            self._record_exception(WorkspaceError('benchmark_download_path_missing', 404))
+                            return self.result
                         if task_id == "task-0" and disk_free is None:
                             first_started.set()
                             await second_started.wait()
@@ -212,6 +280,15 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_all_selected_verifier_inputs_are_checked_before_the_first_agent(self):
         await self._run_failure_batch(invalid_verifier=True)
+
+    async def test_agent_timeout_does_not_mask_later_verifier_failure_or_cleanup(self):
+        report, _, _, held = await self._run_failure_batch(masked_verifier_error=True)
+        for row in report['results']:
+            self.assertEqual(row['infrastructureError'], 'benchmark_download_path_missing')
+            self.assertEqual(row['agentOutcome'], {'status': 'failed', 'error': 'AgentTimeoutError'})
+            self.assertEqual(row['verifierOutcome'], {'status': 'failed', 'error': 'benchmark_download_path_missing'})
+            self.assertEqual(row['cleanupOutcome'], {'status': 'absent', 'error': None})
+        self.assertEqual(held, 0)
 
     async def test_live_disk_shortfall_reduces_concurrency_without_consuming_attempts(self):
         report, started, counts, held = await self._run_failure_batch(disk_free=[24576])
@@ -567,6 +644,8 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             entry["environment"] = environment
             class FakeTrial:
                 result = SimpleNamespace(verifier_result=SimpleNamespace(rewards={"reward": 1}), exception_info=None)
+                def _record_exception(self, error):
+                    pass
                 def add_hook(self, *args):
                     pass
                 async def run(self):
