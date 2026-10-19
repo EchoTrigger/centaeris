@@ -52,13 +52,13 @@ def main():
                       controlRoot=str(root / "control"), outputRoot=str(root / "output"),
                       runcPath="/usr/bin/runc", runcRoot=args.runc_root,
                       dockerPath="/usr/bin/docker", dockerSocket=args.docker_socket,
-                      controllerUid=0, helperPath=None, helperSha256=None)
+                      controllerUid=0, helperPath=None)
         if args.helper:
             helper_path = root / "execution_agent"
             shutil.copyfile(args.helper, helper_path)
             subprocess.run(["/usr/bin/strip", "--strip-debug", str(helper_path)], check=True)
             os.chmod(helper_path, 0o500)
-            config.update(helperPath=str(helper_path), helperSha256="sha256:" + hashlib.sha256(helper_path.read_bytes()).hexdigest())
+            config.update(helperPath=str(helper_path))
         config_path.write_text(json.dumps(config))
         os.chmod(config_path, 0o600)
         service_log = open(root / "service.log", "wb")
@@ -288,7 +288,7 @@ def main():
                           runcVersion=subprocess.check_output(["/usr/bin/runc", "--version"]).decode(),
                           supervisorSha256=hashlib.sha256(Path(args.supervisor).read_bytes()).hexdigest())
             if args.helper:
-                result["helperSha256"] = config["helperSha256"]
+                result["helperSha256"] = "sha256:" + hashlib.sha256(helper_path.read_bytes()).hexdigest()
             Path(args.evidence).write_text(json.dumps(result, indent=2) + "\n")
             print(json.dumps(dict(passed=len(checks), evidence=args.evidence)))
         except Exception:

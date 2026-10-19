@@ -2,6 +2,24 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn managed_helper_configuration_needs_only_its_absolute_installation_path() {
+    let configuration: HostSupervisorConfig = serde_json::from_value(json!({
+        "schema": HOST_SUPERVISOR_SCHEMA,
+        "socketPath": "/run/centaeris-host/control.sock",
+        "controlRoot": "/var/lib/centaeris-host/control",
+        "outputRoot": "/var/lib/centaeris-host/output",
+        "runcPath": "/usr/sbin/runc",
+        "runcRoot": "/run/docker/runtime-runc/moby",
+        "dockerPath": "/usr/bin/docker",
+        "dockerSocket": "/var/run/docker.sock",
+        "controllerUid": 0,
+        "helperPath": "/usr/libexec/centaeris/execution_agent"
+    }))
+    .unwrap();
+    configuration.validate().unwrap();
+}
+
+#[test]
 fn retirement_roundtrips_the_exact_current_target_and_validates_receipts() {
     let target = HostLaunchTarget {
         environment_instance_id: format!("instance_{}", "a".repeat(64)),
@@ -93,7 +111,6 @@ fn host_configuration_keeps_all_control_roots_outside_each_other() {
         docker_socket: "/var/run/docker.sock".into(),
         controller_uid: 0,
         helper_path: None,
-        helper_sha256: None,
     };
     config.validate().unwrap();
     config.output_root = format!("{}/output", config.control_root);

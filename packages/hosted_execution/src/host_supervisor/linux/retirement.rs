@@ -702,7 +702,6 @@ mod tests {
             docker_socket: "/unused/docker.sock".into(),
             controller_uid: 0,
             helper_path: None,
-            helper_sha256: None,
         }
     }
 

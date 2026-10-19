@@ -64,6 +64,21 @@ def compose_config(**overrides):
 
 
 class DeploymentContractTests(unittest.TestCase):
+    def test_installed_host_helper_path_reaches_runtime_and_read_only_mount(self):
+        default = compose_config()["services"]["runtime"]["environment"]
+        self.assertTrue(default["ENVIRONMENT_EXECUTION_HELPER"].startswith("/"))
+        helper = "/srv/centaeris/host/execution_agent"
+        runtime = compose_config(ENVIRONMENT_EXECUTION_HELPER=helper)["services"]["runtime"]
+        self.assertEqual(runtime["environment"]["ENVIRONMENT_EXECUTION_HELPER"], helper)
+        mount = next(volume for volume in runtime["volumes"] if volume["target"] == helper)
+        self.assertEqual(
+            (mount["type"], mount["source"], mount["read_only"]),
+            ("bind", helper, True),
+        )
+        with self.assertRaises(subprocess.CalledProcessError) as missing:
+            compose_config(ENVIRONMENT_EXECUTION_HELPER=None)
+        self.assertIn("ENVIRONMENT_EXECUTION_HELPER", missing.exception.stderr)
+
     def test_explicit_upload_limits_reach_api_and_gateway_and_missing_inputs_fail(self):
         values = {"UPLOAD_BODY_MAX_BYTES": "2097152", "UPLOAD_TEMP_MAX_BYTES": "8388608",
                   "UPLOAD_MAX_CONCURRENT": "3", "UPLOAD_FILE_MAX_BYTES": "1048576"}

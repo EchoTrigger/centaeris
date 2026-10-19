@@ -61,7 +61,8 @@ allocation even when a later controller uses it.
 The native [host supervisor](../../packages/hosted_execution/deploy/README.md)
 owns process launch, task journals and output. It attests the Docker/runc target,
 runs commands with the profile's identity and security configuration, and
-executes fixed helpers from a digest-verified sealed descriptor. Workloads
+loads fixed helpers from a protected root-owned installation path and seals
+their bytes, calculating execution/replay identity internally. Workloads
 receive no host control mount or writable cgroup mount. Filesystem operations,
 inputs, artifacts, snapshots, hooks and MCP use this common execution path.
 Missing workspace directories are prepared for the profile user while image

@@ -65,23 +65,21 @@ pub(super) fn create_body_with_proxy_environment(
 }
 
 pub(super) fn helper_path() -> Result<String, String> {
-    let source = env::var("ENVIRONMENT_EXECUTION_HELPER")
+    helper_path_with(|key| env::var(key), |path| fs::symlink_metadata(path))
+}
+
+fn helper_path_with(
+    config: impl Fn(&str) -> Result<String, env::VarError>,
+    metadata: impl Fn(&str) -> std::io::Result<fs::Metadata>,
+) -> Result<String, String> {
+    let source = config("ENVIRONMENT_EXECUTION_HELPER")
         .map_err(|_| "environment execution helper not configured")?;
-    let expected_hash = env::var("ENVIRONMENT_EXECUTION_HELPER_SHA256")
-        .map_err(|_| "environment execution helper digest not configured")?;
     if !source.starts_with('/') || source.chars().any(char::is_control) {
         return Err("environment execution helper path invalid".into());
     }
-    let metadata = fs::symlink_metadata(&source).map_err(|_| "environment helper unavailable")?;
-    if !metadata.is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.len() > 128 * 1024 * 1024
-    {
-        return Err("environment helper is not a bounded regular file".into());
-    }
-    let bytes = fs::read(&source).map_err(|_| "environment helper read failed")?;
-    if expected_hash != format!("{:x}", Sha256::digest(bytes)) {
-        return Err("environment helper digest mismatch".into());
+    let metadata = metadata(&source).map_err(|_| "environment helper unavailable")?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("environment helper is not a regular file".into());
     }
     Ok(source)
 }
@@ -106,6 +104,86 @@ mod tests {
                 storage_bytes: 10 * 1024 * 1024 * 1024,
             },
         }
+    }
+
+    #[test]
+    fn configured_helper_without_digest_builds_the_current_environment() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let source = "/srv/managed/execution_agent";
+        let selected = helper_path_with(
+            |key| match key {
+                "ENVIRONMENT_EXECUTION_HELPER" => Ok(source.into()),
+                _ => Err(env::VarError::NotPresent),
+            },
+            |path| {
+                assert_eq!(path, source);
+                fs::symlink_metadata(file.path())
+            },
+        )
+        .expect("a configured regular helper needs no operator-supplied digest");
+        let mut runner = super::super::tests::retained_test_runner();
+        let profile = profile();
+        runner.image_digest.clone_from(&profile.image_digest);
+        runner.resources = profile.resources.sandbox_resources();
+        runner.network = profile.network;
+        runner.plugin_mounts.clear();
+        let body = create_body_with_proxy_environment(
+            &runner.container_expectation(),
+            &profile,
+            &selected,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let mounts = body["HostConfig"]["Mounts"].as_array().unwrap();
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0]["Source"], source);
+        assert_eq!(mounts[0]["Target"], HELPER_DESTINATION);
+        assert_eq!(mounts[0]["ReadOnly"], true);
+        assert_eq!(
+            body["Cmd"],
+            serde_json::json!([HELPER_DESTINATION, "environment-keeper"])
+        );
+    }
+
+    #[test]
+    fn helper_path_rejects_missing_configuration_and_invalid_paths() {
+        assert_eq!(
+            helper_path_with(
+                |_| Err(env::VarError::NotPresent),
+                |_| panic!("no configured path")
+            )
+            .unwrap_err(),
+            "environment execution helper not configured"
+        );
+        for source in ["relative/helper", "/srv/helper\n"] {
+            assert_eq!(
+                helper_path_with(
+                    |_| Ok(source.into()),
+                    |_| panic!("invalid path must not reach filesystem")
+                )
+                .unwrap_err(),
+                "environment execution helper path invalid"
+            );
+        }
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(
+            helper_path_with(
+                |_| Ok("/srv/missing/helper".into()),
+                |_| fs::symlink_metadata(root.path().join("missing"))
+            )
+            .unwrap_err(),
+            "environment helper unavailable"
+        );
+    }
+
+    #[test]
+    fn helper_path_rejects_a_directory() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(helper_path_with(
+            |_| Ok("/srv/helper".into()),
+            |_| fs::symlink_metadata(root.path())
+        )
+        .is_err());
     }
 
     #[test]

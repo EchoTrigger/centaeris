@@ -538,10 +538,12 @@ pub fn serve(config_path: &Path) -> Result<(), String> {
     let listener = UnixListener::bind(socket).map_err(|_| "host_socket_bind_failed")?;
     fs::set_permissions(socket, fs::Permissions::from_mode(0o600))
         .map_err(|_| "host_socket_protection_failed")?;
-    let helper_binary = match (&config.helper_path, &config.helper_sha256) {
-        (Some(path), Some(hash)) => Some(Arc::new(HelperBinary::load(path, hash)?)),
-        _ => None,
-    };
+    let helper_binary = config
+        .helper_path
+        .as_deref()
+        .map(HelperBinary::load)
+        .transpose()?
+        .map(Arc::new);
     let host = Arc::new(Host {
         retirement: retirement::RetirementStore::new(&config),
         config,

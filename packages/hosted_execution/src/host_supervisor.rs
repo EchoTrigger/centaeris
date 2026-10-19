@@ -20,7 +20,6 @@ pub struct HostSupervisorConfig {
     pub docker_socket: String,
     pub controller_uid: u32,
     pub helper_path: Option<String>,
-    pub helper_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -141,10 +140,12 @@ impl HostSupervisorConfig {
                 return Err("host_control_paths_overlap".into());
             }
         }
-        match (&self.helper_path, &self.helper_sha256) {
-            (None, None) => {}
-            (Some(path), Some(hash)) if absolute_path(path) && digest_id(hash) => {}
-            _ => return Err("host_helper_configuration_invalid".into()),
+        if self
+            .helper_path
+            .as_ref()
+            .is_some_and(|path| !absolute_path(path) || path == "/")
+        {
+            return Err("host_helper_configuration_invalid".into());
         }
         Ok(())
     }

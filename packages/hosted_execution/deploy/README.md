@@ -40,16 +40,21 @@ Keep the workload init cwd at `/` and include exactly one
 environment. The user must match the OCI process identity. These host-attested
 values select the helper workspace; task environment additions do not alter it.
 
-Enable fixed helper capabilities by setting both `helperPath` and `helperSha256`
-(`sha256:<hex>`) to the reviewed static `execution_agent`. The example leaves
-them unset, so helper dispatch fails explicitly until configured. A dynamically
-linked ELF is refused because its interpreter would be resolved inside the
-workload. For an x86_64 GNU Linux host, one build input is
+Enable fixed helper capabilities by setting `helperPath` to the installed,
+root-owned static `execution_agent`. The example leaves the path unset, so
+helper dispatch fails explicitly until configured. A dynamically linked ELF is
+refused because its interpreter would be resolved inside the workload.
+For an x86_64 GNU Linux host, one build input is
 `RUSTFLAGS=-Ctarget-feature=+crt-static cargo build --locked --release --target
 x86_64-unknown-linux-gnu -p hosted_execution --bin execution_agent`; verify the
-result's ELF program headers, source revision and installed digest. The host
-seals the verified binary in a memfd and passes that descriptor to runc, so a
-root workload cannot replace its executable through a writable pathname.
+result's ELF program headers and source revision. The host checks the managed
+path and file permissions, reads the binary once, and calculates its digest
+internally for execution and replay identity. No manually supplied digest is
+required. It seals those exact bytes in a memfd and passes that descriptor to
+runc, so a root workload cannot replace its executable through a writable pathname.
+Install or update `environment_host_supervisor` and `execution_agent` from the
+same version. After an update, restart the supervisor and Runtime together.
+The running supervisor continues using its sealed copy until restarted.
 
 Helper requests select a fixed kind and carry the owner fence, operation ID,
 scope, byte length and SHA-256 before a bounded binary body. The host buffers

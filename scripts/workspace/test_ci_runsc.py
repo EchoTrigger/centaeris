@@ -1,6 +1,5 @@
 """CI must provision the default OCI runtime before the full deployment gate."""
 from pathlib import Path
-import hashlib
 import json
 import os
 import subprocess
@@ -11,7 +10,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 HELPER_BYTES = b"gate fixture from the newly built image\x00\xff"
 MOCK_DOCKER = r'''
-import hashlib, json, os, pathlib, sys, tempfile
+import json, os, pathlib, sys, tempfile
 args = sys.argv[1:]
 if args[0] == "mktemp":
     if "-d" in args:
@@ -29,12 +28,12 @@ if args[0] == "compose":
     env_path = pathlib.Path(args[args.index("--env-file") + 1])
     values = dict(line.split("=", 1) for line in env_path.read_text().splitlines() if "=" in line and not line.startswith("#"))
     helper = pathlib.Path(values.get("ENVIRONMENT_EXECUTION_HELPER", ""))
-    event.update(helper=str(helper), digest=values.get("ENVIRONMENT_EXECUTION_HELPER_SHA256"), socket=values.get("ENVIRONMENT_HOST_SOCKET_DIRECTORY"))
+    event.update(helper=str(helper), socket=values.get("ENVIRONMENT_HOST_SOCKET_DIRECTORY"))
     args = args[args.index("--env-file") + 2:]
     event["action"] = args[0]
     record()
     if args[0] == "config":
-        if not helper.is_absolute() or not event["digest"]:
+        if not helper.is_absolute():
             raise SystemExit(78)
         if "--format" in args:
             names = ["api", "document-processor", "runtime", "web", "worker", "workspace-general"]
@@ -48,7 +47,7 @@ if args[0] == "compose":
         print("built-" + args[-1])
     elif args[0] == "up":
         assert helper.is_file(), "startup must use the extracted helper"
-        assert hashlib.sha256(helper.read_bytes()).hexdigest() == event["digest"]
+        assert helper.read_bytes() == bytes.fromhex(os.environ["GATE_HELPER_HEX"]), "startup must use the helper from the built image"
         assert pathlib.Path(event["socket"]).is_dir()
         if os.environ["GATE_FAIL"] == "startup":
             raise SystemExit(42)
@@ -114,8 +113,6 @@ node() { printf '%s\\n' fixture-revision; }
         self.assertLess(actions.index("config"), actions.index("build"))
         self.assertLess(max(i for i, action in enumerate(actions) if action == "build"), actions.index("create"))
         self.assertLess(actions.index("cp"), actions.index("up"))
-        self.assertTrue(all(event["digest"] == "0" * 64 for event in events if event["action"] in ("config", "build")))
-        self.assertTrue(all(event["digest"] == hashlib.sha256(HELPER_BYTES).hexdigest() for event in events if event["action"] == "up"))
         self.assertEqual([event["args"] for event in events if event["action"] == "rm"], [["rm", "-f", "owned-helper-container"]])
 
     def test_release_gate_cleans_only_owned_helper_fixture_on_failure(self):

@@ -29,7 +29,7 @@ env_file="$fixture_directory/compose.env"
 helper_path="$fixture_directory/execution_agent"
 socket_directory="$fixture_directory/host"
 helper_container_id_file="$fixture_directory/helper-container.id"
-unset ENVIRONMENT_EXECUTION_HELPER ENVIRONMENT_EXECUTION_HELPER_SHA256 ENVIRONMENT_HOST_SOCKET_DIRECTORY
+unset ENVIRONMENT_EXECUTION_HELPER ENVIRONMENT_HOST_SOCKET_DIRECTORY
 compose=(docker compose --parallel 1 --env-file "$env_file")
 
 cleanup() {
@@ -68,7 +68,6 @@ values = {
     "UPLOAD_MAX_CONCURRENT": "2",
     "WORK_RETURN_AUDIT_INTERVAL_SECONDS": "3600",
     "ENVIRONMENT_EXECUTION_HELPER": sys.argv[3],
-    "ENVIRONMENT_EXECUTION_HELPER_SHA256": "0" * 64,
     "ENVIRONMENT_HOST_SOCKET_DIRECTORY": sys.argv[4],
 }
 rendered = []
@@ -112,20 +111,6 @@ helper_image="$("${compose[@]}" config --format json | python3 -c 'import json, 
 docker create --cidfile "$helper_container_id_file" "$helper_image" >/dev/null
 docker cp "$(cat "$helper_container_id_file"):/opt/centaeris/bin/execution_agent" "$helper_path"
 chmod 500 "$helper_path"
-helper_sha256="$(sha256sum "$helper_path" | cut -d ' ' -f 1)"
-python3 - "$env_file" "$helper_sha256" <<'PY'
-from pathlib import Path
-import sys
-
-target = Path(sys.argv[1])
-digest = sys.argv[2]
-assert len(digest) == 64 and all(char in "0123456789abcdef" for char in digest)
-target.write_text("\n".join(
-    f"ENVIRONMENT_EXECUTION_HELPER_SHA256={digest}"
-    if line.startswith("ENVIRONMENT_EXECUTION_HELPER_SHA256=") else line
-    for line in target.read_text(encoding="utf-8").splitlines()
-) + "\n", encoding="utf-8")
-PY
 "${compose[@]}" up -d --wait --wait-timeout 420 postgres redis api runtime worker material-worker web
 
 for service in postgres redis api runtime worker material-worker web; do

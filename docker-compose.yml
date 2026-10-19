@@ -145,7 +145,6 @@ services:
       WORKSPACE_GENERAL_IMAGE: *workspace-general-image
       ENVIRONMENT_HOST_SOCKET: /run/centaeris-host/control.sock
       ENVIRONMENT_EXECUTION_HELPER: ${ENVIRONMENT_EXECUTION_HELPER:?Set the sealed host execution_agent absolute path}
-      ENVIRONMENT_EXECUTION_HELPER_SHA256: ${ENVIRONMENT_EXECUTION_HELPER_SHA256:?Set its lowercase SHA256 digest}
       PLUGIN_VOLUME_NAME: ${COMPOSE_PROJECT_NAME:-centaeris-workspace}_plugin-data
       AGENT_MEMORY_VOLUME_NAME: ${COMPOSE_PROJECT_NAME:-centaeris-workspace}_agent-memory
     entrypoint: ["runtime_server"]

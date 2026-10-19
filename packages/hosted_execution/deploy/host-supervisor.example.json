@@ -8,6 +8,5 @@
   "dockerPath": "/usr/bin/docker",
   "dockerSocket": "/var/run/docker.sock",
   "controllerUid": 0,
-  "helperPath": null,
-  "helperSha256": null
+  "helperPath": null
 }

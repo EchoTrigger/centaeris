@@ -71,26 +71,36 @@ pub(crate) struct HelperBinary {
     pub digest: String,
 }
 impl HelperBinary {
-    pub(crate) fn load(path: &str, expected: &str) -> Result<Self, String> {
+    pub(crate) fn load(path: &str) -> Result<Self, String> {
         crate::host_supervisor::linux::protected(Path::new(path), false)?;
-        let mut data = Vec::new();
-        OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(path)
+            .map_err(|_| "host_helper_unavailable")?;
+        Self::from_file(file)
+    }
+    fn from_file(file: File) -> Result<Self, String> {
+        const MAX_BYTES: u64 = 128 * 1024 * 1024;
+        if file
+            .metadata()
             .map_err(|_| "host_helper_unavailable")?
-            .take(128 * 1024 * 1024 + 1)
+            .len()
+            > MAX_BYTES
+        {
+            return Err("host_helper_too_large".into());
+        }
+        let mut data = Vec::new();
+        file.take(MAX_BYTES + 1)
             .read_to_end(&mut data)
             .map_err(|_| "host_helper_unavailable")?;
-        if data.len() > 128 * 1024 * 1024
-            || format!("sha256:{:x}", Sha256::digest(&data)) != expected
-        {
-            return Err("host_helper_digest_mismatch".into());
+        if data.len() as u64 > MAX_BYTES {
+            return Err("host_helper_too_large".into());
         }
         static_elf(&data)?;
         Ok(Self {
             file: sealed_file(&data)?,
-            digest: expected.into(),
+            digest: format!("sha256:{:x}", Sha256::digest(&data)),
         })
     }
 }
@@ -468,6 +478,143 @@ impl NativeManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    struct BinaryFixture(PathBuf);
+    impl BinaryFixture {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "managed-helper-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            Self(path)
+        }
+        fn install(&self, name: &str, bytes: &[u8]) -> PathBuf {
+            let path = self.0.join(name);
+            fs::write(&path, bytes).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o500)).unwrap();
+            path
+        }
+    }
+    impl Drop for BinaryFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    fn static_image() -> Vec<u8> {
+        let mut elf = vec![0u8; 120];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2;
+        elf[5] = 1;
+        elf[32..40].copy_from_slice(&64u64.to_le_bytes());
+        elf[54..56].copy_from_slice(&56u16.to_le_bytes());
+        elf[56..58].copy_from_slice(&1u16.to_le_bytes());
+        elf
+    }
+
+    #[test]
+    fn helper_digest_and_sealed_bytes_survive_source_replacement() {
+        let fixture = BinaryFixture::new();
+        let original = static_image();
+        let path = fixture.install("execution_agent", &original);
+        let mut helper = HelperBinary::from_file(File::open(&path).unwrap()).unwrap();
+        let mut replacement = original.clone();
+        replacement[119] = 42;
+        fs::rename(fixture.install("replacement", &replacement), &path).unwrap();
+        assert_eq!(
+            helper.digest,
+            format!("sha256:{:x}", Sha256::digest(&original))
+        );
+        let mut observed = Vec::new();
+        helper.file.read_to_end(&mut observed).unwrap();
+        assert_eq!(observed, original);
+        assert!(helper.file.write_all(b"overwrite").is_err());
+        assert!(helper.file.set_len(0).is_err());
+        let next = HelperBinary::from_file(File::open(path).unwrap()).unwrap();
+        assert_eq!(
+            next.digest,
+            format!("sha256:{:x}", Sha256::digest(&replacement))
+        );
+        assert_ne!(next.digest, helper.digest);
+    }
+
+    #[test]
+    fn helper_byte_loader_preserves_static_format_and_size_limits() {
+        let fixture = BinaryFixture::new();
+        for bytes in [b"not an ELF".to_vec(), {
+            let mut elf = static_image();
+            elf[64..68].copy_from_slice(&3u32.to_le_bytes());
+            elf
+        }] {
+            let path = fixture.install("invalid", &bytes);
+            assert_eq!(
+                HelperBinary::from_file(File::open(&path).unwrap())
+                    .err()
+                    .unwrap(),
+                "host_helper_requires_static_elf"
+            );
+            fs::remove_file(path).unwrap();
+        }
+        let path = fixture.0.join("oversize");
+        File::create(&path)
+            .unwrap()
+            .set_len(128 * 1024 * 1024 + 1)
+            .unwrap();
+        assert_eq!(
+            HelperBinary::from_file(File::open(path).unwrap())
+                .err()
+                .unwrap(),
+            "host_helper_too_large"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires Linux root for a disposable root-owned helper installation"]
+    fn root_managed_helper_loads_without_external_digest_and_rejects_untrusted_paths() {
+        assert_eq!(unsafe { libc::geteuid() }, 0);
+        let fixture = BinaryFixture::new();
+        let bytes = static_image();
+        let path = fixture.install("execution_agent", &bytes);
+        let mut helper = HelperBinary::load(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            helper.digest,
+            format!("sha256:{:x}", Sha256::digest(&bytes))
+        );
+        let mut replacement = bytes.clone();
+        replacement[119] = 99;
+        fs::rename(fixture.install("replacement", &replacement), &path).unwrap();
+        let mut observed = Vec::new();
+        helper.file.read_to_end(&mut observed).unwrap();
+        assert_eq!(observed, bytes);
+        let current = HelperBinary::load(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            current.digest,
+            format!("sha256:{:x}", Sha256::digest(&replacement))
+        );
+        let link = fixture.0.join("symlink");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert_eq!(
+            HelperBinary::load(link.to_str().unwrap()).err().unwrap(),
+            "host_path_untrusted"
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(
+            HelperBinary::load(path.to_str().unwrap()).err().unwrap(),
+            "host_path_untrusted"
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o500)).unwrap();
+        let name = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::chown(name.as_ptr(), 10001, 10001) }, 0);
+        assert_eq!(
+            HelperBinary::load(path.to_str().unwrap()).err().unwrap(),
+            "host_path_untrusted"
+        );
+    }
+
     #[test]
     fn rejected_helper_releases_its_output_reservation_for_retry() {
         let root = std::env::temp_dir().join(format!(
