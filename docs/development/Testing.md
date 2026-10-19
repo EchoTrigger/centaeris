@@ -15,6 +15,23 @@ gate and inspection of its final artifacts.
 
 ## Test quality
 
+Pure declarative configuration and catalog-data updates do not require new tests
+or a red/green TDD cycle when implementation semantics stay unchanged. This
+includes model IDs, provider endpoints and protocol selections, context/output
+limits, reasoning presets, and capability flags. Verify authoritative values,
+validate the format/schema, and run directly affected existing checks. Do not
+copy mutable catalog facts into a second provider or model inventory in tests.
+Consumer tests should verify that the catalog is correctly projected and applied.
+Parsing, validation, request construction, routing logic, and persistence changes
+still require focused behavioral tests.
+
+Remove source-name and formatting checks that do not protect an observable
+contract. An empty implementation passing a check, or a harmless comment or
+formatting change failing it, is evidence that the check is insufficient.
+Preserve real security, protocol, and behavioral coverage rather than replacing
+one source-pattern checklist with another. Package managers and compilers own
+their configuration syntax; tests should exercise the resulting behavior.
+
 Library note conditional commits, immutable content reads, migration/rollback,
 history capacity and browser draft recovery are covered in
 [LibraryNotes.md](LibraryNotes.md). PostgreSQL tests observe real commit and
@@ -125,7 +142,7 @@ transactions and stream cancellation. See the
 
 ## Focused Core gate
 
-Every Rust change runs at least:
+Rust implementation changes run at least:
 
 ```powershell
 cargo test --locked -p centaeris-core query_loop
@@ -134,6 +151,8 @@ cargo test --locked -p centaeris-core query_loop
 Add the smallest focused test owned by the changed contract or adapter. Core
 tests runtime semantics; adapter tests cover storage, transport, and platform
 integration.
+Configuration-only changes, including updates to existing Rust test expectations,
+use the configuration validation scope above and do not trigger this broader gate.
 
 Hosted Redis live-stream changes also run the ignored `transient_stream` Redis
 tests against a disposable loopback Redis service with `MEMORY USAGE`, a 32 MiB

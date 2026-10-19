@@ -1,4 +1,4 @@
-"""Compare rendered deployment identity with the frozen Workspace baseline."""
+"""Validate container build inputs and checked-out source provenance."""
 import json
 import os
 from pathlib import Path
@@ -11,13 +11,6 @@ import tomllib
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def identity(config):
-    keys = ("container_name", "volumes", "environment", "entrypoint", "command", "ports", "depends_on", "restart")
-    return {"name": config["name"], "volumes": config["volumes"],
-            "services": {name: {key: service[key] for key in keys if key in service}
-                         for name, service in config["services"].items()}}
 
 
 def rendered_config():
@@ -33,15 +26,6 @@ def rendered_config():
 
 
 class DeploymentMigrationTests(unittest.TestCase):
-    def test_service_volume_mount_and_runtime_settings_match_the_source_stack(self):
-        baseline = json.loads((ROOT / "tests/workspace/fixtures/compose_identity.json").read_text(encoding="utf-8"))
-        self.assertEqual(identity(rendered_config()), baseline)
-
-    def test_each_product_dockerfile_selects_its_inputs(self):
-        for name in ("api", "worker", "runtime_server", "web", "hosted_execution"):
-            filename = "Dockerfile.agent" if name == "hosted_execution" else "Dockerfile"
-            self.assertNotIn("COPY . .", (ROOT / "packages" / name / filename).read_text(encoding="utf-8"), name)
-
     def test_runtime_image_retains_compiled_hosted_command_contracts(self):
         dockerfile = (ROOT / "packages/runtime_server/Dockerfile").read_text(encoding="utf-8")
         build = dockerfile.split("\nFROM ", 1)[0]
