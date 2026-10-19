@@ -797,6 +797,12 @@ impl TranscriptProjectorV1 {
                 body: TranscriptBlockBodyV1::Notice {
                     notice_type: "run_boundary".into(),
                     content: match payload.get("message").and_then(|value| value.as_str()) {
+                        _ if event.event_type == SessionRecordType::AgentRunInterrupted
+                            && payload.get("reasonType").and_then(|value| value.as_str())
+                                == Some("cancelled") =>
+                        {
+                            TranscriptTextContentV1::inline(String::new())
+                        }
                         Some(message) => text_content(event, "message", message.to_string(), 1),
                         None => TranscriptTextContentV1::inline(String::new()),
                     },

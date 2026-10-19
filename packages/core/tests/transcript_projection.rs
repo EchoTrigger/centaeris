@@ -707,7 +707,7 @@ fn terminal_run_boundaries_retain_failure_and_interruption_messages() {
         ),
         (
             "agent_run_interrupted",
-            json!({"reasonType":"cancelled","message":"Stopped by user","retryable":false}),
+            json!({"reasonType":"provider_interrupted","message":"Provider interrupted","retryable":true}),
         ),
     ] {
         let mut projector =
@@ -725,6 +725,34 @@ fn terminal_run_boundaries_retain_failure_and_interruption_messages() {
         );
         assert_eq!(block["presentation"]["sourceType"], kind);
     }
+}
+
+#[test]
+fn user_cancellation_keeps_terminal_identity_without_a_display_notice() {
+    let mut projector =
+        TranscriptProjectorV1::new("session-1".into(), "generation-1".into()).unwrap();
+    let event = record(
+        42,
+        "agent_run_interrupted",
+        "cancelled",
+        json!({"reasonType":"cancelled","message":"AgentRun cancelled by user.","retryable":false}),
+    );
+    let TranscriptProjectionUpdateV1::Patch(patch) =
+        projector.apply(&event, "run-1", "42").unwrap()
+    else {
+        panic!()
+    };
+    let block = serde_json::to_value(&patch.upserts[0]).unwrap();
+    assert_eq!(block["body"]["content"]["inlineContent"], "");
+    assert_eq!(block["body"]["content"]["sourceRef"], Value::Null);
+    assert_eq!(block["presentation"]["sourceType"], "agent_run_interrupted");
+    assert_eq!(block["presentation"]["agentRunId"], "run-1");
+    assert_eq!(block["presentation"]["observedAtMs"], 42);
+    assert_eq!(event.event.payload["reasonType"], "cancelled");
+    assert_eq!(
+        event.event.payload["message"],
+        "AgentRun cancelled by user."
+    );
 }
 
 #[test]

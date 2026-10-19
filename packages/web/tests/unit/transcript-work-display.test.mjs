@@ -119,6 +119,16 @@ test("one real failure keeps its visible content and one work period", () => {
   assert.equal((markup.match(/workProgress.worked/g) || []).length, 1);
   assert.ok(markup.includes("failure"));
 });
+test("a silent cancellation keeps partial content and the completed work period", () => {
+  const partial = { blockId: "partial-answer", body: { kind: "assistantText" }, orderKey: { sourceSequence: "3" } };
+  const cancelled = { blockId: "cancelled-boundary", body: { kind: "notice", noticeType: "run_boundary", content: { inlineContent: "", sourceRef: null } },
+    presentation: { sourceType: "agent_run_interrupted", agentRunId: "current-run", observedAtMs: 10000 }, orderKey: { sourceSequence: "4" } };
+  const markup = render([user, partial, cancelled], { startedAtMs: 1000, completedAtMs: 10000 });
+  assert.ok(markup.includes("partial-answer"));
+  assert.ok(!markup.includes("cancelled-boundary"));
+  assert.ok(markup.includes("workProgress.worked"));
+  assert.equal(markup, render([user, partial], { startedAtMs: 1000, completedAtMs: 10000 }));
+});
 test("an active or pending request has one working indicator even without process content", () => {
   assert.equal((render([user], { running: true }).match(/workProgress.working/g) || []).length, 1);
   assert.equal((render([], { pendingUserMessage: { ...pending, agentRunId: null } }).match(/workProgress.working/g) || []).length, 1);
