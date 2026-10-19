@@ -56,6 +56,9 @@ class PublicClient:
         return {"operationId": args[3], "command": "submitMessage", "status": "accepted",
                 "sessionId": "session", "agentRunId": "run", "turnId": "turn"}
 
+    def operation(self, *args):
+        return None
+
     def run_environment(self, session, run):
         return {"sessionId": session, "agentRunId": run, "environmentId": "environment"}
 
@@ -79,10 +82,14 @@ class Provisioner:
         self.calls.append(("bind", session, environment, operation))
         return {"environmentId": environment, "sessionId": session, "profileDigest": profile_digest(profile)}
 
-    def observe_setup(self, session, environment, run):
+    def provision(self, session, environment, operation):
+        self.calls.append(("provision", operation))
+        return self.observe_setup(session, environment, None)
+
+    def observe_setup(self, session, environment, run=None):
         self.calls.append(("observe", run))
-        return OwnedEnvironment("session", "environment", "run", "instance", "container", "host", 2,
-                                self.profile["imageDigest"], profile_digest(self.profile), "waitingSetup", 1)
+        return OwnedEnvironment("session", "environment", run, "instance", "container", "host", 2,
+                                self.profile["imageDigest"], profile_digest(self.profile), "resident", 1)
 
     def activate_setup(self, owned, operation):
         self.calls.append(("activate", owned.instance_id, operation))
@@ -131,7 +138,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         environment_dir.mkdir(parents=True)
         (environment_dir / "Dockerfile").write_text("FROM scratch\n")
         (environment_dir.parent / "instruction.md").write_text("  Original task instruction\n", encoding="utf-8")
-        self.profile = {"schema": "runtime.benchmark_execution_profile.v1", "imageDigest": "sha256:" + "a" * 64,
+        self.profile = {"schema": "runtime.environment_profile.v1", "imageDigest": "sha256:" + "a" * 64,
                         "workspaceRoot": "/app", "user": "0:0", "network": "publicInternet", "resources": {
                             "cpuMilli": 1000, "memoryBytes": 2 * 1024**3, "pidsLimit": 256,
                             "dataTmpfsBytes": 1024**3, "storageBytes": 10 * 1024**3}}
@@ -161,13 +168,14 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancelled_agent_blocks_verifier_until_process_quiescence_is_confirmed(self):
         await self.environment.start()
         await self.environment.activate_workspace_setup()
+        self.environment.bind_workspace_run("run")
         self.environment.mark_agent_cancellation_pending("run")
         with self.assertRaisesRegex(WorkspaceError, "agent_quiescence_unconfirmed"):
             await self.environment.exec("verifier")
         self.client.run_fact = lambda session, run: {"agentRunId": run, "status": "cancelled"}
         original = self.provisioner.exec
         def quiesce(owned, **request):
-            if "benchmark-quiesce" in request["command"]:
+            if request["command"] == ":":
                 self.assertEqual(request["user"], self.profile["user"])
                 return {"returnCode": 0, "stdout": json.dumps({"schema": "runtime.benchmark.quiescence.v1", "quiescent": True}), "stderr": ""}
             return original(owned, **request)
@@ -179,6 +187,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_uncertain_quiescence_blocks_verifier_but_keeps_retirement_available(self):
         await self.environment.start()
         await self.environment.activate_workspace_setup()
+        self.environment.bind_workspace_run("run")
         self.environment.mark_agent_cancellation_pending("run")
         self.client.run_fact = lambda session, run: {"agentRunId": run, "status": "cancelled"}
         def unknown(*args, **kwargs):
@@ -222,89 +231,68 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.allocation.released)
         self.assertEqual([call[1] for call in self.provisioner.calls if call[0] == 'retire'], ['instance'])
 
-    async def test_start_pre_admits_once_and_waits_before_any_model_work(self):
+    async def test_start_provisions_once_before_any_model_work(self):
         await self.environment.start(force_build=False)
-        self.assertEqual([call[0] for call in self.client.calls], ["create", "submit"])
-        self.assertEqual(self.client.calls[1][1][4], "  Original task instruction\n")
+        self.assertEqual([call[0] for call in self.client.calls], ["create"])
         self.assertEqual(self.environment.workspace_binding.instance_id, "instance")
-        self.assertFalse(any(call[0] == "activate" for call in self.provisioner.calls))
+        self.assertIsNone(self.environment._agent_run_id)
         self.assertTrue(self.allocation.creation_started)
         await self.environment.start(force_build=False)
-        self.assertEqual(len(self.client.calls), 2)
+        self.assertEqual(sum(call[0] == 'provision' for call in self.provisioner.calls), 1)
 
-    async def test_setup_stops_on_original_run_terminal_without_claiming_an_instance_or_replaying_submit(self):
-        for status in ("completed", "failed", "cancelled"):
-            with self.subTest(status=status):
-                client, allocation = PublicClient(), Allocation()
-                observations, notifications = [], []
-                def run_fact(session, run):
-                    observations.append((session, run))
-                    return {"agentRunId": run, "status": status}
-                client.run_fact = run_fact
-                client.read_run_events = lambda *args, **kwargs: self.fail("pre-admission failure has no committed events")
-                environment = WorkspaceEnvironment(**{**self.arguments,
-                    "workspace_client": client, "allocation": allocation,
-                    "setup_timeout_sec": 0.05, "workspace_event_callback": notifications.append})
-                self.provisioner.observe_setup = lambda *args: None
-                error = "benchmark_setup_agent_run_" + status
-                with self.assertRaisesRegex(WorkspaceError, error):
-                    await environment.start()
-                with self.assertRaisesRegex(WorkspaceError, error):
-                    await environment.start()
-                self.assertEqual(observations, [("session", "run")])
-                self.assertEqual([call[0] for call in client.calls], ["create", "submit"])
-                self.assertIsNone(environment.workspace_binding)
-                self.assertFalse(allocation.released)
-                self.assertEqual(notifications, [{"sessionId": "session", "agentRunId": "run",
-                    "environmentId": "environment", "phase": "setup", "status": "failed", "error": error}])
-                with self.assertRaisesRegex(WorkspaceError, "cleanup_pending"):
-                    await environment.stop(delete=True)
-                self.assertFalse(allocation.released)
-                self.assertFalse(any(call[0] in {"activate", "exec", "retire"} for call in self.provisioner.calls))
 
-    async def test_setup_observes_original_run_while_waiting_then_uses_original_instance(self):
-        observe = self.provisioner.observe_setup
-        def observe_pending(*args):
-            return None if len(reads) < 2 else observe(*args)
-        reads = []
-        def run_fact(session, run):
-            reads.append((session, run))
-            return {"agentRunId": run, "status": "running"}
-        self.client.run_fact = run_fact
-        self.provisioner.observe_setup = observe_pending
-        await self.environment.start()
-        self.assertEqual(reads, [("session", "run"), ("session", "run")])
-        self.assertEqual(self.environment.workspace_binding.instance_id, "instance")
-        self.assertEqual(sum(call[0] == "submit" for call in self.client.calls), 1)
-
-    async def test_setup_public_observation_unavailable_does_not_invent_terminal_or_cleanup(self):
-        observe = self.provisioner.observe_setup
-        waiting = [True]
-        def observe_pending(*args):
-            return None if waiting.pop() else observe(*args)
-        def unavailable(*args, **kwargs):
-            waiting.append(False)
-            raise WorkspaceError("transport_unavailable")
-        self.provisioner.observe_setup = observe_pending
-        self.client.run_fact = unavailable
-        notifications = []
-        self.environment.workspace_event_callback = notifications.append
-        await self.environment.start()
-        self.assertEqual(self.environment.workspace_binding.instance_id, "instance")
+    async def test_pending_provision_does_not_claim_an_instance_or_submit_model_work(self):
+        self.provisioner.provision = lambda *args: None
+        self.provisioner.observe_setup = lambda *args: None
+        with self.assertRaisesRegex(WorkspaceError, 'environment_provision_pending'):
+            await self.environment.start()
+        self.assertIsNone(self.environment.workspace_binding)
+        self.assertEqual([call[0] for call in self.client.calls], ['create'])
+        with self.assertRaisesRegex(WorkspaceError, 'cleanup_pending'):
+            await self.environment.stop(delete=True)
         self.assertFalse(self.allocation.released)
-        self.assertFalse(any(item.get("status") == "failed" for item in notifications))
 
-    async def test_agent_adopts_same_run_then_activates_without_second_prompt(self):
+
+    async def test_cleanup_recovers_original_provision_target_without_a_run(self):
+        def lost(*args):
+            raise WorkspaceError('transport_unavailable')
+        self.provisioner.provision = lost
+        with self.assertRaises(WorkspaceError):
+            await self.environment.start()
+        self.provisioner.physical, self.provisioner.debit = 'absent', 0
+        await self.environment.stop(delete=True)
+        self.assertTrue(self.allocation.released)
+        self.assertEqual([call[0] for call in self.client.calls], ['create'])
+        self.assertEqual([call[1] for call in self.provisioner.calls if call[0] == 'retire'], ['instance'])
+
+
+    async def test_provision_observation_failure_does_not_invent_terminal_or_cleanup(self):
+        def unavailable(*args):
+            raise WorkspaceError('environment_observation_unavailable', 503)
+        self.provisioner.provision = unavailable
+        self.provisioner.observe_setup = lambda *args: None
+        with self.assertRaises(WorkspaceError):
+            await self.environment.start()
+        self.assertIsNone(self.environment._agent_run_id)
+        self.assertFalse(self.allocation.released)
+        with self.assertRaisesRegex(WorkspaceError, 'cleanup_pending'):
+            await self.environment.stop(delete=True)
+
+
+    async def test_agent_submits_one_real_run_after_environment_preparation(self):
         await self.environment.start(force_build=False)
-        agent = WorkspaceAgent(logs_dir=self.root / "agent", model_config_ref="model", thinking_mode="high")
+        self.assertEqual(sum(call[0] == 'submit' for call in self.client.calls), 0)
+        agent = WorkspaceAgent(logs_dir=self.root / 'agent', model_config_ref='model', thinking_mode='high')
         await agent.setup(self.environment)
-        await agent.run("  Original task instruction\n", self.environment, AgentContext())
-        self.assertEqual(sum(call[0] == "submit" for call in self.client.calls), 1)
-        self.assertEqual(sum(call[0] == "activate" for call in self.provisioner.calls), 1)
+        await agent.run('  Original task instruction\n', self.environment, AgentContext())
+        self.assertEqual(sum(call[0] == 'submit' for call in self.client.calls), 1)
+        self.assertEqual(self.environment._owned.agent_run_id, 'run')
+        self.assertEqual(sum(call[0] == 'activate' for call in self.provisioner.calls), 0)
+
 
     async def test_setup_verifier_and_artifacts_use_exact_owned_instance(self):
         await self.environment.start(force_build=False)
-        result = await self.environment.exec("verify command", cwd="/app", user="1000", timeout_sec=120)
+        result = await self.environment.exec("verify command", cwd="/app", user=self.profile["user"], timeout_sec=120)
         self.assertEqual(result.stdout, "same instance")
         source, target = self.root / "source", self.root / "download"
         source.write_bytes(b"bytes")
@@ -401,20 +389,20 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(WorkspaceError, "environment_destroyed"):
             await self.environment.start(force_build=False)
 
-    async def test_cleanup_after_lost_start_ack_only_queries_original_identity(self):
-        submit = self.client.submit_message
-        receipt = []
+    async def test_cleanup_after_lost_provision_ack_only_observes_original_identity(self):
+        calls = []
         def lost(*args):
-            receipt.append(submit(*args))
-            raise WorkspaceError("transport_unavailable")
-        self.client.submit_message = lost
+            calls.append(args)
+            raise WorkspaceError('transport_unavailable')
+        self.provisioner.provision = lost
         with self.assertRaises(WorkspaceError):
             await self.environment.start(force_build=False)
-        self.client.operation = lambda workspace, command, operation: receipt[0]
-        self.provisioner.physical, self.provisioner.debit = "absent", 0
+        self.provisioner.physical, self.provisioner.debit = 'absent', 0
         await self.environment.stop(delete=True)
         self.assertTrue(self.allocation.released)
-        self.assertEqual(sum(call[0] == "submit" for call in self.client.calls), 1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(sum(call[0] == 'submit' for call in self.client.calls), 0)
+
 
     async def test_cleanup_release_interruption_can_be_reconciled_again(self):
         await self.environment.start(force_build=False)
@@ -430,16 +418,15 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         await self.environment.stop(delete=True)
         self.assertTrue(self.allocation.released)
 
-    async def test_ready_instance_is_rejected_before_harbor_can_mutate_setup(self):
-        observe = self.provisioner.observe_setup
-        def already_running(*args):
-            from dataclasses import replace
-            return replace(observe(*args), setup_state="ready")
-        self.provisioner.observe_setup = already_running
-        with self.assertRaisesRegex(WorkspaceError, "prepared_environment_binding_mismatch"):
+    async def test_changed_profile_is_rejected_before_harbor_can_mutate_setup(self):
+        from dataclasses import replace
+        provision = self.provisioner.provision
+        self.provisioner.provision = lambda *args: replace(provision(*args), profile_digest='sha256:' + 'f' * 64)
+        with self.assertRaisesRegex(WorkspaceError, 'prepared_environment_binding_mismatch'):
             await self.environment.start(force_build=False)
         self.assertIsNone(self.environment.workspace_binding)
-        self.assertFalse(self.allocation.released)
+        self.assertFalse(any(call[0] == 'exec' for call in self.provisioner.calls))
+
 
     async def test_exec_transport_failure_is_not_replayed(self):
         await self.environment.start(force_build=False)
@@ -462,11 +449,14 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(WorkspaceError, "task_mounts_or_environment_unsupported"):
             WorkspaceEnvironment(**self.arguments, mounts=[{**mount, "source": str(self.root.parent / "private")}])
 
-    async def test_pre_admission_uses_harbors_canonical_canary_stripped_instruction(self):
-        instruction = self.arguments["environment_dir"].parent / "instruction.md"
-        instruction.write_text("<!-- benchmark canary marker -->\n\nExact task\n", encoding="utf-8")
+    async def test_agent_uses_harbors_canonical_canary_stripped_instruction(self):
+        instruction = self.arguments['environment_dir'].parent / 'instruction.md'
+        instruction.write_text('<!-- benchmark canary marker -->\n\nExact task\n', encoding='utf-8')
         await self.environment.start(force_build=False)
-        self.assertEqual(self.client.calls[1][1][4], "Exact task\n")
+        agent = WorkspaceAgent(logs_dir=self.root / 'agent', model_config_ref='model', thinking_mode='high')
+        await agent.run('Exact task\n', self.environment, AgentContext())
+        self.assertEqual(self.client.calls[1][1][4], 'Exact task\n')
+
 
 
 if __name__ == "__main__":

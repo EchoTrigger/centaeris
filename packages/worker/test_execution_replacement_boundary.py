@@ -16,25 +16,15 @@ os.environ.update(
 )
 
 import worker
+from test_worker import lifecycle_fixture
 
 
 class ExecutionReplacementBoundaryTests(unittest.TestCase):
     def setUp(self):
         self.owner = "claim:execution-replacement-test"
-        self.start = {
-            "agentRunId": "agent_run_replacement",
-            "turnId": "turn_replacement",
-            "authorizationDigest": "sha256:" + "a" * 64,
-        }
-        self.job = {
-            "jobId": "agent_run.lifecycle:agent_run_replacement",
-            "jobKind": "agent_run.lifecycle",
-            "sessionId": "session_replacement",
-            "payloadRef": "record:agent_run:agent_run_replacement",
-            "idempotencyKey": "agent_run.lifecycle:agent_run_replacement:" + self.start["authorizationDigest"],
-            "retryCount": 0,
-            "maxRetries": 2,
-        }
+        self.job, self.start = lifecycle_fixture("agent_run_replacement")
+        self.start["turnId"] = "turn_replacement"
+        self.job.update(sessionId="session_replacement", retryCount=0, maxRetries=2)
         self.calls = []
 
     @contextmanager

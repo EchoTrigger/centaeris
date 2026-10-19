@@ -32,10 +32,11 @@ from .model_adapter.common import fake_tool_call, zero_usage
 from .models import (Agent, AgentCoordinationSession, AgentInputQueue, AgentRun, AgentWorkConsumeAttempt,
                      AgentWorkReturn, AgentWorkSession, HostedOperationReceipt, ModelConfig,
                      Session, Workspace, WorkspaceMembership)
-from .runtime_client import build_agent_run_start, schedule_agent_run_lifecycle
+from .runtime_client import schedule_agent_run_lifecycle
+from .testing import fenced_start_fixture
 from .test_agent_work import PROFILE
 from . import test_agent_work_consumption as consume_fixture
-from .test_native_consumption_runtime import isolate_runtime_schema
+from .runtime_schema_test_helpers import isolate_runtime_schema
 
 
 class NativeConsumptionProductionTests(LiveServerTestCase):
@@ -69,6 +70,8 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
         self.runtime_markers = queue.Queue()
 
     def start_runtime(self):
+        self.runtime_command_lock = threading.Lock()
+        self.cleanup_proofs = {}
         database = connection.settings_dict
         url = "postgresql://{}:{}@{}:{}/{}".format(
             quote(database["USER"]), quote(database["PASSWORD"]), database["HOST"],
@@ -104,9 +107,10 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
         return ready.removeprefix("native-consume-production-ready:")
 
     def stop_runtime(self):
-        if self.runtime_process.poll() is None:
-            self.runtime_process.stdin.write("stop\n")
-            self.runtime_process.stdin.flush()
+        with self.runtime_command_lock:
+            if self.runtime_process.poll() is None:
+                self.runtime_process.stdin.write("stop\n")
+                self.runtime_process.stdin.flush()
         self.runtime_process.wait(timeout=30)
         self.runtime_reader.join(timeout=5)
         self.runtime_process.stdin.close()
@@ -118,9 +122,51 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
             Path(evidence + "-requests.json").write_text(json.dumps({
                 "models": self.requests, "lifecycleSteps": self.steps,
                 "automaticAdmissions": self.automatic_admissions,
+                "cleanupProofs": self.cleanup_proofs,
                 "sessionEvents": list(self.source.events.order_by("sequence").values_list("payload", flat=True)),
             }, indent=2) + "\n", encoding="utf-8")
         self.assertEqual(self.runtime_process.returncode, 0, "".join(self.runtime_lines))
+
+    def runtime_command(self, command, marker):
+        """Keep each stdin request and its proof together on the shared stream."""
+        with self.runtime_command_lock:
+            self.assertIsNone(self.runtime_process.poll(), "".join(self.runtime_lines))
+            self.runtime_process.stdin.write(command + "\n")
+            self.runtime_process.stdin.flush()
+            proof = self.runtime_markers.get(timeout=10)
+            self.assertTrue(proof.startswith(marker), "".join(self.runtime_lines))
+            return json.loads(proof.removeprefix(marker))
+
+    def assert_lifecycle_cleanup(self, run):
+        proof = self.runtime_command("verify-cleanup:" + run.pk, "native-consume-production-cleanup:")
+        self.assertEqual(proof["agentRunId"], run.pk)
+        allocations = proof["allocations"]
+        self.assertIsInstance(allocations, list)
+        self.assertTrue(allocations, "a succeeded lifecycle must prove its actual instance cleanup")
+        identities = {name: [] for name in ("instanceId", "executionId", "removedContainerId")}
+        for allocation in allocations:
+            self.assertEqual(allocation["allocationKind"], "instance")
+            for name in ("cleanupComplete", "physicalRemoved", "noResidentCharge", "physicalAbsent"):
+                self.assertIs(allocation[name], True, allocation)
+            for name, values in identities.items():
+                self.assertIsInstance(allocation[name], str)
+                self.assertTrue(allocation[name].strip(), allocation)
+                values.append(allocation[name])
+        for name, values in identities.items():
+            self.assertEqual(len(values), len(set(values)), f"duplicate {name}: {proof}")
+        for allocation in allocations:
+            self.assertRegex(allocation["removedContainerId"], r"^[0-9a-f]{64}$")
+        execution_ids = list(run.events.filter(payload__type="agent_run_execution_started").values_list(
+            "payload__payload__executionId", flat=True))
+        self.assertTrue(execution_ids, "cleanup must match committed execution identities")
+        self.assertCountEqual(identities["executionId"], execution_ids)
+        for previous in self.cleanup_proofs.values():
+            self.assertTrue(set(identities["executionId"]).isdisjoint(
+                allocation["executionId"] for allocation in previous["allocations"]), proof)
+            self.assertTrue(set(identities["removedContainerId"]).isdisjoint(
+                allocation["removedContainerId"] for allocation in previous["allocations"]), proof)
+        self.cleanup_proofs[run.pk] = proof
+        return proof
 
     def load_worker(self, runtime_url):
         path = Path(__file__).resolve().parents[2] / "worker"
@@ -142,38 +188,56 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
             "terminalFacts": list(run.events.filter(payload__type__in=[
                 "agent_run_completed", "agent_run_failed", "agent_run_interrupted"]).values_list("payload", flat=True))})
 
-    def execute_return_job(self, worker, child):
-        """Publish through an exact real Core lease after the child commits."""
-        job_id = "agent_work.return:" + child.pk
+    def claim_due_job(self, worker, job_id, job_kind, worker_id):
+        """Observe durable due time under a monotonic deadline before claiming."""
         deadline = time.monotonic() + 5
         def poll_request(path, body=None):
             remaining = deadline - time.monotonic()
-            self.assertGreater(remaining, 0, "stable return claim deadline exceeded")
+            self.assertGreater(remaining, 0, f"job claim deadline exceeded: {job_id}")
             return worker.json_request(f"{worker.RUNTIME_INTERNAL_URL}{path}", body,
-                "X-Internal-Token", worker.INTERNAL_API_TOKEN, "native_return_claim_unavailable",
+                "X-Internal-Token", worker.INTERNAL_API_TOKEN, "native_job_claim_unavailable",
                 timeout=remaining)
         while True:
             jobs = poll_request("/internal/jobs/claim", {
-                "schema": "runtime.job.claim.v1", "workerId": "worker:native-return-test",
-                "jobId": job_id, "jobKind": "agent_work.return", "nowMs": worker.now_ms(),
+                "schema": "runtime.job.claim.v1", "workerId": worker_id,
+                "jobId": job_id, "jobKind": job_kind, "nowMs": worker.now_ms(),
                 "leaseMs": 300000, "limit": 1})["jobs"]
             if jobs:
                 break
             current = poll_request("/internal/jobs/" + job_id)["job"]
             remaining = deadline - time.monotonic()
-            self.assertGreater(remaining, 0, f"stable return job did not become due: {current}")
+            self.assertGreater(remaining, 0, f"job did not become due: {current}")
+            self.assertEqual((current["jobId"], current["jobKind"]), (job_id, job_kind))
             self.assertEqual(current["status"], "queued", current)
+            self.assertIs(type(current["runAtMs"]), int)
             due_seconds = max(0.01, (current["runAtMs"] - worker.now_ms()) / 1000)
             time.sleep(min(due_seconds, remaining))
         self.assertEqual(len(jobs), 1)
         job = jobs[0]
-        self.assertEqual((job["status"], job["sessionId"], job["payloadRef"], job["idempotencyKey"]),
-            ("leased", child.session_id, "record:agent_work:" + child.pk, job_id))
+        self.assertEqual((job["jobId"], job["jobKind"], job["status"]), (job_id, job_kind, "leased"))
         current = poll_request("/internal/jobs/" + job_id)["job"]
         self.assertEqual((current["status"], current["leaseOwner"]), ("leased", job["leaseOwner"]))
-        worker.execute_claimed_job(job, job["leaseOwner"])
-        self.assertEqual(worker.runtime_request("/internal/jobs/" + job_id)["job"]["status"], "succeeded")
+        return job
+
+    def execute_return_job(self, worker, child):
+        """Publish through an exact real Core lease after the child commits."""
+        job_id = "agent_work.return:" + child.pk
+        current = worker.runtime_request("/internal/jobs/" + job_id)["job"]
+        binding = (job_id, "agent_work.return", child.session_id, "record:agent_work:" + child.pk, job_id)
+        self.assertEqual(tuple(current[name] for name in ("jobId", "jobKind", "sessionId", "payloadRef", "idempotencyKey")), binding)
+        if current["status"] != "succeeded":
+            job = self.claim_due_job(worker, job_id, "agent_work.return", "worker:native-return-test")
+            self.assertEqual(tuple(job[name] for name in ("jobId", "jobKind", "sessionId", "payloadRef", "idempotencyKey")), binding)
+            worker.execute_claimed_job(job, job["leaseOwner"])
+            current = worker.runtime_request("/internal/jobs/" + job_id)["job"]
+        self.assertEqual(current["status"], "succeeded", current)
         self.assertEqual(AgentWorkReturn.objects.filter(child_run=child).count(), 1)
+        returned = AgentWorkReturn.objects.get(child_run=child)
+        terminal = child.events.get(payload__type="agent_run_completed")
+        self.assertEqual((returned.payload["identity"]["workAgentRunId"], returned.payload["identity"]["workSessionId"]),
+            (child.pk, child.session_id))
+        self.assertEqual(returned.payload["identity"]["factRef"], terminal.eventId)
+        self.assertEqual(returned.payload["terminal"]["factRef"], terminal.eventId)
 
     def model_response(self, model, request):
         self.assertEqual(model.pk, self.model.pk)
@@ -202,12 +266,7 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
 
     def execute_lifecycle(self, worker, run, *, replay=False):
         job_id = "agent_run.lifecycle:" + run.pk
-        jobs = worker.runtime_request("/internal/jobs/claim", {
-            "schema": "runtime.job.claim.v1", "workerId": "worker:native-consume-test",
-            "jobId": job_id, "jobKind": "agent_run.lifecycle", "nowMs": worker.now_ms(),
-            "leaseMs": 300000, "limit": 1})["jobs"]
-        self.assertEqual(len(jobs), 1)
-        job = jobs[0]
+        job = self.claim_due_job(worker, job_id, "agent_run.lifecycle", "worker:native-consume-test")
         self.assertEqual(job["payloadRef"], "record:agent_run:" + run.pk)
         self.assertEqual(job["idempotencyKey"], job_id + ":" + run.authorization.digest)
         owner = job["leaseOwner"]
@@ -216,7 +275,7 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
 
         def step(body):
             self.steps.append(deepcopy(body))
-            self.assertEqual(body["agentRunStart"], build_agent_run_start(run))
+            self.assertEqual(body["agentRunStart"], fenced_start_fixture(run))
             result = original_step(body)
             self.assertEqual(result["terminalState"], "completed", self.lifecycle_diagnostic(run, result))
             if replay:
@@ -232,6 +291,7 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
         run.refresh_from_db()
         self.assertEqual(run.status, "completed")
         self.assertEqual(worker.runtime_request("/internal/jobs/" + job_id)["job"]["status"], "succeeded")
+        self.assert_lifecycle_cleanup(run)
 
     def test_real_consume_record_reference_reaches_first_model_with_native_origin_and_prior_context(self):
         self.exercise_native_consumption()
@@ -298,7 +358,7 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
                 response_payload = response.json()
             attempt = AgentWorkConsumeAttempt.objects.select_related("coordinator_run").get()
             run = attempt.coordinator_run
-            start = build_agent_run_start(run)
+            start = fenced_start_fixture(run)
             supplied = start["initialInput"]["input"]
             self.assertEqual(start["initialInput"]["attemptId"], attempt.pk)
             self.assertEqual(start["initialInput"]["noticeId"], returned.pk)
@@ -360,11 +420,8 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
                 self.assertEqual((AgentRun.objects.count(), HostedOperationReceipt.objects.count()), counts)
             returned.refresh_from_db()
             self.assertEqual(returned.payload, notice)
-            self.runtime_process.stdin.write(json.dumps(start) + "\n")
-            self.runtime_process.stdin.flush()
-            proof = self.runtime_markers.get(timeout=10)
-            self.assertTrue(proof.startswith("native-consume-production-origin:"), "".join(self.runtime_lines))
-            self.assertEqual(json.loads(proof.removeprefix("native-consume-production-origin:")), supplied)
+            proof = self.runtime_command(json.dumps(start), "native-consume-production-origin:")
+            self.assertEqual(proof, supplied)
             print("native-consume-production-model-ok:" + json.dumps({
                 "agentRunId": run.pk, "attemptId": attempt.pk, "noticeId": returned.pk,
                 "input": supplied, "originalUserMessageId": prior_user["messageId"],
@@ -382,21 +439,30 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
     def execute_parallel_child(self, worker, slot, children, busy_seen):
         """One completed job per real worker loop, with bounded diagnostic failure."""
         stopped = threading.Event()
+        deadline = time.monotonic() + 45
         failures = []
         completed = []
-        lifecycle_claims = 0
+        progress = 0
+        last_empty_claim = None
         original_request = worker.runtime_request
         original_next = worker.execute_next_job
         original_execute = worker.execute_claimed_job
         original_step = worker.agent_run_step_request
+        original_wait = worker.wait_for_jobs
 
         def request(path, body=None, **kwargs):
-            nonlocal lifecycle_claims
+            nonlocal last_empty_claim
+            remaining = deadline - time.monotonic()
+            self.assertGreater(remaining, 0, "parallel child worker deadline exceeded")
+            kwargs["timeout"] = min(kwargs.get("timeout") or worker.CONTROL_HTTP_TIMEOUT_SECONDS, remaining)
             if path == "/internal/jobs/claim" and body["jobKind"] == "agent_run.lifecycle":
-                lifecycle_claims += 1
-                self.assertLessEqual(lifecycle_claims, 3, "finite child claim budget exhausted")
+                if last_empty_claim is not None:
+                    self.assertGreater(progress, last_empty_claim,
+                        "an empty child claim must wait or execute another claimed job before polling again")
                 try:
-                    return original_request(path, body, **kwargs)
+                    response = original_request(path, body, **kwargs)
+                    last_empty_claim = None if response["jobs"] else progress
+                    return response
                 except worker.DependencyUnavailable as error:
                     if str(error) == "execution_claim_busy":
                         self.assertEqual(error.http_status, 503)
@@ -406,15 +472,30 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
                     raise
             return original_request(path, body, **kwargs) if body is not None else original_request(path, **kwargs)
 
+        def wait_for_jobs():
+            nonlocal progress
+            progress += 1
+            return original_wait()
+
+        def work_state(run):
+            return {
+                "modelRequests": sum(item["agentRunId"] == run.pk for item in self.requests),
+                "steps": sum(item["agentRunStart"]["agentRunId"] == run.pk for item in self.steps),
+                "executionEvents": list(run.events.filter(payload__type="agent_run_execution_started")
+                    .order_by("agent_run_sequence").values_list("eventId", flat=True)),
+            }
+
         def step(body):
             run = children[body["agentRunStart"]["agentRunId"]]
-            self.assertEqual(body["agentRunStart"], build_agent_run_start(run))
+            self.assertEqual(body["agentRunStart"], fenced_start_fixture(run))
             self.steps.append(deepcopy(body))
             result = original_step(body)
             self.assertEqual(result["terminalState"], "completed", self.lifecycle_diagnostic(run, result))
             return result
 
         def execute(job, owner):
+            nonlocal progress
+            progress += 1
             if job["jobKind"] != "agent_run.lifecycle":
                 # Return jobs may legitimately precede this slot's lifecycle
                 # claim. Execute/yield them through the real worker and Core;
@@ -430,13 +511,39 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
             current = original_request("/internal/jobs/" + job["jobId"])["job"]
             self.assertEqual((current["status"], current["leaseOwner"]), ("leased", owner))
             with self.parallel_mutex:
-                self.assertNotIn(run_id, self.child_leases)
-                self.assertNotIn(owner, self.child_leases.values())
-                self.child_leases[run_id] = owner
+                retry = self.child_cleanup_retries.pop(run_id, None)
+                if run_id in self.child_leases:
+                    self.assertIsNotNone(retry, "another child lease requires a durable cleanup retry")
+                    self.assertEqual(job["retryCount"], retry["job"]["retryCount"])
+                    self.assertEqual(job["lastError"], "retained_cleanup_pending")
+                    self.assertEqual((job["payloadRef"], job["idempotencyKey"]),
+                        (retry["job"]["payloadRef"], retry["job"]["idempotencyKey"]))
+                else:
+                    self.assertIsNone(retry)
+                    self.assertEqual(job["retryCount"], 0)
+                    self.child_leases[run_id] = owner
+                self.assertNotIn(owner, [lease for leases in self.child_lease_attempts.values() for lease in leases])
+                self.child_lease_attempts.setdefault(run_id, []).append(owner)
+            if retry is not None:
+                self.assertEqual(work_state(run), retry["work"])
             original_execute(job, owner)
             run.refresh_from_db()
             self.assertEqual(run.status, "completed")
-            self.assertEqual(original_request("/internal/jobs/" + job["jobId"])["job"]["status"], "succeeded")
+            if retry is not None:
+                self.assertEqual(work_state(run), retry["work"], "cleanup retries must not reexecute a model or step")
+            current = original_request("/internal/jobs/" + job["jobId"])["job"]
+            if current["status"] == "queued":
+                self.assertEqual(current["lastError"], "retained_cleanup_pending", current)
+                self.assertEqual(current["retryCount"], job["retryCount"] + 1, current)
+                self.assertLessEqual(current["retryCount"], current["maxRetries"])
+                self.assertEqual((current["leaseOwner"], current["leaseExpiresAtMs"]), (None, None))
+                self.assertGreater(current["runAtMs"], current["updatedAtMs"])
+                with self.parallel_mutex:
+                    self.child_cleanup_retries[run_id] = {"job": current, "work": work_state(run)}
+                return
+            self.assertEqual(current["status"], "succeeded", json.dumps({"job": current,
+                "agentRunId": run.pk, "transitionReason": run.transitionReason,
+                "runtimeLogTail": self.runtime_lines[-50:]}))
             completed.append(run_id)
             stopped.set()
 
@@ -457,6 +564,7 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
             with patch.object(worker, "runtime_request", side_effect=request), \
                  patch.object(worker, "agent_run_step_request", side_effect=step), \
                  patch.object(worker, "execute_claimed_job", side_effect=execute), \
+                 patch.object(worker, "wait_for_jobs", side_effect=wait_for_jobs), \
                  patch.object(worker, "execute_next_job", side_effect=execute_next):
                 worker.run_job_loop(slot, stopped)
         finally:
@@ -489,6 +597,8 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
             self.parallel_mutex = threading.Lock()
             self.child_model_intervals = []
             self.child_leases = {}
+            self.child_lease_attempts = {}
+            self.child_cleanup_retries = {}
             self.child_claim_busy = []
             # Import-time environment/path patches are process-wide. Prepare
             # both modules before starting their independent job executions.
@@ -517,10 +627,13 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
                     futures = start_children()
                 for future in futures:
                     future.result(timeout=90)
+            for child in children:
+                self.assert_lifecycle_cleanup(child)
             self.assertFalse(self.child_barrier.broken)
             self.child_barrier = None
             self.assertEqual(set(self.child_leases), set(child_by_id))
             self.assertEqual(len(set(self.child_leases.values())), 2)
+            self.assertFalse(self.child_cleanup_retries, "all child cleanup retries must reach succeeded")
             self.assertEqual(len(self.child_model_intervals), 2)
             self.assertEqual({item[0] for item in self.child_model_intervals}, set(child_by_id))
             self.assertGreater(min(item[2] for item in self.child_model_intervals),
@@ -548,6 +661,7 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
             print("native-parallel-claims-ok:" + json.dumps({
                 "controlledClaimBusy": controlled_claim_busy, "busySlots": self.child_claim_busy,
                 "childLeases": {run_id: hashlib.sha256(owner.encode()).hexdigest() for run_id, owner in self.child_leases.items()},
+                "childLeaseAttempts": {run_id: len(leases) for run_id, leases in self.child_lease_attempts.items()},
                 "executionIds": execution_ids, "modelOverlapNs": min(item[2] for item in self.child_model_intervals)
                     - max(item[1] for item in self.child_model_intervals)}))
             for child in children:
@@ -596,19 +710,109 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
                 "attempts": AgentWorkConsumeAttempt.objects.count(), "modelPurpose": "main", "modelLoopIndex": 0}))
 
 
+class NativeProductionJobClaimTests(SimpleTestCase):
+    def test_claim_waits_for_persisted_due_time_and_checks_the_committed_lease(self):
+        clock = [10.0]
+        sleeps = []
+        calls = []
+        job = {"jobId": "scheduled-child", "jobKind": "agent_run.lifecycle", "status": "queued",
+               "runAtMs": 1200, "leaseOwner": None}
+
+        def request(url, body, _header, _token, _reason, *, timeout):
+            self.assertGreater(timeout, 0)
+            self.assertLessEqual(timeout, 5)
+            calls.append((url, deepcopy(body), timeout))
+            if url.endswith("/claim"):
+                self.assertEqual((body["jobId"], body["jobKind"], body["workerId"]),
+                    (job["jobId"], job["jobKind"], "fixture-worker"))
+                if worker.now_ms() < job["runAtMs"]:
+                    return {"jobs": []}
+                job.update(status="leased", leaseOwner="confirmed-owner")
+                return {"jobs": [deepcopy(job)]}
+            self.assertTrue(url.endswith("/" + job["jobId"]))
+            return {"job": deepcopy(job)}
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+
+        worker = SimpleNamespace(RUNTIME_INTERNAL_URL="http://runtime.invalid", INTERNAL_API_TOKEN="fixture",
+            now_ms=lambda: 1000 + round((clock[0] - 10) * 1000), json_request=request)
+        with patch.object(time, "monotonic", side_effect=lambda: clock[0]), \
+                patch.object(time, "sleep", side_effect=sleep):
+            claimed = NativeConsumptionProductionTests.claim_due_job(
+                self, worker, job["jobId"], job["jobKind"], "fixture-worker")
+        self.assertEqual(claimed["leaseOwner"], "confirmed-owner")
+        self.assertEqual(sleeps, [0.2])
+        self.assertEqual([body is not None for _, body, _ in calls], [True, False, True, False])
+        self.assertLess(calls[-1][2], calls[0][2])
+
+    def test_claim_deadline_bounds_a_job_that_remains_queued(self):
+        clock = [20.0]
+        requests = Mock(side_effect=[{"jobs": []}, {"job": {
+            "jobId": "future-job", "jobKind": "agent_work.return", "status": "queued", "runAtMs": 20000}}])
+        worker = SimpleNamespace(RUNTIME_INTERNAL_URL="http://runtime.invalid", INTERNAL_API_TOKEN="fixture",
+            now_ms=lambda: 1000, json_request=requests)
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        with patch.object(time, "monotonic", side_effect=lambda: clock[0]), \
+                patch.object(time, "sleep", side_effect=sleep):
+            with self.assertRaisesRegex(AssertionError, "job claim deadline exceeded: future-job"):
+                NativeConsumptionProductionTests.claim_due_job(
+                    self, worker, "future-job", "agent_work.return", "fixture-worker")
+        self.assertEqual(clock[0], 25.0)
+        self.assertEqual(requests.call_count, 2)
+
+    def test_claim_does_not_hide_a_runtime_request_failure_by_waiting(self):
+        requests = Mock(side_effect=RuntimeError("synthetic runtime request failed"))
+        worker = SimpleNamespace(RUNTIME_INTERNAL_URL="http://runtime.invalid", INTERNAL_API_TOKEN="fixture",
+            now_ms=lambda: 1000, json_request=requests)
+        with patch.object(time, "sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "synthetic runtime request failed"):
+                NativeConsumptionProductionTests.claim_due_job(
+                    self, worker, "failed-job", "agent_run.lifecycle", "fixture-worker")
+        self.assertEqual(requests.call_count, 1)
+        sleep.assert_not_called()
+
+
 class ParallelChildWorkerFixtureTests(SimpleTestCase):
+    def test_parallel_worker_requires_wait_or_claimed_work_between_empty_polls(self):
+        self.live_server_url = "http://api.invalid"
+        worker = NativeConsumptionProductionTests.load_worker(self, "http://runtime.invalid")
+
+        def execute_next(_slot):
+            worker.runtime_request("/internal/jobs/claim", {"jobKind": "agent_run.lifecycle"})
+            return False
+
+        def loop(slot, _stopped):
+            worker.execute_next_job(slot)
+            worker.execute_next_job(slot)
+
+        with patch.object(worker, "runtime_request", return_value={"jobs": []}), \
+                patch.object(worker, "execute_next_job", side_effect=execute_next), \
+                patch.object(worker, "run_job_loop", side_effect=loop):
+            with self.assertRaisesRegex(AssertionError, "an empty child claim must wait or execute"):
+                NativeConsumptionProductionTests.execute_parallel_child(
+                    self, worker, 0, {}, threading.Event())
+
     def test_parallel_worker_preserves_heartbeat_deadline_and_completes_handoff(self):
         self.live_server_url = "http://api.invalid"
         worker = NativeConsumptionProductionTests.load_worker(self, "http://runtime.invalid")
-        run = SimpleNamespace(session_id="child-session", status="queued", refresh_from_db=Mock(),
+        run = SimpleNamespace(pk="child-run", session_id="child-session", status="queued", refresh_from_db=Mock(),
+                              transitionReason="runtime_session_terminal_committed",
                               authorization=SimpleNamespace(digest="child-digest"))
         job = {"jobId": "child-job", "jobKind": "agent_run.lifecycle", "status": "leased",
-               "sessionId": run.session_id}
+               "sessionId": run.session_id, "retryCount": 0}
         owner = "child-owner"
         state = {"status": "leased"}
         heartbeats = []
         self.parallel_mutex = threading.Lock()
         self.child_leases = {}
+        self.child_lease_attempts = {}
+        self.child_cleanup_retries = {}
+        self.runtime_lines = []
 
         def request(path, body=None, *, timeout=None):
             if path == "/internal/jobs/heartbeat":

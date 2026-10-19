@@ -1,5 +1,5 @@
 use super::*;
-use crate::postgres_store::residency::retirement::RetirementRequest;
+use crate::postgres_store::residency::retirement::{RetirementError, RetirementRequest};
 
 fn request(a: &RetainedInstanceAllocation, epoch: i64) -> RetirementRequest {
     RetirementRequest {
@@ -32,7 +32,7 @@ fn postgres_retirement_pending_fences_current_and_new_runs_until_exact_absence()
             .get::<_, String>(0),
         "releasing"
     );
-    let profile = format!("sha256:{}", "b".repeat(64));
+    let profile = a.original.environment_profile.digest().unwrap();
     assert!(store
         .with_retained_instance_operation(&a.request("execution-a", &profile), &allocation, |_| Ok(
             ()
@@ -166,6 +166,94 @@ fn postgres_retirement_rejects_stale_epoch_conflicting_identity_and_preserves_hi
 
 #[test]
 #[ignore = "requires exclusively owned disposable PostgreSQL"]
+fn postgres_retirement_epoch_conflict_is_unaccepted_and_accepted_replay_is_immutable() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let (_, store, mut db) = setup();
+    let a = run(&store, &mut db, "run-a", 3);
+    let physical = Arc::new(Mutex::new(vec![]));
+    let allocation = prepare(&store, &a, "execution-a", &physical).unwrap();
+    let debit_sql = "SELECT row_to_json(s)::text FROM runtime.resident_sandboxes s";
+    let debit_before = db.query_one(debit_sql, &[]).unwrap().get::<_, String>(0);
+    let mut r = request(&allocation, 2);
+    let error = store
+        .retire_retained_instance(&r, |_| panic!("unaccepted request must not mutate Docker"))
+        .unwrap_err();
+    assert!(matches!(&error, RetirementError::ControllerEpochConflict));
+    assert_eq!(error.to_string(), "environment_retirement_epoch_conflict");
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.environment_retirements", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    assert_eq!(
+        db.query_one(debit_sql, &[]).unwrap().get::<_, String>(0),
+        debit_before
+    );
+
+    // Refreshing an explicitly unaccepted request may keep its operation identity.
+    r.expected_controller_epoch = 3;
+    assert_eq!(
+        store
+            .retire_retained_instance(&r, |_| Ok(false))
+            .unwrap()
+            .status,
+        "pending"
+    );
+    let body_sql = "SELECT request_json FROM runtime.environment_retirements WHERE operation_id=$1";
+    let accepted_body = db
+        .query_one(body_sql, &[&r.operation_id])
+        .unwrap()
+        .get::<_, String>(0);
+    db.execute(
+        "UPDATE public.app_core_sessionenvironment SET controller_epoch=4",
+        &[],
+    )
+    .unwrap();
+    let mut changed = r.clone();
+    changed.expected_controller_epoch = 4;
+    let error = store
+        .retire_retained_instance(&changed, |_| panic!("accepted body cannot change"))
+        .unwrap_err();
+    assert!(matches!(error, RetirementError::Rejected(_)));
+    changed.operation_id = "maintenance-2".into();
+    let error = store
+        .retire_retained_instance(&changed, |_| panic!("accepted identity cannot change"))
+        .unwrap_err();
+    assert!(matches!(error, RetirementError::Rejected(_)));
+    assert_eq!(
+        store
+            .retire_retained_instance(&r, |_| {
+                physical.lock().unwrap().clear();
+                Ok(true)
+            })
+            .unwrap()
+            .status,
+        "destroyed"
+    );
+    assert_eq!(
+        store
+            .retire_retained_instance(&r, |_| panic!("destroyed replay must not mutate Docker"))
+            .unwrap()
+            .status,
+        "destroyed"
+    );
+    assert_eq!(
+        db.query_one(body_sql, &[&r.operation_id])
+            .unwrap()
+            .get::<_, String>(0),
+        accepted_body
+    );
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.resident_sandboxes", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+}
+
+#[test]
+#[ignore = "requires exclusively owned disposable PostgreSQL"]
 fn postgres_retirement_committed_barrier_is_visible_before_physical_mutation() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let (url, store, mut db) = setup();
@@ -178,7 +266,7 @@ fn postgres_retirement_committed_barrier_is_visible_before_physical_mutation() {
             let reopened = PostgresRuntimeStore::new(&url)?;
             let b = run(&reopened, &mut db, "run-b", 2);
             assert!(prepare(&reopened, &b, "execution-b", &physical).is_err());
-            let profile = format!("sha256:{}", "b".repeat(64));
+            let profile = a.original.environment_profile.digest().unwrap();
             assert!(reopened
                 .with_retained_instance_operation(
                     &a.request("execution-a", &profile),
@@ -217,7 +305,8 @@ fn postgres_retirement_forward_migration_preserves_existing_allocation_and_relea
         .unwrap()
         .get::<_, String>(0);
     let history=db.query("SELECT version,applied_at_ms FROM runtime.schema_migrations WHERE version<=10 ORDER BY version",&[]).unwrap().iter().map(|r|(r.get::<_,i64>(0),r.get::<_,i64>(1))).collect::<Vec<_>>();
-    db.batch_execute("DROP TABLE runtime.environment_retirements; DROP FUNCTION runtime.protect_environment_retirement(); DELETE FROM runtime.schema_migrations WHERE version=11").unwrap();
+    crate::postgres_store::environment_owner_schema::restore_previous_fixture(&mut db);
+    db.batch_execute("DROP TABLE runtime.environment_maintenance_completions; DROP FUNCTION runtime.protect_environment_maintenance_completion(); DROP TABLE runtime.environment_retirements; DROP FUNCTION runtime.protect_environment_retirement(); DELETE FROM runtime.schema_migrations WHERE version>=11").unwrap();
     drop(PostgresRuntimeStore::new(&url).unwrap());
     assert_eq!(
         db.query_one(
@@ -364,10 +453,13 @@ fn postgres_retirement_pending_other_environment_does_not_block_healthy_run_clea
     binding.environment_id = "environment-b".into();
     binding.agent_run_authorization_digest = digest;
     b.grant = sign(binding);
-    let two = declared_usage(b.original.resources)
-        .checked_add(declared_usage(b.original.resources))
+    let two = declared_usage(b.original.environment_profile.resources.sandbox_resources())
+        .checked_add(declared_usage(
+            b.original.environment_profile.resources.sandbox_resources(),
+        ))
         .unwrap();
-    let profile = format!("sha256:{}", "b".repeat(64));
+    let profile = b.original.environment_profile.digest().unwrap();
+    db.execute("UPDATE public.app_core_sessionenvironment SET environment_profile=$1::text::jsonb,environment_profile_digest=$2 WHERE id='environment-b'", &[&serde_json::to_string(&b.original.environment_profile).unwrap(),&profile]).unwrap();
     let second = store
         .prepare_retained_instance(
             &b.request("execution-b", &profile),
@@ -381,9 +473,13 @@ fn postgres_retirement_pending_other_environment_does_not_block_healthy_run_clea
             |allocation| {
                 physical.lock().unwrap().push(ObservedResidentSandbox {
                     execution_id: allocation.allocation_execution_id.clone(),
-                    agent_run_id: "run-b".into(),
+                    allocation_owner: centaeris_core::execution::EnvironmentTaskOwner::AgentRun {
+                        run_id: "run-b".into(),
+                    },
                     container_id: "container-b".into(),
-                    resources: declared_usage(b.original.resources),
+                    resources: declared_usage(
+                        b.original.environment_profile.resources.sandbox_resources(),
+                    ),
                 });
                 Ok("container-b".into())
             },

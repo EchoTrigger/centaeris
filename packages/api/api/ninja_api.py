@@ -18,7 +18,7 @@ from app_core.http.citations import router as citations_router
 from app_core.http.downloads import router as downloads_router
 from app_core.http.errors import install_error_handlers
 from app_core.http.health import router as health_router
-from app_core.http.benchmark_profiles import router as benchmark_profiles_router
+from app_core.http.environment_profiles import router as environment_profiles_router
 from app_core.http.internal import router as internal_router
 from app_core.http.internal_model import router as internal_model_router
 from app_core.http.jobs import router as jobs_router
@@ -34,6 +34,8 @@ from app_core.http.streaming import router as streaming_router
 from app_core.http.trash import router as trash_router
 from app_core.http.workspace_members import router as workspace_members_router
 from app_core.http.workspaces import router as workspaces_router
+from app_core.http.environment_settings import router as environment_settings_router
+from app_core.http.environment_maintenance import router as environment_maintenance_router
 
 
 api = NinjaAPI(
@@ -58,6 +60,7 @@ api.add_router("/api", agent_definitions_router)
 api.add_router("/api", assistant_connectors_router)
 api.add_router("/api", jobs_router)
 api.add_router("/api", workspaces_router)
+api.add_router("/api", environment_settings_router)
 api.add_router("/api", workspace_members_router)
 api.add_router("/api", citations_router)
 api.add_router("/api", sources_router)
@@ -71,7 +74,8 @@ api.add_router("/api", office_preview_router)
 api.add_router("/api", streaming_router)
 api.add_router("/api", trash_router)
 api.add_router("/internal", internal_router)
-api.add_router("/internal", benchmark_profiles_router)
+api.add_router("/internal", environment_profiles_router)
+api.add_router("/internal", environment_maintenance_router)
 api.add_router("/internal", internal_agent_work_validation_router)
 api.add_router("/internal", internal_model_router)
 api.add_router("/internal", internal_mcp_credentials_router)

@@ -1,7 +1,7 @@
 use super::*;
 use centaeris_core::execution::{
-    EnvironmentTaskControllerPurpose, EnvironmentTaskOutputChunk, EnvironmentTaskScope,
-    EnvironmentTaskSnapshot, EnvironmentTaskState, EnvironmentTaskStream,
+    EnvironmentTaskControllerPurpose, EnvironmentTaskOutputChunk, EnvironmentTaskOwner,
+    EnvironmentTaskScope, EnvironmentTaskSnapshot, EnvironmentTaskState, EnvironmentTaskStream,
     ENVIRONMENT_TASK_READ_BYTES,
 };
 use centaeris_core::tool::DynamicToolRegistry;
@@ -56,7 +56,7 @@ impl EnvironmentTaskPort for FakePort {
 fn fence(run: &str, epoch: u64) -> EnvironmentTaskFence {
     EnvironmentTaskFence {
         environment_instance_id: "private-instance".into(),
-        controller_id: run.into(),
+        controller_owner: EnvironmentTaskOwner::AgentRun { run_id: run.into() },
         controller_epoch: epoch,
         controller_purpose: EnvironmentTaskControllerPurpose::Execute,
     }
@@ -361,6 +361,33 @@ fn list_and_query_hide_run_scoped_control_tasks() {
     );
     assert!(query.is_error);
     assert!(!query.details.to_string().contains("private-run"));
+}
+
+#[test]
+fn model_tools_cannot_use_a_maintenance_owner_as_run_authority() {
+    let mut p = port(
+        "run-a",
+        1,
+        vec![Ok(page(EnvironmentTaskScope::Environment))],
+    );
+    let maintenance = EnvironmentTaskFence {
+        controller_owner: EnvironmentTaskOwner::MaintenanceOperation {
+            operation_id: "run-a".into(),
+        },
+        ..fence("run-a", 1)
+    };
+    let mutable = Arc::get_mut(&mut p).unwrap();
+    mutable.fence = maintenance.clone();
+    *mutable.current.lock().unwrap() = maintenance;
+    let response = call(
+        p.clone(),
+        "background_task_start",
+        "stable-call",
+        start_args(),
+    );
+    assert!(response.is_error);
+    assert_eq!(response.details["errorCode"], "background_task_forbidden");
+    assert!(p.requests.lock().unwrap().is_empty());
 }
 
 #[test]

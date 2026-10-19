@@ -9,29 +9,20 @@ use std::path::{Path, PathBuf};
 use std::io::{Seek, SeekFrom};
 
 use centaeris_core::execution::{
-    run_direct_execution_file_system_operation, run_scoped_execution_file_system_operation,
+    run_direct_execution_file_system_operation, run_policy_scoped_execution_file_system_operation,
     ExecutionFileSystemError, ExecutionFileSystemErrorKind, ExecutionFileSystemOperation,
     ExecutionFileSystemOutput, ExecutionFileSystemRequest, MAX_EXECUTION_INPUT_BYTES,
-    MAX_PUBLISHED_ARTIFACT_BYTES, WORKSPACE_DATA_ROOT,
+    MAX_PUBLISHED_ARTIFACT_BYTES,
 };
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
-mod benchmark;
+#[cfg(test)]
+use centaeris_core::execution::WORKSPACE_DATA_ROOT;
+
 mod snapshot_capture;
-
-pub fn run_benchmark_filesystem_once() -> Result<(), String> {
-    benchmark::filesystem_once()
-}
-
-pub fn run_benchmark_keeper() -> Result<(), String> {
-    benchmark::keeper()
-}
-
-pub fn run_benchmark_quiesce_once() -> Result<(), String> {
-    benchmark::quiesce_once()
-}
+mod workspace;
 
 use crate::memory::{is_memory_uri, run_memory_file_system_operation};
 #[cfg(any(target_os = "linux", test))]
@@ -55,10 +46,20 @@ const SNAPSHOT_PATH_MAX_BYTES: usize = 4 * 1024;
 const SNAPSHOT_PATH_MAX_DEPTH: usize = 64;
 #[cfg(any(target_os = "linux", test))]
 const SNAPSHOT_IO_BUFFER_BYTES: usize = 64 * 1024;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 const AGENT_UID: u32 = 10_001;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 const AGENT_GID: u32 = 10_001;
+
+fn workspace_root() -> Result<&'static Path, String> {
+    Ok(workspace::context()?.root.as_path())
+}
+
+pub fn run_prepare_workspace_once() -> Result<(), String> {
+    require_root()?;
+    workspace::prepare()?;
+    secure_roots()
+}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -81,38 +82,50 @@ fn observe_agent_process_state(
 }
 
 pub fn run_filesystem_once() -> Result<(), String> {
-    let request: SandboxFileSystemRequest = read_json(MAX_JSON_BYTES)?;
+    let request = crate::protocol::read_filesystem_request(&mut std::io::stdin().lock())?;
     let result = run_file_system_request(request);
-    serde_json::to_writer(std::io::stdout(), &SandboxFileSystemResult::from(result))
-        .map_err(|error| format!("encode filesystem helper result failed: {error}"))
+    let mut stdout = std::io::stdout().lock();
+    crate::protocol::write_filesystem_result(&mut stdout, SandboxFileSystemResult::from(result))?;
+    stdout
+        .flush()
+        .map_err(|_| "write filesystem helper result failed".into())
 }
 
 fn run_file_system_request(
-    request: SandboxFileSystemRequest,
+    request: ExecutionFileSystemRequest,
 ) -> Result<ExecutionFileSystemOutput, ExecutionFileSystemError> {
-    if is_memory_uri(request.path.as_str()) {
-        run_memory_file_system_operation(request)
-    } else if request.path.contains("://") {
+    if is_memory_uri(request.model_path.as_str()) {
+        run_memory_file_system_operation(SandboxFileSystemRequest {
+            path: request.model_path,
+            operation: request.operation,
+        })
+    } else if request.model_path.contains("://") {
         Err(ExecutionFileSystemError::new(
             ExecutionFileSystemErrorKind::InvalidPath,
             "filesystem URI scheme is unsupported",
         ))
-    } else if request.path == SYSTEM_SKILL_ROOT
-        || request.path.starts_with(&format!("{SYSTEM_SKILL_ROOT}/"))
+    } else if request.model_path == SYSTEM_SKILL_ROOT
+        || request
+            .model_path
+            .starts_with(&format!("{SYSTEM_SKILL_ROOT}/"))
     {
-        run_read_only_file_system_operation(request, SYSTEM_SKILL_ROOT, "System Skill")
-    } else if request.path.starts_with(&format!("{PLUGIN_ROOT}/")) {
-        run_plugin_file_system_operation(request)
-    } else {
-        run_scoped_execution_file_system_operation(ExecutionFileSystemRequest {
-            operation_id: None,
-            cwd: PathBuf::from(WORKSPACE_DATA_ROOT),
-            policy: centaeris_core::execution::ExecutionPolicy::workspace_write_no_network(
-                WORKSPACE_DATA_ROOT,
-            ),
-            model_path: request.path,
+        run_read_only_file_system_operation(
+            SandboxFileSystemRequest {
+                path: request.model_path,
+                operation: request.operation,
+            },
+            SYSTEM_SKILL_ROOT,
+            "System Skill",
+        )
+    } else if request.model_path == PLUGIN_ROOT
+        || request.model_path.starts_with(&format!("{PLUGIN_ROOT}/"))
+    {
+        run_plugin_file_system_operation(SandboxFileSystemRequest {
+            path: request.model_path,
             operation: request.operation,
         })
+    } else {
+        run_policy_scoped_execution_file_system_operation(request)
     }
 }
 
@@ -140,8 +153,8 @@ fn run_read_only_file_system_operation(
     validate_read_only_path(request.path.as_str(), root, label)?;
     run_direct_execution_file_system_operation(ExecutionFileSystemRequest {
         operation_id: None,
-        cwd: PathBuf::from(WORKSPACE_DATA_ROOT),
-        policy: centaeris_core::execution::ExecutionPolicy::read_only_no_network(PLUGIN_ROOT),
+        cwd: PathBuf::from(root),
+        policy: centaeris_core::execution::ExecutionPolicy::read_only_no_network(root),
         model_path: request.path,
         operation: request.operation,
     })
@@ -483,7 +496,7 @@ fn collect_snapshot_manifest(
         .collect::<BTreeSet<_>>();
     let mut paths = Vec::new();
     collect_snapshot_paths(
-        Path::new(WORKSPACE_DATA_ROOT),
+        workspace_root()?,
         "",
         &protected_paths,
         &mut paths,
@@ -797,7 +810,7 @@ fn validate_snapshot_sha256(value: &str) -> Result<(), String> {
 fn validate_snapshot_file_metadata(metadata: &fs::Metadata) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
 
-    if !metadata.is_file() || metadata.nlink() != 1 || metadata.uid() != AGENT_UID {
+    if !metadata.is_file() || metadata.nlink() != 1 || metadata.uid() != workspace::context()?.uid {
         return Err("workspace snapshot source is unsafe".to_string());
     }
     Ok(())
@@ -836,7 +849,7 @@ fn restore_snapshot_file(
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::MetadataExt;
 
-    let target = Path::new(WORKSPACE_DATA_ROOT).join(expected.path.as_str());
+    let target = workspace_root()?.join(expected.path.as_str());
     let parent = target
         .parent()
         .ok_or_else(|| "snapshot target has no parent".to_string())?;
@@ -858,7 +871,8 @@ fn restore_snapshot_file(
             std::io::Error::last_os_error()
         ));
     }
-    if unsafe { libc::fchown(output.as_raw_fd(), AGENT_UID, AGENT_GID) } != 0 {
+    let identity = workspace::context()?;
+    if unsafe { libc::fchown(output.as_raw_fd(), identity.uid, identity.gid) } != 0 {
         return Err(format!(
             "assign snapshot restore ownership failed: {}",
             std::io::Error::last_os_error()
@@ -885,8 +899,8 @@ fn restore_snapshot_file(
         .metadata()
         .map_err(|error| format!("inspect snapshot restore target failed: {error}"))?;
     if !metadata.is_file()
-        || metadata.uid() != AGENT_UID
-        || metadata.gid() != AGENT_GID
+        || metadata.uid() != identity.uid
+        || metadata.gid() != identity.gid
         || metadata.nlink() != 1
         || metadata.size() != expected.size_bytes
         || (metadata.mode() & 0o111 != 0) != expected.executable
@@ -911,14 +925,14 @@ fn restore_snapshot_file(
 fn create_snapshot_directories(target: &Path) -> Result<(), String> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-    let root = Path::new(WORKSPACE_DATA_ROOT);
+    let root = workspace_root()?;
     if !target.starts_with(root) {
-        return Err("snapshot restore parent escaped /mnt/data".to_string());
+        return Err("snapshot restore parent escaped its workspace".to_string());
     }
     let mut current = root.to_path_buf();
     for component in target
         .strip_prefix(root)
-        .map_err(|_| "snapshot restore parent escaped /mnt/data".to_string())?
+        .map_err(|_| "snapshot restore parent escaped its workspace".to_string())?
         .components()
     {
         current.push(component);
@@ -952,7 +966,8 @@ fn seal_snapshot_directories(manifest: &SandboxWorkspaceSnapshotManifest) -> Res
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::MetadataExt;
 
-    let root = Path::new(WORKSPACE_DATA_ROOT);
+    let root = workspace_root()?;
+    let identity = workspace::context()?;
     let mut directories = BTreeSet::new();
     for file in &manifest.files {
         let mut parent = Path::new(file.path.as_str()).parent();
@@ -974,7 +989,7 @@ fn seal_snapshot_directories(manifest: &SandboxWorkspaceSnapshotManifest) -> Res
         }
         let directory = File::open(path.as_path())
             .map_err(|error| format!("open snapshot restore parent failed: {error}"))?;
-        if unsafe { libc::fchown(directory.as_raw_fd(), AGENT_UID, AGENT_GID) } != 0 {
+        if unsafe { libc::fchown(directory.as_raw_fd(), identity.uid, identity.gid) } != 0 {
             return Err(format!(
                 "assign snapshot restore parent ownership failed: {}",
                 std::io::Error::last_os_error()
@@ -983,8 +998,8 @@ fn seal_snapshot_directories(manifest: &SandboxWorkspaceSnapshotManifest) -> Res
         let metadata = directory
             .metadata()
             .map_err(|error| format!("inspect snapshot restore parent failed: {error}"))?;
-        if metadata.uid() != AGENT_UID
-            || metadata.gid() != AGENT_GID
+        if metadata.uid() != identity.uid
+            || metadata.gid() != identity.gid
             || metadata.mode() & 0o7777 != 0o755
         {
             return Err("snapshot restore parent final ownership is invalid".to_string());
@@ -1057,14 +1072,10 @@ fn workspace_watch_loop() -> Result<(), String> {
     }
     let mut inotify = unsafe { File::from_raw_fd(descriptor) };
     let mut watches = BTreeMap::new();
-    add_workspace_watches(
-        inotify.as_raw_fd(),
-        Path::new(WORKSPACE_DATA_ROOT),
-        &mut watches,
-    )?;
+    add_workspace_watches(inotify.as_raw_fd(), workspace_root()?, &mut watches)?;
     let root_watch = watches
         .iter()
-        .find_map(|(watch, path)| (path == Path::new(WORKSPACE_DATA_ROOT)).then_some(*watch))
+        .find_map(|(watch, path)| (path == workspace_root().ok()?).then_some(*watch))
         .ok_or_else(|| "workspace root watcher is missing".to_string())?;
 
     let epoch = fs::read_to_string("/proc/sys/kernel/random/uuid")
@@ -1414,6 +1425,7 @@ fn wait_for_agent_processes(timeout_ms: u64) -> Result<bool, String> {
 
 #[cfg(target_os = "linux")]
 fn agent_process_ids() -> Result<Vec<i32>, String> {
+    let uid = workspace::context()?.uid;
     let mut result = Vec::new();
     for entry in fs::read_dir("/proc").map_err(|error| format!("read /proc failed: {error}"))? {
         let entry = entry.map_err(|error| format!("read /proc entry failed: {error}"))?;
@@ -1428,7 +1440,7 @@ fn agent_process_ids() -> Result<Vec<i32>, String> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(format!("read sandbox process status failed: {error}")),
         };
-        if is_other_agent_process(pid, std::process::id() as i32, status.as_str()) {
+        if is_other_agent_process(pid, std::process::id() as i32, status.as_str(), uid) {
             result.push(pid);
         }
     }
@@ -1441,17 +1453,18 @@ fn agent_process_ids() -> Result<Vec<i32>, String> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn is_other_agent_process(pid: i32, current_pid: i32, status: &str) -> bool {
-    pid != current_pid && is_agent_process_status(status)
+fn is_other_agent_process(pid: i32, current_pid: i32, status: &str, uid: u32) -> bool {
+    pid > 1 && pid != current_pid && is_agent_process_status(status, uid)
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn is_agent_process_status(status: &str) -> bool {
+fn is_agent_process_status(status: &str, uid: u32) -> bool {
     let is_agent = status
         .lines()
         .find_map(|line| line.strip_prefix("Uid:"))
         .and_then(|line| line.split_whitespace().next())
-        == Some("10001");
+        .and_then(|value| value.parse::<u32>().ok())
+        == Some(uid);
     let is_zombie = status
         .lines()
         .find_map(|line| line.strip_prefix("State:"))
@@ -1462,7 +1475,7 @@ fn is_agent_process_status(status: &str) -> bool {
 
 #[cfg(target_os = "linux")]
 fn require_agent() -> Result<(), String> {
-    if unsafe { libc::geteuid() } != AGENT_UID {
+    if unsafe { libc::geteuid() } != workspace::context()?.uid {
         return Err("sandbox quiesce helper requires agent identity".to_string());
     }
     Ok(())
@@ -1603,33 +1616,15 @@ fn validate_materialized_input(input: &SandboxMaterializedInput) -> Result<(), S
 }
 
 fn normalized_data_path(path: &str) -> Result<String, String> {
-    let relative = if path == WORKSPACE_DATA_ROOT || path == "." {
-        return Ok(".".to_string());
-    } else if let Some(relative) = path.strip_prefix("/mnt/data/") {
-        relative
-    } else if path.starts_with('/') {
-        return Err("sandbox path escaped /mnt/data".to_string());
-    } else {
-        path
-    };
-    if relative.is_empty()
-        || relative.contains('\\')
-        || relative.chars().any(char::is_control)
-        || relative
-            .split('/')
-            .any(|component| component.is_empty() || matches!(component, "." | ".."))
-    {
-        return Err("sandbox path contains an invalid component".to_string());
-    }
-    Ok(relative.to_string())
+    workspace::context()?.relative_path(path)
 }
 
 fn data_target(path: &str) -> Result<PathBuf, String> {
     let relative = normalized_data_path(path)?;
     if relative == "." {
-        return Err("sandbox input cannot target /mnt/data root".to_string());
+        return Err("sandbox input cannot target its workspace root".to_string());
     }
-    Ok(Path::new(WORKSPACE_DATA_ROOT).join(relative))
+    Ok(workspace_root()?.join(relative))
 }
 
 #[cfg(unix)]
@@ -1649,15 +1644,11 @@ fn require_root() -> Result<(), String> {
 fn secure_roots() -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
 
-    let data = fs::symlink_metadata(WORKSPACE_DATA_ROOT)
-        .map_err(|error| format!("inspect /mnt/data failed: {error}"))?;
+    let data = fs::symlink_metadata(workspace_root()?)
+        .map_err(|error| format!("inspect workspace failed: {error}"))?;
     let state = fs::symlink_metadata(STATE_ROOT)
         .map_err(|error| format!("inspect sandbox state root failed: {error}"))?;
-    if !data.is_dir()
-        || data.file_type().is_symlink()
-        || data.uid() != 0
-        || data.gid() != 0
-        || data.mode() & 0o7777 != 0o1777
+    if !valid_workspace_root(&data, workspace::context()?.uid)
         || !state.is_dir()
         || state.file_type().is_symlink()
         || state.uid() != 0
@@ -1666,6 +1657,15 @@ fn secure_roots() -> Result<(), String> {
         return Err("sandbox data or state root permissions are invalid".to_string());
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn valid_workspace_root(data: &fs::Metadata, uid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    data.is_dir()
+        && !data.file_type().is_symlink()
+        && (data.uid() == 0 || data.uid() == uid)
+        && (data.mode() & 0o002 == 0 || data.mode() & 0o1000 != 0)
 }
 
 #[cfg(not(unix))]
@@ -1680,7 +1680,7 @@ fn install_protected_input(target: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = target
         .parent()
         .ok_or_else(|| "sandbox input target has no parent".to_string())?;
-    create_symlink_free_directories(Path::new(WORKSPACE_DATA_ROOT), parent)?;
+    create_symlink_free_directories(workspace_root()?, parent)?;
     match fs::symlink_metadata(target) {
         Ok(_) => return Err("sandbox input target already exists".to_string()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -1720,12 +1720,12 @@ fn create_symlink_free_directories(root: &Path, target: &Path) -> Result<(), Str
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     if !target.starts_with(root) {
-        return Err("sandbox input parent escaped /mnt/data".to_string());
+        return Err("sandbox input parent escaped its workspace".to_string());
     }
     let mut current = root.to_path_buf();
     for component in target
         .strip_prefix(root)
-        .map_err(|_| "sandbox input parent escaped /mnt/data".to_string())?
+        .map_err(|_| "sandbox input parent escaped its workspace".to_string())?
         .components()
     {
         current.push(component);
@@ -1862,6 +1862,7 @@ fn read_artifact(_relative_path: &str, _max_bytes: u64) -> Result<(Vec<u8>, Stri
 fn open_artifact_beneath(relative_path: &str) -> Result<File, String> {
     use std::ffi::CString;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
 
     let components = relative_path.split('/').collect::<Vec<_>>();
     if components.is_empty()
@@ -1871,7 +1872,7 @@ fn open_artifact_beneath(relative_path: &str) -> Result<File, String> {
     {
         return Err("artifact source path is unsafe".to_string());
     }
-    let root = CString::new(WORKSPACE_DATA_ROOT)
+    let root = CString::new(workspace_root()?.as_os_str().as_bytes())
         .map_err(|_| "artifact data root is invalid".to_string())?;
     let root_fd = unsafe {
         libc::open(
@@ -1932,6 +1933,116 @@ fn file_version(metadata: &fs::Metadata) -> (u64, u64, u64, u64, i64, i64, i64, 
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn helper_accepts_an_existing_workspace_owned_by_its_profile_user() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-helper-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        let metadata = fs::symlink_metadata(&root).unwrap();
+        let accepted = valid_workspace_root(&metadata, metadata.uid());
+        fs::remove_dir(&root).unwrap();
+        assert!(
+            accepted,
+            "existing profile directory must not require replacing its permissions"
+        );
+    }
+
+    #[test]
+    fn helper_selected_workspace_child() {
+        if std::env::var("CENTAERIS_HELPER_WORKSPACE_FIXTURE").as_deref() != Ok("1") {
+            return;
+        }
+        assert_eq!(
+            data_target("/project/inputs/a.txt").unwrap(),
+            PathBuf::from("/project/inputs/a.txt")
+        );
+        assert!(data_target("/mnt/data/inputs/a.txt").is_err());
+    }
+
+    #[test]
+    fn helper_input_paths_follow_the_host_selected_workspace() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "agent::tests::helper_selected_workspace_child",
+                "--nocapture",
+            ])
+            .env("CENTAERIS_HELPER_WORKSPACE_FIXTURE", "1")
+            .env("CENTAERIS_WORKSPACE_ROOT", "/project")
+            .env("CENTAERIS_WORKSPACE_USER", "0:0")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    #[test]
+    fn filesystem_helper_uses_request_workspace_and_rejects_escape() {
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-environment-files-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for name in ["ordinary", "custom"] {
+            let workspace = root.join(name);
+            let cwd = workspace.join("working-directory");
+            fs::create_dir_all(&cwd).unwrap();
+            fs::write(cwd.join("input.txt"), name.as_bytes()).unwrap();
+            let request = ExecutionFileSystemRequest {
+                operation_id: None,
+                cwd,
+                policy: centaeris_core::execution::ExecutionPolicy::workspace_write_no_network(
+                    &workspace,
+                ),
+                model_path: "input.txt".into(),
+                operation: ExecutionFileSystemOperation::ReadFile { max_bytes: 100 },
+            };
+            let wire = serde_json::to_value(&request).unwrap();
+            let output = run_file_system_request(serde_json::from_value(wire).unwrap()).unwrap();
+            let ExecutionFileSystemOutput::ReadFile(read) = output else {
+                panic!("read expected")
+            };
+            assert_eq!(read.bytes, name.as_bytes());
+            let mut parent = request.clone();
+            parent.model_path = "../artifact.txt".into();
+            parent.operation = ExecutionFileSystemOperation::WriteFile {
+                content: b"output".to_vec(),
+                observed_file_hash: None,
+                create_only: true,
+            };
+            run_file_system_request(parent).unwrap();
+            assert_eq!(fs::read(workspace.join("artifact.txt")).unwrap(), b"output");
+            let mut outside = request.clone();
+            outside.model_path = "../../outside.txt".into();
+            outside.operation = ExecutionFileSystemOperation::WriteFile {
+                content: b"outside".to_vec(),
+                observed_file_hash: None,
+                create_only: true,
+            };
+            assert!(run_file_system_request(
+                serde_json::from_value(serde_json::to_value(outside).unwrap()).unwrap()
+            )
+            .is_err());
+            assert!(!root.join("outside.txt").exists());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn input_install_rename_never_replaces_an_existing_target() {
@@ -1974,8 +2085,13 @@ mod tests {
 
     #[test]
     fn filesystem_router_rejects_unknown_uri_scheme() {
-        let error = run_file_system_request(SandboxFileSystemRequest {
-            path: "banana://workspace/file.md".to_string(),
+        let error = run_file_system_request(ExecutionFileSystemRequest {
+            operation_id: None,
+            cwd: PathBuf::from(WORKSPACE_DATA_ROOT),
+            policy: centaeris_core::execution::ExecutionPolicy::workspace_write_no_network(
+                WORKSPACE_DATA_ROOT,
+            ),
+            model_path: "banana://workspace/file.md".to_string(),
             operation: ExecutionFileSystemOperation::InspectMutationPath,
         })
         .expect_err("unknown URI scheme must loud-fail before workspace path handling");
@@ -1997,8 +2113,13 @@ mod tests {
                 expected_file_hash: format!("sha256:{}", "a".repeat(64)),
             },
         ] {
-            let error = run_file_system_request(SandboxFileSystemRequest {
-                path: SYSTEM_SKILL_ROOT.to_string(),
+            let error = run_file_system_request(ExecutionFileSystemRequest {
+                operation_id: None,
+                cwd: PathBuf::from(WORKSPACE_DATA_ROOT),
+                policy: centaeris_core::execution::ExecutionPolicy::workspace_write_no_network(
+                    WORKSPACE_DATA_ROOT,
+                ),
+                model_path: SYSTEM_SKILL_ROOT.to_string(),
                 operation,
             })
             .expect_err("catalog root must stay read-only");
@@ -2247,10 +2368,12 @@ mod tests {
         let live = "Name:\thelper\nState:\tS (sleeping)\nUid:\t10001\t10001\t10001\t10001\n";
         let root = "Name:\twatcher\nState:\tS (sleeping)\nUid:\t0\t0\t0\t0\n";
         let zombie = "Name:\thelper\nState:\tZ (zombie)\nUid:\t10001\t10001\t10001\t10001\n";
-        assert!(!is_other_agent_process(41, 41, live));
-        assert!(is_other_agent_process(42, 41, live));
-        assert!(!is_other_agent_process(42, 41, root));
-        assert!(!is_other_agent_process(42, 41, zombie));
+        assert!(!is_other_agent_process(41, 41, live, 10001));
+        assert!(is_other_agent_process(42, 41, live, 10001));
+        assert!(!is_other_agent_process(42, 41, root, 10001));
+        assert!(!is_other_agent_process(42, 41, zombie, 10001));
+        assert!(!is_other_agent_process(1, 41, root, 0));
+        assert!(is_other_agent_process(42, 41, root, 0));
     }
 
     #[cfg(target_os = "linux")]
@@ -2290,9 +2413,10 @@ mod tests {
         let root = "Name:\tbash\nState:\tS (sleeping)\nUid:\t0\t0\t0\t0\n";
         let zombie = "Name:\tsleep\nState:\tZ (zombie)\nUid:\t10001\t10001\t10001\t10001\n";
 
-        assert!(is_agent_process_status(agent));
-        assert!(!is_agent_process_status(root));
-        assert!(!is_agent_process_status(zombie));
+        assert!(is_agent_process_status(agent, 10001));
+        assert!(!is_agent_process_status(root, 10001));
+        assert!(!is_agent_process_status(zombie, 10001));
+        assert!(is_agent_process_status(root, 0));
     }
 
     #[test]

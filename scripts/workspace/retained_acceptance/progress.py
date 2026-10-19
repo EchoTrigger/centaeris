@@ -42,7 +42,9 @@ def validate_live(state, tasks, expected_background):
 
 def probe_reclaimed_controller(container, old, current, background_task):
     import uuid
-    if (old['controllerId']!=current['controllerId']
+    owner=old.get('controllerOwner')
+    if (not isinstance(owner,dict) or set(owner)!={'kind','runId'} or owner['kind']!='agentRun'
+            or owner!=current.get('controllerOwner')
             or old['environmentInstanceId']!=current['environmentInstanceId']
             or current['controllerEpoch']<=old['controllerEpoch']):
         raise RuntimeError('Runtime restart did not reclaim the same Run with a newer fence')
@@ -54,11 +56,11 @@ def probe_reclaimed_controller(container, old, current, background_task):
     # Establish the old fence is obsolete before attempting any mutation.
     results={'list':rejected('list')}
     for operation,arguments in (
-        ('start',{'scope':{'kind':'run','runId':old['controllerId']},'program':'/bin/true',
+        ('start',{'scope':{'kind':'run','runId':old['controllerOwner']['runId']},'program':'/bin/true',
             'args':[],'cwd':'/mnt/data','timeoutMs':1000}),
         ('input',{'taskId':background_task,'data':[120],'close':False}),
         ('terminate',{'taskId':background_task}),
-        ('endRun',{'runId':old['controllerId']})):
+        ('endRun',{'runId':old['controllerOwner']['runId']})):
         results[operation]=rejected(operation,operationId=str(old['controllerEpoch'])+':long-stale-'+uuid.uuid4().hex,**arguments)
     alive=task_rpc(container,current,'query',taskId=background_task,cursor=0,maxBytes=4096)
     if (alive.get('status')!='success' or alive.get('result',{}).get('kind')!='task'
@@ -74,18 +76,18 @@ def inspect_store(container, fence):
         '/opt/centaeris/bin/execution_agent','environment-task-store-inspect'],
         check=True,capture_output=True,text=True).stdout
     metrics=json.loads(raw)
-    expected={'schema','instanceId','controllerId','controllerEpoch','hotTasks','activeTasks',
-        'indexedTasks','indexedRunTasks','controlDirectoryBytes','outputDirectoryBytes'}
-    if (set(metrics)!=expected or metrics['schema']!='environment.task.store.inspection.v1'
+    expected={'schema','instanceId','controllerOwner','controllerEpoch','hotTasks','activeTasks',
+        'indexedTasks','indexedOwnerTasks','controlDirectoryBytes','outputDirectoryBytes'}
+    if (set(metrics)!=expected or metrics['schema']!='environment.task.store.inspection.v2'
             or metrics['instanceId']!=fence['environmentInstanceId']
-            or metrics['controllerId']!=fence['controllerId']):
+            or metrics['controllerOwner']!=fence['controllerOwner']):
         raise RuntimeError('private store inspection schema or authority identity mismatch')
-    counts=expected-{'schema','instanceId','controllerId'}
+    counts=expected-{'schema','instanceId','controllerOwner'}
     if any(type(metrics[key]) is not int or metrics[key]<0 for key in counts):
         raise RuntimeError('private store inspection has invalid counts')
     if (metrics['hotTasks']>64 or metrics['activeTasks']>32
             or metrics['indexedTasks']<metrics['hotTasks']
-            or metrics['indexedRunTasks']>metrics['indexedTasks']):
+            or metrics['indexedOwnerTasks']>metrics['indexedTasks']):
         raise RuntimeError('private store inspection violates live or indexed bounds')
     validate_resource_bytes(metrics)
     if metrics['controllerEpoch']>fence['controllerEpoch']:
@@ -237,7 +239,7 @@ def compaction_recovery_proof(before, current, post_restart_baseline):
     baseline=post_restart_baseline
     if (baseline is None or baseline['highestSessionSequence']<before['highestSessionSequence']
             or baseline['completedCommands']<before['completedCommands']
-            or baseline['fence']['controllerId']!=before['fence']['controllerId']
+            or baseline['fence']['controllerOwner']!=before['fence']['controllerOwner']
             or baseline['fence']['environmentInstanceId']!=before['fence']['environmentInstanceId']
             or baseline['fence']['controllerEpoch']<=before['fence']['controllerEpoch']
             or current['fence']!=baseline['fence']):
@@ -302,7 +304,7 @@ print(json.dumps({'agentRunId':run.id,'runStatus':run.status,'containerId':rows[
  'sessionId':run.session_id,'environmentId':env.id,'instanceId':instances[0][0],
  'completedCommands':len(results),'attemptedCommands':len(calls),
  'highestSessionSequence':max((r.agent_run_sequence for r in records),default=0),'durableCompaction':compaction,
- 'fence':{'environmentInstanceId':instances[0][0],'controllerId':run.id,
+ 'fence':{'environmentInstanceId':instances[0][0],'controllerOwner':{'kind':'agentRun','runId':run.id},
  'controllerEpoch':env.controller_epoch,'controllerPurpose':env.controller_purpose}}))
 """.replace('RUN_ID_LITERAL',repr(args.run)).replace('SUMMARY_ID_LITERAL',repr(proof['durableCompaction']['summaryMessageId'] if proof else None)).replace('AFTER_SEQUENCE_LITERAL',repr(proof['highestSessionSequence'] if proof else 0))
     raw=subprocess.run(['docker','compose','-f',str(args.compose),'exec','-T','api',

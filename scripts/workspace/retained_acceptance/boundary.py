@@ -140,7 +140,7 @@ with transaction.atomic():
    assert len(results)<32
    results.append({**value,'turnId':wire.get('turnId'),'sequence':row.agent_run_sequence})
  main_count=SessionEvent.objects.filter(agent_run=run,payload__type='model_request_started',payload__payload__purpose='main').count()
- print(json.dumps({'agentRunId':run.id,'sessionId':run.session_id,'environmentId':env.id,'containerId':residents[0][0],'instanceId':residents[0][1],'runStatus':run.status,'mainRequestCount':main_count,'calls':calls,'results':results,'fence':{'environmentInstanceId':residents[0][1],'controllerId':run.id,'controllerEpoch':env.controller_epoch,'controllerPurpose':env.controller_purpose}}))
+ print(json.dumps({'agentRunId':run.id,'sessionId':run.session_id,'environmentId':env.id,'containerId':residents[0][0],'instanceId':residents[0][1],'runStatus':run.status,'mainRequestCount':main_count,'calls':calls,'results':results,'fence':{'environmentInstanceId':residents[0][1],'controllerOwner':{'kind':'agentRun','runId':run.id},'controllerEpoch':env.controller_epoch,'controllerPurpose':env.controller_purpose}}))
 """.replace('RUN_LITERAL',repr(run['agentRunId'])).replace('NONCE_LITERAL',repr(config['nonce']))
     result=command(['docker','compose','-f',str(compose),'exec','-T','api','/app/.venv/bin/python','manage.py','shell','-c',code])
     if result.returncode:raise RuntimeError('boundary canonical observation failed')

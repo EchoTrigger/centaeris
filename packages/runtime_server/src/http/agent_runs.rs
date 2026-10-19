@@ -53,25 +53,34 @@ pub(super) fn cancel(
             return json_error_response(400, error.as_str());
         }
     };
-    let agent_run_id = request.agent_run_start.agent_run_id.clone();
-    let terminal_state =
-        match load_existing_terminal_state(job_store.as_ref(), &request.agent_run_start) {
-            Ok(value) => value,
-            Err(error) => {
-                eprintln!("load AgentRun cancellation terminal state failed: {error}");
-                return json_error_response(500, "agent_run_cancel_state_unavailable");
-            }
-        };
+    let agent_run_id = request.agent_run_control.agent_run_id.clone();
+    let terminal_state = match load_terminal_state_for_binding(
+        job_store.as_ref(),
+        &request.agent_run_control.agent_run_id,
+        &request.agent_run_control.authorization,
+        &request.agent_run_control.authorization_digest,
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("load AgentRun cancellation terminal state failed: {error}");
+            return json_error_response(500, "agent_run_cancel_state_unavailable");
+        }
+    };
     let (disposition, terminal_state) = if terminal_state.is_some() {
         ("terminal", terminal_state)
     } else {
         if let Err(error) = job_store.request_agent_run_cancellation(
             agent_run_id.as_str(),
-            request.agent_run_start.authorization.session_id.as_str(),
-            request.agent_run_start.authorization_digest.as_str(),
+            request.agent_run_control.authorization.session_id.as_str(),
+            request.agent_run_control.authorization_digest.as_str(),
             now_ms()?,
         ) {
-            match load_existing_terminal_state(job_store.as_ref(), &request.agent_run_start) {
+            match load_terminal_state_for_binding(
+                job_store.as_ref(),
+                &request.agent_run_control.agent_run_id,
+                &request.agent_run_control.authorization,
+                &request.agent_run_control.authorization_digest,
+            ) {
                 Ok(Some(state)) => ("terminal", Some(state)),
                 Ok(None) => {
                     eprintln!("request AgentRun cancellation failed: {error}");
@@ -117,10 +126,10 @@ pub(super) fn supplement(
         }
     };
     let result = job_store.enqueue_turn_supplement(EnqueueTurnSupplementRequest {
-        agent_run_id: request.agent_run_start.agent_run_id.clone(),
+        agent_run_id: request.agent_run_control.agent_run_id.clone(),
         lifecycle_job_id: request.job_id,
-        session_id: request.agent_run_start.authorization.session_id.clone(),
-        authorization_digest: request.agent_run_start.authorization_digest.clone(),
+        session_id: request.agent_run_control.authorization.session_id.clone(),
+        authorization_digest: request.agent_run_control.authorization_digest.clone(),
         supplement_id: request.supplement_id.clone(),
         message: request.message,
         created_at_ms: now_ms()?,
@@ -143,8 +152,8 @@ pub(super) fn supplement(
         "schema": "runtime.agent_run.supplement.result.v1",
         "accepted": true,
         "disposition": disposition,
-        "agentRunId": request.agent_run_start.agent_run_id,
-        "sessionId": request.agent_run_start.authorization.session_id,
+        "agentRunId": request.agent_run_control.agent_run_id,
+        "sessionId": request.agent_run_control.authorization.session_id,
         "supplementId": request.supplement_id,
         "queuedCount": result.queued_count,
         "queueRevision": result.revision,
@@ -163,126 +172,32 @@ pub(super) fn teardown(
             Ok(envelope) => envelope,
             Err(_) => return json_error_response(400, "agent_run_teardown_request_invalid"),
         };
-    match envelope {
-        crate::contract::AgentRunTeardownEnvelope::PerRun {
-            job_id,
-            lease_owner,
-            agent_run_start,
-        } => teardown_per_run(
-            state,
-            AgentRunTeardownRequest {
-                schema: crate::contract::AGENT_RUN_TEARDOWN_SCHEMA.into(),
-                job_id,
-                lease_owner,
-                agent_run_start: *agent_run_start,
-            },
-        ),
-        crate::contract::AgentRunTeardownEnvelope::Retained {
-            job_id,
-            lease_owner,
-            agent_run_cleanup,
-        } => teardown_retained(state, job_id, lease_owner, *agent_run_cleanup),
-    }
-}
-
-fn teardown_per_run(
-    state: HttpServerState,
-    teardown: AgentRunTeardownRequest,
-) -> Result<Response<Body>, String> {
-    let HttpServerState {
-        runtime,
-        store,
-        job_store,
-        tool_layers,
-        ..
-    } = state;
-    let teardown = match Ok::<_, String>(teardown).and_then(|request| {
-        let signing_key = env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY")
-            .map_err(|_| "AGENT_RUN_AUTHORIZATION_SIGNING_KEY is required".to_string())?;
-        request.validate(signing_key.as_bytes())
-    }) {
-        Ok(value) => value,
-        Err(error) => {
-            return json_error_response(400, error.as_str());
-        }
-    };
-    if let Err(error) = validate_agent_run_lifecycle_job(
-        teardown.job_id.as_str(),
-        teardown.lease_owner.as_str(),
-        &teardown.agent_run_start,
-        job_store.as_ref(),
-    ) {
-        return json_error_response(409, error.as_str());
-    }
-    if load_existing_terminal_state(job_store.as_ref(), &teardown.agent_run_start)?.is_none() {
-        return json_error_response(409, "agent_run_not_terminal");
-    }
-    if let Err(error) = job_store.close_turn_supplement_queue(CloseTurnSupplementQueueRequest {
-        agent_run_id: teardown.agent_run_start.agent_run_id.clone(),
-        lifecycle_job_id: teardown.job_id.clone(),
-        session_id: teardown.agent_run_start.authorization.session_id.clone(),
-        authorization_digest: teardown.agent_run_start.authorization_digest.clone(),
-        lease_owner: Some(teardown.lease_owner.clone()),
-        reason: "agent_run_terminal".to_string(),
-        closed_at_ms: now_ms()?,
-    }) {
-        eprintln!("turn supplement terminal cleanup failed: {error}");
-        return json_error_response(500, "agent_run_supplement_cleanup_failed");
-    }
-    if let Err(error) = runtime.block_on(terminal_subagents::settle_terminal_parent_subagent_jobs(
-        store.as_ref(),
-        &teardown.agent_run_start.authorization.session_id,
-        &teardown.agent_run_start.agent_run_id,
-        now_ms()?,
-    )) {
-        failure_diagnostics::report(
-            &teardown.agent_run_start.agent_run_id,
-            "terminal_subagent_cleanup",
-            &error,
-        );
-        // The parent terminal fact remains committed. A retry repeats only
-        // teardown and retains the context until child cancellation commits.
-        return json_error_response(503, "terminal_subagent_cleanup_unavailable");
-    }
-    if let Err(error) = DockerExecutionHostRunner::teardown(
-        teardown.agent_run_start.agent_run_id.as_str(),
-        job_store.as_ref(),
-        &RuntimeJobLeaseFence {
-            job_id: teardown.job_id.clone(),
-            job_kind: AGENT_RUN_LIFECYCLE_JOB_KIND.into(),
-            lease_owner: teardown.lease_owner.clone(),
-        },
-    ) {
-        eprintln!("sandbox teardown failed: {error}");
-        return json_error_response(500, "sandbox_teardown_failed");
-    }
-    let mut contexts = tool_layers
-        .lock()
-        .map_err(|_| "provider poll tool layer registry lock poisoned".to_string())?;
-    let session_id = teardown.agent_run_start.authorization.session_id.as_str();
-    if contexts
-        .get(session_id)
-        .is_some_and(|context| context.agent_run_id == teardown.agent_run_start.agent_run_id)
+    if envelope.schema != crate::contract::AGENT_RUN_TEARDOWN_SCHEMA
+        || envelope.job_id.trim().is_empty()
+        || envelope.lease_owner.len() < 16
+        || envelope.lease_owner.len() > 160
+        || envelope.lease_owner.chars().any(char::is_control)
     {
-        contexts.remove(session_id);
+        return json_error_response(400, "agent_run_teardown_request_invalid");
     }
-    let response = serde_json::to_vec(&json!({
-        "schema": "runtime.agent_run.teardown.result.v1",
-        "agentRunId": teardown.agent_run_start.agent_run_id,
-        "status": "removed",
-    }))
-    .map_err(|error| format!("encode AgentRun teardown response failed: {error}"))?;
-    Ok(http_response(200, "application/json", response))
+    teardown_owned_tasks(
+        state,
+        envelope.job_id,
+        envelope.lease_owner,
+        *envelope.agent_run_cleanup,
+    )
 }
 
-fn teardown_retained(
+fn teardown_owned_tasks(
     state: HttpServerState,
     job_id: String,
     lease_owner: String,
     cleanup: crate::contract::AgentRunCleanup,
 ) -> Result<Response<Body>, String> {
     use crate::postgres_store::cleanup_receipts::{CleanupAuthorityRequest, CleanupTarget};
-    use centaeris_core::execution::{EnvironmentTaskControllerPurpose, EnvironmentTaskFence};
+    use centaeris_core::execution::{
+        EnvironmentTaskControllerPurpose, EnvironmentTaskFence, EnvironmentTaskOwner,
+    };
     let signing_key = match env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY") {
         Ok(key) => key,
         Err(_) => return json_error_response(503, "retained_cleanup_unavailable"),
@@ -332,7 +247,14 @@ fn teardown_retained(
     {
         return json_error_response(503, "terminal_subagent_cleanup_unavailable");
     }
-    let host_id = match crate::docker_execution_host::resident_host_context() {
+    let host_context = || {
+        #[cfg(test)]
+        if crate::native_consumption_tests::owns_run(&cleanup.agent_run_id) {
+            return crate::native_consumption_tests::owned_host_context();
+        }
+        crate::docker_execution_host::resident_host_context()
+    };
+    let host_id = match host_context() {
         Ok((host_id, _)) => host_id,
         Err(_) => return json_error_response(503, "retained_cleanup_unavailable"),
     };
@@ -343,28 +265,50 @@ fn teardown_retained(
             lease: &lease,
             host_id: &host_id,
         },
-        crate::docker_execution_host::observed_resident_sandboxes,
+        || {
+            #[cfg(test)]
+            if crate::native_consumption_tests::owns_run(&cleanup.agent_run_id) {
+                return crate::native_consumption_tests::owned_inventory();
+            }
+            crate::docker_execution_host::observed_resident_sandboxes()
+        },
         |target, verified| match target {
-            CleanupTarget::NeverAllocated | CleanupTarget::Destroyed { .. } => Ok(()),
+            CleanupTarget::NeverAllocated | CleanupTarget::Destroyed { .. } => {
+                Ok(crate::postgres_store::cleanup_receipts::CleanupPhysicalResult::Retained)
+            }
             CleanupTarget::Instance {
                 allocation,
                 resources,
                 origin_authorization,
             } => {
-                if cleanup.authorization.benchmark_profile.is_some() {
-                    return Err(
-                        "benchmark cleanup waits for verifier and physical retirement".into(),
-                    );
-                }
                 let fence = EnvironmentTaskFence {
                     environment_instance_id: allocation.instance_id.clone(),
-                    controller_id: cleanup.agent_run_id.clone(),
+                    controller_owner: EnvironmentTaskOwner::AgentRun {
+                        run_id: cleanup.agent_run_id.clone(),
+                    },
                     controller_epoch: verified
                         .controller_epoch
                         .try_into()
                         .map_err(|_| "cleanup epoch invalid")?,
                     controller_purpose: EnvironmentTaskControllerPurpose::Cleanup,
                 };
+                let per_run = cleanup.environment_authorization.payload.execution_mode == "perRun";
+                #[cfg(test)]
+                if crate::native_consumption_tests::owns_run(&cleanup.agent_run_id) {
+                    return crate::native_consumption_tests::cleanup_owned_physical_execution(
+                        allocation, *resources, &fence, per_run,
+                    );
+                }
+                // A prior release may have completed before its final DB receipt.
+                // Only the exact recorded container's independent absence closes it.
+                if per_run
+                    && allocation
+                        .container_id
+                        .as_deref()
+                        .is_some_and(|id| matches!(crate::docker_engine::inspect(id), Ok(None)))
+                {
+                    return crate::docker_execution_host::remove_cleaned_environment(allocation);
+                }
                 retained_cleanup::confirm_run_cleanup(
                     &retained_cleanup::DockerCleanupHost {
                         cleanup: &cleanup,
@@ -374,12 +318,27 @@ fn teardown_retained(
                         origin_authorization: origin_authorization.as_ref(),
                     },
                     &fence,
-                )
+                )?;
+                if per_run {
+                    crate::docker_execution_host::remove_cleaned_environment(allocation)
+                } else {
+                    Ok(crate::postgres_store::cleanup_receipts::CleanupPhysicalResult::Retained)
+                }
             }
         },
     ) {
         Ok(receipt) => receipt,
-        Err(_) => return json_error_response(503, "retained_cleanup_unconfirmed"),
+        Err(error) => {
+            #[cfg(test)]
+            if crate::native_consumption_tests::owns_run(&cleanup.agent_run_id) {
+                eprintln!(
+                    "native-consume-owned-cleanup-failed:agentRunId={}; error={error}",
+                    cleanup.agent_run_id
+                );
+            }
+            let _ = error;
+            return json_error_response(503, "retained_cleanup_unconfirmed");
+        }
     };
     let mut contexts = state
         .tool_layers
@@ -396,8 +355,8 @@ fn teardown_retained(
         200,
         "application/json",
         serde_json::to_vec(&json!({
-            "schema":"runtime.agent_run.teardown.result.v2", "agentRunId":cleanup.agent_run_id,
-            "status":"retained", "cleanupReceiptId":receipt.receipt_id,
+            "schema":"runtime.agent_run.teardown.result.v1", "agentRunId":cleanup.agent_run_id,
+            "status":"cleanupConfirmed", "cleanupReceiptId":receipt.receipt_id,
         }))
         .map_err(|_| "cleanup response encoding failed")?,
     ))
@@ -435,7 +394,6 @@ pub(super) fn step(
     ) {
         return json_error_response(409, error.as_str());
     }
-    let retained = agent_run_step.schema == "runtime.agent_run.step.v2";
     let agent_run_id = agent_run_step.agent_run_start.agent_run_id.clone();
     let failure_agent_run_start = agent_run_step.agent_run_start.clone();
     let failure_job_id = agent_run_step.job_id.clone();
@@ -540,17 +498,16 @@ pub(super) fn step(
             }
         }
     };
-    step_response(&agent_run_id, outcome, retained)
+    step_response(&agent_run_id, outcome)
 }
 
 fn step_response(
     agent_run_id: &str,
     outcome: AgentRunStepOutcome,
-    retained: bool,
 ) -> Result<Response<Body>, String> {
     outcome.validate()?;
     let mut response = json!({
-        "schema": if retained { "runtime.agent_run.step.result.v2" } else { "runtime.agent_run.step.result.v1" },
+        "schema": "runtime.agent_run.step.result.v1",
         "agentRunId": agent_run_id,
         "disposition": outcome.disposition,
         "terminalState": outcome.terminal_state,
@@ -568,7 +525,7 @@ fn step_response(
 mod cleanup_receipt_http_tests {
     use super::*;
     #[test]
-    fn retained_step_response_matches_the_worker_version() {
+    fn current_step_response_matches_the_worker_contract() {
         let response = step_response(
             "run-a",
             AgentRunStepOutcome {
@@ -577,7 +534,6 @@ mod cleanup_receipt_http_tests {
                 transition_reason: "runtime_session_terminal_committed".into(),
                 retry_at_ms: None,
             },
-            true,
         )
         .unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -585,7 +541,7 @@ mod cleanup_receipt_http_tests {
             .block_on(axum::body::to_bytes(response.into_body(), 4096))
             .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value["schema"], "runtime.agent_run.step.result.v2");
+        assert_eq!(value["schema"], "runtime.agent_run.step.result.v1");
         assert_eq!(value["terminalState"], "completed");
     }
     #[test]

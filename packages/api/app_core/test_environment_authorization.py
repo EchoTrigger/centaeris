@@ -29,21 +29,25 @@ class EnvironmentAuthorizationContractTests(SimpleTestCase):
 class EnvironmentAuthorizationAdmissionTests(OperationFixture, TestCase):
     def test_start_binds_the_fixed_environment_without_rewriting_original_grant(self):
         from .models import AgentRun
-        from .runtime_client import build_agent_run_start
+        from .testing import fenced_start_fixture
+        from .environment_lifecycle import controller_lease_digest
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
         result = self.post().json()
         run = AgentRun.objects.get(pk=result["agentRunId"])
         original = copy.deepcopy((run.authorization.payload, run.authorization.digest, run.authorization.signature))
-        first = build_agent_run_start(run)
-        self.assertEqual(first["schema"], "workspace.agent_run.start.v3")
+        first = fenced_start_fixture(run)
+        self.assertEqual(first["schema"], "workspace.agent_run.start.v1")
         binding = first["environmentAuthorization"]["payload"]
         self.assertEqual(binding, {"schema": "workspace.environment_authorization.v1",
             "environmentId": run.environment_id, "sessionId": run.session_id,
             "agentRunId": run.pk, "agentRunAuthorizationDigest": run.authorization.digest,
-            "executionMode": "perRun"})
+            "executionMode": "perRun", "controllerId": run.pk,
+            "controllerEpoch": run.environment.controller_epoch, "controllerPurpose": 'execute',
+            "controllerLeaseDigest": controller_lease_digest(
+                run.environment.controller_lease_owner)})
         with CaptureQueriesContext(connection) as queries:
-            self.assertEqual(build_agent_run_start(run), first)
+            self.assertEqual(fenced_start_fixture(run), first)
         self.assertTrue(queries)
         self.assertTrue(all(query["sql"].lstrip().upper().startswith("SELECT") for query in queries),
                         "rebuilding an execution authorization must remain read-only")
@@ -52,4 +56,4 @@ class EnvironmentAuthorizationAdmissionTests(OperationFixture, TestCase):
         foreign = AgentRun.objects.get(pk=self.post(operationId="foreign-submit").json()["agentRunId"])
         run.environment = foreign.environment
         with self.assertRaises((ValueError, RuntimeError)):
-            build_agent_run_start(run)
+            fenced_start_fixture(run)

@@ -303,6 +303,19 @@ class OwnedUsageReader:
         self.timeout = timeout
         self._host_verified = False
 
+    @staticmethod
+    def _scope_sql(parameter=lambda name: ":'" + name + "'"):
+        """One ownership predicate for psql and real PostgreSQL behavior tests."""
+        return f"""SELECT (current_database()={parameter('expected_db')} AND current_user={parameter('expected_user')} AND EXISTS(
+    SELECT 1 FROM app_core_agentrun r JOIN app_core_sessionenvironment env ON env.id=r.environment_id
+    JOIN app_core_agentrunauthorization a ON a.agent_run_id=r.id
+    WHERE r.id={parameter('run_id')} AND r.session_id={parameter('session_id')} AND env.session_id=r.session_id
+    AND env.environment_profile IS NOT NULL
+    AND env.network=env.environment_profile->>'network'
+    AND a.payload->>'schema'='workspace.agent_run_authorization.v1'
+    AND a.payload->'environmentProfile'=env.environment_profile
+    AND a.payload->>'environmentProfileDigest'=env.environment_profile_digest))"""
+
     def read(self, session_id, agent_run_id, after_sequence):
         _identity(session_id); _identity(agent_run_id); _integer(after_sequence)
         if not self._host_verified:
@@ -315,13 +328,7 @@ class OwnedUsageReader:
         query = """BEGIN READ ONLY;
 SET LOCAL statement_timeout='750ms';
 SET LOCAL lock_timeout='250ms';
-SELECT (current_database()=:'expected_db' AND current_user=:'expected_user' AND EXISTS(
-    SELECT 1 FROM app_core_agentrun r JOIN app_core_sessionenvironment env ON env.id=r.environment_id
-    JOIN app_core_agentrunauthorization a ON a.agent_run_id=r.id
-    WHERE r.id=:'run_id' AND r.session_id=:'session_id' AND env.session_id=r.session_id
-    AND env.benchmark_profile IS NOT NULL AND a.payload->>'schema'='workspace.agent_run_authorization.v2'
-    AND a.payload->'benchmarkProfile'=env.benchmark_profile
-    AND a.payload->>'benchmarkProfileDigest'=env.benchmark_profile_digest)) AS metrics_owned \\gset
+""" + self._scope_sql() + """ AS metrics_owned \\gset
 \\if :metrics_owned
 SELECT json_build_object('owned',true);
 SELECT json_build_object(

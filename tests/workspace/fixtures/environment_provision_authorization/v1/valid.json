@@ -1,0 +1,67 @@
+{
+  "payload": {
+    "workspaceId": "workspace_test",
+    "sessionId": "session_test",
+    "environmentId": "environment_test",
+    "controllerOwner": {
+      "kind": "maintenanceOperation",
+      "operationId": "prepare_test"
+    },
+    "controllerEpoch": 2,
+    "controllerLeaseDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "controllerPurpose": "execute",
+    "expiresAtMs": 1800000000000,
+    "schema": "workspace.environment_provision_authorization.v1",
+    "operationKind": "provision",
+    "operationId": "prepare_test",
+    "requestDigest": "sha256:e0f7c0627b1abf10ac605e7b9681ccb7c8b424192b62ce069b56656e26e4e0ab",
+    "environmentProfile": {
+      "schema": "runtime.environment_profile.v1",
+      "imageDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "workspaceRoot": "/app",
+      "user": "0:0",
+      "network": "publicInternet",
+      "resources": {
+        "cpuMilli": 1000,
+        "memoryBytes": 2147483648,
+        "pidsLimit": 512,
+        "dataTmpfsBytes": 67108864,
+        "storageBytes": 10737418240
+      }
+    },
+    "environmentProfileDigest": "sha256:002ce0c3f62ff192b630fef336d994812674e939332a7cc16f7f01c1f314024f",
+    "userId": "user_1",
+    "agentId": "centaeris",
+    "pluginActivation": {
+      "schema": "plugin_activation_snapshot_v1",
+      "digest": "sha256:3bf31c5d8d4d6523712c9ef2b194d4b0edb3255155a49e76f44bbe7382e54f75",
+      "packages": []
+    }
+  },
+  "signature": "hmac-sha256:7bded4e78430f78dd13f4535f675b4675b51c5c302424e28414523aec1ea6412",
+  "request": {
+    "kind": "provisionEnvironment",
+    "environmentProfile": {
+      "schema": "runtime.environment_profile.v1",
+      "imageDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "workspaceRoot": "/app",
+      "user": "0:0",
+      "network": "publicInternet",
+      "resources": {
+        "cpuMilli": 1000,
+        "memoryBytes": 2147483648,
+        "pidsLimit": 512,
+        "dataTmpfsBytes": 67108864,
+        "storageBytes": 10737418240
+      }
+    },
+    "environmentProfileDigest": "sha256:002ce0c3f62ff192b630fef336d994812674e939332a7cc16f7f01c1f314024f",
+    "userId": "user_1",
+    "agentId": "centaeris",
+    "pluginActivation": {
+      "schema": "plugin_activation_snapshot_v1",
+      "digest": "sha256:3bf31c5d8d4d6523712c9ef2b194d4b0edb3255155a49e76f44bbe7382e54f75",
+      "packages": []
+    }
+  }
+}

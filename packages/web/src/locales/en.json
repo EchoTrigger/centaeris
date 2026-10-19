@@ -1105,5 +1105,13 @@
   "libraryObjectRoute.leaveTitle": "Save this draft before leaving",
   "libraryObjectRoute.leaveHelp": "The latest text is not yet saved on this device. We are trying to save it. Stay to retry if saving fails, or explicitly leave without this draft.",
   "libraryObjectRoute.leaveWithoutDraft": "Leave without saving draft",
-  "libraryObjectRoute.stay": "Stay"
+  "libraryObjectRoute.stay": "Stay",
+  "environmentSettings.title": "Execution environment",
+  "environmentSettings.internet": "Allow internet access",
+  "environmentSettings.newEnvironmentsOnly": "Applies to new conversations. Existing environments keep their current network access.",
+  "environmentSettings.loadError": "Unable to load environment settings.",
+  "environmentSettings.saved": "Saved. New conversations will use this setting.",
+  "environmentSettings.retry": "Retry",
+  "environmentSettings.saveUnconfirmed": "The save response was unavailable. The switch now shows the current server setting.",
+  "environmentSettings.loading": "Loading current network policy…"
 }

@@ -226,7 +226,7 @@ export function createRouter() {
                   children: [
                     { path: "app", element: <></> },
                     { path: "agents/:agentId", element: <></> },
-                    ...["preferences", "security", "applications", "general", "members", "groups", "plugins", "models", "global-plugins", "agents"].map((section) => ({ path: `settings/${section}`, Component: SettingsRoute })),
+                    ...["preferences", "security", "applications", "general", "members", "groups", "plugins", "models", "global-plugins", "agents", "environment"].map((section) => ({ path: `settings/${section}`, Component: SettingsRoute })),
                   ],
                 },
                 { path: "trash/sessions/:sessionId", Component: TrashSessionRoute },

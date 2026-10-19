@@ -18,7 +18,7 @@ from .agent_run_authorization_factory import create_agent_run_authorization
 from .models import Agent, AgentCoordinationSession, AgentRun, HostedOperationReceipt, ModelConfig, Session, SessionAssetLink, SessionEvent, UserLibraryObject, Workspace, WorkspaceMembership
 
 
-PROFILE = {"schema": "runtime.execution_profile.v1", "imageCapability": "workspace_general_v1",
+PROFILE = {"schema": "runtime.execution_profile.v1",
            "imageDigest": "sha256:" + "a" * 64}
 
 

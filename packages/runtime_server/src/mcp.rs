@@ -342,7 +342,7 @@ fn valid_binding_digest(value: &str) -> bool {
     })
 }
 
-struct DockerMcpTransport {
+struct EnvironmentMcpTransport {
     child: crate::docker_engine::ExecChild,
     transport: centaeris_mcp::BoundedIoTransport<
         crate::docker_engine::ExecReader,
@@ -350,7 +350,7 @@ struct DockerMcpTransport {
     >,
     stderr: tokio::task::JoinHandle<()>,
 }
-impl DockerMcpTransport {
+impl EnvironmentMcpTransport {
     fn new(mut child: crate::docker_engine::ExecChild) -> Result<Self, String> {
         let stdout = child.stdout.take().ok_or("MCP stdout missing")?;
         let stdin = child.stdin.take().ok_or("MCP stdin missing")?;
@@ -367,7 +367,7 @@ impl DockerMcpTransport {
         })
     }
 }
-impl rmcp::transport::Transport<rmcp::RoleClient> for DockerMcpTransport {
+impl rmcp::transport::Transport<rmcp::RoleClient> for EnvironmentMcpTransport {
     type Error = std::io::Error;
     fn send(
         &mut self,
@@ -387,7 +387,7 @@ impl rmcp::transport::Transport<rmcp::RoleClient> for DockerMcpTransport {
         result
     }
 }
-impl Drop for DockerMcpTransport {
+impl Drop for EnvironmentMcpTransport {
     fn drop(&mut self) {
         self.child.disconnect();
         self.stderr.abort();
@@ -442,8 +442,8 @@ impl McpServerConnector for WorkspaceMcpConnector {
                         .spawn_async()
                         .await
                         .map_err(McpConnectError::Unavailable)?;
-                    let transport =
-                        DockerMcpTransport::new(child).map_err(McpConnectError::Unavailable)?;
+                    let transport = EnvironmentMcpTransport::new(child)
+                        .map_err(McpConnectError::Unavailable)?;
                     connect_mcp_server_transport(
                         self.plugin_name.as_str(),
                         self.server.clone(),

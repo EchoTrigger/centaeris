@@ -11,35 +11,40 @@ See [Workspace architecture](../../docs/architecture/Architecture.md),
 
 ## Execution boundary
 
-- `OCI_RUNTIME` is exactly `runc` or `runsc`; Runtime verifies that Docker has
-  registered the selected runtime and does not fall back to another runtime or
-  a host process.
-- Compose defaults to `runsc`; gVisor must be installed and registered on the
-  Docker host. Local Docker Desktop tests on hosts without gVisor explicitly
-  set `OCI_RUNTIME=runc`. There is no automatic fallback. Performance evidence
-  must identify the actual platform, such as systrap; it does not establish
-  latency or capacity for an untested KVM deployment.
-- Every AgentRun receives one temporary container with explicit mounts, work
-  directory, UID/GID, network, CPU, memory, PID, and temporary-space limits.
-- `read`, `bash`, `edit`, and `write` use that same container. Fixed helpers run
-  through attached Docker Engine exec streams and expose no network listener.
-- Runtime owns the container lifecycle and Docker socket. AgentRun containers
-  receive neither the socket nor control-plane credentials.
-- Plugin Skills, CLI programs, MCP servers, and Hooks use the frozen AgentRun
-  activation and the existing Core tool, receipt, and lifecycle paths.
-- Authorized attachments use Core `read(input_ref)`. `search_knowledge` is not a
-  Workspace model tool.
+A Session owns one environment profile and controller. AgentRuns and maintenance
+operations use the same allocation, host task protocol and cleanup receipts.
+The profile selects the immutable image, workload user, workspace directory,
+network and declared resources. Physical lifetime is either `perRun` or
+`retained`.
 
-`PLUGIN_VOLUME_NAME` and `AGENT_MEMORY_VOLUME_NAME` are required canonical
-Docker volume names. Agent Memory is mounted through the Workspace-owned memory
-boundary and remains outside the public Session workspace model.
+The native host supervisor attests the Docker/runc target and owns process
+launch, journals and output. Commands, files, inputs, artifacts, snapshots, MCP
+and Hooks use that task channel. Workloads receive no Docker socket, host control
+socket, control-plane credentials or writable host cgroup mount. Fixed helpers
+come from the reviewed static binary and run through a sealed descriptor.
+Agent Memory is resolved by Runtime outside the container.
+
+The current native backend supports `OCI_RUNTIME=runc`. The repository keeps
+its existing `runsc` default; connecting that backend to the same supervisor
+contract is remaining integration work. There is no automatic runtime fallback.
+See [native supervisor installation](../hosted_execution/deploy/README.md).
+
+Plugin Skills, CLI programs, MCP servers and Hooks use the frozen activation
+and Core tool/receipt contracts. Authorized attachments use `read(input_ref)`.
+`PLUGIN_VOLUME_NAME` and `AGENT_MEMORY_VOLUME_NAME` remain required canonical
+volume names; only the projected Plugin data enters workload containers.
 
 ## Internal service surface
 
 - `POST /agent-runs/step` starts or resumes the exact authorized lifecycle job.
 - `POST /agent-runs/cancel` requests cooperative cancellation.
-- `POST /agent-runs/teardown` idempotently removes the matching terminal
-  AgentRun container.
+- `POST /agent-runs/teardown` closes the Run scope, confirms cleanup and applies
+  the environment's physical lifetime policy.
+- `POST /internal/environments/provision` allocates an environment independently
+  of an AgentRun.
+- `POST /internal/environments/observe` reads allocation and physical facts.
+- `POST /internal/environments/maintenance/task` and `/filesystem` execute
+  independently signed maintenance operations.
 - `POST /mcp/catalog` and `POST /hooks/catalog` inspect frozen package bytes
   without connecting to an MCP server or executing a Hook.
 

@@ -25,47 +25,11 @@ fn cancellation_unknown(reason: impl Into<String>) -> ExecutionError {
 
 fn operation(fence: &EnvironmentTaskFence, id: &str, action: &str) -> String {
     let mut hash = Sha256::new();
-    for part in ["retained-command-v1", &fence.controller_id, id, action] {
-        hash.update((part.len() as u64).to_be_bytes());
-        hash.update(part.as_bytes());
-    }
+    hash.update(b"centaeris:retained-command:v3\0");
+    hash.update(
+        serde_json::to_vec(&(&fence.controller_owner, id, action)).expect("typed command identity"),
+    );
     fence.operation_id(&format!("command_{:x}", hash.finalize()))
-}
-
-pub(super) fn run_file_helper(
-    fence: &EnvironmentTaskFence,
-    operation_id: &str,
-    input: &[u8],
-    output_limit: usize,
-    path: &str,
-    rpc: impl FnMut(EnvironmentTaskRequest) -> Result<EnvironmentTaskResult, String>,
-) -> Result<Vec<u8>, String> {
-    let request = ExecutionCommandRequest {
-        program: super::AGENT_BINARY.into(),
-        args: vec!["filesystem-once".into()],
-        cwd: WORKSPACE_DATA_ROOT.into(),
-        env: Default::default(),
-        timeout_ms: 30_000,
-        policy: ExecutionPolicy::workspace_write_no_network(WORKSPACE_DATA_ROOT),
-    };
-    let output = run_command_with_input(
-        fence,
-        operation_id,
-        request,
-        None,
-        path,
-        CommandMode::Execute(input),
-        rpc,
-    )
-    .map_err(|e| e.to_string())?;
-    if output.process.exit_code != Some(0)
-        || !output.process.runtime_diagnostics.is_empty()
-        || output.process.stdout_decode.raw_byte_length > output_limit
-        || output.process.stdout.len() > output_limit
-    {
-        return Err("retained filesystem response incomplete or oversized".into());
-    }
-    Ok(output.process.stdout.into_bytes())
 }
 
 #[derive(Default)]
@@ -101,6 +65,25 @@ pub(super) fn run_command(
         cancellation_probe,
         command_path,
         CommandMode::Execute(&[]),
+        rpc,
+    )
+}
+
+pub(super) fn run_command_with_stdin(
+    fence: &EnvironmentTaskFence,
+    operation_id: &str,
+    request: ExecutionCommandRequest,
+    input: &[u8],
+    command_path: &str,
+    rpc: impl FnMut(EnvironmentTaskRequest) -> Result<EnvironmentTaskResult, String>,
+) -> Result<ExecutionHostCommandOutput, ExecutionError> {
+    run_command_with_input(
+        fence,
+        operation_id,
+        request,
+        None,
+        command_path,
+        CommandMode::Execute(input),
         rpc,
     )
 }
@@ -214,29 +197,28 @@ fn run_command_with_input(
             reason: "retained command identity required".into(),
         });
     }
-    let mut args = vec![
-        "-i".into(),
-        format!("HOME={WORKSPACE_HOME}"),
-        format!("PATH={command_path}"),
-        "TMPDIR=/tmp".into(),
-    ];
-    for (key, default) in [("LANG", "C.UTF-8"), ("LC_ALL", "C.UTF-8"), ("TERM", "dumb")] {
-        args.push(format!(
-            "{key}={}",
-            request.env.get(key).map(String::as_str).unwrap_or(default)
-        ));
-    }
-    args.extend([
-        "/usr/bin/timeout".into(),
-        "--signal=TERM".into(),
-        "--kill-after=1s".into(),
-        super::coreutils_timeout_duration(request.timeout_ms),
-        request.program,
-    ]);
-    args.extend(request.args);
-    let scope = EnvironmentTaskScope::Run {
-        run_id: fence.controller_id.clone(),
+    let scope = match &fence.controller_owner {
+        EnvironmentTaskOwner::AgentRun { run_id } => EnvironmentTaskScope::Run {
+            run_id: run_id.clone(),
+        },
+        EnvironmentTaskOwner::MaintenanceOperation { operation_id } => {
+            EnvironmentTaskScope::Operation {
+                operation_id: operation_id.clone(),
+            }
+        }
     };
+    fence
+        .authorize_start(&scope)
+        .map_err(|reason| ExecutionError::Denied { reason })?;
+    let mut env = std::collections::BTreeMap::from([
+        ("HOME".into(), WORKSPACE_HOME.into()),
+        ("PATH".into(), command_path.into()),
+        ("TMPDIR".into(), "/tmp".into()),
+        ("LANG".into(), "C.UTF-8".into()),
+        ("LC_ALL".into(), "C.UTF-8".into()),
+        ("TERM".into(), "dumb".into()),
+    ]);
+    env.extend(request.env.clone());
     let start_id = operation(fence, operation_id, "start");
     let first_request = if recovering {
         EnvironmentTaskRequest::Query {
@@ -250,10 +232,11 @@ fn run_command_with_input(
             fence: fence.clone(),
             operation_id: start_id.clone(),
             scope: scope.clone(),
-            program: "/usr/bin/env".into(),
-            args,
-            cwd: WORKSPACE_DATA_ROOT.into(),
-            timeout_ms: request.timeout_ms.saturating_add(3000),
+            program: request.program,
+            args: request.args,
+            env,
+            cwd: request.cwd.to_string_lossy().into_owned(),
+            timeout_ms: request.timeout_ms,
         }
     };
     let first = rpc(first_request).map_err(|reason| {
@@ -484,6 +467,42 @@ mod tests {
     use super::*;
     use std::collections::{HashMap, VecDeque};
 
+    fn run_stdin_fixture(
+        fence: &EnvironmentTaskFence,
+        operation_id: &str,
+        input: &[u8],
+        output_limit: usize,
+        path: &str,
+        rpc: impl FnMut(EnvironmentTaskRequest) -> Result<EnvironmentTaskResult, String>,
+    ) -> Result<Vec<u8>, String> {
+        let request = ExecutionCommandRequest {
+            program: crate::docker_execution_host::AGENT_BINARY.into(),
+            args: vec!["filesystem-once".into()],
+            cwd: WORKSPACE_DATA_ROOT.into(),
+            env: Default::default(),
+            timeout_ms: 30_000,
+            policy: ExecutionPolicy::workspace_write_no_network(WORKSPACE_DATA_ROOT),
+        };
+        let output = run_command_with_input(
+            fence,
+            operation_id,
+            request,
+            None,
+            path,
+            CommandMode::Execute(input),
+            rpc,
+        )
+        .map_err(|e| e.to_string())?;
+        if output.process.exit_code != Some(0)
+            || !output.process.runtime_diagnostics.is_empty()
+            || output.process.stdout_decode.raw_byte_length > output_limit
+            || output.process.stdout.len() > output_limit
+        {
+            return Err("retained filesystem response incomplete or oversized".into());
+        }
+        Ok(output.process.stdout.into_bytes())
+    }
+
     #[test]
     fn recovery_queries_original_task_without_start_or_input() {
         let mut renewed = fence();
@@ -640,7 +659,7 @@ mod tests {
     #[test]
     fn start_rpc_file_helper_preserves_history_capacity_reason() {
         let mut calls = 0;
-        let error = run_file_helper(
+        let error = run_stdin_fixture(
             &fence(),
             "helper-1",
             b"filesystem request",
@@ -720,7 +739,7 @@ mod tests {
         .unwrap();
         let (mut starts, mut writes, mut receipt_queries, mut closes) = (0, 0, 0, 0);
         let mut original_input = String::new();
-        let result = run_file_helper(&fence(), "tool-1", &frame, 10, "/usr/bin", |r| match r {
+        let result = run_stdin_fixture(&fence(), "tool-1", &frame, 10, "/usr/bin", |r| match r {
             EnvironmentTaskRequest::Start { .. } => {
                 starts += 1;
                 Ok(started())
@@ -781,7 +800,7 @@ mod tests {
     #[test]
     fn helper_lost_eof_ack_reads_its_receipt_without_closing_twice() {
         let (mut writes, mut closes, mut queries) = (0, 0, 0);
-        let result = run_file_helper(&fence(), "tool-1", b"frame", 10, "/usr/bin", |r| match r {
+        let result = run_stdin_fixture(&fence(), "tool-1", b"frame", 10, "/usr/bin", |r| match r {
             EnvironmentTaskRequest::Start { .. } => Ok(started()),
             EnvironmentTaskRequest::Input { close: false, .. } => {
                 writes += 1;
@@ -838,7 +857,7 @@ mod tests {
             let mut starts = 0;
             let mut data_inputs = 0;
             let result =
-                run_file_helper(&fence(), "tool-1", b"frame", 10, "/usr/bin", |r| match r {
+                run_stdin_fixture(&fence(), "tool-1", b"frame", 10, "/usr/bin", |r| match r {
                     EnvironmentTaskRequest::Start { .. } => {
                         starts += 1;
                         Ok(started())
@@ -877,7 +896,7 @@ mod tests {
             let mut data_inputs = 0;
             let mut receipt_queries = 0;
             let result =
-                run_file_helper(&fence(), "tool-1", b"frame", 10, "/usr/bin", |r| match r {
+                run_stdin_fixture(&fence(), "tool-1", b"frame", 10, "/usr/bin", |r| match r {
                     EnvironmentTaskRequest::Start { .. } => Ok(started()),
                     EnvironmentTaskRequest::Input { close: false, .. } => {
                         data_inputs += 1;
@@ -904,7 +923,7 @@ mod tests {
     fn helper_unknown_input_never_rewrites_bytes_or_sends_eof() {
         let mut starts = 0;
         let mut inputs = 0;
-        let result = run_file_helper(&fence(), "tool-1", b"frame", 10, "/usr/bin", |r| match r {
+        let result = run_stdin_fixture(&fence(), "tool-1", b"frame", 10, "/usr/bin", |r| match r {
             EnvironmentTaskRequest::Start { .. } => {
                 starts += 1;
                 Ok(started())
@@ -927,14 +946,14 @@ mod tests {
         let input = vec![b'x'; 5000];
         let mut received = Vec::new();
         let mut closed = false;
-        let result = run_file_helper(&fence(), "tool-1", &input, 10, "/usr/bin", |r| match r {
+        let result = run_stdin_fixture(&fence(), "tool-1", &input, 10, "/usr/bin", |r| match r {
             EnvironmentTaskRequest::Start {
                 program,
                 args,
                 scope,
                 ..
             } => {
-                assert_eq!(program, "/usr/bin/env");
+                assert_eq!(program, super::super::AGENT_BINARY);
                 assert!(args.iter().any(|a| a == "filesystem-once"));
                 assert_eq!(
                     scope,
@@ -960,7 +979,7 @@ mod tests {
         .unwrap();
         assert_eq!(received, input);
         assert_eq!(result, b"hello");
-        let result = run_file_helper(&fence(), "tool-1", b"", 4, "/usr/bin", |_| {
+        let result = run_stdin_fixture(&fence(), "tool-1", b"", 4, "/usr/bin", |_| {
             Ok(finished(false))
         });
         assert!(
@@ -972,7 +991,9 @@ mod tests {
     fn fence() -> EnvironmentTaskFence {
         EnvironmentTaskFence {
             environment_instance_id: "instance-1".into(),
-            controller_id: "run-a".into(),
+            controller_owner: EnvironmentTaskOwner::AgentRun {
+                run_id: "run-a".into(),
+            },
             controller_epoch: 1,
             controller_purpose: EnvironmentTaskControllerPurpose::Execute,
         }
@@ -1047,7 +1068,7 @@ mod tests {
         assert_eq!(out.process.stdout_decode.raw_byte_length, 5);
         assert_eq!(out.process.exit_code, Some(0));
         assert!(
-            matches!(&requests[0], EnvironmentTaskRequest::Start { scope:EnvironmentTaskScope::Run {run_id}, program, args, .. } if run_id=="run-a" && program=="/usr/bin/env" && args.iter().any(|a|a=="printf hello"))
+            matches!(&requests[0], EnvironmentTaskRequest::Start { scope:EnvironmentTaskScope::Run {run_id}, program, args, .. } if run_id=="run-a" && program=="/bin/bash" && args.iter().any(|a|a=="printf hello"))
         );
         assert!(
             matches!(&requests[1], EnvironmentTaskRequest::Input {close:true,data,..} if data.is_empty())
@@ -1096,7 +1117,7 @@ mod tests {
     #[test]
     fn input_capacity_does_not_claim_the_command_never_started() {
         let mut calls = 0;
-        let error = run_file_helper(&fence(), "tool-1", b"request", 100, "/bin", |request| {
+        let error = run_stdin_fixture(&fence(), "tool-1", b"request", 100, "/bin", |request| {
             calls += 1;
             match request {
                 EnvironmentTaskRequest::Start { .. } => Ok(started()),
@@ -1201,7 +1222,7 @@ mod tests {
         let mut identities = Vec::new();
         for (run, epoch) in [("run-a", 1), ("run-a", 3), ("run-b", 4)] {
             let mut current = fence();
-            current.controller_id = run.into();
+            current.controller_owner = EnvironmentTaskOwner::AgentRun { run_id: run.into() };
             current.controller_epoch = epoch;
             run_command(&current, "same-tool-call", command(), None, "/bin", |r| {
                 let EnvironmentTaskRequest::Start {
@@ -1237,6 +1258,62 @@ mod tests {
             ..fence()
         }
         .matches_original_operation_id(&identities[0], &identities[2]));
+    }
+
+    #[test]
+    fn typed_owner_kind_separates_equal_command_identities() {
+        let run = fence();
+        let maintenance = EnvironmentTaskFence {
+            controller_owner: EnvironmentTaskOwner::MaintenanceOperation {
+                operation_id: "run-a".into(),
+            },
+            ..run.clone()
+        };
+        assert_ne!(
+            operation(&run, "same", "start"),
+            operation(&maintenance, "same", "start")
+        );
+    }
+
+    #[test]
+    fn authorized_maintenance_commands_use_operation_scope_without_a_fake_run() {
+        let maintenance = EnvironmentTaskFence {
+            controller_owner: EnvironmentTaskOwner::MaintenanceOperation {
+                operation_id: "maintenance-1".into(),
+            },
+            ..fence()
+        };
+        let result = run_command(&maintenance, "tool-1", command(), None, "/bin", |request| {
+            request.validate_authority()?;
+            let EnvironmentTaskRequest::Start {
+                operation_id,
+                scope,
+                fence,
+                ..
+            } = request
+            else {
+                panic!("completed command must not signal or restart");
+            };
+            assert_eq!(fence.controller_owner, maintenance.controller_owner);
+            assert_eq!(
+                scope,
+                EnvironmentTaskScope::Operation {
+                    operation_id: "maintenance-1".into()
+                }
+            );
+            let mut task = snapshot(true);
+            task.operation_id = operation_id;
+            task.scope = scope;
+            Ok(EnvironmentTaskResult::Task {
+                task,
+                output: Vec::new(),
+                earliest_cursor: 0,
+                next_cursor: 0,
+                gap: false,
+                has_more: false,
+            })
+        });
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[test]

@@ -66,7 +66,7 @@ class SessionStreamAuthorityTests(SimpleTestCase):
 
         signal = {
             "schema": stream.SIGNAL_SCHEMA, "kind": "live", "agentRunId": self.run.id,
-            **live(2),
+            **{key: value for key, value in live(2).items() if key != "text"},
         }
         stream._load_live_text_state_async.side_effect = [live(1), live(2)]
         check = AsyncMock(side_effect=[True, True, False])

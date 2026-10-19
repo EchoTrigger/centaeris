@@ -686,7 +686,7 @@ def _workspace_tmpfs_fits(agent_run: AgentRun, expanded_size_bytes: int) -> bool
         expanded_size_bytes
         + inputs_size_bytes
         + SESSION_WORKSPACE_RESTORE_OVERHEAD_BYTES
-        <= agent_run.authorization.payload["resources"]["dataTmpfsBytes"]
+        <= agent_run.authorization.payload["environmentProfile"]["resources"]["dataTmpfsBytes"]
     )
 
 
@@ -799,7 +799,7 @@ def commit_session_workspace(request):
             with transaction.atomic():
                 agent_run, session, frozen = _locked_session_workspace_agent_run(body)
                 protection_observations.bind(sessionId=str(session.id), runId=str(agent_run.id), jobId=body["jobId"])
-                max_bytes = agent_run.authorization.payload["resources"]["dataTmpfsBytes"]
+                max_bytes = agent_run.authorization.payload["environmentProfile"]["resources"]["dataTmpfsBytes"]
                 if (
                     body["snapshotSizeBytes"] > max_bytes
                     or body["expandedSizeBytes"] > max_bytes
@@ -1526,59 +1526,7 @@ def resolve_agent_run_lifecycle(request):
         body = decode_json_object(request)
     except (ValueError, TypeError):
         return JsonResponse({"error": "agent_run_lifecycle_resolve_invalid"}, status=400)
-    if body.get("schema") == "runtime.agent_run_lifecycle.resolve.v2":
-        return _resolve_retained_agent_run(body)
-    try:
-        if (
-            set(body) != {"schema", "jobId", "agentRunId", "authorizationDigest"}
-            or body["schema"] != "runtime.agent_run_lifecycle.resolve.v1"
-        ):
-            raise ValueError("agent_run_lifecycle_resolve_invalid")
-        require_string("agentRunId", body["agentRunId"])
-        require_string("jobId", body["jobId"])
-        require_string("authorizationDigest", body["authorizationDigest"])
-        agent_run_id = body["agentRunId"]
-        job_id = body["jobId"]
-        digest = body["authorizationDigest"]
-        if not agent_run_id or job_id != agent_run_lifecycle_job_id(agent_run_id) or not digest:
-            raise ValueError("agent_run_lifecycle_resolve_invalid")
-        with transaction.atomic():
-            agent_run = (
-                AgentRun.objects.select_for_update(of=("self",))
-                .select_related("authorization", "modelConfig", "session", "environment")
-                .get(id=agent_run_id)
-            )
-            if agent_run.authorization.digest != digest:
-                return JsonResponse(
-                    {"error": "agent_run_lifecycle_binding_mismatch"}, status=409
-                )
-            terminal_state = committed_session_terminal_state(agent_run)
-            if terminal_state is None:
-                if agent_run.status not in {"queued", "running"}:
-                    return JsonResponse(
-                        {"error": "agent_run_lifecycle_binding_mismatch"}, status=409
-                    )
-            agent_run_start = build_agent_run_start(agent_run)
-    except AgentRun.DoesNotExist:
-        return JsonResponse({"error": "agent_run_not_found"}, status=404)
-    except (RuntimeError, ValueError, TypeError):
-        return JsonResponse({"error": "agent_run_start_invalid"}, status=409)
-    if terminal_state is not None:
-        return JsonResponse(
-            {
-                "schema": "runtime.agent_run_lifecycle.resolved.v1",
-                "disposition": "terminal",
-                "terminalState": terminal_state,
-                "agentRunStart": agent_run_start,
-            }
-        )
-    return JsonResponse(
-        {
-            "schema": "runtime.agent_run_lifecycle.resolved.v1",
-            "disposition": "ready",
-            "agentRunStart": agent_run_start,
-        }
-    )
+    return _resolve_agent_run(body)
 
 
 def _retained_lifecycle_binding(body, schema, extra=()):
@@ -1608,9 +1556,11 @@ def _retained_run_projection(run_id, digest):
     return run, terminal
 
 
-def _resolve_retained_agent_run(body):
+def _resolve_agent_run(body):
     try:
-        _retained_lifecycle_binding(body, "runtime.agent_run_lifecycle.resolve.v2")
+        _retained_lifecycle_binding(body, "runtime.agent_run_lifecycle.resolve.v1", ("executionMode",))
+        if body["executionMode"] not in ("perRun", "retained"):
+            raise ValueError("agent_run_lifecycle_execution_mode_invalid")
     except (ValueError, TypeError):
         return JsonResponse({"error": "agent_run_lifecycle_resolve_invalid"}, status=400)
     try:
@@ -1619,7 +1569,7 @@ def _resolve_retained_agent_run(body):
         for attempt in range(2):
             run, terminal = _retained_run_projection(body["agentRunId"], body["authorizationDigest"])
             receipt = get_environment_release_receipt(run.pk, body["leaseOwner"])
-            common = {"schema": "runtime.agent_run_lifecycle.resolved.v2"}
+            common = {"schema": "runtime.agent_run_lifecycle.resolved.v1"}
             if receipt is not None:
                 if terminal is None:
                     raise ValueError("agent_run_semantic_terminal_missing")
@@ -1628,7 +1578,7 @@ def _resolve_retained_agent_run(body):
             if terminal is not None:
                 authority = acquire_environment_cleanup_controller(run.pk, body["leaseOwner"])
                 return JsonResponse(common | {"disposition": "terminal", "terminalState": terminal,
-                    "agentRunCleanup": build_agent_run_cleanup(run, authority)})
+                    "agentRunCleanup": build_agent_run_cleanup(run, authority, execution_mode=body["executionMode"])})
             try:
                 authority = acquire_environment_controller(run.pk, body["leaseOwner"])
             except EnvironmentControllerTerminal:
@@ -1636,7 +1586,7 @@ def _resolve_retained_agent_run(body):
                     continue
                 raise
             return JsonResponse(common | {"disposition": "ready",
-                "agentRunStart": build_agent_run_start(run, controller_authority=authority)})
+                "agentRunStart": build_agent_run_start(run, controller_authority=authority, execution_mode=body["executionMode"])})
     except AgentRun.DoesNotExist:
         return JsonResponse({"error": "agent_run_not_found"}, status=404)
     except EnvironmentControllerBusy:
@@ -1727,8 +1677,6 @@ def _lifecycle_scan_page(queryset, after, limit):
 def reconcile_agent_run_lifecycle(request):
     try:
         body = decode_json_object(request)
-        if body.get("schema") == "runtime.agent_run_lifecycle.reconcile.v2":
-            return _reconcile_retained_cleanup(body)
         if (
             not {"schema", "limit"} <= set(body)
             or set(body) - {"schema", "limit", "activeAfter", "deadLetterAfter"}
@@ -1825,15 +1773,17 @@ def reconcile_agent_run_lifecycle(request):
     )
 
 
-def _reconcile_retained_cleanup(body):
+@_internal_post("/agent-run-lifecycle/cleanup-reconcile")
+def reconcile_agent_run_cleanup(request):
     try:
-        if set(body) != {"schema", "limit", "after"} or type(body["limit"]) is not int or not 1 <= body["limit"] <= AGENT_RUN_LIFECYCLE_RECONCILE_LIMIT:
+        body = decode_json_object(request)
+        if set(body) != {"schema", "limit", "after"} or body["schema"] != "runtime.agent_run_cleanup.reconcile.v1" or type(body["limit"]) is not int or not 1 <= body["limit"] <= AGENT_RUN_LIFECYCLE_RECONCILE_LIMIT:
             raise ValueError
         after = _lifecycle_scan_cursor(body["after"])
     except (ValueError, TypeError):
         return JsonResponse({"error": "agent_run_lifecycle_reconcile_invalid"}, status=400)
-    # Only a retained controller's pending cleanup participates. Do not infer
-    # retained mode from an old v1 grant or recreate a terminal execution job.
+    # Both lifecycle policies retain their controller until cleanup has a durable
+    # receipt. Report terminal cleanup without recreating an execution job.
     runs, next_cursor = _lifecycle_scan_page(AgentRun.objects.filter(
         status__in={"completed", "failed", "cancelled"}, environment_release__isnull=True,
         environment__controller_run_id=F("id"), environment__controller_purpose__in={"execute", "cleanup"},
@@ -1852,7 +1802,7 @@ def _reconcile_retained_cleanup(body):
             status = "unknown"
         pending.append({"agentRunId": run.pk, "authorizationDigest": run.authorization.digest,
             "terminalState": terminal, "jobStatus": status})
-    return JsonResponse({"schema": "runtime.agent_run_lifecycle.reconciled.v2", "checked": len(runs),
+    return JsonResponse({"schema": "runtime.agent_run_cleanup.reconciled.v1", "checked": len(runs),
         "pending": pending, "next": next_cursor})
 
 

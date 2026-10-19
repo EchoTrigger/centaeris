@@ -125,55 +125,28 @@ impl DockerExecutionHostRunner {
         capture_request: &SandboxSnapshotCaptureRequest,
         observation: &WorkspaceProtection,
     ) -> Result<SnapshotCaptureResult, String> {
-        let command = self.snapshot_capture_request(observation);
-        let mut child = command.spawn()?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or("snapshot capture helper stderr is unavailable")?;
-        let stderr_reader = thread::spawn(move || read_bounded(stderr, DOCKER_DIAGNOSTIC_LIMIT));
-        let result = (|| {
-            let stdin = child
-                .stdin
-                .take()
-                .ok_or("snapshot capture helper stdin is unavailable")?;
-            serde_json::to_writer(stdin, capture_request)
-                .map_err(|error| format!("write snapshot capture request failed: {error}"))?;
-            let mut stdout = child
-                .stdout
-                .take()
-                .ok_or("snapshot capture helper stdout is unavailable")?;
-            read_capture(&mut stdout, capture_request, |source| {
-                capture_snapshot_artifact_observed(
-                    source,
-                    self.resources
-                        .data_tmpfs_bytes
-                        .saturating_add(SESSION_WORKSPACE_MANIFEST_LIMIT as u64 + 4),
-                    observation.clone(),
-                )
-            })
-        })();
-        if result.is_err() {
-            child.disconnect();
-        }
-        let status = child.wait();
-        let stderr = stderr_reader.join();
-        let stderr = stderr
-            .map_err(|_| "snapshot capture stderr reader panicked")?
-            .map_err(|error| format!("read snapshot capture stderr failed: {error}"))?;
-        finish_observed_capture(
-            result,
-            status.map(|status| status.code()),
-            stderr.bytes.as_slice(),
-            observation,
-        )
-    }
-
-    fn snapshot_capture_request(&self, observation: &WorkspaceProtection) -> ExecRequest {
-        let mut command = self.exec_request(vec![AGENT_BINARY.into(), "snapshot-capture".into()]);
-        command.cwd = Some(WORKSPACE_DATA_ROOT.into());
-        observation.helper_environment(&mut command.env);
-        command
+        let bytes =
+            serde_json::to_vec(capture_request).map_err(|_| "snapshot_capture_request_invalid")?;
+        let mut input = tempfile::tempfile().map_err(|_| "snapshot_capture_spool_unavailable")?;
+        input
+            .write_all(&bytes)
+            .map_err(|_| "snapshot_capture_spool_unavailable")?;
+        let (mut output, stderr, exit) = self.supervised_helper_file(
+            hosted_execution::host_supervisor::TrustedHelperKind::SnapshotCapture,
+            &mut input,
+            bytes.len() as u64,
+            &format!("sha256:{:x}", Sha256::digest(&bytes)),
+        )?;
+        let result = read_capture(&mut output, capture_request, |source| {
+            capture_snapshot_artifact_observed(
+                source,
+                self.resources
+                    .data_tmpfs_bytes
+                    .saturating_add(SESSION_WORKSPACE_MANIFEST_LIMIT as u64 + 4),
+                observation.clone(),
+            )
+        });
+        finish_observed_capture(result, Ok(exit), &stderr, observation)
     }
 }
 
@@ -623,27 +596,14 @@ mod tests {
     }
 
     #[test]
-    fn conditional_capture_observation_reaches_helper_and_forwards_bound_counters_on_failure() {
+    fn conditional_capture_forwards_only_bound_counters_on_failure() {
         let (_, events) = crate::observations::capture_protection(|| {
-            let runner = super::super::tests::test_docker_execution_host_runner();
             let observation = WorkspaceProtection::new().with_context(
                 ProtectionTrigger::RecoveryCheckpoint,
                 "run-metrics",
                 Some("job-metrics"),
             );
-            let command = runner.snapshot_capture_request(&observation);
-            let mut expected_environment = vec![];
-            observation.helper_environment(&mut expected_environment);
-            assert!(
-                expected_environment
-                    .iter()
-                    .all(|value| command.env.contains(value)),
-                "capture helper must inherit the observation operation"
-            );
-            let operation_id = expected_environment
-                .iter()
-                .find_map(|value| value.strip_prefix("WORKSPACE_PERF_OPERATION_ID="))
-                .unwrap();
+            let operation_id = observation.operation_id();
             let event = serde_json::json!({"schema":"workspace.perf.v1","source":"sandbox","phase":"workspaceProtection","operationId":operation_id,"metric":"sourceReadBytes","value":17,"outcome":"error"});
             let mut bytes = serde_json::to_vec(&event).unwrap();
             bytes.extend_from_slice(b"\nprivate diagnostic must not become metrics\n");

@@ -1,10 +1,15 @@
-mod benchmark;
 mod environment;
+mod environment_container;
+mod maintenance;
+mod network;
 mod retained;
 mod retained_commands;
 mod snapshot_capture;
+pub(crate) use maintenance::{
+    maintenance_helper, maintenance_task, observe_environment, provision_environment,
+    remove_cleaned_environment,
+};
 
-use crate::docker_engine::{ExecChild, ExecRequest};
 use crate::execution_recovery_coordinator::OwnedExecutionContinuity;
 use crate::execution_recovery_policy::{
     ExecutionActivityWitness, HostFailureEvidence, SnapshotActivityGuard, SnapshotCaptureError,
@@ -17,28 +22,31 @@ use snapshot_capture::{SnapshotCaptureCache, SnapshotCaptureResult};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
-use std::io::{BufRead, BufReader, Cursor, Read, Seek, Write};
+use std::io::{Cursor, Read, Seek, Write};
 use std::path::Path;
 #[cfg(test)]
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+#[cfg(test)]
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 static NEXT_EXECUTION_HOST_INSTANCE: AtomicU64 = AtomicU64::new(1);
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use centaeris_core::execution::NetworkPolicy;
 use centaeris_core::execution::{
-    classify_execution_host_failure, ExecutionCancellationProbe, ExecutionFileSystemError,
-    ExecutionFileSystemErrorKind, ExecutionFileSystemOperation, ExecutionFileSystemOutput,
-    ExecutionFileSystemRequest, ExecutionHostCommandOutput, ExecutionHostCommandRecovery,
-    ExecutionHostFailureKind, ExecutionHostHealth, ExecutionHostRunner, ExecutionHostStatus,
-    ExecutionInputState, ExecutionInputStateChange, ExecutionWorkspaceGeneration,
-    MAX_PUBLISHED_ARTIFACT_BYTES, WORKSPACE_DATA_ROOT, WORKSPACE_HOME,
+    ExecutionCancellationProbe, ExecutionFileSystemError, ExecutionFileSystemErrorKind,
+    ExecutionFileSystemOperation, ExecutionFileSystemOutput, ExecutionFileSystemRequest,
+    ExecutionHostCommandOutput, ExecutionHostCommandRecovery, ExecutionHostHealth,
+    ExecutionHostRunner, ExecutionHostStatus, ExecutionInputState, ExecutionInputStateChange,
+    ExecutionWorkspaceGeneration, MAX_PUBLISHED_ARTIFACT_BYTES, WORKSPACE_DATA_ROOT,
+    WORKSPACE_HOME,
 };
 use centaeris_core::execution::{
-    decode_process_output, ExecutionAttempt, ExecutionCommandRequest, ExecutionError,
-    ExecutionPolicy, ExecutionPolicySummary, ExecutionProcessOutput, NetworkPolicy,
+    ExecutionCommandRequest, ExecutionError, ExecutionPolicy, ExecutionPolicySummary,
 };
 use centaeris_core::extension::hooks::{
     LifecycleHookCommandResultV1, LifecycleHookEventV1, LifecycleHookHandlerV1,
@@ -46,30 +54,38 @@ use centaeris_core::extension::hooks::{
 };
 use centaeris_core::extension::{validate_plugin_activation_snapshot, PluginActivationSnapshotV1};
 use centaeris_core::runtime::contracts::RecoveryWorkspaceSnapshotV1;
-use hosted_execution::memory::{is_memory_uri, MemoryPath, MEMORY_CONTAINER_ROOT};
+#[cfg(test)]
+use hosted_execution::memory::MEMORY_CONTAINER_ROOT;
+use hosted_execution::memory::{is_memory_uri, MemoryPath};
+#[cfg(test)]
+use hosted_execution::protocol::SandboxFileSystemResult;
 use hosted_execution::protocol::{
     SandboxArtifactMetadata, SandboxArtifactRequest, SandboxFileSystemRequest,
-    SandboxFileSystemResult, SandboxInputInventory, SandboxInputRevokeRequest,
-    SandboxMaterializedInput, SandboxWorkspaceGeneration, SandboxWorkspaceSnapshotFile,
-    SandboxWorkspaceSnapshotManifest, SANDBOX_INPUT_INVENTORY_SCHEMA,
-    SANDBOX_WORKSPACE_GENERATION_QUERY_LINE, SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA,
+    SandboxInputInventory, SandboxInputRevokeRequest, SandboxMaterializedInput,
+    SandboxWorkspaceGeneration, SandboxWorkspaceSnapshotFile, SandboxWorkspaceSnapshotManifest,
+    SANDBOX_INPUT_INVENTORY_SCHEMA, SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::agent_run_authorization::SessionWorkspace;
-use crate::agent_run_authorization::{BenchmarkExecutionProfile, SandboxResources};
+use crate::agent_run_authorization::{EnvironmentProfile, ExecutionNetwork, SandboxResources};
 use crate::postgres_store::PostgresRuntimeStore;
-use crate::resident_capacity::{
-    declared_usage, ObservedResidentSandbox, ResidentCapacity, ResidentSandboxRequest,
-};
+use crate::resident_capacity::{declared_usage, ObservedResidentSandbox, ResidentCapacity};
+
+pub(crate) fn environment_policy(profile: &EnvironmentProfile) -> ExecutionPolicy {
+    let mut policy = network::policy(profile.network, &profile.workspace_root);
+    policy.filesystem.denied_read_paths =
+        vec!["/run/centaeris".into(), "/run/centaeris-host".into()];
+    policy.filesystem.denied_write_paths = policy.filesystem.denied_read_paths.clone();
+    policy
+}
 
 const VALIDATE_INPUTS_SCHEMA: &str = "runtime.projected_input.validate.v1";
 const AGENT_BINARY: &str = "/opt/centaeris/bin/execution_agent";
 const AGENT_USER: &str = "10001:10001";
 const HELPER_JSON_LIMIT: usize = 1024 * 1024;
-const WORKSPACE_GENERATION_RPC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const DOCKER_DIAGNOSTIC_LIMIT: usize = 64 * 1024;
 const PLUGIN_VOLUME_NAME_ENV: &str = "PLUGIN_VOLUME_NAME";
 const PLUGIN_CONTAINER_ROOT: &str = "/opt/centaeris/plugins";
@@ -79,7 +95,6 @@ const WORKSPACE_GENERAL_IMAGE_ENV: &str = "WORKSPACE_GENERAL_IMAGE";
 const MEMORY_RUNTIME_VOLUME_ROOT: &str = "/var/lib/centaeris-agent-memory";
 const BASE_COMMAND_PATH: &str =
     "/opt/centaeris/bin:/opt/centaeris/venv/bin:/usr/local/bin:/usr/bin:/bin";
-const SANDBOX_NETWORK_MODE: &str = "none";
 const SESSION_WORKSPACE_RESOLVE_SCHEMA: &str = "runtime.session_workspace.resolve.v1";
 const SESSION_WORKSPACE_RESOLVED_SCHEMA: &str = "runtime.session_workspace.resolved.v1";
 const SESSION_WORKSPACE_DOWNLOAD_SCHEMA: &str = "runtime.session_workspace.download.v1";
@@ -91,7 +106,6 @@ const EXECUTION_WORKSPACE_DOWNLOAD_SCHEMA: &str = "runtime.execution_workspace.d
 const SESSION_WORKSPACE_MANIFEST_LIMIT: usize = 1024 * 1024;
 const SESSION_WORKSPACE_IO_BUFFER_BYTES: usize = 64 * 1024;
 const SESSION_WORKSPACE_RESTORE_OVERHEAD_BYTES: u64 = 64 * 1024;
-const WORKSPACE_EXECUTION_SENTINEL: &str = "/run/centaeris/execution.json";
 
 #[derive(Debug, Clone)]
 pub(crate) struct SessionWorkspaceLease {
@@ -284,7 +298,8 @@ fn plugin_command_path(activation: &PluginActivationSnapshotV1) -> Result<String
 }
 
 pub struct DockerExecutionHostRunner {
-    benchmark_profile: Option<BenchmarkExecutionProfile>,
+    network: ExecutionNetwork,
+    environment_profile: Option<EnvironmentProfile>,
     benchmark_helper: Option<String>,
     pub(crate) transcript_capture: Mutex<crate::transcript_capture::CaptureBuffer>,
     pub(crate) transcript_publisher: Arc<crate::transcript_capture::CapturePublisher>,
@@ -312,7 +327,6 @@ pub struct DockerExecutionHostRunner {
     api_client: reqwest::blocking::Client,
     input_lock: Mutex<()>,
     materialized_inputs: Mutex<BTreeMap<String, SandboxMaterializedInput>>,
-    workspace_generation_rpc: Mutex<Option<WorkspaceGenerationRpc>>,
     resident_store: Option<Arc<PostgresRuntimeStore>>,
     resident_lease: Option<centaeris_core::session::RuntimeJobLeaseFence>,
     retained_allocation:
@@ -321,183 +335,16 @@ pub struct DockerExecutionHostRunner {
     retained_workspace_id: Option<String>,
 }
 
-struct WorkspaceGenerationRpc {
-    child: RpcChild,
-    stdin: Option<Box<dyn Write + Send>>,
-    stderr: Option<thread::JoinHandle<Result<BoundedRead, String>>>,
-    responses: Option<mpsc::Receiver<Result<Vec<u8>, String>>>,
-    reader: Option<thread::JoinHandle<()>>,
-}
-
-enum RpcChild {
-    Engine(ExecChild),
-    #[cfg(test)]
-    Process(Child),
-}
-impl RpcChild {
-    #[cfg(test)]
-    fn id(&self) -> String {
-        match self {
-            Self::Process(child) => child.id().to_string(),
-            Self::Engine(child) => child.id.clone(),
-        }
-    }
-    fn try_wait(&mut self) -> Result<Option<String>, String> {
-        match self {
-            Self::Engine(child) => child
-                .try_wait()
-                .map(|status| status.map(|status| status.to_string())),
-            #[cfg(test)]
-            Self::Process(child) => child
-                .try_wait()
-                .map(|status| status.map(|status| status.to_string()))
-                .map_err(|e| e.to_string()),
-        }
-    }
-    fn disconnect(&mut self) {
-        match self {
-            Self::Engine(child) => child.disconnect(),
-            #[cfg(test)]
-            Self::Process(child) => {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        }
-    }
-}
-
-impl WorkspaceGenerationRpc {
-    #[cfg(test)]
-    fn spawn(command: &mut Command) -> Result<Self, String> {
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        let stdin = Box::new(child.stdin.take().ok_or("RPC stdin missing")?);
-        let stdout = Box::new(child.stdout.take().ok_or("RPC stdout missing")?);
-        Self::from_streams(RpcChild::Process(child), stdin, stdout, None)
-    }
-    fn from_exec(mut child: ExecChild) -> Result<Self, String> {
-        let stdin = Box::new(child.stdin.take().ok_or("RPC stdin missing")?);
-        let stdout = Box::new(child.stdout.take().ok_or("RPC stdout missing")?);
-        let stderr = child.stderr.take().ok_or("RPC stderr missing")?;
-        let drain = thread::spawn(move || read_bounded(stderr, DOCKER_DIAGNOSTIC_LIMIT));
-        Self::from_streams(RpcChild::Engine(child), stdin, stdout, Some(drain))
-    }
-    fn from_streams(
-        child: RpcChild,
-        stdin: Box<dyn Write + Send>,
-        stdout: Box<dyn Read + Send>,
-        stderr: Option<thread::JoinHandle<Result<BoundedRead, String>>>,
-    ) -> Result<Self, String> {
-        let (sender, responses) = mpsc::sync_channel(1);
-        let reader = thread::spawn(move || {
-            let mut stdout = BufReader::new(stdout);
-            loop {
-                let response = read_workspace_generation_response(&mut stdout);
-                let failed = response.is_err();
-                if sender.send(response).is_err() || failed {
-                    break;
-                }
-            }
-        });
-        Ok(Self {
-            child,
-            stderr,
-            stdin: Some(stdin),
-            responses: Some(responses),
-            reader: Some(reader),
-        })
-    }
-
-    fn query(&mut self, timeout: Duration) -> Result<SandboxWorkspaceGeneration, String> {
-        if let Some(status) = self
-            .child
-            .try_wait()
-            .map_err(|error| format!("inspect workspace generation RPC failed: {error}"))?
-        {
-            return Err(format!("workspace generation RPC exited: {status}"));
-        }
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or_else(|| "workspace generation RPC stdin is closed".to_string())?;
-        stdin
-            .write_all(SANDBOX_WORKSPACE_GENERATION_QUERY_LINE)
-            .and_then(|_| stdin.flush())
-            .map_err(|error| format!("write workspace generation RPC failed: {error}"))?;
-        let response = self
-            .responses
-            .as_ref()
-            .ok_or_else(|| "workspace generation RPC response channel is closed".to_string())?
-            .recv_timeout(timeout)
-            .map_err(|error| match error {
-                mpsc::RecvTimeoutError::Timeout => {
-                    "workspace generation RPC response timed out".to_string()
-                }
-                mpsc::RecvTimeoutError::Disconnected => {
-                    "workspace generation RPC response channel disconnected".to_string()
-                }
-            })??;
-        let generation = serde_json::from_slice::<SandboxWorkspaceGeneration>(response.as_slice())
-            .map_err(|error| format!("decode workspace generation RPC failed: {error}"))?;
-        generation.validate()?;
-        Ok(generation)
-    }
-}
-
-impl Drop for WorkspaceGenerationRpc {
-    fn drop(&mut self) {
-        self.responses.take();
-        self.stdin.take();
-        self.child.disconnect();
-        if let Some(stderr) = self.stderr.take() {
-            let _ = stderr.join();
-        }
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
-        }
-    }
-}
-
-fn read_workspace_generation_response(reader: &mut impl BufRead) -> Result<Vec<u8>, String> {
-    let mut response = Vec::new();
-    reader
-        .take(HELPER_JSON_LIMIT as u64 + 2)
-        .read_until(b'\n', &mut response)
-        .map_err(|error| format!("read workspace generation RPC failed: {error}"))?;
-    if response.last() != Some(&b'\n') {
-        return Err("workspace generation RPC response is incomplete".to_string());
-    }
-    response.pop();
-    if response.len() > HELPER_JSON_LIMIT || response.last() == Some(&b'\r') {
-        return Err("workspace generation RPC response is invalid".to_string());
-    }
-    Ok(response)
-}
-
-fn query_workspace_generation_rpc(
-    slot: &mut Option<WorkspaceGenerationRpc>,
-    timeout: Duration,
-    start: impl FnOnce() -> Result<WorkspaceGenerationRpc, String>,
-) -> Result<SandboxWorkspaceGeneration, String> {
-    if slot.is_none() {
-        *slot = Some(start()?);
-    }
-    let result = slot
-        .as_mut()
-        .expect("generation RPC initialized")
-        .query(timeout);
-    if result.is_err() {
-        slot.take();
-    }
-    result
+fn decode_workspace_generation(bytes: &[u8]) -> Result<SandboxWorkspaceGeneration, String> {
+    let generation: SandboxWorkspaceGeneration =
+        serde_json::from_slice(bytes).map_err(|_| "workspace_generation_invalid")?;
+    generation.validate()?;
+    Ok(generation)
 }
 
 pub struct DockerExecutionHostRequest<'a> {
-    pub benchmark_profile: Option<BenchmarkExecutionProfile>,
+    pub network: ExecutionNetwork,
+    pub environment_profile: Option<EnvironmentProfile>,
     pub workspace_id: String,
     pub lifecycle_job_id: String,
     pub lifecycle_lease_owner: String,
@@ -518,14 +365,14 @@ pub struct DockerExecutionHostRequest<'a> {
 
 #[derive(Clone, Copy)]
 struct ContainerExpectation<'a> {
-    benchmark_profile: Option<&'a BenchmarkExecutionProfile>,
+    network: ExecutionNetwork,
+    environment_profile: Option<&'a EnvironmentProfile>,
     benchmark_helper: Option<&'a str>,
-    retained: bool,
     profile_digest: Option<&'a str>,
     name: &'a str,
     agent_run_id: &'a str,
+    allocation_owner: Option<&'a centaeris_core::execution::EnvironmentTaskOwner>,
     execution_id: &'a str,
-    authorization_digest: &'a str,
     environment_id: &'a str,
     instance_id: &'a str,
     binding_digest: &'a str,
@@ -534,10 +381,21 @@ struct ContainerExpectation<'a> {
     resources: SandboxResources,
     plugin_volume_name: &'a str,
     plugin_mounts: &'a [PluginMount],
-    memory_mount: &'a MemoryMount,
 }
 
 impl DockerExecutionHostRunner {
+    pub(crate) fn keeps_instance(&self) -> bool {
+        self.environment_authorization
+            .as_ref()
+            .is_some_and(|a| a.payload.execution_mode == "retained")
+    }
+    pub(crate) fn workspace_root(&self) -> &str {
+        self.environment_profile
+            .as_ref()
+            .map_or(WORKSPACE_DATA_ROOT, |profile| {
+                profile.workspace_root.as_str()
+            })
+    }
     pub(crate) fn recovery_continuity(&self) -> OwnedExecutionContinuity {
         match inspect_container(&self.container_name) {
             Ok(None) => OwnedExecutionContinuity::OwnedMissing,
@@ -588,20 +446,23 @@ impl DockerExecutionHostRunner {
         {
             return Err("Docker environment binding is invalid".into());
         }
-        #[cfg(test)]
         if request
-            .environment_authorization
-            .payload
-            .controller
-            .is_none()
-            && crate::native_consumption_tests::owns_identity(&request.user_id, &request.agent_id)
+            .environment_profile
+            .as_ref()
+            .is_some_and(|profile| profile.network != request.network)
         {
+            return Err("benchmark network differs from signed authorization".into());
+        }
+        #[cfg(test)]
+        if crate::native_consumption_tests::owns_identity(&request.user_id, &request.agent_id) {
             assert!(
                 !request.has_execution_fact,
                 "fresh execution required by native fixture"
             );
             validate_plugin_activation_snapshot(request.plugin_activation)?;
             assert!(plugin_mounts(request.plugin_activation).is_empty());
+            let allocation =
+                crate::native_consumption_tests::prepare_owned_allocation(&request, before_create)?;
             crate::native_consumption_tests::register_owned_run(&request.agent_run_id);
             let mut runner = tests::test_docker_execution_host_runner();
             runner.container_name = format!("native-consume-test:{}", request.execution_id);
@@ -613,19 +474,30 @@ impl DockerExecutionHostRunner {
                 .environment_id
                 .clone();
             runner.binding_digest = request.environment_authorization.payload.digest()?;
-            runner.instance_id =
-                crate::postgres_store::execution_instances::instance_id(&runner.execution_id);
+            runner.instance_id = allocation.instance_id.clone();
             runner.authorization_digest = request.authorization_digest;
             runner.image_digest = request.image_digest;
             runner.resources = request.resources;
+            runner.network = request.network;
             runner.plugin_mounts.clear();
             runner.command_path = "/usr/bin".into();
             runner.api_url = request.api_url;
             runner.api_token = request.api_token;
+            runner.environment_profile = request.environment_profile;
+            runner.environment_authorization = Some(request.environment_authorization);
+            runner.resident_store = Some(request.resident_store);
+            runner.resident_lease = Some(centaeris_core::session::RuntimeJobLeaseFence {
+                job_id: request.lifecycle_job_id,
+                job_kind: "agent_run.lifecycle".into(),
+                lease_owner: request.lifecycle_lease_owner,
+            });
+            runner.retained_workspace_id = Some(request.workspace_id);
+            runner.retained_allocation = Some(allocation);
             return Ok(runner);
         }
         let DockerExecutionHostRequest {
-            benchmark_profile,
+            network,
+            environment_profile,
             workspace_id,
             lifecycle_job_id,
             lifecycle_lease_owner,
@@ -655,14 +527,12 @@ impl DockerExecutionHostRunner {
         }
         let environment_binding = &environment_authorization.payload;
         let retained = environment_binding.controller.is_some();
-        if benchmark_profile.is_some() && (!retained || !plugin_activation.packages.is_empty()) {
-            return Err(
-                "benchmark requires an isolated retained allocation without plugins".into(),
-            );
+        if !retained || environment_profile.is_none() {
+            return Err("environment_profile_and_controller_required".into());
         }
-        let benchmark_helper = benchmark_profile
+        let benchmark_helper = environment_profile
             .as_ref()
-            .map(|_| benchmark::helper_path())
+            .map(|_| environment_container::helper_path())
             .transpose()?;
         let environment_id = environment_binding.environment_id.clone();
         let binding_digest = environment_binding.digest()?;
@@ -676,21 +546,19 @@ impl DockerExecutionHostRunner {
             agent_id.as_str(),
             docker_volume_name_from_environment(AGENT_MEMORY_VOLUME_NAME_ENV)?,
         )?;
-        if !retained && benchmark_profile.is_none() {
-            prepare_memory_scope(&memory_mount)?;
-        }
+        prepare_memory_scope(&memory_mount)?;
         let command_path = plugin_command_path(plugin_activation)?;
         let oci_runtime = OciRuntime::from_environment()?;
         let mut container_name = container_name(execution_id.as_str());
         let expected = ContainerExpectation {
-            benchmark_profile: benchmark_profile.as_ref(),
+            network,
+            environment_profile: environment_profile.as_ref(),
             benchmark_helper: benchmark_helper.as_deref(),
-            retained,
             profile_digest: None,
             name: container_name.as_str(),
             agent_run_id: agent_run_id.as_str(),
+            allocation_owner: None,
             execution_id: execution_id.as_str(),
-            authorization_digest: authorization_digest.as_str(),
             environment_id: &environment_id,
             instance_id: &instance_id,
             binding_digest: &binding_digest,
@@ -699,7 +567,6 @@ impl DockerExecutionHostRunner {
             resources,
             plugin_volume_name: plugin_volume_name.as_str(),
             plugin_mounts: plugin_mounts.as_slice(),
-            memory_mount: &memory_mount,
         };
         let (resident_host_id, resident_limits) = resident_host_context()?;
         let lease = centaeris_core::session::RuntimeJobLeaseFence {
@@ -707,7 +574,7 @@ impl DockerExecutionHostRunner {
             job_kind: centaeris_core::session::reliability::AGENT_RUN_LIFECYCLE_JOB_KIND.into(),
             lease_owner: lifecycle_lease_owner.clone(),
         };
-        let retained_allocation = if retained {
+        let retained_allocation = {
             let key = retained::signing_key()?;
             let profile = retained::profile_digest(&expected, plugin_activation)?;
             let request = crate::postgres_store::execution_instances::RetainedInstanceRequest {
@@ -727,9 +594,7 @@ impl DockerExecutionHostRunner {
                 observed_resident_sandboxes,
                 |client, _| before_create(client),
                 |allocation| {
-                    if !allocation.reused && benchmark_profile.is_none() {
-                        prepare_memory_scope(&memory_mount)?;
-                    }
+                    prepare_memory_scope(&memory_mount)?;
                     let name = self::container_name(&allocation.allocation_execution_id);
                     let physical = retained::origin_expectation(&expected, allocation, &name);
                     ensure_container(&physical, allocation.reused || has_execution_fact)?;
@@ -744,51 +609,17 @@ impl DockerExecutionHostRunner {
                     }
                     let fence =
                         retained::fence(&environment_authorization, &allocation.instance_id)?;
-                    if benchmark_profile.is_none() {
-                        retained::takeover(&physical, &facts.id, &fence)?;
-                    }
+                    retained::takeover(&physical, &facts.id, &fence)?;
                     Ok(facts.id)
                 },
             )?;
             instance_id = allocation.instance_id.clone();
             container_name = self::container_name(&allocation.allocation_execution_id);
             Some(allocation)
-        } else {
-            resident_store.prepare_resident_sandbox_with_client(
-                &resident_host_id,
-                &ResidentSandboxRequest {
-                    execution_id: &execution_id,
-                    agent_run_id: &agent_run_id,
-                    workspace_id: &workspace_id,
-                    lifecycle_job_id: &lifecycle_job_id,
-                    lifecycle_lease_owner: &lifecycle_lease_owner,
-                    must_exist: has_execution_fact,
-                    resources: declared_usage(resources),
-                },
-                resident_limits,
-                observed_resident_sandboxes,
-                |client| {
-                    before_create(client)?;
-                    let committed = crate::postgres_store::execution_instances::bind(
-                        client,
-                        environment_binding,
-                        &execution_id,
-                        &resident_host_id,
-                        &image_digest,
-                    )?;
-                    if committed != instance_id {
-                        return Err("execution instance allocation mismatch".into());
-                    }
-                    ensure_container(&expected, has_execution_fact)?;
-                    Ok(inspect_container(&container_name)?
-                        .ok_or("prepared resident sandbox disappeared")?
-                        .id)
-                },
-            )?;
-            None
         };
         let runner = Self {
-            benchmark_profile,
+            network,
+            environment_profile,
             benchmark_helper,
             transcript_capture: Mutex::new(Default::default()),
             transcript_publisher: Arc::new(Default::default()),
@@ -822,7 +653,6 @@ impl DockerExecutionHostRunner {
                 .map_err(|error| format!("build Docker sandbox API client failed: {error}"))?,
             input_lock: Mutex::new(()),
             materialized_inputs: Mutex::new(BTreeMap::new()),
-            workspace_generation_rpc: Mutex::new(None),
             resident_store: Some(resident_store),
             resident_lease: Some(centaeris_core::session::RuntimeJobLeaseFence {
                 job_id: lifecycle_job_id,
@@ -833,9 +663,6 @@ impl DockerExecutionHostRunner {
             environment_authorization: retained.then_some(environment_authorization),
             retained_workspace_id: retained.then_some(workspace_id),
         };
-        if retained {
-            return Ok(runner);
-        }
         if has_execution_fact {
             runner.quiesce_existing_execution()?;
         }
@@ -858,19 +685,17 @@ impl DockerExecutionHostRunner {
     fn container_expectation(&self) -> ContainerExpectation<'_> {
         let origin = self.retained_allocation.as_ref();
         ContainerExpectation {
-            benchmark_profile: self.benchmark_profile.as_ref(),
+            network: self.network,
+            environment_profile: self.environment_profile.as_ref(),
             benchmark_helper: self.benchmark_helper.as_deref(),
-            retained: origin.is_some(),
             profile_digest: origin.map(|a| a.profile_digest.as_str()),
             name: self.container_name.as_str(),
+            allocation_owner: origin.map(|a| &a.allocation_owner),
             agent_run_id: origin.map_or(self.agent_run_id.as_str(), |a| {
-                a.allocation_agent_run_id.as_str()
+                a.allocation_agent_run_id.as_deref().unwrap_or("")
             }),
             execution_id: origin.map_or(self.execution_id.as_str(), |a| {
                 a.allocation_execution_id.as_str()
-            }),
-            authorization_digest: origin.map_or(self.authorization_digest.as_str(), |a| {
-                a.authorization_digest.as_str()
             }),
             environment_id: &self.environment_id,
             instance_id: origin.map_or(self.instance_id.as_str(), |a| a.instance_id.as_str()),
@@ -881,7 +706,6 @@ impl DockerExecutionHostRunner {
             resources: self.resources,
             plugin_volume_name: self.plugin_volume_name.as_str(),
             plugin_mounts: self.plugin_mounts.as_slice(),
-            memory_mount: &self.memory_mount,
         }
     }
 
@@ -900,92 +724,101 @@ impl DockerExecutionHostRunner {
         Ok(())
     }
 
-    fn exec_request(&self, command: Vec<String>) -> ExecRequest {
-        ExecRequest::owned(
-            &self.container_name,
-            &self.agent_run_id,
-            &self.execution_id,
+    #[cfg(test)]
+    fn exec_request(&self, command: Vec<String>) -> ContainerObservation {
+        ContainerObservation {
+            container: self.container_name.clone(),
+            labels: [
+                ("centaeris.managed".into(), "true".into()),
+                ("centaeris.agent_run_id".into(), self.agent_run_id.clone()),
+                ("centaeris.execution_id".into(), self.execution_id.clone()),
+                ("centaeris.instance_id".into(), self.instance_id.clone()),
+                (
+                    "centaeris.environment_id".into(),
+                    self.environment_id.clone(),
+                ),
+            ]
+            .into(),
             command,
-        )
+            user: None,
+        }
     }
 
     pub(crate) fn mcp_exec_request(
-        &self,
+        self: &Arc<Self>,
         plugin_name: &str,
         program: &str,
         program_args: &[String],
-    ) -> Result<ExecRequest, String> {
-        if self.is_retained() {
-            return Err("retained MCP dispatch unsupported".into());
-        }
-        let _activity = self.recovery_activity.begin_dispatch_activity()?;
+    ) -> Result<crate::environment_stdio::EnvironmentStdioRequest, String> {
         let mount = self
             .plugin_mounts
             .iter()
-            .find(|mount| mount.package_name == plugin_name)
-            .ok_or_else(|| format!("MCP plugin is not activated: {plugin_name}"))?;
+            .find(|m| m.package_name == plugin_name)
+            .ok_or("mcp_plugin_not_activated")?;
         let program = format!("{}/{program}", mount.destination);
-        if !authorized_plugin_path(self.plugin_mounts.as_slice(), program.as_str())
-            .map_err(|_| "validate MCP stdio program failed".to_string())?
+        if !authorized_plugin_path(&self.plugin_mounts, &program)
+            .map_err(|_| "mcp_program_rejected")?
         {
-            return Err("MCP stdio program must belong to its activated plugin".to_string());
+            return Err("mcp_program_rejected".into());
         }
-        let path_env = format!("PATH={}", self.command_path);
+        let fence = self.environment_task_fence()?;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "mcp_identity_invalid")?
+            .as_nanos();
+        let runner = Arc::clone(self);
+        let dispatch = self.recovery_activity.begin_dispatch_activity()?;
+        dispatch.register_persistent_dispatch()?;
         self.deferred_extension_dispatch
             .store(true, Ordering::SeqCst);
-        _activity.register_persistent_dispatch()?;
-        self.recovery_activity.invalidate_before_dispatch()?;
-        let mut command = vec![program];
-        command.extend_from_slice(program_args);
-        let mut request = self.exec_request(command);
-        request.user = Some(AGENT_USER.to_string());
-        request.cwd = Some(WORKSPACE_DATA_ROOT.to_string());
-        request.env = vec!["HOME=/home/agent".into(), path_env, "TMPDIR=/tmp".into()];
-        Ok(request)
+        Ok(crate::environment_stdio::EnvironmentStdioRequest {
+            operation_id: fence.operation_id(&format!("mcp:{}:{stamp}", std::process::id())),
+            fence,
+            program,
+            args: program_args.into(),
+            cwd: self.workspace_root().into(),
+            env: BTreeMap::from([
+                ("HOME".into(), WORKSPACE_HOME.into()),
+                ("PATH".into(), self.command_path.clone()),
+                ("TMPDIR".into(), "/tmp".into()),
+            ]),
+            rpc: Arc::new(move |request| runner.environment_task_rpc(request)),
+        })
     }
 
-    fn lifecycle_hook_exec_request(
+    fn lifecycle_hook_request(
         &self,
         handler: &LifecycleHookHandlerV1,
-    ) -> Result<ExecRequest, String> {
-        if self.is_retained() {
-            return Err("retained lifecycle hook dispatch unsupported".into());
-        }
+    ) -> Result<ExecutionCommandRequest, String> {
         if handler.source.kind != LifecycleHookSourceKindV1::Plugin {
-            return Err("Workspace lifecycle hook source must be Plugin".to_string());
+            return Err("lifecycle_hook_source_rejected".into());
         }
         let mount = self
             .plugin_mounts
             .iter()
-            .find(|mount| mount.package_name == handler.source.name)
-            .ok_or_else(|| {
-                format!(
-                    "lifecycle hook plugin is not activated: {}",
-                    handler.source.name
-                )
-            })?;
-        let mut request = self.exec_request(Vec::new());
-        request.user = Some(AGENT_USER.to_string());
-        request.cwd = Some(mount.destination.clone());
-        for (name, value) in [
-            ("LANG", "C.UTF-8"),
-            ("LC_ALL", "C.UTF-8"),
-            ("TERM", "dumb"),
-            ("HOME", WORKSPACE_HOME),
-            ("PATH", self.command_path.as_str()),
-            ("TMPDIR", "/tmp"),
-        ] {
-            request.env.push(format!("{name}={value}"));
+            .find(|m| m.package_name == handler.source.name)
+            .ok_or("lifecycle_hook_plugin_not_activated")?;
+        let bare = !handler.program.is_empty()
+            && !handler.program.contains('/')
+            && !handler.program.contains('\\')
+            && !handler.program.chars().any(char::is_control);
+        if !bare
+            && (!authorized_plugin_path(&self.plugin_mounts, &handler.program)
+                .map_err(|_| "lifecycle_hook_program_rejected")?
+                || !handler
+                    .program
+                    .starts_with(&format!("{}/", mount.destination)))
+        {
+            return Err("lifecycle_hook_program_rejected".into());
         }
-        request.command.extend([
-            "/usr/bin/timeout".to_string(),
-            "--signal=TERM".to_string(),
-            "--kill-after=1s".to_string(),
-            coreutils_timeout_duration(handler.timeout_ms),
-            handler.program.clone(),
-        ]);
-        request.command.extend(handler.args.clone());
-        Ok(request)
+        Ok(ExecutionCommandRequest {
+            program: handler.program.clone(),
+            args: handler.args.clone(),
+            cwd: mount.destination.clone().into(),
+            env: Default::default(),
+            timeout_ms: handler.timeout_ms,
+            policy: self.execution_policy(),
+        })
     }
 
     fn run_lifecycle_hook_command(
@@ -993,67 +826,48 @@ impl DockerExecutionHostRunner {
         handler: &LifecycleHookHandlerV1,
         event: &LifecycleHookEventV1,
     ) -> Result<LifecycleHookCommandResultV1, String> {
+        let request = self.lifecycle_hook_request(handler)?;
         let _activity = self.recovery_activity.begin_dispatch_activity()?;
-        let mut stdin_json = serde_json::to_vec(event)
-            .map_err(|error| format!("serialize lifecycle hook event failed: {error}"))?;
-        stdin_json.push(b'\n');
-        let request = self.lifecycle_hook_exec_request(handler)?;
         self.recovery_activity.invalidate_before_dispatch()?;
-        let mut child = request.spawn()?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "lifecycle hook stdout is unavailable".to_string())?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| "lifecycle hook stderr is unavailable".to_string())?;
-        let stdout_reader = thread::spawn(move || read_bounded(stdout, DOCKER_DIAGNOSTIC_LIMIT));
-        let stderr_reader = thread::spawn(move || read_bounded(stderr, DOCKER_DIAGNOSTIC_LIMIT));
-        if let Some(mut stdin) = child.stdin.take() {
-            if let Err(error) = stdin.write_all(stdin_json.as_slice()) {
-                child.disconnect();
-                let _ = child.wait();
-                return Err(format!("write lifecycle hook stdin failed: {error}"));
+        let mut input = serde_json::to_vec(event).map_err(|_| "lifecycle_hook_event_invalid")?;
+        input.push(b'\n');
+        let fence = self.environment_task_fence()?;
+        let identity = format!(
+            "hook:{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(handler, event))
+                    .map_err(|_| "lifecycle_hook_event_invalid")?
+            )
+        );
+        let output = retained_commands::run_command_with_stdin(
+            &fence,
+            &identity,
+            request,
+            &input,
+            &self.command_path,
+            |request| self.environment_task_rpc(request),
+        )
+        .map_err(|_| "lifecycle_hook_outcome_unknown")?;
+        let mut stdout = output.process.stdout;
+        let mut stderr = output.process.stderr;
+        let stdout_truncated = output.process.stdout_decode.raw_byte_length > stdout.len()
+            || stdout.len() > DOCKER_DIAGNOSTIC_LIMIT;
+        let stderr_truncated = output.process.stderr_decode.raw_byte_length > stderr.len()
+            || stderr.len() > DOCKER_DIAGNOSTIC_LIMIT;
+        for text in [&mut stdout, &mut stderr] {
+            let mut limit = DOCKER_DIAGNOSTIC_LIMIT.min(text.len());
+            while !text.is_char_boundary(limit) {
+                limit -= 1;
             }
+            text.truncate(limit);
         }
-
-        let deadline =
-            Instant::now() + Duration::from_millis(handler.timeout_ms.saturating_add(5_000));
-        let (exit_code, timed_out) = loop {
-            match child.try_wait() {
-                Ok(Some(status)) if status.code() == Some(124) => break (None, true),
-                Ok(Some(status)) => break (status.code(), false),
-                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
-                Ok(None) => {
-                    let teardown = self.teardown_owned();
-                    child.disconnect();
-                    let _ = child.wait();
-                    return Err(teardown.err().unwrap_or_else(|| {
-                        "lifecycle hook docker exec exceeded its confirmed deadline; sandbox removed"
-                            .to_string()
-                    }));
-                }
-                Err(error) => {
-                    child.disconnect();
-                    let _ = child.wait();
-                    return Err(format!("wait lifecycle hook docker exec failed: {error}"));
-                }
-            }
-        };
-        let stdout = stdout_reader
-            .join()
-            .map_err(|_| "lifecycle hook stdout reader panicked".to_string())??;
-        let stderr = stderr_reader
-            .join()
-            .map_err(|_| "lifecycle hook stderr reader panicked".to_string())??;
         Ok(LifecycleHookCommandResultV1 {
-            exit_code,
-            stdout: String::from_utf8_lossy(stdout.bytes.as_slice()).to_string(),
-            stderr: String::from_utf8_lossy(stderr.bytes.as_slice()).to_string(),
-            stdout_truncated: stdout.total_bytes > stdout.bytes.len(),
-            stderr_truncated: stderr.total_bytes > stderr.bytes.len(),
-            timed_out,
+            exit_code: output.process.exit_code,
+            stdout,
+            stderr,
+            stdout_truncated,
+            stderr_truncated,
+            timed_out: output.process.timed_out,
             spawn_error: None,
         })
     }
@@ -1078,8 +892,9 @@ impl DockerExecutionHostRunner {
         })
     }
 
+    #[cfg(test)]
     fn teardown_owned(&self) -> Result<(), String> {
-        if self.is_retained() {
+        if self.retained_allocation.is_some() {
             return Err("retained instance removal requires explicit cleanup authority".into());
         }
         if let Some(store) = self.resident_store.as_ref() {
@@ -1190,38 +1005,21 @@ impl DockerExecutionHostRunner {
                 input_upper_bound_bytes,
             )
             .map_err(SessionWorkspaceApiError::Rejected)?;
-            let store = self.resident_store.as_ref().ok_or_else(|| {
-                SessionWorkspaceApiError::Unavailable(
-                    "resident restore accounting binding missing".into(),
-                )
-            })?;
-            let fence = self.resident_lease.as_ref().ok_or_else(|| {
-                SessionWorkspaceApiError::Unavailable(
-                    "resident restore lease binding missing".into(),
-                )
-            })?;
-            store
-                .with_resident_execution_restore(
-                    &resident_host_id().map_err(SessionWorkspaceApiError::Unavailable)?,
-                    &self.agent_run_id,
-                    &self.execution_id,
-                    fence,
-                    || -> Result<(), SessionWorkspaceApiError> {
-                        let capture = self.restore_activity()?;
-                        artifact.file.rewind().map_err(|error| {
-                            SessionWorkspaceApiError::Unavailable(error.to_string())
-                        })?;
-                        self.restore_snapshot_stream(
-                            &mut artifact.file,
-                            artifact.descriptor.size_bytes,
-                            &artifact.descriptor.sha256,
-                            &capture,
-                            &artifact.observation,
-                        )
-                        .map_err(SessionWorkspaceApiError::Rejected)
-                    },
-                )
-                .map_err(SessionWorkspaceApiError::Unavailable)??;
+            let capture = self.restore_activity()?;
+            artifact
+                .file
+                .rewind()
+                .map_err(|error| SessionWorkspaceApiError::Unavailable(error.to_string()))?;
+            // The sealed helper authorizes every start, query and result against
+            // the current controller and exact physical instance.
+            self.restore_snapshot_stream(
+                &mut artifact.file,
+                artifact.descriptor.size_bytes,
+                &artifact.descriptor.sha256,
+                &capture,
+                &artifact.observation,
+            )
+            .map_err(SessionWorkspaceApiError::Rejected)?;
         }
         Ok(prepared.resolution)
     }
@@ -1543,7 +1341,7 @@ impl DockerExecutionHostRunner {
         &self,
         collect: impl FnOnce(&SnapshotActivityGuard) -> Result<SessionWorkspaceCommitOutcome, String>,
     ) -> Result<SessionWorkspaceCommitOutcome, String> {
-        if self.is_retained() {
+        if self.keeps_instance() {
             return Ok(SessionWorkspaceCommitOutcome::ProtectionDeferred);
         }
         let Some(capture) = self.recovery_activity.try_final_snapshot_activity()? else {
@@ -1702,7 +1500,7 @@ impl DockerExecutionHostRunner {
         observe: impl FnOnce(&SnapshotActivityGuard) -> Result<u64, String>,
         collect: impl FnOnce(&SnapshotActivityGuard) -> Result<T, String> + Send,
     ) -> Result<Option<(T, WorkspaceReuseEvidence)>, String> {
-        if self.is_retained() {
+        if self.keeps_instance() {
             return Err("retained_consistent_capture_unavailable".into());
         }
         *self
@@ -1998,45 +1796,20 @@ impl DockerExecutionHostRunner {
         observation.timed(ProtectionMetric::RestoreApplyElapsedMs, || {
             self.begin_snapshot_restore()?;
             let _ = capture;
-            let mut request =
-                self.exec_request(vec![AGENT_BINARY.into(), "snapshot-restore".into()]);
-            request.cwd = Some(WORKSPACE_DATA_ROOT.into());
-            let mut child = request.spawn()?;
-            let stdout = child
-                .stdout
-                .take()
-                .ok_or("snapshot restore stdout missing")?;
-            let stderr = child
-                .stderr
-                .take()
-                .ok_or("snapshot restore stderr missing")?;
-            let stdout_reader =
-                thread::spawn(move || read_bounded(stdout, DOCKER_DIAGNOSTIC_LIMIT));
-            let stderr_reader =
-                thread::spawn(move || read_bounded(stderr, DOCKER_DIAGNOSTIC_LIMIT));
-            let mut stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| "snapshot restore helper stdin is unavailable".to_string())?;
-            let copy = copy_exact(source, &mut stdin, expected_size_bytes, expected_sha256);
-            drop(stdin);
-            if let Err(error) = copy {
-                child.disconnect();
-                let _ = child.wait();
-                return Err(error);
+            if expected_size_bytes > hosted_execution::host_supervisor::HELPER_STREAM_LIMIT {
+                return Err("snapshot_restore_limit_exceeded".into());
             }
-            let status = child.wait()?;
-            let _stdout = stdout_reader
-                .join()
-                .map_err(|_| "snapshot restore stdout reader panicked")??;
-            let stderr = stderr_reader
-                .join()
-                .map_err(|_| "snapshot restore stderr reader panicked")??;
-            if !status.success() {
-                return Err(format!(
-                    "snapshot restore helper failed: {}",
-                    bounded_diagnostic(&stderr.bytes)
-                ));
+            let mut input =
+                tempfile::tempfile().map_err(|_| "snapshot_restore_spool_unavailable")?;
+            copy_exact(source, &mut input, expected_size_bytes, expected_sha256)?;
+            let (_, _, exit) = self.supervised_helper_file(
+                hosted_execution::host_supervisor::TrustedHelperKind::SnapshotRestore,
+                &mut input,
+                expected_size_bytes,
+                expected_sha256,
+            )?;
+            if exit != Some(0) {
+                return Err("snapshot_restore_failed".into());
             }
             Ok(())
         })
@@ -2118,21 +1891,10 @@ impl DockerExecutionHostRunner {
     }
 
     fn validate_policy(&self, policy: &ExecutionPolicy) -> Result<(), ExecutionError> {
-        if let Some(profile) = &self.benchmark_profile {
-            return if *policy == benchmark::policy(profile) {
-                Ok(())
-            } else {
-                Err(ExecutionError::Denied {
-                    reason: "benchmark command policy differs from signed profile".into(),
-                })
-            };
-        }
-        if policy.filesystem.workspace_root != Path::new(WORKSPACE_DATA_ROOT)
-            || policy.network != NetworkPolicy::Disabled
-        {
+        let base = network::policy(self.network, self.workspace_root());
+        if policy != &base && policy != &self.execution_policy() {
             return Err(ExecutionError::Denied {
-                reason: "Docker execution requires /mnt/data and disabled network policy"
-                    .to_string(),
+                reason: "environment policy differs from signed profile".into(),
             });
         }
         Ok(())
@@ -2287,55 +2049,32 @@ impl DockerExecutionHostRunner {
         input: &[u8],
         output_limit: usize,
     ) -> Result<Vec<u8>, String> {
-        if self.is_retained() {
-            if mode == "filesystem-once" && user == Some(AGENT_USER) {
-                static HELPER_SEQUENCE: std::sync::atomic::AtomicU64 =
-                    std::sync::atomic::AtomicU64::new(0);
-                let sequence = HELPER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|e| e.to_string())?
-                    .as_nanos();
-                let id = format!("filesystem-{}-{timestamp}-{sequence}", std::process::id());
-                return retained_commands::run_file_helper(
-                    &self.environment_task_fence()?,
-                    &id,
-                    input,
-                    output_limit,
-                    &self.command_path,
-                    |request| self.environment_task_rpc(request),
-                );
-            }
-            return Err("retained helper dispatch unsupported".into());
+        if user.is_some_and(|user| {
+            user != AGENT_USER
+                && self
+                    .environment_profile
+                    .as_ref()
+                    .is_none_or(|profile| user != profile.user)
+        }) {
+            return Err("environment_helper_user_override_rejected".into());
         }
-        if !matches!(
-            mode,
-            "read-artifact" | "input-inventory" | "quiesce-agent-processes" | "agent-process-state"
-        ) {
-            self.recovery_activity.invalidate_before_dispatch()?;
-        }
-        let mut request = self.exec_request(vec![AGENT_BINARY.into(), mode.into()]);
-        request.user = user.map(str::to_string);
-        request.cwd = Some(WORKSPACE_DATA_ROOT.into());
-        let output = exec_with_input(&request, input, output_limit)?;
-        if !output.status.success() {
-            return Err(helper_failure(
-                mode,
-                output.status.code(),
-                output.stderr.as_slice(),
-            ));
-        }
-        if output.stdout.len() > output_limit {
-            return Err(format!("sandbox helper {mode} exceeded its output limit"));
-        }
-        Ok(output.stdout)
-    }
-
-    fn start_workspace_generation_rpc(&self) -> Result<WorkspaceGenerationRpc, String> {
-        let mut request =
-            self.exec_request(vec![AGENT_BINARY.into(), "workspace-generation-rpc".into()]);
-        request.cwd = Some(WORKSPACE_DATA_ROOT.into());
-        WorkspaceGenerationRpc::from_exec(request.spawn()?)
+        use hosted_execution::host_supervisor::TrustedHelperKind;
+        let kind = match mode {
+            "filesystem-once" => TrustedHelperKind::FileSystem,
+            "input-inventory" => TrustedHelperKind::InputInventory,
+            "materialize-input" => TrustedHelperKind::MaterializeInput,
+            "revoke-input" => TrustedHelperKind::RevokeInput,
+            "read-artifact" => TrustedHelperKind::ReadArtifact,
+            "snapshot-collect" => TrustedHelperKind::SnapshotCollect,
+            "snapshot-capture" => TrustedHelperKind::SnapshotCapture,
+            "snapshot-restore" => TrustedHelperKind::SnapshotRestore,
+            "workspace-generation" => TrustedHelperKind::WorkspaceGeneration,
+            "workspace-generation-rpc" => TrustedHelperKind::WorkspaceGenerationRpc,
+            "agent-process-state" => TrustedHelperKind::AgentProcessState,
+            "quiesce-agent-processes" => TrustedHelperKind::QuiesceAgentProcesses,
+            _ => return Err("environment_helper_kind_rejected".into()),
+        };
+        self.supervised_helper(kind, input, output_limit)
     }
 
     fn protected_input_error(
@@ -2343,7 +2082,7 @@ impl DockerExecutionHostRunner {
         model_path: &str,
         operation: &ExecutionFileSystemOperation,
     ) -> Result<Option<ExecutionFileSystemError>, ExecutionFileSystemError> {
-        let path = normalize_model_path(model_path, operation)?;
+        let path = normalize_model_path_at(self.workspace_root(), model_path, operation)?;
         let mutation = matches!(
             operation,
             ExecutionFileSystemOperation::WriteFile { .. }
@@ -2403,44 +2142,14 @@ impl LifecycleHookRunner for DockerExecutionHostRunner {
 impl ExecutionHostRunner for DockerExecutionHostRunner {
     fn status(&self, policy: &ExecutionPolicy) -> Result<ExecutionHostStatus, ExecutionError> {
         self.validate_policy(policy)?;
-        if self.benchmark_profile.is_some() {
-            return self.benchmark_status();
-        }
-        if self.is_retained() {
-            let fence = self
-                .environment_task_fence()
-                .map_err(|error| self.unavailable(error))?;
-            self.environment_task_rpc(centaeris_core::execution::EnvironmentTaskRequest::List {
-                fence,
-            })
+
+        let fence = self
+            .environment_task_fence()
             .map_err(|error| self.unavailable(error))?;
-            return Ok(ExecutionHostStatus::remote(
-                true,
-                ExecutionHostHealth::Ready,
-                None,
-            ));
-        }
-        let facts = inspect_container(self.container_name.as_str())
-            .map_err(|error| self.unavailable(error))?
-            .ok_or_else(|| {
-                self.pre_dispatch_loss.store(true, Ordering::SeqCst);
-                self.unavailable("sandbox container is missing")
-            })?;
-        if facts.matches_configuration(&self.container_expectation()) && !facts.running {
-            self.pre_dispatch_loss.store(true, Ordering::SeqCst);
-            return Err(self.unavailable("sandbox container is stopped"));
-        }
-        if !facts.matches(&self.container_expectation())
-            || !workspace_execution_sentinel_matches(
-                self.container_name.as_str(),
-                self.agent_run_id.as_str(),
-                self.execution_id.as_str(),
-                self.authorization_digest.as_str(),
-            )
-            .map_err(|error| self.unavailable(error))?
-        {
-            return Err(self.unavailable("sandbox container identity mismatch"));
-        }
+        self.environment_task_rpc(centaeris_core::execution::EnvironmentTaskRequest::List {
+            fence,
+        })
+        .map_err(|error| self.unavailable(error))?;
         Ok(ExecutionHostStatus::remote(
             true,
             ExecutionHostHealth::Ready,
@@ -2449,11 +2158,6 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
     }
 
     fn workspace_generation(&self) -> ExecutionWorkspaceGeneration {
-        if self.is_retained() {
-            return ExecutionWorkspaceGeneration::Unknown {
-                reason: "retained consistent capture unavailable".into(),
-            };
-        }
         #[cfg(test)]
         if self.container_name.starts_with("native-consume-test:") {
             return ExecutionWorkspaceGeneration::Known {
@@ -2464,16 +2168,8 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
             };
         }
         let generation = self
-            .workspace_generation_rpc
-            .lock()
-            .map_err(|_| "workspace generation RPC lock poisoned".to_string())
-            .and_then(|mut rpc| {
-                query_workspace_generation_rpc(
-                    &mut rpc,
-                    WORKSPACE_GENERATION_RPC_RESPONSE_TIMEOUT,
-                    || self.start_workspace_generation_rpc(),
-                )
-            });
+            .helper("workspace-generation", None, &[], HELPER_JSON_LIMIT)
+            .and_then(|bytes| decode_workspace_generation(&bytes));
         match generation {
             Ok(generation) => match generation.generation {
                 Some(generation) => ExecutionWorkspaceGeneration::Known { token: generation },
@@ -2500,9 +2196,6 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
         &self,
         request: ExecutionFileSystemRequest,
     ) -> Result<ExecutionFileSystemOutput, ExecutionFileSystemError> {
-        if self.benchmark_profile.is_some() {
-            return self.benchmark_filesystem(request);
-        }
         #[cfg(test)]
         if self.container_name.starts_with("native-consume-test:") {
             return Err(ExecutionFileSystemError::new(
@@ -2510,9 +2203,9 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
                 "empty native consume test host",
             ));
         }
-        if request.cwd != Path::new(WORKSPACE_DATA_ROOT) {
+        if request.cwd != Path::new(self.workspace_root()) {
             return Err(filesystem_unavailable(
-                "sandbox filesystem operation escaped /mnt/data",
+                "environment filesystem cwd differs from profile",
             ));
         }
         let memory_path = if is_memory_uri(request.model_path.as_str()) {
@@ -2532,6 +2225,12 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
                 "filesystem URI scheme is unsupported",
             ));
         }
+        self.validate_policy(&request.policy).map_err(|error| {
+            ExecutionFileSystemError::new(
+                ExecutionFileSystemErrorKind::PermissionDenied,
+                error.to_string(),
+            )
+        })?;
         let plugin_path =
             authorized_plugin_path(self.plugin_mounts.as_slice(), request.model_path.as_str())?;
         let system_skill_path = authorized_system_skill_path(request.model_path.as_str())?;
@@ -2559,31 +2258,44 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
                 return Err(error);
             }
         }
-        let output_limit = filesystem_response_limit(&request.operation)?;
-        let sandbox_request = SandboxFileSystemRequest {
-            path: request.model_path,
-            operation: request.operation,
-        };
-        let body = serde_json::to_vec(&sandbox_request).map_err(|error| {
-            filesystem_unavailable(format!("encode filesystem request failed: {error}"))
-        })?;
-        let output = self
-            .helper(
-                "filesystem-once",
-                (!memory_path).then_some(AGENT_USER),
-                body.as_slice(),
-                output_limit,
-            )
+        if memory_path {
+            prepare_memory_scope(&self.memory_mount).map_err(filesystem_unavailable)?;
+            return hosted_execution::memory::run_memory_file_system_operation_at(
+                &Path::new(MEMORY_RUNTIME_VOLUME_ROOT).join(&self.memory_mount.scope_key),
+                SandboxFileSystemRequest {
+                    path: request.model_path,
+                    operation: request.operation,
+                },
+            );
+        }
+        let mut request = request;
+        request.policy = self.execution_policy();
+        if read_only_path {
+            request
+                .policy
+                .filesystem
+                .read_only_roots
+                .push(request.model_path.clone().into());
+        }
+        let operation = request.operation.clone();
+        let output_limit = usize::try_from(
+            hosted_execution::host_supervisor::TrustedHelperKind::FileSystem.output_limit(),
+        )
+        .map_err(|_| filesystem_unavailable("filesystem budget invalid"))?;
+        let mut body = Vec::new();
+        hosted_execution::protocol::write_filesystem_request(&mut body, request)
             .map_err(filesystem_unavailable)?;
-        let mut result = serde_json::from_slice::<SandboxFileSystemResult>(output.as_slice())
-            .map_err(|error| {
-                filesystem_unavailable(format!("decode filesystem result failed: {error}"))
-            })?
-            .into_result()?;
+        let output = self
+            .helper("filesystem-once", None, &body, output_limit)
+            .map_err(filesystem_unavailable)?;
+        let mut result =
+            hosted_execution::protocol::read_filesystem_result(&mut Cursor::new(output))
+                .map_err(filesystem_unavailable)?
+                .into_result()?;
         if !memory_path && !read_only_path {
             if let Ok(mut buffer) = self.transcript_capture.lock() {
                 buffer.observe_write(
-                    &sandbox_request.operation,
+                    &operation,
                     &result,
                     usize::try_from(
                         self.resources
@@ -2617,16 +2329,6 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
         request: ExecutionCommandRequest,
         cancellation_probe: Option<&ExecutionCancellationProbe>,
     ) -> Result<ExecutionHostCommandRecovery, ExecutionError> {
-        if self.benchmark_profile.is_some() {
-            return Ok(ExecutionHostCommandRecovery::Unknown {
-                reason: "benchmark command outcome requires its original Core receipt; dispatch is never replayed".into(),
-            });
-        }
-        if !self.is_retained() {
-            return Ok(ExecutionHostCommandRecovery::Unknown {
-                reason: "command recovery requires the original live retained instance".into(),
-            });
-        }
         self.validate_policy(&request.policy)?;
         let fence = self
             .environment_task_fence()
@@ -2648,201 +2350,22 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
         request: ExecutionCommandRequest,
         cancellation_probe: Option<&ExecutionCancellationProbe>,
     ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
-        if self.is_retained() && self.benchmark_profile.is_none() {
-            self.validate_policy(&request.policy)?;
-            let operation_id = operation_id
-                .filter(|id| !id.is_empty())
-                .ok_or_else(|| self.unavailable("retained command operation identity required"))?;
-            let fence = self
-                .environment_task_fence()
-                .map_err(|error| self.unavailable(error))?;
-            return retained_commands::run_command(
-                &fence,
-                operation_id,
-                request,
-                cancellation_probe,
-                &self.command_path,
-                |request| self.environment_task_rpc(request),
-            );
-        }
-        let _activity = self
-            .recovery_activity
-            .begin_dispatch_activity()
+        self.validate_policy(&request.policy)?;
+        let operation_id = operation_id
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| self.unavailable("retained command operation identity required"))?;
+        let fence = self
+            .environment_task_fence()
             .map_err(|error| self.unavailable(error))?;
-        self.status(&request.policy)?;
-        self.recovery_activity
-            .invalidate_before_dispatch()
-            .map_err(|error| self.unavailable(error))?;
-        let input_state_changes = self.refresh_materialized_inputs()?;
-        let mut command = if self.benchmark_profile.is_some() {
-            self.benchmark_exec_request(Vec::new())
-                .map_err(|error| self.unavailable(error))?
-        } else {
-            self.exec_request(Vec::new())
-        };
-        if let Some(profile) = &self.benchmark_profile {
-            command.user = Some(profile.user.clone());
-            command.cwd = Some(profile.workspace_root.clone());
-        } else {
-            command.user = Some(AGENT_USER.into());
-            command.cwd = Some(WORKSPACE_DATA_ROOT.into());
-        }
-        for (name, default) in [("LANG", "C.UTF-8"), ("LC_ALL", "C.UTF-8"), ("TERM", "dumb")] {
-            let value = request.env.get(name).map(String::as_str).unwrap_or(default);
-            command.env.push(format!("{name}={value}"));
-        }
-        if self.benchmark_profile.is_none() {
-            for (name, value) in [
-                ("HOME", WORKSPACE_HOME),
-                ("PATH", self.command_path.as_str()),
-                ("TMPDIR", "/tmp"),
-            ] {
-                command.env.push(format!("{name}={value}"));
-            }
-        }
-        command.command.extend([
-            "/usr/bin/timeout".to_string(),
-            "--signal=TERM".to_string(),
-            "--kill-after=1s".to_string(),
-            coreutils_timeout_duration(request.timeout_ms),
-            request.program,
-        ]);
-        command.command.extend(request.args);
-
-        let mut child = self
-            .spawn_command(command)
-            .map_err(|error| ExecutionError::CancellationIndeterminate { reason: error })?;
-        child.stdin.take();
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| self.unavailable("docker exec stdout is unavailable"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| self.unavailable("docker exec stderr is unavailable"))?;
-        // Drain both channels, retaining at most 8 MiB each and exact raw byte counts.
-        let stdout_reader = thread::spawn(move || capture_command_output(stdout, 8 * 1024 * 1024));
-        let stderr_reader = thread::spawn(move || capture_command_output(stderr, 8 * 1024 * 1024));
-        let deadline =
-            Instant::now() + Duration::from_millis(request.timeout_ms.saturating_add(5_000));
-        let (exit_code, timed_out, cancelled) = loop {
-            if let Some(probe) = cancellation_probe {
-                if probe()
-                    .map_err(|error| {
-                        self.unavailable(format!("execution cancellation probe failed: {error}"))
-                    })?
-                    .is_some()
-                {
-                    match self.cancel_command_container() {
-                        Ok(()) => {
-                            child.disconnect();
-                            break (None, false, true);
-                        }
-                        Err(error) => {
-                            child.disconnect();
-                            let _ = child.wait();
-                            return Err(ExecutionError::CancellationIndeterminate {
-                                reason: error,
-                            });
-                        }
-                    }
-                }
-            }
-            match child.try_wait() {
-                Ok(Some(status)) if status.code() == Some(124) => break (None, true, false),
-                Ok(Some(status)) => break (status.code(), false, false),
-                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
-                Ok(None) => {
-                    let teardown = self.cancel_command_container();
-                    child.disconnect();
-                    let _ = child.wait();
-                    return Err(ExecutionError::CancellationIndeterminate {
-                        reason: teardown.err().unwrap_or_else(|| {
-                            "docker exec exceeded its confirmed deadline".to_string()
-                        }),
-                    });
-                }
-                Err(error) => {
-                    child.disconnect();
-                    let _ = child.wait();
-                    return Err(ExecutionError::CancellationIndeterminate {
-                        reason: format!("poll docker exec failed: {error}"),
-                    });
-                }
-            }
-        };
-        let stdout = stdout_reader
-            .join()
-            .map_err(|_| self.unavailable("exec stdout reader panicked"))?;
-        let stderr = stderr_reader
-            .join()
-            .map_err(|_| self.unavailable("exec stderr reader panicked"))?;
-        if !cancelled {
-            if let Some(error) = stdout.error.as_ref().or(stderr.error.as_ref()) {
-                return Err(ExecutionError::CancellationIndeterminate {
-                    reason: error.clone(),
-                });
-            }
-        }
-        let stdout = stdout.output;
-        let stderr = stderr.output;
-        let mut stdout_decoded = decode_process_output(stdout.bytes.as_slice());
-        let mut stderr_decoded = decode_process_output(stderr.bytes.as_slice());
-        stdout_decoded.summary.raw_byte_length = stdout.total_bytes;
-        stderr_decoded.summary.raw_byte_length = stderr.total_bytes;
-        let mut diagnostics = Vec::new();
-        for (stream, captured, decoded) in [
-            ("stdout", &stdout, &mut stdout_decoded),
-            ("stderr", &stderr, &mut stderr_decoded),
-        ] {
-            if captured.total_bytes > captured.bytes.len() {
-                decoded.text.push_str("\n[output truncated at 8 MiB]");
-                diagnostics.push(centaeris_core::execution::RuntimeOutputDiagnostic {
-                    source: "execution_host".into(), stream: stream.into(), severity: "warning".into(),
-                    code: "output_truncated".into(), message: "Output exceeded the per-stream retention limit".into(),
-                    details: Some(serde_json::json!({"retainedBytes":captured.bytes.len(), "rawBytes":captured.total_bytes})),
-                });
-            }
-        }
-        if timed_out {
-            stderr_decoded.text = format!(
-                "sandboxed process timed out after {}ms\n{}",
-                request.timeout_ms, stderr_decoded.text
-            );
-        }
-        let failure_kind = if cancelled {
-            ExecutionHostFailureKind::Cancelled
-        } else {
-            classify_execution_host_failure(
-                exit_code,
-                timed_out,
-                stdout_decoded.text.as_str(),
-                stderr_decoded.text.as_str(),
-            )
-        };
-        Ok(ExecutionHostCommandOutput {
-            process: ExecutionProcessOutput {
-                exit_code,
-                stdout: stdout_decoded.text,
-                stderr: stderr_decoded.text,
-                stdout_decode: stdout_decoded.summary,
-                stderr_decode: stderr_decoded.summary,
-                timed_out,
-                attempt: ExecutionAttempt {
-                    transition_reason: self.oci_runtime.transition_reason().to_string(),
-                    policy: policy_summary(&request.policy),
-                },
-                runtime_diagnostics: diagnostics,
-            },
-            failure_kind,
-            input_state_changes,
-        })
+        retained_commands::run_command(
+            &fence,
+            operation_id,
+            request,
+            cancellation_probe,
+            &self.command_path,
+            |request| self.environment_task_rpc(request),
+        )
     }
-}
-
-fn coreutils_timeout_duration(timeout_ms: u64) -> String {
-    format!("{}.{:03}s", timeout_ms / 1_000, timeout_ms % 1_000)
 }
 
 fn authorized_plugin_path(
@@ -2909,44 +2432,23 @@ fn ensure_container_inner(
     expected: &ContainerExpectation<'_>,
     has_execution_fact: bool,
 ) -> Result<(), String> {
+    let body = container_create_body(expected)?;
     if let Some(facts) = inspect_container(expected.name)? {
-        if has_execution_fact {
-            if !facts.has_identity(expected.agent_run_id, expected.execution_id) {
-                return Err("sandbox container identity mismatch; refusing replacement".to_string());
-            }
-            if !facts.matches_configuration(expected) {
-                return Err(
-                    "sandbox container configuration mismatch; refusing replacement".to_string(),
-                );
-            }
-            if !facts.running {
-                return Err("execution_environment_lost:container_stopped".to_string());
-            }
-            if expected.benchmark_profile.is_some()
-                || workspace_execution_sentinel_matches(
-                    expected.name,
-                    expected.agent_run_id,
-                    expected.execution_id,
-                    expected.authorization_digest,
-                )?
-            {
-                return Ok(());
-            }
-            return Err("sandbox workspace identity mismatch; refusing replacement".to_string());
-        }
-        if !facts.has_identity(expected.agent_run_id, expected.execution_id) {
-            return Err("sandbox container identity mismatch; refusing replacement".to_string());
-        }
         if !facts.matches_configuration(expected) {
-            return Err(
-                "sandbox container configuration mismatch; refusing replacement".to_string(),
-            );
+            return Err("sandbox container configuration mismatch; refusing replacement".into());
+        }
+        if has_execution_fact {
+            return if facts.running {
+                Ok(())
+            } else {
+                Err("execution_environment_lost:container_stopped".into())
+            };
         }
     } else if has_execution_fact {
-        return Err("execution_environment_lost:container_missing".to_string());
+        return Err("execution_environment_lost:container_missing".into());
     }
 
-    let id = crate::docker_engine::ensure_created(expected.name, container_create_body(expected)?)?;
+    let id = crate::docker_engine::ensure_created(expected.name, body)?;
     let prepared = (|| {
         crate::docker_engine::start(&id)?;
         let facts =
@@ -2954,15 +2456,7 @@ fn ensure_container_inner(
         if !facts.matches(expected) {
             return Err("sandbox container creation verification failed".to_string());
         }
-        if expected.benchmark_profile.is_some() {
-            return Ok(());
-        }
-        write_workspace_execution_sentinel(
-            &id,
-            expected.agent_run_id,
-            expected.execution_id,
-            expected.authorization_digest,
-        )
+        Ok(())
     })();
     if let Err(error) = prepared {
         // No Execution fact or user tool dispatch exists at this preparation
@@ -2977,178 +2471,20 @@ fn ensure_container_inner(
 }
 
 fn container_create_body(expected: &ContainerExpectation<'_>) -> Result<serde_json::Value, String> {
-    if let Some(profile) = expected.benchmark_profile {
-        return benchmark::create_body(
-            expected,
-            profile,
-            expected
-                .benchmark_helper
-                .ok_or("benchmark helper missing")?,
-        );
-    }
-    use serde_json::json;
-    let cpu_quota = u64::from(expected.resources.cpu_milli)
-        .checked_mul(100)
-        .ok_or("sandbox CPU quota overflow")?;
-    let mut mounts = expected
-        .plugin_mounts
-        .iter()
-        .map(|mount| {
-            json!({
-                "Type":"volume", "Source":expected.plugin_volume_name, "Target":mount.destination,
-                "ReadOnly":true, "VolumeOptions":{"Subpath":mount.package_name},
-            })
-        })
-        .collect::<Vec<_>>();
-    mounts.push(
-        json!({"Type":"volume", "Source":expected.memory_mount.volume_name,
-        "Target":MEMORY_CONTAINER_ROOT, "ReadOnly":false,
-        "VolumeOptions":{"Subpath":expected.memory_mount.scope_key}}),
-    );
-    let mut body = json!({
-        "Image":expected.image_digest,
-        "Labels":{"centaeris.managed":"true", "centaeris.agent_run_id":expected.agent_run_id,
-            "centaeris.environment_id":expected.environment_id,"centaeris.instance_id":expected.instance_id,
-            "centaeris.environment_authorization_digest":expected.binding_digest,
-            "centaeris.execution_id":expected.execution_id},
-        "HostConfig":{
-            "Runtime":expected.oci_runtime.docker_runtime_name(), "NetworkMode":SANDBOX_NETWORK_MODE,
-            "ReadonlyRootfs":true, "CapDrop":["ALL"], "CapAdd":["CHOWN"],
-            "SecurityOpt":["no-new-privileges"], "Memory":expected.resources.memory_bytes,
-            "CpuPeriod":100000, "CpuQuota":cpu_quota, "PidsLimit":expected.resources.pids_limit,
-            "Tmpfs":{
-                "/mnt/data":format!("rw,exec,nosuid,nodev,size={},uid=0,gid=0,mode=1777",expected.resources.data_tmpfs_bytes),
-                "/tmp":"rw,exec,nosuid,nodev,size=268435456,mode=1777",
-                "/home/agent":"rw,nosuid,nodev,size=134217728,uid=10001,gid=10001,mode=0700",
-                "/run/centaeris":"rw,noexec,nosuid,nodev,size=8388608,uid=0,gid=0,mode=0700"
-            }, "Mounts":mounts
-        }
-    });
-    if expected.retained {
-        if let Some(profile) = expected.profile_digest {
-            body["Labels"]["centaeris.retained_profile_digest"] = json!(profile);
-        }
-        if expected.oci_runtime != OciRuntime::Runc {
-            return Err("retained task supervision requires a verified runc cgroup backend".into());
-        }
-        let id = expected
-            .instance_id
-            .strip_prefix("instance_")
-            .filter(|id| {
-                id.len() == 64
-                    && id
-                        .bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            })
-            .ok_or("retained instance identity invalid")?;
-        // systemd treats hyphens as hierarchy separators. This slice is a
-        // direct child, and the guest sees only its own instance subtree.
-        let parent = format!("centaeris{id}.slice");
-        body["Cmd"] = json!([
-            "/opt/centaeris/bin/execution_agent",
-            "environment-init",
-            expected.instance_id
-        ]);
-        body["HostConfig"]["CgroupParent"] = json!(parent);
-        body["HostConfig"]["Binds"] = json!([format!(
-            "/sys/fs/cgroup/{parent}:/run/centaeris/instance-cgroups:rw"
-        )]);
-        body["HostConfig"]["CapAdd"] = json!(["CHOWN", "SETUID", "SETGID"]);
-        // Output exhaustion must not consume the space needed for control
-        // receipts. Both mounts remain under the same instance memory limit.
-        body["HostConfig"]["Tmpfs"]["/run/centaeris/task-control"] =
-            json!("rw,noexec,nosuid,nodev,size=8388608,uid=0,gid=0,mode=0700");
-        body["HostConfig"]["Tmpfs"]["/run/centaeris/task-output"] =
-            json!("rw,noexec,nosuid,nodev,size=75497472,uid=0,gid=0,mode=0700");
-    }
-    Ok(body)
+    environment_container::create_body(
+        expected,
+        expected
+            .environment_profile
+            .ok_or("environment_profile_required")?,
+        expected
+            .benchmark_helper
+            .ok_or("environment_helper_required")?,
+    )
 }
 
 fn container_name(execution_id: &str) -> String {
     let digest = format!("{:x}", Sha256::digest(execution_id.as_bytes()));
     format!("centaeris-agent-run-{}", &digest[..24])
-}
-
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct WorkspaceExecutionSentinel {
-    agent_run_id: String,
-    execution_id: String,
-    authorization_digest: String,
-}
-
-fn expected_workspace_execution_sentinel(
-    agent_run_id: &str,
-    execution_id: &str,
-    authorization_digest: &str,
-) -> WorkspaceExecutionSentinel {
-    WorkspaceExecutionSentinel {
-        agent_run_id: agent_run_id.to_string(),
-        execution_id: execution_id.to_string(),
-        authorization_digest: authorization_digest.to_string(),
-    }
-}
-
-fn write_workspace_execution_sentinel(
-    name: &str,
-    agent_run_id: &str,
-    execution_id: &str,
-    authorization_digest: &str,
-) -> Result<(), String> {
-    let bytes = serde_json::to_vec(&expected_workspace_execution_sentinel(
-        agent_run_id,
-        execution_id,
-        authorization_digest,
-    ))
-    .map_err(|error| format!("encode workspace execution sentinel failed: {error}"))?;
-    let mut request = ExecRequest::owned(
-        name,
-        agent_run_id,
-        execution_id,
-        vec![
-            "/bin/sh".into(),
-            "-c".into(),
-            format!("umask 077; cat > {WORKSPACE_EXECUTION_SENTINEL}"),
-        ],
-    );
-    request.user = Some("0:0".into());
-    let output = exec_with_input(&request, &bytes, DOCKER_DIAGNOSTIC_LIMIT)?;
-    if !output.status.success() {
-        return Err(format!(
-            "write workspace execution sentinel failed: {}",
-            bounded_diagnostic(output.stderr.as_slice())
-        ));
-    }
-    Ok(())
-}
-
-fn workspace_execution_sentinel_matches(
-    name: &str,
-    agent_run_id: &str,
-    execution_id: &str,
-    authorization_digest: &str,
-) -> Result<bool, String> {
-    let mut request = ExecRequest::owned(
-        name,
-        agent_run_id,
-        execution_id,
-        vec!["cat".into(), WORKSPACE_EXECUTION_SENTINEL.into()],
-    );
-    request.user = Some("0:0".into());
-    let output = exec_with_input(&request, &[], DOCKER_DIAGNOSTIC_LIMIT)?;
-    if !output.status.success() {
-        let diagnostic = bounded_diagnostic(output.stderr.as_slice());
-        if diagnostic.to_ascii_lowercase().contains("no such file") {
-            return Ok(false);
-        }
-        return Err(format!(
-            "read workspace execution sentinel failed: {diagnostic}"
-        ));
-    }
-    let actual = serde_json::from_slice::<WorkspaceExecutionSentinel>(output.stdout.as_slice())
-        .map_err(|error| format!("decode workspace execution sentinel failed: {error}"))?;
-    Ok(actual
-        == expected_workspace_execution_sentinel(agent_run_id, execution_id, authorization_digest))
 }
 
 fn container_ids_for_agent_run(agent_run_id: &str) -> Result<Vec<String>, String> {
@@ -3237,8 +2573,8 @@ fn observed_resident_sandbox(facts: &ContainerFacts) -> Result<ObservedResidentS
     }
     let benchmark_budget = facts
         .labels
-        .get("centaeris.benchmark_profile_digest")
-        .and_then(|_| facts.labels.get("centaeris.benchmark_data_budget"))
+        .get("centaeris.environment_profile_digest")
+        .and_then(|_| facts.labels.get("centaeris.data_budget"))
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0);
     let tmpfs = benchmark_budget
@@ -3256,7 +2592,8 @@ fn observed_resident_sandbox(facts: &ContainerFacts) -> Result<ObservedResidentS
         .ok_or("managed sandbox workspace resource limit unknown; resident admission blocked")?;
     Ok(ObservedResidentSandbox {
         execution_id: label("centaeris.execution_id")?,
-        agent_run_id: label("centaeris.agent_run_id")?,
+        allocation_owner: serde_json::from_str(&label("centaeris.allocation_owner")?)
+            .map_err(|_| "managed sandbox owner invalid")?,
         container_id: facts.id.clone(),
         resources: centaeris_core::execution::ResidentResourceUsage {
             sandbox_count: 1,
@@ -3333,27 +2670,31 @@ impl ContainerFacts {
     fn matches_configuration(&self, expected: &ContainerExpectation<'_>) -> bool {
         container_create_body(expected)
             .is_ok_and(|body| crate::docker_engine::verify_created(&self.raw, &body).is_ok())
-            && self.has_identity(expected.agent_run_id, expected.execution_id)
+            && (if let Some(owner) = expected.allocation_owner {
+                self.labels
+                    .get("centaeris.allocation_owner")
+                    .and_then(|v| {
+                        serde_json::from_str::<centaeris_core::execution::EnvironmentTaskOwner>(v)
+                            .ok()
+                    })
+                    .as_ref()
+                    == Some(owner)
+            } else {
+                self.has_identity(expected.agent_run_id, expected.execution_id)
+            })
             && self.image == expected.image_digest
             && self.runtime == expected.oci_runtime.docker_runtime_name()
             && self.memory == expected.resources.memory_bytes
             && self.cpu_period == 100_000
             && self.cpu_quota == i64::from(expected.resources.cpu_milli) * 100
             && self.pids_limit == Some(i64::from(expected.resources.pids_limit))
-            && self.readonly_rootfs == expected.benchmark_profile.is_none()
-            && self.network_mode
-                == expected
-                    .benchmark_profile
-                    .map_or(SANDBOX_NETWORK_MODE, |profile| {
-                        benchmark::network_mode(profile.network)
-                    })
+            && !self.readonly_rootfs
+            && self.network_mode == network::mode(expected.network)
             && plugin_mounts_match(
                 self.mounts.as_slice(),
                 expected.plugin_volume_name,
                 expected.plugin_mounts,
             )
-            && (expected.benchmark_profile.is_some()
-                || memory_mount_matches(self.mounts.as_slice(), expected.memory_mount))
     }
 }
 
@@ -3385,6 +2726,7 @@ fn plugin_mounts_match(
         })
 }
 
+#[cfg(test)]
 fn memory_mount_matches(actual: &[ContainerMountFacts], expected: &MemoryMount) -> bool {
     let mounts = actual
         .iter()
@@ -3415,40 +2757,54 @@ fn inspect_container(name: &str) -> Result<Option<ContainerFacts>, String> {
     }).transpose()
 }
 
+#[cfg(test)]
+struct ContainerObservation {
+    container: String,
+    labels: BTreeMap<String, String>,
+    command: Vec<String>,
+    user: Option<String>,
+}
+
+#[cfg(test)]
 struct ExecOutput {
-    status: crate::docker_engine::ExecStatus,
+    status: std::process::ExitStatus,
     stdout: Vec<u8>,
-    stderr: Vec<u8>,
 }
 
-fn filesystem_response_limit(
-    operation: &ExecutionFileSystemOperation,
-) -> Result<usize, ExecutionFileSystemError> {
-    match operation {
-        ExecutionFileSystemOperation::ReadFile { max_bytes } => {
-            // serde_json encodes Vec<u8> as decimal numbers: at most "255,"
-            // per input byte. Keep the normal budget for identity/error metadata.
-            // The helper still enforces Core's requested raw-file byte limit.
-            max_bytes
-                .checked_mul(4)
-                .and_then(|bytes| bytes.checked_add(HELPER_JSON_LIMIT))
-                .ok_or_else(|| {
-                    ExecutionFileSystemError::new(
-                        ExecutionFileSystemErrorKind::TooLarge,
-                        "filesystem response budget overflow",
-                    )
-                })
-        }
-        _ => Ok(HELPER_JSON_LIMIT),
-    }
-}
-
+#[cfg(test)]
 fn exec_with_input(
-    request: &ExecRequest,
+    request: &ContainerObservation,
     input: &[u8],
     output_limit: usize,
 ) -> Result<ExecOutput, String> {
-    let mut child = request.spawn()?;
+    // This fixture only seeds or observes explicitly owned physical test state.
+    // Bind immutable daemon identity before the CLI touches that container.
+    let facts =
+        crate::docker_engine::inspect(&request.container)?.ok_or("observation container absent")?;
+    if facts["State"]["Running"] != true
+        || !request.labels.iter().all(|(key, expected)| {
+            facts["Config"]["Labels"][key].as_str() == Some(expected.as_str())
+        })
+    {
+        return Err("observation container owner mismatch".into());
+    }
+    let id = facts["Id"]
+        .as_str()
+        .filter(|id| id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or("observation container identity missing")?;
+    let mut command = Command::new("docker");
+    command.args(["exec", "--interactive"]);
+    if let Some(user) = &request.user {
+        command.args(["--user", user.as_str()]);
+    }
+    let mut child = command
+        .arg(id)
+        .args(&request.command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
     let stdout = child.stdout.take().ok_or("exec stdout missing")?;
     let stderr = child.stderr.take().ok_or("exec stderr missing")?;
     let stdout_reader = thread::spawn(move || read_bounded(stdout, output_limit));
@@ -3456,11 +2812,11 @@ fn exec_with_input(
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(input).map_err(|e| e.to_string())?;
     }
-    let status = child.wait()?;
+    let status = child.wait().map_err(|error| error.to_string())?;
     let stdout = stdout_reader
         .join()
         .map_err(|_| "exec stdout reader panicked")??;
-    let stderr = stderr_reader
+    stderr_reader
         .join()
         .map_err(|_| "exec stderr reader panicked")??;
     if stdout.total_bytes > output_limit {
@@ -3469,7 +2825,6 @@ fn exec_with_input(
     Ok(ExecOutput {
         status,
         stdout: stdout.bytes,
-        stderr: stderr.bytes,
     })
 }
 
@@ -3505,6 +2860,7 @@ fn policy_summary(policy: &ExecutionPolicy) -> ExecutionPolicySummary {
     }
 }
 
+#[cfg(test)]
 struct BoundedRead {
     bytes: Vec<u8>,
     total_bytes: usize,
@@ -3520,40 +2876,7 @@ fn read_all(mut reader: impl Read) -> Result<BoundedRead, String> {
     Ok(BoundedRead { bytes, total_bytes })
 }
 
-struct CapturedOutput {
-    output: BoundedRead,
-    error: Option<String>,
-}
-
-fn capture_command_output(mut reader: impl Read, limit: usize) -> CapturedOutput {
-    let mut output = BoundedRead {
-        bytes: Vec::new(),
-        total_bytes: 0,
-    };
-    let mut buffer = [0u8; 8192];
-    loop {
-        match reader.read(&mut buffer) {
-            Ok(0) => {
-                return CapturedOutput {
-                    output,
-                    error: None,
-                };
-            }
-            Ok(count) => {
-                output.total_bytes = output.total_bytes.saturating_add(count);
-                let keep = count.min(limit.saturating_sub(output.bytes.len()));
-                output.bytes.extend_from_slice(&buffer[..keep]);
-            }
-            Err(error) => {
-                return CapturedOutput {
-                    output,
-                    error: Some(error.to_string()),
-                };
-            }
-        }
-    }
-}
-
+#[cfg(test)]
 fn read_bounded(mut reader: impl Read, limit: usize) -> Result<BoundedRead, String> {
     let mut bytes = Vec::new();
     let mut total_bytes = 0usize;
@@ -3602,18 +2925,27 @@ fn decode_frame<T: serde::de::DeserializeOwned>(frame: &[u8]) -> Result<(T, &[u8
     Ok((metadata, &frame[4 + metadata_len..]))
 }
 
+#[cfg(test)]
 fn normalize_model_path(
+    path: &str,
+    operation: &ExecutionFileSystemOperation,
+) -> Result<String, ExecutionFileSystemError> {
+    normalize_model_path_at(WORKSPACE_DATA_ROOT, path, operation)
+}
+fn normalize_model_path_at(
+    root: &str,
     path: &str,
     operation: &ExecutionFileSystemOperation,
 ) -> Result<String, ExecutionFileSystemError> {
     if matches!(
         operation,
         ExecutionFileSystemOperation::ListDirectory { .. }
-    ) && matches!(path, "." | WORKSPACE_DATA_ROOT)
+    ) && (path == "." || path == root)
     {
-        return Ok(".".to_string());
+        return Ok(".".into());
     }
-    let path = path.strip_prefix("/mnt/data/").unwrap_or(path);
+    let prefix = format!("{}/", root.trim_end_matches('/'));
+    let path = path.strip_prefix(&prefix).unwrap_or(path);
     if path.is_empty()
         || path.starts_with('/')
         || path.contains('\\')
@@ -4351,7 +3683,10 @@ mod tests {
         let origin_execution = "execution-origin";
         let allocation = crate::postgres_store::execution_instances::RetainedInstanceAllocation {
             allocation_execution_id: origin_execution.into(),
-            allocation_agent_run_id: "run-origin".into(),
+            allocation_agent_run_id: Some("run-origin".into()),
+            allocation_owner: centaeris_core::execution::EnvironmentTaskOwner::AgentRun {
+                run_id: "run-origin".into(),
+            },
             instance_id: crate::postgres_store::execution_instances::instance_id(origin_execution),
             environment_id: runner.environment_id.clone(),
             host_id: "host".into(),
@@ -4366,12 +3701,22 @@ mod tests {
         runner.agent_run_id = "run-controller".into();
         runner.execution_id = "execution-controller".into();
         runner.authorization_digest = format!("sha256:{}", "d".repeat(64));
+        let mut authority: crate::environment_authorization::EnvironmentAuthorization =
+            serde_json::from_str(include_str!(
+                "../../../tests/workspace/fixtures/environment_authorization/v1/retained.json"
+            ))
+            .unwrap();
+        authority.payload.environment_id = runner.environment_id.clone();
+        authority.payload.agent_run_id = runner.agent_run_id.clone();
+        authority.payload.agent_run_authorization_digest = runner.authorization_digest.clone();
+        authority.payload.controller.as_mut().unwrap().controller_id = runner.agent_run_id.clone();
+        runner.environment_authorization = Some(authority);
         runner.retained_allocation = Some(allocation);
         runner
     }
 
     #[test]
-    fn retained_container_payload_keeps_origin_labels_and_sentinel_after_takeover() {
+    fn container_payload_keeps_allocation_owner_after_controller_takeover() {
         let runner = retained_test_runner();
         let expected = runner.container_expectation();
         let body = container_create_body(&expected).unwrap();
@@ -4381,59 +3726,65 @@ mod tests {
             body["Labels"]["centaeris.instance_id"],
             runner.retained_allocation.as_ref().unwrap().instance_id
         );
-        assert_eq!(body["Cmd"][1], "environment-init");
-        let sentinel = expected_workspace_execution_sentinel(
-            expected.agent_run_id,
-            expected.execution_id,
-            expected.authorization_digest,
+        assert_eq!(body["Cmd"][1], "environment-keeper");
+        assert_eq!(
+            serde_json::from_str::<centaeris_core::execution::EnvironmentTaskOwner>(
+                body["Labels"]["centaeris.allocation_owner"]
+                    .as_str()
+                    .unwrap()
+            )
+            .unwrap(),
+            centaeris_core::execution::EnvironmentTaskOwner::AgentRun {
+                run_id: "run-origin".into()
+            }
         );
-        assert_eq!(sentinel.agent_run_id, "run-origin");
-        assert_eq!(sentinel.execution_id, "execution-origin");
         assert_eq!(runner.agent_run_id, "run-controller");
         assert_eq!(runner.execution_id, "execution-controller");
     }
 
     #[test]
     fn retained_profile_preserves_configuration_without_controller_identity() {
-        let runner = retained_test_runner();
-        let plugins = PluginActivationSnapshotV1 {
-            schema: "workspace.plugin_activation.v1".into(),
-            digest: "digest-a".into(),
-            packages: Vec::new(),
-        };
+        let mut runner = retained_test_runner();
+        let original: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
+            serde_json::from_str(include_str!(
+                "../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+            ))
+            .unwrap();
+        runner.environment_profile = Some(original.environment_profile.clone());
         let expected = runner.container_expectation();
-        let first = retained::profile_digest(&expected, &plugins).unwrap();
+        let first = retained::profile_digest(&expected, &original.plugin_activation).unwrap();
         let mut next = expected;
         next.agent_run_id = "another-run";
         next.execution_id = "another-execution";
-        next.binding_digest = "another-controller-binding";
-        next.instance_id =
-            "instance_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        assert_eq!(first, retained::profile_digest(&next, &plugins).unwrap());
-        next.resources.memory_bytes += 1;
-        assert_ne!(first, retained::profile_digest(&next, &plugins).unwrap());
-        let mut changed = plugins;
-        changed.digest = "digest-b".into();
+        next.binding_digest = "another-binding";
+        assert_eq!(
+            first,
+            retained::profile_digest(&next, &original.plugin_activation).unwrap()
+        );
+        let mut changed = original.environment_profile.clone();
+        changed.resources.memory_bytes += 1;
+        next.environment_profile = Some(&changed);
         assert_ne!(
             first,
-            retained::profile_digest(&expected, &changed).unwrap()
+            retained::profile_digest(&next, &original.plugin_activation).unwrap()
         );
+        let mut invalid = original.plugin_activation;
+        invalid.schema = "unsupported".into();
+        assert!(retained::profile_digest(&expected, &invalid).is_err());
     }
 
     #[test]
     fn retained_old_dispatch_and_container_removal_are_rejected_before_io() {
         let runner = retained_test_runner();
-        assert!(runner.is_retained());
+        assert!(runner.keeps_instance());
         assert!(runner.is_hot_reuse());
-        assert_eq!(
-            runner.mcp_exec_request("banana", "main", &[]).unwrap_err(),
-            "retained MCP dispatch unsupported"
-        );
-        assert_eq!(
-            runner
-                .helper("input-inventory", None, b"{}", 100)
-                .unwrap_err(),
-            "retained helper dispatch unsupported"
+        let request = Arc::new(retained_test_runner())
+            .mcp_exec_request("banana", "main", &[])
+            .unwrap();
+        assert_eq!(request.program, "/opt/centaeris/plugins/banana/main");
+        assert!(
+            runner.helper("input-inventory", None, b"{}", 100).is_err(),
+            "helper requires current persistent authority"
         );
         assert_eq!(
             runner.teardown_owned().unwrap_err(),
@@ -4460,9 +3811,42 @@ mod tests {
             };
             assert!(matches!(
                 runner.run_host_command(Some("policy-check"), request, None),
-                Err(ExecutionError::Denied { reason }) if reason == "Docker execution requires /mnt/data and disabled network policy"
+                Err(ExecutionError::Denied { reason }) if reason == "environment policy differs from signed profile"
             ));
         }
+    }
+
+    #[test]
+    fn model_policy_rejects_roots_outside_signed_workspace() {
+        let runner = retained_test_runner();
+        let mut policy = runner.execution_policy();
+        policy.filesystem.writable_roots.push("/".into());
+        assert!(matches!(
+            runner.validate_policy(&policy),
+            Err(ExecutionError::Denied { .. })
+        ));
+    }
+    #[test]
+    fn protected_input_path_uses_the_signed_workspace_root() {
+        let mut runner = test_docker_execution_host_runner();
+        let mut profile: EnvironmentProfile = serde_json::from_value(
+            serde_json::from_str::<serde_json::Value>(include_str!(
+                "../../../tests/workspace/fixtures/agent_run_authorization/v1/custom.json"
+            ))
+            .unwrap()["environmentProfile"]
+                .clone(),
+        )
+        .unwrap();
+        profile.workspace_root = "/app".into();
+        runner.environment_profile = Some(profile);
+        let read = ExecutionFileSystemOperation::ReadFile { max_bytes: 32 };
+        assert!(runner
+            .protected_input_error("/app/reports/input.txt", &read)
+            .unwrap()
+            .is_none());
+        assert!(runner
+            .protected_input_error("/outside/input.txt", &read)
+            .is_err());
     }
 
     #[test]
@@ -4605,7 +3989,12 @@ mod tests {
         // Other daemon holdings are observed and charged only in this isolated database.
         for sandbox in observed {
             bind(
-                &sandbox.agent_run_id,
+                &match &sandbox.allocation_owner {
+                    centaeris_core::execution::EnvironmentTaskOwner::AgentRun { run_id } => {
+                        run_id.clone()
+                    }
+                    _ => panic!("expected Run fixture"),
+                },
                 "centaeris-recovery-test-observed-tenant",
             );
         }
@@ -4645,7 +4034,8 @@ mod tests {
              before: &mut (dyn FnMut(&mut Client) -> Result<(), String> + Send)| {
                 DockerExecutionHostRunner::new_with_admitted(
                     DockerExecutionHostRequest {
-                        benchmark_profile: None,
+                        network: ExecutionNetwork::Disabled,
+                        environment_profile: None,
                         workspace_id: "centaeris-recovery-test-tenant".into(),
                         lifecycle_job_id: job.clone(),
                         lifecycle_lease_owner: lease_owner.into(),
@@ -5238,23 +4628,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn command_capture_bounds_retention_and_keeps_failure_evidence() {
-        let captured = super::capture_command_output(&b"0123456789"[..], 4);
-        assert_eq!(captured.output.bytes, b"0123");
-        assert_eq!(captured.output.total_bytes, 10);
-        assert!(captured.error.is_none());
-        struct Broken;
-        impl std::io::Read for Broken {
-            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::other("transport lost"))
-            }
-        }
-        let stream = std::io::Read::chain(&b"partial"[..], Broken);
-        let captured = super::capture_command_output(stream, 64);
-        assert_eq!(captured.output.bytes, b"partial");
-        assert_eq!(captured.error.as_deref(), Some("transport lost"));
-    }
     use super::*;
     use centaeris_core::execution::{
         ExecutionFileIdentity, ExecutionFileReadOutput, ExecutionHostBinding, ExecutionHostMode,
@@ -5305,206 +4678,39 @@ mod tests {
         assert!(validate_docker_volume_name("PLUGIN_VOLUME_NAME", "banana,ro").is_err());
     }
 
-    #[cfg(windows)]
-    fn generation_rpc_test_command(response: &str) -> Command {
-        let request = String::from_utf8_lossy(SANDBOX_WORKSPACE_GENERATION_QUERY_LINE)
-            .trim_end()
-            .replace('\'', "''");
-        let response = response.replace('\'', "''");
-        let script = format!("$expected='{request}';$response='{response}';")
-            + "while (($line=[Console]::In.ReadLine()) -ne $null) {"
-            + "if ($line -ne $expected) { exit 2 };"
-            + "[Console]::Out.Write($response+[char]10);[Console]::Out.Flush()}";
-        let mut command = Command::new("powershell");
-        command.args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()]);
-        command
-    }
-
-    #[cfg(unix)]
-    fn generation_rpc_test_command(response: &str) -> Command {
-        let request = String::from_utf8_lossy(SANDBOX_WORKSPACE_GENERATION_QUERY_LINE);
-        let script = format!(
-            "while IFS= read -r line; do [ \"$line\" = '{}' ] || exit 2; printf '%s\\n' '{}'; done",
-            request.trim_end(),
-            response
-        );
-        let mut command = Command::new("sh");
-        command.args(["-c", script.as_str()]);
-        command
-    }
-
-    fn generation_rpc_response(epoch: &str, generation: u64) -> String {
-        serde_json::json!({
+    #[test]
+    fn workspace_generation_response_preserves_known_unknown_and_invalid_states() {
+        let known = serde_json::json!({
             "schema": "workspace.generation.v1",
-            "generation": {
-                "instanceEpoch": epoch,
-                "generation": generation,
-            },
+            "generation": {"instanceEpoch": "watcher-current", "generation": 7},
             "diagnostic": null,
-        })
-        .to_string()
-    }
-
-    #[cfg(windows)]
-    fn generation_rpc_stalled_test_command(partial: bool) -> Command {
-        let output = if partial { "{\"schema\":" } else { "" };
-        let script = format!("$response='{output}';")
-            + "while (($line=[Console]::In.ReadLine()) -ne $null) {"
-            + "[Console]::Out.Write($response);[Console]::Out.Flush()}";
-        let mut command = Command::new("powershell");
-        command.args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()]);
-        command
-    }
-
-    #[cfg(unix)]
-    fn generation_rpc_stalled_test_command(partial: bool) -> Command {
-        let output = if partial { "{\"schema\":" } else { "" };
-        let script = format!("while IFS= read -r line; do printf '%s' '{output}'; done");
-        let mut command = Command::new("sh");
-        command.args(["-c", script.as_str()]);
-        command
-    }
-
-    #[test]
-    fn workspace_generation_rpc_reuses_one_process_for_42_queries_with_warm_metrics() {
-        let mut command =
-            generation_rpc_test_command(generation_rpc_response("watcher-test", 7).as_str());
-        assert_generation_rpc_42_query_metrics(&mut command, "local_helper");
-    }
-
-    #[test]
-    #[ignore = "requires CENTAERIS_GENERATION_BENCH_CONTAINER with an idle workspace watcher"]
-    fn workspace_generation_rpc_docker_42_query_benchmark() {
-        let container = std::env::var("CENTAERIS_GENERATION_BENCH_CONTAINER")
-            .expect("Docker generation benchmark container");
-        let cold_started = Instant::now();
-        let mut request = ExecRequest::new(
-            &container,
-            vec![AGENT_BINARY.into(), "workspace-generation-rpc".into()],
-        );
-        request.cwd = Some(WORKSPACE_DATA_ROOT.into());
-        let rpc =
-            WorkspaceGenerationRpc::from_exec(request.spawn().expect("start Engine RPC")).unwrap();
-        assert_generation_rpc_metrics(rpc, cold_started, "docker_engine");
-    }
-
-    fn assert_generation_rpc_42_query_metrics(command: &mut Command, transport: &str) {
-        let cold_started = Instant::now();
-        let rpc = WorkspaceGenerationRpc::spawn(command).expect("start test RPC");
-        assert_generation_rpc_metrics(rpc, cold_started, transport);
-    }
-
-    fn assert_generation_rpc_metrics(
-        mut rpc: WorkspaceGenerationRpc,
-        cold_started: Instant,
-        transport: &str,
-    ) {
-        let process_id = rpc.child.id();
-        let mut durations = Vec::new();
-        let mut expected_generation = None;
-        for index in 0..42 {
-            let started = if index == 0 {
-                cold_started
-            } else {
-                Instant::now()
-            };
-            let response = rpc
-                .query(WORKSPACE_GENERATION_RPC_RESPONSE_TIMEOUT)
-                .expect("query persistent RPC");
-            durations.push(started.elapsed());
-            assert_eq!(rpc.child.id(), process_id);
-            let generation = response.generation.expect("known generation");
-            if let Some(expected) = expected_generation.as_ref() {
-                assert_eq!(&generation, expected);
-            } else {
-                expected_generation = Some(generation);
-            }
-        }
-        drop(rpc);
-        let total_ms = cold_started.elapsed().as_secs_f64() * 1_000.0;
-        let cold_ms = durations[0].as_secs_f64() * 1_000.0;
-        let mut warm_ms = durations[1..]
-            .iter()
-            .map(|duration| duration.as_secs_f64() * 1_000.0)
-            .collect::<Vec<_>>();
-        warm_ms.sort_by(f64::total_cmp);
-        let warm_p50_ms = warm_ms[warm_ms.len() / 2];
-        let warm_p95_ms = warm_ms[(warm_ms.len() * 95 / 100).min(warm_ms.len() - 1)];
-        eprintln!(
-            "WORKSPACE_02_GENERATION_RPC transport={transport} queries=42 processes=1 coldMs={cold_ms:.3} warmP50Ms={warm_p50_ms:.3} warmP95Ms={warm_p95_ms:.3} totalMs={total_ms:.3}"
-        );
-    }
-
-    #[test]
-    fn workspace_generation_rpc_failure_clears_process_and_next_query_rebuilds() {
-        let mut slot = None;
-        let mut invalid = Some(generation_rpc_test_command(
-            generation_rpc_response("", 1).as_str(),
-        ));
-        let error = query_workspace_generation_rpc(
-            &mut slot,
-            WORKSPACE_GENERATION_RPC_RESPONSE_TIMEOUT,
-            || WorkspaceGenerationRpc::spawn(invalid.as_mut().expect("invalid command")),
-        )
-        .expect_err("invalid epoch must fail");
-        assert!(error.contains("execution_workspace_generation_epoch_invalid"));
-        assert!(slot.is_none());
-
-        let mut valid = Some(generation_rpc_test_command(
-            generation_rpc_response("watcher-rebuilt", 2).as_str(),
-        ));
-        let response = query_workspace_generation_rpc(
-            &mut slot,
-            WORKSPACE_GENERATION_RPC_RESPONSE_TIMEOUT,
-            || WorkspaceGenerationRpc::spawn(valid.as_mut().expect("valid command")),
-        )
-        .expect("next query rebuilds RPC");
-        assert_eq!(response.generation.expect("known generation").generation, 2);
-        assert!(slot.is_some());
-    }
-
-    #[test]
-    fn workspace_generation_rpc_no_reply_or_partial_line_times_out_and_rebuilds() {
-        for partial in [false, true] {
-            let mut slot = None;
-            let mut stalled = generation_rpc_stalled_test_command(partial);
-            let started = Instant::now();
-            let error = query_workspace_generation_rpc(&mut slot, Duration::from_secs(2), || {
-                WorkspaceGenerationRpc::spawn(&mut stalled)
-            })
-            .expect_err("incomplete response must hit the host deadline");
-            assert!(error.contains("workspace generation RPC response timed out"));
-            assert!(started.elapsed() < Duration::from_secs(5));
-            assert!(slot.is_none());
-
-            let mut valid = generation_rpc_test_command(
-                generation_rpc_response("watcher-after-timeout", 3).as_str(),
-            );
-            let response = query_workspace_generation_rpc(
-                &mut slot,
-                WORKSPACE_GENERATION_RPC_RESPONSE_TIMEOUT,
-                || WorkspaceGenerationRpc::spawn(&mut valid),
-            )
-            .expect("query after timeout rebuilds the process");
-            assert_eq!(response.generation.expect("known generation").generation, 3);
-        }
-    }
-
-    #[test]
-    fn workspace_sentinel_uses_only_durable_execution_identity() {
-        let sentinel = expected_workspace_execution_sentinel(
-            "agent_run_test",
-            "execution_test",
-            &format!("sha256:{}", "a".repeat(64)),
-        );
+        });
         assert_eq!(
-            serde_json::to_value(sentinel).expect("sentinel"),
-            serde_json::json!({
-                "agentRunId": "agent_run_test",
-                "executionId": "execution_test",
-                "authorizationDigest": format!("sha256:{}", "a".repeat(64)),
-            })
+            decode_workspace_generation(&serde_json::to_vec(&known).unwrap())
+                .unwrap()
+                .generation
+                .unwrap()
+                .generation,
+            7
         );
+        let unknown = serde_json::json!({
+            "schema": "workspace.generation.v1",
+            "generation": null,
+            "diagnostic": "workspace watcher unavailable",
+        });
+        let decoded = decode_workspace_generation(&serde_json::to_vec(&unknown).unwrap()).unwrap();
+        assert!(decoded.generation.is_none());
+        assert_eq!(
+            decoded.diagnostic.as_deref(),
+            Some("workspace watcher unavailable")
+        );
+        let mut invalid = known.clone();
+        invalid["generation"]["instanceEpoch"] = "".into();
+        assert!(decode_workspace_generation(&serde_json::to_vec(&invalid).unwrap()).is_err());
+        assert!(decode_workspace_generation(b"{\"schema\":").is_err());
+        let mut extra = known;
+        extra["unexpected"] = true.into();
+        assert!(decode_workspace_generation(&serde_json::to_vec(&extra).unwrap()).is_err());
     }
 
     #[test]
@@ -5515,57 +4721,33 @@ mod tests {
     }
 
     #[test]
-    fn retained_container_starts_supervisor_with_isolated_bounded_control_and_output() {
+    fn environment_container_keeps_host_control_outside_workload_mounts() {
         let runner = test_docker_execution_host_runner();
         let mut expected = runner.container_expectation();
-        expected.retained = true;
         let body = container_create_body(&expected).unwrap();
         assert_eq!(
             body["Cmd"],
-            serde_json::json!([
-                "/opt/centaeris/bin/execution_agent",
-                "environment-init",
-                expected.instance_id
-            ])
+            serde_json::json!([AGENT_BINARY, "environment-keeper"])
         );
-        assert_eq!(
-            body["HostConfig"]["CapAdd"],
-            serde_json::json!(["CHOWN", "SETUID", "SETGID"])
-        );
-        let parent = body["HostConfig"]["CgroupParent"].as_str().unwrap();
-        assert!(
-            !parent.contains('-'),
-            "systemd hyphens change the parent hierarchy"
-        );
-        assert_eq!(
-            body["HostConfig"]["Binds"],
-            serde_json::json!([format!(
-                "/sys/fs/cgroup/{parent}:/run/centaeris/instance-cgroups:rw"
-            )])
-        );
-        let tmpfs = &body["HostConfig"]["Tmpfs"];
-        assert_eq!(
-            tmpfs["/run/centaeris/task-control"],
-            "rw,noexec,nosuid,nodev,size=8388608,uid=0,gid=0,mode=0700"
-        );
-        assert_eq!(
-            tmpfs["/run/centaeris/task-output"],
-            "rw,noexec,nosuid,nodev,size=75497472,uid=0,gid=0,mode=0700"
-        );
-        assert_eq!(
-            body["HostConfig"]["Memory"],
-            expected.resources.memory_bytes
-        );
-        assert_eq!(
-            body["HostConfig"]["PidsLimit"],
-            expected.resources.pids_limit
-        );
-        assert_eq!(body["HostConfig"]["CapDrop"], serde_json::json!(["ALL"]));
-        assert_eq!(body["HostConfig"]["NetworkMode"], "none");
+        assert_eq!(body["User"], "10001:10001");
+        let host = &body["HostConfig"];
+        assert_eq!(host["CapDrop"], serde_json::json!(["ALL"]));
+        assert_eq!(host["CapAdd"], serde_json::json!([]));
+        assert!(host["CgroupParent"].is_null());
+        assert!(host["Binds"].is_null());
+        assert!(host["Tmpfs"].is_null());
+        let mounts = host["Mounts"].as_array().unwrap();
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[0]["Target"], "/opt/centaeris/plugins/banana");
+        assert_eq!(mounts[1]["Target"], AGENT_BINARY);
+        assert!(mounts.iter().all(|mount| mount["ReadOnly"] == true));
+        assert_eq!(host["Memory"], expected.resources.memory_bytes);
+        assert_eq!(host["PidsLimit"], expected.resources.pids_limit);
+        assert_eq!(host["NetworkMode"], "none");
         expected.oci_runtime = OciRuntime::Runsc;
         assert!(
             container_create_body(&expected).is_err(),
-            "unverified delegated cgroup backend must not be admitted"
+            "backend requires its own verified supervisor adapter"
         );
     }
 
@@ -5604,13 +4786,7 @@ mod tests {
         assert!(summary.enforced);
         assert_eq!(summary.workspace_root, WORKSPACE_DATA_ROOT);
         assert_eq!(summary.network, NetworkPolicy::Disabled);
-        assert_eq!(SANDBOX_NETWORK_MODE, "none");
-    }
-
-    #[test]
-    fn docker_timeout_uses_coreutils_seconds() {
-        assert_eq!(coreutils_timeout_duration(1), "0.001s");
-        assert_eq!(coreutils_timeout_duration(120_000), "120.000s");
+        assert_eq!(network::mode(ExecutionNetwork::Disabled), "none");
     }
 
     #[test]
@@ -5638,8 +4814,6 @@ mod tests {
 
     #[test]
     fn filesystem_read_response_preserves_large_binary_bytes() {
-        // A rendered page can be well below Core's file limit while its JSON
-        // byte array exceeds the ordinary helper metadata budget.
         let bytes = vec![255; 400_000];
         let expected = ExecutionFileSystemOutput::ReadFile(ExecutionFileReadOutput {
             identity: ExecutionFileIdentity {
@@ -5649,21 +4823,17 @@ mod tests {
             file_hash: format!("sha256:{:x}", Sha256::digest(&bytes)),
             bytes,
         });
-        let encoded = serde_json::to_vec(&SandboxFileSystemResult::from(Ok(expected.clone())))
-            .expect("encoded response");
-        assert!(encoded.len() > HELPER_JSON_LIMIT);
-        let limit = filesystem_response_limit(&ExecutionFileSystemOperation::ReadFile {
-            max_bytes: 400_000,
-        })
-        .expect("response budget");
-        let captured = read_bounded(Cursor::new(&encoded), limit).expect("bounded read");
-        assert_eq!(
-            captured.bytes.len(),
-            encoded.len(),
-            "valid image response was truncated"
-        );
-        let decoded = serde_json::from_slice::<SandboxFileSystemResult>(&captured.bytes)
-            .expect("complete JSON")
+        let mut encoded = Vec::new();
+        hosted_execution::protocol::write_filesystem_result(
+            &mut encoded,
+            SandboxFileSystemResult::from(Ok(expected.clone())),
+        )
+        .unwrap();
+        let header = u32::from_be_bytes(encoded[..4].try_into().unwrap()) as usize;
+        assert!(header < 4096);
+        assert_eq!(&encoded[header + 4..], vec![255; 400_000]);
+        let decoded = hosted_execution::protocol::read_filesystem_result(&mut Cursor::new(encoded))
+            .expect("complete binary frame")
             .into_result()
             .expect("file response");
         assert_eq!(decoded, expected);
@@ -5671,18 +4841,20 @@ mod tests {
 
     #[test]
     fn filesystem_response_budget_rejects_overflow_and_keeps_metadata_bounded() {
-        assert_eq!(
-            filesystem_response_limit(&ExecutionFileSystemOperation::ReadFile {
-                max_bytes: usize::MAX,
-            })
-            .expect_err("overflow must fail")
-            .kind,
-            ExecutionFileSystemErrorKind::TooLarge,
-        );
-        assert_eq!(
-            filesystem_response_limit(&ExecutionFileSystemOperation::InspectMutationPath)
-                .expect("metadata budget"),
-            HELPER_JSON_LIMIT,
+        let result = SandboxFileSystemResult::from(Err(ExecutionFileSystemError::new(
+            ExecutionFileSystemErrorKind::NotFound,
+            "absent",
+        )));
+        let (mut metadata, raw) =
+            hosted_execution::protocol::FileSystemResponseFrameMetadata::from_result(result)
+                .unwrap();
+        assert!(raw.is_empty());
+        metadata.validate().unwrap();
+        assert!(serde_json::to_vec(&metadata).unwrap().len() < 4096);
+        metadata.content_length = u64::MAX;
+        assert!(
+            metadata.validate().is_err(),
+            "oversize result cannot enter framed transport"
         );
     }
 
@@ -6343,6 +5515,9 @@ mod tests {
         let mut runner = test_docker_execution_host_runner();
         runner.resources.cpu_milli = 4000;
         runner.resources.memory_bytes = 8 * 1024 * 1024 * 1024;
+        let profile = runner.environment_profile.as_mut().unwrap();
+        profile.resources.cpu_milli = runner.resources.cpu_milli;
+        profile.resources.memory_bytes = runner.resources.memory_bytes;
         let body = container_create_body(&runner.container_expectation()).unwrap();
         assert_eq!(body["Image"], runner.image_digest);
         assert_eq!(
@@ -6364,17 +5539,19 @@ mod tests {
         assert_eq!(host["Memory"], 8u64 * 1024 * 1024 * 1024);
         assert_eq!(host["PidsLimit"], runner.resources.pids_limit);
         assert_eq!(host["NetworkMode"], "none");
-        assert_eq!(host["ReadonlyRootfs"], true);
+        assert_eq!(host["ReadonlyRootfs"], false);
         assert_eq!(host["CapDrop"], serde_json::json!(["ALL"]));
-        assert_eq!(host["CapAdd"], serde_json::json!(["CHOWN"]));
+        assert_eq!(host["CapAdd"], serde_json::json!([]));
         assert_eq!(
             host["SecurityOpt"],
             serde_json::json!(["no-new-privileges"])
         );
         assert_eq!(host["Mounts"][0]["ReadOnly"], true);
         assert_eq!(host["Mounts"][0]["VolumeOptions"]["Subpath"], "banana");
-        assert_eq!(host["Mounts"][1]["ReadOnly"], false);
-        assert_eq!(host["Mounts"][1]["VolumeOptions"]["Subpath"], "memory-test");
+        assert_eq!(host["Mounts"][1]["Type"], "bind");
+        assert_eq!(host["Mounts"][1]["ReadOnly"], true);
+        assert_eq!(host["Mounts"][1]["Source"], "/tmp/execution_agent");
+        assert_eq!(host["Mounts"][1]["Target"], AGENT_BINARY);
         // Verify the actual SDK request retains all configured fields before
         // any daemon-dependent gate is run.
         let encoded = serde_json::to_value(
@@ -6392,6 +5569,102 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    #[test]
+    fn ordinary_network_capability_controls_engine_and_core_policy() {
+        let mut runner = test_docker_execution_host_runner();
+        for (network, mode, policy) in [
+            (ExecutionNetwork::Disabled, "none", NetworkPolicy::Disabled),
+            (
+                ExecutionNetwork::PublicInternet,
+                "bridge",
+                NetworkPolicy::PublicInternet,
+            ),
+        ] {
+            runner.network = network;
+            runner.environment_profile.as_mut().unwrap().network = network;
+            let body = container_create_body(&runner.container_expectation()).unwrap();
+            assert_eq!(body["HostConfig"]["NetworkMode"], mode);
+            assert_eq!(body["HostConfig"]["ReadonlyRootfs"], false);
+            let execution = runner.execution_policy();
+            assert_eq!(execution.network, policy);
+            assert_eq!(
+                execution.filesystem.workspace_root,
+                Path::new(WORKSPACE_DATA_ROOT)
+            );
+            assert_eq!(
+                execution.filesystem,
+                environment_policy(runner.environment_profile.as_ref().unwrap()).filesystem
+            );
+            runner.validate_policy(&execution).unwrap();
+            let mut unauthorized = execution.clone();
+            unauthorized.network = if policy == NetworkPolicy::Disabled {
+                NetworkPolicy::PublicInternet
+            } else {
+                NetworkPolicy::Disabled
+            };
+            assert!(matches!(
+                runner.validate_policy(&unauthorized),
+                Err(ExecutionError::Denied { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn retained_network_change_rejects_container_reuse_and_changes_profile() {
+        let mut runner = retained_test_runner();
+        let original: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
+            serde_json::from_str(include_str!(
+                "../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+            ))
+            .unwrap();
+        runner.resources = original.environment_profile.resources.sandbox_resources();
+        runner.image_digest = original.environment_profile.image_digest.clone();
+        runner.retained_allocation.as_mut().unwrap().image_digest = runner.image_digest.clone();
+        runner.environment_profile = Some(original.environment_profile.clone());
+        runner.benchmark_helper = Some("/tmp/execution_agent".into());
+        let expected = runner.container_expectation();
+        let body = container_create_body(&expected).unwrap();
+        let host = &body["HostConfig"];
+        let mut config = body.clone();
+        config.as_object_mut().unwrap().remove("HostConfig");
+        config.as_object_mut().unwrap().remove("Image");
+        let facts = ContainerFacts {
+            id: "a".repeat(64),
+            raw: serde_json::json!({"Id":"a".repeat(64), "Config":config,
+                "Image":body["Image"], "HostConfig":host, "Mounts":host["Mounts"]}),
+            running: true,
+            image: runner.image_digest.clone(),
+            runtime: "runc".into(),
+            labels: serde_json::from_value(body["Labels"].clone()).unwrap(),
+            memory: host["Memory"].as_u64().unwrap(),
+            cpu_period: host["CpuPeriod"].as_i64().unwrap(),
+            cpu_quota: host["CpuQuota"].as_i64().unwrap(),
+            pids_limit: host["PidsLimit"].as_i64(),
+            readonly_rootfs: false,
+            network_mode: "none".into(),
+            mounts: serde_json::from_value(host["Mounts"].clone()).unwrap(),
+        };
+        assert!(facts.matches(&expected), "original retained configuration");
+        let changed = ContainerExpectation {
+            network: ExecutionNetwork::PublicInternet,
+            ..expected
+        };
+        assert!(
+            !facts.matches(&changed),
+            "a new network grant cannot reuse the old physical mode"
+        );
+        let mut changed_profile = original.environment_profile.clone();
+        changed_profile.network = ExecutionNetwork::PublicInternet;
+        let changed = ContainerExpectation {
+            environment_profile: Some(&changed_profile),
+            ..changed
+        };
+        assert_ne!(
+            retained::profile_digest(&expected, &original.plugin_activation).unwrap(),
+            retained::profile_digest(&changed, &original.plugin_activation).unwrap()
+        );
     }
 
     #[test]
@@ -6414,9 +5687,21 @@ mod tests {
             network_mode: "none".into(),
             mounts: Vec::new(),
         };
+        facts.labels.insert(
+            "centaeris.allocation_owner".into(),
+            serde_json::to_string(&centaeris_core::execution::EnvironmentTaskOwner::AgentRun {
+                run_id: runner.agent_run_id.clone(),
+            })
+            .unwrap(),
+        );
         let observed = observed_resident_sandbox(&facts).unwrap();
         assert_eq!(observed.resources, declared_usage(runner.resources));
-        assert_eq!(observed.agent_run_id, runner.agent_run_id);
+        assert_eq!(
+            observed.allocation_owner,
+            centaeris_core::execution::EnvironmentTaskOwner::AgentRun {
+                run_id: runner.agent_run_id.clone()
+            }
+        );
         assert_eq!(observed.execution_id, runner.execution_id);
         facts.labels.remove("centaeris.execution_id");
         assert!(observed_resident_sandbox(&facts).is_err());
@@ -6426,7 +5711,7 @@ mod tests {
         facts.memory = 0;
         assert!(observed_resident_sandbox(&facts).is_err());
         facts.memory = runner.resources.memory_bytes;
-        facts.raw["HostConfig"]["Tmpfs"][WORKSPACE_DATA_ROOT] = serde_json::Value::Null;
+        facts.labels.remove("centaeris.data_budget");
         assert!(observed_resident_sandbox(&facts).is_err());
     }
 
@@ -6819,6 +6104,7 @@ mod tests {
 
     pub(super) fn test_docker_execution_host_runner() -> DockerExecutionHostRunner {
         DockerExecutionHostRunner {
+            network: ExecutionNetwork::Disabled,
             transcript_capture: Mutex::new(Default::default()),
             transcript_publisher: Arc::new(Default::default()),
             recovery_activity: ExecutionActivityWitness::new(
@@ -6858,14 +6144,26 @@ mod tests {
             api_client: reqwest::blocking::Client::new(),
             input_lock: Mutex::new(()),
             materialized_inputs: Mutex::new(BTreeMap::new()),
-            workspace_generation_rpc: Mutex::new(None),
             resident_store: None,
             resident_lease: None,
             retained_allocation: None,
             environment_authorization: None,
             retained_workspace_id: None,
-            benchmark_profile: None,
-            benchmark_helper: None,
+            environment_profile: Some(EnvironmentProfile {
+                schema: "runtime.environment_profile.v1".into(),
+                image_digest: format!("sha256:{}", "b".repeat(64)),
+                workspace_root: WORKSPACE_DATA_ROOT.into(),
+                user: AGENT_USER.into(),
+                network: ExecutionNetwork::Disabled,
+                resources: crate::agent_run_authorization::EnvironmentResources {
+                    cpu_milli: 1,
+                    memory_bytes: 1,
+                    pids_limit: 1,
+                    data_tmpfs_bytes: 1,
+                    storage_bytes: 1,
+                },
+            }),
+            benchmark_helper: Some("/tmp/execution_agent".into()),
         }
     }
 
@@ -7008,35 +6306,35 @@ mod tests {
     #[test]
     fn mcp_exec_is_bound_to_the_agent_run_container() {
         let runner = test_docker_execution_host_runner();
-        let request = runner
+        let mcp_runner = Arc::new(retained_test_runner());
+        let request = mcp_runner
             .mcp_exec_request(
                 "banana",
                 "bin/banana-mcp",
                 &["--mode".into(), "stdio".into()],
             )
             .unwrap();
-        assert_eq!(request.container, "centaeris-agent-run-test");
-        assert_eq!(request.user.as_deref(), Some("10001:10001"));
-        assert_eq!(request.cwd.as_deref(), Some("/mnt/data"));
-        assert_eq!(
-            request.command,
-            [
-                "/opt/centaeris/plugins/banana/bin/banana-mcp",
-                "--mode",
-                "stdio"
-            ]
+        assert!(
+            mcp_runner
+                .recovery_activity
+                .try_snapshot_activity()
+                .unwrap()
+                .is_none(),
+            "live persistent MCP defers recovery capture"
         );
         assert_eq!(
-            request.env,
-            [
-                "HOME=/home/agent",
-                "PATH=/opt/centaeris/plugins/banana/bin:/usr/bin",
-                "TMPDIR=/tmp"
-            ]
+            request.program,
+            "/opt/centaeris/plugins/banana/bin/banana-mcp"
+        );
+        assert_eq!(request.cwd, "/mnt/data");
+        assert_eq!(request.args, ["--mode", "stdio"]);
+        assert_eq!(
+            request.env["PATH"],
+            "/opt/centaeris/plugins/banana/bin:/usr/bin"
         );
 
         let hook_args = runner
-            .lifecycle_hook_exec_request(&LifecycleHookHandlerV1 {
+            .lifecycle_hook_request(&LifecycleHookHandlerV1 {
                 id: "banana:guard".to_string(),
                 event: centaeris_core::extension::hooks::LifecycleHookEventNameV1::PreToolUse,
                 matcher: Some("write".to_string()),
@@ -7051,35 +6349,12 @@ mod tests {
                 timeout_ms: 5_000,
             })
             .expect("Hook command");
-        assert_eq!(hook_args.container, "centaeris-agent-run-test");
-        assert_eq!(hook_args.user.as_deref(), Some("10001:10001"));
-        assert_eq!(
-            hook_args.cwd.as_deref(),
-            Some("/opt/centaeris/plugins/banana")
-        );
-        assert_eq!(
-            hook_args.command,
-            [
-                "/usr/bin/timeout",
-                "--signal=TERM",
-                "--kill-after=1s",
-                "5.000s",
-                "node",
-                "hooks/guard-write.mjs"
-            ]
-        );
-        assert_eq!(
-            hook_args.env,
-            [
-                "LANG=C.UTF-8",
-                "LC_ALL=C.UTF-8",
-                "TERM=dumb",
-                "HOME=/home/agent",
-                "PATH=/opt/centaeris/plugins/banana/bin:/usr/bin",
-                "TMPDIR=/tmp"
-            ]
-        );
-        assert!(!hook_args.env.iter().any(|arg| arg.contains("token")));
+        assert_eq!(hook_args.cwd, Path::new("/opt/centaeris/plugins/banana"));
+        assert_eq!(hook_args.program, "node");
+        assert_eq!(hook_args.args, ["hooks/guard-write.mjs"]);
+        assert_eq!(hook_args.timeout_ms, 5000);
+        assert!(hook_args.env.is_empty());
+        assert_eq!(hook_args.policy, runner.execution_policy());
     }
 
     #[cfg(unix)]

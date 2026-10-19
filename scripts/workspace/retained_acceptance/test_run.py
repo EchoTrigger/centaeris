@@ -54,8 +54,8 @@ class LongDriverSequenceTests(unittest.TestCase):
                             'summaryBytes':100,'sequence':80,'sessionEventId':'event-80','failureCount':0,
                             'requestBound':{'requestId':'request-compact','sequence':70,'manifestDigest':'sha256:'+'b'*64,'compactionPromptDigest':'sha256:'+'c'*64},
                             'lastMainObservation':{'requestId':'main-before' if successful_samples==2 else 'main-after-'+str(successful_samples),'sequence':85 if successful_samples==2 else 210+(successful_samples-3)*100,'manifestDigest':'sha256:'+'d'*64,'summaryContentDigest':'sha256:'+'e'*64,'successfulCommand':{'callId':'command-'+str(successful_samples),'commandIndex':899 if successful_samples==2 else (949 if successful_samples==3 else 974),'callSequence':90 if successful_samples==2 else 220+(successful_samples-3)*100,'resultSequence':95 if successful_samples==2 else 230+(successful_samples-3)*100}}},
-                        'fence':{'environmentInstanceId':'instance','controllerId':'run-2','controllerEpoch':3 if successful_samples<=2 else (5 if purpose=='cleanup' else 4),'controllerPurpose':purpose},
-                        'live':{'backgroundTaskIds':['background']},'store':{'indexedRunTasks':301 if successful_samples==1 else 3000}}))
+                        'fence':{'environmentInstanceId':'instance','controllerOwner':{'kind':'agentRun','runId':'run-2'},'controllerEpoch':3 if successful_samples<=2 else (5 if purpose=='cleanup' else 4),'controllerPurpose':purpose},
+                        'live':{'backgroundTaskIds':['background']},'store':{'indexedOwnerTasks':301 if successful_samples==1 else 3000}}))
                 if len(argv)>1 and Path(argv[1]).name=='observe.py':
                     Path(argv[argv.index('--result')+1]).write_text(json.dumps({'successfulOrdinaryCommands':1000 if len(admissions)==2 else 0,
                         'environmentId':'environment','instanceId':'instance','hostId':'host','containerId':'instance-cid',
@@ -125,12 +125,12 @@ class BoundedProgressEvidenceTests(unittest.TestCase):
     def test_cap_retained_samples_without_losing_full_observation_maxima(self):
         evidence=driver.ProgressEvidence()
         for index in range(1000):
-            evidence.record({'completedCommands':index,'store':{'indexedRunTasks':10000 if index==0 else index},
+            evidence.record({'completedCommands':index,'store':{'indexedOwnerTasks':10000 if index==0 else index},
                 'live':{'hotTaskRecords':64,'activeTasks':1}})
         result=evidence.snapshot()
         self.assertEqual(result['observationCount'],1000)
         self.assertEqual(len(result['retainedSamples']),256)
-        self.assertEqual(result['maxima']['store.indexedRunTasks'],10000)
+        self.assertEqual(result['maxima']['store.indexedOwnerTasks'],10000)
         self.assertEqual(result['retainedSamples'][0]['completedCommands'],744)
 
 class RetryClassificationTests(unittest.TestCase):

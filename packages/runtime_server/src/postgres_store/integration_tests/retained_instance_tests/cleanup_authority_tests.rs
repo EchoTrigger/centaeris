@@ -37,7 +37,7 @@ fn postgres_cleanup_authority_uses_core_terminal_and_allows_revoked_membership_w
     db.batch_execute("DELETE FROM public.app_core_workspacemembership; UPDATE public.app_core_workspace SET status='inactive'; UPDATE public.app_core_session SET \"deletedAt\"=now(),current_environment_id=NULL;
         INSERT INTO public.app_core_sessionevent VALUES('ws_1','sess_1','run-cleanup',false,'{\"type\":\"agent_run_failed\"}')").unwrap();
     assert!(verify(&mut db, &r).is_ok());
-    let profile = format!("sha256:{}", "b".repeat(64));
+    let profile = r.original.environment_profile.digest().unwrap();
     assert!(store
         .with_retained_instance_operation::<()>(
             &r.request("execution-cleanup", &profile),

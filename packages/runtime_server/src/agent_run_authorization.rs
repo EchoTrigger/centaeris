@@ -10,21 +10,26 @@ use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
 pub const AGENT_RUN_AUTHORIZATION_SCHEMA: &str = "workspace.agent_run_authorization.v1";
-pub const BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA: &str = "workspace.agent_run_authorization.v2";
 const AGENT_RUN_AUTHORIZATION_SIGNATURE_DOMAIN: &str = "workspace:agent-run-authorization:v1\0";
-const BENCHMARK_AUTHORIZATION_SIGNATURE_DOMAIN: &str = "workspace:agent-run-authorization:v2\0";
 const MAX_DECLARED_INPUTS: usize = 64;
 
-mod benchmark;
+mod environment_profile;
+pub use environment_profile::EnvironmentProfile;
 #[cfg(test)]
-pub use benchmark::BenchmarkResources;
-pub use benchmark::{BenchmarkExecutionProfile, BenchmarkNetwork};
+pub use environment_profile::EnvironmentResources;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ExecutionNetwork {
+    PublicInternet,
+    Disabled,
+}
 
 #[cfg(test)]
 mod parity;
 
 #[cfg(test)]
-mod benchmark_tests;
+mod environment_profile_tests;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -43,31 +48,9 @@ pub struct WorkspaceAgentRunAuthorization {
     pub artifact_scope_ref: String,
     pub asset_refs: Vec<DeclaredInput>,
     pub message_asset_refs: Vec<String>,
-    pub image_capability: String,
-    pub image_digest: String,
     pub plugin_activation: PluginActivationSnapshotV1,
-    pub resources: SandboxResources,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "present_value"
-    )]
-    pub benchmark_profile: Option<BenchmarkExecutionProfile>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "present_value"
-    )]
-    pub benchmark_profile_digest: Option<String>,
-}
-
-fn present_value<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    // Missing is allowed for v1; explicit null must not disguise a new field.
-    T::deserialize(deserializer).map(Some)
+    pub environment_profile: EnvironmentProfile,
+    pub environment_profile_digest: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,11 +74,8 @@ pub struct SandboxResources {
 
 impl WorkspaceAgentRunAuthorization {
     pub fn validate(&self) -> Result<(), String> {
-        if !matches!(
-            self.schema.as_str(),
-            AGENT_RUN_AUTHORIZATION_SCHEMA | BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA
-        ) {
-            return Err("workspace_agent_run_authorization_schema_mismatch".to_string());
+        if self.schema != AGENT_RUN_AUTHORIZATION_SCHEMA {
+            return Err("workspace_agent_run_authorization_schema_mismatch".into());
         }
         for (name, value) in [
             ("id", self.id.as_str()),
@@ -158,51 +138,20 @@ impl WorkspaceAgentRunAuthorization {
             }
             previous_message_input_ref = Some(input_ref.as_str());
         }
-        match self.schema.as_str() {
-            AGENT_RUN_AUTHORIZATION_SCHEMA => {
-                if self.benchmark_profile.is_some() || self.benchmark_profile_digest.is_some() {
-                    return Err("v1 authorization cannot contain benchmark fields".into());
-                }
-                if self.image_capability != "workspace_general_v1" {
-                    return Err("workspace AgentRun imageCapability mismatch".into());
-                }
-            }
-            BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA => {
-                if self.image_capability != "benchmark_task_v1" {
-                    return Err("benchmark AgentRun imageCapability mismatch".into());
-                }
-                let profile = self
-                    .benchmark_profile
-                    .as_ref()
-                    .ok_or("benchmark profile required")?;
-                let digest = self
-                    .benchmark_profile_digest
-                    .as_deref()
-                    .ok_or("benchmark profile digest required")?;
-                profile.validate()?;
-                validate_sha256("benchmarkProfileDigest", digest)?;
-                if profile.digest()? != digest
-                    || profile.image_digest != self.image_digest
-                    || profile.resources.sandbox_resources() != self.resources
-                {
-                    return Err("benchmark profile binding mismatch".into());
-                }
-            }
-            _ => unreachable!("schema checked above"),
+        self.environment_profile.validate()?;
+        if self.environment_profile.digest()? != self.environment_profile_digest {
+            return Err("environment_profile_binding_mismatch".into());
         }
-        validate_sha256("imageDigest", self.image_digest.as_str())?;
         validate_plugin_activation_snapshot(&self.plugin_activation)?;
-        if self.resources.memory_bytes == 0
-            || self.resources.cpu_milli == 0
-            || self.resources.pids_limit == 0
-            || self.resources.data_tmpfs_bytes == 0
-        {
-            return Err("sandbox resources must be positive".to_string());
-        }
-        if total_input_bytes > self.resources.data_tmpfs_bytes / 2 {
+        if total_input_bytes > self.environment_profile.resources.data_tmpfs_bytes / 2 {
             return Err("declared inputs must fit within half of dataTmpfsBytes".to_string());
         }
         Ok(())
+    }
+
+    pub fn effective_network(&self) -> Result<ExecutionNetwork, String> {
+        self.environment_profile.validate()?;
+        Ok(self.environment_profile.network)
     }
 
     pub fn validate_agent_run_binding(&self, agent_run_id: &str) -> Result<(), String> {
@@ -257,13 +206,10 @@ impl WorkspaceAgentRunAuthorization {
     }
 
     fn signature_domain(&self) -> Result<&'static str, String> {
-        match self.schema.as_str() {
-            AGENT_RUN_AUTHORIZATION_SCHEMA => Ok(AGENT_RUN_AUTHORIZATION_SIGNATURE_DOMAIN),
-            BENCHMARK_AGENT_RUN_AUTHORIZATION_SCHEMA => {
-                Ok(BENCHMARK_AUTHORIZATION_SIGNATURE_DOMAIN)
-            }
-            _ => Err("workspace_agent_run_authorization_schema_mismatch".into()),
+        if self.schema != AGENT_RUN_AUTHORIZATION_SCHEMA {
+            return Err("workspace_agent_run_authorization_schema_mismatch".into());
         }
+        Ok(AGENT_RUN_AUTHORIZATION_SIGNATURE_DOMAIN)
     }
 
     fn verify_digest_signature(
@@ -437,16 +383,14 @@ mod tests {
         let authorization = authorization();
         authorization.validate().expect("authorization");
         let digest = authorization.digest().expect("digest");
-        assert_eq!(
-            digest,
-            "sha256:bd93e8ba466c0d9851e805dd2a8c8a5962b351065c4d982ae961ea0cdb0a6a9f"
-        );
+        let expected: Value = serde_json::from_str(include_str!(
+            "../../../tests/workspace/fixtures/agent_run_authorization/v1/expected.json"
+        ))
+        .unwrap();
+        assert_eq!(digest, expected["digest"]);
         assert_eq!(digest, authorization.digest().expect("repeat digest"));
         let signature = authorization.signature(b"test-key").expect("signature");
-        assert_eq!(
-            signature,
-            "hmac-sha256:86d800a4e2517f1b169894646f9a7bb3297770235a7a3a0cbceffe1897969dd5"
-        );
+        assert_eq!(signature, expected["signature"]);
         authorization
             .verify_signature(b"test-key", signature.as_str())
             .expect("verify");
@@ -465,7 +409,9 @@ mod tests {
     #[test]
     fn authorization_reserves_half_of_data_tmpfs_for_generated_files() {
         let mut authorization = authorization();
-        authorization.resources.data_tmpfs_bytes = 1;
+        authorization.environment_profile.resources.data_tmpfs_bytes = 1;
+        authorization.environment_profile_digest =
+            authorization.environment_profile.digest().unwrap();
         assert_eq!(
             authorization.validate().expect_err("input aggregate"),
             "declared inputs must fit within half of dataTmpfsBytes"

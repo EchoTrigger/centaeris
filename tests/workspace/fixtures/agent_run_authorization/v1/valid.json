@@ -35,17 +35,24 @@
   "messageAssetRefs": [
     "input_1"
   ],
-  "imageCapability": "workspace_general_v1",
-  "imageDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "pluginActivation": {
     "schema": "plugin_activation_snapshot_v1",
     "digest": "sha256:3bf31c5d8d4d6523712c9ef2b194d4b0edb3255155a49e76f44bbe7382e54f75",
     "packages": []
   },
-  "resources": {
-    "memoryBytes": 2147483648,
-    "cpuMilli": 2000,
-    "pidsLimit": 512,
-    "dataTmpfsBytes": 4294967296
-  }
+  "environmentProfile": {
+    "schema": "runtime.environment_profile.v1",
+    "imageDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "workspaceRoot": "/mnt/data",
+    "user": "10001:10001",
+    "network": "disabled",
+    "resources": {
+      "memoryBytes": 2147483648,
+      "cpuMilli": 2000,
+      "pidsLimit": 512,
+      "dataTmpfsBytes": 4294967296,
+      "storageBytes": 4294967296
+    }
+  },
+  "environmentProfileDigest": "sha256:be3453342dd06939470a879ab3caf7190cd092040d0d3f8fb3105308a2530262"
 }

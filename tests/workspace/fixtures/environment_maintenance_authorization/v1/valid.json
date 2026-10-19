@@ -1,0 +1,22 @@
+{
+  "payload": {
+    "schema": "workspace.environment_maintenance_authorization.v1",
+    "workspaceId": "workspace_test",
+    "sessionId": "session_test",
+    "environmentId": "environment_test",
+    "instanceId": "instance_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "containerId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "profileDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "controllerOwner": {
+      "kind": "maintenanceOperation",
+      "operationId": "prepare_test"
+    },
+    "controllerEpoch": 2,
+    "controllerLeaseDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "controllerPurpose": "execute",
+    "requestDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "expiresAtMs": 1800000000000,
+    "operationKind": "task"
+  },
+  "signature": "hmac-sha256:551f1546c58e0782c27286ddaee91c9b7161311d091fcd31e7b5737173407201"
+}

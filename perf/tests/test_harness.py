@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+from config_fixtures import configure_execution_host
 
 SOURCE = Path(__file__).resolve().parents[1] / 'harness' / 'control.py'
 spec = importlib.util.spec_from_file_location('perf_control', SOURCE)
@@ -14,6 +15,31 @@ spec.loader.exec_module(control)
 
 
 class IsolationTests(unittest.TestCase):
+    def test_execution_host_inputs_belong_to_the_performance_project(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / '.env.example').write_bytes((control.ROOT / '.env.example').read_bytes())
+            with patch.dict(os.environ, {
+                    'ENVIRONMENT_EXECUTION_HELPER': '/opt/production/execution_agent',
+                    'ENVIRONMENT_HOST_SOCKET_DIRECTORY': '/run/production-host'}):
+                env_file = control.initialize(root)
+                values = control.read_env(env_file)
+                command, env = control.compose_command(control.ROOT, env_file, ['config', '--format', 'json'])
+                config = json.loads(control.run(command, env=env))
+            helper = '/var/lib/centaeris-perf/host/execution_agent'
+            self.assertEqual(values['ENVIRONMENT_EXECUTION_HELPER'], helper)
+            self.assertEqual(values['ENVIRONMENT_HOST_SOCKET_DIRECTORY'], '/run/centaeris-perf-host')
+            self.assertNotIn('ENVIRONMENT_EXECUTION_HELPER', env)
+            self.assertNotIn('ENVIRONMENT_HOST_SOCKET_DIRECTORY', env)
+            runtime = config['services']['runtime']
+            self.assertEqual(runtime['environment']['ENVIRONMENT_EXECUTION_HELPER'], helper)
+            mounts = {mount['target']: mount for mount in runtime['volumes']}
+            self.assertEqual(mounts[helper]['source'], helper)
+            self.assertTrue(mounts[helper]['read_only'])
+            self.assertEqual(mounts['/run/centaeris-host']['source'], '/run/centaeris-perf-host')
+            self.assertTrue(mounts['/run/centaeris-host']['read_only'])
+            control.validate_config(config, control.ROOT)
+
     def test_manifest_records_gc_identity_for_attributed_reclamation_samples(self):
         stack = object.__new__(control.Stack)
         def container(service):
@@ -219,6 +245,7 @@ class IsolationTests(unittest.TestCase):
                 'volumes': [{'type': 'bind', 'source': '/repo/perf/certs/out/isolated/mock-ca.crt', 'target': '/perf-certs/mock-ca.crt', 'read_only': True}]}
                 for name in ('api', 'runtime')},
         }
+        configure_execution_host(valid['services']['runtime'])
         control.validate_config(valid, Path('/repo'))
         for mutate in (
             lambda c: c.update(name='centaeris-workspace'),
@@ -227,6 +254,16 @@ class IsolationTests(unittest.TestCase):
             lambda c: c['services']['api']['environment'].clear(),
             lambda c: c['services']['api']['volumes'].clear(),
             lambda c: c['services']['api'].update(container_name='production-api'),
+            lambda c: c['services']['runtime']['volumes'][1].update(source='/run/centaeris-host'),
+            lambda c: c['services']['runtime']['volumes'][1].update(read_only=False),
+            lambda c: c['services']['runtime']['volumes'][2].update(source='/opt/production/execution_agent'),
+            lambda c: c['services']['runtime']['volumes'][2].update(target='/elsewhere/execution_agent'),
+            lambda c: c['services']['runtime']['volumes'][2].update(read_only=False),
+            lambda c: c['services']['runtime']['volumes'].append({'type': 'bind', 'source': '/opt/production', 'read_only': True}),
+            lambda c: c['services']['runtime']['volumes'].pop(),
+            lambda c: c['services']['runtime']['environment'].update(ENVIRONMENT_EXECUTION_HELPER='/opt/production/execution_agent'),
+            lambda c: c['services']['runtime']['environment'].update(ENVIRONMENT_HOST_SOCKET='/run/production-host/control.sock'),
+            lambda c: c['services'].update(worker={'volumes': [c['services']['runtime']['volumes'][2]]}),
         ):
             config = json.loads(json.dumps(valid))
             mutate(config)

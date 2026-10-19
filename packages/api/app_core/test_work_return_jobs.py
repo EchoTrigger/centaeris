@@ -10,7 +10,7 @@ from . import test_agent_work_returns as return_fixture
 from . import test_native_consumption_production as runtime_fixture
 from .agent_work_return_jobs import schedule_work_return_job
 from .models import AgentWorkReturn
-from .test_native_consumption_runtime import isolate_runtime_schema
+from .runtime_schema_test_helpers import isolate_runtime_schema
 
 
 class WorkReturnJobRecoveryTests(LiveServerTestCase):

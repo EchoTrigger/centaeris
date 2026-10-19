@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+from config_fixtures import configure_execution_host
 
 
 SOURCE = Path(__file__).resolve().parents[1] / "harness" / "restart_matrix.py"
@@ -43,6 +44,7 @@ class RestartMatrixTests(unittest.TestCase):
                 "mock-model": {"image": restart_matrix.candidate_image("mock-model", "candidate-1")},
             },
         }
+        configure_execution_host(valid['services']['runtime'])
         stack = unittest.mock.Mock(env_file=Path("C:/perf/test.env"))
         with tempfile.TemporaryDirectory() as tmp, patch.object(
                 restart_matrix.control, "run", return_value=json.dumps(valid)) as invoke:
@@ -121,6 +123,7 @@ class RestartMatrixTests(unittest.TestCase):
                            "memswap_limit": 2_147_483_648, "pids_limit": 64},
                 "mock-model": {"image": restart_matrix.candidate_image("mock-model", "deploy-1")},
             }}
+        configure_execution_host(rendered['services']['runtime'])
         with tempfile.TemporaryDirectory() as tmp, patch.object(
                 restart_matrix.control, "run", return_value=json.dumps(rendered)) as invoke:
             restart_matrix.deploy_candidates(stack, Path(tmp), "deploy-1", ("api", "worker"))

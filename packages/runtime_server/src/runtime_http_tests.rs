@@ -13,7 +13,6 @@ fn http_state(runtime: Arc<tokio::runtime::Runtime>) -> HttpServerState {
         tool_layers: Default::default(),
         execution_profile: Arc::new(RuntimeExecutionProfile {
             schema: RUNTIME_EXECUTION_PROFILE_SCHEMA,
-            image_capability: "workspace-general",
             image_digest: "sha256:synthetic-http-fixture".into(),
         }),
         request_capacity: request_capacity::RequestCapacity::for_http_tests(Duration::from_secs(2)),

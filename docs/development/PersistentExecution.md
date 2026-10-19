@@ -104,18 +104,17 @@ is included. File restoration does not promise process-memory restoration.
 - Core remains authoritative for Run, execution and tool-result semantics.
 - The API owns Session environment identity, membership and business authorization.
 - Runtime owns physical allocation, controller fencing and resource reconciliation.
-- A task service in the instance owns registered processes and output independently
+- A native host supervisor owns registered processes and output independently
   of a controller connection. Transport reconnection must not restart a command.
 - A working volume has a stable identity and a single permitted physical writer.
   Replacing an instance does not silently reuse an old instance identity.
 - The existing resident resource ledger remains authoritative for resource usage;
   allocation history is not a second heartbeat, lease or liveness ledger.
 
-The original signed v1 Run authorization stays unchanged. Persistent execution
-requires an explicitly versioned environment binding and strict validation; it
-must not reinterpret the existing perRun authorization as permission to reuse.
-Protocol types, ownership of migrations and production call sites are reviewed
-together before parallel implementation changes shared interfaces.
+The current v1 Run authorization signs the complete environment profile.
+Physical reuse additionally requires the environment controller and exact
+allocation checks described in [Session environments](SessionEnvironments.md).
+Historical persistent facts are handled by explicit forward migrations.
 
 ## Execution and control
 

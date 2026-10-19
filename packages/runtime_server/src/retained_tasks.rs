@@ -4,8 +4,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use centaeris_core::execution::{
-    EnvironmentTaskControllerPurpose, EnvironmentTaskFence, EnvironmentTaskRequest,
-    EnvironmentTaskResult, EnvironmentTaskScope, EnvironmentTaskSnapshot,
+    EnvironmentTaskControllerPurpose, EnvironmentTaskFence, EnvironmentTaskOwner,
+    EnvironmentTaskRequest, EnvironmentTaskResult, EnvironmentTaskScope, EnvironmentTaskSnapshot,
     ENVIRONMENT_TASK_READ_BYTES,
 };
 use centaeris_core::tool::layer::{
@@ -209,7 +209,7 @@ fn operation_id(request: &DynamicToolProviderRequest, fence: &EnvironmentTaskFen
     hash.update(b"centaeris:background-task-operation:v1\0");
     hash.update(
         serde_json::to_vec(&(
-            &fence.controller_id,
+            &fence.controller_owner,
             &request.tool_call_id,
             &request.tool_name,
         ))
@@ -229,7 +229,13 @@ fn execute_task(
         Ok(f) => f,
         Err(error) => return host_failure(&error, false),
     };
-    if fence.controller_purpose != EnvironmentTaskControllerPurpose::Execute {
+    if fence.validate().is_err()
+        || fence.controller_purpose != EnvironmentTaskControllerPurpose::Execute
+        || !matches!(
+            fence.controller_owner,
+            EnvironmentTaskOwner::AgentRun { .. }
+        )
+    {
         return failure("background_task_forbidden");
     }
     let mutation = matches!(args, Args::Start(_) | Args::Stop(_));
@@ -244,6 +250,7 @@ fn execute_task(
             fence,
             scope: EnvironmentTaskScope::Environment,
             program: a.program,
+            env: Default::default(),
             args: a.args,
             cwd: a.cwd,
             timeout_ms: a.timeout_ms,

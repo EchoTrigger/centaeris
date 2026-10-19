@@ -9,8 +9,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(test)]
 mod instance;
+#[cfg(any(target_os = "linux", test))]
+mod migration;
 #[cfg(any(target_os = "linux", test))]
 mod store;
 
@@ -119,30 +121,9 @@ impl TaskStorage {
 }
 
 #[cfg(target_os = "linux")]
-mod linux;
+pub(crate) mod linux;
 #[cfg(target_os = "linux")]
-pub use linux::{relay_once, serve, serve_instance};
-
-#[cfg(target_os = "linux")]
-pub fn inspect_history() -> Result<(), String> {
-    // The private index is unavailable to the ordinary agent UID.
-    // SAFETY: geteuid has no arguments or side effects.
-    if unsafe { libc::geteuid() } != 0 {
-        return Err("task_inspection_denied".into());
-    }
-    if std::env::args().len() != 2 {
-        return Err("task_inspection_arguments_invalid".into());
-    }
-    let inspection = store::inspection(
-        Path::new("/run/centaeris/task-control"),
-        Path::new("/run/centaeris/task-output"),
-    )?;
-    println!(
-        "{}",
-        serde_json::to_string(&inspection).map_err(|_| "task_encoding_failed")?
-    );
-    Ok(())
-}
+pub use linux::workload_keeper;
 
 #[cfg(any(target_os = "linux", test))]
 fn digest(value: &impl Serialize) -> Result<String, String> {
@@ -167,43 +148,72 @@ fn input_identity(
         .ok_or("task_invalid_operation_id")?;
     Ok(format!(
         "input:{task_id}:{}",
-        digest(&(&fence.environment_instance_id, &fence.controller_id, opaque))?
+        digest(&(
+            "environment.task.input.v3",
+            &fence.environment_instance_id,
+            &fence.controller_owner,
+            opaque
+        ))?
     ))
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Record {
     digest: String,
-    creator_controller_id: String,
+    creator_owner: EnvironmentTaskOwner,
+    identity_version: TaskIdentityVersion,
     creator_epoch: u64,
     snapshot: EnvironmentTaskSnapshot,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum TaskIdentityVersion {
+    LegacyV2,
+    OwnerV3,
+}
+
+fn owner_scope(owner: &EnvironmentTaskOwner) -> EnvironmentTaskScope {
+    match owner {
+        EnvironmentTaskOwner::AgentRun { run_id } => EnvironmentTaskScope::Run {
+            run_id: run_id.clone(),
+        },
+        EnvironmentTaskOwner::MaintenanceOperation { operation_id } => {
+            EnvironmentTaskScope::Operation {
+                operation_id: operation_id.clone(),
+            }
+        }
+    }
 }
 #[cfg(any(target_os = "linux", test))]
 impl Record {
     fn validate(&self, instance: &str, id: &str) -> Result<(), String> {
         let fence = EnvironmentTaskFence {
             environment_instance_id: instance.to_owned(),
-            controller_id: self.creator_controller_id.clone(),
+            controller_owner: self.creator_owner.clone(),
             controller_epoch: self.creator_epoch,
             controller_purpose: EnvironmentTaskControllerPurpose::Execute,
         };
-        if self.creator_controller_id.is_empty()
-            || self.creator_controller_id.len() > 128
-            || self.creator_epoch == 0
+        let expected = match self.identity_version {
+            TaskIdentityVersion::OwnerV3 => task_identity(&fence, &self.snapshot.operation_id),
+            TaskIdentityVersion::LegacyV2 => {
+                migration::task_identity_v2(&fence, &self.snapshot.operation_id)
+            }
+        };
+        if fence.validate().is_err()
             || self.digest.len() != 64
             || !self
                 .digest
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             || self.snapshot.task_id != id
-            || task_identity(&fence, &self.snapshot.operation_id).as_deref() != Ok(id)
-            || matches!(&self.snapshot.scope,EnvironmentTaskScope::Run{run_id} if run_id!=&self.creator_controller_id)
+            || expected.as_deref() != Ok(id)
+            || fence.authorize_start(&self.snapshot.scope).is_err()
         {
             return Err("task_index_invalid".into());
         }
         Ok(())
     }
-    fn can_retire(&self, epoch: u64, controller_id: &str, owned_live: bool) -> bool {
+    fn can_retire(&self, epoch: u64, owner: &EnvironmentTaskOwner, owned_live: bool) -> bool {
         !owned_live
             && self.snapshot.cleanup_complete
             && matches!(
@@ -211,7 +221,7 @@ impl Record {
                 EnvironmentTaskState::Exited | EnvironmentTaskState::Unknown
             )
             && self.creator_epoch <= epoch
-            && (self.creator_controller_id == controller_id || self.creator_epoch < epoch)
+            && (&self.creator_owner == owner || self.creator_epoch < epoch)
     }
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -227,15 +237,18 @@ struct Journal {
     poisoned: bool,
     #[serde(skip)]
     index_root: Option<PathBuf>,
+    #[serde(skip)]
+    import_upgrade_owners: Vec<EnvironmentTaskOwner>,
     schema: String,
     instance: String,
     fence: Option<EnvironmentTaskFence>,
     takeover_pending: bool,
-    closed_run: Option<String>,
+    closed_owner: Option<EnvironmentTaskOwner>,
     tasks: BTreeMap<String, Record>,
     receipts: BTreeMap<String, Receipt>,
 }
-const INDEX_MARKER: &[u8] = br#"{"schema":"environment.task.index.v1"}"#;
+const INDEX_MARKER: &[u8] = br#"{"schema":"environment.task.index.v2"}"#;
+const LEGACY_INDEX_MARKER: &[u8] = br#"{"schema":"environment.task.index.v1"}"#;
 fn index_marker(root: &Path, instance: &str) -> Result<(), String> {
     let file = root.join("journal.json");
     if file.exists() {
@@ -243,26 +256,32 @@ fn index_marker(root: &Path, instance: &str) -> Result<(), String> {
         if bytes == INDEX_MARKER {
             return Ok(());
         }
-        let legacy: Journal = serde_json::from_slice(&bytes).map_err(|_| "task_journal_invalid")?;
-        legacy.validate_import()?;
-        if legacy.instance != instance {
-            return Err("task_instance_changed".into());
-        }
-        let backup = root.join("journal.legacy.json");
-        if backup.exists() {
-            if fs::read(&backup).map_err(|_| "task_journal_read_failed")? != bytes {
-                return Err("task_journal_history_conflict".into());
-            }
+        let legacy = if bytes == LEGACY_INDEX_MARKER {
+            None
         } else {
-            let mut target = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&backup)
-                .map_err(|_| "task_journal_write_failed")?;
-            target
-                .write_all(&bytes)
-                .and_then(|_| target.sync_all())
-                .map_err(|_| "task_journal_sync_failed")?;
+            Some(migration::read_journal(&bytes)?)
+        };
+        if let Some(legacy) = legacy {
+            legacy.validate_import()?;
+            if legacy.instance != instance {
+                return Err("task_instance_changed".into());
+            }
+            let backup = root.join("journal.legacy.json");
+            if backup.exists() {
+                if fs::read(&backup).map_err(|_| "task_journal_read_failed")? != bytes {
+                    return Err("task_journal_history_conflict".into());
+                }
+            } else {
+                let mut target = OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&backup)
+                    .map_err(|_| "task_journal_write_failed")?;
+                target
+                    .write_all(&bytes)
+                    .and_then(|_| target.sync_all())
+                    .map_err(|_| "task_journal_sync_failed")?;
+            }
         }
     }
     let pending = root.join("journal.index.pending");
@@ -300,13 +319,19 @@ impl Journal {
             return Err("task_journal_too_large".into());
         }
         let marker = file.exists()
-            && fs::read(&file).map_err(|_| "task_journal_read_failed")? == INDEX_MARKER;
+            && matches!(
+                fs::read(&file)
+                    .map_err(|_| "task_journal_read_failed")?
+                    .as_slice(),
+                INDEX_MARKER | LEGACY_INDEX_MARKER
+            );
         if marker && !root.join("history.sqlite").exists() {
             return Err("task_index_missing".into());
         }
         if marker {
             file = root.join("journal.legacy.json");
         }
+        migration::migrate_index(root, instance)?;
         let mut j = if let Some(indexed) = store::load(root)? {
             indexed
         } else if file.exists() {
@@ -318,7 +343,7 @@ impl Journal {
                 return Err("task_journal_too_large".into());
             }
             let bytes = fs::read(file).map_err(|_| "task_journal_read_failed")?;
-            let j: Self = serde_json::from_slice(&bytes).map_err(|_| "task_journal_invalid")?;
+            let j = migration::read_journal(&bytes)?;
             j.validate_import()?;
             if j.schema != ENVIRONMENT_TASK_SCHEMA || j.instance != instance {
                 return Err("task_instance_changed".into());
@@ -328,11 +353,12 @@ impl Journal {
             Self {
                 poisoned: false,
                 index_root: Some(root.to_owned()),
+                import_upgrade_owners: Vec::new(),
                 schema: ENVIRONMENT_TASK_SCHEMA.into(),
                 instance: instance.into(),
                 fence: None,
                 takeover_pending: false,
-                closed_run: None,
+                closed_owner: None,
                 tasks: BTreeMap::new(),
                 receipts: BTreeMap::new(),
             }
@@ -362,17 +388,13 @@ impl Journal {
             return Err("task_journal_invalid".into());
         }
         if let Some(fence) = &self.fence {
-            if fence.environment_instance_id != self.instance
-                || fence.controller_id.is_empty()
-                || fence.controller_id.len() > 128
-                || fence.controller_epoch == 0
-            {
+            if fence.environment_instance_id != self.instance || fence.validate().is_err() {
                 return Err("task_journal_invalid".into());
             }
         } else if !self.tasks.is_empty()
             || !self.receipts.is_empty()
             || self.takeover_pending
-            || self.closed_run.is_some()
+            || self.closed_owner.is_some()
         {
             return Err("task_journal_invalid".into());
         }
@@ -385,7 +407,8 @@ impl Journal {
             if key.len() > 512
                 || !(key.starts_with("input:")
                     || key.starts_with("terminate:")
-                    || key.starts_with("endRun:"))
+                    || key.starts_with("endRun:")
+                    || key.starts_with("endOperation:"))
                 || receipt.digest.len() != 64
                 || !receipt.digest.bytes().all(|b| b.is_ascii_hexdigit())
             {
@@ -414,11 +437,7 @@ impl Journal {
         if self.poisoned {
             return Err("task_journal_unavailable".into());
         }
-        if f.environment_instance_id != self.instance
-            || f.controller_id.is_empty()
-            || f.controller_id.len() > 128
-            || f.controller_epoch == 0
-        {
+        if f.environment_instance_id != self.instance || f.validate().is_err() {
             return Err("task_invalid_fence".into());
         }
         if let Some(old) = &self.fence {
@@ -432,11 +451,11 @@ impl Journal {
         if self
             .fence
             .as_ref()
-            .is_none_or(|old| old.controller_id != f.controller_id)
+            .is_none_or(|old| old.controller_owner != f.controller_owner)
         {
             self.receipts.clear();
-            if self.closed_run.as_ref() != Some(&f.controller_id) {
-                self.closed_run = None;
+            if self.closed_owner.as_ref() != Some(&f.controller_owner) {
+                self.closed_owner = None;
             }
         }
         self.fence = Some(f);
@@ -479,17 +498,8 @@ impl Journal {
     }
     #[cfg(any(target_os = "linux", test))]
     fn check_admission(&self) -> Result<(), String> {
-        let closed = match (&self.index_root, &self.fence) {
-            (Some(root), Some(fence)) => store::closed(root, &fence.controller_id)?,
-            _ => false,
-        };
-        if closed
-            || self
-                .fence
-                .as_ref()
-                .is_some_and(|f| self.closed_run.as_ref() == Some(&f.controller_id))
-        {
-            return Err("task_run_closed".into());
+        if let Some(fence) = &self.fence {
+            self.check_execution(fence)?;
         }
         if self
             .tasks
@@ -526,7 +536,10 @@ impl Journal {
             }
             // Only exact-tree stop/Run closure may retry an indeterminate action: both
             // are idempotent and never spawn or deliver input.
-            if key.starts_with("terminate:") || key.starts_with("endRun:") {
+            if key.starts_with("terminate:")
+                || key.starts_with("endRun:")
+                || key.starts_with("endOperation:")
+            {
                 return Ok(None);
             }
             return Err("task_operation_unknown".into());
@@ -544,11 +557,13 @@ impl Journal {
         } else if serde_json::to_vec(&candidate)
             .map_err(|_| "task_encoding_failed")?
             .len()
-            .saturating_add(if key.starts_with("endRun:") {
-                ENVIRONMENT_TASK_MAX_RECORDS * 132 + 1024
-            } else {
-                4096
-            })
+            .saturating_add(
+                if key.starts_with("endRun:") || key.starts_with("endOperation:") {
+                    ENVIRONMENT_TASK_MAX_RECORDS * 132 + 1024
+                } else {
+                    4096
+                },
+            )
             > CONTROL_JOURNAL_BYTES
         {
             return Err("task_journal_capacity".into());
@@ -578,7 +593,7 @@ impl Journal {
         let eligible = self.fence.as_ref().is_some_and(|f| {
             self.tasks
                 .get(id)
-                .is_some_and(|r| r.can_retire(epoch, &f.controller_id, owned_live))
+                .is_some_and(|r| r.can_retire(epoch, &f.controller_owner, owned_live))
         });
         if eligible {
             if let Some(root) = &self.index_root {
@@ -602,6 +617,39 @@ impl Journal {
         } else {
             Err("task_controller_fenced".into())
         }
+    }
+    fn check_execution(&self, fence: &EnvironmentTaskFence) -> Result<(), String> {
+        if let Some(root) = &self.index_root {
+            store::check_execution(root, &fence.controller_owner)?;
+        }
+        if self.closed_owner.as_ref() == Some(&fence.controller_owner) {
+            return Err(match fence.controller_owner {
+                EnvironmentTaskOwner::AgentRun { .. } => "task_run_closed",
+                EnvironmentTaskOwner::MaintenanceOperation { .. } => "task_operation_closed",
+            }
+            .into());
+        }
+        Ok(())
+    }
+    fn authorize_task_input(
+        &self,
+        fence: &EnvironmentTaskFence,
+        task_id: &str,
+    ) -> Result<(), String> {
+        self.check(fence)?;
+        self.check_execution(fence)?;
+        let indexed = self
+            .index_root
+            .as_ref()
+            .map(|root| store::task(root, task_id))
+            .transpose()?
+            .flatten();
+        let task = self
+            .tasks
+            .get(task_id)
+            .or(indexed.as_ref())
+            .ok_or("task_not_found")?;
+        fence.authorize_input(&task.snapshot.scope)
     }
     fn existing(&self, id: &str, d: &str) -> Result<Option<EnvironmentTaskSnapshot>, String> {
         let indexed = self
@@ -827,5 +875,7 @@ fn task_query_result(
         has_more,
     })
 }
+#[cfg(test)]
+mod owner_tests;
 #[cfg(test)]
 mod tests;

@@ -6,8 +6,9 @@ use axum::routing::{any, MethodFilter, MethodRouter};
 use axum::Router;
 
 pub(crate) mod agent_runs;
-pub(crate) mod benchmark;
 mod catalogs;
+pub(crate) mod environment_maintenance;
+mod environment_provision;
 mod environment_retirement;
 
 type Operation = fn(HttpServerState, Request<Bytes>) -> Result<Response<Body>, String>;
@@ -15,20 +16,20 @@ type Operation = fn(HttpServerState, Request<Bytes>) -> Result<Response<Body>, S
 pub(super) fn router(state: HttpServerState) -> Router {
     Router::new()
         .route(
-            "/internal/benchmark/observe",
-            on_blocking(MethodFilter::POST, benchmark::observe),
+            "/internal/environments/observe",
+            on_blocking(MethodFilter::POST, environment_provision::observe),
         )
         .route(
-            "/internal/benchmark/exec",
-            on_blocking(MethodFilter::POST, benchmark::exec),
+            "/internal/environments/provision",
+            on_blocking(MethodFilter::POST, environment_provision::provision),
         )
         .route(
-            "/internal/benchmark/upload",
-            on_blocking(MethodFilter::POST, benchmark::upload),
+            "/internal/environments/maintenance/filesystem",
+            on_blocking(MethodFilter::POST, environment_maintenance::filesystem),
         )
         .route(
-            "/internal/benchmark/download",
-            on_blocking(MethodFilter::POST, benchmark::download),
+            "/internal/environments/maintenance/task",
+            on_blocking(MethodFilter::POST, environment_maintenance::task),
         )
         .route(
             "/internal/environments/retire",
@@ -307,18 +308,6 @@ where
     let request = match read_result {
         Ok(request) => request,
         Err(response) => return response,
-    };
-    let deadline = if request.method() == hyper::Method::POST
-        && request.uri().path() == "/internal/benchmark/exec"
-    {
-        // The handler still authenticates and validates the complete request.
-        // Parsing this bounded duration only supplies an outer transport ceiling.
-        Some(
-            Instant::now()
-                + benchmark::exec_timeout(request.body()).unwrap_or(Duration::from_secs(5)),
-        )
-    } else {
-        deadline
     };
     let task = tokio::task::spawn_blocking(move || {
         let _context = observations::Context::enter(request.body());

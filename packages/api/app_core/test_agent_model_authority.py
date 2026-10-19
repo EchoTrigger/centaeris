@@ -7,7 +7,7 @@ from django.test import TestCase, TransactionTestCase
 
 from . import test_agent_messages, test_agent_work_consumption
 from .models import Agent, AgentCoordinationSession, AgentRun, AgentRunAuthorization, HostedOperationReceipt, ModelConfig, Session, WorkspaceMembership
-from .runtime_client import build_agent_run_start
+from .testing import fenced_start_fixture
 from .test_agent_work import PROFILE
 
 
@@ -55,7 +55,7 @@ class AgentCoordinatorModelAuthorityTests(TransactionTestCase):
         self.run.authorization.refresh_from_db()
         self.assertEqual(self.run.modelConfig_id, self.model_config.pk)
         self.assertEqual((self.run.authorization.payload, self.run.authorization.digest, self.run.authorization.signature), source_proof)
-        self.assertEqual(build_agent_run_start(run)["initialInput"], self.attempts().get().input_binding["initialInput"])
+        self.assertEqual(fenced_start_fixture(run)["initialInput"], self.attempts().get().input_binding["initialInput"])
 
     def test_active_run_keeps_snapshot_when_agent_policy_changes_or_is_cleared(self):
         notice = self.notice(idle=False)
@@ -153,7 +153,7 @@ class AgentCoordinatorModelAuthorityTests(TransactionTestCase):
                 replay = self.consume(notice)
                 self.assertEqual(replay.status_code, 200, replay.content)
                 self.assertEqual(replay.json(), accepted.json())
-                self.assertEqual(build_agent_run_start(run)["initialInput"], initial)
+                self.assertEqual(fenced_start_fixture(run)["initialInput"], initial)
         run.refresh_from_db()
         run.authorization.refresh_from_db()
         self.assertEqual((run.modelConfig_id, run.thinkingMode), (selected.pk, "low"))

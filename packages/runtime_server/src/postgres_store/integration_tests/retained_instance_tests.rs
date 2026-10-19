@@ -14,7 +14,7 @@ use postgres::{Client, NoTls};
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
-const KEY: &[u8] = b"retained-test-key";
+pub(super) const KEY: &[u8] = b"retained-test-key";
 mod allocation_mode_tests;
 mod cleanup_authority_tests;
 mod cleanup_receipt_tests;
@@ -27,20 +27,20 @@ fn controller_lease_digest(owner: &str) -> String {
     hash.update(owner.as_bytes());
     format!("sha256:{:x}", hash.finalize())
 }
-fn sign(payload: EnvironmentBinding) -> EnvironmentAuthorization {
+pub(super) fn sign(payload: EnvironmentBinding) -> EnvironmentAuthorization {
     let mut mac = Hmac::<Sha256>::new_from_slice(KEY).unwrap();
-    mac.update(b"workspace:environment-authorization:v2\0");
+    mac.update(b"workspace:environment-authorization:v1\0");
     mac.update(payload.digest().unwrap().as_bytes());
     let signature = format!("hmac-sha256:{:x}", mac.finalize().into_bytes());
     EnvironmentAuthorization { payload, signature }
 }
-struct Run {
-    original: WorkspaceAgentRunAuthorization,
-    grant: EnvironmentAuthorization,
-    fence: RuntimeJobLeaseFence,
+pub(super) struct Run {
+    pub(super) original: WorkspaceAgentRunAuthorization,
+    pub(super) grant: EnvironmentAuthorization,
+    pub(super) fence: RuntimeJobLeaseFence,
 }
 impl Run {
-    fn request<'a>(
+    pub(super) fn request<'a>(
         &'a self,
         execution_id: &'a str,
         profile_digest: &'a str,
@@ -51,9 +51,14 @@ impl Run {
             execution_id,
             workspace_id: &self.original.workspace_id,
             host_id: "host",
-            image_digest: &self.original.image_digest,
+            image_digest: &self.original.environment_profile.image_digest,
             profile_digest,
-            resources: declared_usage(self.original.resources),
+            resources: declared_usage(
+                self.original
+                    .environment_profile
+                    .resources
+                    .sandbox_resources(),
+            ),
             lease: &self.fence,
         }
     }
@@ -71,13 +76,13 @@ pub(in crate::postgres_store) fn setup() -> (String, PostgresRuntimeStore, Clien
         CREATE TABLE public.app_core_workspace(id text PRIMARY KEY,status text); INSERT INTO public.app_core_workspace VALUES('ws_1','active');
         CREATE TABLE public.app_core_workspacemembership(id text PRIMARY KEY,workspace_id text,user_id text,role text); INSERT INTO public.app_core_workspacemembership VALUES('member','ws_1','user_1','member');
         CREATE TABLE public.app_core_session(id text PRIMARY KEY,workspace_id text,owner_id text,agent_id text,current_environment_id text,\"deletedAt\" timestamptz); INSERT INTO public.app_core_session VALUES('sess_1','ws_1','user_1','centaeris','environment',NULL);
-        CREATE TABLE public.app_core_sessionenvironment(id text PRIMARY KEY,session_id text,controller_run_id text,controller_epoch bigint,controller_lease_owner text,controller_purpose text,controller_released boolean); INSERT INTO public.app_core_sessionenvironment VALUES('environment','sess_1',NULL,0,'','',true);
+        CREATE TABLE public.app_core_sessionenvironment(id text PRIMARY KEY,session_id text,controller_run_id text,controller_epoch bigint,controller_lease_owner text,controller_purpose text,controller_released boolean,environment_profile jsonb,environment_profile_digest text); INSERT INTO public.app_core_sessionenvironment VALUES('environment','sess_1',NULL,0,'','',true,NULL,NULL);
         CREATE TABLE public.app_core_agentrunauthorization(agent_run_id text PRIMARY KEY,digest text,payload jsonb,signature text);
         CREATE TABLE public.app_core_sessionevent(workspace_id text,session_id text,agent_run_id text,session_level boolean,payload jsonb);").unwrap();
     let store = PostgresRuntimeStore::new(&url).unwrap();
     (url, store, db)
 }
-fn run(store: &PostgresRuntimeStore, db: &mut Client, id: &str, epoch: i64) -> Run {
+pub(super) fn run(store: &PostgresRuntimeStore, db: &mut Client, id: &str, epoch: i64) -> Run {
     let mut original: WorkspaceAgentRunAuthorization = serde_json::from_str(include_str!(
         "../../../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
     ))
@@ -85,6 +90,9 @@ fn run(store: &PostgresRuntimeStore, db: &mut Client, id: &str, epoch: i64) -> R
     original.agent_run_id = id.into();
     original.id = format!("authorization-{id}");
     let digest = original.digest().unwrap();
+    let profile = serde_json::to_string(&original.environment_profile).unwrap();
+    let profile_digest = original.environment_profile.digest().unwrap();
+    db.execute("UPDATE public.app_core_sessionenvironment SET environment_profile=COALESCE(environment_profile,$1::text::jsonb),environment_profile_digest=COALESCE(environment_profile_digest,$2) WHERE id='environment'", &[&profile,&profile_digest]).unwrap();
     let owner = format!("owner-{id}");
     db.execute("INSERT INTO public.app_core_agentrun(id,session_id,environment_id,workspace_id,user_id,membership_ref,status,\"modelConfig_id\",\"thinkingMode\") VALUES($1,'sess_1','environment','ws_1','user_1','member','running','model_1','high')", &[&id]).unwrap();
     db.execute(
@@ -115,7 +123,7 @@ fn run(store: &PostgresRuntimeStore, db: &mut Client, id: &str, epoch: i64) -> R
         lease_owner: owner.clone(),
     };
     let grant = sign(EnvironmentBinding {
-        schema: "workspace.environment_authorization.v2".into(),
+        schema: "workspace.environment_authorization.v1".into(),
         environment_id: "environment".into(),
         session_id: "sess_1".into(),
         agent_run_id: id.into(),
@@ -134,21 +142,26 @@ fn run(store: &PostgresRuntimeStore, db: &mut Client, id: &str, epoch: i64) -> R
         fence,
     }
 }
-fn limits(run: &Run) -> ResidentCapacity {
-    let one = declared_usage(run.original.resources);
+pub(super) fn limits(run: &Run) -> ResidentCapacity {
+    let one = declared_usage(
+        run.original
+            .environment_profile
+            .resources
+            .sandbox_resources(),
+    );
     ResidentCapacity {
         global: one,
         tenant: one,
         host: one,
     }
 }
-fn prepare(
+pub(super) fn prepare(
     store: &PostgresRuntimeStore,
     run: &Run,
     execution: &str,
     inventory: &Arc<Mutex<Vec<ObservedResidentSandbox>>>,
 ) -> Result<RetainedInstanceAllocation, String> {
-    let profile = format!("sha256:{}", "b".repeat(64));
+    let profile = run.original.environment_profile.digest().unwrap();
     store.prepare_retained_instance(
         &run.request(execution, &profile),
         limits(run),
@@ -163,9 +176,14 @@ fn prepare(
             let container = format!("container-{}", allocation.instance_id);
             physical.push(ObservedResidentSandbox {
                 execution_id: allocation.allocation_execution_id.clone(),
-                agent_run_id: allocation.allocation_agent_run_id.clone(),
+                allocation_owner: allocation.allocation_owner.clone(),
                 container_id: container.clone(),
-                resources: declared_usage(run.original.resources),
+                resources: declared_usage(
+                    run.original
+                        .environment_profile
+                        .resources
+                        .sandbox_resources(),
+                ),
             });
             Ok(container)
         },
@@ -193,7 +211,7 @@ fn postgres_retained_new_run_reuses_origin_and_single_resource_holding() {
     assert!(second.reused);
     assert_eq!(second.instance_id, first.instance_id);
     assert_eq!(second.allocation_execution_id, "execution-a");
-    assert_eq!(second.allocation_agent_run_id, "run-a");
+    assert_eq!(second.allocation_agent_run_id.as_deref(), Some("run-a"));
     assert_eq!(second.authorization_digest, first.authorization_digest);
     assert_eq!(second.binding_digest, first.binding_digest);
     let mut observer = Client::connect(&url, NoTls).unwrap();
@@ -227,11 +245,6 @@ fn postgres_retained_new_run_reuses_origin_and_single_resource_holding() {
             || Ok(physical.lock().unwrap().clone())
         )
         .is_err());
-    assert!(store
-        .with_resident_execution_restore("host", "run-b", "execution-b", &b.fence, || panic!(
-            "legacy restore cannot touch retained"
-        ))
-        .is_err());
     assert_eq!(physical.lock().unwrap().len(), 1);
 }
 
@@ -241,7 +254,7 @@ fn postgres_retained_core_terminal_rejects_execution_before_status_projection() 
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (_url, store, mut db) = setup();
     let a = run(&store, &mut db, "run-a", 1);
-    let profile = format!("sha256:{}", "b".repeat(64));
+    let profile = a.original.environment_profile.digest().unwrap();
     for terminal in [
         "agent_run_completed",
         "agent_run_failed",
@@ -302,7 +315,7 @@ fn postgres_retained_unknown_and_legacy_per_run_holding_block_creation() {
             db.batch_execute("INSERT INTO runtime.execution_instances(execution_id,instance_id,environment_id,session_id,agent_run_id,host_id,authorization_digest,binding_digest,image_digest,allocation_execution_id) VALUES('legacy','legacy-instance','environment','sess_1','run-a','host','grant','binding','image','legacy')").unwrap();
         }
         db.batch_execute("INSERT INTO runtime.resident_sandboxes(host_id,execution_id,agent_run_id,workspace_id,state,memory_bytes,cpu_milli,pids,workspace_bytes,created_at_ms,updated_at_ms) VALUES('host','legacy','run-a','ws_1','reserved',1,1,1,1,1,1)").unwrap();
-        let profile = format!("sha256:{}", "b".repeat(64));
+        let profile = a.original.environment_profile.digest().unwrap();
         let error = store
             .prepare_retained_instance(
                 &a.request("new-execution", &profile),
@@ -333,7 +346,7 @@ fn postgres_retained_confirmed_lost_environment_never_cold_creates_for_new_run()
     db.batch_execute("UPDATE public.app_core_agentrun SET status='completed' WHERE id='run-a'; UPDATE public.app_core_sessionenvironment SET controller_released=true").unwrap();
     let b = run(&store, &mut db, "run-b", 2);
     physical.lock().unwrap().clear();
-    let profile = format!("sha256:{}", "b".repeat(64));
+    let profile = b.original.environment_profile.digest().unwrap();
     let calls = std::sync::atomic::AtomicUsize::new(0);
     let result = store.prepare_retained_instance(
         &b.request("execution-b", &profile),
@@ -368,7 +381,7 @@ fn postgres_retained_unknown_create_survives_restart_without_second_writer() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (url, store, mut db) = setup();
     let a = run(&store, &mut db, "run-a", 1);
-    let profile = format!("sha256:{}", "b".repeat(64));
+    let profile = a.original.environment_profile.digest().unwrap();
     let r = a.request("execution-a", &profile);
     let error = store
         .prepare_retained_instance(
@@ -423,7 +436,9 @@ fn postgres_retained_unknown_create_survives_restart_without_second_writer() {
     // A later complete inventory positively identifies the first creation.
     let physical = Arc::new(Mutex::new(vec![ObservedResidentSandbox {
         execution_id: "execution-a".into(),
-        agent_run_id: "run-a".into(),
+        allocation_owner: centaeris_core::execution::EnvironmentTaskOwner::AgentRun {
+            run_id: "run-a".into(),
+        },
         container_id: "late-ack-container".into(),
         resources: r.resources,
     }]));
@@ -449,7 +464,7 @@ fn postgres_retained_fact_window_rechecks_epoch_and_job_before_physical_work() {
     ] {
         let (_url, store, mut db) = setup();
         let a = run(&store, &mut db, "run-a", 1);
-        let profile = format!("sha256:{}", "b".repeat(64));
+        let profile = a.original.environment_profile.digest().unwrap();
         let error = store
             .prepare_retained_instance(
                 &a.request("execution-a", &profile),
@@ -517,7 +532,7 @@ fn postgres_retained_physical_guard_pins_authority_and_global_host_admission() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (url, store, mut db) = setup();
     let a = run(&store, &mut db, "run-a", 1);
-    let profile = format!("sha256:{}", "b".repeat(64));
+    let profile = a.original.environment_profile.digest().unwrap();
     let r = a.request("execution-a", &profile);
     store
         .prepare_retained_instance(
@@ -577,7 +592,7 @@ fn postgres_retained_operation_requires_current_association_controller_and_job()
     let a = run(&store, &mut db, "run-a", 1);
     let physical = Arc::new(Mutex::new(Vec::new()));
     let allocated = prepare(&store, &a, "execution-a", &physical).unwrap();
-    let profile = format!("sha256:{}", "b".repeat(64));
+    let profile = a.original.environment_profile.digest().unwrap();
     let completed = store
         .with_retained_instance_operation(
             &a.request("execution-a", &profile),
@@ -677,10 +692,14 @@ fn postgres_retained_migration_rejects_provenance_conflict_atomically() {
 }
 
 pub(super) fn downgrade_to_eight(db: &mut Client) {
+    super::super::environment_owner_schema::restore_previous_fixture(db);
     let version = db
         .query_one("SELECT max(version) FROM runtime.schema_migrations", &[])
         .unwrap()
         .get::<_, i64>(0);
+    if version >= 12 {
+        db.batch_execute("DROP TABLE runtime.environment_maintenance_completions; DROP FUNCTION runtime.protect_environment_maintenance_completion(); DELETE FROM runtime.schema_migrations WHERE version=12;").unwrap();
+    }
     if version >= 11 {
         db.batch_execute("DROP TABLE runtime.environment_retirements; DROP FUNCTION runtime.protect_environment_retirement(); DELETE FROM runtime.schema_migrations WHERE version=11;").unwrap();
     }

@@ -28,8 +28,15 @@ fn verify_controller(
             purpose: super::super::controller_authority::ControllerPurpose::Execute,
         },
     )?;
-    if verified.authorization.image_digest != r.image_digest
-        || crate::resident_capacity::declared_usage(verified.authorization.resources) != r.resources
+    if verified.authorization.environment_profile_digest != r.profile_digest
+        || verified.authorization.environment_profile.image_digest != r.image_digest
+        || crate::resident_capacity::declared_usage(
+            verified
+                .authorization
+                .environment_profile
+                .resources
+                .sandbox_resources(),
+        ) != r.resources
     {
         return Err("retained original grant binding rejected".into());
     }
@@ -39,10 +46,12 @@ fn allocation(
     tx: &mut impl GenericClient,
     execution: &str,
 ) -> Result<RetainedInstanceAllocation, String> {
-    let row=tx.query_opt("SELECT execution_id,agent_run_id,instance_id,environment_id,host_id,image_digest,authorization_digest,binding_digest,profile_digest FROM runtime.execution_instances WHERE execution_id=$1 AND allocation_execution_id=execution_id AND allocation_mode='retained'", &[&execution]).map_err(|e|e.to_string())?.ok_or("retained allocation anchor missing")?;
+    let row=tx.query_opt("SELECT execution_id,agent_run_id,instance_id,environment_id,host_id,image_digest,authorization_digest,binding_digest,profile_digest,allocation_owner_json FROM runtime.execution_instances WHERE execution_id=$1 AND allocation_execution_id=execution_id AND allocation_mode='retained'", &[&execution]).map_err(|e|e.to_string())?.ok_or("retained allocation anchor missing")?;
     Ok(RetainedInstanceAllocation {
         allocation_execution_id: row.get(0),
         allocation_agent_run_id: row.get(1),
+        allocation_owner: serde_json::from_str(&row.get::<_, String>(9))
+            .map_err(|_| "allocation_owner_invalid")?,
         instance_id: row.get(2),
         environment_id: row.get(3),
         host_id: row.get(4),
@@ -125,16 +134,16 @@ impl PostgresRuntimeStore {
                 let origin:String=row.get(0); let mut a=allocation(&mut tx,&origin)?;
                 if row.get::<_,String>(1)!=r.host_id || row.get::<_,String>(2)!=r.workspace_id || usage(&row,5)?!=r.resources || a.image_digest!=r.image_digest || a.profile_digest!=r.profile_digest { return Err("retained allocation configuration mismatch".into()); }
                 a.container_id=row.get(3); a.reused=true;
-                if row.get::<_,String>(4)!="resident" || a.container_id.is_none() || !physical.iter().any(|s|s.execution_id==origin && s.agent_run_id==a.allocation_agent_run_id && Some(&s.container_id)==a.container_id.as_ref()) { return Err("retained allocation outcome uncertain; creation blocked".into()); } a
+                if row.get::<_,String>(4)!="resident" || a.container_id.is_none() || !physical.iter().any(|s|s.execution_id==origin && s.allocation_owner==a.allocation_owner && Some(&s.container_id)==a.container_id.as_ref()) { return Err("retained allocation outcome uncertain; creation blocked".into()); } a
             } else {
                 // Losing the resident does not erase its allocation history.
                 // Cold recovery requires a separately authorized restore path;
                 // a new Run/execution cannot impersonate same-instance continuity.
-                if tx.query_opt("SELECT 1 FROM runtime.execution_instances WHERE execution_id=$1 OR (environment_id=$2 AND allocation_mode='retained')", &[&r.execution_id,&b.environment_id]).map_err(|e|e.to_string())?.is_some() { return Err("execution_environment_lost:retained_allocation_missing".into()); }
+                if tx.query_opt("SELECT 1 FROM runtime.execution_instances i WHERE execution_id=$1 OR (environment_id=$2 AND allocation_mode='retained' AND NOT($3 AND EXISTS(SELECT 1 FROM runtime.agent_run_cleanup_receipts c WHERE c.instance_id=i.instance_id AND c.environment_id=i.environment_id AND c.cleanup_complete AND c.physical_removed)))", &[&r.execution_id,&b.environment_id,&(b.execution_mode=="perRun")]).map_err(|e|e.to_string())?.is_some() { return Err("execution_environment_lost:retained_allocation_missing".into()); }
                 let (global,tenant,host)=used(&mut tx,r.host_id,r.workspace_id)?;
                 if !admit_resident_resources(global,tenant,r.resources,limits.global,limits.tenant)? || !host.checked_add(r.resources)?.fits(limits.host) { return Err(RESIDENT_CAPACITY_WAIT.into()); }
-                let a=RetainedInstanceAllocation{allocation_execution_id:r.execution_id.into(),allocation_agent_run_id:b.agent_run_id.clone(),instance_id:instance_id(r.execution_id),environment_id:b.environment_id.clone(),host_id:r.host_id.into(),image_digest:r.image_digest.into(),authorization_digest:b.agent_run_authorization_digest.clone(),binding_digest:b.digest()?,profile_digest:r.profile_digest.into(),container_id:None,reused:false};
-                associate(&mut tx,r,&a)?; insert(&mut tx,r.host_id,r.execution_id,&b.agent_run_id,r.workspace_id,None,"reserved",r.resources)?; a
+                let a=RetainedInstanceAllocation{allocation_execution_id:r.execution_id.into(),allocation_agent_run_id:Some(b.agent_run_id.clone()),allocation_owner:centaeris_core::execution::EnvironmentTaskOwner::AgentRun{run_id:b.agent_run_id.clone()},instance_id:instance_id(r.execution_id),environment_id:b.environment_id.clone(),host_id:r.host_id.into(),image_digest:r.image_digest.into(),authorization_digest:b.agent_run_authorization_digest.clone(),binding_digest:b.digest()?,profile_digest:r.profile_digest.into(),container_id:None,reused:false};
+                associate(&mut tx,r,&a)?; insert(&mut tx,r.host_id,r.execution_id,Some(&b.agent_run_id),r.workspace_id,None,"reserved",r.resources)?; a
             };
             associate(&mut tx,r,&a)?;
             // Commit allocation + reservation before Docker. Errors and lost

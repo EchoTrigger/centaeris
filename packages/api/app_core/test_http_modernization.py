@@ -62,7 +62,6 @@ class ModelCatalogRuntimeClientTests(SimpleTestCase):
         response.read.return_value = json.dumps(
             {
                 "schema": "runtime.execution_profile.v1",
-                "imageCapability": "workspace_general_v1",
                 "imageDigest": digest,
             }
         ).encode()
@@ -76,7 +75,6 @@ class ModelCatalogRuntimeClientTests(SimpleTestCase):
         response.read.return_value = json.dumps(
             {
                 "schema": "runtime.execution_profile.v1",
-                "imageCapability": "workspace_general_v1",
                 "imageDigest": f"sha256:{'A' * 64}",
             }
         ).encode()
@@ -425,7 +423,6 @@ class NinjaContractTests(TestCase):
             "revision": 1,
             "turnId": "turn_1",
             "messageId": "message:turn_1:assistant",
-            "text": "streaming",
         }
         self.assertEqual(
             agent_run_stream._decode_signal(
@@ -722,7 +719,6 @@ class AgentRunStreamContractTests(SimpleTestCase):
             "revision": 2,
             "turnId": "turn_1",
             "messageId": "message:turn_1:assistant",
-            "text": "working",
         }
 
         async def scenario():

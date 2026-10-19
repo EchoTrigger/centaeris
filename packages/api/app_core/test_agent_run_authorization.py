@@ -66,14 +66,9 @@ def payload_for(case):
 class AgentRunAuthorizationContractTests(SimpleTestCase):
     def test_stable_signed_fixture(self):
         payload = fixture()
-        self.assertEqual(
-            authorization_digest(payload),
-            "sha256:bd93e8ba466c0d9851e805dd2a8c8a5962b351065c4d982ae961ea0cdb0a6a9f",
-        )
-        self.assertEqual(
-            authorization_signature(payload, KEY),
-            "hmac-sha256:86d800a4e2517f1b169894646f9a7bb3297770235a7a3a0cbceffe1897969dd5",
-        )
+        expected = json.loads((FIXTURES / "expected.json").read_text(encoding="utf-8"))
+        self.assertEqual(authorization_digest(payload), expected["digest"])
+        self.assertEqual(authorization_signature(payload, KEY), expected["signature"])
         self.assertEqual(
             authorization_digest(dict(reversed(list(payload.items())))),
             authorization_digest(payload),
@@ -100,45 +95,18 @@ class AgentRunAuthorizationContractTests(SimpleTestCase):
         with self.assertRaisesRegex(ValueError, "signature mismatch"):
             verify_agent_run_authorization_signature(payload, KEY, signature)
 
-    def test_builder_rejects_resources_outside_rust_transport_range(self):
-        """Observe the real builder; isolate only asset/plugin I/O, not validation."""
-        payload = fixture()
-        session = SimpleNamespace(
-            agent_id="centaeris", workspaceGeneration=7,
-            workspaceSnapshotSha256=payload["sessionWorkspace"]["snapshotSha256"],
-            workspaceSnapshotSizeBytes=13, workspaceExpandedSizeBytes=7,
-            workspaceFileCount=1,
-        )
-        run = SimpleNamespace(
-            workspace_id="ws_1", user_id="user_1", session=session,
-            session_id="sess_1", id="agent_run_1", modelConfig_id="model_1",
-            thinkingMode="high", workspace=object(), definition_version_id=None,
-            environment=SimpleNamespace(benchmark_profile=None),
-        )
-        for setting, maximum in [
-            ("SANDBOX_CPU_MILLI", 2**32 - 1),
-            ("SANDBOX_PIDS_LIMIT", 2**32 - 1),
-            ("SANDBOX_MEMORY_BYTES", 2**64 - 1),
-            ("SANDBOX_DATA_TMPFS_BYTES", 2**64 - 1),
-        ]:
-            with (
-                self.subTest(setting=setting),
-                patch("app_core.assets.deferred_input_refs", return_value=payload["assetRefs"]),
-                patch(
-                    "app_core.runtime_contract.plugin_activation_for_workspace",
-                    return_value=payload["pluginActivation"],
-                ),
-            ):
-                with override_settings(**{setting: maximum}):
-                    accepted = build_agent_run_authorization_payload(
-                        run, "authorization_1", image_digest=payload["imageDigest"],
-                    )
-                    authorization_signature(accepted, KEY)
-                with override_settings(**{setting: maximum + 1}):
-                    with self.assertRaisesRegex(ValueError, "transport range"):
-                        build_agent_run_authorization_payload(
-                            run, "authorization_1", image_digest=payload["imageDigest"],
-                        )
+    def test_profile_resources_enforce_transport_ranges(self):
+        from .environment_profile import environment_profile_digest
+        for field, maximum in (("cpuMilli", 2**32 - 1), ("pidsLimit", 2**32 - 1),
+                ("memoryBytes", 2**64 - 1), ("dataTmpfsBytes", 2**64 - 1), ("storageBytes", 2**64 - 1)):
+            with self.subTest(field=field):
+                value = fixture()
+                value["environmentProfile"]["resources"][field] = maximum
+                value["environmentProfileDigest"] = environment_profile_digest(value["environmentProfile"])
+                authorization_signature(value, KEY)
+                value["environmentProfile"]["resources"][field] += 1
+                with self.assertRaisesRegex(ValueError, "transport range"):
+                    authorization_signature(value, KEY)
 
     def test_emit_python_signed_payloads_for_rust(self):
         destination = os.environ.get("AGENT_RUN_AUTHORIZATION_VECTORS")

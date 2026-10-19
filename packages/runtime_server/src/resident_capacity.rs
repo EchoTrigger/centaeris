@@ -107,18 +107,8 @@ pub(crate) fn declared_usage(resources: SandboxResources) -> ResidentResourceUsa
 #[derive(Clone, Debug)]
 pub(crate) struct ObservedResidentSandbox {
     pub execution_id: String,
-    pub agent_run_id: String,
+    pub allocation_owner: centaeris_core::execution::EnvironmentTaskOwner,
     pub container_id: String,
-    pub resources: ResidentResourceUsage,
-}
-
-pub(crate) struct ResidentSandboxRequest<'a> {
-    pub execution_id: &'a str,
-    pub agent_run_id: &'a str,
-    pub workspace_id: &'a str,
-    pub lifecycle_job_id: &'a str,
-    pub lifecycle_lease_owner: &'a str,
-    pub must_exist: bool,
     pub resources: ResidentResourceUsage,
 }
 

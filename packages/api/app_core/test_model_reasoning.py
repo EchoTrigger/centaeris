@@ -119,7 +119,7 @@ class ModelReasoningTests(SimpleTestCase):
         self.assertEqual(signatures, {"call-1": "stream-signature"})
         self.assertEqual(holder["result"]["toolCalls"], [{"id": "call-1", "name": "read", "argsJson": "{}"}])
 
-    def test_live_reasoning_snapshot_and_signal_share_exact_contract(self):
+    def test_live_reasoning_snapshot_and_wake_preserve_revision_identity(self):
         from types import SimpleNamespace
         from . import agent_run_stream
 
@@ -128,7 +128,7 @@ class ModelReasoningTests(SimpleTestCase):
         state = agent_run_stream._live_state(meta, "answer")
         self.assertEqual(state["reasoning"], reasoning)
         self.assertEqual((state["revision"], state["text"]), (2, "answer"))
-        signal = {"schema": "agent_run.transient.signal.v1", "kind": "live", "agentRunId": "run-1", **state}
+        signal = {"schema": "agent_run.transient.signal.v1", "kind": "live", "agentRunId": "run-1", **{key: value for key, value in state.items() if key not in {"text", "reasoning"}}}
         self.assertEqual(agent_run_stream._decode_signal(SimpleNamespace(id="run-1"), {"signal": json.dumps(signal)}), signal)
         for invalid in ({**reasoning, "duration": 1}, {**reasoning, "blockId": "wrong"}, {**reasoning, "text": 3}):
             with self.subTest(invalid=invalid), self.assertRaises((ValueError, RuntimeError)):

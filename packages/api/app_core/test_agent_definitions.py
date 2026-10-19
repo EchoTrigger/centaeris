@@ -1,3 +1,4 @@
+from .testing import fenced_start_fixture
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -10,7 +11,7 @@ from django.test import Client, TestCase, TransactionTestCase
 from app_core.models import Agent, AgentRun, ModelConfig, Session, Workspace, WorkspaceMembership
 
 
-PROFILE = {"schema": "runtime.execution_profile.v1", "imageCapability": "workspace_general_v1",
+PROFILE = {"schema": "runtime.execution_profile.v1",
            "imageDigest": "sha256:" + "a" * 64}
 
 
@@ -235,8 +236,8 @@ class AgentDefinitionRunTests(DefinitionFixture, TransactionTestCase):
         self.assertEqual(old_run.definition_version_id, self.version["id"])
         self.assertEqual(old_run.agent_instructions, self.version["instructions"])
         from app_core.runtime_client import build_agent_run_start
-        self.assertEqual(build_agent_run_start(old_run)["agentInstructions"], self.version["instructions"])
-        self.assertEqual(build_agent_run_start(new_run)["agentInstructions"], latest["instructions"])
+        self.assertEqual(fenced_start_fixture(old_run)["agentInstructions"], self.version["instructions"])
+        self.assertEqual(fenced_start_fixture(new_run)["agentInstructions"], latest["instructions"])
 
     def test_disabled_or_revoked_definition_blocks_new_runs_but_retains_private_data_and_receipts(self):
         first = self.submit("accepted")
@@ -344,7 +345,7 @@ class AgentDefinitionRunTests(DefinitionFixture, TransactionTestCase):
         self.assertEqual((rewritten.definition_version_id, rewritten.agent_instructions),
                          (latest["id"], latest["instructions"]))
         from app_core.runtime_client import build_agent_run_start
-        start = build_agent_run_start(rewritten)
+        start = fenced_start_fixture(rewritten)
         self.assertEqual(start["tailAction"], payload["tailAction"])
         original.refresh_from_db()
         self.assertEqual((original.definition_version_id, original.agent_instructions),

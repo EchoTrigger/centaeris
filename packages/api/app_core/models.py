@@ -87,6 +87,10 @@ def new_environment_release_id() -> str:
     return new_id("environment_release")
 
 
+def new_environment_maintenance_grant_id() -> str:
+    return new_id("maintenance_grant")
+
+
 def new_session_project_id() -> str:
     return new_id("session_project")
 
@@ -296,6 +300,8 @@ class Workspace(models.Model):
     id = models.CharField(primary_key=True, max_length=64, default=new_workspace_id)
     name = models.CharField(max_length=160)
     description = models.TextField(blank=True, default="")
+    execution_network = models.CharField(max_length=14, default="disabled",
+        choices=[("disabled", "Disabled"), ("publicInternet", "Internet")])
     status = models.CharField(max_length=32, default="active")
     createdBy = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -311,8 +317,13 @@ class Workspace(models.Model):
     createdAt = models.DateTimeField(auto_now_add=True)
     updatedAt = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        constraints = [models.CheckConstraint(condition=models.Q(execution_network__in=["disabled", "publicInternet"]),
+            name="workspace_execution_network_valid")]
+
     def save(self, *args, **kwargs):
         require_enum("Workspace.status", self.status, {"active", "archived"})
+        require_enum("Workspace.execution_network", self.execution_network, {"disabled", "publicInternet"})
         return super().save(*args, **kwargs)
 
 
@@ -1415,8 +1426,6 @@ class Session(models.Model):
         if self.current_environment_id == stored_scope[3]:
             if stored_scope[4] != self.pk:
                 raise ValueError("session_environment_binding_invalid")
-        elif SessionEnvironment.objects.using(using).filter(pk=stored_scope[3], benchmark_profile__isnull=False).exists():
-            raise ValueError("benchmark_environment_binding_immutable")
         elif not SessionEnvironment.objects.using(using).filter(pk=self.current_environment_id, session_id=self.pk).exists():
             raise ValueError("session_environment_binding_invalid")
         return super().save(*args, **kwargs)
@@ -1428,10 +1437,13 @@ class SessionEnvironment(models.Model):
     id = models.CharField(primary_key=True, max_length=64, default=new_session_environment_id)
     session = models.ForeignKey(Session, on_delete=models.PROTECT, related_name="environments")
     created_at = models.DateTimeField(auto_now_add=True)
-    benchmark_profile = models.JSONField(null=True, default=None, blank=True, editable=False)
-    benchmark_profile_digest = models.CharField(max_length=71, default="", blank=True, editable=False)
-    benchmark_profile_operation_id = models.CharField(max_length=128, default="", blank=True, editable=False)
-    benchmark_profile_bound_at = models.DateTimeField(null=True, default=None, editable=False)
+    network = models.CharField(max_length=14, default="disabled", editable=False,
+        choices=[("disabled", "Disabled"), ("publicInternet", "Internet")])
+    environment_profile = models.JSONField(null=True, default=None, blank=True, editable=False)
+    environment_profile_digest = models.CharField(max_length=71, default="", blank=True, editable=False)
+    environment_profile_operation_id = models.CharField(max_length=128, default="", blank=True, editable=False)
+    environment_profile_bound_at = models.DateTimeField(null=True, default=None, editable=False)
+    historical_profile = models.JSONField(null=True, default=None, blank=True, editable=False)
     benchmark_setup_operation_id = models.CharField(max_length=128, default="", blank=True, editable=False)
     benchmark_setup_run = models.ForeignKey("AgentRun", on_delete=models.PROTECT,
         related_name="+", null=True, default=None, editable=False)
@@ -1441,55 +1453,154 @@ class SessionEnvironment(models.Model):
     controller_epoch = models.PositiveBigIntegerField(default=0, editable=False)
     controller_run = models.ForeignKey("AgentRun", on_delete=models.PROTECT,
         related_name="+", null=True, blank=True, editable=False)
+    controller_maintenance_operation = models.ForeignKey("EnvironmentMaintenanceOperation",
+        on_delete=models.PROTECT, related_name="+", null=True, blank=True, editable=False)
     controller_lease_owner = models.CharField(max_length=160, blank=True, default="", editable=False)
     controller_released = models.BooleanField(default=True, editable=False)
     controller_purpose = models.CharField(max_length=7, default="", editable=False,
         choices=[("execute", "Execute"), ("cleanup", "Cleanup")])
 
     class Meta:
-        constraints = [models.CheckConstraint(
-            condition=(models.Q(controller_run__isnull=True, controller_lease_owner="", controller_released=True, controller_purpose="")
-                | (models.Q(controller_run__isnull=False, controller_epoch__gt=0, controller_purpose__in=["execute", "cleanup"])
+        constraints = [models.CheckConstraint(condition=models.Q(network__in=["disabled", "publicInternet"]),
+            name="environment_network_valid"), models.CheckConstraint(
+            condition=(models.Q(controller_run__isnull=True, controller_maintenance_operation__isnull=True,
+                               controller_lease_owner="", controller_released=True, controller_purpose="")
+                | (((models.Q(controller_run__isnull=False, controller_maintenance_operation__isnull=True)
+                     | models.Q(controller_run__isnull=True, controller_maintenance_operation__isnull=False))
+                    & models.Q(controller_epoch__gt=0, controller_purpose__in=["execute", "cleanup"]))
                    & ~models.Q(controller_lease_owner=""))),
             name="environment_controller_complete"), models.CheckConstraint(
-            condition=(models.Q(benchmark_profile__isnull=True, benchmark_profile_digest="",
-                benchmark_profile_operation_id="", benchmark_profile_bound_at__isnull=True)
-                | (models.Q(benchmark_profile__isnull=False, benchmark_profile_bound_at__isnull=False)
-                   & ~models.Q(benchmark_profile_digest="") & ~models.Q(benchmark_profile_operation_id=""))),
-            name="environment_benchmark_profile_complete"), models.CheckConstraint(
+            condition=(models.Q(environment_profile__isnull=True, environment_profile_digest="",
+                environment_profile_operation_id="", environment_profile_bound_at__isnull=True)
+                | (models.Q(environment_profile__isnull=False, environment_profile_bound_at__isnull=False)
+                   & ~models.Q(environment_profile_digest="") & ~models.Q(environment_profile_operation_id=""))),
+            name="environment_profile_complete"), models.CheckConstraint(
             condition=(models.Q(benchmark_setup_operation_id="", benchmark_setup_run__isnull=True,
                 benchmark_setup_instance_id="", benchmark_setup_container_id="", benchmark_setup_completed_at__isnull=True)
-                | (models.Q(benchmark_profile__isnull=False, benchmark_setup_run__isnull=False,
+                | (models.Q(environment_profile__isnull=False, benchmark_setup_run__isnull=False,
                             benchmark_setup_completed_at__isnull=False)
                    & ~models.Q(benchmark_setup_operation_id="") & ~models.Q(benchmark_setup_instance_id="")
                    & ~models.Q(benchmark_setup_container_id=""))),
             name="environment_benchmark_setup_complete")]
 
     def save(self, *args, **kwargs):
-        if self._state.adding and self.benchmark_profile is not None:
-            raise ValueError("benchmark_profile_requires_binding")
+        if self._state.adding and self.environment_profile is not None:
+            raise ValueError("environment_profile_requires_binding")
+        using = kwargs.get("using") or router.db_for_write(type(self), instance=self)
+        if self._state.adding:
+            self.network = Workspace.objects.using(using).get(sessions__pk=self.session_id).execution_network
+        require_enum("SessionEnvironment.network", self.network, {"disabled", "publicInternet"})
         if not self._state.adding:
             using = kwargs.get("using") or router.db_for_write(type(self), instance=self)
-            stored = type(self).objects.using(using).values("session_id", "benchmark_profile",
-                "benchmark_profile_digest", "benchmark_profile_operation_id", "benchmark_profile_bound_at",
+            stored = type(self).objects.using(using).values("session_id", "network", "environment_profile",
+                "environment_profile_digest", "environment_profile_operation_id", "environment_profile_bound_at", "historical_profile",
                 "benchmark_setup_operation_id", "benchmark_setup_run_id", "benchmark_setup_instance_id",
                 "benchmark_setup_container_id", "benchmark_setup_completed_at").get(pk=self.pk)
             if stored["session_id"] != self.session_id:
                 raise ValueError("session_environment_identity_immutable")
-            fields = ("benchmark_profile", "benchmark_profile_digest", "benchmark_profile_operation_id", "benchmark_profile_bound_at")
-            if stored["benchmark_profile"] is not None and any(stored[name] != getattr(self, name) for name in fields):
-                raise ValueError("benchmark_profile_binding_immutable")
+            if stored["historical_profile"] != self.historical_profile:
+                raise ValueError("environment_profile_history_immutable")
+            binding_profile = stored["environment_profile"] is None and self.environment_profile is not None
+            if stored["network"] != self.network and not binding_profile:
+                raise ValueError("environment_network_immutable")
+            fields = ("environment_profile", "environment_profile_digest", "environment_profile_operation_id", "environment_profile_bound_at")
+            if stored["environment_profile"] is not None and any(stored[name] != getattr(self, name) for name in fields):
+                raise ValueError("environment_profile_binding_immutable")
             setup_fields = ("benchmark_setup_operation_id", "benchmark_setup_run_id", "benchmark_setup_instance_id",
                             "benchmark_setup_container_id", "benchmark_setup_completed_at")
             if stored["benchmark_setup_operation_id"] and any(stored[name] != getattr(self, name) for name in setup_fields):
                 raise ValueError("benchmark_setup_binding_immutable")
-            if (stored["benchmark_profile"] is None and self.benchmark_profile is not None
-                    and AgentRun.objects.using(using).filter(session_id=self.session_id).exists()):
-                raise ValueError("benchmark_profile_requires_unused_session")
-        if self.benchmark_profile is not None:
-            from .benchmark_profile import benchmark_profile_digest
-            if benchmark_profile_digest(self.benchmark_profile) != self.benchmark_profile_digest:
-                raise ValueError("benchmark_profile_digest_invalid")
+            if (stored["environment_profile"] is None and self.environment_profile is not None
+                    and AgentRunAuthorization.objects.using(using).filter(agent_run__environment_id=self.pk).exists()):
+                raise ValueError("environment_profile_requires_unused_session")
+        if self.environment_profile is not None:
+            from .environment_profile import environment_profile_digest
+            if environment_profile_digest(self.environment_profile) != self.environment_profile_digest:
+                raise ValueError("environment_profile_digest_invalid")
+            if self.network != self.environment_profile["network"]:
+                raise ValueError("environment_network_profile_mismatch")
+        created = self._state.adding
+        result = super().save(*args, **kwargs)
+        if created:
+            # PostgreSQL snapshots the authoritative default at INSERT time.
+            # A concurrent settings update may have superseded our earlier read.
+            self.refresh_from_db(using=using, fields=["network"])
+        return result
+
+
+class EnvironmentMaintenanceOperation(models.Model):
+    """One immutable request and physical target, independently owned from a Run."""
+    operation_id = models.CharField(primary_key=True, max_length=160)
+    operation_kind = models.CharField(max_length=9, default='task', choices=[('task', 'Task'), ('provision', 'Provision')])
+    workspace = models.ForeignKey(Workspace, on_delete=models.PROTECT, related_name="+")
+    session = models.ForeignKey(Session, on_delete=models.PROTECT, related_name="+")
+    environment = models.ForeignKey(SessionEnvironment, on_delete=models.PROTECT, related_name="maintenance_operations")
+    instance_id = models.CharField(max_length=73, null=True)
+    container_id = models.CharField(max_length=64, null=True)
+    host_id = models.CharField(max_length=160, null=True)
+    allocation_execution_id = models.TextField(null=True)
+    profile_digest = models.CharField(max_length=71)
+    request = models.JSONField()
+    request_digest = models.CharField(max_length=71)
+    current_grant = models.ForeignKey("EnvironmentMaintenanceGrant", on_delete=models.PROTECT,
+        related_name="+", null=True, editable=False)
+    state = models.CharField(max_length=8, default="active", choices=[("active", "Active"), ("released", "Released")])
+    released_at = models.DateTimeField(null=True, editable=False)
+
+    class Meta:
+        constraints = [models.CheckConstraint(
+            condition=models.Q(state="active", released_at__isnull=True)
+                | models.Q(state="released", released_at__isnull=False), name="maintenance_operation_state_valid"),
+            models.CheckConstraint(condition=(models.Q(operation_kind='provision', instance_id__isnull=True,
+                container_id__isnull=True, host_id__isnull=True, allocation_execution_id__isnull=True)
+                | (models.Q(operation_kind='task', instance_id__isnull=False, container_id__isnull=False,
+                    host_id__isnull=False, allocation_execution_id__isnull=False)
+                    & ~models.Q(instance_id='') & ~models.Q(container_id='') & ~models.Q(host_id='')
+                    & ~models.Q(allocation_execution_id=''))), name='maintenance_operation_target_valid')]
+
+    def save(self, *args, **kwargs):
+        if self._state.adding:
+            kwargs['force_insert'] = True
+        else:
+            fields = ("operation_kind", "workspace_id", "session_id", "environment_id", "instance_id", "container_id", "host_id",
+                      "allocation_execution_id", "profile_digest", "request", "request_digest")
+            stored = type(self).objects.values(*fields).get(pk=self.pk)
+            if any(stored[name] != getattr(self, name) for name in fields):
+                raise ValueError("maintenance_operation_immutable")
+        return super().save(*args, **kwargs)
+
+
+class EnvironmentMaintenanceGrant(models.Model):
+    """Append-only signatures; cleanup renewal never rewrites execution authority."""
+    id = models.CharField(primary_key=True, max_length=64, default=new_environment_maintenance_grant_id)
+    operation = models.ForeignKey(EnvironmentMaintenanceOperation, on_delete=models.PROTECT, related_name="grants")
+    previous_controller_epoch = models.PositiveBigIntegerField()
+    controller_epoch = models.PositiveBigIntegerField()
+    controller_lease_digest = models.CharField(max_length=71)
+    controller_purpose = models.CharField(max_length=7, choices=[("execute", "Execute"), ("cleanup", "Cleanup")])
+    expires_at_ms = models.PositiveBigIntegerField()
+    payload = models.JSONField()
+    digest = models.CharField(max_length=71, default='', editable=False)
+    signature = models.CharField(max_length=76)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=("operation", "controller_epoch"), name="maintenance_grant_epoch_unique"),
+            models.UniqueConstraint(fields=("operation", "previous_controller_epoch", "controller_purpose"),
+                                    name="maintenance_grant_request_unique"),
+            models.CheckConstraint(condition=models.Q(controller_epoch__gt=0, expires_at_ms__gt=0,
+                controller_purpose__in=["execute", "cleanup"]), name="maintenance_grant_valid"),
+            models.CheckConstraint(condition=models.Q(digest__regex=r'^sha256:[0-9a-f]{64}$'),
+                name='maintenance_grant_digest_valid')]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValueError("maintenance_grant_immutable")
+        from .environment_maintenance import _digest
+        digest = _digest(self.payload)
+        if self.digest not in ('', digest):
+            raise ValueError('maintenance_grant_digest_invalid')
+        self.digest = digest
+        kwargs['force_insert'] = True
         return super().save(*args, **kwargs)
 
 
@@ -1818,9 +1929,6 @@ class AgentRun(models.Model):
                 if self.environment_id is not None and self.environment_id != session.current_environment_id:
                     raise ValueError("agent_run_environment_binding_invalid")
                 self.environment = session.current_environment
-                if (self.environment.benchmark_profile is not None
-                        and type(self).objects.using(using).filter(session_id=self.session_id).exists()):
-                    raise ValueError("benchmark_environment_single_run_required")
                 return super().save(*args, **kwargs)
         if stored_snapshot[2:] != (self.session_id, self.environment_id):
             raise ValueError("agent_run_environment_binding_immutable")

@@ -77,14 +77,19 @@ impl Default for PostgresConnectionLimits {
     }
 }
 
-pub(crate) mod benchmark;
+pub(crate) mod allocation_origin;
 pub(crate) mod cleanup_receipts;
 pub(crate) mod controller_authority;
+pub(crate) mod environment_observation;
+mod environment_owner_schema;
 mod execution_capacity;
 pub(crate) mod execution_instances;
 mod external_context;
+mod host_retirement;
 pub(crate) mod lease_renewal;
+pub(crate) mod maintenance;
 pub(crate) mod pre_admission_failure;
+pub(crate) mod provision;
 mod reliability;
 pub(crate) mod residency;
 mod resource_commit;

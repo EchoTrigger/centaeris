@@ -7,7 +7,7 @@ benchmark controller; these contracts do not claim that HTTP host ports exist.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import math
@@ -22,7 +22,7 @@ from harbor.environments.capabilities import EnvironmentCapabilities, Environmen
 from harbor.models.task.task import strip_canary
 from harbor.models.trial.paths import EnvironmentPaths
 
-from workspace_agent import WorkspaceBinding, WorkspaceSubmission, message_operation_id
+from workspace_agent import WorkspaceBinding, message_operation_id
 from workspace_client import WorkspaceError
 
 
@@ -30,27 +30,29 @@ from workspace_client import WorkspaceError
 class OwnedEnvironment:
     session_id: str
     environment_id: str
-    agent_run_id: str
+    agent_run_id: str | None
     instance_id: str
     container_id: str
     host_id: str
     controller_epoch: int
     image_digest: str
     profile_digest: str
-    setup_state: str
+    state: str
     resource_holding: int
 
     def __post_init__(self):
-        for value in (self.session_id, self.environment_id, self.agent_run_id, self.instance_id,
+        for value in (self.session_id, self.environment_id, self.instance_id,
                       self.container_id, self.host_id):
             if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", value) is None:
                 raise ValueError("invalid owned environment identity")
+        if self.agent_run_id is not None and (not isinstance(self.agent_run_id, str) or not self.agent_run_id):
+            raise ValueError("invalid run identity")
         if type(self.controller_epoch) is not int or self.controller_epoch < 0:
             raise ValueError("invalid controller epoch")
         if any(not isinstance(value, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None
                for value in (self.image_digest, self.profile_digest)):
             raise ValueError("invalid image or profile digest")
-        if self.setup_state not in {"waitingSetup", "ready"} or type(self.resource_holding) is not int or self.resource_holding != 1:
+        if self.state != "resident" or type(self.resource_holding) is not int or self.resource_holding != 1:
             raise ValueError("owned instance must hold its resource allocation")
 
 
@@ -77,7 +79,7 @@ class BenchmarkProvisioner(Protocol):
     """
     def bind_profile(self, session_id: str, environment_id: str, profile: dict, operation_id: str) -> dict: ...
     def observe_setup(self, session_id: str, environment_id: str, agent_run_id: str) -> OwnedEnvironment | None: ...
-    def activate_setup(self, owned: OwnedEnvironment, operation_id: str) -> str: ...
+    def provision(self, session_id: str, environment_id: str, operation_id: str) -> OwnedEnvironment | None: ...
     def exec(self, owned: OwnedEnvironment, **request) -> dict: ...
     def upload_file(self, owned: OwnedEnvironment, source: Path, target: str) -> None: ...
     def upload_dir(self, owned: OwnedEnvironment, source: Path, target: str) -> None: ...
@@ -111,7 +113,6 @@ class WorkspaceEnvironment(BaseEnvironment):
         self.poll_interval, self.setup_timeout_sec = poll_interval, setup_timeout_sec
         self.workspace_event_callback = workspace_event_callback
         self.workspace_binding = None
-        self.workspace_submission = None
         self._owned = None
         self._session_id = self._environment_id = self._agent_run_id = None
         self._creation_attempted = self._destroyed = False
@@ -175,11 +176,11 @@ class WorkspaceEnvironment(BaseEnvironment):
         if self.workspace_event_callback:
             self.workspace_event_callback(payload)
 
-    def _check_owned(self, owned, *, waiting=False):
+    def _check_owned(self, owned):
         if (not isinstance(owned, OwnedEnvironment) or owned.session_id != self._session_id
                 or owned.environment_id != self._environment_id or owned.agent_run_id != self._agent_run_id
                 or owned.image_digest != self.profile["imageDigest"] or owned.profile_digest != self.profile_digest
-                or (waiting and owned.setup_state != "waitingSetup")):
+                or owned.state != "resident"):
             raise WorkspaceError("prepared_environment_binding_mismatch")
         if self._owned is not None and any(getattr(owned, key) != getattr(self._owned, key)
                 for key in ("instance_id", "container_id", "host_id", "controller_epoch")):
@@ -204,6 +205,7 @@ class WorkspaceEnvironment(BaseEnvironment):
             # Match Harbor Task.instruction exactly, including its own canary
             # preprocessing, instead of exposing provenance markers to models.
             instruction = strip_canary(instruction_path.read_text(encoding="utf-8"))
+            self._instruction = instruction
             receipt = await asyncio.to_thread(self.workspace_client.create_session,
                 self.workspace_id, self.agent_id, self._operation("session"))
             self._session_id = receipt["sessionId"]
@@ -218,58 +220,44 @@ class WorkspaceEnvironment(BaseEnvironment):
                 self._environment_id, self.profile, self._operation("profile"))
             if (bound.get("sessionId") != self._session_id or bound.get("environmentId") != self._environment_id
                     or bound.get("profileDigest") != self.profile_digest):
-                raise WorkspaceError("benchmark_profile_binding_mismatch")
+                raise WorkspaceError("environment_profile_binding_mismatch")
             self.allocation.mark_creation_started()
             self._creation_attempted = True
-            receipt = await asyncio.to_thread(self.workspace_client.submit_message, self.workspace_id,
-                self._session_id, self.agent_id, message_operation_id(self.trial_id), instruction,
-                self.model_config_ref, self.thinking_mode)
-            self._agent_run_id = receipt["agentRunId"]
-            self.workspace_submission = WorkspaceSubmission(receipt["operationId"], self._session_id,
-                self._agent_run_id, receipt["turnId"], hashlib.sha256(instruction.encode()).hexdigest(),
-                hashlib.sha256(instruction.strip().encode()).hexdigest(), self.model_config_ref, self.thinking_mode)
-            timeout = self.setup_timeout_sec or self.task_env_config.build_timeout_sec
-            deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
-                observed = await asyncio.to_thread(self.provisioner.observe_setup, self._session_id,
-                    self._environment_id, self._agent_run_id)
-                if observed is not None:
-                    self._owned = self._check_owned(observed, waiting=True)
-                    self.workspace_binding = WorkspaceBinding(self.workspace_id, self.agent_id,
-                        self._session_id, self._environment_id, self._owned.instance_id, self.trial_id)
-                    self._notify(sessionId=self._session_id, agentRunId=self._agent_run_id,
-                        environmentId=self._environment_id, instanceId=self._owned.instance_id,
-                        containerId=self._owned.container_id, phase="setup", status="running", resourceHolding=1)
-                    paths = EnvironmentPaths.for_os(self.os)
-                    prepared = await self.ensure_dirs([paths.agent_dir, paths.verifier_dir, paths.artifacts_dir])
-                    if prepared is None or prepared.return_code != 0:
-                        raise WorkspaceError("benchmark_log_directories_unavailable")
-                    await self._upload_environment_dir_after_start()
-                    self._setup_prepared = True
-                    return
-                try:
-                    fact = await asyncio.to_thread(self.workspace_client.run_fact, self._session_id, self._agent_run_id)
-                except WorkspaceError as error:
-                    if error.code != "transport_unavailable" and (error.status is None or error.status < 500):
-                        raise
-                    fact = None
-                if fact is not None and fact["status"] in {"completed", "failed", "cancelled"}:
-                    self._setup_terminal_error = "benchmark_setup_agent_run_" + fact["status"]
-                    self._notify(sessionId=self._session_id, agentRunId=self._agent_run_id,
-                        environmentId=self._environment_id, phase="setup", status="failed", error=self._setup_terminal_error)
-                    raise WorkspaceError(self._setup_terminal_error)
-                await asyncio.sleep(self.poll_interval)
-            raise WorkspaceError("benchmark_setup_timeout")
+            observed = await asyncio.to_thread(self.provisioner.provision, self._session_id,
+                self._environment_id, self._operation("provision"))
+            if observed is None:
+                raise WorkspaceError("environment_provision_pending")
+            self._owned = self._check_owned(observed)
+            self.workspace_binding = WorkspaceBinding(self.workspace_id, self.agent_id,
+                self._session_id, self._environment_id, self._owned.instance_id, self.trial_id)
+            self._notify(sessionId=self._session_id, environmentId=self._environment_id,
+                instanceId=self._owned.instance_id, containerId=self._owned.container_id,
+                phase="setup", status="running", resourceHolding=1)
+            paths = EnvironmentPaths.for_os(self.os)
+            prepared = await self.ensure_dirs([paths.agent_dir, paths.verifier_dir, paths.artifacts_dir])
+            if prepared is None or prepared.return_code != 0:
+                raise WorkspaceError("benchmark_log_directories_unavailable")
+            await self._upload_environment_dir_after_start()
+            self._setup_prepared = True
+
+    def bind_workspace_run(self, run_id):
+        self._require_owned()
+        if (not self._setup_prepared or not isinstance(run_id, str) or not run_id
+                or self._agent_run_id not in (None, run_id)):
+            raise WorkspaceError("workspace_run_binding_mismatch")
+        self._agent_run_id = run_id
+        self._owned = replace(self._owned, agent_run_id=run_id)
+
+    def validate_workspace_submission(self, instruction, model_config_ref, thinking_mode):
+        if (not self._setup_prepared or instruction != self._instruction
+                or model_config_ref != self.model_config_ref or thinking_mode != self.thinking_mode):
+            raise WorkspaceError('submission_binding_mismatch')
 
     async def activate_workspace_setup(self):
         owned = self._require_owned()
         if not self._setup_prepared:
             raise WorkspaceError("workspace_setup_incomplete")
-        if not self._setup_activated:
-            status = await asyncio.to_thread(self.provisioner.activate_setup, owned, self._operation("activate"))
-            if status != "ready":
-                raise WorkspaceError("workspace_setup_not_ready")
-            self._setup_activated = True
+        self._setup_activated = True
         return "ready"
 
     def _require_owned(self):
@@ -289,17 +277,11 @@ class WorkspaceEnvironment(BaseEnvironment):
         fact = await asyncio.to_thread(self.workspace_client.run_fact, owned.session_id, agent_run_id)
         if fact is None or fact.get("agentRunId") != agent_run_id or fact.get("status") not in {"completed", "failed", "cancelled"}:
             raise WorkspaceError("agent_quiescence_unconfirmed")
-        # An independent maintenance command confirms silence even when the
-        # execute controller's last cancellation acknowledgement was lost.
-        value = await asyncio.to_thread(self.provisioner.exec, owned,
-            command="exec /opt/centaeris/benchmark/execution_agent benchmark-quiesce",
-            cwd="/", env={}, timeout_sec=5, user=self.profile["user"])
-        try:
-            receipt = json.loads(value["stdout"])
-        except (KeyError, TypeError, ValueError):
-            raise WorkspaceError("agent_quiescence_unconfirmed") from None
-        if (value.get("returnCode") != 0 or receipt != {"schema": "runtime.benchmark.quiescence.v1", "quiescent": True}
-                or type(receipt.get("quiescent")) is not bool):
+        # A new maintenance owner can acquire only after the Run's durable cleanup
+        # receipt released its controller. Environment-scoped background work survives.
+        value = await asyncio.to_thread(self.provisioner.exec, owned, command=":",
+            cwd=self.profile["workspaceRoot"], env={}, timeout_sec=5, user=self.profile["user"])
+        if value.get("returnCode") != 0:
             raise WorkspaceError("agent_quiescence_unconfirmed")
         self._agent_cancellation_pending = False
 
@@ -372,11 +354,10 @@ class WorkspaceEnvironment(BaseEnvironment):
                         if receipt["sessionId"] != self._session_id:
                             raise WorkspaceError("operation_session_mismatch")
                         self._agent_run_id = receipt["agentRunId"]
-                if self._agent_run_id is not None:
-                    observed = await asyncio.to_thread(self.provisioner.observe_setup, self._session_id,
-                        self._environment_id, self._agent_run_id)
-                    if observed is not None:
-                        self._owned = self._check_owned(observed)
+                observed = await asyncio.to_thread(self.provisioner.observe_setup, self._session_id,
+                    self._environment_id, self._agent_run_id)
+                if observed is not None:
+                    self._owned = self._check_owned(observed)
                 if self._owned is None:
                     raise WorkspaceError("cleanup_pending")
             owned = self._require_owned()

@@ -32,8 +32,11 @@ fn history(db: &mut Client) -> Vec<(i64, i64)> {
 }
 
 fn downgrade_to_nine(db: &mut Client) {
+    super::super::environment_owner_schema::restore_previous_fixture(db);
     db.batch_execute(
-        "DROP TABLE IF EXISTS runtime.environment_retirements;
+        "DROP TABLE IF EXISTS runtime.environment_maintenance_completions;
+         DROP FUNCTION IF EXISTS runtime.protect_environment_maintenance_completion();
+         DROP TABLE IF EXISTS runtime.environment_retirements;
          DROP FUNCTION IF EXISTS runtime.protect_environment_retirement();
          DROP TABLE IF EXISTS runtime.agent_run_cleanup_receipts;
          DELETE FROM runtime.schema_migrations WHERE version>=10;",
@@ -71,7 +74,7 @@ fn seed_live_allocation(db: &mut Client) {
 
 fn allocation_facts(db: &mut Client) -> Vec<String> {
     db.query(
-        "SELECT row_to_json(i)::text FROM runtime.execution_instances i ORDER BY execution_id",
+        "SELECT (to_jsonb(i)-'allocation_owner_json')::text FROM runtime.execution_instances i ORDER BY execution_id",
         &[],
     )
     .unwrap()
@@ -79,7 +82,7 @@ fn allocation_facts(db: &mut Client) -> Vec<String> {
     .map(|row| row.get(0))
     .chain(
         db.query(
-            "SELECT row_to_json(s)::text FROM runtime.resident_sandboxes s ORDER BY execution_id",
+            "SELECT (to_jsonb(s)-'allocation_owner_json')::text FROM runtime.resident_sandboxes s ORDER BY execution_id",
             &[],
         )
         .unwrap()
@@ -94,7 +97,8 @@ fn insert_receipt(db: &mut Client, patch: serde_json::Value) -> Result<u64, post
         "receipt_id":"receipt-a", "agent_run_id":"run-a", "environment_id":"environment",
         "authorization_digest":"authorization", "controller_epoch":1,
         "allocation_kind":"instance", "instance_id":"instance", "cleanup_complete":true,
-        "file_protection":"deferred", "recorded_at_ms":789
+        "file_protection":"deferred", "recorded_at_ms":789,
+        "physical_removed":false, "removed_container_id":null
     });
     receipt
         .as_object_mut()
@@ -116,7 +120,7 @@ fn postgres_cleanup_migration_fresh_store_creates_receipt_table() {
         receipt_table_exists(&mut db),
         "fresh store must persist cleanup receipts"
     );
-    assert_eq!(history(&mut db).last().unwrap().0, 11);
+    assert_eq!(history(&mut db).last().unwrap().0, 13);
 }
 
 #[test]
@@ -137,7 +141,7 @@ fn postgres_cleanup_migration_preserves_allocations_resources_and_receipts_on_re
     assert_eq!(allocation_facts(&mut db), before_facts);
     let migrated_history = history(&mut db);
     assert_eq!(&migrated_history[..9], before_history.as_slice());
-    assert_eq!(migrated_history.len(), 11);
+    assert_eq!(migrated_history.len(), 13);
     assert_eq!(migrated_history[9].0, 10);
 
     insert_receipt(&mut db, serde_json::json!({})).unwrap();

@@ -46,9 +46,8 @@ def request_execution_profile() -> dict:
         raise RuntimeError("runtime_execution_profile_request_failed") from error
     if (
         not isinstance(result, dict)
-        or set(result) != {"schema", "imageCapability", "imageDigest"}
+        or set(result) != {"schema", "imageDigest"}
         or result["schema"] != RUNTIME_EXECUTION_PROFILE_SCHEMA
-        or result["imageCapability"] != "workspace_general_v1"
         or not isinstance(result["imageDigest"], str)
         or len(result["imageDigest"]) != 71
         or not result["imageDigest"].startswith("sha256:")
@@ -110,14 +109,14 @@ def _validate_agent_run_binding(agent_run):
     return authorization
 
 
-def build_agent_run_start(agent_run, *, controller_authority=None) -> dict:
+def build_agent_run_start(agent_run, *, controller_authority, execution_mode="perRun") -> dict:
     from .models import AgentCoordinationSession, AgentInputQueue
-    from .environment_authorization import build_environment_authorization, build_environment_controller_authorization
-    if controller_authority is not None and controller_authority.get("controllerPurpose") != "execute":
+    from .environment_authorization import build_environment_authorization
+    if not isinstance(controller_authority, dict) or controller_authority.get("controllerPurpose") != "execute":
         raise ValueError("agent_run_start_controller_purpose_invalid")
     authorization = _validate_agent_run_binding(agent_run)
     start = {
-        "schema": AGENT_RUN_START_SCHEMA if controller_authority is None else "workspace.agent_run.start.v4",
+        "schema": AGENT_RUN_START_SCHEMA,
         "agentRunId": agent_run.id,
         "turnId": agent_run.turn_id,
         "prompt": agent_run.prompt,
@@ -128,8 +127,8 @@ def build_agent_run_start(agent_run, *, controller_authority=None) -> dict:
         "authorizationDigest": authorization.digest,
         "authorizationSignature": authorization.signature,
         "authorization": authorization.payload,
-        "environmentAuthorization": (build_environment_authorization(agent_run, authorization)
-            if controller_authority is None else build_environment_controller_authorization(agent_run, authorization, controller_authority)),
+        "environmentAuthorization": build_environment_authorization(agent_run, authorization, controller_authority,
+            execution_mode=execution_mode),
         "tailAction": (
             {"type": "append"}
             if agent_run.tailPolicy == "append"
@@ -160,9 +159,9 @@ def build_agent_run_start(agent_run, *, controller_authority=None) -> dict:
     return start
 
 
-def build_agent_run_cleanup(agent_run, controller_authority):
+def build_agent_run_cleanup(agent_run, controller_authority, *, execution_mode="perRun"):
     """Original signed grant plus restricted authority; never load execution input."""
-    from .environment_authorization import build_environment_controller_authorization
+    from .environment_authorization import build_environment_authorization
     authorization = agent_run.authorization
     if (authorization_digest(authorization.payload) != authorization.digest
             or not agent_run_binding_matches(authorization.payload, agent_run)
@@ -171,7 +170,8 @@ def build_agent_run_cleanup(agent_run, controller_authority):
     return {"schema": "workspace.agent_run.cleanup.v1", "agentRunId": agent_run.pk,
         "authorizationDigest": authorization.digest, "authorizationSignature": authorization.signature,
         "authorization": authorization.payload,
-        "environmentAuthorization": build_environment_controller_authorization(agent_run, authorization, controller_authority)}
+        "environmentAuthorization": build_environment_authorization(agent_run, authorization, controller_authority,
+            execution_mode=execution_mode)}
 
 
 def get_agent_run_cleanup_receipt(agent_run_id, digest, receipt_id):
@@ -258,10 +258,16 @@ def schedule_agent_run_lifecycle(agent_run) -> str:
     return payload["disposition"]
 
 
+def build_agent_run_control(agent_run) -> dict:
+    authorization = _validate_agent_run_binding(agent_run)
+    return {'agentRunId': agent_run.pk, 'authorizationDigest': authorization.digest,
+        'authorizationSignature': authorization.signature, 'authorization': authorization.payload}
+
+
 def request_agent_run_cancellation(agent_run) -> dict:
     body = {
         "schema": "runtime.agent_run.cancel.v1",
-        "agentRunStart": build_agent_run_start(agent_run),
+        "agentRunControl": build_agent_run_control(agent_run),
     }
     try:
         result = request_json(
@@ -302,7 +308,7 @@ def request_agent_run_supplement(agent_run, supplement_id: str, message: str) ->
         "supplementId": supplement_id,
         "jobId": agent_run_lifecycle_job_id(agent_run.id),
         "message": message,
-        "agentRunStart": build_agent_run_start(agent_run),
+        "agentRunControl": build_agent_run_control(agent_run),
     }
     try:
         result = request_json(

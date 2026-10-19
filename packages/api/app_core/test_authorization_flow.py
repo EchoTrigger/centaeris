@@ -15,7 +15,8 @@ class AuthorizationFlowTests(SimpleTestCase):
             session_id=payload["sessionId"], user_id=payload["userId"], modelConfig_id=payload["modelConfigRef"],
             thinkingMode=payload["thinkingMode"], session=SimpleNamespace(id=payload["sessionId"], agent_id=payload["agentId"]),
             environment_id="environment-test", environment=SimpleNamespace(
-                id="environment-test", session_id=payload["sessionId"], benchmark_profile=None))
+                id="environment-test", session_id=payload["sessionId"], environment_profile=payload["environmentProfile"],
+                environment_profile_digest=payload["environmentProfileDigest"], network="disabled"))
         self.run.authorization = SimpleNamespace(payload=payload, digest=authorization_digest(payload),
             signature=authorization_signature(payload, KEY))
         self.digest = self.run.authorization.digest
@@ -30,6 +31,12 @@ class AuthorizationFlowTests(SimpleTestCase):
         with self.assertRaisesRegex(inputs.DeferredInputResolutionError, "asset_unavailable"):
             self.resolve()
         self.delivered.assert_called_once_with(self.run, "undeclared")
+
+    def test_historical_grant_cannot_authorize_a_changed_network_snapshot(self):
+        self.run.environment.network = "publicInternet"
+        with self.assertRaisesRegex(inputs.DeferredInputBindingError, "binding mismatch"):
+            self.resolve()
+        self.delivered.assert_not_called()
 
     def test_membership_failure_precedes_corrupt_payload(self):
         self.membership.return_value = False

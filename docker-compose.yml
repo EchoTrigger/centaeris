@@ -143,10 +143,20 @@ services:
       RUNTIME_LIVE_STATE_TTL_SECONDS: ${RUNTIME_LIVE_STATE_TTL_SECONDS}
       OCI_RUNTIME: ${OCI_RUNTIME-runsc}
       WORKSPACE_GENERAL_IMAGE: *workspace-general-image
+      ENVIRONMENT_HOST_SOCKET: /run/centaeris-host/control.sock
+      ENVIRONMENT_EXECUTION_HELPER: ${ENVIRONMENT_EXECUTION_HELPER:?Set the sealed host execution_agent absolute path}
       PLUGIN_VOLUME_NAME: ${COMPOSE_PROJECT_NAME:-centaeris-workspace}_plugin-data
       AGENT_MEMORY_VOLUME_NAME: ${COMPOSE_PROJECT_NAME:-centaeris-workspace}_agent-memory
     entrypoint: ["runtime_server"]
     volumes:
+      - type: bind
+        source: ${ENVIRONMENT_HOST_SOCKET_DIRECTORY:-/run/centaeris-host}
+        target: /run/centaeris-host
+        read_only: true
+      - type: bind
+        source: ${ENVIRONMENT_EXECUTION_HELPER:?Set the sealed host execution_agent absolute path}
+        target: ${ENVIRONMENT_EXECUTION_HELPER:?Set the sealed host execution_agent absolute path}
+        read_only: true
       - runtime-data:/var/lib/centaeris-runtime
       - agent-memory:/var/lib/centaeris-agent-memory
       - type: volume

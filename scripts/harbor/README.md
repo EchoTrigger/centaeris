@@ -1,5 +1,13 @@
 # Terminal-Bench adapter
 
+For the Workspace-backed controller, use [workspace-benchmark.md](workspace-benchmark.md).
+It creates a Session, freezes the common environment profile, provisions the
+instance through independent maintenance authority, and performs Harbor setup
+before its one public AgentRun submission. Commands and binary file transfers use
+the common Core task/filesystem protocols; no setup Run or readiness schema is
+required. The direct Runtime client instructions below describe the standalone
+adapter and its focused native tests.
+
 This adapter requires Harbor 0.21.0, a Linux x86-64 Docker engine, and a prebuilt
 Linux Centaeris Runtime. The adapter submits the task through the existing Runtime
 JSON-RPC interface; Runtime and Core own model requests, tools and compaction.

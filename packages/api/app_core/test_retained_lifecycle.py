@@ -13,14 +13,39 @@ class RetainedLifecycleTests(ExecutionPublicationFixture, TransactionTestCase):
     serialized_rollback = True
 
     def post(self, path='resolve', **changes):
-        body = {'schema': 'runtime.agent_run_lifecycle.resolve.v2', 'jobId': self.job_id,
+        body = {'schema': 'runtime.agent_run_lifecycle.resolve.v1', 'jobId': self.job_id,
             'leaseOwner': self.owner, 'agentRunId': self.run.pk,
             'authorizationDigest': self.authorization.digest} | changes
+        if path == 'resolve':
+            body.setdefault('executionMode', 'retained')
         return self.client.post('/internal/agent-run-lifecycle/' + path, data=json.dumps(body),
             content_type='application/json', HTTP_X_INTERNAL_TOKEN='test-internal-token')
 
     def terminal(self):
         AgentRun.objects.filter(pk=self.run.pk).update(preAdmissionCancelledAt=timezone.now())
+
+    def test_both_modes_acquire_and_replay_the_same_persisted_controller(self):
+        for mode in ('perRun', 'retained'):
+            with self.subTest(mode=mode):
+                result = self.post(executionMode=mode)
+                self.assertEqual(result.status_code, 200, result.content)
+                start = result.json()['agentRunStart']
+                self.assertEqual(start['schema'], 'workspace.agent_run.start.v1')
+                grant = start['environmentAuthorization']['payload']
+                self.assertEqual(grant['schema'], 'workspace.environment_authorization.v1')
+                self.assertEqual(grant['executionMode'], mode)
+                self.run.environment.refresh_from_db()
+                self.assertEqual(grant['controllerId'], self.run.environment.controller_run_id)
+                self.assertEqual(grant['controllerEpoch'], self.run.environment.controller_epoch)
+                self.assertFalse(self.run.environment.controller_released)
+                self.assertEqual(self.post(executionMode=mode).json(), result.json())
+
+    def test_controller_resolve_requires_the_current_worker_lease_for_every_mode(self):
+        for mode in ('perRun', 'retained'):
+            response = self.post(executionMode=mode, leaseOwner='worker:foreign-owner')
+            self.assertEqual(response.status_code, 409, response.content)
+        self.run.environment.refresh_from_db()
+        self.assertEqual(self.run.environment.controller_epoch, 0)
 
     def test_committed_terminal_is_projected_before_durable_cleanup_without_inputs(self):
         self.terminal()
@@ -120,10 +145,10 @@ class RetainedLifecycleTests(ExecutionPublicationFixture, TransactionTestCase):
         self.terminal()
         response = self.post()
         self.assertEqual(response.status_code, 200, response.content)
-        request = {'schema': 'runtime.agent_run_lifecycle.reconcile.v2', 'limit': 10, 'after': None}
+        request = {'schema': 'runtime.agent_run_cleanup.reconcile.v1', 'limit': 10, 'after': None}
         with patch('app_core.http.internal.get_runtime_job', return_value={'status': 'dead_lettered'}), \
                 patch('app_core.http.internal.schedule_agent_run_lifecycle', side_effect=AssertionError('new execution scheduled')):
-            result = self.client.post('/internal/agent-run-lifecycle/reconcile', data=json.dumps(request),
+            result = self.client.post('/internal/agent-run-lifecycle/cleanup-reconcile', data=json.dumps(request),
                 content_type='application/json', HTTP_X_INTERNAL_TOKEN='test-internal-token')
         self.assertEqual(result.status_code, 200, result.content)
         self.assertEqual(result.json()['pending'], [{'agentRunId': self.run.pk,
@@ -136,7 +161,7 @@ class RetainedLifecycleTests(ExecutionPublicationFixture, TransactionTestCase):
         self.session.current_environment.controller_purpose = 'execute'
         self.session.current_environment.save(update_fields=['controller_purpose'])
         with patch('app_core.http.internal.get_runtime_job', return_value={'status': 'dead_lettered'}):
-            before_cleanup = self.client.post('/internal/agent-run-lifecycle/reconcile', data=json.dumps(request),
+            before_cleanup = self.client.post('/internal/agent-run-lifecycle/cleanup-reconcile', data=json.dumps(request),
                 content_type='application/json', HTTP_X_INTERNAL_TOKEN='test-internal-token')
         self.assertEqual(len(before_cleanup.json()['pending']), 1,
             'terminal may deadletter before acquiring its cleanup fence')

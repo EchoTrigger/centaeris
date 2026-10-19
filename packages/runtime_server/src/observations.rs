@@ -104,11 +104,8 @@ impl WorkspaceProtection {
         }
     }
 
-    pub fn helper_environment(&self, env: &mut Vec<String>) {
-        if self.enabled {
-            env.push("WORKSPACE_PERF_OBSERVATIONS=1".into());
-            env.push(format!("WORKSPACE_PERF_OPERATION_ID={}", self.id));
-        }
+    pub fn operation_id(&self) -> &str {
+        &self.id
     }
 
     pub fn with_context(
@@ -153,7 +150,7 @@ impl WorkspaceProtection {
             return;
         }
         let mut event = serde_json::json!({"schema":"workspace.perf.v1", "source":source,
-            "phase":"workspaceProtection", "operationId":self.id, "metric":metric,
+            "phase":"workspaceProtection", "operationId":self.operation_id(), "metric":metric,
             "value":value, "outcome":outcome,
             "atUnixMs":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64});
         if let Some(trigger) = self.trigger {
@@ -695,14 +692,11 @@ mod tests {
     }
 
     #[test]
-    fn protection_opt_out_keeps_io_and_errors_without_records_or_helper_environment() {
+    fn protection_opt_out_keeps_io_and_errors_without_records() {
         let (_, records) = capture_protection_records(|| {
             let mut operation = WorkspaceProtection::new();
             operation.enabled = false;
             operation.forward_sandbox(b"ordinary private diagnostic");
-            let mut environment = vec!["EXISTING=1".into()];
-            operation.helper_environment(&mut environment);
-            assert_eq!(environment, ["EXISTING=1"]);
             let mut bytes = Vec::new();
             operation
                 .upload_reader(std::io::Cursor::new(b"body"), 4)

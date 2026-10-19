@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod host_supervisor;
 pub mod memory;
 pub mod protocol;
 #[cfg(any(target_os = "linux", test))]

@@ -47,10 +47,45 @@ pub(crate) struct RetirementResult {
     pub status: &'static str,
 }
 
+#[derive(Debug)]
+pub(crate) enum RetirementError {
+    /// No retirement was accepted: the locked Environment epoch had changed.
+    ControllerEpochConflict,
+    Rejected(String),
+}
+
+impl From<String> for RetirementError {
+    fn from(error: String) -> Self {
+        Self::Rejected(error)
+    }
+}
+
+impl From<&str> for RetirementError {
+    fn from(error: &str) -> Self {
+        Self::Rejected(error.into())
+    }
+}
+
+impl std::fmt::Display for RetirementError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ControllerEpochConflict => f.write_str("environment_retirement_epoch_conflict"),
+            Self::Rejected(error) => f.write_str(error),
+        }
+    }
+}
+
+impl From<RetirementError> for String {
+    fn from(error: RetirementError) -> Self {
+        error.to_string()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct RetirementTarget {
     pub allocation_execution_id: String,
-    pub allocation_agent_run_id: String,
+    pub allocation_agent_run_id: Option<String>,
+    pub allocation_owner: centaeris_core::execution::EnvironmentTaskOwner,
     pub environment_id: String,
     pub instance_id: String,
     pub container_id: String,
@@ -65,10 +100,10 @@ impl PostgresRuntimeStore {
         &self,
         request: &RetirementRequest,
         retire: impl FnOnce(&RetirementTarget) -> Result<bool, String> + Send,
-    ) -> Result<RetirementResult, String> {
+    ) -> Result<RetirementResult, RetirementError> {
         request.validate()?;
         let body = serde_json::to_string(request).map_err(|e| e.to_string())?;
-        self.with_execution_control_client(|client| {
+        self.with_execution_control_client_error(|client| {
             let lock = lock_host(client)?;
             let mut tx = lock.0.transaction().map_err(|e| e.to_string())?;
             super::super::resource_commit::require_durable_resource_commit(&mut tx)?;
@@ -79,20 +114,21 @@ impl PostgresRuntimeStore {
             let (execution, container) = if let Some(row) = previous {
                 if row.get::<_,String>(0) != body { return Err("retirement operation conflict".into()); }
                 if row.get::<_,String>(1) == "destroyed" {
+                    super::super::host_retirement::enqueue(&mut tx,&request.host_id,&request.instance_id)?;
                     tx.commit().map_err(|e| e.to_string())?;
                     return Ok(retirement_result(request, "destroyed"));
                 }
                 (row.get::<_,String>(2), row.get::<_,String>(3))
             } else {
-                if env.get::<_,i64>(0) != request.expected_controller_epoch { return Err("retirement controller epoch rejected".into()); }
+                if env.get::<_,i64>(0) != request.expected_controller_epoch { return Err(RetirementError::ControllerEpochConflict); }
                 let row = tx.query_opt("SELECT s.execution_id,s.container_id FROM runtime.resident_sandboxes s JOIN runtime.execution_instances i ON i.execution_id=s.execution_id AND i.instance_id=s.instance_id WHERE s.environment_id=$1 AND s.instance_id=$2 AND s.host_id=$3 AND s.allocation_mode='retained' AND i.allocation_mode='retained' FOR UPDATE OF s", &[&request.environment_id,&request.instance_id,&request.host_id]).map_err(|e| e.to_string())?.ok_or("retirement allocation missing or mismatched")?;
                 let execution: String = row.get(0);
                 let container = row.get::<_,Option<String>>(1).ok_or("retirement physical identity unknown")?;
                 tx.execute("INSERT INTO runtime.environment_retirements(operation_id,environment_id,instance_id,host_id,allocation_execution_id,container_id,request_json,state,recorded_at_ms) VALUES($1,$2,$3,$4,$5,$6,$7,'pending',(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint)", &[&request.operation_id,&request.environment_id,&request.instance_id,&request.host_id,&execution,&container,&body]).map_err(|e| e.to_string())?;
                 (execution, container)
             };
-            let row = tx.query_one("SELECT agent_run_id,image_digest,binding_digest FROM runtime.execution_instances WHERE execution_id=$1 AND allocation_execution_id=execution_id AND environment_id=$2 AND instance_id=$3 AND host_id=$4 AND allocation_mode='retained'", &[&execution,&request.environment_id,&request.instance_id,&request.host_id]).map_err(|e| e.to_string())?;
-            let target = RetirementTarget { allocation_execution_id: execution.clone(), allocation_agent_run_id: row.get(0), environment_id: request.environment_id.clone(), instance_id: request.instance_id.clone(), container_id: container, image_digest: row.get(1), binding_digest: row.get(2) };
+            let row = tx.query_one("SELECT agent_run_id,image_digest,binding_digest,allocation_owner_json FROM runtime.execution_instances WHERE execution_id=$1 AND allocation_execution_id=execution_id AND environment_id=$2 AND instance_id=$3 AND host_id=$4 AND allocation_mode='retained'", &[&execution,&request.environment_id,&request.instance_id,&request.host_id]).map_err(|e| e.to_string())?;
+            let target = RetirementTarget { allocation_execution_id: execution.clone(), allocation_agent_run_id: row.get(0), allocation_owner: serde_json::from_str(&row.get::<_,String>(3)).map_err(|_|"allocation_owner_invalid")?, environment_id: request.environment_id.clone(), instance_id: request.instance_id.clone(), container_id: container, image_digest: row.get(1), binding_digest: row.get(2) };
             tx.execute("UPDATE runtime.resident_sandboxes SET state='releasing' WHERE execution_id=$1 AND host_id=$2 AND instance_id=$3", &[&execution,&request.host_id,&request.instance_id]).map_err(|e| e.to_string())?;
             // No physical mutation before this synchronous resource commit.
             tx.commit().map_err(|e| e.to_string())?;
@@ -102,6 +138,7 @@ impl PostgresRuntimeStore {
             super::super::resource_commit::require_durable_resource_commit(&mut tx)?;
             tx.execute("DELETE FROM runtime.resident_sandboxes WHERE execution_id=$1 AND host_id=$2 AND instance_id=$3 AND state='releasing'", &[&execution,&request.host_id,&request.instance_id]).map_err(|e| e.to_string())?;
             tx.execute("UPDATE runtime.environment_retirements SET state='destroyed' WHERE operation_id=$1 AND state='pending'", &[&request.operation_id]).map_err(|e| e.to_string())?;
+            super::super::host_retirement::enqueue(&mut tx,&request.host_id,&request.instance_id)?;
             tx.commit().map_err(|e| e.to_string())?;
             Ok(retirement_result(request, "destroyed"))
         })

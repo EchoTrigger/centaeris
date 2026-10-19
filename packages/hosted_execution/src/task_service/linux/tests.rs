@@ -3,6 +3,131 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+fn retirement_preserves_a_confirmed_exit_while_the_supervisor_handle_is_still_present() {
+    let root = lock_root();
+    let control = root.join("control");
+    let output = root.join("output");
+    let groups = root.join("groups");
+    for path in [&control, &output, &groups] {
+        fs::create_dir(path).unwrap();
+    }
+    seeded_running_journal(&control);
+    let mut manager = Manager::open(
+        TaskStorage::new(control, output, OUTPUT_BUDGET_BYTES).unwrap(),
+        groups.clone(),
+        "i",
+    )
+    .unwrap();
+    let id = manager.journal.tasks.keys().next().unwrap().clone();
+    let snapshot = &mut manager.journal.tasks.get_mut(&id).unwrap().snapshot;
+    snapshot.state = EnvironmentTaskState::Exited;
+    snapshot.exit_code = Some(7);
+    snapshot.output_complete = true;
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "exit 7"])
+        .spawn()
+        .unwrap();
+    child.wait().unwrap();
+    let supervisor = thread::spawn(|| ());
+    while !supervisor.is_finished() {
+        thread::yield_now();
+    }
+    manager.live.insert(
+        id.clone(),
+        Live {
+            child: TaskChild::Local(child),
+            input: None,
+            cgroup: groups.join(&id),
+            supervisor,
+            input_worker: None,
+        },
+    );
+    let manager = Arc::new(Mutex::new(manager));
+    assert!(retire_manager(&manager).unwrap());
+    let snapshot = manager.lock().unwrap().journal.tasks[&id].snapshot.clone();
+    assert_eq!(snapshot.state, EnvironmentTaskState::Exited);
+    assert_eq!(snapshot.exit_code, Some(7));
+    assert!(snapshot.output_complete);
+    assert!(snapshot.cleanup_complete);
+    drop(manager);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn retirement_waits_for_a_reserved_helper_input_worker() {
+    let root = lock_root();
+    let control = root.join("control");
+    let output = root.join("output");
+    for path in [&control, &output] {
+        fs::create_dir(path).unwrap();
+    }
+    let manager = Manager::open(
+        TaskStorage::new(control, output, OUTPUT_BUDGET_BYTES).unwrap(),
+        root.join("unused-cgroups"),
+        "i",
+    )
+    .unwrap();
+    let worker_lease = HelperInputLease {
+        _input_guard: None,
+        _worker: DrainLease::new(&manager.drain_workers),
+    };
+    let input = File::create(root.join("input")).unwrap();
+    let worker = ReservedInput::new(input, Some(Arc::new(worker_lease))).unwrap();
+    let manager = Arc::new(Mutex::new(manager));
+    assert!(!retire_manager(&manager).unwrap());
+    drop(worker);
+    assert!(retire_manager(&manager).unwrap());
+    drop(manager);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn retirement_waits_for_output_writers_without_inventing_exit_or_eof_facts() {
+    let root = lock_root();
+    let control = root.join("control");
+    let output = root.join("output");
+    let groups = root.join("groups");
+    for path in [&control, &output, &groups] {
+        fs::create_dir(path).unwrap();
+    }
+    seeded_running_journal(&control);
+    let mut manager = Manager::open(
+        TaskStorage::new(control.clone(), output, OUTPUT_BUDGET_BYTES).unwrap(),
+        groups,
+        "i",
+    )
+    .unwrap();
+    let id = manager.journal.tasks.keys().next().unwrap().clone();
+    manager.journal.tasks.get_mut(&id).unwrap().snapshot.state = EnvironmentTaskState::Unknown;
+    let original = manager.journal.tasks[&id].snapshot.clone();
+    let writer = DrainLease::new(&manager.drain_workers);
+    let manager = Arc::new(Mutex::new(manager));
+    let reaper = start_reaper(&manager).unwrap();
+    assert!(
+        !retire_manager(&manager).unwrap(),
+        "active output writers keep retirement pending"
+    );
+    drop(writer);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !reaper.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(reaper.is_finished(), "retirement must stop its own reaper");
+    reaper.join().unwrap();
+    assert!(retire_manager(&manager).unwrap());
+    let snapshot = manager.lock().unwrap().journal.tasks[&id].snapshot.clone();
+    assert_eq!(snapshot.state, original.state);
+    assert_eq!(snapshot.exit_code, original.exit_code);
+    assert_eq!(snapshot.output_complete, original.output_complete);
+    assert!(
+        snapshot.cleanup_complete,
+        "only independently proven domain absence changes"
+    );
+    drop(manager);
+    fs::remove_dir_all(root).unwrap();
+}
+
 // An unrelated test's fork inherits flock descriptions until exec closes them.
 // Fixtures that assert immediate lock release therefore own an entire process.
 fn isolated_lock_fixture(flag: &str, name: &str) -> bool {
@@ -109,13 +234,100 @@ fn lock_root() -> PathBuf {
     fs::create_dir_all(&root).unwrap();
     root
 }
+
+#[test]
+fn supervisor_commits_eof_before_domain_cleanup_without_rewriting_unchanged_facts() {
+    let root = lock_root();
+    let control = root.join("control");
+    let output = root.join("output");
+    let groups = root.join("groups");
+    for path in [&control, &output, &groups] {
+        fs::create_dir(path).unwrap();
+    }
+    seeded_running_journal(&control);
+    let storage = TaskStorage::new(control.clone(), output, OUTPUT_BUDGET_BYTES).unwrap();
+    let mut manager = Manager::open(storage, groups.clone(), "i").unwrap();
+    let id = manager.journal.tasks.keys().next().unwrap().clone();
+    manager.journal.tasks.get_mut(&id).unwrap().snapshot.state = EnvironmentTaskState::Running;
+    fs::create_dir(groups.join(&id)).unwrap();
+    fs::write(groups.join(&id).join("cgroup.events"), "populated 1\n").unwrap();
+    let child = Command::new("/bin/sh")
+        .args(["-c", "exec sleep 5"])
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let manager = Arc::new(Mutex::new(manager));
+    let mut guard = manager.lock().unwrap();
+    let worker_manager = manager.clone();
+    let worker_id = id.clone();
+    let worker = thread::spawn(move || {
+        supervise(
+            worker_manager,
+            worker_id,
+            0,
+            thread::spawn(|| true),
+            thread::spawn(|| true),
+        )
+    });
+    guard.live.insert(
+        id.clone(),
+        Live {
+            child: TaskChild::Local(child),
+            input: None,
+            cgroup: groups.join(&id),
+            supervisor: worker,
+            input_worker: None,
+        },
+    );
+    drop(guard);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let observed_eof = loop {
+        if manager.lock().unwrap().journal.tasks[&id]
+            .snapshot
+            .output_complete
+        {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    let before = fs::read(control.join("history.sqlite")).unwrap();
+    thread::sleep(Duration::from_millis(120));
+    let unchanged = before == fs::read(control.join("history.sqlite")).unwrap();
+    let before_cleanup = manager.lock().unwrap().journal.tasks[&id].snapshot.clone();
+    // The fake observation seam never owns a real cgroup. Cleanup this exact
+    // direct child before asserting so a failing test cannot leave it running.
+    unsafe {
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
+    fs::write(groups.join(&id).join("cgroup.events"), "populated 0\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while manager.lock().unwrap().live.contains_key(&id) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        observed_eof,
+        "stdout/stderr EOF must commit while the domain remains populated"
+    );
+    assert!(
+        unchanged,
+        "polling unchanged physical facts must not rewrite the durable index"
+    );
+    assert!(!before_cleanup.cleanup_complete);
+    assert_eq!(before_cleanup.state, EnvironmentTaskState::Running);
+    assert!(manager.lock().unwrap().live.is_empty());
+    drop(manager);
+    fs::remove_dir_all(root).unwrap();
+}
 fn seeded_running_journal(root: &Path) -> Vec<u8> {
     let mut journal = Journal::open(root, "i").unwrap();
     journal
         .takeover_persist(
             EnvironmentTaskFence {
                 environment_instance_id: "i".into(),
-                controller_id: "r".into(),
+                controller_owner: EnvironmentTaskOwner::AgentRun { run_id: "r".into() },
                 controller_epoch: 3,
                 controller_purpose: EnvironmentTaskControllerPurpose::Execute,
             },
@@ -127,7 +339,8 @@ fn seeded_running_journal(root: &Path) -> Vec<u8> {
         task.clone(),
         Record {
             digest: "d".repeat(64),
-            creator_controller_id: "r".into(),
+            creator_owner: EnvironmentTaskOwner::AgentRun { run_id: "r".into() },
+            identity_version: TaskIdentityVersion::OwnerV3,
             creator_epoch: 3,
             snapshot: EnvironmentTaskSnapshot {
                 task_id: task.clone(),
@@ -342,7 +555,7 @@ fn corrupt_or_removed_output_does_not_prevent_control_restart_and_queries() {
     fs::create_dir(&output).unwrap();
     let fence = EnvironmentTaskFence {
         environment_instance_id: "i".into(),
-        controller_id: "r".into(),
+        controller_owner: EnvironmentTaskOwner::AgentRun { run_id: "r".into() },
         controller_epoch: 1,
         controller_purpose: EnvironmentTaskControllerPurpose::Execute,
     };
@@ -362,7 +575,8 @@ fn corrupt_or_removed_output_does_not_prevent_control_restart_and_queries() {
         task_id.clone(),
         Record {
             digest: "d".repeat(64),
-            creator_controller_id: "r".into(),
+            creator_owner: EnvironmentTaskOwner::AgentRun { run_id: "r".into() },
+            identity_version: TaskIdentityVersion::OwnerV3,
             creator_epoch: 1,
             snapshot: snapshot.clone(),
         },
@@ -414,7 +628,7 @@ fn corrupt_or_removed_output_does_not_prevent_control_restart_and_queries() {
         &manager,
         EnvironmentTaskRequest::Takeover {
             environment_instance_id: "i".into(),
-            controller_id: "r".into(),
+            controller_owner: EnvironmentTaskOwner::AgentRun { run_id: "r".into() },
             controller_epoch: 2,
             controller_purpose: EnvironmentTaskControllerPurpose::Execute,
         },
@@ -470,7 +684,9 @@ impl Fixture {
         fs::create_dir_all("/mnt/data").unwrap();
         let fence = EnvironmentTaskFence {
             environment_instance_id: suffix.clone(),
-            controller_id: "run-one".into(),
+            controller_owner: EnvironmentTaskOwner::AgentRun {
+                run_id: "run-one".into(),
+            },
             controller_epoch: 1,
             controller_purpose: EnvironmentTaskControllerPurpose::Execute,
         };
@@ -487,7 +703,9 @@ impl Fixture {
             &manager,
             EnvironmentTaskRequest::Takeover {
                 environment_instance_id: suffix,
-                controller_id: fence.controller_id.clone(),
+                controller_owner: EnvironmentTaskOwner::AgentRun {
+                    run_id: fence.controller_owner.id().to_owned(),
+                },
                 controller_epoch: 1,
                 controller_purpose: EnvironmentTaskControllerPurpose::Execute,
             },
@@ -512,6 +730,7 @@ impl Fixture {
             scope,
             program: "/bin/sh".into(),
             args: vec!["-c".into(), script.into()],
+            env: BTreeMap::new(),
             cwd: "/mnt/data".into(),
             timeout_ms: 10_000,
         }
@@ -589,12 +808,16 @@ fn one_hundred_runs_release_history_without_stopping_environment_task() {
     let mut old_request = None;
     for epoch in 2..=101 {
         f.fence.controller_epoch = epoch;
-        f.fence.controller_id = format!("run-{epoch}");
+        f.fence.controller_owner = EnvironmentTaskOwner::AgentRun {
+            run_id: format!("run-{epoch}"),
+        };
         Manager::handle(
             &f.manager,
             EnvironmentTaskRequest::Takeover {
                 environment_instance_id: f.fence.environment_instance_id.clone(),
-                controller_id: f.fence.controller_id.clone(),
+                controller_owner: EnvironmentTaskOwner::AgentRun {
+                    run_id: f.fence.controller_owner.id().to_owned(),
+                },
                 controller_epoch: epoch,
                 controller_purpose: EnvironmentTaskControllerPurpose::Execute,
             },
@@ -603,7 +826,7 @@ fn one_hundred_runs_release_history_without_stopping_environment_task() {
         let request = f.start(
             "foreground",
             EnvironmentTaskScope::Run {
-                run_id: f.fence.controller_id.clone(),
+                run_id: f.fence.controller_owner.id().to_owned(),
             },
             "printf completed",
         );
@@ -613,7 +836,7 @@ fn one_hundred_runs_release_history_without_stopping_environment_task() {
             &f.manager,
             EnvironmentTaskRequest::EndRun {
                 fence: f.fence.clone(),
-                run_id: f.fence.controller_id.clone(),
+                run_id: f.fence.controller_owner.id().to_owned(),
                 operation_id: f.fence.operation_id("end"),
             },
         )
@@ -678,7 +901,7 @@ fn same_run_history_retirement_keeps_output_and_progress_before_run_close() {
             f.start(
                 &format!("short-{index}"),
                 EnvironmentTaskScope::Run {
-                    run_id: f.fence.controller_id.clone(),
+                    run_id: f.fence.controller_owner.id().to_owned(),
                 },
                 "printf retained-output",
             ),
@@ -690,7 +913,7 @@ fn same_run_history_retirement_keeps_output_and_progress_before_run_close() {
     let overflow = f.start(
         "overflow",
         EnvironmentTaskScope::Run {
-            run_id: f.fence.controller_id.clone(),
+            run_id: f.fence.controller_owner.id().to_owned(),
         },
         "false",
     );
@@ -701,18 +924,22 @@ fn same_run_history_retirement_keeps_output_and_progress_before_run_close() {
         &f.manager,
         EnvironmentTaskRequest::EndRun {
             fence: f.fence.clone(),
-            run_id: f.fence.controller_id.clone(),
+            run_id: f.fence.controller_owner.id().to_owned(),
             operation_id: f.fence.operation_id("end"),
         },
     )
     .unwrap();
-    f.fence.controller_id = "next-run".into();
+    f.fence.controller_owner = EnvironmentTaskOwner::AgentRun {
+        run_id: "next-run".into(),
+    };
     f.fence.controller_epoch = 2;
     Manager::handle(
         &f.manager,
         EnvironmentTaskRequest::Takeover {
             environment_instance_id: f.fence.environment_instance_id.clone(),
-            controller_id: f.fence.controller_id.clone(),
+            controller_owner: EnvironmentTaskOwner::AgentRun {
+                run_id: f.fence.controller_owner.id().to_owned(),
+            },
             controller_epoch: 2,
             controller_purpose: EnvironmentTaskControllerPurpose::Execute,
         },
@@ -723,7 +950,7 @@ fn same_run_history_retirement_keeps_output_and_progress_before_run_close() {
         f.start(
             "after",
             EnvironmentTaskScope::Run {
-                run_id: f.fence.controller_id.clone(),
+                run_id: f.fence.controller_owner.id().to_owned(),
             },
             "true",
         ),
@@ -741,7 +968,7 @@ fn same_run_reconstructed_controller_does_not_repeat_spawn_or_acknowledged_input
     let mut start = f.start(
         "cat",
         EnvironmentTaskScope::Run {
-            run_id: f.fence.controller_id.clone(),
+            run_id: f.fence.controller_owner.id().to_owned(),
         },
         "cat",
     );
@@ -759,7 +986,9 @@ fn same_run_reconstructed_controller_does_not_repeat_spawn_or_acknowledged_input
         &f.manager,
         EnvironmentTaskRequest::Takeover {
             environment_instance_id: f.fence.environment_instance_id.clone(),
-            controller_id: f.fence.controller_id.clone(),
+            controller_owner: EnvironmentTaskOwner::AgentRun {
+                run_id: f.fence.controller_owner.id().to_owned(),
+            },
             controller_epoch: 2,
             controller_purpose: EnvironmentTaskControllerPurpose::Execute,
         },
@@ -801,8 +1030,8 @@ fn same_run_reconstructed_controller_does_not_repeat_spawn_or_acknowledged_input
     assert_eq!(m.journal.tasks.len(), 1);
     assert_eq!(m.journal.tasks[&task].creator_epoch, 1);
     assert_eq!(
-        m.journal.tasks[&task].creator_controller_id,
-        f.fence.controller_id
+        m.journal.tasks[&task].creator_owner,
+        f.fence.controller_owner
     );
     let (chunks, _, _, _, _) = m.logs[&task]
         .lock()
@@ -822,7 +1051,7 @@ fn input_history_pressure_leaves_termination_and_end_run_reconcilable() {
     let mut start = f.start(
         "cat",
         EnvironmentTaskScope::Run {
-            run_id: f.fence.controller_id.clone(),
+            run_id: f.fence.controller_owner.id().to_owned(),
         },
         "cat",
     );
@@ -866,7 +1095,7 @@ fn input_history_pressure_leaves_termination_and_end_run_reconcilable() {
     f.await_cleanup(&task);
     let end = EnvironmentTaskRequest::EndRun {
         fence: f.fence.clone(),
-        run_id: f.fence.controller_id.clone(),
+        run_id: f.fence.controller_owner.id().to_owned(),
         operation_id: f.fence.operation_id("end"),
     };
     assert!(matches!(
@@ -886,7 +1115,7 @@ fn task_deadline_exits_before_late_input_and_uncertain_input_is_not_replayed() {
     let mut start = f.start(
         "deadline-cat",
         EnvironmentTaskScope::Run {
-            run_id: f.fence.controller_id.clone(),
+            run_id: f.fence.controller_owner.id().to_owned(),
         },
         "exec cat",
     );
@@ -1212,7 +1441,10 @@ fn real_background_tree_survives_controller_takeover_and_drains_both_streams() {
         }
         drop(log);
         drop(m);
-        assert!(Instant::now()<end,"both streams must drain through their completion markers and expose the overwritten prefix");
+        assert!(
+            Instant::now() < end,
+            "both streams must drain through their completion markers and expose the overwritten prefix"
+        );
         thread::sleep(Duration::from_millis(20));
     }
     let mut updated = request;
@@ -1223,7 +1455,9 @@ fn real_background_tree_survives_controller_takeover_and_drains_both_streams() {
         &f.manager,
         EnvironmentTaskRequest::Takeover {
             environment_instance_id: f.fence.environment_instance_id.clone(),
-            controller_id: f.fence.controller_id.clone(),
+            controller_owner: EnvironmentTaskOwner::AgentRun {
+                run_id: f.fence.controller_owner.id().to_owned(),
+            },
             controller_epoch: 2,
             controller_purpose: EnvironmentTaskControllerPurpose::Execute,
         },
@@ -1502,7 +1736,7 @@ fn cross_run_takeover_cleans_only_old_run_tasks_and_is_retryable() {
         f.start(
             "run",
             EnvironmentTaskScope::Run {
-                run_id: f.fence.controller_id.clone(),
+                run_id: f.fence.controller_owner.id().to_owned(),
             },
             "sleep 30 & wait",
         ),
@@ -1519,7 +1753,9 @@ fn cross_run_takeover_cleans_only_old_run_tasks_and_is_retryable() {
     .unwrap());
     let takeover = EnvironmentTaskRequest::Takeover {
         environment_instance_id: f.fence.environment_instance_id.clone(),
-        controller_id: "run-two".into(),
+        controller_owner: EnvironmentTaskOwner::AgentRun {
+            run_id: "run-two".into(),
+        },
         controller_epoch: 2,
         controller_purpose: EnvironmentTaskControllerPurpose::Execute,
     };
@@ -1534,7 +1770,9 @@ fn cross_run_takeover_cleans_only_old_run_tasks_and_is_retryable() {
     f.await_cleanup(&run_id);
     assert!(f.manager.lock().unwrap().live.contains_key(&environment_id));
     let fence = EnvironmentTaskFence {
-        controller_id: "run-two".into(),
+        controller_owner: EnvironmentTaskOwner::AgentRun {
+            run_id: "run-two".into(),
+        },
         controller_epoch: 2,
         ..f.fence.clone()
     };
@@ -1559,7 +1797,7 @@ fn terminal_cleanup_controller_cannot_resume_execution_or_kill_environment_scope
         f.start(
             "run",
             EnvironmentTaskScope::Run {
-                run_id: f.fence.controller_id.clone(),
+                run_id: f.fence.controller_owner.id().to_owned(),
             },
             "sleep 30 & wait",
         ),
@@ -1583,7 +1821,9 @@ fn terminal_cleanup_controller_cannot_resume_execution_or_kill_environment_scope
         &f.manager,
         EnvironmentTaskRequest::Takeover {
             environment_instance_id: fence.environment_instance_id.clone(),
-            controller_id: fence.controller_id.clone(),
+            controller_owner: EnvironmentTaskOwner::AgentRun {
+                run_id: fence.controller_owner.id().to_owned(),
+            },
             controller_epoch: 2,
             controller_purpose: EnvironmentTaskControllerPurpose::Cleanup,
         },
@@ -1619,7 +1859,7 @@ fn terminal_cleanup_controller_cannot_resume_execution_or_kill_environment_scope
         &f.manager,
         EnvironmentTaskRequest::EndRun {
             fence,
-            run_id: f.fence.controller_id.clone(),
+            run_id: f.fence.controller_owner.id().to_owned(),
             operation_id: "2:end".into(),
         },
     )
@@ -1679,7 +1919,9 @@ fn output_capacity_failure_preserves_existing_process_control_and_allows_cleanup
         &f.manager,
         EnvironmentTaskRequest::Takeover {
             environment_instance_id: fence.environment_instance_id.clone(),
-            controller_id: fence.controller_id.clone(),
+            controller_owner: EnvironmentTaskOwner::AgentRun {
+                run_id: fence.controller_owner.id().to_owned(),
+            },
             controller_epoch: fence.controller_epoch,
             controller_purpose: fence.controller_purpose.clone(),
         },

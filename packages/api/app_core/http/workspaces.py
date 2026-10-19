@@ -1391,15 +1391,6 @@ def create_session_message(
                 if linked_attachment_refs != set(attachment_refs):
                     return Status(403, {"error": "attachment_not_accessible"})
             definition_version = published_version_for_agent(session.agent, membership)
-            if session.current_environment.benchmark_profile is not None:
-                if session.agent_runs.exists():
-                    raise AgentSessionCreationError(409, "benchmark_environment_single_run_required")
-                from app_core.plugin_catalog import plugin_activation_for_workspace
-                activation = (definition_version.plugin_activation if definition_version else
-                              plugin_activation_for_workspace(workspace))
-                if (attachment_refs or session.assetLinks.exists() or activation["packages"]
-                        or session.workspaceGeneration != 0):
-                    raise AgentSessionCreationError(400, "benchmark_profile_combination_unsupported")
             agent_run = AgentRun.objects.create(
                 workspace=workspace,
                 session=session,

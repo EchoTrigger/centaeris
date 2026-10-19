@@ -16,6 +16,23 @@ fn commit_wake_signal(agent_run_id: &str, high_water_sequence: u64) -> serde_jso
     })
 }
 
+fn live_wake_signal(
+    agent_run_id: &str,
+    after_sequence: u64,
+    revision: u64,
+    pending: &PendingLiveText,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema": SIGNAL_SCHEMA,
+        "kind": "live",
+        "agentRunId": agent_run_id,
+        "afterSequence": after_sequence,
+        "revision": revision,
+        "turnId": pending.turn_id,
+        "messageId": pending.message_id,
+    })
+}
+
 pub struct TransientAgentRunStream {
     agent_run_id: String,
     signal_stream_key: String,
@@ -145,7 +162,7 @@ elseif kind == "replace" then
   redis.call("SET", KEYS[1], ARGV[2])
   redis.call("HSET", KEYS[2], "revision", ARGV[6])
   redis.call("HSET", KEYS[2], "reasoning", ARGV[9])
-  local cursor = redis.call("XADD", KEYS[3], "MAXLEN", "~", ARGV[8], "*", "signal", ARGV[7])
+  local cursor = redis.call("XADD", KEYS[3], "MAXLEN", "=", ARGV[8], "*", "signal", ARGV[7])
   redis.call("EXPIRE", KEYS[1], ttl)
   redis.call("EXPIRE", KEYS[2], ttl)
   redis.call("EXPIRE", KEYS[3], ttl)
@@ -238,7 +255,7 @@ impl TransientAgentRunStream {
         let cursor = redis::cmd("XADD")
             .arg(self.signal_stream_key.as_str())
             .arg("MAXLEN")
-            .arg("~")
+            .arg("=")
             .arg(STREAM_MAX_LENGTH)
             .arg("*")
             .arg(SIGNAL_FIELD)
@@ -368,17 +385,14 @@ impl TransientAgentRunStream {
             .live_revision
             .checked_add(1)
             .ok_or_else(|| LiveTextError::Fatal("live revision exhausted".to_string()))?;
-        let encoded = serde_json::to_string(&serde_json::json!({
-            "schema": SIGNAL_SCHEMA,
-            "kind": "live",
-            "agentRunId": self.agent_run_id,
-            "afterSequence": self.live_after_sequence,
-            "revision": new_revision,
-            "turnId": pending.turn_id,
-            "messageId": pending.message_id,
-            "text": self.live_text,
-            "reasoning": self.live_reasoning,
-        }))
+        // Wakes never retain generated content. Readers coalesce them and load
+        // the one current text/reasoning snapshot under its atomic revision.
+        let encoded = serde_json::to_string(&live_wake_signal(
+            &self.agent_run_id,
+            self.live_after_sequence,
+            new_revision,
+            pending,
+        ))
         .map_err(|error| {
             LiveTextError::Fatal(format!("encode live stream event failed: {error}"))
         })?;
@@ -504,7 +518,125 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore = "requires isolated TEST_REASONING_REDIS_URL Docker service"]
+    #[ignore = "requires isolated TEST_REASONING_REDIS_URL service"]
+    fn redis_signal_history_has_an_exact_cap_for_live_and_commit_wakes() {
+        let url = std::env::var("TEST_REASONING_REDIS_URL").expect("isolated test Redis URL");
+        let run = format!("wake-cap-{}", std::process::id());
+        let mut stream = TransientAgentRunStream::connect(&url, &run, 60, 60).unwrap();
+        stream
+            .live_open("turn-1", "message:turn-1:assistant", 4, "")
+            .unwrap();
+        for index in 0..300 {
+            stream
+                .live_replace("turn-1", "message:turn-1:assistant", "answer")
+                .unwrap();
+            stream.live_flush().unwrap();
+            let count: usize = stream.connection.xlen(signal_stream_key(&run)).unwrap();
+            assert!(
+                count <= STREAM_MAX_LENGTH,
+                "live wake count {count} exceeds exact cap"
+            );
+            stream.publish_commit_wake(index + 5).unwrap();
+            let count: usize = stream.connection.xlen(signal_stream_key(&run)).unwrap();
+            assert!(
+                count <= STREAM_MAX_LENGTH,
+                "commit wake count {count} exceeds exact cap"
+            );
+        }
+        let _: usize = stream
+            .connection
+            .del((
+                signal_stream_key(&run),
+                live_text_key(&run),
+                live_meta_key(&run),
+            ))
+            .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires isolated TEST_REASONING_REDIS_URL service with MEMORY USAGE"]
+    fn redis_live_history_retains_one_complete_snapshot_with_bounded_wakes() {
+        let url = std::env::var("TEST_REASONING_REDIS_URL").expect("isolated test Redis URL");
+        let mut streams: Vec<_> = (0..2)
+            .map(|index| {
+                let run = format!("bounded-live-{}-{index}", std::process::id());
+                let mut stream = TransientAgentRunStream::connect(&url, &run, 60, 60).unwrap();
+                stream
+                    .live_open("turn-1", "message:turn-1:assistant", 4, "")
+                    .unwrap();
+                stream
+            })
+            .collect();
+        let text = "完整 answer ".repeat(512);
+        let mut reasoning = String::new();
+        for revision in 1..=320 {
+            reasoning.push_str(&"thinking 完整 ".repeat(32));
+            for stream in &mut streams {
+                stream
+                    .live_replace("turn-1", "message:turn-1:assistant", &text)
+                    .unwrap();
+                stream
+                    .live_reasoning("turn-1", "request-1", &reasoning)
+                    .unwrap();
+                stream.live_flush().unwrap();
+                stream.publish_commit_wake(4 + revision).unwrap();
+            }
+        }
+        for stream in &mut streams {
+            let run = stream.agent_run_id.clone();
+            let mut restored = TransientAgentRunStream::connect(&url, &run, 60, 60).unwrap();
+            assert_eq!(
+                restored.read_live_text().unwrap().as_deref(),
+                Some(text.as_str())
+            );
+            assert_eq!(
+                restored.read_live_reasoning().unwrap().unwrap()["text"],
+                reasoning
+            );
+            let meta = restored.read_live_meta().unwrap().unwrap();
+            assert_eq!(meta.after_sequence, 4);
+            assert_eq!(meta.turn_id, "turn-1");
+            assert_eq!(meta.message_id, "message:turn-1:assistant");
+            assert_eq!(meta.revision, stream.live_revision);
+            let count: usize = restored.connection.xlen(signal_stream_key(&run)).unwrap();
+            assert!(
+                count <= STREAM_MAX_LENGTH,
+                "wake count {count} exceeds exact cap"
+            );
+            let mut total_bytes = 0usize;
+            for key in [
+                signal_stream_key(&run),
+                live_text_key(&run),
+                live_meta_key(&run),
+            ] {
+                let bytes: usize = redis::cmd("MEMORY")
+                    .arg("USAGE")
+                    .arg(&key)
+                    .query(&mut restored.connection)
+                    .unwrap();
+                total_bytes += bytes;
+                let ttl: i64 = restored.connection.ttl(&key).unwrap();
+                assert!((1..=60).contains(&ttl), "transient key must expire");
+            }
+            let latest_bytes = text.len() + reasoning.len();
+            println!(
+                "{run}: retainedBytes={total_bytes}, latestSnapshotBytes={latest_bytes}, wakeCount={count}"
+            );
+            assert!(
+                total_bytes <= latest_bytes * 3 + 256 * 1024,
+                "retained {total_bytes} bytes for latest snapshot of {latest_bytes} bytes"
+            );
+            assert!(stream
+                .live_seal_before_sequence("turn-1", "message:turn-1:assistant", 5)
+                .unwrap());
+            assert!(restored.read_live_text().unwrap().is_none());
+            assert!(restored.read_live_reasoning().unwrap().is_none());
+            let _: usize = restored.connection.del(signal_stream_key(&run)).unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "requires isolated TEST_REASONING_REDIS_URL service"]
     fn redis_reasoning_snapshot_survives_reconnect_and_seals_with_answer() {
         let url = std::env::var("TEST_REASONING_REDIS_URL").expect("isolated test Redis URL");
         let run = format!("reasoning-test-{}", std::process::id());
@@ -533,8 +665,18 @@ mod tests {
             .unwrap();
         let signal: String = records.ids[0].get("signal").unwrap();
         let signal: serde_json::Value = serde_json::from_str(&signal).unwrap();
-        assert_eq!(signal["reasoning"], thinking);
-        assert_eq!(signal["text"], text);
+        assert_eq!(
+            signal,
+            serde_json::json!({
+                "schema": SIGNAL_SCHEMA,
+                "kind": "live",
+                "agentRunId": run,
+                "afterSequence": 1,
+                "revision": restored.read_live_meta().unwrap().unwrap().revision,
+                "turnId": "turn-1",
+                "messageId": "message:turn-1:assistant",
+            })
+        );
         assert!(stream
             .live_seal_before_sequence("turn-1", "message:turn-1:assistant", 2)
             .unwrap());
@@ -695,17 +837,23 @@ mod tests {
     }
 
     #[test]
-    fn commit_wake_is_an_exact_payload_free_hint() {
-        let signal = commit_wake_signal("run_1", 42);
-
+    fn transient_wakes_match_the_shared_api_contract() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/agent-run-transient-signals.json"
+        ))
+        .unwrap();
+        assert_eq!(commit_wake_signal("run-1", 42), fixture["commitWake"]);
         assert_eq!(
-            signal,
-            serde_json::json!({
-                "schema": "agent_run.transient.signal.v1",
-                "kind": "commit_wake",
-                "agentRunId": "run_1",
-                "highWaterSequence": 42,
-            })
+            live_wake_signal(
+                "run-1",
+                4,
+                2,
+                &PendingLiveText {
+                    turn_id: "turn-1".to_string(),
+                    message_id: "message:turn-1:assistant".to_string(),
+                }
+            ),
+            fixture["live"]
         );
     }
 }

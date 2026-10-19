@@ -4,6 +4,9 @@ use sha2::{Digest, Sha256};
 
 use crate::agent_run_authorization::WorkspaceAgentRunAuthorization;
 
+pub(crate) mod maintenance;
+pub(crate) mod provision;
+
 const DOMAIN: &[u8] = b"workspace:environment-authorization:v1\0";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -51,18 +54,18 @@ impl<'de> Deserialize<'de> for EnvironmentBinding {
             }
         }
         let mut fields = deserializer.deserialize_map(Fields)?;
-        let retained = match fields.get("schema").and_then(|v| v.as_str()) {
-            Some("workspace.environment_authorization.v1") => false,
-            Some("workspace.environment_authorization.v2") => true,
-            _ => return Err(D::Error::custom("environment_authorization_schema_invalid")),
-        };
+        if fields.get("schema").and_then(|v| v.as_str())
+            != Some("workspace.environment_authorization.v1")
+        {
+            return Err(D::Error::custom("environment_authorization_schema_invalid"));
+        }
         let controller_names = [
             "controllerId",
             "controllerEpoch",
             "controllerLeaseDigest",
             "controllerPurpose",
         ];
-        let controller = if retained {
+        let controller = {
             let mut values = serde_json::Map::new();
             for name in controller_names {
                 values.insert(
@@ -76,8 +79,6 @@ impl<'de> Deserialize<'de> for EnvironmentBinding {
                 serde_json::from_value(serde_json::Value::Object(values))
                     .map_err(D::Error::custom)?,
             )
-        } else {
-            None
         };
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -113,8 +114,7 @@ pub(crate) struct EnvironmentAuthorization {
 impl EnvironmentBinding {
     pub(crate) fn digest(&self) -> Result<String, String> {
         match (&*self.schema, &*self.execution_mode, &self.controller) {
-            ("workspace.environment_authorization.v1", "perRun", None) => {}
-            ("workspace.environment_authorization.v2", "retained", Some(controller)) => {
+            ("workspace.environment_authorization.v1", "perRun" | "retained", Some(controller)) => {
                 if controller.controller_id != self.agent_run_id
                     || controller.controller_epoch < 1
                     || !matches!(
@@ -195,11 +195,7 @@ impl EnvironmentAuthorization {
             .map(|i| u8::from_str_radix(&encoded[i..i + 2], 16).expect("validated hex"))
             .collect();
         let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|e| e.to_string())?;
-        mac.update(if self.payload.controller.is_some() {
-            b"workspace:environment-authorization:v2\0"
-        } else {
-            DOMAIN
-        });
+        mac.update(DOMAIN);
         mac.update(digest.as_bytes());
         mac.verify_slice(&bytes)
             .map_err(|_| "environment_authorization_signature_invalid".into())
@@ -214,7 +210,12 @@ impl EnvironmentAuthorization {
             agent_run_id: authorization.agent_run_id.clone(),
             agent_run_authorization_digest: authorization.digest().unwrap(),
             execution_mode: "perRun".into(),
-            controller: None,
+            controller: Some(ControllerBinding {
+                controller_id: authorization.agent_run_id.clone(),
+                controller_epoch: 1,
+                controller_lease_digest: format!("sha256:{}", "a".repeat(64)),
+                controller_purpose: "execute".into(),
+            }),
         };
         let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
         mac.update(DOMAIN);
@@ -238,7 +239,7 @@ mod tests {
     #[test]
     fn controller_signature_binds_epoch_lease_and_purpose() {
         let value: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../tests/workspace/fixtures/environment_authorization/v2/valid.json"
+            "../../../tests/workspace/fixtures/environment_authorization/v1/retained.json"
         ))
         .unwrap();
         let authorization: WorkspaceAgentRunAuthorization = serde_json::from_str(include_str!(
@@ -280,13 +281,15 @@ mod tests {
         let mut mixed = value;
         mixed["payload"]["schema"] = "workspace.environment_authorization.v1".into();
         mixed["payload"]["executionMode"] = "perRun".into();
-        assert!(serde_json::from_value::<EnvironmentAuthorization>(mixed).is_err());
+        let mixed: EnvironmentAuthorization = serde_json::from_value(mixed).unwrap();
+        assert_eq!(mixed.payload.execution_mode, "perRun");
+        assert!(mixed.verify(&authorization, &digest, b"test-key").is_err());
     }
 
     #[test]
     fn controller_binding_rejects_invalid_authority_and_duplicate_fields() {
         let original: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../tests/workspace/fixtures/environment_authorization/v2/valid.json"
+            "../../../tests/workspace/fixtures/environment_authorization/v1/retained.json"
         ))
         .unwrap();
         for (field, value) in [
@@ -325,7 +328,7 @@ mod tests {
                 "../../../tests/workspace/fixtures/environment_authorization/v1/valid.json"
             ),
             include_str!(
-                "../../../tests/workspace/fixtures/environment_authorization/v2/valid.json"
+                "../../../tests/workspace/fixtures/environment_authorization/v1/retained.json"
             ),
         ] {
             let duplicate = source.replacen(

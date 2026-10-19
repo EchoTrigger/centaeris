@@ -1,0 +1,15 @@
+{
+  "payload": {
+    "schema": "workspace.environment_authorization.v1",
+    "environmentId": "environment_1",
+    "sessionId": "sess_1",
+    "agentRunId": "agent_run_1",
+    "agentRunAuthorizationDigest": "sha256:31a6abff1f44a1fa289bbda702f444e91e066bcda782b73118220bb9db7a3492",
+    "executionMode": "retained",
+    "controllerId": "agent_run_1",
+    "controllerEpoch": 1,
+    "controllerLeaseDigest": "sha256:ef00f99d10396558287dfcbfe0571f0f933d86e2c58a130fee0853388652726b",
+    "controllerPurpose": "execute"
+  },
+  "signature": "hmac-sha256:829638b0e3ccf1371b8e69324b3024f77c1ab18b8c449f252763a2ab09ddc9c9"
+}

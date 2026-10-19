@@ -23,7 +23,13 @@ if docker volume ls -q | grep -q '^centaeris-workspace_'; then
   exit 65
 fi
 
-env_file="$(mktemp)"
+umask 077
+fixture_directory="$(mktemp -d)"
+env_file="$fixture_directory/compose.env"
+helper_path="$fixture_directory/execution_agent"
+socket_directory="$fixture_directory/host"
+helper_container_id_file="$fixture_directory/helper-container.id"
+unset ENVIRONMENT_EXECUTION_HELPER ENVIRONMENT_HOST_SOCKET_DIRECTORY
 compose=(docker compose --parallel 1 --env-file "$env_file")
 
 cleanup() {
@@ -34,12 +40,16 @@ cleanup() {
     "${compose[@]}" logs --no-color --tail=200
   fi
   "${compose[@]}" down --volumes --remove-orphans
-  rm -f "$env_file"
+  if [[ -s "$helper_container_id_file" ]]; then
+    docker rm -f "$(cat "$helper_container_id_file")"
+  fi
+  rm -rf -- "$fixture_directory"
   exit "$status"
 }
 trap cleanup EXIT
 
-python3 - "$workspace_root/.env.example" "$env_file" <<'PY'
+mkdir -m 700 "$socket_directory"
+python3 - "$workspace_root/.env.example" "$env_file" "$helper_path" "$socket_directory" <<'PY'
 from pathlib import Path
 import sys
 
@@ -57,6 +67,8 @@ values = {
     "UPLOAD_TEMP_MAX_BYTES": "4194304",
     "UPLOAD_MAX_CONCURRENT": "2",
     "WORK_RETURN_AUDIT_INTERVAL_SECONDS": "3600",
+    "ENVIRONMENT_EXECUTION_HELPER": sys.argv[3],
+    "ENVIRONMENT_HOST_SOCKET_DIRECTORY": sys.argv[4],
 }
 rendered = []
 for line in source:
@@ -93,6 +105,12 @@ for service in document-processor workspace-general runtime api worker web; do
   "${compose[@]}" build --pull "$service"
 done
 "${compose[@]}" config --format json | python3 scripts/workspace/verify-deployment-images.py
+# This gate checks startup and migrations; its private socket directory has no
+# supervisor. Extract the real helper without running an AgentRun or container.
+helper_image="$("${compose[@]}" config --format json | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["workspace-general"]["image"])')"
+docker create --cidfile "$helper_container_id_file" "$helper_image" >/dev/null
+docker cp "$(cat "$helper_container_id_file"):/opt/centaeris/bin/execution_agent" "$helper_path"
+chmod 500 "$helper_path"
 "${compose[@]}" up -d --wait --wait-timeout 420 postgres redis api runtime worker material-worker web
 
 for service in postgres redis api runtime worker material-worker web; do

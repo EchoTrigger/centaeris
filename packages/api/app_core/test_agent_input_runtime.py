@@ -14,7 +14,7 @@ from django.test import TransactionTestCase, LiveServerTestCase
 from . import test_agent_input_delivery as fixture
 from . import test_native_consumption_runtime as native_fixture
 from . import test_agent_input_attachments as attachment_fixture
-from .runtime_client import build_agent_run_start
+from .testing import fenced_start_fixture
 
 
 def runtime_fixture_env(payload):
@@ -47,7 +47,7 @@ class AgentInputTypedStoreTests(TransactionTestCase):
         database = connection.settings_dict
         url = "postgresql://{}:{}@{}:{}/{}".format(quote(database["USER"]), quote(database["PASSWORD"]),
             database["HOST"], database["PORT"], quote(database["NAME"]))
-        payload = {"agentRunStart": build_agent_run_start(run), "databaseUrl": url,
+        payload = {"agentRunStart": fenced_start_fixture(run), "databaseUrl": url,
             "signingKey": settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY,
             "expected": [{"inputId": identity, "body": body} for identity, body in zip(
                 ["initial-one", "active-two"], bodies)]}
@@ -90,7 +90,7 @@ class AgentInputAttachmentStoreTests(LiveServerTestCase):
         database = connection.settings_dict
         url = "postgresql://{}:{}@{}:{}/{}".format(quote(database["USER"]), quote(database["PASSWORD"]),
             database["HOST"], database["PORT"], quote(database["NAME"]))
-        payload = {"agentRunStart": build_agent_run_start(run), "databaseUrl": url,
+        payload = {"agentRunStart": fenced_start_fixture(run), "databaseUrl": url,
             "signingKey": settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY, "attachmentRecovery": True,
             "apiUrl": self.live_server_url, "internalToken": settings.INTERNAL_API_TOKEN,
             "expectedImageData": {initial: base64.b64encode(image).decode(),
@@ -145,7 +145,7 @@ class AgentInputMainRequestTests(LiveServerTestCase):
             run = self.delivery("initial-one").queue.agent_run
             csrf_request = HttpRequest()
             csrf_token = get_token(csrf_request)
-            payload = {"agentRunStart": build_agent_run_start(run), "databaseUrl": url,
+            payload = {"agentRunStart": fenced_start_fixture(run), "databaseUrl": url,
                 "signingKey": settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY,
                 "apiUrl": self.live_server_url + self.input_url,
                 "cookie": settings.SESSION_COOKIE_NAME + "=" + self.client.cookies[settings.SESSION_COOKIE_NAME].value

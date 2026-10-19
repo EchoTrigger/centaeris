@@ -95,15 +95,25 @@ pub fn is_memory_uri(value: &str) -> bool {
 pub fn run_memory_file_system_operation(
     request: SandboxFileSystemRequest,
 ) -> Result<ExecutionFileSystemOutput, ExecutionFileSystemError> {
+    run_memory_file_system_operation_at(std::path::Path::new(MEMORY_CONTAINER_ROOT), request)
+}
+
+/// The host selects this root from the authenticated user and Agent scope.
+pub fn run_memory_file_system_operation_at(
+    root: &std::path::Path,
+    request: SandboxFileSystemRequest,
+) -> Result<ExecutionFileSystemOutput, ExecutionFileSystemError> {
     let memory_path = MemoryPath::parse(request.path.as_str()).map_err(|_| invalid_uri())?;
     let uri = memory_path.uri();
+    let root = memory_root(root).map_err(|error| sanitize_error(error, &uri))?;
     let operation = request.operation;
     let result = match operation {
         ExecutionFileSystemOperation::WriteFile {
             content,
             observed_file_hash,
             create_only,
-        } if memory_path.is_file() => atomic_write(
+        } if memory_path.is_file() => atomic_write_at(
+            &root,
             &memory_path,
             content.as_slice(),
             observed_file_hash.as_deref(),
@@ -117,10 +127,8 @@ pub fn run_memory_file_system_operation(
         )),
         operation => run_scoped_execution_file_system_operation(ExecutionFileSystemRequest {
             operation_id: None,
-            cwd: PathBuf::from(MEMORY_CONTAINER_ROOT),
-            policy: centaeris_core::execution::ExecutionPolicy::workspace_write_no_network(
-                MEMORY_CONTAINER_ROOT,
-            ),
+            cwd: root.clone(),
+            policy: centaeris_core::execution::ExecutionPolicy::workspace_write_no_network(&root),
             model_path: memory_path.relative_path().to_string_lossy().to_string(),
             operation,
         }),
@@ -210,23 +218,6 @@ fn memory_identity(path: &MemoryPath) -> ExecutionFileIdentity {
         key: uri.clone(),
         display_path: uri,
     }
-}
-
-#[cfg(target_os = "linux")]
-fn atomic_write(
-    memory_path: &MemoryPath,
-    content: &[u8],
-    expected_file_hash: Option<&str>,
-    create_only: bool,
-) -> Result<ExecutionFileWriteOutput, ExecutionFileSystemError> {
-    let root = memory_root()?;
-    atomic_write_at(
-        root.as_path(),
-        memory_path,
-        content,
-        expected_file_hash,
-        create_only,
-    )
 }
 
 #[cfg(target_os = "linux")]
@@ -367,7 +358,8 @@ fn install_atomic(
 }
 
 #[cfg(not(target_os = "linux"))]
-fn atomic_write(
+fn atomic_write_at(
+    _root: &std::path::Path,
     _memory_path: &MemoryPath,
     _content: &[u8],
     _expected_file_hash: Option<&str>,
@@ -379,11 +371,9 @@ fn atomic_write(
     ))
 }
 
-#[cfg(target_os = "linux")]
-fn memory_root() -> Result<PathBuf, ExecutionFileSystemError> {
-    let root = Path::new(MEMORY_CONTAINER_ROOT);
-    let metadata =
-        fs::symlink_metadata(root).map_err(|error| io_error("inspect Agent Memory root", error))?;
+fn memory_root(root: &std::path::Path) -> Result<PathBuf, ExecutionFileSystemError> {
+    let metadata = std::fs::symlink_metadata(root)
+        .map_err(|error| io_error("inspect Agent Memory root", error))?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(ExecutionFileSystemError::new(
             ExecutionFileSystemErrorKind::HostUnavailable,
@@ -450,7 +440,6 @@ fn unsupported_entry() -> ExecutionFileSystemError {
     )
 }
 
-#[cfg(target_os = "linux")]
 fn io_error(operation: &str, error: std::io::Error) -> ExecutionFileSystemError {
     let kind = match error.kind() {
         std::io::ErrorKind::NotFound => ExecutionFileSystemErrorKind::NotFound,
@@ -464,6 +453,39 @@ fn io_error(operation: &str, error: std::io::Error) -> ExecutionFileSystemError 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_host_root_preserves_uri_identity_and_isolates_scopes() {
+        let base = std::env::temp_dir().join(format!(
+            "centaeris-memory-scopes-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for scope in ["one", "two"] {
+            let root = base.join(scope);
+            std::fs::create_dir_all(root.join("topics")).unwrap();
+            std::fs::write(root.join("MEMORY.md"), scope.as_bytes()).unwrap();
+            let request = SandboxFileSystemRequest {
+                path: "plastic-memories://self/MEMORY.md".into(),
+                operation: ExecutionFileSystemOperation::ReadFile { max_bytes: 100 },
+            };
+            let ExecutionFileSystemOutput::ReadFile(read) =
+                run_memory_file_system_operation_at(&root, request).unwrap()
+            else {
+                panic!("read expected")
+            };
+            assert_eq!(read.bytes, scope.as_bytes());
+            assert_eq!(
+                read.identity.display_path,
+                "plastic-memories://self/MEMORY.md"
+            );
+            assert_eq!(read.identity.key, read.identity.display_path);
+        }
+        std::fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn uri_parser_accepts_only_the_agent_private_memory_tree() {

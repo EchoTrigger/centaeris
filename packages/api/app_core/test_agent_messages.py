@@ -149,12 +149,12 @@ class AgentMessageTests(TestCase):
         self.assertEqual(self.validate(run, recipientSessionId=self.work.id).status_code, 400)
 
     def test_only_bound_coordination_run_start_exposes_hosted_message_context(self):
-        from .runtime_client import build_agent_run_start
+        from .testing import fenced_start_fixture
         source = self.bind()
         run = self.message_run(source)
-        self.assertEqual(build_agent_run_start(run)["coordinationSessionId"], source.id)
+        self.assertEqual(fenced_start_fixture(run)["coordinationSessionId"], source.id)
         ordinary = self.message_run(self.work)
-        self.assertNotIn("coordinationSessionId", build_agent_run_start(ordinary))
+        self.assertNotIn("coordinationSessionId", fenced_start_fixture(ordinary))
 
     def test_current_authority_and_resource_refs_are_rechecked_each_call(self):
         source = self.bind()

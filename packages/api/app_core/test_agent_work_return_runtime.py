@@ -13,7 +13,7 @@ from django.test import LiveServerTestCase
 from . import test_agent_work as fixture
 from . import test_agent_work_returns as returns_fixture
 from .models import AgentRun, AgentWorkReturn, AgentWorkSession, HostedOperationReceipt
-from .runtime_client import build_agent_run_start
+from .testing import fenced_start_fixture
 from .runtime_schema_test_helpers import remove_runtime_trigger_functions
 
 
@@ -47,7 +47,7 @@ class WorkReturnRuntimeTests(LiveServerTestCase):
         self.addCleanup(cleanup_runtime_tables)
         database = settings.DATABASES["default"]
         runtime_fixture = {"database": {key: database[key] for key in ("NAME", "USER", "PASSWORD", "HOST", "PORT")},
-            "cases": [{"kind": kind, "agentRunStart": build_agent_run_start(child)} for kind, child in cases]}
+            "cases": [{"kind": kind, "agentRunStart": fenced_start_fixture(child)} for kind, child in cases]}
         result = subprocess.run(["cargo", "test", "--locked", "-p", "runtime_server",
             "agent_work::tests::returns::django_committed_work_return_facts", "--", "--ignored", "--exact", "--nocapture"],
             cwd=Path(__file__).resolve().parents[3],

@@ -7,7 +7,7 @@ from django.test import TransactionTestCase
 
 from . import models, test_agent_input_delivery as fixture
 from .deferred_input import resolved_input_storage
-from .runtime_client import build_agent_run_start
+from .testing import fenced_start_fixture
 from .http.agent_previews import _select_content, PreviewRejected
 from django.http import HttpRequest
 
@@ -45,7 +45,7 @@ class AgentInputAttachmentTests(TransactionTestCase):
         self.assertEqual(run.authorization.payload["messageAssetRefs"], [attached])
         self.assertEqual([item["inputRef"] for item in run.authorization.payload["assetRefs"]], [attached])
         self.assertNotIn(unused, json.dumps(run.authorization.payload))
-        self.assertEqual(build_agent_run_start(run)["initialInput"]["attachmentRefs"], [attached])
+        self.assertEqual(fenced_start_fixture(run)["initialInput"]["attachmentRefs"], [attached])
 
     def test_active_input_keeps_run_signature_and_uses_only_its_captured_attachment_grant(self):
         with self.runtime():
@@ -118,7 +118,7 @@ class AgentInputAttachmentTests(TransactionTestCase):
             response = self.submit("nine-files", "", refs)
         self.assertEqual(response.status_code, 201, response.content)
         self.assertEqual([item["inputRef"] for item in response.json()["input"]["attachments"]], refs)
-        self.assertEqual(build_agent_run_start(self.delivery("nine-files").queue.agent_run)["initialInput"]["attachmentRefs"], refs)
+        self.assertEqual(fenced_start_fixture(self.delivery("nine-files").queue.agent_run)["initialInput"]["attachmentRefs"], refs)
 
     def test_run_capture_budget_retains_late_input_for_the_next_serialized_run(self):
         from copy import deepcopy

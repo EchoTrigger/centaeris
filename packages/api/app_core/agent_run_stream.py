@@ -31,7 +31,6 @@ SIGNAL_FIELDS = {
         "revision",
         "turnId",
         "messageId",
-        "text",
     },
 }
 TERMINAL_EVENT_TYPES = {"agent_run_completed", "agent_run_failed", "agent_run_interrupted"}
@@ -217,7 +216,7 @@ def _decode_signal(agent_run: AgentRun, fields: dict) -> dict:
         raise RuntimeError("Redis AgentRun signal is invalid JSON") from error
     if not isinstance(signal, dict) or signal.get("kind") not in SIGNAL_FIELDS:
         raise RuntimeError("Redis AgentRun signal kind is unsupported")
-    if set(signal) - ({"reasoning"} if signal["kind"] == "live" else set()) != SIGNAL_FIELDS[signal["kind"]]:
+    if set(signal) != SIGNAL_FIELDS[signal["kind"]]:
         raise RuntimeError("Redis AgentRun signal fields mismatch")
     if signal["schema"] != SIGNAL_SCHEMA or signal["agentRunId"] != agent_run.id:
         raise RuntimeError("Redis AgentRun signal binding mismatch")
@@ -230,11 +229,9 @@ def _decode_signal(agent_run: AgentRun, fields: dict) -> dict:
         value = signal[field]
         if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
             raise RuntimeError(f"Redis live signal {field} is invalid")
-    for field in ("turnId", "messageId", "text"):
-        if not isinstance(signal[field], str) or (field != "text" and not signal[field]):
+    for field in ("turnId", "messageId"):
+        if not isinstance(signal[field], str) or not signal[field]:
             raise RuntimeError(f"Redis live signal {field} is invalid")
-    if "reasoning" in signal:
-        _validate_reasoning(signal["reasoning"])
     return signal
 
 
