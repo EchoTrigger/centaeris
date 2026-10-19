@@ -114,6 +114,7 @@ impl PostgresRuntimeStore {
             let (execution, container) = if let Some(row) = previous {
                 if row.get::<_,String>(0) != body { return Err("retirement operation conflict".into()); }
                 if row.get::<_,String>(1) == "destroyed" {
+                    super::super::host_retirement::enqueue(&mut tx,&request.host_id,&request.instance_id)?;
                     tx.commit().map_err(|e| e.to_string())?;
                     return Ok(retirement_result(request, "destroyed"));
                 }
@@ -137,6 +138,7 @@ impl PostgresRuntimeStore {
             super::super::resource_commit::require_durable_resource_commit(&mut tx)?;
             tx.execute("DELETE FROM runtime.resident_sandboxes WHERE execution_id=$1 AND host_id=$2 AND instance_id=$3 AND state='releasing'", &[&execution,&request.host_id,&request.instance_id]).map_err(|e| e.to_string())?;
             tx.execute("UPDATE runtime.environment_retirements SET state='destroyed' WHERE operation_id=$1 AND state='pending'", &[&request.operation_id]).map_err(|e| e.to_string())?;
+            super::super::host_retirement::enqueue(&mut tx,&request.host_id,&request.instance_id)?;
             tx.commit().map_err(|e| e.to_string())?;
             Ok(retirement_result(request, "destroyed"))
         })

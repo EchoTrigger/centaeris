@@ -81,6 +81,17 @@ confirms absence and releases its debit before cleanup confirmation. `retained`
 keeps the verified instance for later use. Permanent environment retirement is
 a separate operation.
 
+Both physical-removal paths atomically enqueue native Host retirement in the
+existing Runtime job store. A Host-local worker retries unavailable, busy or
+unconfirmed responses; only an exact `Retired` acknowledgement completes the job.
+Every attempt rechecks the immutable physical-removal facts and absence of a
+live resource holding. A lost acknowledgement or Runtime restart therefore keeps
+the cleanup obligation. Startup performs one bounded keyset traversal to recover
+older completed facts; periodic work drains only pending jobs, including expired
+leases, without repeatedly sweeping history. Host independently verifies the
+exact container is absent before removing its private state. This does not
+reconstruct workloads or change the physical cleanup receipt.
+
 API controller release reads the matching Runtime cleanup receipt. Repeated
 release requests recover the same receipt, including after a later takeover.
 An expired execution lease only permits independently acquired cleanup recovery.

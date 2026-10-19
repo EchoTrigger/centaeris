@@ -203,6 +203,9 @@ impl PostgresRuntimeStore {
                     &[&receipt.receipt_id,&receipt.agent_run_id,&receipt.environment_id,&receipt.authorization_digest,&receipt.controller_epoch,&kind,&instance,&crate::now_ms()?,&physical_removed,&removed_container]).map_err(|e|e.to_string())?;
                 let stored=load_receipt(&mut tx,&receipt.agent_run_id)?.ok_or("cleanup receipt commit missing")?;
                 if stored!=receipt {return Err("cleanup receipt identity conflict".into());}
+                if physical_removed {
+                    super::host_retirement::enqueue(&mut tx,request.host_id,instance.ok_or("cleanup physical instance missing")?)?;
+                }
                 tx.commit().map_err(|e|e.to_string())?;
                 Ok(stored)
             })

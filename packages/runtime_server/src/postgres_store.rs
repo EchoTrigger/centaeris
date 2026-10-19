@@ -85,6 +85,7 @@ mod environment_owner_schema;
 mod execution_capacity;
 pub(crate) mod execution_instances;
 mod external_context;
+mod host_retirement;
 pub(crate) mod lease_renewal;
 pub(crate) mod maintenance;
 pub(crate) mod pre_admission_failure;

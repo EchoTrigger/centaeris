@@ -74,6 +74,8 @@ def main():
                 ['cargo', 'test', '--locked', '-p', 'runtime_server',
                  'postgres_store::integration_tests::retained_instance_tests', '--'],
                 ['cargo', 'test', '--locked', '-p', 'runtime_server',
+                 'postgres_store::integration_tests::host_retirement_tests', '--'],
+                ['cargo', 'test', '--locked', '-p', 'runtime_server',
                  'postgres_store::integration_tests::cleanup_migration_tests', '--'],
                 ['cargo', 'test', '--locked', '-p', 'runtime_server',
                  'postgres_store::integration_tests::maintenance_completion_schema_tests', '--'],

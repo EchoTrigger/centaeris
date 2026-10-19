@@ -22,6 +22,7 @@ mod execution_recovery_policy;
 mod execution_recovery_schedule;
 mod failure_diagnostics;
 mod file_mutation_commit;
+mod host_retirement;
 mod http;
 mod job_protocol;
 mod lifecycle_hooks;
@@ -425,6 +426,10 @@ fn main() -> Result<(), String> {
     let store = Arc::new(store);
     let job_store = Arc::new(job_store);
     DockerExecutionHostRunner::reconcile_residency(job_store.as_ref())?;
+    runtime.spawn(host_retirement::run(
+        job_store.clone(),
+        docker_execution_host::resident_host_context()?.0,
+    ));
     let tool_layers = Arc::new(Mutex::new(HashMap::<String, HostedRuntimeContext>::new()));
     let resolver_layers = tool_layers.clone();
     let resolver_jobs = job_store.clone();

@@ -44,6 +44,7 @@ mod cold_append_tests;
 mod environment_observation_tests;
 mod environment_owner_schema_tests;
 mod execution_instance_tests;
+mod host_retirement_tests;
 mod lease_renewal_tests;
 mod maintenance_authority_tests;
 mod maintenance_completion_schema_tests;

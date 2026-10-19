@@ -429,6 +429,25 @@ pub(crate) fn inspect(instance: &str) -> Result<serde_json::Value, String> {
     }
 }
 
+pub(crate) fn retire(target: HostLaunchTarget) -> Result<(), String> {
+    retire_with(target, send)
+}
+
+fn retire_with(
+    target: HostLaunchTarget,
+    transport: impl FnOnce(HostSupervisorRequest) -> Result<HostSupervisorResult, String>,
+) -> Result<(), String> {
+    target.validate()?;
+    // Docker is already absent: registering here would attempt to resurrect its
+    // physical binding. Host independently verifies absence and its own records.
+    match transport(HostSupervisorRequest::Retire {
+        target: target.clone(),
+    })? {
+        HostSupervisorResult::Retired { target: actual } if actual == target => Ok(()),
+        _ => Err("environment_host_retirement_unconfirmed".into()),
+    }
+}
+
 pub(crate) fn task(
     target: HostLaunchTarget,
     envelope: EnvironmentTaskEnvelope,
@@ -496,6 +515,40 @@ mod tests {
             profile_digest: format!("sha256:{}", "b".repeat(64)),
             image_digest: format!("sha256:{}", "d".repeat(64)),
         }
+    }
+    #[test]
+    fn host_retirement_requires_exact_ack_without_registering_absent_container() {
+        let expected = target();
+        retire_with(expected.clone(), |request| {
+            let HostSupervisorRequest::Retire { target } = request else {
+                panic!("retirement cannot register or dispatch a task")
+            };
+            assert_eq!(target, expected);
+            Ok(HostSupervisorResult::Retired {
+                target: expected.clone(),
+            })
+        })
+        .unwrap();
+        let mut wrong = expected.clone();
+        wrong.container_id = "e".repeat(64);
+        assert_eq!(
+            retire_with(expected.clone(), |_| Ok(HostSupervisorResult::Retired {
+                target: wrong
+            }))
+            .unwrap_err(),
+            "environment_host_retirement_unconfirmed"
+        );
+        assert_eq!(
+            retire_with(expected.clone(), |_| Ok(HostSupervisorResult::Registered {
+                target: expected.clone()
+            }))
+            .unwrap_err(),
+            "environment_host_retirement_unconfirmed"
+        );
+        assert_eq!(
+            retire_with(expected, |_| Err("host_retirement_busy".into())).unwrap_err(),
+            "host_retirement_busy"
+        );
     }
     fn envelope() -> EnvironmentTaskEnvelope {
         EnvironmentTaskEnvelope {
