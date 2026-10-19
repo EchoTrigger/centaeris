@@ -67,6 +67,22 @@ Install or update `environment_host_supervisor` and `execution_agent` from the
 same version. After an update, restart the supervisor and Runtime together.
 The running supervisor continues using its sealed copy until restarted.
 
+For runsc on x86_64, build the helper as a static musl executable instead:
+
+```sh
+RUSTFLAGS=-Ctarget-feature=+crt-static cargo rustc --locked --release \
+  --target x86_64-unknown-linux-musl -p hosted_execution \
+  --bin execution_agent -- -C relocation-model=static
+```
+
+Verify that `readelf -l` reports no `INTERP` segment before installation. The
+GNU static PIE helper can abort during glibc startup when runsc imports its
+sealed descriptor as an anonymous executable. The musl target alone is not
+sufficient if the linker still emits a dynamic PIE. The supervisor itself may
+use the host GNU target. The host seals the helper and reopens its descriptor
+read-only before import; runsc requires a read-only host descriptor even when
+the underlying memfd already has write seals.
+
 Helper requests select a fixed kind and carry the owner fence, operation ID,
 scope, byte length and SHA-256 before a bounded binary body. The host buffers
 and verifies the complete input before execution. Input and artifact contents

@@ -21,6 +21,10 @@ use std::{
 const CGROUP_ROOT: &str = "/centaeris-tasks";
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 
+fn control_path(container_id: &str, path: &str) -> String {
+    format!("/{container_id}{}", path.trim_end_matches('/'))
+}
+
 fn task_id(path: &Path) -> Result<&str, String> {
     let id = path
         .file_name()
@@ -49,6 +53,7 @@ fn control_unlocked(
         .runtime_path
         .to_str()
         .ok_or("host_configuration_invalid")?;
+    let scoped_path = control_path(&target.container_id, path);
     let mut args = vec![
         "--root",
         root,
@@ -59,7 +64,7 @@ fn control_unlocked(
         },
         &target.container_id,
         "pids",
-        path,
+        &scoped_path,
         name,
     ];
     if let Some(value) = value {
@@ -67,6 +72,22 @@ fn control_unlocked(
     }
     let bytes = crate::host_supervisor::linux::command_bytes_unlocked(binary, &args)?;
     String::from_utf8(bytes).map_err(|_| "runsc_cgroup_response_invalid".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_controls_use_the_attested_containers_cgroup_namespace() {
+        let first = "a".repeat(64);
+        let second = "b".repeat(64);
+        let task = format!("/centaeris-tasks/task-{}", "c".repeat(64));
+        assert_eq!(control_path(&first, "/"), format!("/{first}"));
+        assert_eq!(control_path(&first, &task), format!("/{first}{task}"));
+        assert_eq!(control_path(&second, &task), format!("/{second}{task}"));
+        assert_ne!(control_path(&first, &task), control_path(&second, &task));
+    }
 }
 
 pub(super) fn events(target: &OciTarget, path: &Path) -> Result<String, String> {
