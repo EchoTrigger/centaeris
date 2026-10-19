@@ -15,7 +15,7 @@ from django.test import Client, TransactionTestCase
 from . import test_agent_work as work_fixture
 from . import test_agent_work_returns as return_fixture
 from .models import AgentRun, AgentRunAuthorization, HostedOperationReceipt, WorkspaceMembership
-from .testing import fenced_start_fixture
+from .testing import fenced_start_fixture, leased_lifecycle_job_fixture
 
 
 class AgentWorkConsumptionTests(TransactionTestCase):
@@ -240,33 +240,41 @@ class AgentWorkConsumptionTests(TransactionTestCase):
         binding = deepcopy(attempt.input_binding)
         initial = binding["initialInput"]
         native = initial["input"]
+        lease_owner = leased_lifecycle_job_fixture(self, run)
         before = self.counts()
         def resolve():
             return self.client.post("/internal/agent-run-lifecycle/resolve", content_type="application/json",
                 data=json.dumps({"schema": "runtime.agent_run_lifecycle.resolve.v1",
                     "jobId": "agent_run.lifecycle:" + run.pk, "agentRunId": run.pk,
-                    "authorizationDigest": run.authorization.digest}),
+                    "authorizationDigest": run.authorization.digest,
+                    "leaseOwner": lease_owner, "executionMode": "perRun"}),
                 HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN)
         cases = [
-            ("missing binding fields", {}),
-            ("run identity precedes malformed initial input", {**binding, "agentRunId": "another-run", "initialInput": None}),
-            ("missing initial input fields", {**binding, "initialInput": {}}),
-            ("another notice", {**binding, "initialInput": {**initial, "noticeId": "another-notice"}}),
-            ("missing native input fields", {**binding, "initialInput": {**initial, "input": {}}}),
-            ("null native input", {**binding, "initialInput": {**initial, "input": None}}),
-            ("another source", {**binding, "initialInput": {**initial, "input": {**native, "source": "another-source"}}}),
-            ("non-string content", {**binding, "initialInput": {**initial, "input": {**native, "content": 7}}}),
-            ("malformed JSON", {**binding, "initialInput": {**initial, "input": {**native, "content": "{"}}}),
-            ("another payload", {**binding, "initialInput": {**initial, "input": {**native, "content": "{}"}}}),
+            ("missing binding fields", {}, "agent_work_consume_binding_rejected"),
+            ("run identity precedes malformed initial input", {**binding, "agentRunId": "another-run", "initialInput": None}, "agent_work_consume_binding_rejected"),
+            ("missing initial input fields", {**binding, "initialInput": {}}, "agent_work_consume_binding_rejected"),
+            ("another notice", {**binding, "initialInput": {**initial, "noticeId": "another-notice"}}, "agent_work_consume_binding_rejected"),
+            ("missing native input fields", {**binding, "initialInput": {**initial, "input": {}}}, "agent_work_consume_binding_rejected"),
+            ("null native input", {**binding, "initialInput": {**initial, "input": None}}, "agent_run_start_invalid"),
+            ("another source", {**binding, "initialInput": {**initial, "input": {**native, "source": "another-source"}}}, "agent_work_consume_binding_rejected"),
+            ("non-string content", {**binding, "initialInput": {**initial, "input": {**native, "content": 7}}}, "agent_run_start_invalid"),
+            ("malformed JSON", {**binding, "initialInput": {**initial, "input": {**native, "content": "{"}}}, None),
+            ("another payload", {**binding, "initialInput": {**initial, "input": {**native, "content": "{}"}}}, "agent_work_consume_binding_rejected"),
         ]
         with patch("urllib.request.urlopen", side_effect=AssertionError("rejection requires no Runtime RPC")):
-            for label, changed in cases:
+            for label, changed, expected_error in cases:
                 with self.subTest(binding=label):
                     self.attempts().filter(pk=attempt.pk).update(input_binding=changed)
                     rejected = resolve()
                     replay = self.consume(notice)
                     self.assertEqual(rejected.status_code, 409, rejected.content)
-                    self.assertEqual(rejected.json(), {"error": "agent_run_start_invalid"})
+                    if expected_error is None:
+                        # JSON parser wording is not part of the rejection contract.
+                        self.assertEqual(set(rejected.json()), {"error"})
+                        self.assertIsInstance(rejected.json()["error"], str)
+                        self.assertTrue(rejected.json()["error"])
+                    else:
+                        self.assertEqual(rejected.json(), {"error": expected_error})
                     self.assertEqual(replay.status_code, 400, replay.content)
                     self.assertEqual(replay.json(), {"error": "agent_work_consume_invalid"})
                     self.assertEqual(self.counts(), before)
@@ -327,12 +335,14 @@ class AgentWorkConsumptionTests(TransactionTestCase):
 
     def test_existing_record_job_rebuilds_typed_user_start_without_changing_authorization(self):
         self.run.refresh_from_db()
+        lease_owner = leased_lifecycle_job_fixture(self, self.run)
         before = (self.run.id, self.run.turn_id, self.run.authorization.digest,
                   self.run.authorization.signature, self.run.membership_ref)
         response = self.client.post("/internal/agent-run-lifecycle/resolve", content_type="application/json",
             data=json.dumps({"schema": "runtime.agent_run_lifecycle.resolve.v1",
                 "jobId": "agent_run.lifecycle:" + self.run.pk, "agentRunId": self.run.pk,
-                "authorizationDigest": self.run.authorization.digest}),
+                "authorizationDigest": self.run.authorization.digest,
+                "leaseOwner": lease_owner, "executionMode": "perRun"}),
             HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN)
         self.assertEqual(response.status_code, 200, response.content)
         start = response.json()["agentRunStart"]

@@ -59,3 +59,32 @@ def fenced_start_fixture(agent_run, *, execution_mode='perRun'):
             'controller_lease_owner', 'controller_purpose', 'controller_released'])
     agent_run.environment = environment
     return build_agent_run_start(agent_run, controller_authority=_authority(environment), execution_mode=execution_mode)
+
+
+def leased_lifecycle_job_fixture(test_case, agent_run):
+    """Persist the worker lease used by real lifecycle HTTP/controller fixtures."""
+    from django.db import connection
+    from .runtime_schema_test_helpers import isolate_runtime_schema
+
+    isolate_runtime_schema(test_case)
+    job_id = f"agent_run.lifecycle:{agent_run.pk}"
+    lease_owner = "worker:fixture:" + agent_run.pk
+    with connection.cursor() as cursor:
+        cursor.execute("CREATE SCHEMA IF NOT EXISTS runtime")
+        cursor.execute("CREATE TABLE IF NOT EXISTS runtime.runtime_jobs("
+            "job_id text PRIMARY KEY, job_kind text NOT NULL, status text NOT NULL, "
+            "lease_owner text, lease_expires_at_ms bigint, idempotency_key text NOT NULL, "
+            "session_id text, payload_ref text)")
+        cursor.execute("INSERT INTO runtime.runtime_jobs(job_id,job_kind,status,lease_owner,"
+            "lease_expires_at_ms,idempotency_key,session_id,payload_ref) "
+            "VALUES(%s,'agent_run.lifecycle','running',%s,"
+            "(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint+60000,%s,%s,%s)",
+            [job_id, lease_owner, f"{job_id}:{agent_run.authorization.digest}",
+             agent_run.session_id, f"record:agent_run:{agent_run.pk}"])
+
+    def delete_job():
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM runtime.runtime_jobs WHERE job_id=%s", [job_id])
+
+    test_case.addCleanup(delete_job)
+    return lease_owner

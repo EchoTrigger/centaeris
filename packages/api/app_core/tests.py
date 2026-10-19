@@ -105,7 +105,7 @@ from .agent_run_authorization_factory import (
     create_agent_run_authorization as create_agent_run_authorization_with_image,
 )
 from .runtime_client import TranscriptRuntimeError
-from .testing import fenced_start_fixture
+from .testing import fenced_start_fixture, leased_lifecycle_job_fixture
 from .session_event import (
     project_committed_agent_run,
     rebuild_agent_run_citation_projection,
@@ -751,6 +751,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
                                       modelConfig=model, prompt="never admitted", status="running",
                                       transitionReason="execution_queue_expired")
         create_agent_run_authorization(run)
+        lease_owner = leased_lifecycle_job_fixture(self, run)
         body = {"schema": "runtime.agent_run.transition.v1", "agentRunId": run.id,
                 "state": "cancelled", "transitionReason": "agent_run_cancelled"}
         def transition():
@@ -759,13 +760,18 @@ class ApiVerticalSliceTests(TransactionTestCase):
         self.assertEqual(transition().status_code, 409)  # Caller claims are not evidence.
         committed_at = timezone.now()
         AgentRun.objects.filter(id=run.id).update(preAdmissionCancelledAt=committed_at)
-        resolved = self.client.post("/internal/agent-run-lifecycle/resolve",
-            data=json.dumps({"schema": "runtime.agent_run_lifecycle.resolve.v1",
-                "agentRunId": run.id, "jobId": f"agent_run.lifecycle:{run.id}",
-                "authorizationDigest": run.authorization.digest}),
-            content_type="application/json", HTTP_X_INTERNAL_TOKEN="test-internal-token")
-        self.assertEqual(resolved.status_code, 200)
+        def resolve():
+            return self.client.post("/internal/agent-run-lifecycle/resolve",
+                data=json.dumps({"schema": "runtime.agent_run_lifecycle.resolve.v1",
+                    "agentRunId": run.id, "jobId": f"agent_run.lifecycle:{run.id}",
+                    "authorizationDigest": run.authorization.digest,
+                    "leaseOwner": lease_owner, "executionMode": "perRun"}),
+                content_type="application/json", HTTP_X_INTERNAL_TOKEN="test-internal-token")
+        resolved = resolve()
+        self.assertEqual(resolved.status_code, 200, resolved.content)
         self.assertEqual(resolved.json()["terminalState"], "cancelled")
+        self.assertEqual(resolved.json()["agentRunCleanup"]["environmentAuthorization"]["payload"]["controllerPurpose"], "cleanup")
+        self.assertEqual(resolve().json(), resolved.json())
         for _ in range(2):
             self.assertEqual(transition().status_code, 200)
         run.refresh_from_db()
@@ -1043,7 +1049,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
         self.assertEqual(late.status, "completed")
         self.assertEqual(late.transitionReason, "runtime_session_terminal_committed")
 
-    def test_agent_run_lifecycle_resolve_reports_committed_session_terminal_without_projecting_run(
+    def test_agent_run_lifecycle_resolve_projects_committed_terminal_and_authorizes_cleanup(
         self,
     ):
         user = User.objects.create_user(
@@ -1065,6 +1071,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
             prompt="already committed",
         )
         authorization = create_agent_run_authorization(agent_run)
+        lease_owner = leased_lifecycle_job_fixture(self, agent_run)
         append_started(agent_run)
         append_session_records(
             agent_run,
@@ -1092,24 +1099,48 @@ class ApiVerticalSliceTests(TransactionTestCase):
                     "jobId": f"agent_run.lifecycle:{agent_run.id}",
                     "agentRunId": agent_run.id,
                     "authorizationDigest": authorization.digest,
+                    "leaseOwner": lease_owner,
+                    "executionMode": "perRun",
                 }
             ),
             content_type="application/json",
             HTTP_X_INTERNAL_TOKEN="test-internal-token",
         )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 200, response.content)
+        resolved = response.json()
+        cleanup = resolved["agentRunCleanup"]
         self.assertEqual(
-            response.json(),
+            {name: value for name, value in resolved.items() if name != "agentRunCleanup"},
             {
                 "schema": "runtime.agent_run_lifecycle.resolved.v1",
                 "disposition": "terminal",
                 "terminalState": "completed",
-                "agentRunStart": fenced_start_fixture(agent_run),
             },
         )
         agent_run.refresh_from_db()
-        self.assertEqual(agent_run.status, "queued")
+        self.assertEqual(agent_run.status, "completed")
+        self.assertEqual({name: value for name, value in cleanup.items() if name != "environmentAuthorization"}, {
+            "schema": "workspace.agent_run.cleanup.v1", "agentRunId": agent_run.pk,
+            "authorizationDigest": authorization.digest, "authorizationSignature": authorization.signature,
+            "authorization": authorization.payload,
+        })
+        environment = agent_run.environment
+        from .environment_authorization import sign_environment_authorization
+        from .environment_lifecycle import controller_lease_digest
+        expected_authority = {
+            "schema": "workspace.environment_authorization.v1", "environmentId": environment.pk,
+            "sessionId": session.pk, "agentRunId": agent_run.pk,
+            "agentRunAuthorizationDigest": authorization.digest, "executionMode": "perRun",
+            "controllerId": agent_run.pk, "controllerEpoch": environment.controller_epoch,
+            "controllerLeaseDigest": controller_lease_digest(lease_owner), "controllerPurpose": "cleanup",
+        }
+        self.assertEqual(cleanup["environmentAuthorization"], {"payload": expected_authority,
+            "signature": sign_environment_authorization(expected_authority, settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY)})
+        self.assertEqual(environment.controller_run_id, agent_run.pk)
+        self.assertEqual(environment.controller_lease_owner, lease_owner)
+        self.assertEqual(environment.controller_purpose, "cleanup")
+        self.assertFalse(environment.controller_released)
 
     def test_session_workspace_internal_cas_uses_lease_fence_and_supports_replay(self):
         user = User.objects.create_user(
@@ -3812,6 +3843,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
             modelConfig=model,
             prompt="previous",
         )
+        create_agent_run_authorization(advancedRun)
         session.workspaceGeneration = 7
         session.workspaceStorageKey = "workspaces/ws_1/sessions/sess_1/snapshot"
         session.workspaceSnapshotSha256 = f"sha256:{'c' * 64}"
@@ -3855,14 +3887,14 @@ class ApiVerticalSliceTests(TransactionTestCase):
         digest = authorization_digest(payload)
         self.assertEqual(
             digest,
-            "sha256:bd93e8ba466c0d9851e805dd2a8c8a5962b351065c4d982ae961ea0cdb0a6a9f",
+            "sha256:31a6abff1f44a1fa289bbda702f444e91e066bcda782b73118220bb9db7a3492",
         )
         self.assertEqual(
             authorization_digest(dict(reversed(list(payload.items())))), digest
         )
         self.assertEqual(
             authorization_signature(payload, "test-key"),
-            "hmac-sha256:86d800a4e2517f1b169894646f9a7bb3297770235a7a3a0cbceffe1897969dd5",
+            "hmac-sha256:c018fa632708fad687e5b3a3e2179dabfb1517a9260e46e48cf8ec726a8732a3",
         )
         unknownPayload = dict(payload, schema="banana")
         with self.assertRaisesRegex(ValueError, "agent_run_authorization_schema_mismatch"):

@@ -93,7 +93,7 @@ class RuntimeHttpClientTests(SimpleTestCase):
             (lambda: runtime_job_client.schedule_runtime_job({"jobId": "job_1"}), 503,
              {"error": "busy"}, RuntimeError, "runtime_job_schedule_failed"),
         ]:
-            with self.subTest(status=status, message=message), patch.object(runtime_client, "build_agent_run_start", return_value={}):
+            with self.subTest(status=status, message=message), patch.object(runtime_client, "build_agent_run_control", return_value={}):
                 self.reply(status, payload)
                 before = len(self.server.requests)
                 with self.assertRaisesRegex(exception, message):

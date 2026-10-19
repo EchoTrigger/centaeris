@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 from django.utils import timezone
@@ -232,8 +232,9 @@ class EnvironmentNetworkMigrationTests(TransactionTestCase):
     def test_insert_race_returns_the_database_network_snapshot_to_the_caller(self):
         from .models import Session, SessionEnvironment
 
-        with isolated_migration_database(self.current, route_current_models=True) as database:
-            fixture = self.fixture(database, self.current)
+        latest = MigrationExecutor(connection).loader.graph.leaf_nodes("app_core")
+        with isolated_migration_database(latest, route_current_models=True) as database:
+            fixture = self.fixture(database, latest)
             writer = database.copy(alias=database.alias + "_policy_writer")
             changed = False
             insertion = f'INSERT INTO {database.ops.quote_name(SessionEnvironment._meta.db_table)}'
