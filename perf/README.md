@@ -50,6 +50,16 @@ dependency and must be built using the normal project build before setup.
 Fresh isolated CA files use `perf/certs/out/isolated/`, leaving any legacy certificate
 files mounted by an existing development stack unchanged.
 
+Before starting the stack, install the supervisor and helper from the same checkout
+using the [native host deployment instructions](../packages/hosted_execution/deploy/README.md).
+Use `/var/lib/centaeris-perf/host/execution_agent` for the helper and
+`/run/centaeris-perf-host/control.sock` for the supervisor socket, with separate
+control and output directories under `/var/lib/centaeris-perf/host/`.
+Initialization pins these performance-owned paths in `perf/.state/test.env`.
+Runtime mounts the helper at its original path and the socket directory at
+`/run/centaeris-host`, both read-only. Configuration validation checks those exact
+bindings and rejects production host paths or access from other services.
+
 Slot changes require zero queued/running runs, replace only the worker using
 `--no-deps`, and verify that all other container identities are unchanged. Run
 `stop` only after the stack drains; it preserves test volumes. There is no automatic

@@ -15,6 +15,10 @@ import time
 PROJECT = 'centaeris-perf'
 ROOT = Path(__file__).resolve().parents[2]
 SERVICES = ('api', 'runtime', 'worker', 'gc', 'postgres', 'redis')
+HOST_ROOT = f'/var/lib/{PROJECT}/host'
+HOST_SOCKET_DIRECTORY = f'/run/{PROJECT}-host'
+EXECUTION_HELPER = f'{HOST_ROOT}/execution_agent'
+HOST_MOUNTS = {HOST_SOCKET_DIRECTORY: '/run/centaeris-host', EXECUTION_HELPER: EXECUTION_HELPER}
 
 
 def read_env(path):
@@ -42,7 +46,9 @@ def initialize(root, oci_runtime=None):
                   # Explicit synthetic inputs for this isolated two-slot fixture.
                   # Two overlapping spool copies per 1 MiB upload fit two slots.
                   UPLOAD_BODY_MAX_BYTES='1048576', UPLOAD_TEMP_MAX_BYTES='4194304',
-                  UPLOAD_MAX_CONCURRENT='2')
+                  UPLOAD_MAX_CONCURRENT='2',
+                  ENVIRONMENT_EXECUTION_HELPER=EXECUTION_HELPER,
+                  ENVIRONMENT_HOST_SOCKET_DIRECTORY=HOST_SOCKET_DIRECTORY)
     path = root / 'perf/.state/test.env'
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('x', encoding='utf-8') as output:
@@ -87,6 +93,9 @@ def validate_config(config, root):
                 source = mount['source'].replace('\\', '/')
                 if source == '/var/run/docker.sock' and name in {'runtime', 'material-worker'}:
                     continue
+                if (name == 'runtime' and source in HOST_MOUNTS and HOST_MOUNTS[source] == mount.get('target')
+                        and mount.get('read_only')):
+                    continue
                 permitted = {ca, (root / 'perf/certs/out/isolated/mock-model-bundle.pem').as_posix()}
                 if source not in permitted or not mount.get('read_only'):
                     raise ValueError('unexpected bind mount')
@@ -100,6 +109,16 @@ def validate_config(config, root):
         if not any(m.get('target') == '/perf-certs/mock-ca.crt' for m in service.get('volumes', [])):
             raise ValueError('mock CA mount missing')
     runtime_env = config['services']['runtime'].get('environment', {})
+    if (runtime_env.get('ENVIRONMENT_EXECUTION_HELPER') != EXECUTION_HELPER
+            or runtime_env.get('ENVIRONMENT_HOST_SOCKET') != '/run/centaeris-host/control.sock'):
+        raise ValueError('performance execution host configuration mismatch')
+    runtime_mounts = config['services']['runtime'].get('volumes', [])
+    for source, target in HOST_MOUNTS.items():
+        matches = [mount for mount in runtime_mounts if mount.get('target') == target]
+        if (len(matches) != 1 or matches[0].get('type') != 'bind'
+                or matches[0].get('source', '').replace('\\', '/') != source
+                or not matches[0].get('read_only')):
+            raise ValueError('performance execution host mount missing or invalid')
     for key in ('PLUGIN_VOLUME_NAME', 'AGENT_MEMORY_VOLUME_NAME'):
         if key in runtime_env and not runtime_env[key].startswith(PROJECT + '_'):
             raise ValueError('runtime references a foreign volume')
