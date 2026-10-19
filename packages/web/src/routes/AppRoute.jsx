@@ -45,6 +45,7 @@ import { ShellSidebar } from "../shell/ShellSidebar";
 import { groupSessionNavigation, sortSessionNavigation as sortSessions } from "../shell/sessionNavigation.mjs";
 import { SessionNavigationRow } from "../shell/SessionNavigationRow";
 import { useSessionNavigationActions } from "../shell/useSessionNavigationActions";
+import { useSessionNavigationRefresh } from "../shell/useSessionNavigationRefresh";
 import {
   Image as ImageIcon,
   PanelLeft,
@@ -531,10 +532,17 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     }
   }
 
-  async function refreshSessions(targetWorkspaceId) {
-    const response = await apiResponse(`/api/workspaces/${targetWorkspaceId}/sessions?agentId=${encodeURIComponent(activeAgent.id)}`);
+  useSessionNavigationRefresh({
+    scopeKey: requestScopeKey,
+    enabled: isSidebarOpen && !loadingHistory && !sessionActions.savingSessionId && !sessionActions.deletingSessionId && !sessionActions.editingSessionId,
+    onRefresh: signal => refreshSessions(workspace.id, signal),
+  });
+
+  async function refreshSessions(targetWorkspaceId, signal) {
+    const scope = requestScopeRef.current;
+    const response = await apiResponse(`/api/workspaces/${targetWorkspaceId}/sessions?agentId=${encodeURIComponent(activeAgent.id)}`, { signal });
     const data = await response.json();
-    setSessions(data.sessions);
+    if (!signal?.aborted && scope.active && requestScopeRef.current === scope) setSessions(data.sessions);
     return data.sessions;
   }
 
