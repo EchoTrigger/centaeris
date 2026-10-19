@@ -6952,44 +6952,22 @@ mod tests {
     }
 
     pub(super) fn agent_run_start() -> AgentRunStart {
-        let authorization = serde_json::json!({
-            "schema": "workspace.agent_run_authorization.v1",
-            "id": "authorization_1",
-            "organizationId": "org_1",
-            "workspaceId": "ws_1",
-            "userId": "user_1",
-            "agentId": "centaeris",
-            "sessionId": "sess_1",
-            "agentRunId": "agent_run_1",
-            "sessionWorkspace": {
-                "generation": 0,
-                "snapshotSha256": "",
-                "snapshotSizeBytes": 0,
-                "expandedSizeBytes": 0,
-                "fileCount": 0
-            },
-            "modelConfigRef": "model_1",
-            "thinkingMode": null,
-            "artifactScopeRef": "artifact_scope_1",
-            "assetRefs": [],
-            "messageAssetRefs": [],
-            "imageCapability": "workspace_general_v1",
-            "imageDigest": format!("sha256:{}", "a".repeat(64)),
-            "pluginActivation": centaeris_core::extension::build_plugin_activation_snapshot(&[])
-                .expect("empty plugin activation"),
-            "resources": {
-                "memoryBytes": 2147483648_u64,
-                "cpuMilli": 2000,
-                "pidsLimit": 512,
-                "dataTmpfsBytes": 4294967296_u64
-            }
-        });
-        let digest = serde_json::from_value::<
-            crate::agent_run_authorization::WorkspaceAgentRunAuthorization,
-        >(authorization.clone())
-        .expect("authorization")
-        .digest()
-        .expect("authorization digest");
+        let mut authorization: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
+            serde_json::from_str(include_str!(
+                "../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+            ))
+            .expect("current authorization fixture");
+        authorization.session_workspace = crate::agent_run_authorization::SessionWorkspace {
+            generation: 0,
+            snapshot_sha256: String::new(),
+            snapshot_size_bytes: 0,
+            expanded_size_bytes: 0,
+            file_count: 0,
+        };
+        authorization.thinking_mode = None;
+        authorization.asset_refs.clear();
+        authorization.message_asset_refs.clear();
+        let digest = authorization.digest().expect("authorization digest");
         serde_json::from_value::<AgentRunStart>(serde_json::json!({
             "schema": "workspace.agent_run.start.v1",
             "initialInput": {"type":"userMessage"},
@@ -7001,7 +6979,7 @@ mod tests {
             "modelMaxOutputTokens": 32768,
             "authorizationDigest": digest,
             "authorizationSignature": "hmac-sha256:test-only-not-validated",
-            "environmentAuthorization": crate::environment_authorization::EnvironmentAuthorization::for_test(&serde_json::from_value(authorization.clone()).unwrap(), b"test-run-authorization-signing-key"),
+            "environmentAuthorization": crate::environment_authorization::EnvironmentAuthorization::for_test(&authorization, b"test-run-authorization-signing-key"),
             "authorization": authorization,
             "tailAction": {"type": "append"}
         }))
