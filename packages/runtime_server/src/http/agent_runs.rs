@@ -247,7 +247,14 @@ fn teardown_owned_tasks(
     {
         return json_error_response(503, "terminal_subagent_cleanup_unavailable");
     }
-    let host_id = match crate::docker_execution_host::resident_host_context() {
+    let host_context = || {
+        #[cfg(test)]
+        if crate::native_consumption_tests::owns_run(&cleanup.agent_run_id) {
+            return crate::native_consumption_tests::owned_host_context();
+        }
+        crate::docker_execution_host::resident_host_context()
+    };
+    let host_id = match host_context() {
         Ok((host_id, _)) => host_id,
         Err(_) => return json_error_response(503, "retained_cleanup_unavailable"),
     };
@@ -258,7 +265,13 @@ fn teardown_owned_tasks(
             lease: &lease,
             host_id: &host_id,
         },
-        crate::docker_execution_host::observed_resident_sandboxes,
+        || {
+            #[cfg(test)]
+            if crate::native_consumption_tests::owns_run(&cleanup.agent_run_id) {
+                return crate::native_consumption_tests::owned_inventory();
+            }
+            crate::docker_execution_host::observed_resident_sandboxes()
+        },
         |target, verified| match target {
             CleanupTarget::NeverAllocated | CleanupTarget::Destroyed { .. } => {
                 Ok(crate::postgres_store::cleanup_receipts::CleanupPhysicalResult::Retained)
@@ -280,6 +293,12 @@ fn teardown_owned_tasks(
                     controller_purpose: EnvironmentTaskControllerPurpose::Cleanup,
                 };
                 let per_run = cleanup.environment_authorization.payload.execution_mode == "perRun";
+                #[cfg(test)]
+                if crate::native_consumption_tests::owns_run(&cleanup.agent_run_id) {
+                    return crate::native_consumption_tests::cleanup_owned_physical_execution(
+                        allocation, *resources, &fence, per_run,
+                    );
+                }
                 // A prior release may have completed before its final DB receipt.
                 // Only the exact recorded container's independent absence closes it.
                 if per_run
@@ -309,7 +328,17 @@ fn teardown_owned_tasks(
         },
     ) {
         Ok(receipt) => receipt,
-        Err(_) => return json_error_response(503, "retained_cleanup_unconfirmed"),
+        Err(error) => {
+            #[cfg(test)]
+            if crate::native_consumption_tests::owns_run(&cleanup.agent_run_id) {
+                eprintln!(
+                    "native-consume-owned-cleanup-failed:agentRunId={}; error={error}",
+                    cleanup.agent_run_id
+                );
+            }
+            let _ = error;
+            return json_error_response(503, "retained_cleanup_unconfirmed");
+        }
     };
     let mut contexts = state
         .tool_layers

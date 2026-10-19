@@ -2,6 +2,11 @@ use super::*;
 use centaeris_core::session::reliability::*;
 use serde_json::Value;
 
+mod owned_execution;
+pub(super) use owned_execution::{
+    cleanup_owned_physical_execution, owned_host_context, owned_inventory, prepare_owned_allocation,
+};
+
 fn production_fixture() -> Option<Value> {
     env::var("CENTAERIS_NATIVE_CONSUME_PRODUCTION_FIXTURE")
         .ok()
@@ -53,7 +58,7 @@ fn native_consumption_production_server() {
     let state = HttpServerState {
         runtime: runtime.clone(),
         store: store.clone(),
-        job_store: backend,
+        job_store: backend.clone(),
         tool_layers: Arc::new(Mutex::new(HashMap::new())),
         execution_profile: Arc::new(RuntimeExecutionProfile {
             schema: RUNTIME_EXECUTION_PROFILE_SCHEMA,
@@ -68,6 +73,12 @@ fn native_consumption_production_server() {
         let command = command.unwrap();
         if command == "stop" {
             break;
+        }
+        if let Some(run_id) = command.strip_prefix("verify-cleanup:") {
+            let proof = owned_execution::verify_cleanup(backend.as_ref(), run_id).unwrap();
+            println!("native-consume-production-cleanup:{proof}");
+            io::stdout().flush().unwrap();
+            continue;
         }
         let start = serde_json::from_str::<AgentRunStart>(&command)
             .unwrap()

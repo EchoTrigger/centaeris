@@ -454,19 +454,15 @@ impl DockerExecutionHostRunner {
             return Err("benchmark network differs from signed authorization".into());
         }
         #[cfg(test)]
-        if request
-            .environment_authorization
-            .payload
-            .controller
-            .is_none()
-            && crate::native_consumption_tests::owns_identity(&request.user_id, &request.agent_id)
-        {
+        if crate::native_consumption_tests::owns_identity(&request.user_id, &request.agent_id) {
             assert!(
                 !request.has_execution_fact,
                 "fresh execution required by native fixture"
             );
             validate_plugin_activation_snapshot(request.plugin_activation)?;
             assert!(plugin_mounts(request.plugin_activation).is_empty());
+            let allocation =
+                crate::native_consumption_tests::prepare_owned_allocation(&request, before_create)?;
             crate::native_consumption_tests::register_owned_run(&request.agent_run_id);
             let mut runner = tests::test_docker_execution_host_runner();
             runner.container_name = format!("native-consume-test:{}", request.execution_id);
@@ -478,8 +474,7 @@ impl DockerExecutionHostRunner {
                 .environment_id
                 .clone();
             runner.binding_digest = request.environment_authorization.payload.digest()?;
-            runner.instance_id =
-                crate::postgres_store::execution_instances::instance_id(&runner.execution_id);
+            runner.instance_id = allocation.instance_id.clone();
             runner.authorization_digest = request.authorization_digest;
             runner.image_digest = request.image_digest;
             runner.resources = request.resources;
@@ -488,6 +483,16 @@ impl DockerExecutionHostRunner {
             runner.command_path = "/usr/bin".into();
             runner.api_url = request.api_url;
             runner.api_token = request.api_token;
+            runner.environment_profile = request.environment_profile;
+            runner.environment_authorization = Some(request.environment_authorization);
+            runner.resident_store = Some(request.resident_store);
+            runner.resident_lease = Some(centaeris_core::session::RuntimeJobLeaseFence {
+                job_id: request.lifecycle_job_id,
+                job_kind: "agent_run.lifecycle".into(),
+                lease_owner: request.lifecycle_lease_owner,
+            });
+            runner.retained_workspace_id = Some(request.workspace_id);
+            runner.retained_allocation = Some(allocation);
             return Ok(runner);
         }
         let DockerExecutionHostRequest {
