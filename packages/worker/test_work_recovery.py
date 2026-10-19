@@ -93,6 +93,9 @@ class WorkRecoveryTests(unittest.TestCase):
                 entered.set()
                 self.assertTrue(release.wait(5))
                 return {**self.page(),"entries":[],"next":None}
+            if path.endswith("/cleanup-reconcile"):
+                return {"schema":"runtime.agent_run_cleanup.reconciled.v1",
+                        "checked":0,"pending":[],"next":None}
             return {"activeNext":None,"deadLetterNext":None}
         def runtime(path,body):
             return {"disposition":"reconciled","checked":0,"waiters":[],"next":None} if path.endswith("reconcile-waiters") else {}
@@ -102,8 +105,8 @@ class WorkRecoveryTests(unittest.TestCase):
             try:
                 self.assertTrue(entered.wait(5))
                 self.assertIn("waiters",worker.LifecycleReconciler()())
-                stopped.set()
             finally:
+                stopped.set()
                 release.set()
                 thread.join(5)
             self.assertFalse(thread.is_alive())
