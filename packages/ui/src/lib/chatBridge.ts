@@ -1886,7 +1886,7 @@ export const listenAgentRuntimeConfigChanges = async (
     return () => undefined;
   }
   return listenHost<unknown>("runtime/config-changed", (payload) => {
-    if (!isRecord(payload) || Object.keys(payload).length !== 0) {
+    if (!isRecord(payload) || Array.isArray(payload) || Object.keys(payload).length !== 0) {
       throw new Error("runtime/config-changed payload must be an empty object");
     }
     handler();

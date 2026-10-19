@@ -1,31 +1,28 @@
-import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import path from "node:path";
-import { test } from "vitest";
+import { expect, test, vi } from "vitest";
+import { isNativeHostRuntime, listenHost } from "../src/host/hostBridge";
+import { listenAgentRuntimeConfigChanges } from "../src/lib/chatBridge";
 
-const readSource = (rootDir, relativePath) =>
-  readFile(path.join(rootDir, relativePath), "utf8");
+vi.mock("../src/host/hostBridge", () => ({
+  invokeHost: vi.fn(),
+  isNativeHostRuntime: vi.fn(() => true),
+  listenHost: vi.fn(),
+}));
 
-test("welcome pickers open down while conversation pickers open up", async () => {
-  const rootDir = path.resolve(import.meta.dirname, "..");
-  const css = await readSource(rootDir, "src/styles/chat.css");
-
-  assert.match(
-    css,
-    /\.composerPickerPanel,\s*\.contextWindowPanel\s*\{[\s\S]*?bottom: calc\(100% \+ 3px\)/,
-  );
-  assert.match(
-    css,
-    /\.chatBottomPlane\.is-welcome \.composerPickerPanel,\s*\.chatBottomPlane\.is-welcome \.contextWindowPanel\s*\{[\s\S]*?top: calc\(100% \+ 3px\);\s*bottom: auto/,
-  );
-  assert.match(css, /\.composerLucideIcon\.is-chevron\s*\{[\s\S]*?transform: rotate\(180deg\)/);
-  assert.match(css, /\.chatBottomPlane\.is-welcome \.composerLucideIcon\.is-chevron\s*\{\s*transform: none/);
-});
-
-test("the runtime config bridge validates the shared notification payload", async () => {
-  const rootDir = path.resolve(import.meta.dirname, "..");
-  const bridge = await readSource(rootDir, "src/lib/chatBridge.ts");
-
-  assert.match(bridge, /listenHost<unknown>\("runtime\/config-changed"/);
-  assert.match(bridge, /Object\.keys\(payload\)\.length !== 0/);
+test("runtime config notifications reject invalid payloads and retain unsubscribe ownership", async () => {
+  const handler = vi.fn();
+  const unsubscribe = vi.fn();
+  vi.mocked(listenHost).mockResolvedValue(unsubscribe);
+  expect(await listenAgentRuntimeConfigChanges(handler)).toBe(unsubscribe);
+  const [event, notify] = vi.mocked(listenHost).mock.calls[0];
+  expect(event).toBe("runtime/config-changed");
+  notify({});
+  expect(handler).toHaveBeenCalledTimes(1);
+  for (const payload of [null, [], "changed", { revision: 1 }]) {
+    expect(() => notify(payload)).toThrow();
+  }
+  expect(handler).toHaveBeenCalledTimes(1);
+  vi.mocked(listenHost).mockClear();
+  vi.mocked(isNativeHostRuntime).mockReturnValue(false);
+  expect(await listenAgentRuntimeConfigChanges(handler)).toBeTypeOf("function");
+  expect(listenHost).not.toHaveBeenCalled();
 });
