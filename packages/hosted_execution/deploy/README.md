@@ -11,8 +11,19 @@ by other users. Control, output and socket directories must be distinct private
 directories (mode `0700`); the service creates missing directories with that
 mode and refuses to change permissions on an existing shared directory.
 
-Set `runcPath`, `runcRoot` and `dockerSocket` to the exact binary, state root and
+Set `ociRuntime` to `runc` or `runsc`, and `runtimePath`, `runtimeRoot` and
+`dockerSocket` to the exact binary, state root and
 daemon that own the workload containers. Record the binary version and digest.
+Operator configs using `runcPath`/`runcRoot` must be updated explicitly; those
+field names are no longer accepted. The task wire protocol is unchanged.
+
+The runsc adapter requires the matching sealed helper and gVisor's
+`--in-sandbox-cgroup=v2` runtime argument. Workload capabilities must be empty
+and the workload cgroup mount read-only. A sealed runner uses a different UID
+for trusted setup, restores the profile identity and capabilities before exec,
+and keeps its reaper outside the task cgroup. Commands retain the environment's
+PID namespace; cancelling one task uses its gVisor cgroup rather than killing
+the whole sandbox. Host-owned journals and output remain outside the workload.
 An upstream interface reference is runc v1.3.3 `exec --process --cgroup`; that
 reference does not establish the installed binary's provenance. The supervisor
 cross-checks Docker identity, runc state, init PID/starttime, bundle/security

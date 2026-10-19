@@ -35,7 +35,7 @@ fn static_elf(bytes: &[u8]) -> Result<(), String> {
     }
     Ok(())
 }
-fn sealed_file(bytes: &[u8]) -> Result<File, String> {
+pub(super) fn sealed_file(bytes: &[u8]) -> Result<File, String> {
     // SAFETY: the constant name is NUL terminated; ownership transfers to File.
     let fd = unsafe {
         libc::memfd_create(

@@ -2,14 +2,41 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn runsc_configuration_selects_a_native_backend_and_requires_the_sealed_runner() {
+    let value = json!({
+        "schema":HOST_SUPERVISOR_SCHEMA,
+        "socketPath":"/run/centaeris-host/control.sock",
+        "controlRoot":"/var/lib/centaeris-host/control",
+        "outputRoot":"/var/lib/centaeris-host/output",
+        "ociRuntime":"runsc",
+        "runtimePath":"/usr/bin/runsc",
+        "runtimeRoot":"/run/docker/runtime-runc/moby",
+        "dockerPath":"/usr/bin/docker",
+        "dockerSocket":"/var/run/docker.sock",
+        "controllerUid":0,
+        "helperPath":"/opt/centaeris/host/execution_agent"
+    });
+    let config: HostSupervisorConfig = serde_json::from_value(value.clone()).unwrap();
+    config.validate().unwrap();
+    let mut missing = value.clone();
+    missing["helperPath"] = json!(null);
+    let config: HostSupervisorConfig = serde_json::from_value(missing).unwrap();
+    assert_eq!(config.validate().unwrap_err(), "host_runsc_runner_required");
+    let mut unsupported = value;
+    unsupported["ociRuntime"] = json!("automatic");
+    assert!(serde_json::from_value::<HostSupervisorConfig>(unsupported).is_err());
+}
+
+#[test]
 fn managed_helper_configuration_needs_only_its_absolute_installation_path() {
     let configuration: HostSupervisorConfig = serde_json::from_value(json!({
         "schema": HOST_SUPERVISOR_SCHEMA,
         "socketPath": "/run/centaeris-host/control.sock",
         "controlRoot": "/var/lib/centaeris-host/control",
         "outputRoot": "/var/lib/centaeris-host/output",
-        "runcPath": "/usr/sbin/runc",
-        "runcRoot": "/run/docker/runtime-runc/moby",
+        "ociRuntime": "runc",
+        "runtimePath": "/usr/sbin/runc",
+        "runtimeRoot": "/run/docker/runtime-runc/moby",
         "dockerPath": "/usr/bin/docker",
         "dockerSocket": "/var/run/docker.sock",
         "controllerUid": 0,
@@ -74,7 +101,7 @@ fn trusted_registration_is_strict_and_task_requests_cannot_choose_host_paths() {
     }))
     .unwrap();
     envelope.validate().unwrap();
-    for field in ["runcRoot", "controlRoot", "capabilities", "process"] {
+    for field in ["runtimeRoot", "controlRoot", "capabilities", "process"] {
         let mut value = serde_json::to_value(&envelope).unwrap();
         value["request"]["target"][field] = json!("/host");
         assert!(serde_json::from_value::<HostSupervisorEnvelope>(value).is_err());
@@ -105,8 +132,9 @@ fn host_configuration_keeps_all_control_roots_outside_each_other() {
         socket_path: "/run/centaeris-host/control.sock".into(),
         control_root: "/var/lib/centaeris-host/control".into(),
         output_root: "/var/lib/centaeris-host/output".into(),
-        runc_path: "/usr/bin/runc".into(),
-        runc_root: "/run/docker/runtime-runc/moby".into(),
+        oci_runtime: HostOciRuntime::Runc,
+        runtime_path: "/usr/bin/runc".into(),
+        runtime_root: "/run/docker/runtime-runc/moby".into(),
         docker_path: "/usr/bin/docker".into(),
         docker_socket: "/var/run/docker.sock".into(),
         controller_uid: 0,

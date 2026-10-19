@@ -2,6 +2,8 @@ fn main() {
     let result = match std::env::args().nth(1).as_deref() {
         #[cfg(target_os = "linux")]
         Some("environment-keeper") => hosted_execution::task_service::workload_keeper(),
+        #[cfg(target_os = "linux")]
+        Some("runsc-control") => hosted_execution::runsc_task::run(),
         Some("filesystem-once") => hosted_execution::agent::run_filesystem_once(),
         Some("prepare-workspace") => hosted_execution::agent::run_prepare_workspace_once(),
         Some("agent-process-state") => hosted_execution::agent::run_agent_process_state_once(),

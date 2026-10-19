@@ -3,9 +3,11 @@ use super::*;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 
 #[derive(Clone)]
-pub(crate) struct RuncTarget {
-    pub runc_path: PathBuf,
-    pub runc_root: PathBuf,
+pub(crate) struct OciTarget {
+    pub runtime: crate::host_supervisor::HostOciRuntime,
+    pub helper_binary: Option<Arc<HelperBinary>>,
+    pub runtime_path: PathBuf,
+    pub runtime_root: PathBuf,
     pub container_id: String,
     pub process: serde_json::Value,
     pub launch_root: PathBuf,
@@ -28,6 +30,7 @@ pub(super) enum TaskChild {
         pid: u32,
         status: Option<std::process::ExitStatus>,
     },
+    Runsc(super::runsc::RunscChild),
 }
 impl TaskChild {
     pub(super) fn id(&self) -> u32 {
@@ -35,10 +38,12 @@ impl TaskChild {
             #[cfg(test)]
             Self::Local(child) => child.id(),
             Self::Native { pid, .. } => *pid,
+            Self::Runsc(child) => child.id(),
         }
     }
     pub(super) fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
         match self {
+            Self::Runsc(child) => child.try_wait(),
             #[cfg(test)]
             Self::Local(child) => child.try_wait(),
             Self::Native { pid, status } => {
@@ -67,19 +72,19 @@ pub(super) struct Spawned {
     pub stderr: std::process::ChildStderr,
 }
 
-impl RuncTarget {
-    fn verify_identity(&self) -> Result<(), String> {
+impl OciTarget {
+    pub(super) fn verify_identity(&self) -> Result<(), String> {
         use crate::host_supervisor::linux::{command_json_unlocked, start_time};
         if start_time(self.init_pid)? != self.init_start_time {
             return Err("host_registered_target_changed".into());
         }
         let state = command_json_unlocked(
-            self.runc_path
+            self.runtime_path
                 .to_str()
                 .ok_or("host_configuration_invalid")?,
             &[
                 "--root",
-                self.runc_root
+                self.runtime_root
                     .to_str()
                     .ok_or("host_configuration_invalid")?,
                 "state",
@@ -110,6 +115,9 @@ impl RuncTarget {
         cgroup: &Path,
         trusted: Option<&TrustedLaunch>,
     ) -> Result<Spawned, String> {
+        if self.runtime == crate::host_supervisor::HostOciRuntime::Runsc {
+            return super::runsc::spawn(self, id, request, cgroup, trusted);
+        }
         let TaskProcess {
             program,
             args,
@@ -136,10 +144,10 @@ impl RuncTarget {
         serde_json::to_writer(&mut file, &process).map_err(|_| "task_launch_state_failed")?;
         file.sync_all().map_err(|_| "task_launch_state_failed")?;
         let result = (|| {
-            let mut command = Command::new(&self.runc_path);
+            let mut command = Command::new(&self.runtime_path);
             command
                 .arg("--root")
-                .arg(&self.runc_root)
+                .arg(&self.runtime_root)
                 .arg("exec")
                 .arg("--detach")
                 .arg("--process")
