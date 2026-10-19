@@ -82,36 +82,63 @@ fn preparing_tool_name_requires_bounded_lower_snake_case() {
 #[tokio::test]
 async fn built_in_provider_registry_contains_expected_defaults() {
     let providers = built_in_model_providers();
-    let openai_provider = providers
-        .get("openai.default")
-        .expect("openai provider should exist");
-    assert_eq!(
-        openai_provider.capability_profile.max_context_tokens,
-        Some(1_050_000)
-    );
-    assert!(providers.contains_key("anthropic.default"));
-    let kimi_provider = providers
-        .get("kimi.default")
-        .expect("kimi provider should exist");
-    assert_eq!(
-        kimi_provider.base_url.as_deref(),
-        Some("https://api.moonshot.cn/v1")
-    );
-    assert_eq!(
-        kimi_provider.auth,
-        AuthSpec::BearerEnv {
-            env_key: "KIMI_API_KEY".to_string(),
-        }
-    );
-    let deepseek_provider = providers
-        .get("deepseek.default")
-        .expect("deepseek provider should exist");
-    assert_eq!(deepseek_provider.provider_kind, ModelProviderKind::DeepSeek);
-    assert_eq!(deepseek_provider.wire_api, WireApi::OpenAiChatCompletions);
-    assert_eq!(
-        deepseek_provider.base_url.as_deref(),
-        Some("https://api.deepseek.com")
-    );
+    for definition in &centaeris_model_catalog::model_catalog().providers {
+        let provider = providers
+            .get(&definition.provider_id)
+            .expect("catalog provider");
+        assert_eq!(provider.name, definition.display_name);
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some(definition.api_base.as_str())
+        );
+        assert_eq!(
+            provider.capability_profile.max_context_tokens,
+            definition
+                .models
+                .iter()
+                .map(|model| model.context_tokens)
+                .max()
+        );
+        assert_eq!(
+            provider.capability_profile.max_output_tokens,
+            definition
+                .models
+                .iter()
+                .map(|model| model.max_output_tokens)
+                .max()
+        );
+        assert_eq!(
+            provider.capability_profile.supports_vision,
+            definition.models.iter().any(|model| model.supports_vision)
+        );
+        assert_eq!(
+            provider.capability_profile.supports_reasoning,
+            definition
+                .models
+                .iter()
+                .any(|model| !model.thinking_modes.is_empty())
+        );
+        let expected_api = match definition.api {
+            centaeris_model_catalog::ModelApi::OpenAiCompletions => WireApi::OpenAiChatCompletions,
+            centaeris_model_catalog::ModelApi::OpenAiResponses => WireApi::OpenAiResponses,
+            centaeris_model_catalog::ModelApi::AnthropicMessages => WireApi::AnthropicMessages,
+        };
+        assert_eq!(provider.wire_api, expected_api);
+        let expected_auth = if definition.credential.header == "authorization"
+            && definition.credential.prefix.as_deref() == Some("Bearer")
+        {
+            AuthSpec::BearerEnv {
+                env_key: definition.credential.env.clone(),
+            }
+        } else {
+            AuthSpec::ApiKeyEnv {
+                env_key: definition.credential.env.clone(),
+                header_name: definition.credential.header.clone(),
+                prefix: definition.credential.prefix.clone(),
+            }
+        };
+        assert_eq!(provider.auth, expected_auth);
+    }
     assert!(providers.contains_key("custom.openai_compatible"));
     assert!(providers.contains_key("local.default"));
 }
@@ -127,18 +154,29 @@ fn built_in_model_profiles_are_canonical_and_bounded() {
             .map(|provider| provider.models.len())
             .sum::<usize>()
     );
-    let deepseek = built_in_model_profile("deepseek.default", "deepseek-flash")
-        .expect("DeepSeek Flash profile");
-    assert_eq!(deepseek.context_tokens, 1_000_000);
-    assert_eq!(deepseek.max_output_tokens, 384_000);
-    assert_eq!(deepseek.thinking_mode.as_deref(), Some("high"));
-    assert_eq!(deepseek.thinking_modes, ["low", "high", "max"]);
-    let kimi = built_in_model_profile("kimi.default", "kimi-k3").expect("Kimi K3 profile");
-    assert_eq!(kimi.context_tokens, 1_048_576);
-    assert_eq!(kimi.max_output_tokens, 131_072);
-    assert_eq!(kimi.thinking_mode.as_deref(), Some("high"));
-    assert!(built_in_model_profile("deepseek.default", "deepseek-v4-fast").is_none());
-    assert!(built_in_model_profile("deepseek.default", "DEEPSEEK-FLASH").is_none());
+    for provider in &centaeris_model_catalog::model_catalog().providers {
+        for model in &provider.models {
+            let profile = built_in_model_profile(&provider.provider_id, &model.model)
+                .expect("catalog model profile");
+            assert_eq!(
+                serde_json::to_value(profile).unwrap(),
+                json!({
+                    "providerId": provider.provider_id,
+                    "model": model.model,
+                    "displayName": model.display_name,
+                    "contextTokens": model.context_tokens,
+                    "maxOutputTokens": model.max_output_tokens,
+                    "thinkingMode": model.thinking_mode,
+                    "thinkingModes": model.thinking_modes,
+                    "supportsVision": model.supports_vision,
+                    "apiOverride": model.api_override,
+                    "apiBaseOverride": model.api_base_override,
+                })
+            );
+        }
+        assert!(built_in_model_profile(&provider.provider_id, "__unknown_model__").is_none());
+    }
+    assert!(built_in_model_profile("__unknown_provider__", "__unknown_model__").is_none());
 }
 
 #[tokio::test]

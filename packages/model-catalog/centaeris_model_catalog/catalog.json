@@ -745,7 +745,7 @@
       "displayName": "OpenCode Go",
       "providerKind": "custom",
       "api": "openai-completions",
-      "apiBase": "https://opencode.ai/zen/go/v1",
+      "apiBase": "https://opencode.ai/inference/go/openai/v1",
       "credential": {
         "env": "OPENCODE_API_KEY",
         "header": "authorization",
@@ -756,7 +756,7 @@
         {
           "model": "glm-5.3-flash",
           "displayName": "GLM-5.3 Flash",
-          "contextTokens": 1000000,
+          "contextTokens": 1048576,
           "maxOutputTokens": 131072,
           "thinkingMode": "high",
           "thinkingModes": [
@@ -764,14 +764,14 @@
             "high",
             "max"
           ],
-          "supportsVision": false,
+          "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
         },
         {
           "model": "deepseek-v4.1-flash",
           "displayName": "DeepSeek V4.1 Flash",
-          "contextTokens": 1000000,
+          "contextTokens": 1048576,
           "maxOutputTokens": 384000,
           "thinkingMode": "high",
           "thinkingModes": [
@@ -895,7 +895,7 @@
       "catalogId": "command_code_goat",
       "displayName": "Command Code GOAT",
       "providerKind": "command_code",
-      "api": "openai-responses",
+      "api": "openai-completions",
       "apiBase": "https://api.commandcode.ai/provider/v1",
       "credential": {
         "env": "COMMAND_CODE_API_KEY",
@@ -907,43 +907,29 @@
         {
           "model": "deepseek/deepseek-v4.1-flash",
           "displayName": "DeepSeek V4.1 Flash",
-          "contextTokens": 1000000,
-          "maxOutputTokens": 65536,
-          "thinkingMode": null,
-          "thinkingModes": [],
+          "contextTokens": 1048576,
+          "maxOutputTokens": 384000,
+          "thinkingMode": "high",
+          "thinkingModes": [
+            "low",
+            "high",
+            "max"
+          ],
           "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
         },
         {
           "model": "z-ai/glm-5.3-flash",
-          "displayName": "GLM 5.3 Flash",
+          "displayName": "GLM-5.3 Flash",
           "contextTokens": 1048576,
-          "maxOutputTokens": 65536,
-          "thinkingMode": null,
-          "thinkingModes": [],
-          "supportsVision": false,
-          "apiOverride": null,
-          "apiBaseOverride": null
-        },
-        {
-          "model": "xiaomi/mimo-v2.6-flash",
-          "displayName": "MiMo V2.6 Flash",
-          "contextTokens": 1048576,
-          "maxOutputTokens": 65536,
-          "thinkingMode": null,
-          "thinkingModes": [],
-          "supportsVision": true,
-          "apiOverride": null,
-          "apiBaseOverride": null
-        },
-        {
-          "model": "MiniMaxAI/MiniMax-M3",
-          "displayName": "MiniMax M3",
-          "contextTokens": 1000000,
-          "maxOutputTokens": 65536,
-          "thinkingMode": null,
-          "thinkingModes": [],
+          "maxOutputTokens": 131072,
+          "thinkingMode": "high",
+          "thinkingModes": [
+            "low",
+            "high",
+            "max"
+          ],
           "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
