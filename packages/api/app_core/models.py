@@ -39,6 +39,10 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
 
 
+def new_external_identity_id() -> str:
+    return new_id("external_identity")
+
+
 def new_workspace_id() -> str:
     return f"ws_{secrets.token_urlsafe(12)}"
 
@@ -2944,6 +2948,41 @@ class ModelRunLog(models.Model):
     promptCacheMissTokens = models.IntegerField(null=True, blank=True)
     error = models.TextField(blank=True, default="")
     createdAt = models.DateTimeField(auto_now_add=True)
+
+
+class ExternalIdentity(models.Model):
+    id = models.CharField(primary_key=True, max_length=64, default=new_external_identity_id)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="external_identities")
+    provider_id = models.CharField(max_length=64)
+    provider_name = models.CharField(max_length=160)
+    provider_fingerprint = models.CharField(max_length=64)
+    subject = models.CharField(max_length=255)
+    display_name = models.CharField(max_length=150, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_login_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["provider_id", "subject"], name="external_identity_subject_unique"),
+            models.UniqueConstraint(fields=["user", "provider_id"], name="external_identity_user_provider_unique"),
+            models.CheckConstraint(condition=~models.Q(subject="") & ~models.Q(provider_id=""), name="external_identity_nonempty"),
+        ]
+
+
+class SsoAuthorizationAttempt(models.Model):
+    state_digest = models.CharField(primary_key=True, max_length=64)
+    provider_id = models.CharField(max_length=64)
+    provider_fingerprint = models.CharField(max_length=64)
+    purpose = models.CharField(max_length=5)
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.CASCADE)
+    actor_auth_hash = models.CharField(max_length=64, blank=True)
+    session_digest = models.CharField(max_length=64)
+    return_to = models.CharField(max_length=2048)
+    expires_at = models.DateTimeField(db_index=True)
+    consumed_at = models.DateTimeField(null=True)
+
+    class Meta:
+        constraints = [models.CheckConstraint(condition=models.Q(purpose__in=["login", "link"]), name="sso_attempt_purpose_valid")]
 
 
 class BrowserLoginSession(AbstractBaseSession):

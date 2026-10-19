@@ -3,6 +3,7 @@ from app_core.http.office_preview import router as office_preview_router
 from ninja import NinjaAPI
 
 from app_core.http.auth import router as auth_router
+from app_core.http.sso import router as sso_router
 from app_core.http.app_delegations import router as app_delegations_router
 from app_core.http.business_agent_branches import router as business_agent_branches_router
 from app_core.http.agents import router as agents_router
@@ -48,6 +49,7 @@ api = NinjaAPI(
 install_error_handlers(api)
 api.add_router("", health_router)
 api.add_router("/api", auth_router)
+api.add_router("/api", sso_router)
 api.add_router("/api", app_delegations_router)
 api.add_router("/api", business_agent_branches_router)
 api.add_router("/api", agents_router)

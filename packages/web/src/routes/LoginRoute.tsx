@@ -2,6 +2,7 @@
 import { useTranslation } from "../i18n";
 import { useNavigate, useSearchParams } from "react-router";
 import { LoginForm } from "../components/LoginForm";
+import { SsoFeedback, SsoLoginOptions } from "../components/ExternalLogin";
 import { OnboardingUtilities } from "../components/OnboardingUtilities";
 
 function safeReturnTo(value: string | null) {
@@ -24,6 +25,7 @@ export default function LoginPage() {
       <LoginForm
         initialEmail={searchParams.get("email") || ""}
         notice={searchParams.get("reset") === "1" ? t("loginRoute.yourPasswordHasBeenUpdatedSignInWithYour") : ""}
+        externalOptions={<><SsoFeedback search={searchParams.toString()} /><SsoLoginOptions returnTo={safeReturnTo(searchParams.get("next"))} /></>}
         onAuthenticated={() => navigate(safeReturnTo(searchParams.get("next")), { replace: true })}
       />
       <OnboardingUtilities />

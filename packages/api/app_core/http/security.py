@@ -38,6 +38,9 @@ class ProductSessionAuth(SessionAuth):
                 raise DelegationRejected("authentication_mixed", 400)
             raise PublicAuthenticationRequired("authentication_required")
         if request.user.is_authenticated:
+            from app_core.sso import external_session_valid
+            if not external_session_valid(request):
+                raise PublicAuthenticationRequired("authentication_required")
             if request.method not in {"GET", "HEAD", "OPTIONS", "TRACE"}:
                 if request.content_type == "application/json":
                     _ = request.body

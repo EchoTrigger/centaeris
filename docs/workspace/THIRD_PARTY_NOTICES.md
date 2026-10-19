@@ -1,5 +1,11 @@
 # Third-party notices
 
+External OAuth sign-in uses [Authlib](https://github.com/authlib/authlib) 1.9.1
+and its [joserfc](https://github.com/authlib/joserfc) 1.7.7 dependency, both under
+the BSD 3-Clause license. Their Python distributions include the license texts.
+The HTTP transport [Requests](https://github.com/psf/requests) 2.34.2 is licensed
+under Apache-2.0.
+
 Office previews bundle Mozilla PDF.js (`pdfjs-dist` 6.3.289), licensed under
 Apache-2.0. Its license is distributed with the web application as
 [`Apache-2.0-PDFjs.txt`](../../packages/web/public/licenses/Apache-2.0-PDFjs.txt).
