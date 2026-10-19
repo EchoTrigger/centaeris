@@ -459,6 +459,7 @@ fn postgres_retirement_pending_other_environment_does_not_block_healthy_run_clea
         ))
         .unwrap();
     let profile = b.original.environment_profile.digest().unwrap();
+    db.execute("UPDATE public.app_core_sessionenvironment SET environment_profile=$1::text::jsonb,environment_profile_digest=$2 WHERE id='environment-b'", &[&serde_json::to_string(&b.original.environment_profile).unwrap(),&profile]).unwrap();
     let second = store
         .prepare_retained_instance(
             &b.request("execution-b", &profile),
