@@ -4812,6 +4812,7 @@ class ModelAdminAcceptanceTests(TestCase):
         retiring = ModelConfig.objects.get(provider_id=provider_id, modelName="old", isCurrent=True)
         run = AgentRun.objects.create(workspace=workspace, session=session, user=self.admin,
                                       modelConfig=retiring, prompt="Finish first")
+        create_agent_run_authorization(run)
         preview = self.client.get("/api/admin/model-catalog-reconciliation")
         self.assertEqual(preview.status_code, 200)
         self.assertFalse(preview.json()["blocked"])
@@ -7982,6 +7983,7 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         from .test_platform_mcp import processing_specification
 
         producer = AgentRun.objects.create(workspace=self.workspace, session=self.session, user=self.member, modelConfig=self.model, prompt="produce")
+        create_agent_run_authorization(producer)
         key, size, digest = self.store_bytes("platform-artifact.txt", b"artifact material")
         artifact = Artifact.objects.create(workspace=self.workspace, session=self.session, agent_run=producer,
             createdBy=self.member, displayName="artifact.txt", safeFilename="artifact.txt", contentType="text/plain",
