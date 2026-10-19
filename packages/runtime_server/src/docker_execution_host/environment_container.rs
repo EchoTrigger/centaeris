@@ -20,8 +20,7 @@ pub(super) fn create_body_with_proxy_environment(
     proxy_environment: &BTreeMap<String, String>,
 ) -> Result<serde_json::Value, String> {
     profile.validate()?;
-    if expected.oci_runtime != OciRuntime::Runc
-        || expected.image_digest != profile.image_digest
+    if expected.image_digest != profile.image_digest
         || expected.resources != profile.resources.sandbox_resources()
         || expected.network != profile.network
         || !helper_path.starts_with('/')
@@ -53,7 +52,7 @@ pub(super) fn create_body_with_proxy_environment(
         "Cmd":[HELPER_DESTINATION,"environment-keeper"],
         "Env":[format!("CENTAERIS_WORKSPACE_ROOT={}",profile.workspace_root),format!("CENTAERIS_WORKSPACE_USER={}",profile.user)],
         "HostConfig":{
-            "Runtime":"runc", "NetworkMode":network::mode(expected.network),
+            "Runtime":expected.oci_runtime.docker_runtime_name(), "NetworkMode":network::mode(expected.network),
             "ReadonlyRootfs":false,"CapDrop":["ALL"],"CapAdd":[],"SecurityOpt":["no-new-privileges"],
             "Memory":profile.resources.memory_bytes, "CpuPeriod":100000,
             "CpuQuota":u64::from(profile.resources.cpu_milli)*100,
@@ -143,6 +142,37 @@ mod tests {
             body["Cmd"],
             serde_json::json!([HELPER_DESTINATION, "environment-keeper"])
         );
+    }
+
+    #[test]
+    fn runsc_creates_the_signed_environment_without_downgrading_the_runtime() {
+        let mut runner = super::super::tests::retained_test_runner();
+        let profile = profile();
+        runner.oci_runtime = OciRuntime::Runsc;
+        runner.image_digest.clone_from(&profile.image_digest);
+        runner.resources = profile.resources.sandbox_resources();
+        runner.network = profile.network;
+        runner.plugin_mounts.clear();
+        let body = create_body_with_proxy_environment(
+            &runner.container_expectation(),
+            &profile,
+            "/srv/helpers/execution_agent",
+            &BTreeMap::new(),
+        )
+        .expect("runsc must accept the same signed environment profile");
+        assert_eq!(body["HostConfig"]["Runtime"], "runsc");
+        assert_eq!(body["Image"], profile.image_digest);
+        assert_eq!(body["User"], profile.user);
+        assert_eq!(body["HostConfig"]["CapDrop"], serde_json::json!(["ALL"]));
+        assert_eq!(body["HostConfig"]["Mounts"][0]["ReadOnly"], true);
+        runner.resources.memory_bytes += 1;
+        assert!(create_body_with_proxy_environment(
+            &runner.container_expectation(),
+            &profile,
+            "/srv/helpers/execution_agent",
+            &BTreeMap::new(),
+        )
+        .is_err());
     }
 
     #[test]
