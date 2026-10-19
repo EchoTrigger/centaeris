@@ -198,7 +198,7 @@ class AgentInputDeliveryTests(TransactionTestCase):
         self.assertEqual(sum("UNION ALL" in query["sql"] for query in queries), 1)
 
     def test_stored_manifest_uptake_projects_only_the_owned_committed_main_request(self):
-        from .test_native_consumption_runtime import isolate_runtime_schema
+        from .runtime_schema_test_helpers import isolate_runtime_schema
         isolate_runtime_schema(self)
         with connection.cursor() as cursor:
             cursor.execute("CREATE SCHEMA IF NOT EXISTS runtime")

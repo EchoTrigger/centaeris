@@ -3,7 +3,7 @@ from django.db import connection, DatabaseError
 from django.contrib.contenttypes.models import ContentType
 from django.test import TransactionTestCase
 
-from .test_native_consumption_runtime import isolate_runtime_schema
+from .runtime_schema_test_helpers import isolate_runtime_schema
 
 
 class RuntimeSchemaCleanupTests(TransactionTestCase):
@@ -27,7 +27,10 @@ class RuntimeSchemaCleanupTests(TransactionTestCase):
             cursor.execute("CREATE SCHEMA runtime")
             cursor.execute("CREATE TABLE runtime.schema_migrations(version integer PRIMARY KEY)")
             for name in ("notify_runtime_job_ready_v1", "verify_execution_allocation",
-                         "verify_resident_allocation", "protect_environment_retirement"):
+                         "verify_resident_allocation", "protect_environment_retirement",
+                         "protect_environment_maintenance_completion",
+                         "protect_agent_run_cleanup_receipt",
+                         "protect_environment_provision_completion"):
                 cursor.execute("CREATE FUNCTION runtime." + name + "() RETURNS trigger "
                                "LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$")
 

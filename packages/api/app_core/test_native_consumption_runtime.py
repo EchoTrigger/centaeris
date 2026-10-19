@@ -3,7 +3,6 @@ import json
 import os
 from pathlib import Path
 import subprocess
-import uuid
 from unittest.mock import patch
 from urllib.parse import quote
 
@@ -16,31 +15,7 @@ from . import test_agent_work_returns as return_fixture
 from . import test_agent_work_consumption as consume_fixture
 from .models import AgentRun
 from .testing import fenced_start_fixture
-from .runtime_schema_test_helpers import remove_runtime_trigger_functions
-
-
-def isolate_runtime_schema(test):
-    test.assertTrue(connection.settings_dict["NAME"].startswith("test_"))
-    saved_schema = connection.ops.quote_name("native_consume_previous_" + uuid.uuid4().hex)
-    with connection.cursor() as cursor:
-        cursor.execute("SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='runtime')")
-        previous_schema_exists = cursor.fetchone()[0]
-        if previous_schema_exists:
-            # Earlier API fixtures can leave a partial Runtime schema.
-            cursor.execute("ALTER SCHEMA runtime RENAME TO " + saved_schema)
-
-    def restore_runtime_schema():
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT tablename FROM pg_tables WHERE schemaname='runtime'")
-            tables = [row[0] for row in cursor.fetchall()]
-            if tables:
-                cursor.execute("DROP TABLE " + ", ".join(
-                    "runtime." + connection.ops.quote_name(table) for table in sorted(tables)))
-            remove_runtime_trigger_functions(cursor)
-            cursor.execute("DROP SCHEMA IF EXISTS runtime")
-            if previous_schema_exists:
-                cursor.execute("ALTER SCHEMA " + saved_schema + " RENAME TO runtime")
-    test.addCleanup(restore_runtime_schema)
+from .runtime_schema_test_helpers import isolate_runtime_schema
 
 
 class NativeConsumptionRuntimeTests(TransactionTestCase):
