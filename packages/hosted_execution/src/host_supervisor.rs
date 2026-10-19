@@ -51,6 +51,9 @@ pub enum HostSupervisorRequest {
     Register {
         target: HostLaunchTarget,
     },
+    Retire {
+        target: HostLaunchTarget,
+    },
     Task {
         envelope: EnvironmentTaskEnvelope,
     },
@@ -93,6 +96,9 @@ pub enum HostSupervisorResponse {
 )]
 pub enum HostSupervisorResult {
     Registered {
+        target: HostLaunchTarget,
+    },
+    Retired {
         target: HostLaunchTarget,
     },
     Task {
@@ -167,7 +173,8 @@ impl HostSupervisorEnvelope {
             return Err("host_schema_unsupported".into());
         }
         match &self.request {
-            HostSupervisorRequest::Register { target } => target.validate(),
+            HostSupervisorRequest::Register { target }
+            | HostSupervisorRequest::Retire { target } => target.validate(),
             HostSupervisorRequest::Task { envelope } => {
                 envelope.validate()?;
                 if !request_instance(&envelope.request)
@@ -216,7 +223,9 @@ impl HostSupervisorResponse {
         }
         match self {
             Self::Success {
-                result: HostSupervisorResult::Registered { target },
+                result:
+                    HostSupervisorResult::Registered { target }
+                    | HostSupervisorResult::Retired { target },
                 ..
             } => target.validate(),
             Self::Success {

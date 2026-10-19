@@ -1,6 +1,7 @@
 use super::*;
 use crate::task_service::linux::{launcher::RuncTarget, HelperBinary, NativeManager};
 mod helpers;
+mod retirement;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -138,6 +139,10 @@ pub(crate) fn command_json_unlocked(
     path: &str,
     args: &[&str],
 ) -> Result<serde_json::Value, String> {
+    serde_json::from_slice(&command_bytes_unlocked(path, args)?)
+        .map_err(|_| "host_command_response_invalid".into())
+}
+fn command_bytes_unlocked(path: &str, args: &[&str]) -> Result<Vec<u8>, String> {
     let mut child = Command::new(path)
         .args(args)
         .env_clear()
@@ -178,7 +183,7 @@ pub(crate) fn command_json_unlocked(
     if !status.success() || data.len() > MAX_RESPONSE {
         return Err("host_command_failed".into());
     }
-    serde_json::from_slice(&data).map_err(|_| "host_command_response_invalid".into())
+    Ok(data)
 }
 
 pub(crate) fn start_time(pid: u32) -> Result<u64, String> {
@@ -342,14 +347,21 @@ struct Host {
     managers: Mutex<BTreeMap<String, (Registration, Arc<NativeManager>)>>,
     _lease: File,
     helper_binary: Option<Arc<HelperBinary>>,
+    retirement: retirement::RetirementStore,
 }
 impl Host {
     fn registration_path(&self, id: &str) -> PathBuf {
         Path::new(&self.config.control_root).join(format!("{id}.target.json"))
     }
     fn manager(&self, target: &HostLaunchTarget) -> Result<Arc<NativeManager>, String> {
+        if self.retirement.blocks(&target.environment_instance_id)? {
+            return Err("host_retirement_pending".into());
+        }
         let actual = attest(&self.config, target)?;
         let mut managers = self.managers.lock().map_err(|_| "host_service_failed")?;
+        if self.retirement.blocks(&target.environment_instance_id)? {
+            return Err("host_retirement_pending".into());
+        }
         if let Some((expected, manager)) = managers.get(&target.environment_instance_id) {
             if expected != &actual {
                 return Err("host_registered_target_changed".into());
@@ -422,12 +434,46 @@ impl Host {
         }
         self.manager(&registration.target)
     }
+    fn retire(&self, target: &HostLaunchTarget) -> Result<(), String> {
+        self.retire_with_probe(target, || retirement::docker_absent(&self.config, target))
+    }
+    fn retire_with_probe(
+        &self,
+        target: &HostLaunchTarget,
+        absent: impl FnOnce() -> Result<bool, String>,
+    ) -> Result<(), String> {
+        target.validate()?;
+        let mut managers = self.managers.lock().map_err(|_| "host_service_failed")?;
+        if managers
+            .get(&target.environment_instance_id)
+            .is_some_and(|(registration, _)| &registration.target != target)
+        {
+            return Err("host_retirement_target_mismatch".into());
+        }
+        self.retirement.retire(target, absent, || {
+            if let Some((_, manager)) = managers.get(&target.environment_instance_id) {
+                // Every accepted upload/RPC/output stream holds this exact Arc
+                // until it stops touching private state. Never unlink beneath it.
+                if Arc::strong_count(manager) != 1 {
+                    return Err("host_retirement_busy".into());
+                }
+                manager.retire_after_absence()?;
+            }
+            Ok(())
+        })?;
+        managers.remove(&target.environment_instance_id);
+        Ok(())
+    }
     fn handle(&self, envelope: HostSupervisorEnvelope) -> Result<HostSupervisorResult, String> {
         envelope.validate()?;
         match envelope.request {
             HostSupervisorRequest::Register { target } => {
                 self.manager(&target)?;
                 Ok(HostSupervisorResult::Registered { target })
+            }
+            HostSupervisorRequest::Retire { target } => {
+                self.retire(&target)?;
+                Ok(HostSupervisorResult::Retired { target })
             }
             HostSupervisorRequest::Inspect {
                 environment_instance_id,
@@ -497,11 +543,13 @@ pub fn serve(config_path: &Path) -> Result<(), String> {
         _ => None,
     };
     let host = Arc::new(Host {
+        retirement: retirement::RetirementStore::new(&config),
         config,
         managers: Mutex::new(BTreeMap::new()),
         _lease: lease,
         helper_binary,
     });
+    retirement::start_retries(&host)?;
     let active = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
         let stream = stream.map_err(|_| "host_socket_accept_failed")?;

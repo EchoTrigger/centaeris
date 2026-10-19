@@ -1,6 +1,44 @@
 use super::*;
 use serde_json::json;
 
+#[test]
+fn retirement_roundtrips_the_exact_current_target_and_validates_receipts() {
+    let target = HostLaunchTarget {
+        environment_instance_id: format!("instance_{}", "a".repeat(64)),
+        container_id: "b".repeat(64),
+        environment_id: "environment".into(),
+        profile_digest: format!("sha256:{}", "c".repeat(64)),
+        image_digest: format!("sha256:{}", "d".repeat(64)),
+    };
+    let request = HostSupervisorEnvelope {
+        schema: HOST_SUPERVISOR_SCHEMA.into(),
+        request: HostSupervisorRequest::Retire {
+            target: target.clone(),
+        },
+    };
+    let wire = serde_json::to_value(request).unwrap();
+    assert_eq!(wire["request"]["operation"], "retire");
+    let parsed: HostSupervisorEnvelope = serde_json::from_value(wire).unwrap();
+    parsed.validate().unwrap();
+    let response = HostSupervisorResponse::Success {
+        schema: HOST_SUPERVISOR_SCHEMA.into(),
+        result: HostSupervisorResult::Retired {
+            target: target.clone(),
+        },
+    };
+    response.validate().unwrap();
+    let wire = serde_json::to_value(response).unwrap();
+    assert_eq!(wire["result"]["kind"], "retired");
+    assert_eq!(wire["result"]["target"]["containerId"], target.container_id);
+    let mut malformed = target;
+    malformed.environment_instance_id = "../other".into();
+    assert!(HostSupervisorResponse::Success {
+        schema: HOST_SUPERVISOR_SCHEMA.into(),
+        result: HostSupervisorResult::Retired { target: malformed }
+    }
+    .validate()
+    .is_err());
+}
 fn target() -> HostLaunchTarget {
     HostLaunchTarget {
         environment_instance_id: format!("instance_{}", "1".repeat(64)),

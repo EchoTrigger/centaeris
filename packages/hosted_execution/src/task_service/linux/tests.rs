@@ -3,6 +3,131 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+fn retirement_preserves_a_confirmed_exit_while_the_supervisor_handle_is_still_present() {
+    let root = lock_root();
+    let control = root.join("control");
+    let output = root.join("output");
+    let groups = root.join("groups");
+    for path in [&control, &output, &groups] {
+        fs::create_dir(path).unwrap();
+    }
+    seeded_running_journal(&control);
+    let mut manager = Manager::open(
+        TaskStorage::new(control, output, OUTPUT_BUDGET_BYTES).unwrap(),
+        groups.clone(),
+        "i",
+    )
+    .unwrap();
+    let id = manager.journal.tasks.keys().next().unwrap().clone();
+    let snapshot = &mut manager.journal.tasks.get_mut(&id).unwrap().snapshot;
+    snapshot.state = EnvironmentTaskState::Exited;
+    snapshot.exit_code = Some(7);
+    snapshot.output_complete = true;
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "exit 7"])
+        .spawn()
+        .unwrap();
+    child.wait().unwrap();
+    let supervisor = thread::spawn(|| ());
+    while !supervisor.is_finished() {
+        thread::yield_now();
+    }
+    manager.live.insert(
+        id.clone(),
+        Live {
+            child: TaskChild::Local(child),
+            input: None,
+            cgroup: groups.join(&id),
+            supervisor,
+            input_worker: None,
+        },
+    );
+    let manager = Arc::new(Mutex::new(manager));
+    assert!(retire_manager(&manager).unwrap());
+    let snapshot = manager.lock().unwrap().journal.tasks[&id].snapshot.clone();
+    assert_eq!(snapshot.state, EnvironmentTaskState::Exited);
+    assert_eq!(snapshot.exit_code, Some(7));
+    assert!(snapshot.output_complete);
+    assert!(snapshot.cleanup_complete);
+    drop(manager);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn retirement_waits_for_a_reserved_helper_input_worker() {
+    let root = lock_root();
+    let control = root.join("control");
+    let output = root.join("output");
+    for path in [&control, &output] {
+        fs::create_dir(path).unwrap();
+    }
+    let manager = Manager::open(
+        TaskStorage::new(control, output, OUTPUT_BUDGET_BYTES).unwrap(),
+        root.join("unused-cgroups"),
+        "i",
+    )
+    .unwrap();
+    let worker_lease = HelperInputLease {
+        _input_guard: None,
+        _worker: DrainLease::new(&manager.drain_workers),
+    };
+    let input = File::create(root.join("input")).unwrap();
+    let worker = ReservedInput::new(input, Some(Arc::new(worker_lease))).unwrap();
+    let manager = Arc::new(Mutex::new(manager));
+    assert!(!retire_manager(&manager).unwrap());
+    drop(worker);
+    assert!(retire_manager(&manager).unwrap());
+    drop(manager);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn retirement_waits_for_output_writers_without_inventing_exit_or_eof_facts() {
+    let root = lock_root();
+    let control = root.join("control");
+    let output = root.join("output");
+    let groups = root.join("groups");
+    for path in [&control, &output, &groups] {
+        fs::create_dir(path).unwrap();
+    }
+    seeded_running_journal(&control);
+    let mut manager = Manager::open(
+        TaskStorage::new(control.clone(), output, OUTPUT_BUDGET_BYTES).unwrap(),
+        groups,
+        "i",
+    )
+    .unwrap();
+    let id = manager.journal.tasks.keys().next().unwrap().clone();
+    manager.journal.tasks.get_mut(&id).unwrap().snapshot.state = EnvironmentTaskState::Unknown;
+    let original = manager.journal.tasks[&id].snapshot.clone();
+    let writer = DrainLease::new(&manager.drain_workers);
+    let manager = Arc::new(Mutex::new(manager));
+    let reaper = start_reaper(&manager).unwrap();
+    assert!(
+        !retire_manager(&manager).unwrap(),
+        "active output writers keep retirement pending"
+    );
+    drop(writer);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !reaper.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(reaper.is_finished(), "retirement must stop its own reaper");
+    reaper.join().unwrap();
+    assert!(retire_manager(&manager).unwrap());
+    let snapshot = manager.lock().unwrap().journal.tasks[&id].snapshot.clone();
+    assert_eq!(snapshot.state, original.state);
+    assert_eq!(snapshot.exit_code, original.exit_code);
+    assert_eq!(snapshot.output_complete, original.output_complete);
+    assert!(
+        snapshot.cleanup_complete,
+        "only independently proven domain absence changes"
+    );
+    drop(manager);
+    fs::remove_dir_all(root).unwrap();
+}
+
 // An unrelated test's fork inherits flock descriptions until exec closes them.
 // Fixtures that assert immediate lock release therefore own an entire process.
 fn isolated_lock_fixture(flag: &str, name: &str) -> bool {

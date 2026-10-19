@@ -7,7 +7,10 @@ use std::{
     },
     path::PathBuf,
     process::{ChildStdin, Command, Stdio},
-    sync::{mpsc, Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc, Arc, Mutex,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -150,6 +153,9 @@ struct Manager {
     journal: Journal,
     live: BTreeMap<String, Live>,
     logs: BTreeMap<String, Arc<Mutex<OutputLog>>>,
+    container_absent: bool,
+    stop_reaper: bool,
+    drain_workers: Arc<AtomicUsize>,
     #[cfg(test)]
     fail_running_commit: bool,
     #[cfg(test)]
@@ -206,6 +212,9 @@ impl Manager {
             journal,
             live: BTreeMap::new(),
             logs,
+            container_absent: false,
+            stop_reaper: false,
+            drain_workers: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             fail_running_commit: false,
             #[cfg(test)]
@@ -557,7 +566,15 @@ impl Manager {
                             .input
                             .try_clone()
                             .map_err(|_| "host_helper_input_incomplete".to_owned())
-                            .and_then(|input| ReservedInput::new(input, launch.input_guard.clone()))
+                            .and_then(|input| {
+                                ReservedInput::new(
+                                    input,
+                                    Some(Arc::new(HelperInputLease {
+                                        _input_guard: launch.input_guard.clone(),
+                                        _worker: DrainLease::new(&m.drain_workers),
+                                    })),
+                                )
+                            })
                     })
                     .transpose()?;
                 let cgroup = m.cgroups.join(&id);
@@ -718,12 +735,14 @@ impl Manager {
                                     log: log.clone(),
                                     stream: EnvironmentTaskStream::Stdout,
                                     capture: trusted.map(|launch| launch.capture.clone()),
+                                    _lease: DrainLease::new(&m.drain_workers),
                                 },
                                 DrainWork {
                                     reader: Box::new(stderr),
                                     log,
                                     stream: EnvironmentTaskStream::Stderr,
                                     capture: trusted.map(|launch| launch.capture.clone()),
+                                    _lease: DrainLease::new(&m.drain_workers),
                                 },
                             )
                             .is_err()
@@ -945,6 +964,23 @@ struct DrainWork {
     log: Arc<Mutex<OutputLog>>,
     stream: EnvironmentTaskStream,
     capture: Option<Arc<Mutex<HelperCapture>>>,
+    _lease: DrainLease,
+}
+struct DrainLease(Arc<AtomicUsize>);
+struct HelperInputLease {
+    _input_guard: Option<Arc<dyn Send + Sync>>,
+    _worker: DrainLease,
+}
+impl DrainLease {
+    fn new(workers: &Arc<AtomicUsize>) -> Self {
+        workers.fetch_add(1, Ordering::AcqRel);
+        Self(workers.clone())
+    }
+}
+impl Drop for DrainLease {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 struct Supervision {
     manager: Arc<Mutex<Manager>>,
@@ -1058,6 +1094,7 @@ fn drain(work: DrainWork) -> bool {
         log,
         stream,
         capture,
+        _lease,
     } = work;
     let mut buf = [0; CHUNK];
     let mut okay = true;
@@ -1128,6 +1165,7 @@ fn supervise(
                 .clone();
             let poisoned = m.journal.poisoned;
             let unknown = before.state == EnvironmentTaskState::Unknown;
+            let container_absent = m.container_absent;
             let input_failed = {
                 let Some(live) = m.live.get_mut(&id) else {
                     break;
@@ -1158,19 +1196,25 @@ fn supervise(
             let Some(live) = m.live.get_mut(&id) else {
                 break;
             };
-            if poisoned
-                || unknown
-                || input_failed
-                || (timeout_ms > 0 && began.elapsed() >= Duration::from_millis(timeout_ms))
+            if !container_absent
+                && (poisoned
+                    || unknown
+                    || input_failed
+                    || (timeout_ms > 0 && began.elapsed() >= Duration::from_millis(timeout_ms)))
             {
                 let _ = cgroup_kill(&live.cgroup);
             }
             let input_pending = live.input_worker.is_some();
+            let mut lost_wait = false;
             let leader = match live.child.try_wait() {
                 Ok(Some(status)) => Some(status.code()),
                 Ok(None) => None,
-                Err(_) => {
-                    let _ = cgroup_kill(&live.cgroup);
+                Err(error) => {
+                    // Missing wait ownership is not a synthesized exit receipt.
+                    lost_wait = error.raw_os_error() == Some(libc::ECHILD);
+                    if !container_absent {
+                        let _ = cgroup_kill(&live.cgroup);
+                    }
                     m.journal
                         .tasks
                         .get_mut(&id)
@@ -1180,8 +1224,9 @@ fn supervise(
                     None
                 }
             };
-            let empty = fs::read_to_string(m.cgroups.join(&id).join("cgroup.events"))
-                .is_ok_and(|s| s.lines().any(|line| line == "populated 0"));
+            let empty = container_absent
+                || fs::read_to_string(m.cgroups.join(&id).join("cgroup.events"))
+                    .is_ok_and(|s| s.lines().any(|line| line == "populated 0"));
             let snapshot = &mut m.journal.tasks.get_mut(&id).expect("task record").snapshot;
             crate::host_supervisor::physical_snapshot(
                 snapshot,
@@ -1189,10 +1234,16 @@ fn supervise(
                 eof == [Some(true), Some(true)],
                 empty,
             );
+            if container_absent {
+                snapshot.cleanup_complete = true;
+            }
             if *snapshot != before {
                 let _ = m.persist();
             }
-            leader.is_some() && empty && !input_pending && eof.iter().all(Option::is_some)
+            (leader.is_some() || (container_absent && lost_wait))
+                && empty
+                && !input_pending
+                && eof.iter().all(Option::is_some)
         };
         if finished {
             break;
@@ -1215,8 +1266,31 @@ pub(crate) struct NativeManager {
     helper_binary: Option<Arc<HelperBinary>>,
     workspace_root: String,
     helper_admission: Mutex<()>,
+    reaper: Mutex<Option<thread::JoinHandle<()>>>,
 }
 impl NativeManager {
+    #[cfg(test)]
+    pub(crate) fn retirement_fixture(
+        control: PathBuf,
+        output: PathBuf,
+        instance: &str,
+    ) -> Result<Self, String> {
+        let manager = Manager::open(
+            TaskStorage::new(control.clone(), output.clone(), OUTPUT_BUDGET_BYTES)?,
+            control.join("unused-cgroups"),
+            instance,
+        )?;
+        Ok(Self {
+            manager: Arc::new(Mutex::new(manager)),
+            helper_root: output.clone(),
+            control,
+            output,
+            helper_binary: None,
+            workspace_root: "/".into(),
+            helper_admission: Mutex::new(()),
+            reaper: Mutex::new(None),
+        })
+    }
     pub(crate) fn open(
         control: PathBuf,
         output: PathBuf,
@@ -1240,7 +1314,7 @@ impl NativeManager {
         manager.helper_root = Some(helper_root.clone());
         manager.launcher = Some(launcher);
         let manager = Arc::new(Mutex::new(manager));
-        start_reaper(&manager)?;
+        let reaper = start_reaper(&manager)?;
         Ok(Self {
             manager,
             control,
@@ -1249,6 +1323,7 @@ impl NativeManager {
             helper_binary,
             workspace_root,
             helper_admission: Mutex::new(()),
+            reaper: Mutex::new(Some(reaper)),
         })
     }
     pub(crate) fn handle(
@@ -1261,6 +1336,83 @@ impl NativeManager {
         let _guard = self.manager.lock().map_err(|_| "task_service_failed")?;
         store::inspection(&self.control, &self.output)
     }
+    /// Called only after the host independently proves this exact Docker ID absent.
+    /// It never translates physical container absence into a successful task exit.
+    pub(crate) fn retire_after_absence(&self) -> Result<(), String> {
+        let ready = retire_manager(&self.manager)?;
+        let mut reaper = self.reaper.lock().map_err(|_| "task_service_failed")?;
+        if reaper.as_ref().is_some_and(|worker| worker.is_finished()) {
+            reaper
+                .take()
+                .expect("finished reaper")
+                .join()
+                .map_err(|_| "host_retirement_pending")?;
+        }
+        if !ready || reaper.is_some() || Arc::strong_count(&self.manager) != 1 {
+            return Err("host_retirement_busy".into());
+        }
+        Ok(())
+    }
+}
+
+fn retire_manager(manager: &Arc<Mutex<Manager>>) -> Result<bool, String> {
+    let mut m = manager.lock().map_err(|_| "task_service_failed")?;
+    m.container_absent = true;
+    m.stop_reaper = true;
+    let mut finished = Vec::new();
+    let mut changed = false;
+    for (id, live) in &mut m.live {
+        live.input.take();
+        if !live.supervisor.is_finished() {
+            continue;
+        }
+        if live
+            .input_worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+        {
+            continue;
+        }
+        let leader = match live.child.try_wait() {
+            Ok(None) => continue,
+            Ok(Some(status)) => Some(status.code()),
+            Err(error) if error.raw_os_error() == Some(libc::ECHILD) => None,
+            Err(_) => continue,
+        };
+        finished.push((id.clone(), leader));
+    }
+    for (id, leader) in finished {
+        let live = m.live.remove(&id).expect("finished supervisor");
+        let _ = live.supervisor.join();
+        if let Some(worker) = live.input_worker {
+            let _ = worker.join();
+        }
+        let snapshot = &mut m
+            .journal
+            .tasks
+            .get_mut(&id)
+            .ok_or("task_not_found")?
+            .snapshot;
+        // A fully recorded exit/EOF can precede release of its final handle.
+        // Preserve that confirmed outcome; incomplete supervision stays unknown.
+        if snapshot.state != EnvironmentTaskState::Exited || !snapshot.output_complete {
+            snapshot.state = EnvironmentTaskState::Unknown;
+            if let Some(exit) = leader {
+                snapshot.exit_code = exit;
+            }
+        }
+        changed = true;
+    }
+    for record in m.journal.tasks.values_mut() {
+        if !record.snapshot.cleanup_complete {
+            record.snapshot.cleanup_complete = true;
+            changed = true;
+        }
+    }
+    if changed {
+        m.persist()?;
+    }
+    Ok(m.live.is_empty() && m.drain_workers.load(Ordering::Acquire) == 0)
 }
 /// Workload PID 1 has no controller socket, state or elevated host authority.
 pub fn workload_keeper() -> Result<(), String> {
@@ -1325,7 +1477,7 @@ fn spawn_local(
     })
 }
 
-fn start_reaper(manager: &Arc<Mutex<Manager>>) -> Result<(), String> {
+fn start_reaper(manager: &Arc<Mutex<Manager>>) -> Result<thread::JoinHandle<()>, String> {
     // SAFETY: enabling subreaping only adopts orphaned descendants of this service.
     if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
         return Err("task_subreaper_unavailable".into());
@@ -1341,7 +1493,7 @@ fn start_reaper(manager: &Arc<Mutex<Manager>>) -> Result<(), String> {
                     let failed: Vec<_> = m
                         .live
                         .iter()
-                        .filter(|(_, live)| live.supervisor.is_finished())
+                        .filter(|(_, live)| !m.stop_reaper && live.supervisor.is_finished())
                         .map(|(id, _)| id.clone())
                         .collect();
                     for id in failed {
@@ -1408,14 +1560,21 @@ fn start_reaper(manager: &Arc<Mutex<Manager>>) -> Result<(), String> {
                                 }
                             }
                         }
+                        // Retiring managers make one final adopted-child pass
+                        // after leaders and all I/O workers have released ownership.
+                        if m.stop_reaper
+                            && m.live.is_empty()
+                            && m.drain_workers.load(Ordering::Acquire) == 0
+                        {
+                            break;
+                        }
                     }
                 }
                 drop(manager);
                 thread::sleep(Duration::from_millis(100));
             }
         })
-        .map_err(|_| "task_reaper_start_failed")?;
-    Ok(())
+        .map_err(|_| "task_reaper_start_failed".into())
 }
 #[cfg(test)]
 fn relay_exchange(stream: &mut (impl Read + Write), bytes: &[u8]) -> Result<Vec<u8>, String> {
