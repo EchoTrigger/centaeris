@@ -22,6 +22,9 @@ pub(super) enum TranscriptLine {
     },
     User(String),
     Summary(String),
+    ReferencedAnswer {
+        key: String,
+    },
     LiveAssistant {
         markdown: String,
         separator: bool,

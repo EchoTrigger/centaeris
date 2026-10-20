@@ -580,7 +580,9 @@ fn render_transcript_selection(buffer: &mut Buffer, area: Rect, selection: Optio
 
 /// Render one assistant message, marking only its first nonempty line.
 pub(super) fn render_summary_lines(text: &str, width: u16) -> Vec<Line<'static>> {
-    let mut markdown = render_markdown_lines(text.trim_start(), width.saturating_sub(2), false).0;
+    let projected = centaeris_core::session::visualization::project_markdown(text, true);
+    let mut markdown =
+        render_markdown_lines(projected.trim_start(), width.saturating_sub(2), false).0;
     indent_assistant_lines(&mut markdown, true, width);
     markdown
 }
@@ -610,17 +612,27 @@ pub(super) fn indent_assistant_lines(
 /// 这些行仍是当前 provider attempt 的视觉投影，不写入 session history；
 /// `ModelTextReplace` 会撤销它们并从同一来源重绘。
 pub(super) fn materialize_assistant_prefix(app: &mut App) -> bool {
-    let Some(end) = app
+    let Some(mut end) = app
         .assistant_buffer
         .rfind('\n')
         .map(|index| index.saturating_add(1))
     else {
         return false;
     };
+    for block in centaeris_core::session::visualization::visual_blocks(&app.assistant_buffer) {
+        if !block.complete || (block.start < end && block.end > end) {
+            end = end.min(block.start);
+        }
+    }
     if end <= app.assistant_emitted_bytes {
         return false;
     }
-    let source = app.assistant_buffer[app.assistant_emitted_bytes..end].to_string();
+    let source = centaeris_core::session::visualization::project_markdown_range(
+        &app.assistant_buffer,
+        app.assistant_emitted_bytes..end,
+        false,
+    )
+    .expect("source-aligned assistant prefix");
     let (_, in_code_block) = render_markdown_lines(
         source.as_str(),
         app.render_width,
@@ -634,7 +646,12 @@ pub(super) fn materialize_assistant_prefix(app: &mut App) -> bool {
 }
 
 pub(super) fn materialize_assistant_tail(app: &mut App, separator: bool) {
-    let source = app.assistant_buffer[app.assistant_emitted_bytes..].to_string();
+    let source = centaeris_core::session::visualization::project_markdown_range(
+        &app.assistant_buffer,
+        app.assistant_emitted_bytes..app.assistant_buffer.len(),
+        separator,
+    )
+    .expect("source-aligned assistant tail");
     if source.is_empty() && (!separator || !app.assistant_stream_started) {
         return;
     }
@@ -668,7 +685,13 @@ pub(super) fn append_live_assistant_markdown(app: &mut App, markdown: String, se
 
 /// 只渲染当前未闭合尾块；已闭合行已经进入 owned transcript source。
 pub(super) fn build_assistant_live_lines(app: &App, width: u16) -> Vec<Line<'static>> {
-    let assistant = &app.assistant_buffer[app.assistant_emitted_bytes..];
+    let projected = centaeris_core::session::visualization::project_markdown_range(
+        &app.assistant_buffer,
+        app.assistant_emitted_bytes..app.assistant_buffer.len(),
+        false,
+    )
+    .expect("source-aligned assistant preview");
+    let assistant = projected.as_str();
     if assistant.trim().is_empty() {
         return Vec::new();
     }
@@ -721,6 +744,15 @@ pub(super) fn build_transcript_view(app: &App, width: u16) -> TranscriptView {
                 };
                 lines.push(Line::styled(text, Style::default().fg(theme().muted)));
             }
+            TranscriptLine::ReferencedAnswer { key } => {
+                source_line_indices.push((key.clone(), lines.len()));
+                let loaded = output_preview::assistant_answer_text(app, key);
+                lines.extend(render_summary_lines(
+                    loaded.as_deref().unwrap_or("Loading answer…"),
+                    width,
+                ));
+                lines.push(Line::from(""));
+            }
             TranscriptLine::RunFailure { key, reason } => {
                 source_line_indices.push((key.clone(), lines.len()));
                 let loaded = output_preview::run_error_text(app, key);
@@ -738,6 +770,7 @@ pub(super) fn build_transcript_view(app: &App, width: u16) -> TranscriptView {
                             TranscriptLine::Tool(_)
                                 | TranscriptLine::ProcessEnd { .. }
                                 | TranscriptLine::RunFailure { .. }
+                                | TranscriptLine::ReferencedAnswer { .. }
                         )
                     })
                     .map_or(transcript.len(), |offset| cursor + offset);
@@ -2180,6 +2213,12 @@ pub(super) fn transcript_to_lines_from(
             TranscriptLine::RunItem { .. }
             | TranscriptLine::RunBoundary { .. }
             | TranscriptLine::ProcessEnd { .. } => {}
+            TranscriptLine::ReferencedAnswer { .. } => {
+                live_in_code_block = false;
+                if emit {
+                    lines.extend(render_summary_lines("Loading answer…", width));
+                }
+            }
             TranscriptLine::RunFailure { reason, .. } => {
                 live_in_code_block = false;
                 if emit {

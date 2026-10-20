@@ -352,6 +352,23 @@ impl TranscriptPagingState {
             })
     }
 
+    pub(super) fn assistant_answer_reference(
+        &self,
+        key: &str,
+    ) -> Option<centaeris_core::session::transcript::TranscriptContentRefV1> {
+        self.view
+            .visible_blocks()
+            .into_iter()
+            .find_map(|block| match &block.body {
+                TranscriptBlockBodyV1::AssistantText { content, .. }
+                    if key == format!("answer:{}", block.block_id) =>
+                {
+                    content.source_ref.clone()
+                }
+                _ => None,
+            })
+    }
+
     pub(super) fn run_error_reference(
         &self,
         key: &str,
@@ -462,7 +479,13 @@ fn materialize_block_body(
             TranscriptLine::User(materialize_text(content))
         }
         TranscriptBlockBodyV1::AssistantText { content, .. } => {
-            TranscriptLine::Summary(materialize_text(content))
+            if content.source_ref.is_some() {
+                TranscriptLine::ReferencedAnswer {
+                    key: format!("answer:{}", block.block_id),
+                }
+            } else {
+                TranscriptLine::Summary(materialize_text(content))
+            }
         }
         TranscriptBlockBodyV1::Reasoning { content, .. } => TranscriptLine::Reasoning {
             key: block.block_id.clone(),

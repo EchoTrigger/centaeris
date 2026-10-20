@@ -6314,3 +6314,125 @@ fn lazy_session_picker_keeps_unloaded_workspace_choices() {
         vec!["/a", "/b"]
     );
 }
+
+#[test]
+fn visualization_tui_preserves_information_in_summary_and_stream() {
+    let cases: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../core/tests/fixtures/visualizations.json"
+    ))
+    .unwrap();
+    let source = cases[0]["source"].as_str().unwrap();
+    let fence = "\u{60}".repeat(3);
+    let markdown = format!("Before\n\n{fence}centaeris_visual\n{source}\n{fence}\n\nAfter");
+    let text = rendered_lines_text(&render_summary_lines(&markdown, 80));
+    assert!(text.contains("Run A") && text.contains("Run B") && text.contains("After"));
+    assert!(!text.contains("elements"));
+    let workspace = unique_test_dir("visualization-workspace");
+    let data_root = unique_test_dir("visualization-data");
+    let mut app = test_app("", workspace.clone(), data_root.clone());
+    app.assistant_buffer = format!("Before\n\n{fence}centaeris_visual\n{source}");
+    materialize_assistant_prefix(&mut app);
+    let pending = rendered_lines_text(&build_assistant_live_lines(&app, 80));
+    assert!(!pending.contains("elements"));
+    app.assistant_buffer.push_str(&format!("\n{fence}\n"));
+    materialize_assistant_prefix(&mut app);
+    let complete = rendered_lines_text(&transcript_to_lines(&app.transcript, 80));
+    assert!(complete.contains("Run A") && complete.contains("Run B"));
+    assert!(!complete.contains("elements"));
+    let _ = std::fs::remove_dir_all(workspace);
+    let _ = std::fs::remove_dir_all(data_root);
+}
+
+#[test]
+fn visualization_referenced_tui_answer_loads_all_pages_and_restores_reading_order() {
+    let path = PathBuf::from("D:/presentation-test");
+    let mut app = test_app("", path.clone(), path);
+    let cases: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../core/tests/fixtures/visualizations.json"
+    ))
+    .unwrap();
+    let fence = "\u{60}".repeat(3);
+    let body = format!(
+        "{}\n\n{fence}centaeris_visual\n{}\n{fence}\nAfter",
+        "Preface ".repeat(2050),
+        cases[0]["source"].as_str().unwrap()
+    );
+    let mut page = history_run_page(None);
+    if let TranscriptBlockBodyV1::AssistantText { content, .. } = &mut page.blocks[1].body {
+        *content = TranscriptTextContentV1 {
+            inline_content: None,
+            source_ref: Some(
+                centaeris_core::session::transcript::TranscriptContentRefV1 {
+                    ref_id: "answer-ref".into(),
+                    revision: "1".into(),
+                    byte_length: body.len().to_string(),
+                },
+            ),
+        };
+    }
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let requests = calls.clone();
+    app.runtime = Some(RuntimeClient::from_test_request_handler(move |frame| {
+        assert_eq!(frame["method"], "transcript/content-range");
+        let request = &frame["params"]["request"];
+        requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let start: usize = request["offset"].as_str().unwrap().parse().unwrap();
+        let mut end = (start + request["maxBytes"].as_u64().unwrap() as usize).min(body.len());
+        while !body.is_char_boundary(end) {
+            end -= 1;
+        }
+        json!({"schema":"transcript.content.range.v1","sessionId":request["sessionId"],"projectionVersion":request["projectionVersion"],
+            "projectionGeneration":request["projectionGeneration"],"refId":"answer-ref","revision":"1","byteLength":body.len().to_string(),
+            "startOffset":start.to_string(),"endOffset":end.to_string(),"content":&body[start..end],"hasMore":end<body.len()})
+    }));
+    app.transcript_paging = Some(TranscriptPagingState::open(page).unwrap());
+    sync_materialized_transcript_history(&mut app);
+    let initial = build_transcript_view(&app, 100);
+    assert!(rendered_lines_text(&initial.lines).contains("Loading answer"));
+    output_preview::prepare_visible(&mut app, &initial, 100);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        output_preview::poll(&mut app);
+        let text = rendered_lines_text(&build_transcript_view(&app, 100).lines);
+        if text.contains("Run A") && text.contains("Run B") && text.contains("After") {
+            assert!(!text.contains("elements"));
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(calls.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+}
+
+#[test]
+fn visualization_referenced_answer_rejects_oversized_body_before_reading() {
+    let path = PathBuf::from("D:/presentation-test");
+    let mut app = test_app("", path.clone(), path);
+    let mut page = history_run_page(None);
+    if let TranscriptBlockBodyV1::AssistantText { content, .. } = &mut page.blocks[1].body {
+        *content = TranscriptTextContentV1 {
+            inline_content: None,
+            source_ref: Some(
+                centaeris_core::session::transcript::TranscriptContentRefV1 {
+                    ref_id: "oversized-answer".into(),
+                    revision: "1".into(),
+                    byte_length: (centaeris_core::session::visualization::MAX_ANSWER_BYTES + 1)
+                        .to_string(),
+                },
+            ),
+        };
+    }
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let requests = calls.clone();
+    app.runtime = Some(RuntimeClient::from_test_request_handler(move |_| {
+        requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        json!(null)
+    }));
+    app.transcript_paging = Some(TranscriptPagingState::open(page).unwrap());
+    sync_materialized_transcript_history(&mut app);
+    let initial = build_transcript_view(&app, 80);
+    output_preview::prepare_visible(&mut app, &initial, 100);
+    let text = rendered_lines_text(&build_transcript_view(&app, 80).lines);
+    assert!(text.contains("display byte limit"));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
