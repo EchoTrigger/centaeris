@@ -70,7 +70,16 @@ def start_sso_link(request, provider_id: str, payload: LinkRequest):
         return Status(error.status, {"error": error.code})
 
 
-@router.get("/sso/{provider_id}/callback", auth=None)
+@router.get(
+    "/sso/{provider_id}/callback",
+    auth=None,
+    response={302: None},
+    openapi_extra={
+        "responses": {302: {
+            "headers": {"Location": {"schema": {"type": "string", "format": "uri"}}},
+        }},
+    },
+)
 def sso_callback(request, provider_id: str):
     return complete_authorization(request, provider_id)
 

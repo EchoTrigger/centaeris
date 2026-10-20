@@ -171,9 +171,27 @@ class NinjaContractTests(TestCase):
         self.assertIsNone(api.docs_url)
         self.assertIsNone(api.openapi_url)
 
+    @override_settings(SSO_PROVIDERS=[], WEB_ORIGIN="https://app.example.test")
+    def test_external_auth_callback_publishes_its_browser_redirect_contract(self):
+        response = self.client.get("/api/sso/missing/callback")
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response["Location"],
+            "https://app.example.test/login?ssoError=sso_provider_unavailable",
+        )
+        operation = api.get_openapi_schema()["paths"]["/api/sso/{provider_id}/callback"]["get"]
+        responses = {str(code): definition for code, definition in operation["responses"].items()}
+        self.assertEqual(set(responses), {str(response.status_code)})
+        self.assertNotIn("content", responses["302"])
+        self.assertEqual(
+            responses["302"]["headers"]["Location"]["schema"],
+            {"type": "string", "format": "uri"},
+        )
+
     def test_ordinary_public_json_operations_publish_success_schemas(self):
         schema = api.get_openapi_schema()
         raw_response_paths = {
+            "/api/sso/{provider_id}/callback",
             "/api/agents/{agent_id}/messages/{message_id}/files/{input_ref}/{action}",
             "/api/agents/{agent_id}/inputs/{input_id}/attachments/{input_ref}/{action}",
             "/api/agents/{agent_id}/attachments/{input_ref}/{action}",
