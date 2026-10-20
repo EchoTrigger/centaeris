@@ -335,4 +335,37 @@ mod tests {
         assert_eq!(actual[0], "CENTAERIS_WORKSPACE_ROOT=/app");
         assert_eq!(actual[1], "CENTAERIS_WORKSPACE_USER=0:0");
     }
+    #[test]
+    #[ignore = "requires explicit paths for an owned physical storage probe"]
+    fn export_owned_runsc_storage_probe_request() {
+        let input = std::env::var("CENTAERIS_STORAGE_PROBE_INPUT").expect("probe input required");
+        let output =
+            std::env::var("CENTAERIS_STORAGE_PROBE_OUTPUT").expect("probe output required");
+        let input: serde_json::Value = serde_json::from_slice(&fs::read(input).unwrap()).unwrap();
+        let profile: EnvironmentProfile = serde_json::from_value(input["profile"].clone()).unwrap();
+        let mut runner = super::super::tests::retained_test_runner();
+        runner.oci_runtime = OciRuntime::Runsc;
+        runner.image_digest.clone_from(&profile.image_digest);
+        runner.resources = profile.resources.sandbox_resources();
+        runner.network = profile.network;
+        runner.plugin_mounts.clear();
+        let body = create_body_with_proxy_environment(
+            &runner.container_expectation(),
+            &profile,
+            input["helperPath"].as_str().unwrap(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(body["HostConfig"]["Runtime"], "runsc");
+        assert_eq!(body["HostConfig"]["Memory"], profile.resources.memory_bytes);
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(output)
+            .unwrap();
+        use std::io::Write;
+        file.write_all(&serde_json::to_vec_pretty(&body).unwrap())
+            .unwrap();
+        file.sync_all().unwrap();
+    }
 }
