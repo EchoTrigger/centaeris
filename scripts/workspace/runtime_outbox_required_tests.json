@@ -1,4 +1,11 @@
 [
+  "postgres_store::integration_tests::resource_lifecycle_tests::postgres_failed_before_create_releases_the_committed_reservation",
+  "postgres_store::integration_tests::resource_lifecycle_tests::postgres_reused_resident_preparation_failure_keeps_original_allocation",
+  "postgres_store::integration_tests::resource_lifecycle_tests::postgres_unmaterialized_allocation_cleanup_replays_and_next_run_can_create",
+  "postgres_store::integration_tests::resource_lifecycle_tests::postgres_creation_attempt_forward_migration_keeps_historical_unknown_charged",
+  "postgres_store::integration_tests::resource_lifecycle_tests::postgres_prepare_cleanup_without_transmitted_evidence_keeps_the_reservation",
+  "postgres_store::integration_tests::resource_lifecycle_tests::postgres_pre_dispatch_settlement_and_resource_release_are_atomic",
+  "postgres_store::integration_tests::resource_lifecycle_tests::postgres_pre_dispatch_failure_cannot_settle_after_controller_takeover",
   "postgres_store::integration_tests::host_retirement_tests::postgres_per_run_physical_cleanup_durably_schedules_exact_host_retirement",
   "postgres_store::integration_tests::host_retirement_tests::postgres_permanent_retirement_durably_schedules_the_same_host_cleanup_path",
   "postgres_store::integration_tests::host_retirement_tests::postgres_host_retirement_retries_lost_ack_and_recovers_expired_or_terminal_jobs",

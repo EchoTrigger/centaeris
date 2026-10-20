@@ -35,6 +35,9 @@ impl From<()> for CleanupPhysicalResult {
 
 #[derive(Debug)]
 pub(crate) enum CleanupTarget {
+    Unmaterialized {
+        instance_id: String,
+    },
     Destroyed {
         instance_id: String,
     },
@@ -176,7 +179,7 @@ impl PostgresRuntimeStore {
                         if deleted!=1{return Err("cleanup_physical_release_unconfirmed".into());}(true,Some(container_id))
                     }
                     (CleanupTarget::Instance{..},CleanupPhysicalResult::Retained)if !per_run=>(false,None),
-                    (CleanupTarget::NeverAllocated|CleanupTarget::Destroyed{..},CleanupPhysicalResult::Retained)=>(false,None),
+                    (CleanupTarget::NeverAllocated|CleanupTarget::Destroyed{..}|CleanupTarget::Unmaterialized{..},CleanupPhysicalResult::Retained)=>(false,None),
                     _=>return Err("cleanup_physical_release_unconfirmed".into()),
                 };
                 // Wall-clock lease expiry can occur while physical cleanup runs
@@ -184,7 +187,7 @@ impl PostgresRuntimeStore {
                 verify_controller_authority(&mut tx,&authority)?;
                 let allocation=match &target {
                     CleanupTarget::Instance {allocation,..} => CleanupAllocation::Instance {instance_id:allocation.instance_id.clone()},
-                    CleanupTarget::Destroyed {instance_id} => CleanupAllocation::Instance {instance_id:instance_id.clone()},
+                    CleanupTarget::Destroyed {instance_id} | CleanupTarget::Unmaterialized {instance_id} => CleanupAllocation::Instance {instance_id:instance_id.clone()},
                     CleanupTarget::NeverAllocated => CleanupAllocation::NeverAllocated {},
                 };
                 let mut hash=Sha256::new();
@@ -224,7 +227,22 @@ fn require_physical_replay(
         let removed=db.query_one("SELECT physical_removed FROM runtime.agent_run_cleanup_receipts WHERE receipt_id=$1",&[&receipt.receipt_id]).map_err(|e|e.to_string())?.get::<_,bool>(0);
         if !removed {
             let retired=db.query_one("SELECT EXISTS(SELECT 1 FROM runtime.environment_retirements WHERE environment_id=$1 AND instance_id=$2 AND state='destroyed')",&[&receipt.environment_id,&match &receipt.allocation{CleanupAllocation::Instance{instance_id}=>Some(instance_id),_=>None}]).map_err(|e|e.to_string())?.get::<_,bool>(0);
-            if !retired {
+            let unmaterialized = match &receipt.allocation {
+                CleanupAllocation::Instance { instance_id } => {
+                    let row=db.query_opt("SELECT allocation_execution_id FROM runtime.execution_instances WHERE agent_run_id=$1 AND instance_id=$2 AND environment_id=$3",&[&receipt.agent_run_id,instance_id,&receipt.environment_id]).map_err(|e|e.to_string())?;
+                    if let Some(row) = row {
+                        super::creation_attempts::not_materialized(
+                            db,
+                            &row.get::<_, String>(0),
+                            instance_id,
+                        )?
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
+            if !retired && !unmaterialized {
                 return Err("cleanup_physical_release_unconfirmed".into());
             }
         }
@@ -308,6 +326,21 @@ fn resolve_target(
         let history=db.query_one("SELECT EXISTS(SELECT 1 FROM public.app_core_sessionevent WHERE agent_run_id=$1 AND session_level=false AND payload->>'type' IN('agent_run_execution_started','agent_run_execution_ended'))", &[&b.agent_run_id]).map_err(|e|e.to_string())?.get::<_,bool>(0);
         if history {
             return Err("cleanup execution association missing".into());
+        }
+    }
+    if let Some(execution) = anchors.first() {
+        let row = db
+            .query_one(
+                "SELECT instance_id FROM runtime.execution_instances WHERE execution_id=$1",
+                &[execution],
+            )
+            .map_err(|e| e.to_string())?;
+        let instance_id: String = row.get(0);
+        if super::creation_attempts::not_materialized(db, execution, &instance_id)? {
+            if physical.iter().any(|p| &p.execution_id == execution) {
+                return Err("cleanup_non_dispatch_evidence_conflict".into());
+            }
+            return Ok(CleanupTarget::Unmaterialized { instance_id });
         }
     }
     let holdings=db.query("SELECT execution_id,instance_id,allocation_mode,host_id FROM runtime.resident_sandboxes WHERE environment_id=$1", &[&b.environment_id]).map_err(|e|e.to_string())?;

@@ -236,4 +236,361 @@ fn postgres_prepare_cleanup_without_transmitted_evidence_keeps_the_reservation()
         1,
         "a string failure cannot prove removal; keep the charge until structured evidence reaches the ledger"
     );
+    assert_eq!(
+        db.query_one(
+            "SELECT state FROM runtime.environment_creation_attempts",
+            &[]
+        )
+        .unwrap()
+        .get::<_, String>(0),
+        "dispatched"
+    );
+    assert!(
+        db.execute(
+            "UPDATE runtime.environment_creation_attempts SET state='notDispatched'",
+            &[]
+        )
+        .is_err(),
+        "a possible dispatch must never be rewritten as non-dispatch"
+    );
+}
+
+fn failed_creation_cleanup(
+    db: &mut Client,
+    run: &mut super::retained_instance_tests::Run,
+) -> crate::contract::AgentRunCleanup {
+    use super::retained_instance_tests as fixture;
+    let mut binding = run.grant.payload.clone();
+    binding.controller.as_mut().unwrap().controller_purpose = "cleanup".into();
+    run.grant = fixture::sign(binding);
+    db.execute("UPDATE public.app_core_sessionenvironment SET controller_purpose='cleanup' WHERE id='environment'", &[]).unwrap();
+    db.execute("INSERT INTO public.app_core_sessionevent VALUES('ws_1','sess_1',$1,false,'{\"type\":\"agent_run_failed\"}')", &[&run.original.agent_run_id]).unwrap();
+    crate::contract::AgentRunCleanup {
+        schema: "workspace.agent_run.cleanup.v1".into(),
+        agent_run_id: run.original.agent_run_id.clone(),
+        authorization_digest: run.original.digest().unwrap(),
+        authorization_signature: run.original.signature(fixture::KEY).unwrap(),
+        authorization: run.original.clone(),
+        environment_authorization: run.grant.clone(),
+    }
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL"]
+fn postgres_reused_resident_preparation_failure_keeps_original_allocation() {
+    use super::retained_instance_tests as fixture;
+    use crate::resident_capacity::ObservedResidentSandbox;
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_url, store, mut db) = fixture::setup();
+    let a = fixture::run(&store, &mut db, "resident-origin", 1);
+    let profile = a.original.environment_profile.digest().unwrap();
+    let original = store
+        .prepare_retained_instance(
+            &a.request("resident-origin-execution", &profile),
+            fixture::limits(&a),
+            || Ok(vec![]),
+            |_, _| Ok(()),
+            |_| Ok("a".repeat(64)),
+        )
+        .unwrap();
+    let b = fixture::run(&store, &mut db, "resident-reuser", 2);
+    let error = store
+        .prepare_retained_instance(
+            &b.request("resident-reuser-execution", &profile),
+            fixture::limits(&b),
+            || {
+                Ok(vec![ObservedResidentSandbox {
+                    execution_id: original.allocation_execution_id.clone(),
+                    allocation_owner: original.allocation_owner.clone(),
+                    container_id: original.container_id.clone().unwrap(),
+                    resources: b.request("resident-reuser-execution", &profile).resources,
+                }])
+            },
+            |_, allocation| {
+                assert!(allocation.reused);
+                assert_eq!(allocation.instance_id, original.instance_id);
+                Err("injected pre-dispatch failure".into())
+            },
+            |_| panic!("failed callback must not touch the retained instance"),
+        )
+        .unwrap_err();
+    assert_eq!(error, "injected pre-dispatch failure");
+    let holding = db
+        .query_one(
+            "SELECT execution_id,container_id,state FROM runtime.resident_sandboxes",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        holding.get::<_, String>(0),
+        original.allocation_execution_id
+    );
+    assert_eq!(holding.get::<_, String>(1), original.container_id.unwrap());
+    assert_eq!(holding.get::<_, String>(2), "resident");
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.execution_instances", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        2
+    );
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL"]
+fn postgres_unmaterialized_allocation_cleanup_replays_and_next_run_can_create() {
+    use super::retained_instance_tests as fixture;
+    use crate::postgres_store::cleanup_receipts::{
+        CleanupAllocation, CleanupAuthorityRequest, CleanupTarget,
+    };
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for mode in ["retained", "perRun"] {
+        let (url, store, mut db) = fixture::setup();
+        let mut a = fixture::run(&store, &mut db, "unmaterialized-origin", 1);
+        let mut binding = a.grant.payload.clone();
+        binding.execution_mode = mode.into();
+        a.grant = fixture::sign(binding);
+        let profile = a.original.environment_profile.digest().unwrap();
+        let error = store
+            .prepare_retained_instance(
+                &a.request("unmaterialized-execution", &profile),
+                fixture::limits(&a),
+                || Ok(vec![]),
+                |_, _| Err("injected pre-dispatch failure".into()),
+                |_| panic!("unmaterialized creation must not dispatch"),
+            )
+            .unwrap_err();
+        assert_eq!(error, "injected pre-dispatch failure");
+        drop(store);
+        let store = PostgresRuntimeStore::new(&url).unwrap();
+        db.batch_execute("ALTER TABLE public.app_core_sessionenvironment ADD COLUMN controller_maintenance_operation_id text").unwrap();
+        store
+            .with_environment_observation("sess_1", "environment", |target| {
+                assert!(!target.resource_holding);
+                assert!(!target.destroyed);
+                assert!(
+                    target.allocation.is_some(),
+                    "allocation history must remain visible"
+                );
+                assert_eq!(
+                    crate::docker_execution_host::observe_environment(target),
+                    "notMaterialized"
+                );
+                Ok(())
+            })
+            .unwrap();
+        let instance: String = db
+            .query_one("SELECT instance_id FROM runtime.execution_instances", &[])
+            .unwrap()
+            .get(0);
+        let cleanup = failed_creation_cleanup(&mut db, &mut a);
+        let request = CleanupAuthorityRequest {
+            cleanup: &cleanup,
+            signing_key: fixture::KEY,
+            lease: &a.fence,
+            host_id: "host",
+        };
+        let receipt = store
+            .with_cleanup_authority(
+                &request,
+                || Ok(vec![]),
+                |target, _| {
+                    assert!(!matches!(
+                        target,
+                        CleanupTarget::NeverAllocated | CleanupTarget::Instance { .. }
+                    ));
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            receipt.allocation,
+            CleanupAllocation::Instance {
+                instance_id: instance
+            }
+        );
+        assert!(receipt.cleanup_complete);
+        drop(store);
+        let store = PostgresRuntimeStore::new(&url).unwrap();
+        let replay = store
+            .with_cleanup_authority(
+                &request,
+                || {
+                    panic!(
+                        "completed unmaterialized cleanup must replay without physical observation"
+                    )
+                },
+                |_, _| -> Result<(), String> { panic!("completed cleanup must not run again") },
+            )
+            .unwrap();
+        assert_eq!(receipt, replay);
+        let b = fixture::run(&store, &mut db, "later-run", 2);
+        let next = store
+            .prepare_retained_instance(
+                &b.request("later-execution", &profile),
+                fixture::limits(&b),
+                || Ok(vec![]),
+                |_, _| Ok(()),
+                |_| Ok("b".repeat(64)),
+            )
+            .unwrap();
+        assert!(!next.reused);
+        assert_ne!(
+            next.instance_id,
+            match receipt.allocation {
+                CleanupAllocation::Instance { instance_id } => instance_id,
+                _ => unreachable!(),
+            }
+        );
+        assert_eq!(
+            db.query_one("SELECT count(*) FROM runtime.resident_sandboxes", &[])
+                .unwrap()
+                .get::<_, i64>(0),
+            1
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL"]
+fn postgres_creation_attempt_forward_migration_keeps_historical_unknown_charged() {
+    use super::retained_instance_tests as fixture;
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (url, store, mut db) = fixture::setup();
+    let a = fixture::run(&store, &mut db, "historical-unknown", 1);
+    let profile = a.original.environment_profile.digest().unwrap();
+    store
+        .prepare_retained_instance(
+            &a.request("historical-execution", &profile),
+            fixture::limits(&a),
+            || Ok(vec![]),
+            |_, _| Ok(()),
+            |_| Err("unknown create acknowledgement".into()),
+        )
+        .unwrap_err();
+    drop(store);
+    // Reconstruct the released schema with an evidence-free historical reservation.
+    super::super::creation_attempts::restore_previous_fixture(&mut db);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    assert_eq!(
+        db.query_one("SELECT max(version) FROM runtime.schema_migrations", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        14
+    );
+    assert_eq!(
+        db.query_one(
+            "SELECT count(*) FROM runtime.environment_creation_attempts",
+            &[]
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        0,
+        "migration cannot invent dispatch or settlement evidence"
+    );
+    assert_eq!(
+        db.query_one(
+            "SELECT count(*) FROM runtime.resident_sandboxes WHERE state='reserved'",
+            &[]
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        1
+    );
+    assert!(store
+        .prepare_retained_instance(
+            &a.request("historical-execution", &profile),
+            fixture::limits(&a),
+            || Ok(vec![]),
+            |_, _| panic!("historical unknown cannot restart preparation"),
+            |_| panic!("historical unknown cannot dispatch again"),
+        )
+        .is_err());
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL"]
+fn postgres_pre_dispatch_settlement_and_resource_release_are_atomic() {
+    use super::retained_instance_tests as fixture;
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_url, store, mut db) = fixture::setup();
+    let a = fixture::run(&store, &mut db, "settlement-rollback", 1);
+    let profile = a.original.environment_profile.digest().unwrap();
+    db.batch_execute("CREATE FUNCTION public.reject_test_release() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected resource release failure'; END $$;
+        CREATE TRIGGER reject_test_release BEFORE DELETE ON runtime.resident_sandboxes FOR EACH ROW EXECUTE FUNCTION public.reject_test_release();").unwrap();
+    assert!(store
+        .prepare_retained_instance(
+            &a.request("rollback-execution", &profile),
+            fixture::limits(&a),
+            || Ok(vec![]),
+            |_, _| Err("injected before-create failure".into()),
+            |_| panic!("failed preparation must not create"),
+        )
+        .is_err());
+    assert_eq!(
+        db.query_one(
+            "SELECT state FROM runtime.environment_creation_attempts",
+            &[]
+        )
+        .unwrap()
+        .get::<_, String>(0),
+        "prepared",
+        "a failed resource release must roll back the settlement evidence too"
+    );
+    assert_eq!(
+        db.query_one(
+            "SELECT count(*) FROM runtime.resident_sandboxes WHERE state='reserved'",
+            &[]
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        1
+    );
+    db.batch_execute("DROP TRIGGER reject_test_release ON runtime.resident_sandboxes; DROP FUNCTION public.reject_test_release();").unwrap();
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL"]
+fn postgres_pre_dispatch_failure_cannot_settle_after_controller_takeover() {
+    use super::retained_instance_tests as fixture;
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (url, store, mut db) = fixture::setup();
+    let a = fixture::run(&store, &mut db, "stale-before-create", 1);
+    let profile = a.original.environment_profile.digest().unwrap();
+    assert!(store
+        .prepare_retained_instance(
+            &a.request("stale-execution", &profile),
+            fixture::limits(&a),
+            || Ok(vec![]),
+            |_, _| {
+                db.execute(
+                    "UPDATE public.app_core_sessionenvironment SET controller_epoch=2",
+                    &[],
+                )
+                .unwrap();
+                Err("injected pre-dispatch failure".into())
+            },
+            |_| panic!("a stale preparation cannot dispatch"),
+        )
+        .is_err());
+    drop(store);
+    let _reopened = PostgresRuntimeStore::new(&url).unwrap();
+    assert_eq!(
+        db.query_one(
+            "SELECT state FROM runtime.environment_creation_attempts",
+            &[]
+        )
+        .unwrap()
+        .get::<_, String>(0),
+        "prepared"
+    );
+    assert_eq!(
+        db.query_one(
+            "SELECT count(*) FROM runtime.resident_sandboxes WHERE state='reserved'",
+            &[]
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        1,
+        "the expired controller cannot settle the current owner's resources"
+    );
 }
