@@ -6,6 +6,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml biome.json ./
 COPY packages/ui/package.json packages/ui/package.json
 COPY packages/desktop/package.json packages/desktop/package.json
 COPY packages/web/package.json packages/web/package.json
+COPY packages/visualization-react packages/visualization-react
 COPY packages/web packages/web
 COPY packages/code_preview_languages.json packages/code_preview_languages.json
 RUN pnpm --filter web --filter centaeris install --frozen-lockfile \

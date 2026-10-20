@@ -15,6 +15,12 @@ gate and inspection of its final artifacts.
 
 ## Test quality
 
+Frontend visual design uses manual appearance acceptance rather than TDD.
+Implement and iterate on layout, icons, spacing, color and typography directly.
+Focused behavioral tests still protect parsing, validation, requests, state
+transitions, streaming, recovery, accessibility interactions and content
+preservation. Do not turn visual preferences into pixel or class-name assertions.
+
 Pure declarative configuration and catalog-data updates do not require new tests
 or a red/green TDD cycle when implementation semantics stay unchanged. This
 includes model IDs, provider endpoints and protocol selections, context/output

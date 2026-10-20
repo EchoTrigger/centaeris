@@ -1,0 +1,89 @@
+.visualizationPreviewPage {
+	display: block;
+	overflow: auto;
+	background: var(--surface-color);
+	color: var(--on-surface);
+}
+.visualizationPreviewPage #root {
+	display: block;
+	height: auto;
+	min-height: 100vh;
+	overflow: visible;
+}
+.visualizationPreview {
+	margin: 0 auto;
+	padding: 40px 24px 80px;
+	width: 100%;
+	transition: max-width 0.2s;
+}
+.visualizationPreview header {
+	border-bottom: 1px solid var(--outline-variant);
+	padding-bottom: 24px;
+	margin-bottom: 32px;
+}
+.visualizationPreview small {
+	color: var(--on-surface-variant);
+	letter-spacing: 0.08em;
+	font-size: 11px;
+}
+.visualizationPreview h1 {
+	font-size: 28px;
+	margin-block: 12px 8px;
+	font-weight: 650;
+}
+.visualizationPreview header p {
+	color: var(--on-surface-variant);
+	margin-bottom: 20px;
+}
+.visualizationPreviewControls {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 20px;
+	font-size: 13px;
+}
+.visualizationPreviewControls label {
+	display: flex;
+	gap: 6px;
+	align-items: center;
+	cursor: pointer;
+}
+.visualizationPreviewControls input {
+	width: auto;
+}
+.visualizationPreviewControls select {
+	color: inherit;
+	background: var(--surface-variant);
+	padding: 6px 10px;
+	border: 1px solid var(--outline-variant);
+	border-radius: 7px;
+}
+.visualizationPreview section {
+	margin-bottom: 40px;
+}
+.visualizationPreview h2 {
+	font-size: 17px;
+	font-weight: 600;
+	margin-bottom: 20px;
+}
+.visualizationPreview details {
+	color: var(--on-surface-variant);
+	font-size: 13px;
+	margin-top: 20px;
+}
+.visualizationPreview details summary {
+	cursor: pointer;
+}
+.visualizationPreview details pre {
+	color: var(--on-surface);
+	font:
+		12px / 1.7 "Google Sans Code",
+		monospace;
+	white-space: pre-wrap;
+	padding-block: 16px;
+}
+@media (prefers-reduced-motion: reduce) {
+	.visualizationPreview {
+		transition: none;
+	}
+}

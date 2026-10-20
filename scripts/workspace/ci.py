@@ -72,6 +72,7 @@ def main(skip_frontend_tests=False, stage="All"):
         ("First-party MCP Rust/Python client", [*api, "scripts/workspace/platform-mcp-client-gate.py"]),
         ("Node install", [pnpm, "install", "--frozen-lockfile"]),
         ("Performance artifact validation", ["node", "--test", "scripts/workspace/performance-eval-artifact.test.mjs"]),
+        ("Visualization types", [pnpm, "--filter", "@centaeris/visualization-react", "run", "typecheck"]),
         ("Web production validation", [pnpm, "--filter", "web", "run", "build"]),
     ]
     if not skip_frontend_tests:
@@ -86,7 +87,7 @@ def main(skip_frontend_tests=False, stage="All"):
                            (f"Rust tests {name}", ["cargo", "test", "--locked", "-p", name])])
     rust_labels = {"Core source resolution", "Monorepo Core source", "Rust toolchain consistency",
                    "Transcript exporter cache isolation", "Transcript generated contract"}
-    web_labels = {"Node install", "Web production validation", "Web fixture toolchain", "Web fixture source", "Web unit tests"}
+    web_labels = {"Visualization types", "Node install", "Web production validation", "Web fixture toolchain", "Web fixture source", "Web unit tests"}
     if stage == "Rust":
         gates = [gate for gate in gates if gate[0] in rust_labels] + rust_gates
     elif stage == "Web":

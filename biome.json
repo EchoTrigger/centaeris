@@ -2,6 +2,7 @@
   "$schema": "https://biomejs.dev/schemas/2.5.12/schema.json",
   "files": {
     "includes": [
+      "packages/visualization-react/src/**",
       "packages/ui/src/**",
       "packages/ui/tests/**",
       "packages/ui/scripts/**",

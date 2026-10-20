@@ -197,6 +197,9 @@ importers:
 
   packages/ui:
     dependencies:
+      '@centaeris/visualization-react':
+        specifier: workspace:*
+        version: link:../visualization-react
       '@codemirror/commands':
         specifier: 6.10.3
         version: 6.10.3
@@ -310,8 +313,42 @@ importers:
         specifier: 4.1.10
         version: 4.1.10(@types/node@24.12.2)(vite@8.1.5(@types/node@24.12.2)(jiti@2.7.0))
 
+  packages/visualization-react:
+    dependencies:
+      '@json-render/core':
+        specifier: 0.21.1
+        version: 0.21.1(zod@4.3.6)
+      '@json-render/react':
+        specifier: 0.21.1
+        version: 0.21.1(react@19.2.7)(zod@4.3.6)
+      '@lezer/markdown':
+        specifier: 1.7.2
+        version: 1.7.2
+      jsonc-parser:
+        specifier: 3.3.1
+        version: 3.3.1
+      lucide-react:
+        specifier: 1.24.0
+        version: 1.24.0(react@19.2.7)
+      react:
+        specifier: ^19.2.3
+        version: 19.2.7
+      zod:
+        specifier: 4.3.6
+        version: 4.3.6
+    devDependencies:
+      '@types/react':
+        specifier: 19.2.14
+        version: 19.2.14
+      typescript:
+        specifier: 7.0.2
+        version: 7.0.2
+
   packages/web:
     dependencies:
+      '@centaeris/visualization-react':
+        specifier: workspace:*
+        version: link:../visualization-react
       '@codemirror/autocomplete':
         specifier: 6.20.3
         version: 6.20.3
@@ -664,6 +701,16 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
+
+  '@json-render/core@0.21.1':
+    resolution: {integrity: sha512-5hUxJTOnNlBhLuSzS/Vs46jjAqQ2TnkGz9n/0RW2djYwxANZKhOTc1QOuL1Cgu+HxtfTPdJjzUs5dOei/Y+aag==}
+    peerDependencies:
+      zod: ^4.0.0
+
+  '@json-render/react@0.21.1':
+    resolution: {integrity: sha512-xuK67UzMhKCwGlB48Y22BfPsPxwKy+xLq+fK8dG0jCJyE8SKT/WCLReOEG0+rRzGZo5gcIbjC+3r6fcbtNt16w==}
+    peerDependencies:
+      react: ^19.2.3
 
   '@lezer/common@1.5.2':
     resolution: {integrity: sha512-sxQE460fPZyU3sdc8lafxiPwJHBzZRy/udNFynGQky1SePYBdhkBl1kOagA9uT3pxR8K09bOrmTUqA9wb/PjSQ==}
@@ -1395,6 +1442,9 @@ packages:
     engines: {node: '>=6'}
     hasBin: true
 
+  jsonc-parser@3.3.1:
+    resolution: {integrity: sha512-HUgH65KyejrUFPvHFPbqOY0rsFip3Bo5wb4ngvdi1EpCYWUQDC5V+Y7mZws+DLkr4M//zQJoanu1SP+87Dv1oQ==}
+
   lightningcss-android-arm64@1.32.0:
     resolution: {integrity: sha512-YK7/ClTt4kAK0vo6w3X+Pnm0D2cf2vPHbhOXdoNti1Ga0al1P4TBZhwjATvjNwLEBCnKvjJc2jQgHXH0NEwlAg==}
     engines: {node: '>= 12.0.0'}
@@ -1843,6 +1893,9 @@ packages:
 
   yallist@3.1.1:
     resolution: {integrity: sha512-a4UGQaWPH59mOXUYnAG2ewncQS4i4F43Tv3JoAM+s2VDAmS9NsK8GpDMLrCHPksFT7h3K6TOoUNn2pb7RoXx4g==}
+
+  zod@4.3.6:
+    resolution: {integrity: sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg==}
 
   zustand@5.0.14:
     resolution: {integrity: sha512-/8tAspM5LMPr28b3fwLYrtdj77ECpfZviaP75CMTnwO8ISyaE4GDIG/9rDDYq/cH9D2Xw2A2RXglLInmVBQB/g==}
@@ -2315,6 +2368,17 @@ snapshots:
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.6.0
+
+  '@json-render/core@0.21.1(zod@4.3.6)':
+    dependencies:
+      zod: 4.3.6
+
+  '@json-render/react@0.21.1(react@19.2.7)(zod@4.3.6)':
+    dependencies:
+      '@json-render/core': 0.21.1(zod@4.3.6)
+      react: 19.2.7
+    transitivePeerDependencies:
+      - zod
 
   '@lezer/common@1.5.2': {}
 
@@ -2902,6 +2966,8 @@ snapshots:
 
   json5@2.2.3: {}
 
+  jsonc-parser@3.3.1: {}
+
   lightningcss-android-arm64@1.32.0:
     optional: true
 
@@ -3238,6 +3304,8 @@ snapshots:
       stackback: 0.0.2
 
   yallist@3.1.1: {}
+
+  zod@4.3.6: {}
 
   zustand@5.0.14(@types/react@19.2.14)(react@19.2.7)(use-sync-external-store@1.6.0(react@19.2.7)):
     optionalDependencies:

@@ -1,0 +1,101 @@
+{
+  "components": {
+    "Badge": {
+      "children": false,
+      "props": {
+        "text": {
+          "required": true
+        }
+      }
+    },
+    "Card": {
+      "children": true,
+      "props": {
+        "description": {},
+        "title": {}
+      }
+    },
+    "Columns": {
+      "children": true,
+      "props": {
+        "title": {}
+      }
+    },
+    "Divider": {
+      "children": false,
+      "props": {}
+    },
+    "Group": {
+      "children": true,
+      "props": {
+        "description": {},
+        "title": {
+          "required": true
+        }
+      }
+    },
+    "Icon": {
+      "children": false,
+      "props": {
+        "name": {
+          "enum": [
+            "checkCircle",
+            "circleAlert",
+            "hardDrive",
+            "gitBranch",
+            "arrowDown"
+          ],
+          "required": true
+        }
+      }
+    },
+    "Sequence": {
+      "children": true,
+      "props": {
+        "title": {}
+      }
+    },
+    "Status": {
+      "children": false,
+      "props": {
+        "label": {
+          "required": true
+        },
+        "tone": {
+          "enum": [
+            "neutral",
+            "info",
+            "success",
+            "warning",
+            "error"
+          ],
+          "required": true
+        }
+      }
+    },
+    "Text": {
+      "children": false,
+      "props": {
+        "role": {
+          "enum": [
+            "title",
+            "body",
+            "caption"
+          ],
+          "required": true
+        },
+        "text": {
+          "required": true
+        }
+      }
+    }
+  },
+  "limits": {
+    "answerBytes": 16777216,
+    "bytes": 32768,
+    "depth": 8,
+    "elements": 128,
+    "textBytes": 8192
+  },
+  "schema": "centaeris.visual.v1"
+}

@@ -1,5 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
+import { createRequire } from "node:module";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { transformWithOxc } from "vite";
 
 // Lightweight component characterization through the project's existing JSX
@@ -18,12 +20,16 @@ export function createJsxSubjectLoader(overrides = new Map()) {
     }
     const result = await transformWithOxc(source, file, { jsx: { runtime: "automatic" } });
     const replacements = new Map();
-    for (const match of result.code.matchAll(/(?:from\s*|import\s*)["']([^"']+)["']/g)) {
+    for (const match of result.code.matchAll(/(?:from\s*|import\s*(?:\(\s*)?)["']([^"']+)["']/g)) {
       const specifier = match[1];
       if (replacements.has(specifier)) continue;
       let target;
       if (overrides.has(specifier)) target = overrides.get(specifier);
       else if (specifier.endsWith(".css")) target = dataUrl("");
+      else if (specifier.includes("?") && new URLSearchParams(specifier.split("?")[1]).has("url")) {
+        const asset = createRequire(file).resolve(specifier.split("?")[0]);
+        target = dataUrl("export default " + JSON.stringify(pathToFileURL(asset).href) + ";");
+      }
       else if (specifier.endsWith("/i18n")) target = dataUrl('export const t=key=>key; export const useTranslation=()=>({t});');
       else if (specifier.endsWith("/ContextUsagePicker")) target = dataUrl('export const ContextUsagePicker=()=>null;');
       else if (specifier.endsWith("/AttachmentCard")) target = dataUrl('export const AttachmentCard=()=>null; export const LocalAttachmentCard=()=>null; export const localAttachmentKey=file=>file.name;');
@@ -32,7 +38,11 @@ export function createJsxSubjectLoader(overrides = new Map()) {
         const child = [base, ...[".jsx", ".js", ".tsx", ".ts"].map(extension => base + extension)].find(existsSync);
         if (!child) throw new Error(`Unresolved characterization import: ${specifier}`);
         target = await load(child);
-      } else target = import.meta.resolve(specifier);
+      } else if (specifier.startsWith("node:")) target = specifier;
+      else {
+        const resolved = pathToFileURL(createRequire(file).resolve(specifier)).href;
+        target = /\.[cm]?tsx?$/.test(resolved) ? await load(fileURLToPath(resolved)) : resolved;
+      }
       replacements.set(specifier, target);
     }
     let code = result.code;

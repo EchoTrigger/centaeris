@@ -1,4 +1,5 @@
 import { ApiError } from "../api.ts";
+import visualCatalog from "@centaeris/visualization-react/catalog" with { type: "json" };
 import { abortableDelay } from "./abortableDelay.ts";
 
 type Range = Readonly<{ content: string; startOffset: string; endOffset: string; hasMore: boolean }>;
@@ -6,7 +7,7 @@ type Snapshot = Readonly<{ content: string; loading: boolean; error: boolean; un
 
 // Tool output can be arbitrarily large. Stop automatic continuation once this
 // many bytes have been read; the caller still holds what was already loaded.
-const MAX_ACCUMULATED_BYTES = 16 * 1024 * 1024;
+const MAX_ACCUMULATED_BYTES = visualCatalog.limits.answerBytes;
 
 function retryable(error: unknown) {
   return error instanceof TypeError

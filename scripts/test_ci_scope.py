@@ -38,6 +38,10 @@ class ScopeTests(unittest.TestCase):
         ui = select_products(["packages/ui/src/components/chat/messageScroll.ts"])
         self.assertTrue(ui["localNode"] and ui["web"])
 
+    def test_shared_visualization_changes_run_both_react_consumers_and_web_image(self):
+        selected = select_products(["packages/visualization-react/src/Renderer.tsx"])
+        self.assertEqual({key for key, value in selected.items() if value}, {"localNode", "web", "docker"})
+
     def test_documentation_can_return_a_result_without_product_builds(self):
         self.assertFalse(any(select_products(["docs/workspace/Product.md"]).values()))
 

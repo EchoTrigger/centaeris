@@ -20,10 +20,12 @@
     "lint:hooks": "pnpm -w run lint:hooks",
     "lint:unused": "pnpm -w run lint:unused",
     "preview": "vite preview",
+    "preview:visualizations": "vite --host 127.0.0.1 --port 5179 --strictPort",
     "test": "vitest run",
     "typecheck": "node ./scripts/build.mjs --mode typecheck"
   },
   "dependencies": {
+    "@centaeris/visualization-react": "workspace:*",
     "@codemirror/commands": "6.10.3",
     "@codemirror/lang-cpp": "6.0.3",
     "@codemirror/lang-css": "6.3.1",

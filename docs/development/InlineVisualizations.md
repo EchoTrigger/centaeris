@@ -1,6 +1,8 @@
 # Inline visualizations
 
-Design for implementation. Runtime, React and TUI support remains pending.
+Initial implementation provides a Core catalog, strict validation and text
+projection, a shared json-render React adapter, and Desktop/Web/TUI integration.
+Appearance and full product interaction acceptance remain manual.
 
 Assistant answers need a shared way to explain sequences, groups and state
 without losing information when a conversation moves between Desktop, Web and
@@ -41,7 +43,7 @@ An assistant answer may interleave ordinary Markdown and fenced
 
 The `spec` uses json-render's flat `root` and `elements` structure. Component names
 are registry identifiers; public field names use exact camelCase. `children`
-contains ordered element IDs, including an empty array for leaves. Every element
+contains ordered nonempty element IDs, including an empty array for leaves. Every element
 must belong to the tree rooted at `root`, and each non-root element has exactly
 one parent. Missing references, duplicate ownership, cycles and unreachable
 nodes are invalid.
@@ -128,11 +130,15 @@ and referenced content use the same extraction and validation behavior.
 Restart, pagination, reconnect and history replay reconstruct visuals from that
 source. The visual feature does not increase existing transcript inline or
 transport budgets; content references continue to carry larger answers.
+Assistant answer references are assembled in source order before Markdown parsing,
+using bounded range reads and a 16 MiB display limit. Other paged output retains
+its existing interaction. A reference crossing a fence boundary must not expose
+partial JSON as a finished diagram.
 
 Rendering diagnostics are local to the affected block. Invalid data produces a
 visible reason and a way to inspect or copy the original content while the
-surrounding answer remains readable. Copy and export preserve both a readable
-text representation and access to the original Markdown and JSON.
+surrounding answer remains readable. Text selection copies visible content;
+existing whole-answer copy and export retain the original Markdown and JSON.
 
 This content extension uses the existing assistant text records. Enabling it
 requires no rewrite of historical records. Future changes to released persistent
@@ -158,11 +164,11 @@ the transport owner; visual rendering does not start another generation request.
 
 ## Model instructions
 
-Generate the supported vocabulary and property descriptions from the same
-catalog metadata used for validation. Add concise examples for a Session with
-two Runs and for a resource-control hierarchy. The response instructions ask for
-visuals when ordered relationships, containment or state explanations benefit
-from them; prose remains available for the surrounding explanation.
+Generate a compact valid wire example and component/property vocabulary from
+the validation catalog for the root prompt. Keep full Session and resource-control
+examples in the shared fixtures and manual preview. The compact root guide
+preserves headroom for existing small-context tool and compaction scenarios.
+Prose remains available for the surrounding explanation.
 
 The model emits one portable format for every client. A conversation opened
 later in TUI retains the information originally generated for Desktop or Web.
@@ -171,8 +177,10 @@ completion or changing the answer's meaning.
 
 ## Acceptance requirements
 
-Add focused failing behavior tests before implementation. Protect each completed
-boundary before expanding scope, following [Testing](Testing.md).
+Visual design does not use TDD. Layout, icons, spacing, color and responsive
+appearance are accepted manually by the maintainer. Focused behavioral tests
+protect parsing, validation, streaming, role isolation, recovery and information
+preservation, following [Testing](Testing.md).
 
 - Use shared fixtures representing both reference layouts: consecutive Runs
   with retained explanatory context, and a layered resource diagram with two
@@ -198,9 +206,21 @@ boundary before expanding scope, following [Testing](Testing.md).
   builds, the focused Core `query_loop` gate for Rust implementation changes,
   and applicable [ReleaseGate](../eval/ReleaseGate.md) checks before acceptance.
 
-Implementation commits must report their actual checks and results. This design
-establishes acceptance criteria; renderer behavior, cross-client recovery,
-performance and target-surface acceptance remain to be demonstrated.
+Implementation commits report their actual checks and results. Automated
+functional checks cover validation, ordered text projection, interruption,
+reference loading and renderer-failure isolation. Manual product interaction,
+appearance and performance acceptance remain required before merge.
+
+## Manual preview
+
+Run `pnpm --filter centaeris-ui run preview:visualizations` and open
+`http://127.0.0.1:5179/visualization-preview.html`. This development page renders
+both reference examples through the actual shared adapter. Switch light/dark,
+narrow layout and complete/pending/interrupted/invalid content states. Expand
+the text projection to compare reading order. The page is not a production entry.
+
+The preview and automated functional checks do not establish visual acceptance.
+The maintainer accepts appearance and product interaction manually before merge.
 
 ## References
 

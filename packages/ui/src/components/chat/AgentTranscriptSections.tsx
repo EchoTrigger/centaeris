@@ -197,6 +197,7 @@ export const AgentFinalAnswer = memo(function AgentFinalAnswer({
       <div className="answer-content" key={finalItem.id}>
         <MarkdownContent
           text={visibleText}
+          allowVisuals
           isStreaming={presentationActive}
           onOpenWorkspacePath={onOpenWorkspacePath}
         />

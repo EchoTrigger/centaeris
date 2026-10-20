@@ -2,6 +2,7 @@ packages:
   - packages/ui
   - packages/desktop
   - packages/web
+  - packages/visualization-react
 
 enablePrePostScripts: true
 storeDir: .cache/pnpm
