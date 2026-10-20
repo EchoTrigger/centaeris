@@ -119,7 +119,10 @@ export function ExternalIdentitySettings({ returnTo, redirect = redirectBrowser 
 
   if (!data && !loadError) return <p className="ssoLoading" role="status">{t("sso.loading")}</p>;
   if (loadError) return <section className="externalIdentitySettings"><p className="error" role="alert">{t("sso.loadFailed")}</p><button type="button" onClick={() => setRefresh(value => value + 1)}>{t("sso.retry")}</button></section>;
-  if (!data.providers.length) return null;
+  if (!data.providers.length) return <section className="externalIdentitySettings" aria-labelledby="external-identities-heading">
+    <h2 id="external-identities-heading">{t("sso.title")}</h2>
+    <p className="ssoHint">{t("sso.notConfigured")}</p>
+  </section>;
   return <section className="externalIdentitySettings" aria-labelledby="external-identities-heading">
     <h2 id="external-identities-heading">{t("sso.title")}</h2>
     <p className="ssoHint">{t("sso.hint")}</p>

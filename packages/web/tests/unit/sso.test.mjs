@@ -19,6 +19,22 @@ test("disabled external login adds no login controls", async () => {
   subject.unmount();
 });
 
+test("account security explains an unconfigured identity provider without offering binding", async () => {
+  const requests = [];
+  const subject = renderer(ExternalIdentitySettings, {}, environment({ request: async url => {
+    requests.push(url);
+    return { providers: [], canVerifyPassword: true };
+  } }));
+  try {
+    await subject.settle();
+    const html = renderToStaticMarkup(subject.tree);
+    assert.ok(html.includes("sso.title"));
+    assert.ok(html.includes("sso.notConfigured"));
+    assert.equal(buttons(subject).length, 0);
+    assert.deepEqual(requests, ["/api/account/external-identities"]);
+  } finally { subject.unmount(); }
+});
+
 test("provider login posts a local return target and follows the issued authorization URL", async () => {
   const writes = [], redirects = [];
   const env = environment({ request: async (_url, options) => {

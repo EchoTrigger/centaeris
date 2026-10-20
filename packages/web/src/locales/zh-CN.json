@@ -1133,6 +1133,7 @@
   "sso.retry": "重试",
   "sso.title": "外部登录",
   "sso.hint": "关联后可通过外部身份源登录当前账号。你的工作区、角色和数据归属保持不变。",
+  "sso.notConfigured": "此部署尚未配置单点登录身份源。请联系部署管理员完成配置，当前仍可使用账号密码登录。",
   "sso.passwordRequired": "请先设置可用的本地密码，再管理外部身份关联。",
   "sso.linked": "已关联",
   "sso.notLinked": "未关联",

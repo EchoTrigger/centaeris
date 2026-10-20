@@ -1133,6 +1133,7 @@
   "sso.retry": "Retry",
   "sso.title": "External sign-in",
   "sso.hint": "Link an external identity to sign in to this account. Your workspaces, roles and data stay with this account.",
+  "sso.notConfigured": "Single sign-on is not configured for this deployment. Ask the deployment administrator to configure an identity provider. You can continue signing in with your password.",
   "sso.passwordRequired": "Set a usable local password before managing external identities.",
   "sso.linked": "Linked",
   "sso.notLinked": "Not linked",
