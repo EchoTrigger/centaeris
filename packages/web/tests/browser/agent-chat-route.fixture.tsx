@@ -164,6 +164,44 @@ async function waitFor(read: () => boolean) {
   throw new Error("Synthetic route did not reach the expected state");
 }
 const button = (label: string) => [...document.querySelectorAll<HTMLButtonElement>("button")].find(item => item.textContent?.trim() === label || item.getAttribute("aria-label") === label)!;
+
+async function checkSidebarTransition(label: string, toggle: HTMLButtonElement) {
+  const shell = document.querySelector<HTMLElement>(".shShellPage")!;
+  const sidebar = shell.querySelector<HTMLElement>(".shSidebar")!;
+  const title = shell.querySelector<HTMLElement>(".agentChatRouteHeader nav")!;
+  const samples: { titleLeft: number; sidebarRight: number; overlapsSidebar: boolean; overlapsToggle: boolean }[] = [];
+  const sample = () => {
+    const titleBounds = title.getBoundingClientRect();
+    const sidebarBounds = sidebar.getBoundingClientRect();
+    const opener = button(t("appRoute.showSidebar"));
+    samples.push({
+      titleLeft: titleBounds.left, sidebarRight: sidebarBounds.right,
+      overlapsSidebar: getComputedStyle(sidebar).visibility !== "hidden" && sidebarBounds.width > 1 && titleBounds.left < sidebarBounds.right - 1,
+      overlapsToggle: Boolean(opener && getComputedStyle(opener).visibility !== "hidden" && titleBounds.left < opener.getBoundingClientRect().right - 1),
+    });
+  };
+  sample();
+  toggle.click();
+  await Promise.resolve();
+  sample();
+  await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+  sample();
+  const deadline = performance.now() + 5000;
+  const moving = () => [shell, sidebar, title.parentElement, button(t("appRoute.showSidebar"))]
+    .flatMap(element => element?.getAnimations() || [])
+    .some(animation => animation.playState === "running" || animation.pending);
+  while (moving()) {
+    if (performance.now() >= deadline) throw new Error("Sidebar transition did not finish");
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    sample();
+  }
+  sample();
+  check(`${label}: Agent title never overlaps the visible sidebar`, samples.find(row => row.overlapsSidebar) || null, null);
+  check(`${label}: Agent title never overlaps the sidebar toggle`, samples.find(row => row.overlapsToggle) || null, null);
+  const start = samples[0].titleLeft, end = samples[samples.length - 1].titleLeft;
+  check(`${label}: Agent title stays between its expanded and collapsed positions`, samples.find(row => row.titleLeft < Math.min(start, end) - 1 || row.titleLeft > Math.max(start, end) + 1) || null, null);
+}
+
 if (new URLSearchParams(location.search).has("review")) {
   await waitFor(() => Boolean(button("Synthetic work session")) && Boolean(document.querySelector("textarea")));
   button(t("agentChat.toggleOverview")).click();
@@ -276,7 +314,7 @@ if (new URLSearchParams(location.search).has("review")) {
   check("opening preview preserves composer position", composerWithPreview.left, composerBeforePreview.left);
   check("preview leaves the input clear", previewBounds.bottom <= composerWithPreview.top, true);
   if (innerWidth > 760) {
-    button(t("shellSidebar.hideSidebar")).click();
+    await checkSidebarTransition("collapse navigation", button(t("shellSidebar.hideSidebar")));
     await waitForLayout([".shMain", ".agentChatRoutePlane", ".agentChatConversationColumn", ".agentChatPreviewDock", ".agentChatContentWidth", ".agentInputComposer"]);
     const plane = document.querySelector(".agentChatRoutePlane")!.getBoundingClientRect();
     const panel = document.querySelector(".agentChatPreviewDock")!.getBoundingClientRect();
@@ -287,7 +325,7 @@ if (new URLSearchParams(location.search).has("review")) {
     check("hidden navigation: input stays centered in the full plane", Math.abs(editor.left + editor.width / 2 - plane.left - plane.width / 2) < 1, true);
     check("hidden navigation: input remains clear", panel.bottom <= editor.top, true);
     check("hidden navigation: changing layout retains draft", input.value, exactDraft);
-    button(t("appRoute.showSidebar")).click();
+    await checkSidebarTransition("expand navigation", button(t("appRoute.showSidebar")));
     await waitForLayout([".shMain", ".agentChatRoutePlane", ".agentChatConversationColumn", ".agentChatPreviewDock", ".agentChatContentWidth", ".agentInputComposer"]);
   }
   check("preview uses one inner content scroller", getComputedStyle(document.querySelector(".agentChatSessionPreview")!).overflowY, "hidden");
