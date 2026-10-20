@@ -4723,32 +4723,31 @@ mod tests {
     #[test]
     fn environment_container_keeps_host_control_outside_workload_mounts() {
         let runner = test_docker_execution_host_runner();
-        let mut expected = runner.container_expectation();
-        let body = container_create_body(&expected).unwrap();
-        assert_eq!(
-            body["Cmd"],
-            serde_json::json!([AGENT_BINARY, "environment-keeper"])
-        );
-        assert_eq!(body["User"], "10001:10001");
-        let host = &body["HostConfig"];
-        assert_eq!(host["CapDrop"], serde_json::json!(["ALL"]));
-        assert_eq!(host["CapAdd"], serde_json::json!([]));
-        assert!(host["CgroupParent"].is_null());
-        assert!(host["Binds"].is_null());
-        assert!(host["Tmpfs"].is_null());
-        let mounts = host["Mounts"].as_array().unwrap();
-        assert_eq!(mounts.len(), 2);
-        assert_eq!(mounts[0]["Target"], "/opt/centaeris/plugins/banana");
-        assert_eq!(mounts[1]["Target"], AGENT_BINARY);
-        assert!(mounts.iter().all(|mount| mount["ReadOnly"] == true));
-        assert_eq!(host["Memory"], expected.resources.memory_bytes);
-        assert_eq!(host["PidsLimit"], expected.resources.pids_limit);
-        assert_eq!(host["NetworkMode"], "none");
-        expected.oci_runtime = OciRuntime::Runsc;
-        assert!(
-            container_create_body(&expected).is_err(),
-            "backend requires its own verified supervisor adapter"
-        );
+        for runtime in [OciRuntime::Runc, OciRuntime::Runsc] {
+            let mut expected = runner.container_expectation();
+            expected.oci_runtime = runtime;
+            let body = container_create_body(&expected).unwrap();
+            assert_eq!(
+                body["Cmd"],
+                serde_json::json!([AGENT_BINARY, "environment-keeper"])
+            );
+            assert_eq!(body["User"], "10001:10001");
+            let host = &body["HostConfig"];
+            assert_eq!(host["Runtime"], runtime.docker_runtime_name());
+            assert_eq!(host["CapDrop"], serde_json::json!(["ALL"]));
+            assert_eq!(host["CapAdd"], serde_json::json!([]));
+            assert!(host["CgroupParent"].is_null());
+            assert!(host["Binds"].is_null());
+            assert!(host["Tmpfs"].is_null());
+            let mounts = host["Mounts"].as_array().unwrap();
+            assert_eq!(mounts.len(), 2);
+            assert_eq!(mounts[0]["Target"], "/opt/centaeris/plugins/banana");
+            assert_eq!(mounts[1]["Target"], AGENT_BINARY);
+            assert!(mounts.iter().all(|mount| mount["ReadOnly"] == true));
+            assert_eq!(host["Memory"], expected.resources.memory_bytes);
+            assert_eq!(host["PidsLimit"], expected.resources.pids_limit);
+            assert_eq!(host["NetworkMode"], "none");
+        }
     }
 
     #[test]

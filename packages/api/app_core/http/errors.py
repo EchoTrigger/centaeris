@@ -15,6 +15,9 @@ from .security import (
 logger = logging.getLogger(__name__)
 
 VALIDATION_ERROR_CODES = {
+    "start_sso_login": "sso_request_invalid",
+    "start_sso_link": "sso_request_invalid",
+    "unlink_external_identity": "sso_request_invalid",
     "register_business_app": "business_app_request_invalid",
     "update_business_app": "business_app_request_invalid",
     "issue_app_delegation": "delegation_request_invalid",

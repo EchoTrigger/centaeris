@@ -696,6 +696,23 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 .login { display: grid; min-height: 100vh; place-items: center; padding: 20px; background: var(--shell); }
 .loginForm { display: grid; width: min(390px, 100%); gap: 15px; padding: 28px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface); box-shadow: 0 18px 50px rgba(21, 27, 34, .07); }
 .loginFormEmbedded { width: 100%; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+.ssoLoginOptions { display: grid; gap: 12px; }
+.ssoLoginOptions > button { min-height: 40px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--on-surface); cursor: pointer; font: inherit; }
+.ssoDivider { display: flex; align-items: center; gap: 12px; color: var(--process-text); font-size: 11px; }
+.ssoDivider::before, .ssoDivider::after { content: ""; height: 1px; background: var(--border); flex: 1; }
+.externalIdentitySettings { margin-top: 36px; padding-top: 24px; border-top: 1px solid var(--outline-variant); }
+.externalIdentitySettings h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.ssoHint, .ssoLoading { color: var(--process-text); font-size: 12px; line-height: 1.6; }
+.ssoProvider { border-bottom: 1px solid var(--outline-variant); padding: 18px 0; }
+.ssoProviderRow { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.ssoProviderIdentity { display: grid; gap: 5px; min-width: 0; overflow-wrap: anywhere; font-size: 12px; }
+.ssoProviderIdentity > span, .ssoProviderIdentity small { color: var(--process-text); font-size: 11px; }
+.ssoProviderRow > button, .ssoActions button { flex-shrink: 0; padding: 8px 12px; border: 1px solid var(--outline-variant); border-radius: 6px; background: var(--surface-color); color: var(--on-surface); font: inherit; font-size: 12px; cursor: pointer; }
+.ssoConfirmation { display: grid; gap: 14px; padding-top: 16px; max-width: 460px; }
+.ssoConfirmation > p { margin: 0; font-size: 12px; line-height: 1.6; }
+.ssoActions { display: flex; justify-content: flex-end; gap: 8px; }
+.ssoActions .primary { background: var(--primary-color); color: var(--on-primary); }
+.ssoLoginOptions button:disabled, .externalIdentitySettings button:disabled { cursor: default; opacity: .5; }
 .loginBrand { display: flex; align-items: center; gap: 12px; margin-bottom: 5px; }
 .loginBrand img { width: 42px; height: 42px; border-radius: 11px; object-fit: cover; }
 .loginBrand h1, .loginBrand p { margin: 0; }

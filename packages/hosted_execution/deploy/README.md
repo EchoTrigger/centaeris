@@ -11,8 +11,19 @@ by other users. Control, output and socket directories must be distinct private
 directories (mode `0700`); the service creates missing directories with that
 mode and refuses to change permissions on an existing shared directory.
 
-Set `runcPath`, `runcRoot` and `dockerSocket` to the exact binary, state root and
+Set `ociRuntime` to `runc` or `runsc`, and `runtimePath`, `runtimeRoot` and
+`dockerSocket` to the exact binary, state root and
 daemon that own the workload containers. Record the binary version and digest.
+Operator configs using `runcPath`/`runcRoot` must be updated explicitly; those
+field names are no longer accepted. The task wire protocol is unchanged.
+
+The runsc adapter requires the matching sealed helper and gVisor's
+`--in-sandbox-cgroup=v2` runtime argument. Workload capabilities must be empty
+and the workload cgroup mount read-only. A sealed runner uses a different UID
+for trusted setup, restores the profile identity and capabilities before exec,
+and keeps its reaper outside the task cgroup. Commands retain the environment's
+PID namespace; cancelling one task uses its gVisor cgroup rather than killing
+the whole sandbox. Host-owned journals and output remain outside the workload.
 An upstream interface reference is runc v1.3.3 `exec --process --cgroup`; that
 reference does not establish the installed binary's provenance. The supervisor
 cross-checks Docker identity, runc state, init PID/starttime, bundle/security
@@ -55,6 +66,22 @@ runc, so a root workload cannot replace its executable through a writable pathna
 Install or update `environment_host_supervisor` and `execution_agent` from the
 same version. After an update, restart the supervisor and Runtime together.
 The running supervisor continues using its sealed copy until restarted.
+
+For runsc on x86_64, build the helper as a static musl executable instead:
+
+```sh
+RUSTFLAGS=-Ctarget-feature=+crt-static cargo rustc --locked --release \
+  --target x86_64-unknown-linux-musl -p hosted_execution \
+  --bin execution_agent -- -C relocation-model=static
+```
+
+Verify that `readelf -l` reports no `INTERP` segment before installation. The
+GNU static PIE helper can abort during glibc startup when runsc imports its
+sealed descriptor as an anonymous executable. The musl target alone is not
+sufficient if the linker still emits a dynamic PIE. The supervisor itself may
+use the host GNU target. The host seals the helper and reopens its descriptor
+read-only before import; runsc requires a read-only host descriptor even when
+the underlying memfd already has write seals.
 
 Helper requests select a fixed kind and carry the owner fence, operation ID,
 scope, byte length and SHA-256 before a bounded binary body. The host buffers

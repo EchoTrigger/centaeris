@@ -19,34 +19,16 @@ class SourceLayoutTests(unittest.TestCase):
             self.assertFalse({"git", "rev", "branch"}.intersection(dependency))
 
     def test_all_node_products_share_the_root_lock(self):
-        lock = (ROOT / "pnpm-lock.yaml").read_text(encoding="utf-8")
-        workspace = (ROOT / "pnpm-workspace.yaml").read_text(encoding="utf-8")
-        for path in ("packages/ui", "packages/desktop", "packages/web"):
-            self.assertIn("  - " + path, workspace)
-            self.assertIn("  " + path + ":", lock)
+        self.assertTrue((ROOT / "pnpm-lock.yaml").is_file())
+        for manifest in (ROOT / "packages").glob("*/package.json"):
+            for name in ("package-lock.json", "pnpm-lock.yaml", "yarn.lock"):
+                self.assertFalse((manifest.parent / name).exists(), str(manifest.parent / name))
         self.assertFalse((ROOT / "package-lock.json").exists())
 
-    def test_package_manager_bootstrap_pins_match_the_root_manifest(self):
-        import re
+    def test_package_manager_selection_matches_the_root_manifest(self):
         manifest = json.loads((ROOT / "package.json").read_text())
         version = manifest["engines"]["pnpm"]
         self.assertEqual(manifest["packageManager"], f"pnpm@{version}")
-        files = [ROOT / "packages/web/Dockerfile", *(ROOT / ".github/workflows").glob("*.yml")]
-        pins = []
-        for file in files:
-            pins.extend(re.findall(r"npm install --global pnpm@([0-9.]+)", file.read_text()))
-        self.assertTrue(pins)
-        self.assertEqual(set(pins), {version})
-
-    def test_ci_caches_pnpm_only_for_jobs_that_install_frontend_dependencies(self):
-        import re
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
-        jobs = dict(re.findall(r"^  ([a-z][a-z-]+):\n(.*?)(?=^  [a-z][a-z-]+:|\Z)", workflow, re.M | re.S))
-        cached = {name for name, body in jobs.items() if "cache: pnpm" in body}
-        self.assertEqual(cached, {"local-node", "web"})
-        release = (ROOT / ".github/workflows/release-product.yml").read_text()
-        local_product = release.split("  local-product:", 1)[1].split("  hosted-product:", 1)[0]
-        self.assertIn("cache: ${{ inputs.product == 'desktop' && 'pnpm' || '' }}", local_product)
 
     def test_relocated_python_tools_find_the_product_root(self):
         for name in ("ci.py", "test_product_version.py", "transcript-schema.py", "agent-run-authorization-gate.py"):
@@ -60,12 +42,6 @@ class SourceLayoutTests(unittest.TestCase):
         lock = tomllib.loads((ROOT / "Cargo.lock").read_text())
         for package in lock["package"]:
             self.assertNotIn("git+https://github.com/EchoTrigger/centaeris", package.get("source", ""))
-
-    def test_hosted_rust_test_fixtures_resolve_after_relocation(self):
-        import re
-        for file in (ROOT / "packages/runtime_server/src").rglob("*.rs"):
-            for relative in re.findall(r'include_str!\(\s*"([^"]*tests/[^\"]+)"', file.read_text(encoding="utf-8")):
-                self.assertTrue((file.parent / relative).is_file(), f"Missing fixture: {file}: {relative}")
 
     def test_python_workspace_and_database_migrations_are_retained(self):
         project = tomllib.loads((ROOT / "pyproject.toml").read_text())

@@ -19,13 +19,20 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--docker-socket", required=True)
     parser.add_argument("--daemon-id", required=True)
-    parser.add_argument("--runc-root", required=True)
+    parser.add_argument("--runtime-root", required=True)
+    parser.add_argument("--oci-runtime", choices=["runc", "runsc"], default="runc")
+    parser.add_argument("--runtime-path")
+    parser.add_argument("--busybox", default="/usr/bin/busybox")
+    parser.add_argument("--library", action="append", default=[])
     parser.add_argument("--supervisor", required=True)
     parser.add_argument("--helper")
     parser.add_argument("--workload-user", default="0:0")
     parser.add_argument("--workspace-root", default="/workspace")
     parser.add_argument("--evidence", required=True)
     args = parser.parse_args()
+    runtime_path = args.runtime_path or "/usr/bin/" + args.oci_runtime
+    if args.oci_runtime == "runsc" and not args.helper:
+        parser.error("runsc requires the static sealed helper")
     workspace = args.workspace_root
     if os.geteuid() != 0 or args.docker_socket == "/var/run/docker.sock":
         raise RuntimeError("explicit disposable daemon and Linux root required")
@@ -50,7 +57,7 @@ def main():
         control_socket = root / "socket" / "control.sock"
         config = dict(schema="environment.host.v1", socketPath=str(control_socket),
                       controlRoot=str(root / "control"), outputRoot=str(root / "output"),
-                      runcPath="/usr/bin/runc", runcRoot=args.runc_root,
+                      ociRuntime=args.oci_runtime, runtimePath=runtime_path, runtimeRoot=args.runtime_root,
                       dockerPath="/usr/bin/docker", dockerSocket=args.docker_socket,
                       controllerUid=0, helperPath=None)
         if args.helper:
@@ -185,7 +192,16 @@ def main():
                     item.type = tarfile.DIRTYPE
                     item.mode = 0o755
                     archive.addfile(item)
-                archive.add("/usr/bin/busybox", arcname="bin/busybox", recursive=False)
+                archive.add(args.busybox, arcname="bin/busybox", recursive=False)
+                for library in args.library:
+                    path = Path(library)
+                    if not path.is_absolute() or ".." in path.parts:
+                        raise RuntimeError("test library must be an absolute host path")
+                    content = path.read_bytes()
+                    item = tarfile.TarInfo(str(path).lstrip("/"))
+                    item.size = len(content)
+                    item.mode = path.stat().st_mode & 0o777
+                    archive.addfile(item, io.BytesIO(content))
                 shell=tarfile.TarInfo("bin/sh");shell.type=tarfile.SYMTYPE;shell.linkname="busybox"
                 archive.addfile(shell)
                 marker=tarfile.TarInfo("workspace/from-image");marker.size=len(b"preserved image data");marker.mode=0o644
@@ -193,10 +209,11 @@ def main():
             image = docker("import", "-", "centaeris-native-acceptance:" + suffix,
                            data=tar_data.getvalue()).stdout.decode().strip()
             container = docker("create", "--name", "centaeris-native-" + suffix,
-                               "--runtime", "runc", "--network", "none", "--user", args.workload_user,
+                               "--runtime", args.oci_runtime,
+                               *(["--cap-drop", "ALL"] if args.oci_runtime == "runsc" else []), "--network", "none", "--user", args.workload_user,
                                "--workdir", "/", "--security-opt", "no-new-privileges",
                                "--env", "CENTAERIS_WORKSPACE_ROOT="+workspace, "--env", "CENTAERIS_WORKSPACE_USER="+args.workload_user,
-                               "--memory", "128m", "--pids-limit", "128", "--cpus", "1",
+                               "--memory", "512m", "--pids-limit", "128", "--cpus", "1",
                                "--label", "centaeris.managed=true",
                                "--label", "centaeris.instance_id=" + instance,
                                "--label", "centaeris.environment_id=acceptance",
@@ -206,7 +223,7 @@ def main():
             start_service()
             target = dict(environmentInstanceId=instance, containerId=container,
                           environmentId="acceptance", profileDigest=profile, imageDigest=image)
-            bundle = Path(json.loads(subprocess.check_output(["/usr/bin/runc", "--root", args.runc_root, "state", container]))["bundle"])
+            bundle = Path(json.loads(subprocess.check_output([runtime_path, "--root", args.runtime_root, "state", container]))["bundle"])
             original_mode = bundle.stat().st_mode & 0o777
             try:
                 os.chmod(bundle, 0o755)
@@ -285,7 +302,9 @@ def main():
             checks += ["supervisor_restart_retains_cleanup_obligation", "restart_can_stop_old_domain"]
             result = dict(checks=checks, daemonId=observed_id, instanceId=instance,
                           workloadUser=args.workload_user, workspaceRoot=workspace,
-                          runcVersion=subprocess.check_output(["/usr/bin/runc", "--version"]).decode(),
+                          ociRuntime=args.oci_runtime, runtimeVersion=subprocess.check_output([runtime_path, "--version"]).decode(),
+                          busyboxSha256=hashlib.sha256(Path(args.busybox).read_bytes()).hexdigest(),
+                          libraries={path:hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in args.library},
                           supervisorSha256=hashlib.sha256(Path(args.supervisor).read_bytes()).hexdigest())
             if args.helper:
                 result["helperSha256"] = "sha256:" + hashlib.sha256(helper_path.read_bytes()).hexdigest()
@@ -294,7 +313,7 @@ def main():
         except Exception:
             print((root / "service.log").read_text(errors="replace"))
             if container:
-                diagnostic = subprocess.run(["/usr/bin/runc", "--root", args.runc_root, "state", container],
+                diagnostic = subprocess.run([runtime_path, "--root", args.runtime_root, "state", container],
                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 if diagnostic.returncode == 0:
                     bundle = Path(json.loads(diagnostic.stdout)["bundle"])

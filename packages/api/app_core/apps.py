@@ -6,5 +6,7 @@ class AppCoreConfig(AppConfig):
     name = "app_core"
 
     def ready(self):
+        from .sso_logging import configure_oauth_logging
+        configure_oauth_logging()
         from .upload_temp import initialize_upload_temp_root
         initialize_upload_temp_root()

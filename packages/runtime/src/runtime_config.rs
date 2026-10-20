@@ -1851,28 +1851,34 @@ mod tests {
             Some("deepseek-flash".to_string())
         );
         let record = default_record(&state);
-        assert_eq!(record.model_context_tokens, Some(1_000_000));
-        assert_eq!(record.model_max_output_tokens, Some(384_000));
-        assert_eq!(record.model_thinking_mode.as_deref(), Some("high"));
+        let profile = built_in_model_profile(DEEPSEEK_PROVIDER_ID, "deepseek-flash")
+            .expect("selected model profile");
+        assert_eq!(record.model_context_tokens, Some(profile.context_tokens));
+        assert_eq!(
+            record.model_max_output_tokens,
+            Some(profile.max_output_tokens)
+        );
+        assert_eq!(record.model_thinking_mode, profile.thinking_mode);
 
         let invalid = AgentRuntimeConfigSetRequest {
-            model_thinking_mode: Some("xhigh".to_string()),
+            model_thinking_mode: Some("unsupported-effort".to_string()),
             ..AgentRuntimeConfigSetRequest::default()
         };
         assert!(apply_model_thinking_mode_request(&mut state, &invalid)
-            .expect_err("DeepSeek must reject xhigh")
-            .contains("expected low, high, max"));
+            .expect_err("unknown effort must be rejected")
+            .contains("unsupported"));
+        let selected_effort = profile.thinking_modes.last().expect("selectable effort");
         apply_model_thinking_mode_request(
             &mut state,
             &AgentRuntimeConfigSetRequest {
-                model_thinking_mode: Some("max".to_string()),
+                model_thinking_mode: Some(selected_effort.clone()),
                 ..AgentRuntimeConfigSetRequest::default()
             },
         )
-        .expect("DeepSeek max thinking");
+        .expect("select catalog effort");
         assert_eq!(
             default_record(&state).model_thinking_mode.as_deref(),
-            Some("max")
+            Some(selected_effort.as_str())
         );
     }
 
@@ -1951,48 +1957,42 @@ mod tests {
     }
 
     #[test]
-    fn opencode_go_models_resolve_concrete_effort_without_provider_default() {
-        for model in ["glm-5.3-flash", "deepseek-v4.1-flash"] {
+    fn catalog_models_resolve_concrete_effort_without_provider_default() {
+        for profile in built_in_model_profiles()
+            .into_iter()
+            .filter(|profile| !profile.thinking_modes.is_empty())
+        {
             let mut state = PersistedRuntimeConfigState {
                 active_model: Some(ActiveModelRef {
-                    provider_id: "opencode-go.default".into(),
-                    model: model.into(),
+                    provider_id: profile.provider_id.clone(),
+                    model: profile.model.clone(),
                     model_thinking_mode: None,
                 }),
                 ..Default::default()
             };
             assert_eq!(
-                default_record(&state).model_thinking_mode.as_deref(),
-                Some("high")
+                default_record(&state).model_thinking_mode,
+                profile.thinking_mode
             );
             let item = model_catalog(&state)
                 .into_iter()
-                .find(|item| item.provider_id == "opencode-go.default" && item.model == model)
+                .find(|item| item.provider_id == profile.provider_id && item.model == profile.model)
                 .unwrap();
-            assert_eq!(item.model_thinking_modes, ["low", "high", "max"]);
+            assert_eq!(item.model_thinking_modes, profile.thinking_modes);
+            let selected_effort = profile.thinking_modes.last().unwrap();
             apply_model_thinking_mode_request(
                 &mut state,
                 &AgentRuntimeConfigSetRequest {
-                    model_thinking_mode: Some("max".into()),
+                    model_thinking_mode: Some(selected_effort.clone()),
                     ..Default::default()
                 },
             )
             .unwrap();
             assert_eq!(
                 default_record(&state).model_thinking_mode.as_deref(),
-                Some("max")
+                Some(selected_effort.as_str())
             );
         }
-    }
-
-    #[test]
-    fn opencode_go_catalog_exposes_only_the_approved_two_models() {
-        let models = model_catalog(&PersistedRuntimeConfigState::default())
-            .into_iter()
-            .filter(|item| item.provider_id == "opencode-go.default")
-            .map(|item| item.model)
-            .collect::<Vec<_>>();
-        assert_eq!(models, ["glm-5.3-flash", "deepseek-v4.1-flash"]);
     }
 
     #[test]

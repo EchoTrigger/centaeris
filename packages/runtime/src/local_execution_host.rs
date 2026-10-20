@@ -1483,47 +1483,53 @@ mod tests {
     }
 
     #[test]
-    fn background_process_inheriting_output_returns_after_parent_shell_exits() {
-        let marker_path = env::temp_dir().join(format!(
-            "centaeris-local-background-{}-{}.txt",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock")
-                .as_nanos()
-        ));
-        let bash_marker_path = marker_path.to_string_lossy().replace('\\', "/");
+    fn background_process_inheriting_output_waits_for_release_after_command_returns() {
+        let workspace = tempfile::tempdir().expect("create background process workspace");
+        let bash_workspace = workspace.path().to_string_lossy().replace('\\', "/");
+        let completed = workspace.path().join("completed");
         let mut command = Command::new(resolve_bash_path(None).expect("resolve Bash"));
         command
             .args([
                 "-c",
-                "printf 'DONE\\n'; ( sleep 0.3; printf ALIVE > \"$1\" ) &",
+                concat!(
+                    "( printf READY > \"$1/ready\"; ",
+                    "while [ ! -f \"$1/release\" ]; do ",
+                    "[ -d \"$1\" ] || exit; sleep 0.05; done; ",
+                    "printf ALIVE > \"$1/completed\" ) & ",
+                    "while [ ! -f \"$1/ready\" ]; do sleep 0.05; done; ",
+                    "printf 'DONE\\n'",
+                ),
                 "_",
-                bash_marker_path.as_str(),
+                bash_workspace.as_str(),
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         configure_local_process(&mut command);
 
-        let started = Instant::now();
-        let output = run_local_command_with_timeout(&mut command, 5_000, None, None)
-            .expect("background command must return after the parent shell exits");
+        let output = run_local_command_with_timeout(&mut command, 10_000, None, None);
+        let completed_before_release = completed.exists();
+        // Release the child even if the runner failed, so failed assertions cannot
+        // leave it waiting indefinitely. Removing the directory also stops it.
+        std::fs::write(workspace.path().join("release"), "release")
+            .expect("release background process");
+        let completion_deadline = Instant::now() + Duration::from_secs(10);
+        while std::fs::read_to_string(&completed).ok().as_deref() != Some("ALIVE")
+            && Instant::now() < completion_deadline
+        {
+            sleep(PROCESS_POLL_INTERVAL);
+        }
 
+        let output = output.expect("return without waiting for inherited output pipes to close");
         assert!(!output.timed_out);
         assert_eq!(output.exit_code, Some(0));
         assert_eq!(output.stdout, "DONE\n");
-        assert!(started.elapsed() < Duration::from_secs(1));
-
-        let marker_deadline = Instant::now() + Duration::from_secs(2);
-        while !marker_path.exists() && Instant::now() < marker_deadline {
-            sleep(PROCESS_POLL_INTERVAL);
-        }
+        assert!(!completed_before_release);
         assert_eq!(
-            std::fs::read_to_string(&marker_path).expect("background marker"),
+            std::fs::read_to_string(completed)
+                .expect("background process must survive parent exit"),
             "ALIVE"
         );
-        std::fs::remove_file(marker_path).expect("remove background marker");
     }
 
     #[test]

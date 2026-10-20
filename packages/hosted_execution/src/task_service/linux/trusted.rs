@@ -35,7 +35,7 @@ fn static_elf(bytes: &[u8]) -> Result<(), String> {
     }
     Ok(())
 }
-fn sealed_file(bytes: &[u8]) -> Result<File, String> {
+pub(super) fn sealed_file(bytes: &[u8]) -> Result<File, String> {
     // SAFETY: the constant name is NUL terminated; ownership transfers to File.
     let fd = unsafe {
         libc::memfd_create(
@@ -63,7 +63,9 @@ fn sealed_file(bytes: &[u8]) -> Result<File, String> {
     }
     file.seek(SeekFrom::Start(0))
         .map_err(|_| "host_helper_sealing_failed")?;
-    Ok(file)
+    // gVisor imports sealed regular files only through read-only host FDs.
+    // Reopening preserves the memfd seals while dropping the writable access mode.
+    File::open(format!("/proc/self/fd/{fd}")).map_err(|_| "host_helper_sealing_failed".into())
 }
 
 pub(crate) struct HelperBinary {
@@ -684,6 +686,11 @@ mod tests {
     #[test]
     fn trusted_binary_descriptor_cannot_reopen_into_a_host_file_write() {
         let mut file = sealed_file(b"immutable helper").unwrap();
+        assert_eq!(
+            unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) } & libc::O_ACCMODE,
+            libc::O_RDONLY,
+            "runsc imports sealed regular files through read-only host descriptors"
+        );
         let mut reopened = OpenOptions::new()
             .read(true)
             .write(true)

@@ -42,6 +42,44 @@ session-specific expiry and anonymous sessions remain finite. Browser sessions d
 not determine business application grant expiry or the lifetime of Agents and
 accepted work.
 
+## External OAuth sign-in
+
+`SSO_PROVIDERS_JSON` is a server-side JSON array; `[]` disables external sign-in.
+Each provider requires `providerId`, `displayName`, `clientId`, `clientSecret`,
+`authorizeUrl`, `tokenUrl`, `userinfoUrl` and `subjectField`. Optional fields are
+`scope` (default empty), `displayNameField` (default `name`) and
+`tokenEndpointAuthMethod` (`client_secret_basic`, default, or `client_secret_post`).
+Profile field paths may use dots for nested JSON objects. The subject must be the
+provider's stable user identifier; email does not automatically link accounts.
+
+Register the exact callback `${WEB_ORIGIN}/api/sso/<providerId>/callback` with the
+provider. This integration uses Authlib's authorization code flow with state and
+PKCE S256. The provider must support PKCE and return JSON user information using
+a bearer token. OAuth does not define a universal userinfo endpoint or field map;
+configure those from the provider's documentation. OIDC discovery and ID-token
+validation are not implemented; `openid` scope is rejected.
+
+Keep provider secrets in deployment configuration outside Git and image layers.
+Providers and `WEB_ORIGIN` require HTTPS. `SSO_ALLOW_INSECURE_HTTP=1` is permitted
+only with `DJANGO_DEBUG=1` for an isolated local test deployment.
+
+An existing user signs in locally, opens **Security → External sign-in**, verifies
+the current password, and authorizes their external identity. The same local User
+and workspace membership are used on subsequent external sign-ins. Unlinked
+identities cannot create accounts. Workspace invitations and roles remain under
+existing membership management. Unlinking requires a usable local password and
+invalidates sessions using that identity; local sessions remain available.
+
+Treat `providerId` as a permanent identity namespace. Changing client ID, endpoint
+URLs or subject mapping invalidates existing associations and their external
+sessions; sign in locally, unlink, then link again. Display labels and secret
+rotation do not change the identity namespace. Back up the database before
+applying the additive external-identity migration.
+
+The standalone `scripts/workspace/oauth_test_provider.py` supplies synthetic
+Alice/Bob identities for local acceptance. Its fixed credentials and account
+selector are test fixtures. Keep it on an isolated test host.
+
 ## Service addresses
 
 The bundled Compose deployment owns internal service addresses: PostgreSQL is

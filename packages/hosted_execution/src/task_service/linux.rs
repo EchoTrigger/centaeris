@@ -85,9 +85,11 @@ const OUTPUT_BUDGET_BYTES: u64 = (ENVIRONMENT_TASK_MAX_RECORDS
     * (HEADER + CHUNK)) as u64;
 #[cfg(test)]
 const MAX_RESPONSE: usize = 512 * 1024;
+mod domains;
 pub(crate) mod launcher;
+mod runsc;
 mod trusted;
-use launcher::{RuncTarget, Spawned, TaskChild};
+use launcher::{OciTarget, Spawned, TaskChild};
 pub(crate) use trusted::HelperBinary;
 use trusted::{HelperCapture, ReservedInput, TrustedLaunch};
 struct Live {
@@ -148,7 +150,7 @@ struct Manager {
     _control_lease: ControlLease,
     storage: TaskStorage,
     cgroups: PathBuf,
-    launcher: Option<RuncTarget>,
+    launcher: Option<Arc<OciTarget>>,
     helper_root: Option<PathBuf>,
     journal: Journal,
     live: BTreeMap<String, Live>,
@@ -236,8 +238,7 @@ impl Manager {
         // Unexpected supervisor exit is reconciled by the reaper, which must
         // also confirm ownership of the direct child has ended.
         if !r.snapshot.cleanup_complete && !failed_supervisor {
-            let events = fs::read_to_string(self.cgroups.join(id).join("cgroup.events"))
-                .map_err(|_| "task_tree_observation_failed")?;
+            let events = domains::events(&self.launcher, &self.cgroups.join(id))?;
             if events.lines().any(|line| line == "populated 0") {
                 r.snapshot.cleanup_complete = true;
                 self.persist()?;
@@ -373,12 +374,11 @@ impl Manager {
             let domain = self.cgroups.join(&id);
             if domain.exists() {
                 // Confirm the exact owned tree again before dropping its observable domain.
-                let events = fs::read_to_string(domain.join("cgroup.events"))
-                    .map_err(|_| "task_tree_observation_failed")?;
+                let events = domains::events(&self.launcher, &domain)?;
                 if !events.lines().any(|line| line == "populated 0") {
                     continue;
                 }
-                fs::remove_dir(&domain).map_err(|_| "task_history_retirement_pending")?;
+                domains::remove(&self.launcher, &domain)?;
             }
             // Flush terminal identity before retiring the hot object. Its compact
             // output remains the recoverable copy until authoritative Run closure.
@@ -460,7 +460,7 @@ impl Manager {
                 m.persist()?;
                 let mut clean = true;
                 for id in previous_run_tasks {
-                    let empty = cgroup_kill(&m.cgroups.join(&id)).unwrap_or(false);
+                    let empty = domains::kill(&m.launcher, &m.cgroups.join(&id)).unwrap_or(false);
                     m.journal
                         .tasks
                         .get_mut(&id)
@@ -578,16 +578,9 @@ impl Manager {
                     })
                     .transpose()?;
                 let cgroup = m.cgroups.join(&id);
-                verify_domain(&m.cgroups)?;
-                fs::create_dir(&cgroup).map_err(|_| "task_cgroup_create_failed")?;
                 // Task groups provide exact tree ownership. Runtime verifies the enclosing
                 // Docker instance's aggregate memory, CPU and PID limits before activation.
-                verify_domain(&cgroup)?;
-                let procs = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(cgroup.join("cgroup.procs"))
-                    .map_err(|_| "task_cgroup_assignment_unavailable")?;
+                let procs = domains::create(&m.launcher, &m.cgroups, &cgroup)?;
                 let log = match m
                     .storage
                     .open_output(&id, ENVIRONMENT_TASK_OUTPUT_BYTES / CHUNK)
@@ -595,7 +588,7 @@ impl Manager {
                     Ok(log) => Arc::new(Mutex::new(log)),
                     Err(error) => {
                         drop(procs);
-                        let _ = fs::remove_dir(&cgroup);
+                        let _ = domains::remove(&m.launcher, &cgroup);
                         return Err(error);
                     }
                 };
@@ -624,7 +617,7 @@ impl Manager {
                         drop(log);
                         drop(procs);
                         let _ = fs::remove_file(m.storage.output_root.join(format!("{id}.output")));
-                        let _ = fs::remove_dir(&cgroup);
+                        let _ = domains::remove(&m.launcher, &cgroup);
                         return Err("task_journal_capacity".into());
                     }
                     return Err(error);
@@ -668,7 +661,13 @@ impl Manager {
                 } else {
                     #[cfg(test)]
                     {
-                        spawn_local(&program, &args, &cwd, &env, procs.as_raw_fd())
+                        spawn_local(
+                            &program,
+                            &args,
+                            &cwd,
+                            &env,
+                            procs.as_ref().expect("local task cgroup").as_raw_fd(),
+                        )
                     }
                     #[cfg(not(test))]
                     {
@@ -755,7 +754,7 @@ impl Manager {
                                 .expect("accepted record")
                                 .snapshot
                                 .state = EnvironmentTaskState::Unknown;
-                            let _ = cgroup_kill(&cgroup);
+                            let _ = domains::kill(&m.launcher, &cgroup);
                             m.persist()?;
                             return Err("task_worker_delivery_failed".into());
                         }
@@ -765,14 +764,14 @@ impl Manager {
                                 .map_err(|_| "fault_injection_failed")?;
                         }
                         if input_failed {
-                            let _ = cgroup_kill(&cgroup);
+                            let _ = domains::kill(&m.launcher, &cgroup);
                             m.journal.poisoned = true;
                             return Err("task_input_configuration_failed".into());
                         }
                         m.persist()?;
                     }
                     Err(_) => {
-                        let clean = cgroup_kill(&cgroup).unwrap_or(false);
+                        let clean = domains::kill(&m.launcher, &cgroup).unwrap_or(false);
                         let s = &mut m
                             .journal
                             .tasks
@@ -855,7 +854,7 @@ impl Manager {
                     return Ok(r);
                 }
                 if !m.journal.tasks[&task_id].snapshot.cleanup_complete {
-                    cgroup_kill(&m.cgroups.join(&task_id))?;
+                    domains::kill(&m.launcher, &m.cgroups.join(&task_id))?;
                 }
                 let result = m.mutation(&task_id)?;
                 m.finish(key, result)
@@ -898,7 +897,7 @@ impl Manager {
                 let mut cleanup_complete = true;
                 for id in &task_ids {
                     let clean = m.journal.tasks[id].snapshot.cleanup_complete
-                        || cgroup_kill(&m.cgroups.join(id))?;
+                        || domains::kill(&m.launcher, &m.cgroups.join(id))?;
                     m.journal
                         .tasks
                         .get_mut(id)
@@ -1166,6 +1165,7 @@ fn supervise(
             let poisoned = m.journal.poisoned;
             let unknown = before.state == EnvironmentTaskState::Unknown;
             let container_absent = m.container_absent;
+            let launcher = m.launcher.clone();
             let input_failed = {
                 let Some(live) = m.live.get_mut(&id) else {
                     break;
@@ -1202,7 +1202,7 @@ fn supervise(
                     || input_failed
                     || (timeout_ms > 0 && began.elapsed() >= Duration::from_millis(timeout_ms)))
             {
-                let _ = cgroup_kill(&live.cgroup);
+                let _ = domains::kill(&launcher, &live.cgroup);
             }
             let input_pending = live.input_worker.is_some();
             let mut lost_wait = false;
@@ -1213,7 +1213,7 @@ fn supervise(
                     // Missing wait ownership is not a synthesized exit receipt.
                     lost_wait = error.raw_os_error() == Some(libc::ECHILD);
                     if !container_absent {
-                        let _ = cgroup_kill(&live.cgroup);
+                        let _ = domains::kill(&launcher, &live.cgroup);
                     }
                     m.journal
                         .tasks
@@ -1225,7 +1225,7 @@ fn supervise(
                 }
             };
             let empty = container_absent
-                || fs::read_to_string(m.cgroups.join(&id).join("cgroup.events"))
+                || domains::events(&m.launcher, &m.cgroups.join(&id))
                     .is_ok_and(|s| s.lines().any(|line| line == "populated 0"));
             let snapshot = &mut m.journal.tasks.get_mut(&id).expect("task record").snapshot;
             crate::host_supervisor::physical_snapshot(
@@ -1296,23 +1296,18 @@ impl NativeManager {
         output: PathBuf,
         cgroups: PathBuf,
         instance: &str,
-        launcher: RuncTarget,
+        launcher: OciTarget,
         helper_root: PathBuf,
         helper_binary: Option<Arc<HelperBinary>>,
     ) -> Result<Self, String> {
-        let parent = cgroups.parent().ok_or("task_cgroup_path_invalid")?;
-        verify_domain(parent)?;
-        if !cgroups.exists() {
-            fs::create_dir(&cgroups).map_err(|_| "task_cgroup_create_failed")?;
-        }
-        verify_domain(&cgroups)?;
+        domains::initialize(&launcher, &cgroups)?;
         let lease = ControlLease::acquire(&control)?;
         let journal = Journal::open(&control, instance)?;
         let storage = TaskStorage::new(control.clone(), output.clone(), OUTPUT_BUDGET_BYTES)?;
         let mut manager = Manager::from_journal(storage, cgroups, journal, lease)?;
         let (workspace_root, _) = crate::host_supervisor::workspace_context(&launcher.process)?;
         manager.helper_root = Some(helper_root.clone());
-        manager.launcher = Some(launcher);
+        manager.launcher = Some(Arc::new(launcher));
         let manager = Arc::new(Mutex::new(manager));
         let reaper = start_reaper(&manager)?;
         Ok(Self {
@@ -1496,13 +1491,14 @@ fn start_reaper(manager: &Arc<Mutex<Manager>>) -> Result<thread::JoinHandle<()>,
                         .filter(|(_, live)| !m.stop_reaper && live.supervisor.is_finished())
                         .map(|(id, _)| id.clone())
                         .collect();
+                    let launcher = m.launcher.clone();
                     for id in failed {
                         #[cfg(test)]
                         let defer_reap = m.defer_failed_child_reap;
                         #[cfg(not(test))]
                         let defer_reap = false;
                         let live = m.live.get_mut(&id).expect("owned child");
-                        let clean = cgroup_kill(&live.cgroup).unwrap_or(false);
+                        let clean = domains::kill(&launcher, &live.cgroup).unwrap_or(false);
                         let reaped = !defer_reap && matches!(live.child.try_wait(), Ok(Some(_)));
                         let snapshot =
                             &mut m.journal.tasks.get_mut(&id).expect("task record").snapshot;

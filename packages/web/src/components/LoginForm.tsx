@@ -1,7 +1,7 @@
 import { feedback, useLocalizedFeedback } from "../localizedFeedback";
 import { t } from "../i18n";
 import { useTranslation } from "../i18n";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, type ReactNode, useState } from "react";
 import { Link } from "react-router";
 import { ApiError, apiJson, apiResponse, clearCsrfToken, jsonOptions } from "../api";
 
@@ -16,6 +16,7 @@ type LoginFormProps = {
   description?: string;
   submitLabel?: string;
   notice?: string;
+  externalOptions?: ReactNode;
   onAuthenticated: (user: LoginIdentity) => void | Promise<void>;
 };
 
@@ -43,6 +44,7 @@ export function LoginForm({
   description = "Centaeris Workspace",
   submitLabel = t("loginForm.signIn"),
   notice = "",
+  externalOptions,
   onAuthenticated,
 }: LoginFormProps) {
   const { t } = useTranslation();
@@ -92,5 +94,6 @@ export function LoginForm({
     {!reauthenticating && !embedded ? <div className="loginAuxiliary"><Link to="/forgot-password">{t("loginForm.forgotPassword")}</Link></div> : null}
     {error ? <div className="error" role="alert">{error}</div> : null}
     <button className="primary" type="submit" disabled={busy}>{busy ? t("loginForm.signingIn") : submitLabel}</button>
+    {externalOptions}
   </form>;
 }

@@ -217,6 +217,12 @@ fn register(target: &HostLaunchTarget) -> Result<(), String> {
         _ => Err("environment_host_registration_rejected".into()),
     }
 }
+fn helper_receipt_matches(request: &HostHelperRequest, task: &EnvironmentTaskSnapshot) -> bool {
+    request
+        .fence
+        .matches_start_receipt(task, &request.operation_id, &request.scope)
+}
+
 pub(crate) fn helper_start(
     target: &HostLaunchTarget,
     request: HostHelperRequest,
@@ -277,10 +283,7 @@ pub(crate) fn helper_start(
         EnvironmentTaskResult::Mutated { task } | EnvironmentTaskResult::Task { task, .. } => task,
         _ => return Err("environment_helper_start_unconfirmed".into()),
     };
-    if task.operation_id != request.operation_id
-        || task.scope != request.scope
-        || task.task_id != request.fence.task_id(&request.operation_id)?
-    {
+    if !helper_receipt_matches(&request, &task) {
         return Err("environment_helper_start_unconfirmed".into());
     }
     Ok(task)
@@ -352,8 +355,7 @@ pub(crate) fn prepare_helper_output(
         return Err("environment_host_helper_unconfirmed".into());
     };
     if task.task_id != task_id
-        || task.operation_id != helper.operation_id
-        || task.scope != helper.scope
+        || !helper_receipt_matches(&helper, &task)
         || task.state != EnvironmentTaskState::Exited
         || !task.cleanup_complete
         || !task.output_complete
@@ -406,10 +408,7 @@ pub(crate) fn helper(
         let EnvironmentTaskResult::Task { task: current, .. } = result else {
             return Err("environment_helper_outcome_unknown".into());
         };
-        if current.task_id != task.task_id
-            || current.operation_id != request.operation_id
-            || current.scope != request.scope
-        {
+        if current.task_id != task.task_id || !helper_receipt_matches(&request, &current) {
             return Err("environment_helper_outcome_unknown".into());
         }
         task = current;
@@ -634,6 +633,57 @@ mod tests {
         assert!(exchange(&mut wire, HostSupervisorRequest::Task { envelope: request }).is_err());
         assert!(wire.written.is_empty());
     }
+    #[test]
+    fn helper_receipts_survive_same_owner_controller_renewal() {
+        use centaeris_core::execution::{EnvironmentTaskOwner, EnvironmentTaskScope};
+        use hosted_execution::host_supervisor::TrustedHelperKind;
+        let original = if let EnvironmentTaskRequest::List { fence } = envelope().request {
+            fence
+        } else {
+            unreachable!()
+        };
+        let mut request = HostHelperRequest {
+            operation_id: original.operation_id("prepare-workspace"),
+            scope: EnvironmentTaskScope::Run {
+                run_id: "run".into(),
+            },
+            kind: TrustedHelperKind::PrepareWorkspace,
+            input_digest: format!("sha256:{:x}", Sha256::digest([])),
+            input_length: 0,
+            fence: original.clone(),
+        };
+        let task = EnvironmentTaskSnapshot {
+            task_id: original.task_id(&request.operation_id).unwrap(),
+            operation_id: request.operation_id.clone(),
+            scope: request.scope.clone(),
+            state: EnvironmentTaskState::Exited,
+            exit_code: Some(0),
+            cleanup_complete: true,
+            output_complete: true,
+        };
+        assert!(helper_receipt_matches(&request, &task));
+        request.fence.controller_epoch += 1;
+        request.operation_id = request.fence.operation_id("prepare-workspace");
+        assert!(helper_receipt_matches(&request, &task));
+        let mut changed = request.clone();
+        changed.fence.controller_owner = EnvironmentTaskOwner::AgentRun {
+            run_id: "foreign".into(),
+        };
+        assert!(!helper_receipt_matches(&changed, &task));
+        changed = request.clone();
+        changed.fence.environment_instance_id = "foreign-instance".into();
+        assert!(!helper_receipt_matches(&changed, &task));
+        changed = request.clone();
+        changed.operation_id = changed.fence.operation_id("another-helper");
+        assert!(!helper_receipt_matches(&changed, &task));
+        let mut changed_task = task.clone();
+        changed_task.scope = EnvironmentTaskScope::Environment;
+        assert!(!helper_receipt_matches(&request, &changed_task));
+        changed_task = task.clone();
+        changed_task.operation_id = "99:prepare-workspace".into();
+        assert!(!helper_receipt_matches(&request, &changed_task));
+    }
+
     #[test]
     fn helper_transport_keeps_binary_bytes_prefetched_with_the_json_header() {
         use hosted_execution::host_supervisor::{HostHelperRequest, TrustedHelperKind};

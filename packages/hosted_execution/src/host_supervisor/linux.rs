@@ -1,5 +1,5 @@
 use super::*;
-use crate::task_service::linux::{launcher::RuncTarget, HelperBinary, NativeManager};
+use crate::task_service::linux::{launcher::OciTarget, HelperBinary, NativeManager};
 mod helpers;
 mod retirement;
 use sha2::{Digest, Sha256};
@@ -142,7 +142,7 @@ pub(crate) fn command_json_unlocked(
     serde_json::from_slice(&command_bytes_unlocked(path, args)?)
         .map_err(|_| "host_command_response_invalid".into())
 }
-fn command_bytes_unlocked(path: &str, args: &[&str]) -> Result<Vec<u8>, String> {
+pub(crate) fn command_bytes_unlocked(path: &str, args: &[&str]) -> Result<Vec<u8>, String> {
     let mut child = Command::new(path)
         .args(args)
         .env_clear()
@@ -224,7 +224,7 @@ fn attest(
         || labels["centaeris.instance_id"] != target.environment_instance_id
         || labels["centaeris.environment_id"] != target.environment_id
         || labels["centaeris.environment_profile_digest"] != target.profile_digest
-        || value["HostConfig"]["Runtime"] != "runc"
+        || value["HostConfig"]["Runtime"] != config.oci_runtime.name()
         || value["HostConfig"]["Privileged"] != false
         || value["HostConfig"]["PidMode"] == "host"
         || value["HostConfig"]["IpcMode"] == "host"
@@ -242,7 +242,7 @@ fn attest(
         if [
             &config.control_root,
             &config.output_root,
-            &config.runc_root,
+            &config.runtime_root,
             &config.socket_path,
         ]
         .iter()
@@ -270,8 +270,13 @@ fn attest(
         }
     }
     let state = command_json(
-        &config.runc_path,
-        &["--root", &config.runc_root, "state", &target.container_id],
+        &config.runtime_path,
+        &[
+            "--root",
+            &config.runtime_root,
+            "state",
+            &target.container_id,
+        ],
     )?;
     if state["id"] != target.container_id || state["pid"] != pid || state["status"] != "running" {
         return Err("host_runtime_identity_rejected".into());
@@ -295,6 +300,9 @@ fn attest(
         "ambient",
     ] {
         if let Some(caps) = process["capabilities"][capability].as_array() {
+            if config.oci_runtime == HostOciRuntime::Runsc && !caps.is_empty() {
+                return Err("host_runsc_workload_capabilities_rejected".into());
+            }
             if caps.iter().any(|c| {
                 matches!(
                     c.as_str(),
@@ -312,6 +320,18 @@ fn attest(
                 return Err("host_workload_capabilities_rejected".into());
             }
         }
+    }
+    if config.oci_runtime == HostOciRuntime::Runsc
+        && !spec["mounts"].as_array().is_some_and(|mounts| {
+            mounts.iter().any(|mount| {
+                mount["destination"] == "/sys/fs/cgroup"
+                    && mount["options"]
+                        .as_array()
+                        .is_some_and(|options| options.iter().any(|v| v == "ro"))
+            })
+        })
+    {
+        return Err("host_runsc_readonly_cgroup_required".into());
     }
     let membership = fs::read_to_string(format!("/proc/{pid}/cgroup"))
         .map_err(|_| "host_target_cgroup_unknown")?;
@@ -399,9 +419,11 @@ impl Host {
         directory(&output)?;
         directory(&launch)?;
         directory(&helper_root)?;
-        let launch_target = RuncTarget {
-            runc_path: (&self.config.runc_path).into(),
-            runc_root: (&self.config.runc_root).into(),
+        let launch_target = OciTarget {
+            runtime: self.config.oci_runtime,
+            helper_binary: self.helper_binary.clone(),
+            runtime_path: (&self.config.runtime_path).into(),
+            runtime_root: (&self.config.runtime_root).into(),
             container_id: target.container_id.clone(),
             process: actual.process.clone(),
             launch_root: launch,
@@ -413,7 +435,13 @@ impl Host {
         let manager = Arc::new(NativeManager::open(
             control,
             output,
-            Path::new(&actual.cgroup).join("tasks"),
+            if self.config.oci_runtime == HostOciRuntime::Runsc {
+                Path::new(&self.config.control_root)
+                    .join(&target.environment_instance_id)
+                    .join("domains")
+            } else {
+                Path::new(&actual.cgroup).join("tasks")
+            },
             &target.environment_instance_id,
             launch_target,
             helper_root,
@@ -508,9 +536,9 @@ pub fn serve(config_path: &Path) -> Result<(), String> {
     let config: HostSupervisorConfig = serde_json::from_value(read_json(config_path)?)
         .map_err(|_| "host_configuration_invalid")?;
     config.validate()?;
-    protected(Path::new(&config.runc_path), false)?;
+    protected(Path::new(&config.runtime_path), false)?;
     protected(Path::new(&config.docker_path), false)?;
-    protected(Path::new(&config.runc_root), true)?;
+    protected(Path::new(&config.runtime_root), true)?;
     directory(Path::new(&config.control_root))?;
     directory(Path::new(&config.output_root))?;
     let socket = Path::new(&config.socket_path);

@@ -1,8 +1,10 @@
 /* Agent presentation only. Inherit the host's theme and typography tokens. */
 .shMain.agentChatMain { display: flex; block-size: 100dvh; min-block-size: 0; flex-direction: column; overflow: hidden; }
-.agentChatRouteHeader { display: flex; flex: none; min-block-size: 40px; align-items: center; justify-content: space-between; gap: 16px; padding-inline: 0 8px; }
+.agentChatRouteHeader { display: flex; flex: none; min-block-size: 40px; align-items: center; justify-content: space-between; gap: 16px; padding-inline: 0 8px; transition: padding-inline-start var(--shell-sidebar-duration) var(--motion-sidebar); }
 .agentChatRouteHeader nav { min-inline-size: 0; font-size: 12px; }
 .shShellPage.isSidebarClosed .agentChatRouteHeader { padding-inline-start: 44px; }
+.agentChatShell .shSidebarOpen { animation: reveal-sidebar-toggle var(--shell-sidebar-duration) step-end; }
+@keyframes reveal-sidebar-toggle { from { visibility: hidden; } to { visibility: visible; } }
 .agentChatPanelToggle { display: grid; place-items: center; flex: none; inline-size: 32px; block-size: 32px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--process-text); cursor: pointer; }
 .agentChatPanelToggle:hover, .agentChatPanelToggle.isActive { background: var(--surface-variant); color: var(--on-surface); }
 .agentChatPanelToggle svg { inline-size: 18px; block-size: 18px; }

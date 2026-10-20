@@ -7,6 +7,7 @@ import { ApiError, apiJson, jsonOptions } from "../api";
 import { useModalDialog } from "../components/useModalDialog";
 import { LanguageSelector } from "../components/LanguageSelector";
 import { ThemeSelector } from "../components/ThemeSelector";
+import { ExternalIdentitySettings } from "../components/ExternalLogin";
 import { useEnterStartsNewLine, writeEnterStartsNewLine } from "../preferences";
 import ModelSettings from "./ModelSettings";
 import GlobalPluginSettings from "./GlobalPluginSettings";
@@ -120,6 +121,7 @@ function AccountSecurity() {
       {notice ? <p className="accountSecurityNotice" role="status">{notice}</p> : null}
       <div className="accountSecurityActions"><button type="submit" disabled={busy || !currentPassword || !newPassword || !confirmation}>{busy ? t("passwordResetRoute.updating") : t("passwordResetRoute.updatePassword")}</button></div>
     </form>
+    <ExternalIdentitySettings />
   </div>;
 }
 

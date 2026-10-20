@@ -86,6 +86,7 @@ export async function apiResponse(path: string, options: RequestInit = {}) {
       ? body.error
       : `request_failed:${response.status}`;
     const error = new ApiError(message, response.status, body);
+    if (response.status === 403 && message === "csrf_failed") clearCsrfToken();
     if (isAuthenticationRequired(error)) authenticationRequiredHandler?.();
     throw error;
   }

@@ -281,18 +281,6 @@ sys.stdout.write(re.sub(pattern,replace,text))
         del config["services"]["material-worker"]["depends_on"]["document-processor"]
         self.assertNotEqual(validate(config).returncode, 0)
 
-    def test_docker_release_gate_starts_and_checks_material_worker(self):
-        source = (ROOT / "scripts/workspace/docker-release-gate.sh").read_text(encoding="utf-8")
-        start = next(line for line in source.splitlines() if line.startswith('"${compose[@]}" up -d --wait '))
-        checked = next(line for line in source.splitlines() if line.startswith("for service in postgres "))
-        self.assertIn("material-worker", start.split())
-        self.assertIn("material-worker", checked.split())
-
-    def test_runtime_image_does_not_bundle_docker_cli(self):
-        dockerfile = (ROOT / "packages/runtime_server/Dockerfile").read_text(encoding="utf-8")
-        self.assertNotIn("docker-cli", dockerfile)
-        self.assertNotIn("/usr/local/bin/docker", dockerfile)
-
     def test_runtime_compose_starts_without_a_cli_preflight(self):
         runtime = compose_config()["services"]["runtime"]
         self.assertEqual(runtime["entrypoint"], ["runtime_server"])

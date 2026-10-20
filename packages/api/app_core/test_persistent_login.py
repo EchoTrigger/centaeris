@@ -45,6 +45,25 @@ class PersistentLoginTests(TestCase):
         self.assertEqual(self.request_at(timedelta(days=29)).status_code, 200)
         self.assertEqual(self.request_at(timedelta(days=40)).status_code, 200)
 
+    def test_local_logins_in_independent_browsers_do_not_replace_each_other(self):
+        password = "Independent-browser-test-passphrase!2026"
+        self.user.set_password(password)
+        self.user.save(update_fields=["password"])
+        first = Client(enforce_csrf_checks=True)
+        second = Client(enforce_csrf_checks=True)
+        for browser in [first, second]:
+            token = browser.get("/api/csrf").json()["csrfToken"]
+            result = browser.post("/api/login", {"email": self.user.username, "password": password},
+                content_type="application/json", HTTP_X_CSRFTOKEN=token)
+            self.assertEqual(result.status_code, 200)
+        self.assertNotEqual(first.session.session_key, second.session.session_key)
+        for browser in [first, second]:
+            self.assertEqual(browser.get("/api/me").json()["user"]["id"], str(self.user.pk))
+        token = second.get("/api/csrf").json()["csrfToken"]
+        self.assertEqual(second.post("/api/logout", {}, content_type="application/json", HTTP_X_CSRFTOKEN=token).status_code, 200)
+        self.assertEqual(second.get("/api/me").status_code, 401)
+        self.assertEqual(first.get("/api/me").status_code, 200)
+
     def test_server_credential_remains_valid_after_years_without_requests(self):
         response = self.request_at(timedelta(days=3650))
         self.assertEqual(response.status_code, 200)

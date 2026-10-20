@@ -156,6 +156,16 @@ for _origin in _web_origins:
             or _url.path or _url.query or _url.fragment or _origin.strip() != _origin):
         raise RuntimeError("Web origins must be explicit http(s) origins without paths or credentials")
 CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(_web_origins))
+SSO_ALLOW_INSECURE_HTTP = boolean_env("SSO_ALLOW_INSECURE_HTTP")
+if SSO_ALLOW_INSECURE_HTTP and not DEBUG:
+    raise RuntimeError("SSO_ALLOW_INSECURE_HTTP requires DJANGO_DEBUG=1")
+from app_core.sso_config import parse_providers
+SSO_PROVIDERS = parse_providers(
+    os.environ.get("SSO_PROVIDERS_JSON", "[]"),
+    allow_insecure_http=SSO_ALLOW_INSECURE_HTTP,
+)
+if SSO_PROVIDERS and not WEB_ORIGIN.startswith("https://") and not SSO_ALLOW_INSECURE_HTTP:
+    raise RuntimeError("OAuth login requires an HTTPS WEB_ORIGIN")
 CORS_ALLOWED_ORIGINS = CSRF_TRUSTED_ORIGINS.copy()
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_HEADERS = ["Content-Type", "Last-Event-ID", "X-CSRFToken"]

@@ -7,6 +7,22 @@ pub use helper::{HostHelperRequest, TrustedHelperKind, HELPER_STREAM_LIMIT};
 
 pub const HOST_SUPERVISOR_SCHEMA: &str = "environment.host.v1";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostOciRuntime {
+    Runc,
+    Runsc,
+}
+
+impl HostOciRuntime {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Runc => "runc",
+            Self::Runsc => "runsc",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HostSupervisorConfig {
@@ -14,8 +30,9 @@ pub struct HostSupervisorConfig {
     pub socket_path: String,
     pub control_root: String,
     pub output_root: String,
-    pub runc_path: String,
-    pub runc_root: String,
+    pub oci_runtime: HostOciRuntime,
+    pub runtime_path: String,
+    pub runtime_root: String,
     pub docker_path: String,
     pub docker_socket: String,
     pub controller_uid: u32,
@@ -125,8 +142,8 @@ impl HostSupervisorConfig {
             &self.socket_path,
             &self.control_root,
             &self.output_root,
-            &self.runc_path,
-            &self.runc_root,
+            &self.runtime_path,
+            &self.runtime_root,
             &self.docker_path,
             &self.docker_socket,
         ] {
@@ -134,7 +151,7 @@ impl HostSupervisorConfig {
                 return Err("host_configuration_invalid".into());
             }
         }
-        let paths = [&self.control_root, &self.output_root, &self.runc_root];
+        let paths = [&self.control_root, &self.output_root, &self.runtime_root];
         for (i, a) in paths.iter().enumerate() {
             if paths.iter().skip(i + 1).any(|b| overlaps(a, b)) || overlaps(a, &self.socket_path) {
                 return Err("host_control_paths_overlap".into());
@@ -146,6 +163,9 @@ impl HostSupervisorConfig {
             .is_some_and(|path| !absolute_path(path) || path == "/")
         {
             return Err("host_helper_configuration_invalid".into());
+        }
+        if self.oci_runtime == HostOciRuntime::Runsc && self.helper_path.is_none() {
+            return Err("host_runsc_runner_required".into());
         }
         Ok(())
     }

@@ -9,16 +9,17 @@ import { runBrowser, waitFor } from "./browserHarness.mjs";
 
 for (const entry of [
   { name: "agent-chat-route", completed: "all Agent route checks completed", widths: [1280, 390, 820, 2048] },
+  { name: "agent-chat-route", completed: "all Agent route checks completed", widths: [1280], reduced: true },
   { name: "agent-model-settings", completed: "all Agent Settings checks completed", widths: [1280, 390] },
   { name: "conversation-layout", completed: "all conversation layout checks completed", widths: [1280, 390, 820, 2048] },
-]) for (const theme of ["light", "dark"]) for (const width of entry.widths) test(`${entry.name} (${theme}, ${width}px)`, async () => {
+]) for (const theme of ["light", "dark"]) for (const width of entry.widths) test(`${entry.name} (${theme}, ${width}px${entry.reduced ? ", reduced motion" : ""})`, async () => {
   assert.ok(process.env.CHROME_BIN, "Set CHROME_BIN to a Chromium executable");
   const profile = await mkdtemp(join(tmpdir(), "centaeris-agent-route-"));
   const server = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), server: { port: 0, host: "127.0.0.1", strictPort: false } });
   try {
     await server.listen();
     const url = `${server.resolvedUrls.local[0]}tests/browser/${entry.name}.html?theme=${theme}`;
-    await runBrowser(url, { width }, profile, async ({ evaluate, send, frame, press, browserVersion }) => {
+    await runBrowser(url, { width, reduced: entry.reduced }, profile, async ({ evaluate, send, frame, press, browserVersion }) => {
       const payload = await waitFor(() => evaluate('document.getElementById("results")?.textContent'), "route assertions");
       const results = JSON.parse(payload);
       assert.ok(results.some(result => result.name === entry.completed), JSON.stringify(results));
