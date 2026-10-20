@@ -139,11 +139,11 @@ impl PostgresRuntimeStore {
                 // Losing the resident does not erase its allocation history.
                 // Cold recovery requires a separately authorized restore path;
                 // a new Run/execution cannot impersonate same-instance continuity.
-                if tx.query_opt("SELECT 1 FROM runtime.execution_instances i WHERE execution_id=$1 OR (environment_id=$2 AND allocation_mode='retained' AND NOT($3 AND EXISTS(SELECT 1 FROM runtime.agent_run_cleanup_receipts c WHERE c.instance_id=i.instance_id AND c.environment_id=i.environment_id AND c.cleanup_complete AND c.physical_removed)))", &[&r.execution_id,&b.environment_id,&(b.execution_mode=="perRun")]).map_err(|e|e.to_string())?.is_some() { return Err("execution_environment_lost:retained_allocation_missing".into()); }
+                if tx.query_opt("SELECT 1 FROM runtime.execution_instances i WHERE execution_id=$1 OR (environment_id=$2 AND allocation_mode='retained' AND NOT EXISTS(SELECT 1 FROM runtime.environment_creation_attempts a WHERE a.allocation_execution_id=i.allocation_execution_id AND a.state='notDispatched') AND NOT($3 AND EXISTS(SELECT 1 FROM runtime.agent_run_cleanup_receipts c WHERE c.instance_id=i.instance_id AND c.environment_id=i.environment_id AND c.cleanup_complete AND c.physical_removed)))", &[&r.execution_id,&b.environment_id,&(b.execution_mode=="perRun")]).map_err(|e|e.to_string())?.is_some() { return Err("execution_environment_lost:retained_allocation_missing".into()); }
                 let (global,tenant,host)=used(&mut tx,r.host_id,r.workspace_id)?;
                 if !admit_resident_resources(global,tenant,r.resources,limits.global,limits.tenant)? || !host.checked_add(r.resources)?.fits(limits.host) { return Err(RESIDENT_CAPACITY_WAIT.into()); }
                 let a=RetainedInstanceAllocation{allocation_execution_id:r.execution_id.into(),allocation_agent_run_id:Some(b.agent_run_id.clone()),allocation_owner:centaeris_core::execution::EnvironmentTaskOwner::AgentRun{run_id:b.agent_run_id.clone()},instance_id:instance_id(r.execution_id),environment_id:b.environment_id.clone(),host_id:r.host_id.into(),image_digest:r.image_digest.into(),authorization_digest:b.agent_run_authorization_digest.clone(),binding_digest:b.digest()?,profile_digest:r.profile_digest.into(),container_id:None,reused:false};
-                associate(&mut tx,r,&a)?; insert(&mut tx,r.host_id,r.execution_id,Some(&b.agent_run_id),r.workspace_id,None,"reserved",r.resources)?; a
+                associate(&mut tx,r,&a)?; insert(&mut tx,r.host_id,r.execution_id,Some(&b.agent_run_id),r.workspace_id,None,"reserved",r.resources)?; super::super::creation_attempts::reserve(&mut tx,&a)?; a
             };
             associate(&mut tx,r,&a)?;
             // Commit allocation + reservation before Docker. Errors and lost
@@ -151,11 +151,29 @@ impl PostgresRuntimeStore {
             tx.commit().map_err(|e|e.to_string())?;
             // Core persists its execution fact using this same Client, outside
             // our transaction. It must finish before authority is pinned again.
-            before_create(lock.0,&a)?;
+            if let Err(error)=before_create(lock.0,&a) {
+                if !a.reused {
+                    let mut tx=lock.0.transaction().map_err(|e|e.to_string())?;
+                    super::super::resource_commit::require_durable_resource_commit(&mut tx)?;
+                    verify_controller(&mut tx,r)?;
+                    super::super::creation_attempts::close_before_dispatch(&mut tx,&a)?;
+                    tx.commit().map_err(|e|e.to_string())?;
+                }
+                return Err(error);
+            }
             let mut tx=lock.0.transaction().map_err(|e|e.to_string())?;
             super::super::resource_commit::require_durable_resource_commit(&mut tx)?; verify_controller(&mut tx,r)?;
             let current=tx.query_opt("SELECT container_id,state FROM runtime.resident_sandboxes WHERE host_id=$1 AND execution_id=$2 FOR UPDATE", &[&r.host_id,&a.allocation_execution_id]).map_err(|e|e.to_string())?.ok_or("retained reservation missing")?;
             if current.get::<_,String>(1)=="releasing" || current.get::<_,Option<String>>(0)!=a.container_id { return Err("retained reservation changed".into()); }
+            if !a.reused {
+                // Persist the conservative dispatch boundary before the host call.
+                // A crash before the actual send is Unknown, never refund evidence.
+                super::super::creation_attempts::dispatch(&mut tx,&a)?;
+                tx.commit().map_err(|e|e.to_string())?;
+                tx=lock.0.transaction().map_err(|e|e.to_string())?;
+                super::super::resource_commit::require_durable_resource_commit(&mut tx)?;
+                verify_controller(&mut tx,r)?;
+            }
             let container=prepare(&a)?;
             if container.trim().is_empty() || a.container_id.as_ref().is_some_and(|id|id!=&container) { return Err("retained physical instance reassignment rejected".into()); }
             tx.execute("UPDATE runtime.resident_sandboxes SET container_id=$3,state='resident',updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE host_id=$1 AND execution_id=$2", &[&r.host_id,&a.allocation_execution_id,&container]).map_err(|e|e.to_string())?;

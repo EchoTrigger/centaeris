@@ -273,7 +273,9 @@ fn teardown_owned_tasks(
             crate::docker_execution_host::observed_resident_sandboxes()
         },
         |target, verified| match target {
-            CleanupTarget::NeverAllocated | CleanupTarget::Destroyed { .. } => {
+            CleanupTarget::NeverAllocated
+            | CleanupTarget::Destroyed { .. }
+            | CleanupTarget::Unmaterialized { .. } => {
                 Ok(crate::postgres_store::cleanup_receipts::CleanupPhysicalResult::Retained)
             }
             CleanupTarget::Instance {

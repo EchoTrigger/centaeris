@@ -160,6 +160,9 @@ pub(crate) fn observe_environment(
             "unallocated"
         };
     };
+    if target.not_materialized && !target.resource_holding {
+        return "notMaterialized";
+    }
     let Ok((host, _)) = resident_host_context() else {
         return "unknown";
     };

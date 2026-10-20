@@ -150,5 +150,22 @@ class OutboxGateTests(unittest.TestCase):
             self.assertEqual(limit, "17")
 
 
+
+    def test_allocation_settlement_discovery_selects_required_cases_exactly(self):
+        group = 'postgres_store::integration_tests::resource_lifecycle_tests::'
+        expected = {name for name in gate.required_tests() if name.startswith(group)}
+        self.assertTrue(expected)
+        calls = []
+        def discover(command, **kwargs):
+            calls.append(command)
+            return discovery_output(command)
+        driver = SimpleNamespace(connect=lambda **kwargs: (_ for _ in ()).throw(RuntimeError('after discovery')), sql=SimpleNamespace())
+        with patch.dict(sys.modules, {'psycopg': driver}), patch.object(gate.subprocess, 'run', discover):
+            with self.assertRaisesRegex(RuntimeError, 'after discovery'):
+                gate.main()
+        selected = {command[5] for command in calls if '--exact' in command}
+        self.assertTrue(expected.issubset(selected))
+
+
 if __name__ == '__main__':
     unittest.main()

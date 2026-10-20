@@ -651,7 +651,7 @@ fn postgres_completion_delivery_upgrade_preserves_records_and_accepts_core_obser
     let upgraded = PostgresRuntimeStore::new(&test_url()).unwrap();
     assert_eq!(
         observation_versions(&f),
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
     );
     assert_eq!(legacy_retained_rows(&f), before);
     upgraded.with_client(|db| db.execute(
@@ -698,7 +698,7 @@ fn postgres_current_schema_reopen_retains_sealed_wait_handoff() {
     let reopened = PostgresRuntimeStore::new(&test_url()).unwrap();
     assert_eq!(
         observation_versions(&f),
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
     );
     assert_eq!(retained_rows(&f), before);
     assert_eq!(
@@ -725,6 +725,12 @@ fn retained_rows(f: &Fixture) -> std::collections::BTreeMap<String, String> {
 
 fn legacy_retained_rows(f: &Fixture) -> std::collections::BTreeMap<String, String> {
     let mut rows = retained_rows(f);
+    if let Some(attempts) = rows.remove("runtime.environment_creation_attempts") {
+        assert_eq!(
+            attempts, "[]",
+            "forward migration must not invent creation evidence"
+        );
+    }
     if let Some(completions) = rows.remove("runtime.environment_provision_completions") {
         assert_eq!(
             completions, "[]",
