@@ -2,6 +2,45 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn task_and_helper_requests_carry_the_exact_target_without_a_registration_round_trip() {
+    let instance = format!("instance_{}", "a".repeat(64));
+    let target = json!({
+        "environmentInstanceId": instance, "containerId": "b".repeat(64),
+        "environmentId": "environment-1", "profileDigest": format!("sha256:{}", "c".repeat(64)),
+        "imageDigest": format!("sha256:{}", "d".repeat(64)),
+    });
+    let fence = json!({"environmentInstanceId":instance,
+        "controllerOwner":{"kind":"agentRun","runId":"run-1"},
+        "controllerEpoch":1,"controllerPurpose":"execute"});
+    let requests = [
+        json!({"operation":"task","target":target,"envelope":{
+            "schema":centaeris_core::execution::ENVIRONMENT_TASK_SCHEMA,
+            "request":{"operation":"list","fence":fence}}}),
+        json!({"operation":"helper","target":target,"helper":{
+            "fence":fence,"operationId":"1:prepare","scope":{"kind":"run","runId":"run-1"},
+            "kind":"prepareWorkspace","inputLength":0,
+            "inputDigest":format!("sha256:{}", "e".repeat(64))}}),
+    ];
+    for request in requests {
+        let value = json!({"schema":HOST_SUPERVISOR_SCHEMA,"request":request});
+        let envelope: HostSupervisorEnvelope = serde_json::from_value(value.clone())
+            .expect("one request must carry its immutable physical target");
+        envelope.validate().unwrap();
+        let mut missing = value.clone();
+        missing["request"].as_object_mut().unwrap().remove("target");
+        assert!(serde_json::from_value::<HostSupervisorEnvelope>(missing).is_err());
+        let mut changed = value.clone();
+        changed["request"]["target"]["environmentInstanceId"] =
+            json!(format!("instance_{}", "f".repeat(64)));
+        let envelope: HostSupervisorEnvelope = serde_json::from_value(changed).unwrap();
+        assert_eq!(envelope.validate().unwrap_err(), "host_target_invalid");
+        let mut forged = value;
+        forged["request"]["target"]["trusted"] = json!(true);
+        assert!(serde_json::from_value::<HostSupervisorEnvelope>(forged).is_err());
+    }
+}
+
+#[test]
 fn runsc_configuration_selects_a_native_backend_and_requires_the_sealed_runner() {
     let value = json!({
         "schema":HOST_SUPERVISOR_SCHEMA,
@@ -270,7 +309,7 @@ fn workspace_helper_context_is_bound_to_profile_identity_and_independent_of_keep
 
 #[test]
 fn task_routing_rejects_path_identifiers_before_reading_registration() {
-    let value = json!({"schema":HOST_SUPERVISOR_SCHEMA,"request":{"operation":"task","envelope":{
+    let value = json!({"schema":HOST_SUPERVISOR_SCHEMA,"request":{"operation":"task","target":{"environmentInstanceId":format!("instance_{}", "a".repeat(64)),"containerId":"b".repeat(64),"environmentId":"environment","profileDigest":format!("sha256:{}","c".repeat(64)),"imageDigest":format!("sha256:{}","d".repeat(64))},"envelope":{
         "schema":centaeris_core::execution::ENVIRONMENT_TASK_SCHEMA,"request":{"operation":"list","fence":{
             "environmentInstanceId":"../elsewhere","controllerOwner":{"kind":"agentRun","runId":"run"},
             "controllerEpoch":1,"controllerPurpose":"execute"}}}}});

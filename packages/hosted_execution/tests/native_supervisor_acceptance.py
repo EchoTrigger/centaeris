@@ -107,7 +107,7 @@ def main():
             request = dict(operation=operation, **fields)
             if operation != "takeover":
                 request["fence"] = fence.copy()
-            result = rpc(dict(operation="task", envelope=dict(schema="environment.task.v1",
+            result = rpc(dict(operation="task", target=target, envelope=dict(schema="environment.task.v1",
                                                               request=request)))["response"]
             if result["status"] != "success":
                 raise RuntimeError(result["error"])
@@ -123,7 +123,7 @@ def main():
             with socket.socket(socket.AF_UNIX) as stream:
                 stream.settimeout(80)
                 stream.connect(str(control_socket))
-                stream.sendall(json.dumps(dict(schema="environment.host.v1", request=dict(operation="helper", helper=header)), separators=(",", ":")).encode() + b"\n" + body)
+                stream.sendall(json.dumps(dict(schema="environment.host.v1", request=dict(operation="helper", target=target, helper=header)), separators=(",", ":")).encode() + b"\n" + body)
                 reader = stream.makefile("rb")
                 response = json.loads(reader.readline(1024 * 1024 + 1))
                 if response["status"] != "success":
@@ -231,8 +231,18 @@ def main():
             finally:
                 os.chmod(bundle, original_mode)
             checks += ["runtime_bundle_must_remain_private"]
-            assert rpc(dict(operation="register", target=target))["target"] == target
             task("takeover", **fence)
+            for field, value in (("containerId", "f" * 64),
+                                 ("profileDigest", "sha256:" + "f" * 64),
+                                 ("imageDigest", "sha256:" + "e" * 64),
+                                 ("environmentId", "other-environment"),
+                                 ("environmentInstanceId", "instance_" + "e" * 64)):
+                changed = {**target, field: value}
+                rejected = rpc(dict(operation="task", target=changed, envelope=dict(
+                    schema="environment.task.v1", request=dict(operation="list", fence=fence.copy()))), allow_error=True)
+                assert rejected["status"] == "error", (field, rejected)
+            assert task("list")["tasks"] == []
+            checks += ["target_bound_task_without_registration", "changed_physical_target_rejected"]
             if args.helper:
                 helper("prepareWorkspace", "prepare-workspace")
                 assert docker("exec", container, "/bin/busybox", "cat", "/workspace/from-image").stdout == b"preserved image data"
@@ -282,9 +292,14 @@ def main():
             checks += ["native_environment_works_without_image_env_utility"]
             task("endRun", runId="shared", operationId="1:end")
             assert not query(task_id)["task"]["cleanupComplete"]
+            old_fence = fence.copy()
             fence["controllerOwner"] = dict(kind="maintenanceOperation", operationId="shared")
             fence["controllerEpoch"] = 2
             task("takeover", **fence)
+            stale = rpc(dict(operation="task", target=target, envelope=dict(
+                schema="environment.task.v1", request=dict(operation="list", fence=old_fence))))["response"]
+            assert stale["status"] == "error", stale
+            checks += ["target_bound_request_keeps_current_controller_fence"]
             maintenance = task("start", operationId="2:maintenance", scope=dict(kind="operation", operationId="shared"),
                                program="/bin/busybox", args=["sleep", "60"], cwd=workspace, timeoutMs=0)
             maintenance_id = maintenance["task"]["taskId"]

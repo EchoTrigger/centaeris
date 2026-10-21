@@ -17,6 +17,16 @@ daemon that own the workload containers. Record the binary version and digest.
 Operator configs using `runcPath`/`runcRoot` must be updated explicitly; those
 field names are no longer accepted. The task wire protocol is unchanged.
 
+Host `task` and `helper` requests carry a required `target` with the immutable
+instance, container, Environment, profile and image identities. The supervisor
+attests that target while resolving the operation, without a separate Runtime
+registration round trip. Task/helper instance identity must match the target;
+the task manager still validates the current controller fence on every action.
+Attestation is repeated for each new request, including after supervisor restart;
+there is no cross-request identity cache. Output and retirement keep their own
+identity and completion checks. Deploy matching Runtime and supervisor builds:
+older task/helper request bodies without `target` are rejected, with no fallback.
+
 The runsc adapter requires the matching sealed helper and gVisor's
 `--in-sandbox-cgroup=v2` runtime argument. Workload capabilities must be empty
 and the workload cgroup mount read-only. A sealed runner uses a different UID

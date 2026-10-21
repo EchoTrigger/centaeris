@@ -75,6 +75,7 @@ fn exchange(
 #[cfg(test)]
 fn exchange_helper(
     stream: &mut (impl Read + Write + ?Sized),
+    target: &HostLaunchTarget,
     helper: HostHelperRequest,
     input: &mut impl Read,
     stdout: &mut impl Write,
@@ -84,6 +85,7 @@ fn exchange_helper(
     write_request(
         stream,
         HostSupervisorRequest::Helper {
+            target: target.clone(),
             helper: helper.clone(),
         },
     )?;
@@ -209,16 +211,6 @@ fn connection() -> Result<Box<dyn HostStream>, String> {
 fn send(request: HostSupervisorRequest) -> Result<HostSupervisorResult, String> {
     exchange(&mut *connection()?, request)
 }
-fn register(target: &HostLaunchTarget) -> Result<(), String> {
-    match crate::observations::timed("hostRegister", || {
-        send(HostSupervisorRequest::Register {
-            target: target.clone(),
-        })
-    })? {
-        HostSupervisorResult::Registered { target: actual } if actual == *target => Ok(()),
-        _ => Err("environment_host_registration_rejected".into()),
-    }
-}
 fn helper_receipt_matches(request: &HostHelperRequest, task: &EnvironmentTaskSnapshot) -> bool {
     request
         .fence
@@ -234,11 +226,11 @@ pub(crate) fn helper_start(
     if target.environment_instance_id != request.fence.environment_instance_id {
         return Err("environment_host_target_rejected".into());
     }
-    register(target)?;
     let mut stream = connection()?;
     write_request(
         &mut *stream,
         HostSupervisorRequest::Helper {
+            target: target.clone(),
             helper: request.clone(),
         },
     )?;
@@ -464,17 +456,12 @@ fn task_with(
     target.validate()?;
     envelope.validate()?;
     envelope.request.validate_authority()?;
-    match crate::observations::timed("hostTaskRegister", || {
-        transport(HostSupervisorRequest::Register {
-            target: target.clone(),
-        })
-    })? {
-        HostSupervisorResult::Registered { target: actual } if actual == target => {}
-        _ => return Err("environment_host_registration_rejected".into()),
-    }
-    match crate::observations::timed("hostTaskRequest", || {
-        transport(HostSupervisorRequest::Task { envelope })
-    })? {
+    let request = HostSupervisorEnvelope {
+        schema: HOST_SUPERVISOR_SCHEMA.into(),
+        request: HostSupervisorRequest::Task { target, envelope },
+    };
+    request.validate()?;
+    match crate::observations::timed("hostTaskRequest", || transport(request.request))? {
         HostSupervisorResult::Task { response } => {
             response.validate()?;
             match response {
@@ -571,41 +558,52 @@ mod tests {
         }
     }
     #[test]
-    fn external_supervisor_requires_matching_registration_before_task_dispatch() {
+    fn external_supervisor_dispatches_one_target_bound_request() {
         let expected = target();
         let mut calls = 0;
         let result = task_with(expected.clone(), envelope(), |request| {
             calls += 1;
-            match request {
-                HostSupervisorRequest::Register { target } => {
-                    assert_eq!(target, expected);
-                    Ok(HostSupervisorResult::Registered { target })
-                }
-                HostSupervisorRequest::Task { envelope: actual } => {
-                    assert_eq!(actual, envelope());
-                    Ok(HostSupervisorResult::Task {
-                        response: EnvironmentTaskResponse::from_result(Ok(
-                            EnvironmentTaskResult::Listed { tasks: vec![] },
-                        )),
-                    })
-                }
-                _ => panic!("unexpected request"),
-            }
+            let HostSupervisorRequest::Task {
+                target: actual_target,
+                envelope: actual,
+            } = request
+            else {
+                panic!("the operation must carry its target in one request");
+            };
+            assert_eq!(actual_target, expected);
+            assert_eq!(actual, envelope());
+            Ok(HostSupervisorResult::Task {
+                response: EnvironmentTaskResponse::from_result(Ok(EnvironmentTaskResult::Listed {
+                    tasks: vec![],
+                })),
+            })
         })
         .unwrap();
         assert!(matches!(result, EnvironmentTaskResult::Listed { .. }));
-        assert_eq!(calls, 2);
+        assert_eq!(calls, 1);
         let mut calls = 0;
         assert_eq!(
-            task_with(expected, envelope(), |_| {
+            task_with(expected.clone(), envelope(), |_| {
                 calls += 1;
-                let mut changed = target();
-                changed.container_id = "e".repeat(64);
-                Ok(HostSupervisorResult::Registered { target: changed })
+                Ok(HostSupervisorResult::Registered {
+                    target: expected.clone(),
+                })
             }),
-            Err("environment_host_registration_rejected".into())
+            Err("environment_host_task_unconfirmed".into())
         );
         assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn external_supervisor_rejects_cross_instance_requests_before_transport() {
+        let mut changed = target();
+        changed.environment_instance_id = format!("instance_{}", "f".repeat(64));
+        assert_eq!(
+            task_with(changed, envelope(), |_| panic!(
+                "invalid target reached transport"
+            )),
+            Err("host_target_invalid".into())
+        );
     }
     #[test]
     fn external_supervisor_jsonl_is_bounded_strict_and_redacts_remote_diagnostics() {
@@ -636,7 +634,14 @@ mod tests {
             read: std::io::Cursor::new(vec![]),
             written: vec![],
         };
-        assert!(exchange(&mut wire, HostSupervisorRequest::Task { envelope: request }).is_err());
+        assert!(exchange(
+            &mut wire,
+            HostSupervisorRequest::Task {
+                target: target(),
+                envelope: request
+            }
+        )
+        .is_err());
         assert!(wire.written.is_empty());
     }
     #[test]
@@ -737,6 +742,7 @@ mod tests {
         let mut stderr = Vec::new();
         let result = exchange_helper(
             &mut wire,
+            &target(),
             helper.clone(),
             &mut &b"input"[..],
             &mut stdout,
@@ -747,6 +753,14 @@ mod tests {
         assert_eq!(stdout, vec![0xff; 2 * 1024 * 1024]);
         assert_eq!(stderr, b"err");
         assert!(wire.written.ends_with(b"\ninput"));
+        let header_end = wire.written.iter().position(|byte| *byte == b'\n').unwrap();
+        let sent: serde_json::Value = serde_json::from_slice(&wire.written[..header_end]).unwrap();
+        assert_eq!(sent["request"]["operation"], "helper");
+        assert_eq!(
+            sent["request"]["target"],
+            serde_json::to_value(target()).unwrap()
+        );
+
         let mut changed = helper;
         changed.input_length = 6;
         let mut wire = Wire {
@@ -755,6 +769,7 @@ mod tests {
         };
         assert!(exchange_helper(
             &mut wire,
+            &target(),
             changed,
             &mut &b"input"[..],
             &mut Vec::new(),

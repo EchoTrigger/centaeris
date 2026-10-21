@@ -541,9 +541,8 @@ impl Host {
                     inspection: manager.inspection()?,
                 })
             }
-            HostSupervisorRequest::Task { envelope } => {
-                let id = request_instance(&envelope.request);
-                let manager = self.existing(id)?;
+            HostSupervisorRequest::Task { target, envelope } => {
+                let manager = self.manager(&target)?;
                 Ok(HostSupervisorResult::Task {
                     response: EnvironmentTaskResponse::from_result(
                         manager.handle(envelope.request),
@@ -676,8 +675,8 @@ fn exchange(host: &Arc<Host>, mut stream: UnixStream) -> Result<(), String> {
         let envelope: HostSupervisorEnvelope =
             serde_json::from_slice(&data).map_err(|_| "host_request_invalid")?;
         envelope.validate()?;
-        if let HostSupervisorRequest::Helper { helper } = envelope.request {
-            let manager = host.existing(&helper.fence.environment_instance_id)?;
+        if let HostSupervisorRequest::Helper { target, helper } = envelope.request {
+            let manager = host.manager(&target)?;
             stream
                 .set_read_timeout(Some(Duration::from_secs(30)))
                 .and_then(|_| stream.set_write_timeout(Some(Duration::from_secs(30))))

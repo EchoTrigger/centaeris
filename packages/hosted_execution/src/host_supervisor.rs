@@ -71,12 +71,14 @@ pub enum HostSupervisorRequest {
         target: HostLaunchTarget,
     },
     Task {
+        target: HostLaunchTarget,
         envelope: EnvironmentTaskEnvelope,
     },
     Inspect {
         environment_instance_id: String,
     },
     Helper {
+        target: HostLaunchTarget,
         helper: HostHelperRequest,
     },
     HelperOutput {
@@ -196,18 +198,23 @@ impl HostSupervisorEnvelope {
         match &self.request {
             HostSupervisorRequest::Register { target }
             | HostSupervisorRequest::Retire { target } => target.validate(),
-            HostSupervisorRequest::Task { envelope } => {
+            HostSupervisorRequest::Task { target, envelope } => {
+                target.validate()?;
                 envelope.validate()?;
-                if !request_instance(&envelope.request)
-                    .strip_prefix("instance_")
-                    .is_some_and(hex_id)
-                {
+                if request_instance(&envelope.request) != target.environment_instance_id {
                     return Err("host_target_invalid".into());
                 }
                 Ok(())
             }
-            HostSupervisorRequest::Helper { helper }
-            | HostSupervisorRequest::HelperOutput { helper, .. } => {
+            HostSupervisorRequest::Helper { target, helper } => {
+                target.validate()?;
+                helper.validate()?;
+                if helper.fence.environment_instance_id != target.environment_instance_id {
+                    return Err("host_target_invalid".into());
+                }
+                Ok(())
+            }
+            HostSupervisorRequest::HelperOutput { helper, .. } => {
                 helper.validate()?;
                 if !helper
                     .fence
