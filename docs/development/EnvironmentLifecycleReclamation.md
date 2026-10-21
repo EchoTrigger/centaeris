@@ -39,6 +39,24 @@ Acceptance must exercise the real preparation and task path before judging works
 
 The opt-in `export_owned_runsc_storage_probe_request` test exports a request from the production container request builder for an explicitly owned physical probe. Probe drivers, private configuration and artifacts remain outside the source checkout. A separate Docker daemon must also run in a separate Linux network namespace; a different socket/data root alone does not isolate Docker's host network management.
 
+## Resource limits, commitments and observations
+
+Environment resource limits, admission commitments and observed consumption are separate facts. The resource limit bounds what an isolated environment may consume. Its admission commitment describes what the scheduler promises and charges. Observation describes a particular host/container at a particular time; it does not modify the promise or establish physical absence.
+
+Core's `ResidentResourceClaim` binds immutable `limits` and `reservation` vectors. Resident admission adds the reservation, while preserving the original limits for host enforcement. Both vectors describe one sandbox. Memory commitment is positive and cannot exceed the memory limit; CPU commitment may be zero for best-effort service and cannot exceed the CPU limit. This first contract keeps PID and workspace-space ceilings fully reserved. It does not introduce a storage-overcommit policy or configure a cgroup. Invalid bounds and arithmetic overflow fail explicitly.
+
+Both Runtime allocation entry points, AgentRun and no-Run provision, explicitly construct fully reserved claims. Their existing profile signatures, Docker limits, inventory comparison, PostgreSQL resource columns, historical debit and default behavior retain their current meaning. Partial CPU/memory claims are supported and tested by Core; hosted shared admission is not enabled by this change. A low observed RSS cannot reduce or erase an existing holding.
+
+Before hosted callers may use partial commitments, persistence must separately retain the original limits, the immutable admission commitment and its policy revision/digest for each allocation. Reuse, reconciliation, settlement and no-Run provision must all read the same commitment. Existing rows require a tested forward migration that preserves their full original debit and signed authorization bytes. Changing a process configuration must not reinterpret an existing allocation. Unknown creation/deletion and releasing resources retain their commitment and investigation responsibility.
+
+Shared admission also needs a current node-pressure gate and accounting for in-flight placements. Summing commitments alone cannot guarantee simultaneous use of every environment's maximum. Keep independent control capacity, a bounded aggregate workload pool and host headroom; specify what happens when workloads burst together before enabling overcommit. Actual node supply and placement remain platform responsibilities. The current 8/4/8 Agent execution settings are separate from physical sandbox density.
+
+The observation contract must identify the host and exact container/instance plus the sample time and interval. Use cgroup `memory.current`, memory pressure/events, CPU usage/throttling, PIDs and storage usage. In gVisor, application memory is largely accounted as shmem/file, so host `anon` or guest RSS alone is insufficient. Do not add shmem to file when one is included in the other. Observe individual cgroups and the aggregate pool; control-plane and runtime/daemon overhead outside that pool require their own capacity. No observation grants execution or deletion authority.
+
+Linux CPU weights/quotas, demand paging and reclaim provide a mechanism to share a host while keeping separate address spaces and private writable state. `memory.high` causes reclaim/throttling rather than reserving memory, and aggressive settings can delay ordinary operations. Anonymous private data cannot be discarded merely because it is idle. Retained cold suspension/restoration requires its own state-preservation contract. Firecracker remains a candidate backend if measured isolation, compatibility or resource-efficiency requirements warrant it; a backend change does not replace this admission and settlement contract.
+
+The admission regression first failed while the algorithm charged the ceiling: three contract/characterization tests passed and the shared-commitment case failed. Charging the validated reservation made all four pass. Final validation passed the portable Rust source gate, Core's 729 unit tests and focused 129-test query-loop gate, plus warning-denied Core/hosted Runtime Clippy. The native hosted Runtime suite passed 468 tests with 204 opt-in tests ignored. The first native hosted run inherited a proxy that broke 15 loopback fixtures; process-local proxy exclusion restored all 468 passes. This change adds no persistent format; PostgreSQL physical/shared-admission acceptance is not established by these results.
+
 ## Bounded lifecycle control leases
 
 Runtime schema 15 adds a persistent `execute/control` purpose and, for control leases, an `advance/cleanup` stage to the existing lifecycle Job. Missing historical purposes become `execute`; existing signed grants, owners and job history are preserved. The purpose and stage cannot change while the same lease owner remains current. Upgrade API, Worker and Runtime together after draining incompatible live consumers, following [Session environment upgrades](SessionEnvironments.md#persistence-and-upgrades).
@@ -119,6 +137,28 @@ A secondary observation needs its own timing breakdown: after perRun cancellatio
 Fixture bring-up failures are excluded from the successful trial counts: a GNU static helper failed during memfd execution and was replaced by the musl build; stale task-protocol and output-read parameters were corrected in the private observer. An early daemon-isolation attempt coincided with changes to application start times, whose cause was not established. After isolation was strengthened with an independent containerd and forced private runsc root, both reported physical groups retained the existing application's exact container IDs, images and start times. Owned test containers and daemons were removed after the measurements; operator teardown is not product retirement acceptance.
 
 These results establish the exercised WSL cancellation, Run-scope preservation and resident-capacity waiting boundaries. Physical saturation, crash/reply-loss recovery, explicit Environment retirement, byte/inode enforcement, Debian acceptance and the default lifetime migration remain open.
+
+## WSL bounded sandbox density experiment
+
+The density target is 100 separate runsc sandboxes, each holding and repeatedly reading 100 MiB of private, actually touched anonymous memory. This is a physical adapter experiment, independent of API/Worker AgentRun admission and the unchanged 8/4/8 execution limits. It does not certify 100 concurrent AgentRuns or enable hosted overcommit. The sandbox image and ptrace runtime match the physical experiment above; the isolated diagnostic Docker daemon uses the cgroupfs driver rather than the deployment's systemd driver.
+
+A dedicated parent cgroup bounds workload memory to 12 GiB, CPU bandwidth to four cores and PIDs to 16,384, with swap disabled. Each child retains an 8 GiB/four-CPU/512-PID ceiling. The driver advances toward 100 only while keeping test-pool and host headroom. Docker, containerd, runsc state, network/mount namespaces and all status directories are private to the fixture. Daemon/controller memory outside the workload parent is not included in the table.
+
+Each guest touches all 25,600 pages, retains the mapping, periodically scans it and verifies a private canary. The observer checks host-side heartbeat-file modification times; guest and host monotonic clocks have different origins and are not compared. The workload and sentinel checks establish the exercised private-state behavior, not a general security-isolation acceptance.
+
+| Live sandboxes at ramp sample | Payload memory, MiB | Aggregate cgroup memory, MiB | Excess over payload per sandbox, MiB | Host cgroup PIDs |
+| --- | --- | --- | --- | --- |
+| 1 | 100 | 122.09 | 22.09 | 39 |
+| 5 | 500 | 604.63 | 20.93 | 193 |
+| 10 | 1000 | 1208.13 | 20.81 | 392 |
+| 20 | 2000 | 2414.45 | 20.72 | 780 |
+| 40 | 4000 | 4826.45 | 20.66 | 1584 |
+
+All sampled working sets and canaries were live. At the 40-sandbox sample, the parent reported no OOM, no limit hits and zero recorded memory-pressure stall time; the host reported 9490.66 MiB available. The observed excess includes runtime and charged kernel/cache memory, not just application heap. This demonstrates that the nominal child ceilings are not physically preallocated.
+
+The WSL distribution then stopped and the probe exited without reaching its steady hold or cancellation measurements. A subsequent check found Debian stopped; after starting it for diagnosis, kernel uptime was 12.35 seconds, versus 278.12 seconds at the last sample. The cause of the host stop is unestablished. Separate host Docker/containerd stop/start activity was also observed during fixture calibration. Neither interruption is treated as a measured resource ceiling. All owned orphaned temporary roots from the interrupted fixtures were removed after checking ownership and absence of live runtime processes.
+
+The 100-sandbox target, steady-state CPU/PID overhead, removal latency under peak density and first actual limiting resource remain unmeasured. Continue with a stable host window, retain the same workload and report the actual attained count even if it is below 100. The small earlier mechanism pilot separately observed a 512 MiB touch/release move pool memory from 92.64 to 605.40 and back to 92.09 MiB. Its aggressive `memory.high` configuration later caused an in-sandbox observer request to exceed eight seconds; that pilot did not finish its pressure/teardown acceptance.
 
 ## Verified control boundary
 
