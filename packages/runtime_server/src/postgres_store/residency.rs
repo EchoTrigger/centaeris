@@ -1,4 +1,6 @@
-use centaeris_core::execution::{admit_resident_resources, ResidentResourceUsage};
+use centaeris_core::execution::{
+    admit_resident_resources, ResidentResourceClaim, ResidentResourceUsage,
+};
 use centaeris_core::session::reliability::agent_run_lifecycle_job_id;
 use centaeris_core::session::RuntimeJobLeaseFence;
 use postgres::{Client, GenericClient};
