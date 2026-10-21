@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use postgres::{Client, GenericClient};
 
-const STORE_SCHEMA_VERSION: i64 = 15;
+const STORE_SCHEMA_VERSION: i64 = 16;
 const MAINTENANCE_COMPLETION_DDL: &str = r#"
 CREATE TABLE runtime.environment_maintenance_completions(
  operation_id text PRIMARY KEY,environment_id text NOT NULL,instance_id text NOT NULL,
@@ -34,6 +34,8 @@ pub(super) const RUNTIME_TABLES: &[&str] = &[
     "model_observation_contents",
     "model_observation_manifests",
     "resource_claims",
+    "resident_capacity_clock",
+    "resident_capacity_waiters",
     "resident_sandboxes",
     "runtime_events",
     "runtime_jobs",
@@ -76,6 +78,8 @@ const RUNTIME_INDEXES: &[&str] = &[
 ];
 
 const TABLE_SHAPES: &[(&str, &str)] = &[
+    ("resident_capacity_clock", "singleton:boolean:NO,generation:bigint:NO,changed_at_ms:bigint:NO"),
+    ("resident_capacity_waiters", "job_id:text:NO,lease_owner:text:NO,observed_generation:bigint:NO"),
     ("environment_creation_attempts", "allocation_execution_id:text:NO,instance_id:text:NO,attempt_id:text:NO,state:text:NO,recorded_at_ms:bigint:NO"),
     ("environment_provision_completions","operation_id:text:NO,environment_id:text:NO,session_id:text:NO,workspace_id:text:NO,host_id:text:NO,instance_id:text:NO,container_id:text:NO,profile_digest:text:NO,controller_epoch:bigint:NO,controller_lease_digest:text:NO,request_digest:text:NO,completion_json:text:NO,recorded_at_ms:bigint:NO"),
     ("environment_maintenance_completions", "operation_id:text:NO,environment_id:text:NO,instance_id:text:NO,container_id:text:NO,profile_digest:text:NO,controller_epoch:bigint:NO,controller_lease_digest:text:NO,request_digest:text:NO,completion_json:text:NO,recorded_at_ms:bigint:NO"),
@@ -285,6 +289,7 @@ pub(super) fn ensure_schema(client: &mut Client) -> Result<(), String> {
         upgrade_environment_owners(client)?;
         upgrade_creation_attempts(client)?;
         upgrade_control_leases(client)?;
+        upgrade_capacity_waits(client)?;
     }
     validate_schema_version(client)?;
     validate_schema(client, CURRENT_OBSERVATION_KINDS)
@@ -467,6 +472,29 @@ fn upgrade_environment_retirements(client: &mut Client) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     tx.execute(
         "INSERT INTO runtime.schema_migrations(version,applied_at_ms) VALUES(11,$1)",
+        &[&now_ms()?],
+    )
+    .map_err(|e| e.to_string())?;
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+fn upgrade_capacity_waits(client: &mut Client) -> Result<(), String> {
+    if schema_versions(client)? != (1..=15).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    let mut tx = client.transaction().map_err(|e| e.to_string())?;
+    super::resource_commit::require_durable_resource_commit(&mut tx)?;
+    tx.batch_execute("LOCK TABLE runtime.schema_migrations IN ACCESS EXCLUSIVE MODE")
+        .map_err(|e| e.to_string())?;
+    if schema_versions(&mut tx)? != (1..=15).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.batch_execute(&super::capacity_wait::ddl())
+        .map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO runtime.schema_migrations(version,applied_at_ms) VALUES(16,$1)",
         &[&now_ms()?],
     )
     .map_err(|e| e.to_string())?;
@@ -665,6 +693,8 @@ fn create_schema(client: &mut Client) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     tx.batch_execute(super::lifecycle_control::DDL)
         .map_err(|e| e.to_string())?;
+    tx.batch_execute(&super::capacity_wait::ddl())
+        .map_err(|e| e.to_string())?;
     for version in 1..=STORE_SCHEMA_VERSION {
         tx.execute(
             "INSERT INTO runtime.schema_migrations(version, applied_at_ms) VALUES($1, $2)",
@@ -702,12 +732,18 @@ fn validate_schema_with_resource_budgets(
     let typed_owners = maintenance_completions && schema_versions(client)?.contains(&13);
     let creation_attempts = typed_owners && schema_versions(client)?.contains(&14);
     let control_leases = creation_attempts && schema_versions(client)?.contains(&15);
+    let capacity_waits = control_leases && schema_versions(client)?.contains(&16);
     let tables = object_names(client, "BASE TABLE")?;
     let expected_tables = RUNTIME_TABLES
         .iter()
         .copied()
         .filter(|table| {
-            (creation_attempts || *table != "environment_creation_attempts")
+            (capacity_waits
+                || !matches!(
+                    *table,
+                    "resident_capacity_clock" | "resident_capacity_waiters"
+                ))
+                && (creation_attempts || *table != "environment_creation_attempts")
                 && (resident_budget || *table != "resident_sandboxes")
                 && (instance_binding || *table != "execution_instances")
                 && (cleanup_receipts || *table != "agent_run_cleanup_receipts")
@@ -721,7 +757,12 @@ fn validate_schema_with_resource_budgets(
         return Err(format!("Postgres runtime table set mismatch: {tables:?}"));
     }
     for (table, expected) in TABLE_SHAPES {
-        if (*table == "environment_creation_attempts" && !creation_attempts)
+        if (!capacity_waits
+            && matches!(
+                *table,
+                "resident_capacity_clock" | "resident_capacity_waiters"
+            ))
+            || (*table == "environment_creation_attempts" && !creation_attempts)
             || (*table == "resident_sandboxes" && !resident_budget)
             || (*table == "execution_instances" && !instance_binding)
             || (*table == "agent_run_cleanup_receipts" && !cleanup_receipts)
@@ -768,6 +809,9 @@ fn validate_schema_with_resource_budgets(
                 "Postgres runtime table definition mismatch: {table}"
             ));
         }
+    }
+    if capacity_waits {
+        super::capacity_wait::validate(client)?;
     }
     if typed_owners {
         let removal = client.query_opt("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='runtime.agent_run_cleanup_receipts'::regclass AND conname='cleanup_physical_removal_facts' AND contype='c' AND convalidated", &[]).map_err(|e|e.to_string())?.map(|row|row.get::<_,String>(0));
@@ -1109,6 +1153,12 @@ fn validate_schema_with_resource_budgets(
             return Err("Postgres lifecycle lease purpose trigger mismatch".into());
         }
     }
+    if capacity_waits {
+        expected_functions.extend([
+            "resident_capacity_release".into(),
+            "resident_capacity_job_change".into(),
+        ]);
+    }
     if functions != expected_functions {
         return Err(format!(
             "Postgres runtime function set mismatch: {functions:?}"
@@ -1145,6 +1195,12 @@ fn validate_schema_with_resource_budgets(
     }
     if creation_attempts {
         expected_triggers.insert("environment_creation_attempt_facts".into());
+    }
+    if capacity_waits {
+        expected_triggers.extend([
+            "resident_capacity_release".into(),
+            "resident_capacity_job_change".into(),
+        ]);
     }
     if triggers != expected_triggers {
         return Err(format!(
@@ -1291,7 +1347,7 @@ mod tests {
 
     #[test]
     fn transcript_read_model_and_wait_handoff_have_explicit_store_schema() {
-        assert_eq!(STORE_SCHEMA_VERSION, 15);
+        assert_eq!(STORE_SCHEMA_VERSION, 16);
         for table in [
             "transcript_projection_heads",
             "transcript_projection_current_generations",

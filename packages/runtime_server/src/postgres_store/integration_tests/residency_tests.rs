@@ -1,3 +1,4 @@
+mod capacity_wake_tests;
 use std::sync::{Arc, Mutex};
 
 use centaeris_core::execution::ResidentResourceUsage;
