@@ -1648,22 +1648,34 @@ fn postgres_hosted_worker_reclaim_changes_claim_identity() {
     assert!(store
         .complete_runtime_job(CompleteRuntimeJobRequest {
             job_id: id.into(),
-            lease_owner: old,
+            lease_owner: old.clone(),
             output_refs: vec![],
             completed_at_ms: now + 1
         })
         .is_err());
+    assert!(
+        store
+            .start_runtime_job(StartRuntimeJobRequest {
+                job_id: id.into(),
+                lease_owner: old,
+                started_at_ms: now + 1,
+            })
+            .is_err(),
+        "the replaced claim cannot start work"
+    );
+    // A new lease permits starting this scheduling-only fixture. It does not
+    // supply the terminal/cleanup/release facts required for lifecycle completion;
+    // resource_lifecycle_tests exercises that complete contract with real grants.
     store
-        .complete_runtime_job(CompleteRuntimeJobRequest {
+        .start_runtime_job(StartRuntimeJobRequest {
             job_id: id.into(),
             lease_owner: current,
-            output_refs: vec![],
-            completed_at_ms: now + 1,
+            started_at_ms: now + 1,
         })
         .unwrap();
     assert_eq!(
         store.get_runtime_job(id).unwrap().unwrap().status,
-        RuntimeJobStatus::Succeeded
+        RuntimeJobStatus::Running
     );
 }
 
