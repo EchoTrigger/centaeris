@@ -100,6 +100,7 @@ export const ComposerPromptInput = forwardRef<
       <textarea
         ref={textareaRef}
         id="message-input"
+        aria-label="Message"
         value={value}
         placeholder={isStreaming ? t("composerPromptInput.addInputWithoutInterruptingTheCurrentRun") : t("composerPromptInput.message")}
         rows={1}

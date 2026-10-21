@@ -1,3 +1,4 @@
+vi.mock("../src/components/ui/dropdown-menu", async () => import("./helpers/menuTestDouble"));
 vi.mock("../src/components/chat/ComposerRuntimeControls", () => ({ ComposerRuntimeControls: ({ activePanel }: { activePanel: string | null }) => activePanel === "context" ? <div role="region" aria-label="Context details" /> : null }));
 import type { ReactNode } from "react";
 import {
@@ -262,7 +263,8 @@ test("stable props isolate the composer from an unrelated parent render", async 
   await act(async () => {
     rendered.current = create(<Harness />);
   });
-  expect(renderHarness.buttonRenders).toBe(1);
+  const initialButtonRenders = renderHarness.buttonRenders;
+  expect(initialButtonRenders).toBeGreaterThan(0);
 
   const triggerParentRender = rerender.current;
   if (!triggerParentRender) {
@@ -271,7 +273,7 @@ test("stable props isolate the composer from an unrelated parent render", async 
   await act(async () => {
     triggerParentRender();
   });
-  expect(renderHarness.buttonRenders).toBe(1);
+  expect(renderHarness.buttonRenders).toBe(initialButtonRenders);
 
   const renderer = rendered.current;
   if (!renderer) {
@@ -322,6 +324,7 @@ test("a configuration result cannot reopen an MCP panel after its session reset"
   await act(async () => {
     tokenProps.onChange({
       target: { value: "secret-token" },
+      currentTarget: { value: "secret-token" },
     } as unknown as ChangeEvent<HTMLInputElement>);
   });
 
@@ -367,6 +370,7 @@ test("a configuration result cannot reopen an MCP panel after its session reset"
   await act(async () => {
     newOwnerTokenProps.onChange({
       target: { value: "new-owner-token" },
+      currentTarget: { value: "new-owner-token" },
     } as unknown as ChangeEvent<HTMLInputElement>);
   });
   const newOwnerForm = renderer.root.findByType("form");

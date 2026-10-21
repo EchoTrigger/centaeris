@@ -284,27 +284,29 @@ Unknown stream envelope types must still fail explicitly.
 
 ## Desktop application navigation
 
-- The title bar exposes Back/Forward, sidebar toggle and native File/Edit/View/Help menus. Windows caption buttons remain system-owned.
+- The title bar keeps the theme toggle at the top left, followed by sidebar and Back/Forward controls and native File/Edit/View/Help menus. Collapse navigation and open every management page: theme switching remains reachable. Windows caption buttons remain system-owned.
 - File > Open Folder (Ctrl+O) uses the system directory picker. Cancel preserves the current session and panel; success opens a new-chat context for the selected directory without changing any existing session cwd.
 - The sidebar shows New chat, Scheduled tasks and Plugins above cross-workspace Pinned/Recents, with Settings at the bottom. Collapse retains icon navigation; reduced motion disables the width animation.
-- Pin/unpin persists through existing session metadata. Rename and deletion retain their previous inline behavior.
+- The workspace switcher shows the selected workspace name and full path (with truncation and a full-path tooltip where needed). Open its menu, switch between same-named workspaces, cancel the folder picker, and retry a failed switch. Expanding a workspace group must not silently select it.
+- New chat shows the welcome surface and selected workspace, with no conversation title. Resources and the right-panel toggle remain reachable; returning to an existing conversation restores its title and own workspace.
+- Pin/unpin persists through existing session metadata. Rename uses explicit Save/Cancel and returns focus; deletion requires confirmation. Sort pinned conversations with pointer and keyboard; a failed write recovers the authoritative order.
 - Navigate between a chat and management pages, then Back/Forward. The active chat remains mounted on management pages; returning to another chat restores that chat's saved workspace tabs. Pending file previews explicitly offer retry on return.
-- Plugins and Skill use keyboard-operable tabs on one page. Settings currently contains the existing model manager only; further categories remain a separate design task.
+- Plugins and Skills use keyboard-operable tabs on one page. Settings provides Appearance and Model services. Verify System/Light/Dark previews and the permanent title-bar toggle stay synchronized. Composer and welcome model setup actions open Model services directly.
 - Scheduled tasks reads the existing Host list/history and links occurrences to their sessions. Creating and changing schedules remains agent-driven; the page does not create schedules automatically.
 - Browser-only preview cannot open native menus, folders or Host resources. Validate those in Electron.
 
 ### Plugin and Skill resource pages
 
-- Open Plugins from the sidebar. Plugins / Skill navigation stays in the upper left; the list uses two flat columns, collapsing to one in a narrow window.
+- Open Plugins from the sidebar. Plugins / Skills navigation and page headings form one compact header. Verify readable rows, search, filters and details in wide and narrow windows without nested decorative cards.
 - Search plugins, scroll the list, then open one. Verify the full detail page and Plugins breadcrumb; breadcrumb return and global Back retain the list search and scroll. Global Forward restores the selected plugin.
 - Verify existing install, reload, enable/disable, reveal, and managed-plugin removal actions against the local Host.
-- In Skill, verify only Personal / System filters are shown and Personal is selected initially. Personal includes user and current-workspace skills; System includes only built-in skills. Plugin-owned skills remain in their plugin detail, not either Skill filter. Search by name or description. Open a workspace skill and verify its detail says Current workspace only. Skill Markdown scrolls inside the modal. Close or Escape returns focus to the row without clearing the search/filter or moving the list.
+- In Skill, verify only Personal / System filters are shown and Personal is selected initially. Personal includes user and current-workspace skills; System includes only built-in skills. Plugin-owned skills remain in their plugin detail, not either Skill filter. Search by name or description. Open a workspace skill and verify its scope and location identify the current workspace. Instructions are readable in the detail page. Back to skills restores the list query and scope; instructions scroll with the page.
 - Reload skills, open location management, inspect/toggle a source, and add a location using the native picker. Removing a user/workspace location still requires confirmation and leaves files unchanged.
 - Confirm no store, connected-account, or Try now controls appear without supporting functionality.
 
 ### Model services settings
 
-- Settings opens a single-column list of configured services, without a nested provider/model tree or global Save/Cancel footer.
+- In Settings, select Model services to open a single-column list of configured services, without a nested provider/model tree or global Save/Cancel footer.
 - Open a service and use the Model services breadcrumb to return. Confirm connection details distinguish stored credentials from environment credentials, without claiming an untested connection works.
 - Edit a connection, change its name or URL, and cancel. Reopen the editor and verify saved values remain unchanged.
 - Add a built-in service through the searchable picker; add a custom service with its URL, protocol, and optional key. If configuration saves but credential storage fails, retain the editor/key for retry and show the partial-save result.
@@ -319,3 +321,16 @@ Unknown stream envelope types must still fail explicitly.
 - Type commands, paste text, use completion/arrows/Ctrl+C, and run an interactive full-screen program. Resize the split pane and hide/show the panel; no zero-sized geometry or new shell should appear.
 - Close a running terminal tab, switch workspace and return, then reopen Existing terminals. Verify the original shell remains and output replays; history beyond the bounded cache reports a gap.
 - End terminal stops its process tree. Exited output remains readable; create another terminal for a new shell. Disconnect/reconnect must never resend user input or recreate old process identities.
+
+
+### Portable visualization System Skill
+
+- In Skills > System, find `inline-visualizations` and open its instructions. Its
+generated reference uses the same schema and limits as the Core validator. Verify
+the packaged Runtime discovers it alongside the other built-in System Skills.
+- Ask for an ordered process and a nested ownership explanation. Inspect the
+resulting portable content in Desktop, then open the same conversation in TUI:
+labels, order and containment remain understandable. Simple answers remain prose.
+- Inspect complete visuals in both themes and a narrow conversation pane. Confirm
+vertical reading order, wrapped labels and real containment; the accepted light
+reference remains the baseline. The host supplies components and appearance.

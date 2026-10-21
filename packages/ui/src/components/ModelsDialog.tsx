@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Eye, EyeOff, KeyRound, Plus, Search, ChevronRight, MoreHorizontal } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { ArrowLeft, Check, CircleAlert, Eye, EyeOff, KeyRound, LoaderCircle, MoreHorizontal, Plus, Search, Server, Trash2, X, ChevronRight } from "lucide-react";
 import {
   getAgentRuntimeConfig,
   resetAgentRuntimeConfig,
@@ -11,7 +11,14 @@ import {
   type ModelWireApi,
 } from "../lib/chatBridge";
 import type { ConfirmAction } from "./ConfirmDialog";
-import { ResourceDetailDialog } from "./ResourceDetailDialog";
+import { Badge } from "./ui/badge";
+import { Button } from "./ui/button";
+import { Checkbox } from "./ui/checkbox";
+import { Dialog, DialogClose, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
+import { Input } from "./ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
+import "../styles/desktop-settings.css";
 import { ProviderLogo } from "./ProviderLogo";
 
 type ModelsDialogProps = {
@@ -70,14 +77,15 @@ const errorText = (error: unknown): string =>
 
 const customProviderId = (): string => `custom.${crypto.randomUUID().replaceAll("-", "")}`;
 
-const customDraftsFromConfig = (config: AgentRuntimeConfig): CustomProviderDraft[] =>
+const customDraftsFromConfig = (config: AgentRuntimeConfig, currentDrafts?: CustomProviderDraft[]): CustomProviderDraft[] =>
   (config.customModelProviders ?? []).map((provider) => ({
     providerId: provider.providerId,
     name: provider.name,
     baseUrl: provider.baseUrl,
     api: provider.api,
-    models: provider.models.map((model) => ({
-        key: nextCustomModelKey++,
+    models: provider.models.map((model, index) => ({
+        // Editing only appends models; preserve existing row identities when cancelling.
+        key: currentDrafts?.find(draft => draft.providerId === provider.providerId)?.models[index]?.key ?? nextCustomModelKey++,
         model: model.model,
         displayName: model.displayName ?? "",
         contextTokens: model.contextTokens,
@@ -88,7 +96,7 @@ const customDraftsFromConfig = (config: AgentRuntimeConfig): CustomProviderDraft
   }));
 
 export const buildCustomProvidersInput = (
-  providers: CustomProviderDraft[],
+  providers: readonly CustomModelProviderInput[],
 ): CustomModelProviderInput[] => providers.map((provider) => ({
   providerId: provider.providerId,
   name: provider.name,
@@ -123,6 +131,31 @@ const testSummary = (result: ModelTestState): string => {
     .join(" · ");
 };
 
+function SettingsDialog({ title, description, children, onClose, busy = false, initialFocus }: {
+  title: string; description: string; children: ReactNode; onClose: () => void; busy?: boolean;
+  initialFocus?: RefObject<HTMLInputElement | null>;
+}) {
+  return <Dialog open onOpenChange={open => { if (!open && !busy) onClose(); }}>
+    <DialogContent className="desktopModelDialog" showCloseButton={false} initialFocus={initialFocus}>
+      <DialogHeader><DialogTitle>{title}</DialogTitle><DialogDescription>{description}</DialogDescription></DialogHeader>
+      <DialogClose render={<Button variant="ghost" size="icon-sm" className="desktopModelDialogClose" aria-label="Close detail" disabled={busy} />}><X size={16} /></DialogClose>
+      {children}
+    </DialogContent>
+  </Dialog>;
+}
+
+function ProtocolSelect({ value, onChange, inherit = false, disabled = false }: {
+  value: string; onChange: (value: string) => void; inherit?: boolean; disabled?: boolean;
+}) {
+  return <Select value={value} onValueChange={next => { if (next !== null) onChange(next); }} disabled={disabled}>
+    <SelectTrigger aria-label={inherit ? "API override" : "API protocol"}><SelectValue>{value === "inherit" ? "Inherit provider" : value}</SelectValue></SelectTrigger>
+    <SelectContent align="start" alignItemWithTrigger={false}>
+      {inherit ? <SelectItem value="inherit">Inherit provider</SelectItem> : null}
+      {API_OPTIONS.map(api => <SelectItem key={api} value={api}>{api}</SelectItem>)}
+    </SelectContent>
+  </Select>;
+}
+
 export function ModelsDialog({ onConfigured, confirmAction }: ModelsDialogProps) {
   const [editing, setEditing] = useState(false);
   const [modelQuery, setModelQuery] = useState("");
@@ -141,10 +174,18 @@ export function ModelsDialog({ onConfigured, confirmAction }: ModelsDialogProps)
   const [providerPickerOpen, setProviderPickerOpen] = useState(false);
   const [providerQuery, setProviderQuery] = useState("");
   const loadSequence = useRef(0);
-  const select = useCallback((next: Selection) => {
-    setSelection(next);
+  const dialogInput = useRef<HTMLInputElement>(null);
+  const screenOwner = useRef({});
+  const testOwner = useRef<object | null>(null);
+  const invalidateTest = useCallback(() => {
+    testOwner.current = null;
+    setTestingModelId("");
     setModelTest(null);
   }, []);
+  const select = useCallback((next: Selection) => {
+    setSelection(next);
+    invalidateTest();
+  }, [invalidateTest]);
 
   const acceptConfig = useCallback((next: AgentRuntimeConfig) => {
     setConfig(next);
@@ -179,15 +220,17 @@ export function ModelsDialog({ onConfigured, confirmAction }: ModelsDialogProps)
 
   const resetUnsupportedConfig = async () => {
     if (!canResetUnsupportedConfig || loading || savingSettings) return;
-    setMessage("");
+    const owner = screenOwner.current;
+    setSavingSettings(true);
     try {
       const confirmed = await confirmAction({
         title: "Reset model settings?",
         message: "This removes all API keys saved by Centaeris. Environment credentials stay unchanged.",
       });
-      if (!confirmed) return;
-      setSavingSettings(true);
+      if (!confirmed || owner !== screenOwner.current) return;
+      setMessage("");
       const response = await resetAgentRuntimeConfig();
+      if (owner !== screenOwner.current) return;
       acceptConfig(response.config);
       setCustomProviders([]);
       setApiKeys({});
@@ -195,15 +238,20 @@ export function ModelsDialog({ onConfigured, confirmAction }: ModelsDialogProps)
       setCanResetUnsupportedConfig(false);
       setMessage("Runtime configuration reset");
     } catch (error) {
-      setMessage(errorText(error));
+      if (owner === screenOwner.current) setMessage(errorText(error));
     } finally {
-      setSavingSettings(false);
+      if (owner === screenOwner.current) setSavingSettings(false);
     }
   };
 
   useEffect(() => {
     void load();
+    return () => { loadSequence.current += 1; };
   }, [load]);
+  useEffect(() => () => {
+    screenOwner.current = {};
+    testOwner.current = null;
+  }, []);
 
   const selectedProviderId = selection.kind === "empty" ? null : selection.providerId;
   const selectedCustomProvider = customProviders.find((provider) => provider.providerId === selectedProviderId);
@@ -231,28 +279,35 @@ export function ModelsDialog({ onConfigured, confirmAction }: ModelsDialogProps)
     setCustomProviders((providers) => providers.map((provider) => provider.providerId !== selectedCustomProvider.providerId
       ? provider
       : { ...provider, models: provider.models.map((model) => model.key === key ? { ...model, ...patch } : model) }));
-    setModelTest(null);
+    invalidateTest();
   };
 
   const cancelEdit = () => {
     if (savingSettings || credentialProviderId) return;
-    if (config) setCustomProviders(customDraftsFromConfig(config));
+    if (config) setCustomProviders(customDraftsFromConfig(config, customProviders));
     setApiKeys({}); setRevealedProviderId(null); setEditing(false); setMessage("");
     select(selectedProviderId && config?.modelProviders.some(p => p.providerId === selectedProviderId)
       ? {kind:"provider",providerId:selectedProviderId} : {kind:"empty"});
   };
+  const savedProviders = useMemo(() => JSON.stringify(buildCustomProvidersInput(config?.customModelProviders ?? [])), [config]);
+  const settingsDirty = savedProviders !== JSON.stringify(buildCustomProvidersInput(customProviders));
+  const hasChanges = settingsDirty || Boolean(apiKeys[selectedProviderId ?? ""]?.trim());
+
   const saveAll = async () => {
-    if (loading || savingSettings || !selectedProviderId) return;
+    if (loading || savingSettings || credentialProviderId || !selectedProviderId || !hasChanges) return;
+    const owner = screenOwner.current;
     setSavingSettings(true); setMessage("");
     let settingsSaved = false;
     try {
       if (selectedCustomProvider) {
         const next = await setAgentRuntimeConfig({customModelProviders: buildCustomProvidersInput(customProviders)});
+        if (owner !== screenOwner.current) return;
         acceptConfig(next); settingsSaved = true;
       }
       const key = apiKeys[selectedProviderId]?.trim();
       if (key) {
         const next = await setAgentRuntimeConfig({modelProviderId:selectedProviderId,modelApiKey:key});
+        if (owner !== screenOwner.current) return;
         acceptConfig(next);
         setApiKeys({});
       }
@@ -260,12 +315,15 @@ export function ModelsDialog({ onConfigured, confirmAction }: ModelsDialogProps)
       select({kind:"provider",providerId:selectedProviderId});
       setMessage("Saved");
     } catch (error) {
+      if (owner !== screenOwner.current) return;
       setMessage(`${settingsSaved ? "Connection settings saved, but the API key was not saved. Retry saving the key. " : ""}${errorText(error)}`);
-    } finally { setSavingSettings(false); }
+    } finally { if (owner === screenOwner.current) setSavingSettings(false); }
   };
 
   const clearCredential = async (providerId: string) => {
-    if (credentialProviderId) return;
+    if (credentialProviderId || savingSettings || loading) return;
+    const owner = screenOwner.current;
+    invalidateTest();
     setCredentialProviderId(providerId);
     setMessage("");
     try {
@@ -273,13 +331,14 @@ export function ModelsDialog({ onConfigured, confirmAction }: ModelsDialogProps)
         modelProviderId: providerId,
         clearModelApiKey: true,
       });
+      if (owner !== screenOwner.current) return;
       acceptConfig(next);
       select({ kind: "provider", providerId });
       setMessage("Credential removed");
     } catch (error) {
-      setMessage(errorText(error));
+      if (owner === screenOwner.current) setMessage(errorText(error));
     } finally {
-      setCredentialProviderId("");
+      if (owner === screenOwner.current) setCredentialProviderId("");
     }
   };
 
@@ -310,37 +369,55 @@ export function ModelsDialog({ onConfigured, confirmAction }: ModelsDialogProps)
   };
 
   const removeSelectedModel = async () => {
-    if (!selectedCustomProvider || !selectedCustomModel) return;
+    if (!selectedCustomProvider || !selectedCustomModel || savingSettings || credentialProviderId) return;
+    const owner = screenOwner.current;
+    setSavingSettings(true);
+    invalidateTest();
     setMessage("");
     try {
       const confirmed = await confirmAction({
         title: "Remove this model?",
         message: `“${selectedCustomModel.model || "New model"}” will be removed from this provider.`,
       });
-      if (!confirmed) return;
+      if (!confirmed || owner !== screenOwner.current) return;
       const providers = customProviders.map(provider => provider.providerId !== selectedCustomProvider.providerId ? provider : { ...provider, models: provider.models.filter(model => model.key !== selectedCustomModel.key) });
-      const next = await setAgentRuntimeConfig({customModelProviders:buildCustomProvidersInput(providers)});
-      acceptConfig(next); setCustomProviders(customDraftsFromConfig(next)); setEditing(false);
+      const next = await setAgentRuntimeConfig({ customModelProviders: buildCustomProvidersInput(providers) });
+      if (owner !== screenOwner.current) return;
+      acceptConfig(next);
+      setCustomProviders(customDraftsFromConfig(next));
+      setEditing(false);
       select({ kind: "provider", providerId: selectedCustomProvider.providerId });
+      setMessage("Model removed");
     } catch (error) {
-      setMessage(errorText(error));
+      if (owner === screenOwner.current) setMessage(errorText(error));
+    } finally {
+      if (owner === screenOwner.current) setSavingSettings(false);
     }
   };
 
   const removeSelectedProvider = async () => {
-    if (!selectedCustomProvider) return;
+    if (!selectedCustomProvider || savingSettings || credentialProviderId) return;
+    const owner = screenOwner.current;
+    setSavingSettings(true);
+    invalidateTest();
     setMessage("");
     try {
       const confirmed = await confirmAction({
         title: "Remove this provider?",
         message: `“${selectedCustomProvider.name}” and its models will be removed.`,
       });
-      if (!confirmed) return;
-      const next = await setAgentRuntimeConfig({customModelProviders:buildCustomProvidersInput(customProviders.filter(provider => provider.providerId !== selectedCustomProvider.providerId))});
-      acceptConfig(next); setCustomProviders(customDraftsFromConfig(next)); setEditing(false);
+      if (!confirmed || owner !== screenOwner.current) return;
+      const next = await setAgentRuntimeConfig({ customModelProviders: buildCustomProvidersInput(customProviders.filter(provider => provider.providerId !== selectedCustomProvider.providerId)) });
+      if (owner !== screenOwner.current) return;
+      acceptConfig(next);
+      setCustomProviders(customDraftsFromConfig(next));
+      setEditing(false);
       select({ kind: "empty" });
+      setMessage("Service removed");
     } catch (error) {
-      setMessage(errorText(error));
+      if (owner === screenOwner.current) setMessage(errorText(error));
+    } finally {
+      if (owner === screenOwner.current) setSavingSettings(false);
     }
   };
 
@@ -348,12 +425,16 @@ export function ModelsDialog({ onConfigured, confirmAction }: ModelsDialogProps)
     const catalogModel = selectedProvider?.models.find(model => model.model === modelId);
     if (!catalogModel || !selectedProviderId || catalogModel.diagnostic || testingModelId) return;
     const testId = `${selectedProviderId}\0${catalogModel.model}`;
+    const owner = {};
+    testOwner.current = owner;
     setTestingModelId(testId);
     setMessage("");
     try {
       const result = await testAgentRuntimeModel({ providerId: selectedProviderId, model: catalogModel.model });
+      if (testOwner.current !== owner) return;
       setModelTest({ ...result, providerId: selectedProviderId, model: catalogModel.model });
     } catch (error) {
+      if (testOwner.current !== owner) return;
       setModelTest({
         providerId: selectedProviderId,
         model: catalogModel.model,
@@ -362,7 +443,10 @@ export function ModelsDialog({ onConfigured, confirmAction }: ModelsDialogProps)
         errorKeyword: errorText(error),
       });
     } finally {
-      setTestingModelId("");
+      if (testOwner.current === owner) {
+        testOwner.current = null;
+        setTestingModelId("");
+      }
     }
   };
 
@@ -392,60 +476,77 @@ export function ModelsDialog({ onConfigured, confirmAction }: ModelsDialogProps)
   const openProvider = (providerId: string) => { setMessage(""); setModelQuery(""); setEditing(false); select({kind:"provider",providerId}); };
   const listedProviders = (config?.modelProviders ?? []).filter(p => p.configured || !p.builtIn);
   const modelRows = selectedCustomProvider ? selectedCustomProvider.models.map(m => ({key:m.key, id:m.model, name:m.displayName || m.model})) : (selectedProvider?.models ?? []).map(m => ({key:m.model,id:m.model,name:m.model}));
-  const saveButtons = <footer className="modelEditActions"><button type="button" onClick={cancelEdit} disabled={busy}>Cancel</button><button type="button" onClick={() => void saveAll()} disabled={busy || !config || (!selectedCustomProvider && !apiKeys[selectedProviderId ?? ""]?.trim())}>{busy ? "Saving…" : "Save"}</button></footer>;
-  return <div className="modelServices">
+  const visibleModels = modelRows.filter(model => `${model.id} ${model.name}`.toLocaleLowerCase().includes(modelQuery.trim().toLocaleLowerCase()));
+  const providerName = selectedCustomProvider?.name ?? selectedProvider?.name ?? "New provider";
+  const saveButtons = <footer className="desktopModelEditActions">
+    <span>{hasChanges ? "Unsaved changes" : "No changes"}</span>
+    <Button variant="outline" disabled={busy} onClick={cancelEdit}>Cancel</Button>
+    <Button disabled={busy || !config || !hasChanges} onClick={() => void saveAll()}>{savingSettings ? <LoaderCircle size={15} className="desktopSettingsSpinner" /> : null}{savingSettings ? "Saving…" : "Save"}</Button>
+  </footer>;
+  const messageSucceeded = ["Saved", "Credential removed", "Runtime configuration reset", "Model removed", "Service removed"].includes(message);
+  const feedback = message ? <div className="desktopModelFeedback" data-success={messageSucceeded} role="status">
+    {messageSucceeded ? <Check size={16} /> : <CircleAlert size={16} />}<span>{message}</span>
+  </div> : null;
+  const isTestingSelectedModel = Boolean(testingModelId) && testingModelId === selectedTestId;
+  const selectedResult = testForSelectedModel ? <p className="desktopModelTestResult" data-success={testSucceeded(testForSelectedModel)} role="status">{testSucceeded(testForSelectedModel) ? <Check size={16} /> : <CircleAlert size={16} />}<span>{testSummary(testForSelectedModel)}</span></p> : null;
+  return <div className="desktopModels" aria-busy={loading || busy}>
     {selection.kind === "empty" ? <>
-      <header className="modelServicesHeading"><h1>Model services</h1><button type="button" disabled={!config || loading} onClick={() => {setProviderQuery("");setProviderPickerOpen(true);}}><Plus size={16}/> Add service</button></header>
-      <div className="modelServiceList">{listedProviders.map(provider => <button type="button" className="modelServiceRow" key={provider.providerId} aria-label={`Open ${provider.name}`} onClick={() => openProvider(provider.providerId)}>
-        <ProviderLogo svg={provider.logoSvg} name={provider.name}/><span><strong>{provider.name}</strong><small>{credentialLabel(provider)}</small></span><ChevronRight size={16}/>
-      </button>)}</div>
-      {!loading && config && !listedProviders.length ? <p className="pageDescription">Add a service to configure your models.</p> : null}
+      <header className="desktopSettingsHeading desktopModelsHeading"><div><h1>Model services</h1><p>Connect a provider and choose the models available to your chats.</p></div><Button disabled={!config || loading} onClick={() => { setProviderQuery(""); setProviderPickerOpen(true); }}><Plus size={16} />Add service</Button></header>
+      {listedProviders.length ? <section className="desktopModelServiceList" aria-label="Configured model services">{listedProviders.map(provider => <Button variant="ghost" className="desktopModelServiceRow" key={provider.providerId} aria-label={`Open ${provider.name}`} onClick={() => openProvider(provider.providerId)}>
+        <ProviderLogo svg={provider.logoSvg} name={provider.name} /><span className="desktopModelServiceIdentity"><strong>{provider.name}</strong><small>{credentialLabel(provider)}</small></span><Badge variant="secondary">{provider.models.length} {provider.models.length === 1 ? "model" : "models"}</Badge><ChevronRight size={16} />
+      </Button>)}</section> : !loading && config ? <div className="desktopModelEmpty"><Server size={24} /><h2>Connect your first model service</h2><p>Add an API provider or a compatible endpoint to start a chat.</p><Button variant="outline" onClick={() => { setProviderQuery(""); setProviderPickerOpen(true); }}><Plus size={16} />Choose a provider</Button></div> : null}
     </> : <>
-      <nav className="extensionBreadcrumb" aria-label="Model service navigation"><button type="button" disabled={editing || busy} onClick={() => {select({kind:"empty"});setMessage("");}}>Model services</button><ChevronRight size={14}/><span>{selectedCustomProvider?.name ?? selectedProvider?.name}</span></nav>
-      <header className="modelServicesHeading"><h1>{selectedCustomProvider?.name ?? selectedProvider?.name}</h1>
-        {!editing ? <details className="modelServiceMenu"><summary aria-label="Service actions"><MoreHorizontal size={18}/></summary><div>{providerStored ? <button type="button" disabled={busy} onClick={() => void clearCredential(selectedProviderId!)}>Remove credential</button> : null}{selectedCustomProvider ? <button type="button" disabled={busy} onClick={() => void removeSelectedProvider()}>Remove service</button> : null}</div></details> : null}
+      <nav className="desktopModelBreadcrumb" aria-label="Model service navigation"><Button variant="ghost" size="sm" disabled={editing || busy} onClick={() => { select({ kind: "empty" }); setMessage(""); }}><ArrowLeft size={14} />Model services</Button><span>/</span><span>{providerName}</span></nav>
+      <header className="desktopSettingsHeading desktopModelsHeading"><div><h1>{providerName}</h1><p>{selectedCustomProvider ? "Manage this endpoint, its credentials, and the models it provides." : "Manage the credentials used to connect to this provider."}</p></div>
+        {!editing && (providerStored || selectedCustomProvider) ? <DropdownMenu><DropdownMenuTrigger render={<Button variant="outline" size="icon" aria-label="Service actions" disabled={busy} />}><MoreHorizontal size={18} /></DropdownMenuTrigger><DropdownMenuContent align="end">
+          {providerStored ? <DropdownMenuItem disabled={busy} onClick={() => void clearCredential(selectedProviderId!)}><KeyRound size={15} />Remove credential</DropdownMenuItem> : null}
+          {selectedCustomProvider ? <DropdownMenuItem variant="destructive" disabled={busy} onClick={() => void removeSelectedProvider()}><Trash2 size={15} />Remove service</DropdownMenuItem> : null}
+        </DropdownMenuContent></DropdownMenu> : null}
       </header>
-      <section className="modelConnection"><header><h2>Connection</h2>{!editing ? <button type="button" onClick={() => {setMessage("");setEditing(true);}}>Edit connection</button> : null}</header>
+      <section className="desktopModelSection" aria-labelledby="modelConnectionHeading">
+        <header className="desktopModelSectionHeading"><div><h2 id="modelConnectionHeading">Connection</h2><p>{editing && selection.kind === "provider" ? "Changes are applied when you save." : "Provider connection and authentication."}</p></div>{!editing ? <Button variant="outline" disabled={busy} onClick={() => { setMessage(""); setEditing(true); }}>Edit connection</Button> : null}</header>
         {editing && selection.kind === "provider" ? <>
-          <div className="modelConnectionForm">
-            {selectedCustomProvider ? <><label>Provider name<input aria-label="Provider name" value={selectedCustomProvider.name} onChange={e=>updateCustomProvider({name:e.target.value})}/></label><label>Base URL<input value={selectedCustomProvider.baseUrl} onChange={e=>updateCustomProvider({baseUrl:e.target.value})} placeholder="https://api.example.com/v1"/></label><label>API protocol<select value={selectedCustomProvider.api} onChange={e=>updateCustomProvider({api:e.target.value as ModelWireApi})}>{API_OPTIONS.map(api=><option key={api}>{api}</option>)}</select></label></> : null}
-            <label>API key<div className="modelsKeyInput"><KeyRound size={16}/><input aria-label="API key" autoComplete="off" type={revealedProviderId === selectedProviderId ? "text" : "password"} value={apiKeys[selectedProviderId!] ?? ""} onChange={e=>setApiKeys(keys=>({...keys,[selectedProviderId!]:e.target.value}))} placeholder={selectedProvider?.configured ? "Leave blank to keep current credential" : "Enter API key"}/><button type="button" aria-label="Toggle API key visibility" onClick={()=>setRevealedProviderId(revealedProviderId ? null : selectedProviderId)}>{revealedProviderId ? <EyeOff size={16}/> : <Eye size={16}/>}</button></div></label>
+          <div className="desktopModelForm">
+            {selectedCustomProvider ? <><label className="desktopModelField">Provider name<Input aria-label="Provider name" value={selectedCustomProvider.name} disabled={busy} onChange={event => updateCustomProvider({ name: event.target.value })} /></label>
+              <label className="desktopModelField">Base URL<Input value={selectedCustomProvider.baseUrl} disabled={busy} onChange={event => updateCustomProvider({ baseUrl: event.target.value })} placeholder="https://api.example.com/v1" /><small>The API endpoint supplied by your model provider.</small></label>
+              <div className="desktopModelField"><span>API protocol</span><ProtocolSelect value={selectedCustomProvider.api} disabled={busy} onChange={api => updateCustomProvider({ api: api as ModelWireApi })} /></div></> : null}
+            <label className="desktopModelField">API key<div className="desktopModelKeyInput"><Input aria-label="API key" autoComplete="off" spellCheck={false} disabled={busy} type={revealedProviderId === selectedProviderId ? "text" : "password"} value={apiKeys[selectedProviderId!] ?? ""} onChange={event => setApiKeys(keys => ({ ...keys, [selectedProviderId!]: event.target.value }))} placeholder={selectedProvider?.configured ? "Leave blank to keep current credential" : "Enter API key"} /><Button variant="ghost" size="icon-sm" disabled={busy} aria-label="Toggle API key visibility" aria-pressed={revealedProviderId === selectedProviderId} onClick={() => setRevealedProviderId(revealedProviderId ? null : selectedProviderId)}>{revealedProviderId ? <EyeOff size={16} /> : <Eye size={16} />}</Button></div><small>Stored by the desktop runtime. Leave blank to keep an existing credential.</small></label>
           </div>{saveButtons}
-        </> : <dl className="modelConnectionFacts"><div><dt>Credential</dt><dd>{credentialLabel(selectedProvider)}</dd></div>{selectedCustomProvider ? <><div><dt>Base URL</dt><dd>{selectedCustomProvider.baseUrl}</dd></div><div><dt>API protocol</dt><dd>{selectedCustomProvider.api}</dd></div></> : null}</dl>}
+        </> : <dl className="desktopModelFacts"><div><dt>Credential</dt><dd><KeyRound size={14} />{credentialLabel(selectedProvider)}</dd></div>{selectedCustomProvider ? <><div><dt>Base URL</dt><dd>{selectedCustomProvider.baseUrl || "No endpoint configured"}</dd></div><div><dt>API protocol</dt><dd>{selectedCustomProvider.api}</dd></div></> : null}</dl>}
       </section>
-      {!editing || selection.kind === "model" ? <section className="modelServiceModels"><header><h2>Models</h2><label className="extensionSearch"><Search size={16}/><input aria-label="Search models" placeholder="Search models" value={modelQuery} onChange={e=>setModelQuery(e.target.value)}/></label>{selectedCustomProvider ? <button type="button" onClick={()=>addModel(selectedProviderId!)}><Plus size={16}/> Add model</button> : null}</header>
-        {modelRows.filter(m=>`${m.id} ${m.name}`.toLowerCase().includes(modelQuery.toLowerCase())).map(model=><div className="modelServiceModelRow" key={model.key}><button type="button" onClick={()=>{setMessage("");setEditing(true);select({kind:"model",providerId:selectedProviderId!,modelKey:model.key});}}>{model.name || "New model"}</button><small>{model.name !== model.id ? model.id : ""}</small><button type="button" aria-label={`Test ${model.id}`} disabled={!!testingModelId || !selectedProvider?.models.some(m => m.model === model.id && !m.diagnostic)} onClick={()=>void runTest(model.id)}>{testingModelId === `${selectedProviderId}\0${model.id}` ? "Testing…" : "Test"}</button></div>)}
-        {modelTest?.providerId === selectedProviderId && selection.kind === "provider" ? <p className="modelsTestSummary">{modelTest.model}: {testSummary(modelTest)}</p> : null}
-        {!modelRows.length ? <p className="pageDescription">No models added.</p> : null}
+      {!editing || selection.kind === "model" ? <section className="desktopModelSection" aria-labelledby="modelListHeading"><header className="desktopModelSectionHeading"><div><h2 id="modelListHeading">Models <span className="desktopModelCount">{modelRows.length}</span></h2><p>{selectedCustomProvider ? "Add the model IDs supported by this endpoint." : "Models available from this provider."}</p></div>{selectedCustomProvider ? <Button variant="outline" disabled={busy} onClick={() => addModel(selectedProviderId!)}><Plus size={16} />Add model</Button> : null}</header>
+        {modelRows.length ? <div className="desktopModelSearch"><Search size={15} /><Input aria-label="Search models" placeholder="Search models" value={modelQuery} onChange={event => setModelQuery(event.target.value)} /></div> : null}
+        <div className="desktopModelRows">{visibleModels.map(model => {
+          const catalogModel = selectedProvider?.models.find(item => item.model === model.id);
+          return <div className="desktopModelRow" key={model.key}><Button variant="ghost" className="desktopModelOpen" disabled={busy} aria-label={model.name || "New model"} onClick={() => { setMessage(""); setEditing(true); select({ kind: "model", providerId: selectedProviderId!, modelKey: model.key }); }}><span><strong>{model.name || "New model"}</strong>{model.name !== model.id ? <small>{model.id}</small> : null}</span>{catalogModel?.diagnostic ? <Badge variant="outline">Needs attention</Badge> : null}<ChevronRight size={15} /></Button><Button variant="outline" size="sm" aria-label={`Test ${model.id}`} disabled={busy || Boolean(testingModelId) || settingsDirty || !catalogModel || Boolean(catalogModel.diagnostic)} onClick={() => void runTest(model.id)}>{testingModelId === `${selectedProviderId}\0${model.id}` ? <LoaderCircle size={14} className="desktopSettingsSpinner" /> : null}{testingModelId === `${selectedProviderId}\0${model.id}` ? "Testing…" : "Test"}</Button>{modelTest?.providerId === selectedProviderId && modelTest.model === model.id && selection.kind === "provider" ? <p className="desktopModelTestResult" data-success={testSucceeded(modelTest)} role="status">{testSucceeded(modelTest) ? <Check size={16} /> : <CircleAlert size={16} />}<span>{modelTest.model}: {testSummary(modelTest)}</span></p> : null}</div>;
+        })}</div>
+        {!modelRows.length ? <div className="desktopModelEmpty desktopModelEmpty--compact"><h3>No models added</h3><p>{selectedCustomProvider ? "Add a model ID from your provider to make it available in chats." : "This service has no models available."}</p>{selectedCustomProvider ? <Button variant="outline" disabled={busy} onClick={() => addModel(selectedProviderId!)}>Add your first model</Button> : null}</div> : !visibleModels.length ? <div className="desktopModelEmpty desktopModelEmpty--compact"><p>No models match “{modelQuery}”.</p><Button variant="ghost" onClick={() => setModelQuery("")}>Clear search</Button></div> : null}
       </section> : null}
     </>}
-    {message || loading ? <p className="modelServiceMessage" role="status">{message || "Loading…"}</p> : null}
-    {canResetUnsupportedConfig ? <button type="button" disabled={loading || busy} onClick={()=>void resetUnsupportedConfig()}>Reset configuration…</button> : null}
-    {selection.kind === "model" ? <ResourceDetailDialog title={selectedModelId || "New model"} onClose={cancelEdit}>
-          {selectedCustomModel ? <section className="modelsSection">
-            <div className="modelsSectionHeading"><span>MODEL</span><span className="modelsModelActions"><button type="button" className={testForSelectedModel && testSucceeded(testForSelectedModel) ? "modelsTestButton is-success" : "modelsTestButton"} disabled={!selectedCatalogModel || Boolean(selectedCatalogModel.diagnostic) || Boolean(testingModelId)} onClick={() => void runTest()}>{testingModelId === selectedTestId ? "Testing…" : testForSelectedModel ? (testSucceeded(testForSelectedModel) ? "OK" : testForSelectedModel.httpStatus ? `HTTP ${testForSelectedModel.httpStatus}` : "Failed") : "Test"}</button>{selectedCustomModel ? <button type="button" className="modelsDangerButton" onClick={() => void removeSelectedModel()}>Remove</button> : null}</span></div>
-            {selectedCatalogModel?.diagnostic ? <div className="modelsDiagnostic">{selectedCatalogModel.diagnostic}</div> : null}
-            {testForSelectedModel ? <div className={testSucceeded(testForSelectedModel) ? "modelsTestSummary is-success" : "modelsTestSummary"}>{testSummary(testForSelectedModel)}</div> : null}
-            <div className="modelsModelForm">
-              <label><span>ID *</span><input value={selectedCustomModel.model} onChange={(event) => updateCustomModel(selectedCustomModel.key, { model: event.target.value })} placeholder="model-id" /></label>
-              <label><span>Name</span><input value={selectedCustomModel.displayName} onChange={(event) => updateCustomModel(selectedCustomModel.key, { displayName: event.target.value })} placeholder="Optional home label" /></label>
-              <label><span>API override</span><select value={selectedCustomModel.apiOverride ?? ""} onChange={(event) => updateCustomModel(selectedCustomModel.key, { apiOverride: event.target.value ? event.target.value as ModelWireApi : undefined })}><option value="">Inherit provider</option>{API_OPTIONS.map((api) => <option key={api} value={api}>{api}</option>)}</select></label>
-              <label><span>Context window</span><input value={selectedCustomModel.contextTokens} onChange={(event) => updateCustomModel(selectedCustomModel.key, { contextTokens: event.target.value })} /></label>
-              <label><span>Max output</span><input value={selectedCustomModel.maxOutputTokens} onChange={(event) => updateCustomModel(selectedCustomModel.key, { maxOutputTokens: event.target.value })} /></label>
-              <label><span>Image input</span><input type="checkbox" checked={selectedCustomModel.supportsVision} onChange={(event) => updateCustomModel(selectedCustomModel.key, { supportsVision: event.target.checked })} /></label>
-            </div>
-          </section> : null}
-      {!selectedCustomModel ? <section><h2>{selectedModelId}</h2>{selectedCatalogModel?.diagnostic ? <p>{selectedCatalogModel.diagnostic}</p> : null}<button type="button" disabled={!selectedCatalogModel || !!selectedCatalogModel.diagnostic || !!testingModelId} onClick={()=>void runTest()}>{testingModelId ? "Testing…" : "Test"}</button>{testForSelectedModel ? <p className="modelsTestSummary">{testSummary(testForSelectedModel)}</p> : null}</section> : saveButtons}
-      {message ? <p role="status">{message}</p> : null}
-    </ResourceDetailDialog> : null}
-    {providerPickerOpen ? <ResourceDetailDialog title="Add service" onClose={()=>setProviderPickerOpen(false)}>
-      <h2>Add service</h2><label className="extensionSearch"><Search size={16}/><input aria-label="Search providers" placeholder="Search services" value={providerQuery} onChange={e=>setProviderQuery(e.target.value)}/></label>
-      <div className="modelServicePicker">
-        {customCandidateVisible ? <button type="button" onClick={addCustomProvider}><Plus size={16}/><span>Custom service<small>OpenAI / Anthropic compatible</small></span></button> : null}
-        {visibleApiProviders.map(provider=><button type="button" key={provider.providerId} onClick={()=>{openProvider(provider.providerId);setEditing(true);setProviderPickerOpen(false);}}><ProviderLogo svg={provider.logoSvg} name={provider.name}/><span>{provider.name}</span></button>)}
-        {providerPickerEmpty ? <p>No services found.</p> : null}
+    {busy && !editing ? <div className="desktopModelLoading" role="status"><LoaderCircle size={16} className="desktopSettingsSpinner" />Updating service…</div> : null}
+    {loading ? <div className="desktopModelLoading" role="status"><LoaderCircle size={16} className="desktopSettingsSpinner" />Loading model services…</div> : null}
+    {selection.kind !== "model" ? feedback : null}
+    {!loading && !config ? <div className="desktopModelRecovery"><Button variant="outline" disabled={busy} onClick={() => void load()}>Retry</Button>{canResetUnsupportedConfig ? <Button variant="destructive" disabled={busy} onClick={() => void resetUnsupportedConfig()}>Reset configuration…</Button> : null}</div> : null}
+    {selection.kind === "model" ? <SettingsDialog title={selectedModelId || "New model"} description={`${providerName} · ${selectedCustomModel ? "Model configuration" : "Connection test"}`} onClose={cancelEdit} busy={busy} initialFocus={selectedCustomModel ? dialogInput : undefined}>
+      <div className="desktopModelDialogToolbar"><span>{selectedCustomModel ? <Badge variant="secondary">{hasChanges ? "Unsaved changes" : "Custom model"}</Badge> : <Badge variant="secondary">Provider model</Badge>}</span><Button variant="outline" disabled={busy || settingsDirty || !selectedCatalogModel || Boolean(selectedCatalogModel.diagnostic) || Boolean(testingModelId)} onClick={() => void runTest()}>{isTestingSelectedModel ? <LoaderCircle size={15} className="desktopSettingsSpinner" /> : null}{isTestingSelectedModel ? "Testing…" : "Test"}</Button></div>
+      {selectedCatalogModel?.diagnostic ? <p className="desktopModelDiagnostic"><CircleAlert size={16} /><span>{selectedCatalogModel.diagnostic}</span></p> : null}
+      {selectedResult}
+      {selectedCustomModel ? <><div className="desktopModelForm">
+        <label className="desktopModelField">ID *<Input ref={dialogInput} value={selectedCustomModel.model} disabled={busy} onChange={event => updateCustomModel(selectedCustomModel.key, { model: event.target.value })} placeholder="model-id" /><small>Use the exact model ID accepted by this endpoint.</small></label>
+        <label className="desktopModelField">Name<Input value={selectedCustomModel.displayName} disabled={busy} onChange={event => updateCustomModel(selectedCustomModel.key, { displayName: event.target.value })} placeholder="Optional display name" /></label>
+        <div className="desktopModelField"><span>API override</span><ProtocolSelect value={selectedCustomModel.apiOverride ?? "inherit"} disabled={busy} inherit onChange={api => updateCustomModel(selectedCustomModel.key, { apiOverride: api === "inherit" ? undefined : api as ModelWireApi })} /><small>Inherit the provider protocol unless this model requires another one.</small></div>
+        <div className="desktopModelFormColumns"><label className="desktopModelField">Context window<Input value={selectedCustomModel.contextTokens} disabled={busy} onChange={event => updateCustomModel(selectedCustomModel.key, { contextTokens: event.target.value })} placeholder="128k" /></label><label className="desktopModelField">Max output<Input value={selectedCustomModel.maxOutputTokens} disabled={busy} onChange={event => updateCustomModel(selectedCustomModel.key, { maxOutputTokens: event.target.value })} placeholder="32k" /></label></div>
+        <label className="desktopModelCheckbox"><Checkbox aria-label="Image input" checked={selectedCustomModel.supportsVision} disabled={busy} onCheckedChange={checked => updateCustomModel(selectedCustomModel.key, { supportsVision: checked })} /><span><strong>Image input</strong><small>This model accepts images alongside text.</small></span></label>
+      </div>{settingsDirty ? <p className="desktopSettingsNote">Save changes before testing this model.</p> : null}
+      {feedback}<div className="desktopModelDialogFooter"><Button variant="ghost" className="desktopModelRemove" disabled={busy} onClick={() => void removeSelectedModel()}><Trash2 size={15} />Remove model</Button>{saveButtons}</div></> : feedback}
+    </SettingsDialog> : null}
+    {providerPickerOpen ? <SettingsDialog title="Add service" description="Choose a provider or connect your own compatible endpoint." onClose={() => setProviderPickerOpen(false)} initialFocus={dialogInput}>
+      <div className="desktopModelSearch"><Search size={16} /><Input ref={dialogInput} aria-label="Search providers" placeholder="Search services" value={providerQuery} onChange={event => setProviderQuery(event.target.value)} /></div>
+      <div className="desktopModelPicker">{customCandidateVisible ? <Button variant="ghost" className="desktopModelPickerRow" onClick={addCustomProvider}><span className="desktopModelProviderIcon"><Plus size={18} /></span><span><strong>Custom service</strong><small>OpenAI / Anthropic compatible</small></span><ChevronRight size={16} /></Button> : null}
+        {visibleApiProviders.map(provider => <Button variant="ghost" className="desktopModelPickerRow" key={provider.providerId} onClick={() => { openProvider(provider.providerId); setEditing(true); setProviderPickerOpen(false); }}><ProviderLogo svg={provider.logoSvg} name={provider.name} /><span><strong>{provider.name}</strong><small>{credentialLabel(provider)}</small></span><ChevronRight size={16} /></Button>)}
+        {providerPickerEmpty ? <div className="desktopModelEmpty desktopModelEmpty--compact"><p>No services found.</p><Button variant="ghost" onClick={() => setProviderQuery("")}>Clear search</Button></div> : null}
       </div>
-    </ResourceDetailDialog> : null}
+    </SettingsDialog> : null}
   </div>;
 }
 

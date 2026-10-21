@@ -50,6 +50,29 @@ A save includes the complete authoritative list, is not reentrant, and cannot
 overwrite a catalog changed during a drag. Failed writes return to the
 controller's reconciled order. Native file upload uses browser file interfaces.
 
+## Desktop pages and interactions
+
+The application bar keeps the theme control visible at the top left, including
+when navigation is collapsed. The workspace switcher shows the selected name and
+path, offers recent workspaces, and separates changing workspace from expanding
+its conversation group. Existing conversations show their title and own workspace;
+New chat uses a welcome surface with workspace actions and no conversation title.
+
+Sidebar row menus use explicit rename/save/cancel and confirmed deletion. Preview
+panes use keyboard-operated tabs, adjacent-tab focus after closing, an overflow
+list, retained view state, and retry for failed reads. Resources remain available
+from both the welcome surface and an existing conversation. The composer exposes
+available commands without discarding an unrelated draft; questions, model
+selection and MCP configuration use labelled controls with owned async receipts.
+
+Settings provides Appearance and Model services. Connection editing, model tests,
+custom model parameters and removals retain explicit saving, cancellation and
+failure recovery. Plugins and Skills share list/detail navigation, source and
+scope information, search, enablement and installation flows. Scheduled tasks
+exposes the Host list and occurrence history; creating or changing schedules
+continues through the agent. A page cannot imply a backend capability that the
+Host does not provide.
+
 ## State boundaries
 
 Session catalogs, workspace catalogs and preview tabs use one Zustand store per
@@ -66,6 +89,11 @@ cancellation and persistence contracts remain in Core and the existing hosts.
 Migrating a subscription mechanism does not redefine those contracts.
 
 ## Inline visualizations
+
+The built-in `inline-visualizations` System Skill teaches when and how to emit
+portable relationships. Its reference is generated from Core with the browser
+contracts; the ordinary root prompt keeps general policy. The System Skill bundle
+is packaged with Desktop and discovered through the existing Runtime mechanism.
 
 The shared adapter validates content before delegating presentation to a host.
 Desktop lazily loads its Nova mapping and the accepted compact visual language.

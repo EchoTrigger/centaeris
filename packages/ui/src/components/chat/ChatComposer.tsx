@@ -1,5 +1,8 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
+import { SquareTerminal } from "lucide-react";
+import { Button } from "../ui/button";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "../ui/dropdown-menu";
 import type {
   AgentContextUsageSummary,
   ModelThinkingMode,
@@ -217,11 +220,11 @@ const ChatComposerLifecycle = memo(function ChatComposerLifecycle({
     setActivePanel(null);
   }, [onReasoningEffortSelect]);
 
-  const runComposerCommand = (command: ComposerCommand) => {
+  const runComposerCommand = (command: ComposerCommand, fromInput = true) => {
     if (command.disabled) {
       return;
     }
-    onInputChange("");
+    if (fromInput || commandQuery !== null) onInputChange("");
     switch (command.id) {
       case "new":
         setActivePanel(null);
@@ -380,6 +383,12 @@ const ChatComposerLifecycle = memo(function ChatComposerLifecycle({
         onModelSelect={handleRuntimeModelSelect}
         onReasoningEffortSelect={handleRuntimeReasoningEffortSelect}
       />
+      <div className="desktopComposerFooter">
+        <DropdownMenu><DropdownMenuTrigger render={<Button variant="ghost" size="xs" aria-label="Composer commands" />}><SquareTerminal size={13} aria-hidden="true" /> Commands</DropdownMenuTrigger>
+          <DropdownMenuContent align="start" side="top" className="desktopComposerCommands">{commands.map(command => <DropdownMenuItem key={command.id} disabled={command.disabled} onClick={() => runComposerCommand(command, false)}><span>{command.description}</span><kbd>{command.name}</kbd></DropdownMenuItem>)}</DropdownMenuContent>
+        </DropdownMenu>
+        <span><kbd>Enter</kbd> to send · <kbd>Shift Enter</kbd> for a new line</span>
+      </div>
     </div>
   );
 });

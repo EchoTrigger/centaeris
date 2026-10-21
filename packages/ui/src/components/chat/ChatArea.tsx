@@ -15,6 +15,7 @@ import {
   GitBranch,
   HardDrive,
   Pencil,
+  Folder,
 } from "lucide-react";
 import { GitHubMarkIcon } from "../icons/GitHubMarkIcon";
 import type { UiSession } from "../../types/ui";
@@ -927,7 +928,7 @@ export function ChatArea({
       {syncError && !sessionLoadError ? (
         <div className="session-sync-status" role="status">
           <span>{t("chatArea.syncPaused", { message: syncError })}</span>
-          <button type="button" onClick={retrySessionSync}>{t("chatArea.retrySync")}</button>
+          <Button variant="outline" size="sm" type="button" onClick={retrySessionSync}>{t("chatArea.retrySync")}</Button>
         </div>
       ) : null}
 
@@ -1010,8 +1011,9 @@ export function ChatArea({
         >
         {chatViewMode === "welcome" ? (
           <div className="emptyChatIdentity">
-            <strong>Centaeris</strong>
-            <span>Run /help for commands</span>
+            <div className="desktopWelcomeWorkspace" aria-label="Current workspace" title={workspaceRoot ?? undefined}><Folder size={14} aria-hidden="true" /><strong>{workspaceName}</strong><span>{workspaceRoot}</span></div>
+            <strong>What would you like to work on?</strong>
+            <p>Describe a task, ask a question, or explore your project.</p>
           </div>
         ) : null}
         <div className="input-section">
@@ -1028,7 +1030,7 @@ export function ChatArea({
 
             {queuedNextPrompt.trim() ? (
               <div className="queuedNextPromptDrawer">
-                <div className="queuedNextPromptText">
+                <div className="queuedNextPromptText"><small>Queued for the next turn</small>
                   {queuedNextPrompt.trim()}
                 </div>
                 <div className="queuedNextPromptActions">

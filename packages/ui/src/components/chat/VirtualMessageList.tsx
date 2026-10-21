@@ -15,6 +15,7 @@ import {
 } from "./chatViewStore";
 import { formatUserMessageTimestamp } from "./chatRuntimeModel";
 import { Button } from "../ui/button";
+import { Textarea } from "../ui/textarea";
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import type { ChatMessage } from "./types";
 
@@ -80,24 +81,25 @@ const UserMessageRow = memo(function UserMessageRow({
     <div className={`message user-message ${isEditing ? "is-editing" : ""}`}>
       {isEditing ? (
         <div className="message-bubble user-edit-bubble">
-          <textarea
+          <Textarea
+            aria-label="Edit message"
             className="user-edit-textarea"
             value={editingPrompt}
             onChange={(event) => onEditingPromptChange(event.target.value)}
             autoFocus
           />
           <div className="user-edit-actions">
-            <button
+            <Button variant="outline" size="sm"
               type="button"
-              className="user-edit-secondary"
+              className="desktopUserEditCancel"
               onClick={onCancelEditingUserMessage}
-            >{t("virtualMessageList.cancel")}</button>
-            <button
+            >{t("virtualMessageList.cancel")}</Button>
+            <Button size="sm"
               type="button"
-              className="user-edit-primary"
+              className="desktopUserEditSubmit"
               onClick={() => onSubmitEditedUserMessage(message.id)}
               disabled={!editingPrompt.trim()}
-            >{t("composerPromptInput.send")}</button>
+            >{t("composerPromptInput.send")}</Button>
           </div>
         </div>
       ) : (

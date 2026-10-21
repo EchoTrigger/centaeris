@@ -24,13 +24,13 @@ distributed under the Apache License, Version 2.0, including Centaeris changes:
 | skill-installer | <https://github.com/openai/skills/tree/main/skills/.system/skill-installer> | [`LICENSE.txt`](system-skills/skill-installer/LICENSE.txt), [`NOTICE`](system-skills/skill-installer/NOTICE) |
 
 The exact upstream revisions used for the initial adaptations were not recorded.
-`runtime-recovery` is a Centaeris-authored System Skill covered by the project's
-AGPL-3.0-only license.
+`runtime-recovery` and `inline-visualizations` are Centaeris-authored System Skills
+covered by the project's AGPL-3.0-only license.
 
 ## shadcn/ui components
 
 Desktop foundational components (Button, Input, Textarea, Tooltip, Card, Badge,
-Separator, Dialog, Popover, Select and Dropdown Menu) are adapted from the official Base UI + Nova
+Separator, Dialog, Popover, Select, Dropdown Menu, Switch, Checkbox, Tabs and Scroll Area) are adapted from the official Base UI + Nova
 registry at https://ui.shadcn.com/r/styles/base-nova/.
 
 MIT License

@@ -3422,7 +3422,7 @@ button.agent-tool-chip {
 .contextWindowIndicator {
   width: 22px;
   height: 22px;
-  display: grid !important;
+  display: grid;
   place-items: center;
   padding: 0;
   border: 0;
@@ -3556,7 +3556,7 @@ button.agent-tool-chip {
   padding: 4px;
 }
 
-.slashCommandPanel button {
+.slashCommandPanel button:not([data-slot="button"]) {
   width: 100%;
   min-height: 31px;
   display: grid;
@@ -3572,12 +3572,12 @@ button.agent-tool-chip {
   cursor: pointer;
 }
 
-.slashCommandPanel button:hover,
-.slashCommandPanel button.is-selected {
+.slashCommandPanel button:not([data-slot="button"]):hover,
+.slashCommandPanel button:not([data-slot="button"]).is-selected {
   background: var(--surface-variant);
 }
 
-.slashCommandPanel button:disabled {
+.slashCommandPanel button:not([data-slot="button"]):disabled {
   opacity: 0.42;
   cursor: default;
 }
@@ -3664,7 +3664,7 @@ button.agent-tool-chip {
   color: var(--primary-color);
 }
 
-.slashCommandPanel .mcpPanelBack {
+.slashCommandPanel .mcpPanelBack:not([data-slot="button"]) {
   width: auto;
   min-height: 24px;
   display: flex;
@@ -3732,7 +3732,7 @@ button.agent-tool-chip {
   gap: 6px;
 }
 
-.slashCommandPanel .mcpConfigActions button {
+.slashCommandPanel .mcpConfigActions button:not([data-slot="button"]) {
   width: auto;
   min-height: 28px;
   display: block;

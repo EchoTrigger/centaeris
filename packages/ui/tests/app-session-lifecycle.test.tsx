@@ -441,3 +441,18 @@ test("clearing selection supersedes a pending workspace selection", async () => 
 
   await act(async () => renderer?.unmount());
 });
+
+
+test("new chat is a welcome surface without a conversation title; a real session restores its header", async () => {
+  let renderer!: ReactTestRenderer;
+  await act(async () => { renderer = create(<App />); });
+  const headers = () => renderer.root.findAllByProps({ "aria-label": "Conversation" });
+  expect(headers()).toHaveLength(1);
+  await act(async () => getSidebarProps().onNewChat());
+  expect(getSidebarProps().currentSessionId).toBeNull();
+  expect(headers()).toHaveLength(0);
+  await act(async () => getSidebarProps().onSelectSession("session-local"));
+  expect(headers()).toHaveLength(1);
+  expect(headers()[0].findAllByType("strong").some(node => node.children.join("") === "Session session-local")).toBe(true);
+  await act(async () => renderer.unmount());
+});

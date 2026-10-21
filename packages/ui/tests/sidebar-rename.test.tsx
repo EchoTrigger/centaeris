@@ -1,75 +1,100 @@
-vi.mock("../src/components/ui/dropdown-menu", async () => import("./helpers/menuTestDouble"));
-import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import { expect, test, vi } from "vitest";
+// @vitest-environment jsdom
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, expect, test, vi } from "vitest";
 import { Sidebar } from "../src/components/Sidebar";
-
-vi.mock("../src/components/WorkspaceFilesPanel", () => ({ WorkspaceFilesPanel: () => null }));
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-
+import { sidebarProps } from "./helpers/sidebarFixture";
+afterEach(cleanup);
 async function editing(onRenameSession = vi.fn(async () => {})) {
-  let renderer!: ReactTestRenderer;
-  const noop = () => {};
-  await act(async () => {
-    renderer = create(<Sidebar sessions={[{ id: "s", title: "Original", cwd: "D:/test", sessionKind: "main", messageCount: 1 }]}
-      currentSessionId="s" workspaces={[{ root: "D:/test", name: "test", sortOrder: 0, updatedAt: 0 }]} activeWorkspaceRoot={null} runningSessionIds={new Set()}
-      completedSessionIds={new Set()} workspaceCatalogError={null} onNewChat={noop} onOpenWorkspace={noop}
-      onSelectWorkspace={noop} onRetryWorkspaceCatalog={async () => {}} onResetWorkspaceCatalog={async () => {}}
-      onSelectSession={noop} onRenameSession={onRenameSession} onDeleteSession={async () => {}}
-      onOpenResource={noop} onOpenFile={noop} />);
-  });
-  await act(async () => renderer.root.findByProps({ "aria-label": "Rename Original" }).props.onClick());
-  const input = () => renderer.root.findByType("input");
-  await act(async () => input().props.onChange({ target: { value: "  Renamed  " } }));
-  return { renderer, input, onRenameSession };
+	const user = userEvent.setup();
+	render(<Sidebar {...sidebarProps({ onRenameSession })} />);
+	const trigger = screen.getByRole("button", { name: "Chat actions Original" });
+	await user.click(trigger);
+	await screen.findByRole("menu");
+	await user.click(screen.getByRole("menuitem", { name: "Rename Original" }));
+	const input = await screen.findByRole("textbox", {
+		name: "Conversation name",
+	});
+	await waitFor(() => expect(document.activeElement).toBe(input));
+	return { user, input, trigger, onRenameSession };
 }
-
-test("blur saves a trimmed title and exits editing", async () => {
-  const f = await editing();
-  await act(async () => f.input().props.onBlur());
-  expect(f.onRenameSession).toHaveBeenCalledExactlyOnceWith("s", "Renamed");
-  expect(f.renderer.root.findAllByType("input")).toHaveLength(0);
-  await act(async () => f.renderer.unmount());
+test("rename has explicit Save and Cancel; blur retains the draft and Save trims it", async () => {
+	const f = await editing();
+	await f.user.clear(f.input);
+	await f.user.type(f.input, "  Renamed  ");
+	await f.user.tab();
+	expect(f.onRenameSession).not.toHaveBeenCalled();
+	expect((f.input as HTMLInputElement).value).toBe("  Renamed  ");
+	await f.user.click(screen.getByRole("button", { name: "Save" }));
+	await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+	expect(f.onRenameSession).toHaveBeenCalledExactlyOnceWith("s", "Renamed");
+	await waitFor(() => expect(document.activeElement).toBe(f.trigger));
 });
-
-test("Enter followed by blur saves once; Escape followed by blur saves nothing", async () => {
-  let finish!: () => void;
-  const f = await editing(vi.fn(() => new Promise<void>((resolve) => { finish = resolve; })));
-  const blur = f.input().props.onBlur;
-  await act(async () => {
-    f.renderer.root.findByType("form").props.onSubmit({ preventDefault() {} });
-    blur();
-  });
-  expect(f.onRenameSession).toHaveBeenCalledTimes(1);
-  await act(async () => finish());
-  await act(async () => f.renderer.unmount());
-
-  const cancelled = await editing();
-  const cancelledBlur = cancelled.input().props.onBlur;
-  await act(async () => {
-    cancelled.input().props.onKeyDown({ key: "Escape", preventDefault() {} });
-    cancelledBlur();
-  });
-  expect(cancelled.onRenameSession).not.toHaveBeenCalled();
-  await act(async () => cancelled.renderer.unmount());
+test("pending save cannot submit twice or dismiss on Escape", async () => {
+	let finish!: () => void;
+	const f = await editing(
+		vi.fn(
+			() =>
+				new Promise<void>((resolve) => {
+					finish = resolve;
+				}),
+		),
+	);
+	await f.user.clear(f.input);
+	await f.user.type(f.input, "Renamed{Enter}{Enter}{Escape}");
+	expect(f.onRenameSession).toHaveBeenCalledTimes(1);
+	expect(screen.getByRole("dialog")).toBeTruthy();
+	expect(
+		(screen.getByRole("button", { name: "Saving…" }) as HTMLButtonElement)
+			.disabled,
+	).toBe(true);
+	await act(async () => finish());
+	await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
-
-test("a blank name dismisses editing without replacing the original", async () => {
-  const f = await editing();
-  await act(async () => f.input().props.onChange({ target: { value: "  " } }));
-  await act(async () => f.input().props.onBlur());
-  expect(f.onRenameSession).not.toHaveBeenCalled();
-  expect(f.renderer.root.findAllByType("input")).toHaveLength(0);
-  await act(async () => f.renderer.unmount());
+test("Escape cancels without saving, blank titles remain editable, and failed save can retry", async () => {
+	const f = await editing(
+		vi
+			.fn()
+			.mockRejectedValueOnce(Error("Save unavailable"))
+			.mockResolvedValueOnce(undefined),
+	);
+	await f.user.clear(f.input);
+	await f.user.type(f.input, "  ");
+	expect(
+		(screen.getByRole("button", { name: "Save" }) as HTMLButtonElement)
+			.disabled,
+	).toBe(true);
+	await f.user.keyboard("{Escape}");
+	await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+	expect(f.onRenameSession).not.toHaveBeenCalled();
+	await f.user.click(f.trigger);
+	await screen.findByRole("menu");
+	await f.user.click(screen.getByRole("menuitem", { name: "Rename Original" }));
+	const input = await screen.findByRole("textbox");
+	await f.user.clear(input);
+	await f.user.type(input, "Retry name");
+	await f.user.click(screen.getByRole("button", { name: "Save" }));
+	expect((await screen.findByRole("alert")).textContent).toContain(
+		"Save unavailable",
+	);
+	expect((input as HTMLInputElement).value).toBe("Retry name");
+	await f.user.click(screen.getByRole("button", { name: "Save" }));
+	await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+	expect(f.onRenameSession).toHaveBeenCalledTimes(2);
 });
-
-test("sidebar uses application navigation and separate pinned/recent groups", async () => {
-  const f = await editing();
-  await act(async () => f.input().props.onKeyDown({ key: "Escape", preventDefault() {} }));
-  expect(f.renderer.root.findAllByProps({ "aria-label": "Current project" })).toHaveLength(0);
-  expect(f.renderer.root.findByProps({ "aria-label": "Scheduled" })).toBeTruthy();
-  expect(JSON.stringify(f.renderer.toJSON())).not.toContain("No chats");
-  expect(f.renderer.root.findByProps({ "aria-label": "Settings" })).toBeTruthy();
-  expect(f.renderer.root.findByProps({ "aria-label": "Pinned" })).toBeTruthy();
-  expect(f.renderer.root.findByProps({ "aria-label": "Recents" })).toBeTruthy();
-  await act(async () => f.renderer.unmount());
+test("application navigation and expanded/collapsed workspace entry remain discoverable", async () => {
+	const props = sidebarProps();
+	const view = render(<Sidebar {...props} />);
+	expect(screen.getByRole("navigation", { name: "Application" })).toBeTruthy();
+	expect(screen.getByRole("region", { name: "Pinned" })).toBeTruthy();
+	expect(screen.getByRole("region", { name: "Recents" })).toBeTruthy();
+	expect(screen.getByRole("button", { name: "Scheduled" })).toBeTruthy();
+	view.rerender(<Sidebar {...props} collapsed />);
+	expect(screen.queryByRole("region", { name: "Recents" })).toBeNull();
+	expect(
+		screen
+			.getByRole("button", { name: "Switch workspace: test" })
+			.getAttribute("title"),
+	).toBe("D:/test");
+	expect(screen.getByRole("button", { name: "Settings" })).toBeTruthy();
 });

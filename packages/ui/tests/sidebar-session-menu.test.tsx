@@ -1,39 +1,80 @@
-vi.mock("../src/components/ui/dropdown-menu", async () => import("./helpers/menuTestDouble"));
-import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import { expect, test, vi } from "vitest";
+// @vitest-environment jsdom
+import {
+	act,
+	cleanup,
+	render,
+	screen,
+	waitFor,
+	within,
+} from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, expect, test, vi } from "vitest";
 import { Sidebar } from "../src/components/Sidebar";
-vi.mock("../src/components/WorkspaceFilesPanel", () => ({ WorkspaceFilesPanel: () => null }));
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-
-async function sidebar(onDeleteSession = vi.fn(async () => {})) {
-  let view!: ReactTestRenderer;
-  const noop = () => {};
-  await act(async () => { view = create(<Sidebar sessions={[{id:"s",title:"Original",cwd:"/test",sessionKind:"main",messageCount:1}]} currentSessionId="s" workspaces={[{root:"/test",name:"test",sortOrder:0,updatedAt:0}]} activeWorkspaceRoot={null} runningSessionIds={new Set(["s"])} completedSessionIds={new Set()} workspaceCatalogError={null} onNewChat={noop} onOpenWorkspace={noop} onSelectWorkspace={noop} onRetryWorkspaceCatalog={async()=>{}} onResetWorkspaceCatalog={async()=>{}} onSelectSession={noop} onRenameSession={async()=>{}} onDeleteSession={onDeleteSession} onOpenResource={noop} onOpenFile={noop}/>); });
-  await act(async () => view.root.findByProps({"aria-label":"Delete Original"}).props.onClick());
-  return { view, onDeleteSession };
+import { sidebarProps } from "./helpers/sidebarFixture";
+afterEach(cleanup);
+async function deleting(onDeleteSession = vi.fn(async () => {})) {
+	const user = userEvent.setup();
+	render(
+		<Sidebar
+			{...sidebarProps({ runningSessionIds: new Set(["s"]), onDeleteSession })}
+		/>,
+	);
+	const trigger = screen.getByRole("button", { name: "Chat actions Original" });
+	await user.click(trigger);
+	await screen.findByRole("menu");
+	await user.click(screen.getByRole("menuitem", { name: "Delete Original" }));
+	const dialog = await screen.findByRole("dialog", {
+		name: "Delete conversation?",
+	});
+	return { user, trigger, dialog, onDeleteSession };
 }
-test("a running session can be deleted only after inline confirmation", async () => {
-  const {view,onDeleteSession} = await sidebar();
-  expect(onDeleteSession).not.toHaveBeenCalled();
-  const dialog = view.root.findByProps({role:"alertdialog"});
-  expect(dialog.props["aria-label"]).toBe("Delete Original?");
-  const buttons = dialog.findAllByType("button");
-  expect(buttons[1].props.autoFocus).toBe(true);
-  expect(buttons[0].props.disabled).toBe(false);
-  await act(async () => buttons[0].props.onClick());
-  expect(onDeleteSession).toHaveBeenCalledExactlyOnceWith("s");
-  expect(view.root.findAllByProps({role:"alertdialog"})).toHaveLength(0);
-  await act(async () => view.unmount());
+test("running conversation deletion needs confirmation and pending delete cannot reenter", async () => {
+	let finish!: () => void;
+	const f = await deleting(
+		vi.fn(
+			() =>
+				new Promise<void>((resolve) => {
+					finish = resolve;
+				}),
+		),
+	);
+	expect(f.onDeleteSession).not.toHaveBeenCalled();
+	expect(f.dialog.textContent).toContain(
+		"Running work in this conversation will be stopped",
+	);
+	await f.user.click(within(f.dialog).getByRole("button", { name: "Delete" }));
+	await f.user.keyboard("{Enter}{Escape}");
+	expect(f.onDeleteSession).toHaveBeenCalledExactlyOnceWith("s");
+	expect(screen.getByRole("dialog")).toBeTruthy();
+	await act(async () => finish());
+	await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
-test("Escape and leaving the confirmation cancel; internal focus movement retains it", async () => {
-  const {view,onDeleteSession} = await sidebar();
-  await act(async () => view.root.findByProps({role:"alertdialog"}).props.onBlur({currentTarget:{contains:()=>true},relatedTarget:{}}));
-  expect(view.root.findAllByProps({role:"alertdialog"})).toHaveLength(1);
-  await act(async () => view.root.findByProps({role:"alertdialog"}).props.onKeyDown({key:"Escape"}));
-  expect(view.root.findAllByProps({role:"alertdialog"})).toHaveLength(0);
-  await act(async () => view.root.findByProps({"aria-label":"Delete Original"}).props.onClick());
-  await act(async () => view.root.findByProps({role:"alertdialog"}).props.onBlur({currentTarget:{contains:()=>false},relatedTarget:null}));
-  expect(view.root.findAllByProps({role:"alertdialog"})).toHaveLength(0);
-  expect(onDeleteSession).not.toHaveBeenCalled();
-  await act(async () => view.unmount());
+test("Escape or Cancel restores the conversation action trigger without deleting", async () => {
+	const f = await deleting();
+	await f.user.keyboard("{Tab}");
+	expect(f.dialog.contains(document.activeElement)).toBe(true);
+	await f.user.keyboard("{Escape}");
+	await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+	await waitFor(() => expect(document.activeElement).toBe(f.trigger));
+	await f.user.click(f.trigger);
+	await screen.findByRole("menu");
+	await f.user.click(screen.getByRole("menuitem", { name: "Delete Original" }));
+	await f.user.click(await screen.findByRole("button", { name: "Cancel" }));
+	await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+	expect(f.onDeleteSession).not.toHaveBeenCalled();
+});
+test("failed deletion retains the confirmation and offers retry", async () => {
+	const f = await deleting(
+		vi
+			.fn()
+			.mockRejectedValueOnce(Error("Delete unavailable"))
+			.mockResolvedValueOnce(undefined),
+	);
+	await f.user.click(within(f.dialog).getByRole("button", { name: "Delete" }));
+	expect((await screen.findByRole("alert")).textContent).toContain(
+		"Delete unavailable",
+	);
+	await f.user.click(within(f.dialog).getByRole("button", { name: "Delete" }));
+	await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+	expect(f.onDeleteSession).toHaveBeenCalledTimes(2);
 });

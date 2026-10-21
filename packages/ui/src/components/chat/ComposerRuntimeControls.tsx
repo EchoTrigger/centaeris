@@ -2,7 +2,6 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrig
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { t } from "../../i18n";
 import { memo, useMemo, type CSSProperties } from "react";
-import { Image } from "lucide-react";
 import type {
   AgentContextUsageSummary,
   ModelThinkingMode,
@@ -88,9 +87,6 @@ export const ComposerRuntimeControls = memo(function ComposerRuntimeControls({
     <>
       <div className="composerMetaRow">
         <div className="composerMetaGroup">
-          <span className="composer-chip composerImageIndicator" title={t("composerRuntimeControls.image")}>
-            <Image className="composerLucideIcon" aria-hidden="true" />
-          </span>
           <Select value={activeModel ? JSON.stringify([activeModel.providerId, activeModel.model]) : null}
             open={activePanel === "model"}
             onOpenChange={(open) => onPanelChange(open ? "model" : null)}
@@ -98,7 +94,7 @@ export const ComposerRuntimeControls = memo(function ComposerRuntimeControls({
               const model = selectableModels.find((item) => JSON.stringify([item.providerId, item.model]) === value);
               if (model) onModelSelect(model);
             }}>
-            <SelectTrigger className="composer-chip" title={modelRuntimeSummary} aria-label={t("composerRuntimeControls.globalModels")}>
+            <SelectTrigger disabled={selectableModels.length === 0} className="composer-chip" title={modelRuntimeSummary} aria-label={t("composerRuntimeControls.globalModels")}>
               <span>{activeModelIndex >= 0 ? (activeModel?.displayName || activeModel?.model) : t("composerRuntimeControls.noModelConfigured")}</span>
             </SelectTrigger>
             <SelectContent side="top" align="start" alignItemWithTrigger={false} className="min-w-64">
@@ -131,15 +127,16 @@ export const ComposerRuntimeControls = memo(function ComposerRuntimeControls({
               title="Context window"
               aria-expanded={activePanel === "context"}
             >
-              <span style={{ "--context-used": `${usedPercentage * 3.6}deg` } as CSSProperties} />
+              <span style={{ "--context-used": `${usedPercentage * 3.6}deg` } as CSSProperties} /><small>Context{contextUsage ? ` ${usedPercentage}%` : ""}</small>
             </PopoverTrigger>
-              <PopoverContent side="top" align="end" className="contextWindowPanel">
+              <PopoverContent side="top" align="end" className="contextWindowPanel" aria-label="Context window">
                 <header>
                   <span>Context window</span>
                   <strong title={`${formatTokenCount(usedTokens)} / ${formatTokenCount(maxContextTokens)}`}>
                     {formatContextTokenCount(usedTokens)} / {formatContextTokenCount(maxContextTokens)} ({usedPercentage}%)
                   </strong>
                 </header>
+                {!contextUsage ? <p className="desktopContextEmpty">Context usage is not available yet.</p> : null}
                 <div className="contextWindowBar">
                   {contextSegments.filter(([, tokens]) => tokens > 0).map(([label, tokens, kind]) => (
                     <i

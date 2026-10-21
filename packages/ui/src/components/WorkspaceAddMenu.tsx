@@ -1,20 +1,35 @@
 import { Button } from "./ui/button";
-import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
+import {
+	Popover,
+	PopoverContent,
+	PopoverTrigger,
+	PopoverTitle,
+} from "./ui/popover";
 import { useEffect, useRef, useState } from "react";
-import { Plus } from "lucide-react";
+import {
+	Plus,
+	ChevronDown,
+	FolderOpen,
+	FileDiff,
+	TerminalSquare,
+	Loader2,
+} from "lucide-react";
 import {
 	createTerminal,
 	listTerminals,
 	type TerminalSnapshot,
 	type TerminalList,
 } from "../lib/terminalBridge";
+import "../styles/desktop-workbench.css";
 export function WorkspaceAddMenu({
 	root,
 	sessionId,
 	onFiles,
 	onReview,
 	onTerminal,
+	triggerLabel,
 }: {
+	triggerLabel?: string;
 	root: string;
 	sessionId: string | null;
 	onFiles: () => void;
@@ -31,20 +46,27 @@ export function WorkspaceAddMenu({
 		null,
 	);
 	const [open, setOpen] = useState(false);
+	const [listRevision, setListRevision] = useState(0);
 	const [list, setList] = useState<TerminalList | null>(null);
 	const [error, setError] = useState("");
 	const [busy, setBusy] = useState(false);
 	const activeStart = useRef<object | null>(null);
 	useEffect(() => {
 		// A departed view cannot own the new view's retry, error or busy state.
-		if (pendingStart.current?.workspaceRoot !== root || pendingStart.current?.sessionId !== sessionId) {
+		if (
+			pendingStart.current?.workspaceRoot !== root ||
+			pendingStart.current?.sessionId !== sessionId
+		) {
 			activeStart.current = null;
 			pendingStart.current = null;
 			setError("");
 			setBusy(false);
 		}
-		return () => { activeStart.current = null; };
+		return () => {
+			activeStart.current = null;
+		};
 	}, [root, sessionId]);
+	// biome-ignore lint/correctness/useExhaustiveDependencies: listRevision is the explicit retry trigger after a failed terminal catalog request.
 	useEffect(() => {
 		if (!open) return;
 		let disposed = false;
@@ -53,7 +75,10 @@ export function WorkspaceAddMenu({
 		void listTerminals(root)
 			.then((v) => {
 				if (disposed) return;
-				if (pendingStart.current && pendingStart.current.serviceInstanceId !== v.serviceInstanceId) {
+				if (
+					pendingStart.current &&
+					pendingStart.current.serviceInstanceId !== v.serviceInstanceId
+				) {
 					activeStart.current = null;
 					pendingStart.current = null;
 					setBusy(false);
@@ -63,14 +88,17 @@ export function WorkspaceAddMenu({
 			.catch((e) => {
 				if (!disposed) setError(String(e));
 			});
-		return () => { disposed = true; };
-	}, [open, root]);
+		return () => {
+			disposed = true;
+		};
+	}, [open, root, listRevision]);
 	const start = async () => {
 		if (!list || busy || activeStart.current) return;
 		const scope = scopeRef.current;
 		const owner = {};
 		activeStart.current = owner;
-		const isCurrent = () => scopeRef.current === scope && activeStart.current === owner;
+		const isCurrent = () =>
+			scopeRef.current === scope && activeStart.current === owner;
 		setBusy(true);
 		setError("");
 		try {
@@ -108,62 +136,120 @@ export function WorkspaceAddMenu({
 		}
 	};
 	return (
-		<Popover open={open} onOpenChange={setOpen}><div className="workspaceAddMenu">
-			<PopoverTrigger render={<Button variant="ghost" size="icon" aria-label="Add workspace tab" />}>
-				<Plus size={16} />
-			</PopoverTrigger>
-			{open ? (
-				<PopoverContent align="end" className="workspaceAddChoices">
-					<button
-						type="button"
-						onClick={() => {
-							onFiles();
-							setOpen(false);
-						}}
-					>
-						Files
-					</button>
-					<button
-						type="button"
-						onClick={() => {
-							onReview();
-							setOpen(false);
-						}}
-					>
-						Review
-					</button>
-					<button
-						type="button"
-						disabled={busy || !list}
-						onClick={() => void start()}
-					>
-						{busy ? "Starting…" : "Terminal"}
-					</button>
-					{list?.terminals.length ? (
+		<Popover open={open} onOpenChange={setOpen}>
+			<div className="workspaceAddMenu">
+				<PopoverTrigger
+					render={
+						<Button
+							variant="ghost"
+							size={triggerLabel ? "sm" : "icon"}
+							className="desktopTerminalTrigger"
+							aria-label={
+								triggerLabel ? "Terminal options" : "Add workspace tab"
+							}
+						/>
+					}
+				>
+					{triggerLabel ? (
 						<>
-							<small>Existing terminals</small>
-							{list.terminals.map((terminal, index) => (
-								<button
-									type="button"
-									key={terminal.terminalId}
-									onClick={() => {
-										onTerminal(
-											terminal,
-											list.serviceInstanceId,
-											`${terminal.shell.split(/[\\/]/).pop()} ${index + 1}`,
-										);
-										setOpen(false);
-									}}
-								>
-									{terminal.shell.split(/[\\/]/).pop()} {index + 1} ·{" "}
-									{terminal.state}
-								</button>
-							))}
+							<TerminalSquare size={15} aria-hidden="true" />
+							<span>{triggerLabel}</span>
+							<ChevronDown size={12} aria-hidden="true" />
 						</>
-					) : null}
-					{error ? <p role="status">{error}</p> : null}
-				</PopoverContent>
-			) : null}
-		</div></Popover>
+					) : (
+						<Plus size={16} aria-hidden="true" />
+					)}
+				</PopoverTrigger>
+				{open ? (
+					<PopoverContent align="end" className="desktopViewChoices">
+						<PopoverTitle>Workspace views</PopoverTitle>
+						<Button
+							variant="ghost"
+							type="button"
+							onClick={() => {
+								onFiles();
+								setOpen(false);
+							}}
+						>
+							<FolderOpen size={16} aria-hidden="true" />
+							Files
+						</Button>
+						<Button
+							variant="ghost"
+							type="button"
+							onClick={() => {
+								onReview();
+								setOpen(false);
+							}}
+						>
+							<FileDiff size={16} aria-hidden="true" />
+							Review
+						</Button>
+						<Button
+							variant="ghost"
+							type="button"
+							disabled={busy || !list}
+							onClick={() => void start()}
+						>
+							{busy ? (
+								<Loader2
+									size={16}
+									className="workbenchSpinner"
+									aria-hidden="true"
+								/>
+							) : (
+								<TerminalSquare size={16} aria-hidden="true" />
+							)}
+							{busy ? "Starting…" : "Terminal"}
+						</Button>
+						{list?.terminals.length ? (
+							<>
+								<small className="desktopViewSectionLabel">
+									Existing terminals
+								</small>
+								{list.terminals.map((terminal, index) => (
+									<Button
+										variant="ghost"
+										type="button"
+										key={terminal.terminalId}
+										onClick={() => {
+											onTerminal(
+												terminal,
+												list.serviceInstanceId,
+												`${terminal.shell.split(/[\\/]/).pop()} ${index + 1}`,
+											);
+											setOpen(false);
+										}}
+									>
+										<TerminalSquare size={16} aria-hidden="true" />
+										{terminal.shell.split(/[\\/]/).pop()} {index + 1} ·{" "}
+										{terminal.state}
+									</Button>
+								))}
+							</>
+						) : null}
+						{!list && !error ? (
+							<p className="desktopViewLoading" role="status">
+								Loading terminals…
+							</p>
+						) : null}
+						{error ? (
+							<div className="workbenchInlineError" role="alert">
+								<p>{error}</p>
+								{!list ? (
+									<Button
+										variant="outline"
+										size="sm"
+										onClick={() => setListRevision((value) => value + 1)}
+									>
+										Retry
+									</Button>
+								) : null}
+							</div>
+						) : null}
+					</PopoverContent>
+				) : null}
+			</div>
+		</Popover>
 	);
 }
