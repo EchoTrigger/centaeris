@@ -228,7 +228,48 @@ PostgreSQL [LISTEN](https://www.postgresql.org/docs/current/sql-listen.html) req
 
 Matklad's [Benchmark In Milliseconds](https://matklad.github.io/2026/10/05/benchmark-milliseconds.html) recommends adjusting a microbenchmark's input size until one run takes roughly 300 ms, supporting quick repeated comparisons and intuition. That duration is a benchmark-method choice, not a resource-release, scheduler or end-to-end latency objective. Product timings retain their actual duration.
 
-The next physical comparison keeps execution capacity at 8/4/8, sandbox ceilings at 8 GiB/four CPUs/512 PIDs, and the queue fixture's 8 GiB resident boundary. Measure release recorded to next claim recorded separately from cancel request to the next actual workload. Also record admission through final lifecycle Job completion for a fixed local-model tool workload, with existing Session events, Runtime startup profiles, cleanup/release facts and a live private Docker event stream. Client totals use a monotonic clock; recorded facts use the common WSL wall clock and are not exact database commit acknowledgements. Polling adds observation delay. Three repetitions establish directional evidence, not latency percentiles or a production SLO. Cached-image new instances and same-instance retained reuse are distinct conditions; this experiment does not claim cold remote image download or page-cache eviction.
+The repaired physical comparison keeps execution capacity at 8/4/8, sandbox ceilings at 8 GiB/four CPUs/512 PIDs, and the queue fixture's 8 GiB resident boundary. Measure release recorded to next claim recorded separately from cancel request to the next actual workload. Also record admission through final lifecycle Job completion for a fixed local-model tool workload, with existing Session events, Runtime startup profiles, cleanup/release facts and a live private Docker event stream. Client totals use a monotonic clock; recorded facts use the common WSL wall clock and are not exact database commit acknowledgements. Polling adds observation delay. Three repetitions establish directional evidence, not latency percentiles or a production SLO. Cached-image new instances and same-instance retained reuse are distinct conditions; this experiment does not claim cold remote image download or page-cache eviction.
+
+## Capacity wake and full-call observations
+
+The repaired Runtime was built from `70d98b0d144e8bd16ef8b65ebbff26e7bdc472db`. To control variables, the supervisor, static execution helper and sandbox image remained at the previously measured `91c7e4280787940c99439d25900c2bdc51b1f2e5` baseline; their protocol did not change. The Runtime image was `sha256:5500bb5272c6efda20e8c02f2a1ebb34a97f5b1b7e0b409d716ec13cb154e359`, with Runtime binary SHA-256 `979a661c4adcfc34ca89b5e9a37d1067752439e665cefc77986f750aa7a2ac04`. Supervisor and helper SHA-256 were respectively `1b5d6da26ce8e116a91ff9041e7aca9f703f87c4e06e6eb605390754691b1e29` and `1010e74091070431900913fe5ce1b6a013f294f76e793d405f4d81c4d532961d`. API and Worker production sources were unchanged from that baseline. Execution remained 8/4/8; no Windows pagefile setting changed.
+
+The same three A/B/C capacity trials passed with a private 8 GiB global resident budget. C cancellation preserved A and left B waiting. Removing A enabled B without manual intervention; all nine lifecycle Jobs settled, and every trial ended with zero holdings and managed containers. Each physically executed Run had exactly one terminal, cleanup and release fact. The new claim event recorded these intervals:
+
+| Trial | Release recorded to B claim recorded, ms | C cancellation to Job completion observed, ms | A cancellation flow invocation to B workload observed, ms |
+| --- | --- | --- | --- |
+| 1 | 29 | 971.99 | 9923.72 |
+| 2 | 26 | 2101.89 | 9795.27 |
+| 3 | 22 | 950.66 | 10547.52 |
+
+The durable eligibility change removes the timer-induced wait in these trials. The final column improves on the baseline's 29.6-30.1 seconds, but includes sequential pre-cancel verification, database/container observations and guest-file/task queries. It is not release-to-start latency. It must not be replaced by the 22-29 ms claim interval either. A subsequent diagnostic uses Docker event timestamps and the workload's own leader/child file modification times to separate physical progress from observation overhead.
+
+One additional instrumented trial retained the same frozen binaries and limits. Its release-record-to-claim interval was 87 ms. Docker's event stream recorded container creation 338.78 ms after release and start at 565.55 ms. The first model-request record was at 3400 ms, the first tool-call record at 6169 ms, and both workload leader/child marker files existed by their own filesystem timestamps at 6682.95 ms. The sequential observer reported 9660.42 ms from cancellation-flow invocation to discovering the live workload. Thus observation overhead matters, but the remaining delay also includes real time after container start. All three Runs settled, holdings/managed containers returned to zero, and the existing application was unchanged. This diagnostic is one additional sample, not a new percentile estimate; all four observed claim intervals were 22/26/29/87 ms.
+
+A separate six-call experiment used the same deterministic local model and a single successful `printf` tool before normal completion. The global resident budget returned to the example's 32 GiB; Workspace resident capacity stayed 8 GiB. Each perRun call used a new Session; the retained calls shared one Session and one verified physical container. Images were cached. The first retained call created that container, and the next two reused it.
+
+| Call | Admission HTTP, ms | First successful tool recorded, ms | Run terminal recorded, ms | Lifecycle complete recorded, ms | Lifecycle complete observed, ms |
+| --- | --- | --- | --- | --- | --- |
+| New perRun 1 | 106.86 | 7550.06 | 11421.06 | 13776.06 | 13792.00 |
+| New perRun 2 | 58.60 | 6770.39 | 10560.39 | 12926.39 | 13177.83 |
+| New perRun 3 | 50.64 | 6621.44 | 10560.44 | 12914.44 | 13200.90 |
+| First retained | 56.49 | 4005.75 | 5265.75 | 6338.75 | 6784.02 |
+| Same-instance retained 1 | 40.32 | 3714.59 | 4875.59 | 5956.59 | 6298.63 |
+| Same-instance retained 2 | 37.12 | 3757.03 | 4937.03 | 6039.03 | 6248.23 |
+
+All columns after admission are cumulative from request initiation, not additive phase durations. Recorded facts use the shared WSL wall clock; the last column is a client monotonic total ending at observation. Each Run had one terminal and complete cleanup/release receipt pair. PerRun calls removed their exact container and holding. Retained calls kept the same container and holding; their completion is Run completion, not Environment retirement.
+
+The three perRun startup profiles reported sandbox ensure of 1550/1593/1500 ms and total profiled startup of 1600/1642/1543 ms. First retained ensure was 1509 ms; same-instance ensure was still 1252/1249 ms, with startup totals 1324/1348 ms. New containers' Docker create-to-start intervals were approximately 187-211 ms. Even same-instance calls therefore spend time in preparation beyond container creation.
+
+PerRun's first model-request record preceded its first tool-call record by 3404/2737/2718 ms; the corresponding retained gaps were 94/97/109 ms. PerRun terminal-to-cleanup-record gaps were 2300/2318/2307 ms, versus 1027/1036/1056 ms for retained. These are measured regions, not proof of which function dominates them. Trace the pre-dispatch/checkpoint and terminal cleanup boundaries before choosing the next optimization. The experiment has not established that remote image paging or a different isolation runtime would remove these intervals.
+
+These small samples provide optimization intuition, not percentiles or a production latency commitment. They exclude external model/provider latency, cold image downloads, CPU-heavy agent throughput and storage-quota acceptance. Fixture cleanup of the retained container does not validate the product's Environment retirement contract. Both experiments removed their owned daemons/resources and verified the existing application's container IDs, image IDs and start times were unchanged.
+
+### Validation of the capacity wake candidate
+
+The focused baseline first failed the future-deadline and release-before-yield regressions while preserving the Unknown-removal guard. The final complete PostgreSQL gate passed all 178 discovered identities, including all seven new capacity-wake cases and the required manifest. Coverage includes release/yield races, reopen without relying on notifications, unknown and rolled-back removal, full execution/Workspace capacity, reclaim embargo, conversion to question waiting, schema-15-to-16 preservation and drift rejection. Legacy scheduling/terminal fixtures now supply the canonical lifecycle binding and required settlement facts; production completion guards were not weakened. Terminal append still exercises all three business terminal kinds, stale-owner rejection, transaction rollback, waiter consumption, terminal outbox publication, acknowledgement and reopen.
+
+The Rust source gate passed, including 129 Core query-loop tests and the full local-product Rust suite. Runtime's ordinary suite passed 468 tests with 211 opt-in tests excluded from that ordinary result; the PostgreSQL gate above executes its selected opt-in cases separately. Warning-denied Runtime Clippy, formatting, whitespace and all 11 PostgreSQL gate-driver checks passed. These results establish this repair and its measured WSL paths, not the remaining storage, no-Run creation, retirement, target-host or default-retained acceptance requirements.
 
 ## Verified control boundary
 
