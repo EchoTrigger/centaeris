@@ -112,8 +112,10 @@ associations and preserves historical signed grants. Migrations `0017` through
 `0023_unified_environment_profile` reconstructs known profile records while
 retaining their original evidence. `0024_environment_provision_authority` and
 `0025_maintenance_grant_digest` add independent provision ownership and immutable
-maintenance grant digests. Runtime schema 13 retains prior allocations and
-resource reservations.
+maintenance grant digests. Runtime forward migrations preserve prior allocations
+and resource reservations; the [lifecycle reclamation contract](EnvironmentLifecycleReclamation.md)
+describes creation-attempt evidence, execution/control lease purposes and their
+matching-stack upgrade boundary.
 
 Historical reconstruction is explicit migration code. Current execution readers
 define only the current structure. Signed historical payloads are never silently

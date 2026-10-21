@@ -71,6 +71,31 @@ Every target had exactly one durable cancellation-intent event. Targets had no a
 
 The first demonstrated obstruction is execution-capacity eligibility at ready/claim: cancellation is acknowledged promptly but cannot obtain processing while ordinary execution is full. Releasing one unrelated execution owner removes that obstruction immediately. The control-lease implementation above and service-chain follow-up below address that obstruction. This experiment does not measure physical cleanup or Job completion latency.
 
+## Service-chain queued-cancellation measurements
+
+The repaired build was tested from committed source `8e7b36ed58a44a2811ac4cc139b17a8050edd115`, using Runtime image `sha256:5873344755da0a3922241e10ba9aa2cb2ae9162a23c08bbd011beaede25cf280` and Runtime binary SHA-256 `496b63be3f1194e2a7ba2aba25fa9a1b1bb41b930f60f676a6f196c1ce5780c4`. API and Worker used that same committed source over the existing dependency images in a separate owned stack. A documentation-only follow-up does not change those executable sources.
+
+This experiment exercised public authenticated Session/Run admission and cancellation, real Worker ordinary and control threads, original signed authorization, API terminal projection, Runtime receipts, PostgreSQL and Job completion. Ordinary workers were held immediately before Runtime step dispatch, after real claim/start/controller resolution; their normal heartbeat loops remained active. These were execution-entry barriers, not eight physical 8 GiB sandboxes. There were no model calls, physical task executions or sandbox allocations. A GET-only Docker socket proxy rejected physical mutations.
+
+WSL had eight virtual CPUs and 16 GiB RAM. The private stack bounded Runtime and Worker to 512 MiB/1 CPU each and API and PostgreSQL to 1 GiB/1 CPU each. Per-sandbox declarations remained 8 GiB, four CPUs, 4 GiB data budget and 512 PIDs; this test did not establish their physical enforcement. Both execution limits and ordinary Worker count remained 8/4/8. Each saturated condition ran three times with a distinct target Session.
+
+| Condition | Cancel HTTP acknowledgement, ms | Request start to observed Job completion, ms | Ordinary execution held through completion |
+| --- | --- | --- | --- |
+| Workspace full | 25.78, 25.44, 28.84 | 399.10, 397.61, 431.18 | Four owners in the target Workspace |
+| Global and Worker full | 26.48, 25.20, 22.86 | 395.52, 411.24, 416.02 | Eight owners in two Workspaces; target in an empty third Workspace |
+
+All six targets had one no-effects receipt, a cancelled Run with committed pre-admission cancellation and a succeeded lifecycle Job whose final lease purpose was `control`. Their Environment epoch stayed zero with no controller owner; no Core execution records, physical allocations or resident holdings appeared. The original four/eight owners stayed unchanged, the same ordinary Worker slots remained held, and no extra ordinary execution was admitted. Completion timestamps include database polling and client overhead; they are diagnostic observations, not latency guarantees or percentile estimates. This experiment includes more services than the earlier Runtime-only baseline, so acknowledgement timings are not a direct speed comparison.
+
+The useful comparison is dependency: the deployed baseline remained unclaimable throughout the 1.5-second observation until an unrelated owner yielded. The repaired service chain completed while every blocker stayed held. Control workers currently poll every 250 ms; their idle request overhead and contention at larger Worker counts have not been benchmarked. HTTP/DB saturation, slow physical teardown and actual sandbox cleanup remain separate measurements.
+
+The probe issued zero Docker mutation requests. All owned probe containers and network were removed, and the existing application's container IDs, image IDs and start times were unchanged. Private fixture drivers and synthetic secrets remained outside the source checkout.
+
+## Verified control boundary
+
+The repaired source passed 115 individually selected tests on fresh owned PostgreSQL databases: all 113 required identities plus both retained Unknown-create reservation/adoption protections. Each identity executed exactly once. These tests cover ordinary/control readiness parity and exclusion, independent bounded stages, unchanged owners, current-purpose host and execution rejection, no-effects reply replay, missing/foreign receipt rejection, prior-history cancellation, cleanup-required completion, purpose immutability, reclaim exhaustion and schema-14-to-15 preservation/drift rejection.
+
+The final Runtime unit suite passed 468 tests; 204 opt-in tests were ignored by that ordinary run and are not counted as passed there. Core `query_loop` passed 129 tests. Worker discovery executed all 101 tests with no skips, including full ordinary-slot occupancy, terminal handoff and cleanup failure retry. The affected API PostgreSQL suite passed 45 tests. All 37 rendered Compose contract tests, 11 PostgreSQL gate-driver tests, warning-denied Runtime Clippy, formatting and whitespace checks passed. This is focused repair validation plus the service-chain experiment above, not completion of the full hosted release or physical-host acceptance gate.
+
 ## Reclamation completion conditions
 
 - Preserve one authoritative lifecycle and one current lease owner. A control lease cannot run the model, allocate a sandbox or invoke ordinary execution.
