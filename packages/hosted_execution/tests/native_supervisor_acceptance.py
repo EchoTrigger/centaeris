@@ -23,6 +23,7 @@ def main():
     parser.add_argument("--oci-runtime", choices=["runc", "runsc"], default="runc")
     parser.add_argument("--runtime-path")
     parser.add_argument("--busybox", default="/usr/bin/busybox")
+    parser.add_argument("--strip", default="/usr/bin/strip")
     parser.add_argument("--library", action="append", default=[])
     parser.add_argument("--supervisor", required=True)
     parser.add_argument("--helper")
@@ -63,7 +64,7 @@ def main():
         if args.helper:
             helper_path = root / "execution_agent"
             shutil.copyfile(args.helper, helper_path)
-            subprocess.run(["/usr/bin/strip", "--strip-debug", str(helper_path)], check=True)
+            subprocess.run([args.strip, "--strip-debug", str(helper_path)], check=True)
             os.chmod(helper_path, 0o500)
             config.update(helperPath=str(helper_path))
         config_path.write_text(json.dumps(config))

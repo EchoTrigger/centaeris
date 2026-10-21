@@ -15,7 +15,7 @@ Set `ociRuntime` to `runc` or `runsc`, and `runtimePath`, `runtimeRoot` and
 `dockerSocket` to the exact binary, state root and
 daemon that own the workload containers. Record the binary version and digest.
 Operator configs using `runcPath`/`runcRoot` must be updated explicitly; those
-field names are no longer accepted. The task wire protocol is unchanged.
+field names are no longer accepted.
 
 Host `task` and `helper` requests carry a required `target` with the immutable
 instance, container, Environment, profile and image identities. The supervisor
@@ -117,3 +117,8 @@ background-domain retention, owner-scoped stop, lost acknowledgement, restart
 reconciliation, and confirmed resource release. Existing in-container journals
 require the explicit persisted-data migration with original evidence retained;
 moving files alone is not a live process/pipe handoff.
+
+The native acceptance script needs a static BusyBox, or its matching libraries
+provided with `--library`. When testing a sealed helper, `--strip` can select an
+operator-provided strip executable; its default is `/usr/bin/strip`. Stripping
+must succeed before the helper is tested.
