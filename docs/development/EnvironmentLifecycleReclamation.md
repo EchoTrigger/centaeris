@@ -265,6 +265,44 @@ PerRun's first model-request record preceded its first tool-call record by 3404/
 
 These small samples provide optimization intuition, not percentiles or a production latency commitment. They exclude external model/provider latency, cold image downloads, CPU-heavy agent throughput and storage-quota acceptance. Fixture cleanup of the retained container does not validate the product's Environment retirement contract. Both experiments removed their owned daemons/resources and verified the existing application's container IDs, image IDs and start times were unchanged.
 
+### Sandbox preparation timing observations
+
+A paired WSL experiment used Runtime and host supervisor source `d0f23f68501c6105fcc01756782651d5e4d69e71`, first with `WORKSPACE_PERF_OBSERVATIONS=0`, then with `1`. Each private stack ran three new perRun Sessions, one new retained Session and two subsequent calls in that retained Session. The local model, cached images, workload and 8/4/8 execution limits were unchanged. All twelve calls completed with exactly one terminal, cleanup and release fact each. PerRun removed its container and holding; retained kept its verified instance until fixture cleanup. Both private daemons were stopped and the existing application's container identities, image identities and start times were unchanged.
+
+Both passes used Runtime image `sha256:118711071fb08b9171c5649c320d7e38d26a0c845857717de1cf776186a3a9dc`. Runtime binary SHA-256 was `e21815deafec172b24188f69306498358c25baae5608f0158c690df9567bc294`; supervisor SHA-256 was `054260874ad1f9e37160f5570e09591d5dc2748d536a6550944805811b8b8098`. The static helper and sandbox image stayed at the earlier `91c7e4280787940c99439d25900c2bdc51b1f2e5` baseline, with the helper hash recorded above. The supervisor directly invoked `/usr/bin/runsc` with its private runtime root. The fixture's Python wrapper was confined to Docker's OCI runtime invocation and was not on the supervisor's state/query/helper command path.
+
+Runtime observations now expose the sandbox-preparation boundary, controller takeover, workspace preparation helper, input inventory and helper start/confirmation/output-copy spans. Existing numeric timing records gain `startedAtMs` for alignment. The supervisor's opt-in records contain fixed phase labels, numeric wall-clock start and monotonic duration, outcome and process ID; they contain no command, path, request body or error text. Disabled observations emit nothing. Unavailable diagnostic output does not change the operation result. No authorization, locking, resource claim, lifetime default or polling interval changed.
+
+The enabled pass produced these preparation durations, in milliseconds. Columns after total are successive outer steps; the final column is the total less those measured steps, including admission, database work and surrounding checks.
+
+| Call | Total | Container ensure | Controller takeover | Workspace preparation helper | Input inventory | Other preparation |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| New perRun 1 | 1546.70 | 344.21 | 188.39 | 414.99 | 530.46 | 68.64 |
+| New perRun 2 | 1508.82 | 309.31 | 173.64 | 419.28 | 540.14 | 66.46 |
+| New perRun 3 | 1657.99 | 303.89 | 315.21 | 412.92 | 552.57 | 73.39 |
+| First retained | 1566.46 | 338.52 | 179.32 | 437.71 | 539.03 | 71.89 |
+| Same-instance retained 1 | 1282.29 | 1.76 | 264.12 | 424.81 | 532.59 | 59.01 |
+| Same-instance retained 2 | 1291.63 | 1.94 | 263.15 | 419.11 | 549.65 | 57.78 |
+
+With observations disabled, new perRun preparation was 1554/1536/1507 ms, first retained 1521 ms and retained reuse 1258/1315 ms. Enabled and disabled passes remain in the same approximate range; this small sequential comparison does not establish zero instrumentation overhead or a percentile bound. The enabled perRun outlier coincided with the larger takeover span. The experiment has not identified the exclusive cause of that individual outlier.
+
+The supervisor recorded the following activity inside the two same-instance preparation windows. Counts exclude Runtime's own Docker API calls. These are nested or potentially concurrent spans: their sums must not be added together as an exclusive wall-clock breakdown.
+
+| Supervisor activity | Count in each reuse | Summed duration, reuse 1 / reuse 2, ms |
+| --- | ---: | ---: |
+| Target attestation | 12 | 447.36 / 423.84 |
+| Docker inspect subprocess | 12 | 245.70 / 245.25 |
+| runsc state subprocess | 26 | 269.70 / 269.27 |
+| OCI identity verification | 14 | 158.88 / 158.23 |
+| runsc task-domain read-control | 7 | 72.46 / 72.36 |
+| Observed global-command-lock acquisition | 36 | 62.60 / 55.59 |
+| Two helper launch spans | 2 | 112.89 / 112.95 |
+| Helper ready handshake, inside launch | 2 | 50.89 / 50.92 |
+
+Container reuse therefore reduces container ensure to about 2 ms, while workspace preparation and input inventory still account for approximately 958/969 ms of the 1282/1292 ms preparation window. The launch spans are not pure gVisor startup measurements: they include identity verification and waiting. Likewise, workspace-helper duration includes transport and completion confirmation, not just guest directory work. These observations support reducing repeated host attestations and small-query round trips before attributing the whole delay to runsc. The existing child-command observer polls every 10 ms; inspect/state durations cluster near 20/10 ms, so the measurements include that observation granularity. The next change should preserve bounded command completion, immutable target identity, current controller/lease checks and physical cleanup evidence.
+
+Validation: the numeric-output contract first failed when enabled observations emitted no record, then passed. The final three Linux diagnostic tests cover opt-out, result/error preservation, bounded output fields and unavailable diagnostic output. The broader Linux hosted suite passed 136 tests with 20 opt-in cases excluded before the diagnostic-output guard; the final guard was checked by the focused tests. Native Runtime passed 468 tests with 211 opt-in cases excluded, including its seven existing observation tests. The Rust source gate, 129 Core query-loop tests, native warning-denied Runtime/hosted Clippy, formatting and whitespace checks passed. The minimal Linux builder lacked Runtime test fixtures and the Clippy component, so its attempted Runtime test/Clippy commands are not acceptance results; native checks and the actual private WSL calls are reported separately. No PostgreSQL schema or scheduling logic changed in this timing work. This does not extend storage-quota, Environment retirement, target Debian 13 or retained-default acceptance.
+
 ### Validation of the capacity wake candidate
 
 The focused baseline first failed the future-deadline and release-before-yield regressions while preserving the Unknown-removal guard. The final complete PostgreSQL gate passed all 178 discovered identities, including all seven new capacity-wake cases and the required manifest. Coverage includes release/yield races, reopen without relying on notifications, unknown and rolled-back removal, full execution/Workspace capacity, reclaim embargo, conversion to question waiting, schema-15-to-16 preservation and drift rejection. Legacy scheduling/terminal fixtures now supply the canonical lifecycle binding and required settlement facts; production completion guards were not weakened. Terminal append still exercises all three business terminal kinds, stale-owner rejection, transaction rollback, waiter consumption, terminal outbox publication, acknowledgement and reopen.
