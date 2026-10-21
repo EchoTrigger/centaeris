@@ -2942,6 +2942,10 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
             r#"
             DROP TABLE IF EXISTS public.app_core_sessionevent;
             DROP TABLE IF EXISTS public.app_core_session CASCADE;
+            DROP TABLE IF EXISTS public.app_core_agentrunenvironmentrelease;
+            DROP TABLE IF EXISTS public.app_core_agentrun CASCADE;
+            CREATE TABLE public.app_core_agentrun(id text PRIMARY KEY,session_id text NOT NULL,"preAdmissionCancelledAt" timestamptz);
+            CREATE TABLE public.app_core_agentrunenvironmentrelease(agent_run_id text PRIMARY KEY,environment_id text NOT NULL,authorization_digest text NOT NULL,controller_epoch bigint NOT NULL);
             CREATE TABLE public.app_core_session(
                 id varchar(64) PRIMARY KEY,
                 workspace_id varchar(64) NOT NULL
@@ -2963,6 +2967,7 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
             );
             INSERT INTO public.app_core_session(id, workspace_id)
             VALUES('session_fenced_terminal', 'workspace_fenced_terminal');
+            INSERT INTO public.app_core_agentrun(id,session_id) VALUES('agent_run_fenced_terminal','session_fenced_terminal');
             "#,
         )
         .expect("create session event table");
@@ -3010,7 +3015,10 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
     };
     let mut lifecycle_job = job(
         "agent_run.lifecycle:agent_run_fenced_terminal",
-        "fenced-terminal",
+        &format!(
+            "agent_run.lifecycle:agent_run_fenced_terminal:{}",
+            start.authorization_digest
+        ),
     );
     lifecycle_job.job_kind = "agent_run.lifecycle".to_string();
     lifecycle_job.session_id = Some(session_id.to_string());
@@ -3312,14 +3320,31 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
         Some(expected_state),
         "committed terminal history is authoritative before any terminal outbox"
     );
-    store
-        .complete_runtime_job(CompleteRuntimeJobRequest {
-            job_id: "agent_run.lifecycle:agent_run_fenced_terminal".into(),
-            lease_owner: new_owner,
-            output_refs: vec![],
-            completed_at_ms: now_ms + 14,
-        })
+    let completion = CompleteRuntimeJobRequest {
+        job_id: "agent_run.lifecycle:agent_run_fenced_terminal".into(),
+        lease_owner: new_owner,
+        output_refs: vec![],
+        completed_at_ms: now_ms + 14,
+    };
+    assert!(
+        store
+            .complete_runtime_job(completion.clone())
+            .unwrap_err()
+            .contains("cleanup and release receipts required"),
+        "terminal history alone cannot complete a lifecycle Job"
+    );
+    // This transcript fixture never allocated a physical instance. Supply its
+    // matching never-allocated cleanup and controller release before exercising
+    // terminal outbox publication and acknowledgement below.
+    let environment = &start.environment_authorization.payload.environment_id;
+    audit.execute("INSERT INTO runtime.agent_run_cleanup_receipts(receipt_id,agent_run_id,environment_id,authorization_digest,controller_epoch,allocation_kind,instance_id,cleanup_complete,file_protection,recorded_at_ms,physical_removed,removed_container_id) VALUES('cleanup:fenced_terminal',$1,$2,$3,1,'neverAllocated',NULL,true,'deferred',$4,false,NULL)",&[&agent_run_id,&environment,&start.authorization_digest,&(now_ms+14)]).unwrap();
+    audit
+        .execute(
+            "INSERT INTO public.app_core_agentrunenvironmentrelease VALUES($1,$2,$3,1)",
+            &[&agent_run_id, &environment, &start.authorization_digest],
+        )
         .unwrap();
+    store.complete_runtime_job(completion).unwrap();
     let pending = store.list_pending_runtime_job_outbox(10).unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(
