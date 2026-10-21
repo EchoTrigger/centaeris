@@ -1,3 +1,4 @@
+vi.mock("../src/components/ui/tooltip", async () => import("./helpers/tooltipTestDouble"));
 import { Profiler, type ProfilerOnRenderCallback } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";

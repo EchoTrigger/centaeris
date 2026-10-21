@@ -1,21 +1,22 @@
+import { animate } from "motion";
+
 type Geometry = { height: number; contentEnd: number; anchorTop: number; scrollTop: number };
 type Port = {
   measure(): Geometry | null;
   setPadding(value: number): void;
   scrollTo(value: number): void;
-  requestFrame(callback: (time: number) => void): number;
-  cancelFrame(id: number): void;
   reducedMotion(): boolean;
   onFollowingChange(value: boolean): void;
 };
 
-// Both clients use this controller. Geometry comes from actual visible content,
+// Geometry comes from actual visible content,
 // including measured virtual rows, never from the height of hidden process text.
 export function createMessageScroll(port: Port) {
   let following = true;
   let anchored = false;
   let padding = 0;
-  let frame: number | null = null;
+  let animation: ReturnType<typeof animate> | null = null;
+  let animating = false;
   let target = 0;
   let lastScrollTop = 0;
   const scrollTo = (top: number) => { lastScrollTop = top; port.scrollTo(top); };
@@ -29,8 +30,9 @@ export function createMessageScroll(port: Port) {
     port.setPadding(value);
   };
   const cancel = () => {
-    if (frame !== null) port.cancelFrame(frame);
-    frame = null;
+    animating = false;
+    animation?.stop();
+    animation = null;
   };
   const update = () => {
     const g = port.measure();
@@ -45,7 +47,7 @@ export function createMessageScroll(port: Port) {
     target = anchored ? Math.max(naturalEnd, g.anchorTop - g.height / 4, 0) : naturalEnd;
     setPadding(anchored ? Math.max(0, target + g.height - g.contentEnd) : 0);
     if (anchored && padding === 0) anchored = false;
-    if (frame === null) scrollTo(target);
+    if (!animating) scrollTo(target);
   };
   return {
     update,
@@ -58,22 +60,29 @@ export function createMessageScroll(port: Port) {
       if (port.reducedMotion()) { update(); return; }
       const start = g.scrollTop;
       lastScrollTop = start;
-      let began: number | null = null;
-      const tick = (time: number) => {
-        began ??= time;
-        update();
-        const progress = Math.min(1, (time - began) / 320);
-        scrollTo(start + (target - start) * (1 - (1 - progress) ** 3));
-        frame = progress < 1 ? port.requestFrame(tick) : null;
-      };
-      frame = port.requestFrame(tick);
+      animating = true;
+      animation = animate(0, 1, {
+        duration: 0.32, ease: "easeOut",
+        onUpdate: (progress) => {
+          // Motion may emit a final value while stop() captures its velocity.
+          if (!animating) return;
+          update();
+          scrollTo(start + (target - start) * progress);
+        },
+        onComplete: () => {
+          if (!animating) return;
+          animating = false;
+          animation = null;
+          update();
+        },
+      });
       update();
     },
     pause() { cancel(); anchored = false; setFollowing(false); update(); },
     userScroll() {
       const g = port.measure();
       if (!g) return;
-      if (frame !== null || anchored) {
+      if (animating || anchored) {
         if (Math.abs(g.scrollTop - lastScrollTop) <= 2) return;
         cancel(); anchored = false; setFollowing(false); update();
         return;

@@ -1,3 +1,4 @@
+import { DropdownMenuItem } from "./ui/dropdown-menu";
 import { useRef, useState, type ReactNode } from "react";
 import { Folder } from "lucide-react";
 import { ChatActionsMenu } from "./ChatActionsMenu";
@@ -38,8 +39,8 @@ export function SidebarWorkspaceGroup({ root, name, children, onRename, onRemove
         <Folder aria-hidden="true" /><span>{name}</span>
       </button>}
       <ChatActionsMenu label={`Workspace actions ${name}`}>
-        <button type="button" disabled={pending || !onRename} onClick={() => { setDraft(name); setEditing(true); }}>Rename</button>
-        <button type="button" disabled={pending || !onRemove} onClick={() => { if (onRemove) void run(() => onRemove(root)); }}>Remove</button>
+        <DropdownMenuItem disabled={pending || !onRename} onClick={() => { setDraft(name); setEditing(true); }}>Rename</DropdownMenuItem>
+        <DropdownMenuItem disabled={pending || !onRemove} onClick={() => { if (onRemove) void run(() => onRemove(root)); }}>Remove</DropdownMenuItem>
       </ChatActionsMenu>
     </div>
     {expanded ? children : null}

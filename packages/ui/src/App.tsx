@@ -1,5 +1,7 @@
+import { DesktopShell } from "./components/DesktopShell";
 import { querySessionCatalog } from "./lib/chatBridge";
 import { ChatActionsMenu } from "./components/ChatActionsMenu";
+import { DropdownMenuItem } from "./components/ui/dropdown-menu";
 import { SettingsPage } from "./components/SettingsPage";
 import { ApplicationBar } from "./components/ApplicationBar";
 import { SchedulesPage } from "./components/SchedulesPage";
@@ -7,7 +9,7 @@ import { useAppNavigation, type AppPage } from "./components/app/useAppNavigatio
 import { listenHost } from "./host/hostBridge";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { t } from "./i18n";
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PanelRight, X } from "lucide-react";
 import { Sidebar, type ResourceModalKind } from "./components/Sidebar";
 import { ChatArea } from "./components/chat/ChatArea";
@@ -20,7 +22,7 @@ import {
   type ConfirmAction,
 } from "./components/ConfirmDialog";
 import { WorkspaceOverview } from "./components/WorkspaceOverview";
-import { WorkspaceSplitHandle } from "./components/WorkspaceSplitHandle";
+import { WorkspaceLayout } from "./components/WorkspaceLayout";
 import { SummaryPanel } from "./components/SummaryPanel";
 import { useSessionController } from "./components/app/useSessionController";
 import { useWorkspaceController } from "./components/app/useWorkspaceController";
@@ -53,7 +55,6 @@ const errorMessage = (error: unknown, fallback: string): string =>
 
 function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [workspacePanelRatio, setWorkspacePanelRatio] = useState(0.5);
   const [page, setPage] = useState<AppPage>("chat");
   const [pluginId, setPluginId] = useState("");
   const [resourceTab, setResourceTab] = useState<"plugins" | "skills">("plugins");
@@ -309,7 +310,7 @@ function App() {
   const isFilePaneVisible = page === "chat" && workspacePanel.isVisible;
 
   return (
-    <div className={`thinAppShell ${isSidebarOpen ? "is-sidebar-open" : "is-sidebar-collapsed"}`}>
+    <DesktopShell expanded={isSidebarOpen} className={`thinAppShell ${isSidebarOpen ? "is-sidebar-open" : "is-sidebar-collapsed"}`}>
       <ApplicationBar expanded={isSidebarOpen} onToggle={() => setIsSidebarOpen(open => !open)} canBack={navigation.canBack} canForward={navigation.canForward} onBack={() => void navigation.move(-1)} onForward={() => void navigation.move(1)} onError={setHostError} />
 
       <div className="thinSidebarSlot">
@@ -346,12 +347,32 @@ function App() {
       <div className={`thinWorkspaceShell ${page === "chat" ? "is-chat-page" : ""}`}>
         {page !== "chat" ? <header className="workspacePageHeader"><strong>{page === "schedules" ? "Scheduled" : page === "plugins" ? "Plugins" : page === "settings" ? "Settings" : "About Centaeris"}</strong></header> : null}
 
-        <div className="thinWorkspaceBody" hidden={page !== "chat"} style={{ "--workspace-panel-width": `${workspacePanelRatio * 100}%` } as CSSProperties}>
+        <WorkspaceLayout hidden={page !== "chat"} previewVisible={isFilePaneVisible} preview={
+          <aside id="workspace-preview" className={`thinFilePane ${isFilePaneVisible ? "is-open" : ""}`} aria-label="Preview" aria-hidden={!isFilePaneVisible}>
+            {workspacePanel.tabs.length > 0 ? (
+              <SummaryPanel
+                workspaceRoot={activeWorkspaceRoot}
+                sessionId={currentSessionId}
+                onFiles={() => workspacePanel.actions.openWorkspaceView("files")}
+                onReview={() => workspacePanel.actions.openWorkspaceView("review")}
+                onTerminal={workspacePanel.actions.openTerminal}
+                visible={isFilePaneVisible}
+                onRefreshFile={workspacePanel.actions.refreshActiveFile}
+                tabs={workspacePanel.tabs}
+                activeTabId={workspacePanel.activeTabId}
+                onSelectTab={workspacePanel.actions.selectTab}
+                onCloseTab={workspacePanel.actions.closeTab}
+                onCollapse={workspacePanel.actions.collapse}
+                onOpenWorkspacePath={workspacePanel.actions.openFilePath}
+              />
+            ) : null}
+          </aside>
+        }>
           <main className="thinChatColumn">
         <header className="workspacePageHeader">
           <strong>{page === "chat" ? currentSession?.title ?? "New chat" : page === "schedules" ? "Scheduled" : page === "plugins" ? "Plugins" : page === "settings" ? "Settings" : "About Centaeris"}</strong>
           {page === "chat" ? <div className="workspacePageActions">
-            {currentSession ? <ChatActionsMenu><button onClick={() => void pinSession(currentSession.id, !currentSession.isPinned).catch(() => undefined)}>{currentSession.isPinned ? "Unpin chat" : "Pin chat"}</button><button onClick={() => { void confirmAction({ title: "Delete chat?", message: currentSession.title }).then(confirmed => { if (confirmed) void handleDeleteSession(currentSession.id).catch(() => undefined); }); }}>Delete chat</button></ChatActionsMenu> : null}
+            {currentSession ? <ChatActionsMenu><DropdownMenuItem onClick={() => void pinSession(currentSession.id, !currentSession.isPinned).catch(() => undefined)}>{currentSession.isPinned ? "Unpin chat" : "Pin chat"}</DropdownMenuItem><DropdownMenuItem onClick={() => { void confirmAction({ title: "Delete chat?", message: currentSession.title }).then(confirmed => { if (confirmed) void handleDeleteSession(currentSession.id).catch(() => undefined); }); }}>Delete chat</DropdownMenuItem></ChatActionsMenu> : null}
           <WorkspaceOverview
             key={activeWorkspaceRoot ?? "no-workspace"}
             root={activeWorkspaceRoot}
@@ -411,27 +432,7 @@ function App() {
             )}
           </main>
 
-          {isFilePaneVisible ? <WorkspaceSplitHandle value={workspacePanelRatio} onChange={setWorkspacePanelRatio} /> : null}
-          <aside id="workspace-preview" className={`thinFilePane ${isFilePaneVisible ? "is-open" : ""}`} aria-label="Preview" aria-hidden={!isFilePaneVisible}>
-            {workspacePanel.tabs.length > 0 ? (
-              <SummaryPanel
-                workspaceRoot={activeWorkspaceRoot}
-                sessionId={currentSessionId}
-                onFiles={() => workspacePanel.actions.openWorkspaceView("files")}
-                onReview={() => workspacePanel.actions.openWorkspaceView("review")}
-                onTerminal={workspacePanel.actions.openTerminal}
-                visible={isFilePaneVisible}
-                onRefreshFile={workspacePanel.actions.refreshActiveFile}
-                tabs={workspacePanel.tabs}
-                activeTabId={workspacePanel.activeTabId}
-                onSelectTab={workspacePanel.actions.selectTab}
-                onCloseTab={workspacePanel.actions.closeTab}
-                onCollapse={workspacePanel.actions.collapse}
-                onOpenWorkspacePath={workspacePanel.actions.openFilePath}
-              />
-            ) : null}
-          </aside>
-        </div>
+        </WorkspaceLayout>
         {page === "schedules" ? <SchedulesPage onSession={id => void handleSelectSession(id)} /> : null}
         {page === "plugins" ? <section className="managementPage resourcePage"><div className="resourceTabs" hidden={resourceTab === "plugins" && !!pluginId} role="tablist" aria-label="Extensions">{(["plugins", "skills"] as const).map(tab => <button key={tab} role="tab" id={`resource-${tab}`} aria-controls="resource-content" aria-selected={resourceTab === tab} tabIndex={resourceTab === tab ? 0 : -1} onClick={() => setResourceTab(tab)} onKeyDown={event => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) { event.preventDefault(); const next = event.key === "Home" ? "plugins" : event.key === "End" ? "skills" : resourceTab === "plugins" ? "skills" : "plugins"; setResourceTab(next); document.getElementById(`resource-${next}`)?.focus(); } }}>{tab === "plugins" ? "Plugins" : "Skill"}</button>)}</div><div id="resource-content" role="tabpanel" aria-labelledby={`resource-${resourceTab}`}>{resourceTab === "plugins" ? <PluginsDialog selectedPluginId={pluginId} onSelect={id => { void navigation.move({page: "plugins", resourceTab: "plugins", pluginId: id, sessionId: currentSessionId, root: activeWorkspaceRoot}); }} /> : <SkillsDialog workspaceRoot={activeWorkspaceRoot} confirmAction={confirmAction} />}</div></section> : null}
         {page === "settings" ? <SettingsPage><ModelsDialog onClose={() => navigatePage("chat")} onConfigured={setHasSelectableModel} confirmAction={confirmAction} /></SettingsPage> : null}
@@ -449,7 +450,7 @@ function App() {
       {hostError ? (
         <div className="thinHostError" role="alert"><span>{hostError}</span><button type="button" onClick={() => setHostError("")}><X aria-hidden="true" /></button></div>
       ) : null}
-    </div>
+    </DesktopShell>
   );
 }
 

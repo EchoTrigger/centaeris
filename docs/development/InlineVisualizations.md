@@ -2,7 +2,9 @@
 
 Initial implementation provides a Core catalog, strict validation and text
 projection, a shared json-render React adapter, and Desktop/Web/TUI integration.
-Appearance and full product interaction acceptance remain manual.
+The compact light reference has passed visual acceptance. The complete Desktop
+foundation integration is reviewed and verified before product acceptance; Web
+adoption follows that acceptance. See [Frontend foundations](FrontendFoundations.md).
 
 Assistant answers need a shared way to explain sequences, groups and state
 without losing information when a conversation moves between Desktop, Web and
@@ -215,9 +217,21 @@ appearance and performance acceptance remain required before merge.
 
 Run `pnpm --filter centaeris-ui run preview:visualizations` and open
 `http://127.0.0.1:5179/visualization-preview.html`. This development page renders
-both reference examples through the actual shared adapter. Switch light/dark,
-narrow layout and complete/pending/interrupted/invalid content states. Expand
-the text projection to compare reading order. The page is not a production entry.
+the two reference examples and four additional scenarios through the actual
+shared adapter: Session lifecycle, resource control, delivery, recovery, task
+ownership and long text. The selected visual direction follows the supplied
+references with a narrower content column and compact spacing. Run labels sit
+beside their prose, with a single separator between Runs. The resource chain is
+centered on one vertical axis; its nested regions represent actual containment.
+Sibling tasks remain stacked vertically. Other sequences read as titled
+paragraphs with local status icons. The light theme follows the supplied white
+reference with a pale blue resource region and a neutral inner container.
+Visual review covers completed content. Choose one example, the containment-only
+filter, or all six; switch light/dark and narrow layout. Expand the text
+projection to compare reading order. The page uses the production Desktop
+Markdown renderer, Nova component mapping and visualization styles. Only the
+example chooser and inspection controls are specific to this development page;
+the page itself is not a production entry.
 
 The preview and automated functional checks do not establish visual acceptance.
 The maintainer accepts appearance and product interaction manually before merge.

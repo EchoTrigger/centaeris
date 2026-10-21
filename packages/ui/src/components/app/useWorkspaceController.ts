@@ -10,22 +10,14 @@ import {
   resetWorkspaceCatalog,
   renameWorkspace as renameWorkspaceEntry,
   removeWorkspace as removeWorkspaceEntry,
-  type WorkspaceGitHubCliStatusResponse,
-  type WorkspaceGitStatusResponse,
   type WorkspaceOpenMode,
   type WorkspaceSnapshot,
 } from "../../lib/workspaceBridge";
 
-export type WorkspaceCatalogErrorState = {
-  message: string;
-  canReset: boolean;
-};
-
-const emptyWorkspaceSnapshot: WorkspaceSnapshot = {
-  activeWorkspaceRoot: null,
-  workspaces: [],
-  cancelled: false,
-};
+import { useStore } from "zustand";
+import { useShallow } from "zustand/react/shallow";
+import { createWorkspaceCatalogViewStore } from "./workspaceCatalogViewStore";
+export type { WorkspaceCatalogErrorState } from "./workspaceCatalogViewStore";
 
 const normalizeRoot = (root?: string | null): string =>
   String(root || "")
@@ -49,19 +41,21 @@ export function useWorkspaceController({
   confirmAction: ConfirmAction;
   reportHostError: (message: string) => void;
 }) {
-  const [snapshot, setSnapshot] = useState<WorkspaceSnapshot>(emptyWorkspaceSnapshot);
-  const [catalogError, setCatalogError] = useState<WorkspaceCatalogErrorState | null>(null);
-  const [gitStatus, setGitStatus] = useState<WorkspaceGitStatusResponse | null>(null);
-  const [gitStatusError, setGitStatusError] = useState("");
-  const [githubCliStatus, setGithubCliStatus] = useState<WorkspaceGitHubCliStatusResponse | null>(null);
+  const [store] = useState(createWorkspaceCatalogViewStore);
+  const { snapshot, catalogError, gitStatus, gitStatusError, githubCliStatus } = useStore(
+    store,
+    useShallow(state => ({
+      snapshot: state.snapshot,
+      catalogError: state.catalogError,
+      gitStatus: state.gitStatus,
+      gitStatusError: state.gitStatusError,
+      githubCliStatus: state.githubCliStatus,
+    })),
+  );
+  const { commitSnapshot, setCatalogError, setGitStatus, setGitStatusError, setGithubCliStatus } = store.getState();
   const inputsRef = useRef({ confirmAction, reportHostError });
   const actionRevisionRef = useRef(0);
   inputsRef.current = { confirmAction, reportHostError };
-
-  const commitSnapshot = useCallback((nextSnapshot: WorkspaceSnapshot) => {
-    setSnapshot(nextSnapshot);
-    setCatalogError(null);
-  }, []);
 
   const beginAction = useCallback((): number => {
     const revision = actionRevisionRef.current + 1;
@@ -111,7 +105,7 @@ export function useWorkspaceController({
       return;
     }
     inputsRef.current.reportHostError(message);
-  }, []);
+  }, [setCatalogError]);
 
   const retryCatalog = useCallback(async () => {
     const revision = beginAction();
@@ -219,7 +213,7 @@ export function useWorkspaceController({
     return () => {
       cancelled = true;
     };
-  }, [activeWorkspaceRoot]);
+  }, [activeWorkspaceRoot, setGitStatus, setGithubCliStatus, setGitStatusError]);
 
   const activeWorkspace = useMemo(
     () => snapshot.workspaces.find(

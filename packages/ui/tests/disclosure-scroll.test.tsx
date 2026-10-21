@@ -14,7 +14,7 @@ afterEach(()=>act(()=>renderer?.unmount()));
 
 test("manual disclosure grows below its title without following the new bottom",()=>{
  const geometry={height:400,contentEnd:1000,anchorTop:0,scrollTop:600};
- const scroll=createMessageScroll({measure:()=>geometry,setPadding:()=>{},scrollTo:value=>{geometry.scrollTop=value;},requestFrame:()=>1,cancelFrame:()=>{},reducedMotion:()=>true,onFollowingChange:()=>{}});
+ const scroll=createMessageScroll({measure:()=>geometry,setPadding:()=>{},scrollTo:value=>{geometry.scrollTop=value;},reducedMotion:()=>true,onFollowingChange:()=>{}});
  const noop=()=>{};
  act(()=>{renderer=create(<VirtualMessageList containerRef={createRef()} onReadingIntent={()=>scroll.pause()}
   onContentSizeChange={()=>scroll.update()} onScroll={()=>scroll.userScroll()} editingUserMessageId={null} editingPrompt="" copiedUserMessageId={null} latestUserMessageId={null} editableUserMessageId={null}

@@ -1,6 +1,8 @@
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger } from "../ui/select";
+import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { t } from "../../i18n";
 import { memo, useMemo, type CSSProperties } from "react";
-import { Check, ChevronDown, Image } from "lucide-react";
+import { Image } from "lucide-react";
 import type {
   AgentContextUsageSummary,
   ModelThinkingMode,
@@ -19,7 +21,7 @@ export type ComposerRuntimeControlsProps = {
   reasoningEfforts: ModelThinkingMode[];
   contextUsage: AgentContextUsageSummary | null;
   runtimeConfigError: string;
-  onTogglePanel: (panel: Exclude<RuntimeComposerPanel, null>) => void;
+  onPanelChange: (panel: RuntimeComposerPanel) => void;
   onModelSelect: (model: SelectableModel) => void;
   onReasoningEffortSelect: (effort: ModelThinkingMode) => void;
 };
@@ -39,7 +41,7 @@ export const ComposerRuntimeControls = memo(function ComposerRuntimeControls({
   reasoningEfforts,
   contextUsage,
   runtimeConfigError,
-  onTogglePanel,
+  onPanelChange,
   onModelSelect,
   onReasoningEffortSelect,
 }: ComposerRuntimeControlsProps) {
@@ -89,101 +91,49 @@ export const ComposerRuntimeControls = memo(function ComposerRuntimeControls({
           <span className="composer-chip composerImageIndicator" title={t("composerRuntimeControls.image")}>
             <Image className="composerLucideIcon" aria-hidden="true" />
           </span>
-          <div className={`composerPicker model-chip ${activePanel === "model" ? "is-open" : ""}`}>
-            <button
-              type="button"
-              className="composer-chip composerPickerTrigger"
-              title={modelRuntimeSummary}
-              aria-haspopup="listbox"
-              aria-expanded={activePanel === "model"}
-              onClick={() => onTogglePanel("model")}
-            >
+          <Select value={activeModel ? JSON.stringify([activeModel.providerId, activeModel.model]) : null}
+            open={activePanel === "model"}
+            onOpenChange={(open) => onPanelChange(open ? "model" : null)}
+            onValueChange={(value) => {
+              const model = selectableModels.find((item) => JSON.stringify([item.providerId, item.model]) === value);
+              if (model) onModelSelect(model);
+            }}>
+            <SelectTrigger className="composer-chip" title={modelRuntimeSummary} aria-label={t("composerRuntimeControls.globalModels")}>
               <span>{activeModelIndex >= 0 ? (activeModel?.displayName || activeModel?.model) : t("composerRuntimeControls.noModelConfigured")}</span>
-              <ChevronDown className="composerLucideIcon is-chevron" aria-hidden="true" />
-            </button>
-            {activePanel === "model" ? (
-              <div className="composerPickerPanel is-model" role="listbox" aria-label={t("composerRuntimeControls.globalModels")}>
-                {modelGroups.map((group) => (
-                  <section key={group.providerId}>
-                    <p className="composerPickerGroupLabel">{group.providerName}</p>
-                    {group.models.map((configured) => {
-                      const selected = configured.providerId === activeModel?.providerId
-                        && configured.model === activeModel?.model;
-                      return (
-                        <button
-                          type="button"
-                          role="option"
-                          aria-selected={selected}
-                          className={selected ? "is-selected" : ""}
-                          key={`${configured.providerId}:${configured.model}`}
-                          onClick={() => onModelSelect(configured)}
-                        >
-                          <span className="composerPickerCheck">
-                            {selected ? <Check aria-hidden="true" /> : null}
-                          </span>
-                          <strong>{configured.displayName || configured.model}</strong>
-                        </button>
-                      );
-                    })}
-                  </section>
-                ))}
-              </div>
-            ) : null}
-          </div>
+            </SelectTrigger>
+            <SelectContent side="top" align="start" alignItemWithTrigger={false} className="min-w-64">
+              {modelGroups.map((group) => <SelectGroup key={group.providerId}>
+                <SelectLabel>{group.providerName}</SelectLabel>
+                {group.models.map((configured) => <SelectItem key={JSON.stringify([configured.providerId, configured.model])}
+                  value={JSON.stringify([configured.providerId, configured.model])}>
+                  {configured.displayName || configured.model}
+                </SelectItem>)}
+              </SelectGroup>)}
+            </SelectContent>
+          </Select>
         </div>
         <div className="composerMetaGroup is-end">
           {reasoningEfforts.length ? (
-            <div className={`composerPicker reasoning-chip ${activePanel === "reasoning" ? "is-open" : ""}`}>
-              <button
-                type="button"
-                className="composer-chip composerPickerTrigger"
-                aria-label={t("composerRuntimeControls.reasoningEffort")}
-                aria-haspopup="listbox"
-                aria-expanded={activePanel === "reasoning"}
-                onClick={() => onTogglePanel("reasoning")}
-              >
-                <span>{reasoningLabel}</span>
-                <ChevronDown className="composerLucideIcon is-chevron" aria-hidden="true" />
-              </button>
-              {activePanel === "reasoning" ? (
-                <div className="composerPickerPanel is-reasoning" role="listbox" aria-label={t("composerRuntimeControls.reasoningEffort")}>
-                  {reasoningEfforts.map((effort) => {
-                    const selected = effort === reasoningEffort;
-                    return (
-                      <button
-                        type="button"
-                        role="option"
-                        aria-selected={selected}
-                        className={selected ? "is-selected" : ""}
-                        key={effort}
-                        onClick={() => onReasoningEffortSelect(effort)}
-                      >
-                        <span className="composerPickerCheck">
-                          {selected ? <Check aria-hidden="true" /> : null}
-                        </span>
-                        <strong>{effort}</strong>
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : null}
-            </div>
-          ) : reasoningLabel ? (
-            <span className="composer-chip reasoning-chip">{reasoningLabel}</span>
-          ) : null}
+            <Select value={reasoningEffort} open={activePanel === "reasoning"}
+              onOpenChange={(open) => onPanelChange(open ? "reasoning" : null)}
+              onValueChange={(value) => { if (value !== null) onReasoningEffortSelect(value); }}>
+              <SelectTrigger className="composer-chip" aria-label={t("composerRuntimeControls.reasoningEffort")}><span>{reasoningLabel}</span></SelectTrigger>
+              <SelectContent side="top" align="end" alignItemWithTrigger={false}>
+                {reasoningEfforts.map((effort) => <SelectItem key={effort} value={effort}>{effort}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          ) : reasoningLabel ? <span className="composer-chip reasoning-chip">{reasoningLabel}</span> : null}
+          <Popover open={activePanel === "context"} onOpenChange={(open) => onPanelChange(open ? "context" : null)}>
           <div className={`composerPicker contextWindowPicker ${activePanel === "context" ? "is-open" : ""}`}>
-            <button
-              type="button"
+            <PopoverTrigger
               className="contextWindowIndicator"
               aria-label="Context window"
               title="Context window"
               aria-expanded={activePanel === "context"}
-              onClick={() => onTogglePanel("context")}
             >
               <span style={{ "--context-used": `${usedPercentage * 3.6}deg` } as CSSProperties} />
-            </button>
-            {activePanel === "context" ? (
-              <div className="contextWindowPanel">
+            </PopoverTrigger>
+              <PopoverContent side="top" align="end" className="contextWindowPanel">
                 <header>
                   <span>Context window</span>
                   <strong title={`${formatTokenCount(usedTokens)} / ${formatTokenCount(maxContextTokens)}`}>
@@ -229,9 +179,9 @@ export const ComposerRuntimeControls = memo(function ComposerRuntimeControls({
                     ) : null}
                   </>
                 ) : null}
-              </div>
-            ) : null}
+              </PopoverContent>
           </div>
+          </Popover>
         </div>
       </div>
       {runtimeConfigError.trim() ? (

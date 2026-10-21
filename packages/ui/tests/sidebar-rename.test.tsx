@@ -1,3 +1,4 @@
+vi.mock("../src/components/ui/dropdown-menu", async () => import("./helpers/menuTestDouble"));
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { expect, test, vi } from "vitest";
 import { Sidebar } from "../src/components/Sidebar";

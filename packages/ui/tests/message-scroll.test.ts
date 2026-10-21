@@ -1,30 +1,42 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { createMessageScroll } from "../src/components/chat/messageScroll";
+
+const motion = vi.hoisted(() => ({ current: null as null | { progress(value: number): void; stop(): void } }));
+vi.mock("motion", () => ({ animate: (_from: number, _to: number, options: { onUpdate(value: number): void; onComplete(): void }) => {
+  let active = true;
+  const playback = {
+    progress(value: number) {
+      if (!active) return;
+      options.onUpdate(value);
+      if (value === 1) { active = false; options.onComplete(); }
+    },
+    stop() { active = false; },
+  };
+  motion.current = playback;
+  return playback;
+} }));
 
 describe("message anchoring", () => {
   function fixture(reducedMotion = false) {
     const geometry = { height: 800, contentEnd: 1300, anchorTop: 1200, scrollTop: 500 };
     let padding = 0;
-    let frame: ((time: number) => void) | undefined;
     const scroll = createMessageScroll({
       measure: () => geometry,
       setPadding: (value) => { padding = value; },
       scrollTo: (value) => { geometry.scrollTop = value; },
-      requestFrame: (callback) => { frame = callback; return 1; },
-      cancelFrame: () => { frame = undefined; },
       reducedMotion: () => reducedMotion,
       onFollowingChange: () => {},
     });
-    return { geometry, scroll, padding: () => padding, tick: (time: number) => frame?.(time) };
+    return { geometry, scroll, padding: () => padding, progress: (value: number) => motion.current?.progress(value) };
   }
 
   it("eases a sent message to one quarter and consumes space as content grows", () => {
     const f = fixture();
     f.scroll.anchor();
-    f.tick(0); f.tick(160);
-    expect(f.geometry.scrollTop).toBeGreaterThan(750);
+    f.progress(0); f.progress(0.5);
+    expect(f.geometry.scrollTop).toBeGreaterThan(500);
     expect(f.geometry.scrollTop).toBeLessThan(1000);
-    f.tick(320);
+    f.progress(1);
     expect(f.geometry.scrollTop).toBe(1000);
     expect(f.padding()).toBe(500);
     f.geometry.contentEnd = 1600; f.scroll.update();
@@ -49,10 +61,10 @@ describe("message anchoring", () => {
 
   it("cancels animation on user intent and resets space on session change", () => {
     const f = fixture();
-    f.scroll.anchor(); f.tick(0); f.tick(80);
+    f.scroll.anchor(); f.progress(0); f.progress(0.25);
     f.scroll.pause();
     const position = f.geometry.scrollTop;
-    f.tick(320);
+    f.progress(1);
     expect(f.geometry.scrollTop).toBe(position);
     f.scroll.reset();
     expect(f.padding()).toBe(0);
@@ -72,6 +84,26 @@ describe("message anchoring", () => {
     f.scroll.update();
     expect(f.geometry.scrollTop).toBe(320);
     expect(f.padding()).toBe(200);
+  });
+
+  it("retargets a moving message during the anchoring interaction", () => {
+    const f = fixture();
+    f.scroll.anchor(); f.progress(0); f.progress(0.25);
+    f.geometry.anchorTop = 1400;
+    f.geometry.contentEnd = 1500;
+    f.progress(0.5); f.progress(1);
+    expect(f.geometry.scrollTop).toBe(1200);
+    expect(f.padding()).toBe(500);
+  });
+
+  it("a real user scroll cancels anchoring and later content cannot pull the reader down", () => {
+    const f = fixture();
+    f.scroll.anchor(); f.progress(0); f.progress(0.25);
+    f.geometry.scrollTop = 300;
+    f.scroll.userScroll();
+    f.progress(1);
+    f.geometry.contentEnd = 1800; f.scroll.update();
+    expect(f.geometry.scrollTop).toBe(300);
   });
 
 });

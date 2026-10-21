@@ -23,8 +23,6 @@ export const useChatScrollFollow = (sessionKey: string) => {
       },
       setPadding: (value) => { if (spacerRef.current) spacerRef.current.style.height = `${value}px`; },
       scrollTo: (top) => { if (messagesContainerRef.current) messagesContainerRef.current.scrollTop = top; },
-      requestFrame: (callback) => window.requestAnimationFrame(callback),
-      cancelFrame: (id) => window.cancelAnimationFrame(id),
       reducedMotion: () => window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false,
       onFollowingChange: setIsFollowingLatest,
     });

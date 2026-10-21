@@ -7,7 +7,7 @@ import {
 	useMemo,
 	type ReactNode,
 } from "react";
-import { parseVisual, visualBlocks, type VisualBlock } from "./contract";
+import { parseVisual, visualBlocks, type VisualBlock, type VisualEnvelope } from "./contract";
 import "./styles.css";
 
 const LazyRenderer = lazy(() =>
@@ -51,15 +51,24 @@ class VisualBoundary extends Component<
 	}
 }
 
+type RenderVisual = (visual: VisualEnvelope) => ReactNode;
+
+function HostVisual({ visual, renderVisual }: { visual: VisualEnvelope; renderVisual: RenderVisual }) {
+  return renderVisual(visual);
+}
+
+
 const Visual = memo(
 	function Visual({
 		block,
 		source,
 		finalized,
+		renderVisual,
 	}: {
 		block: VisualBlock;
 		source: string;
 		finalized: boolean;
+		renderVisual?: RenderVisual;
 	}) {
 		const result = useMemo(() => {
 			if (!block.complete) return { error: "Incomplete visualization" };
@@ -77,24 +86,26 @@ const Visual = memo(
 			return (
 				<VisualBoundary key={block.json} source={source}>
 					<Suspense fallback={pending}>
-						<LazyRenderer visual={result.visual} />
+						{renderVisual ? <HostVisual visual={result.visual} renderVisual={renderVisual} /> : <LazyRenderer visual={result.visual} />}
 					</Suspense>
 				</VisualBoundary>
 			);
 		return <SourceError reason={result.error} source={source} />;
 	},
 	(before, after) =>
-		before.source === after.source && before.finalized === after.finalized,
+		before.source === after.source && before.finalized === after.finalized && before.renderVisual === after.renderVisual,
 );
 
 export function VisualMarkdown({
 	text,
 	finalized,
 	renderMarkdown,
+	renderVisual,
 }: {
 	text: string;
 	finalized: boolean;
 	renderMarkdown: (source: string) => ReactNode;
+	renderVisual?: RenderVisual;
 }) {
 	const blocks = useMemo(() => visualBlocks(text), [text]);
 	const nodes: ReactNode[] = [];
@@ -112,6 +123,7 @@ export function VisualMarkdown({
 				block={block}
 				source={text.slice(block.start, block.end)}
 				finalized={finalized}
+				renderVisual={renderVisual}
 			/>,
 		);
 		cursor = block.end;

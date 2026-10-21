@@ -1,3 +1,5 @@
+import { Button } from "./ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 import { useEffect, useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import {
@@ -32,7 +34,17 @@ export function WorkspaceAddMenu({
 	const [list, setList] = useState<TerminalList | null>(null);
 	const [error, setError] = useState("");
 	const [busy, setBusy] = useState(false);
-	const ref = useRef<HTMLDivElement>(null);
+	const activeStart = useRef<object | null>(null);
+	useEffect(() => {
+		// A departed view cannot own the new view's retry, error or busy state.
+		if (pendingStart.current?.workspaceRoot !== root || pendingStart.current?.sessionId !== sessionId) {
+			activeStart.current = null;
+			pendingStart.current = null;
+			setError("");
+			setBusy(false);
+		}
+		return () => { activeStart.current = null; };
+	}, [root, sessionId]);
 	useEffect(() => {
 		if (!open) return;
 		let disposed = false;
@@ -40,34 +52,32 @@ export function WorkspaceAddMenu({
 		setError("");
 		void listTerminals(root)
 			.then((v) => {
-				if (!disposed) setList(v);
+				if (disposed) return;
+				if (pendingStart.current && pendingStart.current.serviceInstanceId !== v.serviceInstanceId) {
+					activeStart.current = null;
+					pendingStart.current = null;
+					setBusy(false);
+				}
+				setList(v);
 			})
 			.catch((e) => {
 				if (!disposed) setError(String(e));
 			});
-		const close = (e: MouseEvent) => {
-			if (!ref.current?.contains(e.target as Node)) setOpen(false);
-		};
-		const key = (e: KeyboardEvent) => {
-			if (e.key === "Escape") setOpen(false);
-		};
-		document.addEventListener("mousedown", close);
-		document.addEventListener("keydown", key);
-		return () => {
-			disposed = true;
-			document.removeEventListener("mousedown", close);
-			document.removeEventListener("keydown", key);
-		};
+		return () => { disposed = true; };
 	}, [open, root]);
 	const start = async () => {
-		if (!list || busy) return;
+		if (!list || busy || activeStart.current) return;
 		const scope = scopeRef.current;
+		const owner = {};
+		activeStart.current = owner;
+		const isCurrent = () => scopeRef.current === scope && activeStart.current === owner;
 		setBusy(true);
 		setError("");
 		try {
 			if (
 				!pendingStart.current ||
 				pendingStart.current.workspaceRoot !== root ||
+				pendingStart.current.sessionId !== sessionId ||
 				pendingStart.current.serviceInstanceId !== list.serviceInstanceId
 			)
 				pendingStart.current = {
@@ -80,8 +90,8 @@ export function WorkspaceAddMenu({
 					rows: 24,
 				};
 			const terminal = await createTerminal(pendingStart.current);
+			if (!isCurrent()) return;
 			pendingStart.current = null;
-			if (scopeRef.current !== scope) return;
 			onTerminal(
 				terminal,
 				list.serviceInstanceId,
@@ -89,23 +99,21 @@ export function WorkspaceAddMenu({
 			);
 			setOpen(false);
 		} catch (e) {
-			setError(String(e));
+			if (isCurrent()) setError(String(e));
 		} finally {
-			setBusy(false);
+			if (isCurrent()) {
+				activeStart.current = null;
+				setBusy(false);
+			}
 		}
 	};
 	return (
-		<div ref={ref} className="workspaceAddMenu">
-			<button
-				type="button"
-				aria-label="Add workspace tab"
-				aria-expanded={open}
-				onClick={() => setOpen((v) => !v)}
-			>
+		<Popover open={open} onOpenChange={setOpen}><div className="workspaceAddMenu">
+			<PopoverTrigger render={<Button variant="ghost" size="icon" aria-label="Add workspace tab" />}>
 				<Plus size={16} />
-			</button>
+			</PopoverTrigger>
 			{open ? (
-				<div className="workspaceAddChoices">
+				<PopoverContent align="end" className="workspaceAddChoices">
 					<button
 						type="button"
 						onClick={() => {
@@ -154,8 +162,8 @@ export function WorkspaceAddMenu({
 						</>
 					) : null}
 					{error ? <p role="status">{error}</p> : null}
-				</div>
+				</PopoverContent>
 			) : null}
-		</div>
+		</div></Popover>
 	);
 }

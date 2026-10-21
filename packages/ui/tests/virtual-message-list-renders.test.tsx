@@ -60,6 +60,8 @@ vi.mock("../src/components/ui/button", () => ({
 
 vi.mock("../src/components/ui/tooltip", () => ({
   Tooltip: ({ children }: { children: ReactNode }) => children,
+  TooltipTrigger: ({ render }: { render: ReactNode }) => render,
+  TooltipContent: () => null,
 }));
 
 import { VirtualMessageList } from "../src/components/chat/VirtualMessageList";

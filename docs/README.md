@@ -30,8 +30,10 @@ implementation plans or compatibility aliases.
 
 - [Building](development/Building.md): toolchains and artifact commands.
 - [Testing](development/Testing.md): focused and full local gates.
-- [Inline visualizations](development/InlineVisualizations.md): proposed React and
-  TUI content contract and acceptance requirements; implementation pending.
+- [Frontend foundations](development/FrontendFoundations.md): mature component,
+  animation, layout, sorting and state implementations; Desktop acceptance precedes Web migration.
+- [Inline visualizations](development/InlineVisualizations.md): React and TUI
+  content contract, implementation boundaries and acceptance requirements.
 - [ExecutionHost contract](architecture/ExecutionHostContract.md):
   execution semantics and Host boundaries for the native local Host.
 - [Release process](development/ReleaseProcess.md): source freeze, clean-clone

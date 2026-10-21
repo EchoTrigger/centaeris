@@ -1,3 +1,5 @@
+vi.mock("../src/components/chat/ComposerRuntimeControls", () => ({ ComposerRuntimeControls: ({ activePanel }: { activePanel: string | null }) => activePanel === "context" ? <div role="region" aria-label="Context details" /> : null }));
+import type { ReactNode } from "react";
 import {
   useState,
   type ChangeEvent,
@@ -13,10 +15,8 @@ import {
 } from "react-test-renderer";
 import { afterAll, beforeEach, expect, test, vi } from "vitest";
 import type {
-  AgentContextUsageSummary,
   NativeMcpCatalog,
   NativeMcpServer,
-  SelectableModel,
 } from "../src/lib/chatBridge";
 
 const renderHarness = vi.hoisted(() => ({ buttonRenders: 0 }));
@@ -29,6 +29,12 @@ const mcpHarness = vi.hoisted(() => ({
     }) => Promise<NativeMcpCatalog>
   >(),
   getNativeMcpCatalog: vi.fn<() => Promise<NativeMcpCatalog>>(),
+}));
+
+vi.mock("../src/components/ui/tooltip", () => ({
+  Tooltip: ({ children }: { children: ReactNode }) => children,
+  TooltipTrigger: ({ render }: { render: ReactNode }) => render,
+  TooltipContent: () => null,
 }));
 
 vi.mock("../src/components/ui/button", () => ({
@@ -573,7 +579,7 @@ test("a selected slash command consumes Enter instead of submitting the prompt",
   await changeTextarea(renderer, "/state");
   await pressTextareaKey(renderer, { key: "Enter" });
   expect(baseProps.onSubmit).not.toHaveBeenCalled();
-  expect(renderer.root.findAllByProps({ className: "contextWindowPanel" })).toHaveLength(1);
+  expect(renderer.root.findAllByProps({ "aria-label": "Context details" })).toHaveLength(1);
 
   await act(async () => renderer.unmount());
 });
@@ -671,120 +677,6 @@ test("the prompt input caps its height and restores focus after its action", asy
     renderer.update(<ChatComposer {...props} inputValue="" hasInput={false} />);
   });
   expect(textareaNode.style.height).toBe("auto");
-
-  await act(async () => renderer.unmount());
-});
-
-test("runtime controls select exact models and reasoning modes", async () => {
-  const firstModel = {
-    providerId: "provider-one",
-    providerName: "Provider One",
-    model: "shared-model",
-    displayName: "Shared model",
-    modelThinkingModes: ["low", "high"],
-  } satisfies SelectableModel;
-  const secondModel = {
-    ...firstModel,
-    providerId: "provider-two",
-    providerName: "Provider Two",
-  } satisfies SelectableModel;
-  const props = {
-    ...createComposerProps(),
-    modelRuntimeSummary: "shared-model · provider-one",
-    selectableModels: [firstModel, secondModel],
-    activeModelIndex: 0,
-    reasoningEffort: "low" as const,
-    reasoningEfforts: ["low", "high"] as const,
-    onModelSelect: vi.fn(),
-    onReasoningEffortSelect: vi.fn(),
-  };
-  const rendered = { current: null as ReactTestRenderer | null };
-  await act(async () => {
-    rendered.current = create(<ChatComposer {...props} reasoningEfforts={[...props.reasoningEfforts]} />);
-  });
-  const renderer = rendered.current;
-  if (!renderer) {
-    throw new Error("Composer did not render");
-  }
-
-  const modelTrigger = renderer.root.findByProps({ title: props.modelRuntimeSummary });
-  await click(modelTrigger);
-  const modelList = renderer.root.findByProps({ "aria-label": "Global models" });
-  const modelOptions = modelList.findAllByProps({ role: "option" });
-  expect(modelOptions).toHaveLength(2);
-
-  const reasoningTrigger = renderer.root.findByProps({ "aria-label": "Reasoning effort" });
-  await click(reasoningTrigger);
-  expect(renderer.root.findAllByProps({ "aria-label": "Global models" })).toHaveLength(0);
-  expect(renderer.root.findAllByProps({
-    className: "composerPickerPanel is-reasoning",
-  })).toHaveLength(1);
-  await click(reasoningTrigger);
-  expect(renderer.root.findAllByProps({
-    className: "composerPickerPanel is-reasoning",
-  })).toHaveLength(0);
-
-  await click(modelTrigger);
-  const reopenedModelList = renderer.root.findByProps({ "aria-label": "Global models" });
-  const reopenedModelOptions = reopenedModelList.findAllByProps({ role: "option" });
-  await click(reopenedModelOptions[1]);
-  expect(props.onModelSelect).toHaveBeenCalledWith(secondModel);
-  expect(renderer.root.findAllByProps({ "aria-label": "Global models" })).toHaveLength(0);
-
-  await click(reasoningTrigger);
-  const reasoningList = renderer.root.findByProps({
-    className: "composerPickerPanel is-reasoning",
-  });
-  const highOption = reasoningList
-    .findAllByType("button")
-    .find((candidate) => candidate.children.some(
-      (child) => typeof child !== "string" && child.children.join("") === "high",
-    ));
-  if (!highOption) {
-    throw new Error("Missing high reasoning option");
-  }
-  await click(highOption);
-  expect(props.onReasoningEffortSelect).toHaveBeenCalledWith("high");
-
-  await act(async () => renderer.unmount());
-});
-
-test("zero-sized context usage renders finite percentages and MCP tool details", async () => {
-  const props = {
-    ...createComposerProps(),
-    contextUsage: {
-      sessionId: "session-one",
-      usedTokens: 0,
-      maxContextTokens: 0,
-      usedPercentage: 0,
-      isCompacting: false,
-      breakdown: {
-        systemPromptTokens: 0,
-        systemToolTokens: 0,
-        mcpToolTokens: 12,
-        skillsTokens: 0,
-        messageTokens: 0,
-        autoCompactBufferTokens: 0,
-        freeSpaceTokens: 0,
-        mcpTools: [{ providerId: "provider-one", name: "search", tokens: 12 }],
-      },
-    } satisfies AgentContextUsageSummary,
-  };
-  const rendered = { current: null as ReactTestRenderer | null };
-  await act(async () => {
-    rendered.current = create(<ChatComposer {...props} />);
-  });
-  const renderer = rendered.current;
-  if (!renderer) {
-    throw new Error("Composer did not render");
-  }
-
-  await click(renderer.root.findByProps({ "aria-label": "Context window" }));
-  const serialized = JSON.stringify(renderer.toJSON());
-  expect(serialized).not.toContain("NaN");
-  expect(serialized).not.toContain("Infinity");
-  expect(serialized).toContain("provider-one · search");
-  expect(serialized).toContain("12");
 
   await act(async () => renderer.unmount());
 });

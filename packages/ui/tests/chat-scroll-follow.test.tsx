@@ -29,6 +29,7 @@ const harness = vi.hoisted(() => ({
   composerProps: null as ComposerHarnessProps | null,
   frameCallbacks: new Map<number, FrameRequestCallback>(),
   nextFrameId: 1,
+  anchorAnimation: null as null | { progress(value: number): void; complete(): void },
   scrollContainer: {
     clientHeight: 400,
     scrollHeight: 1_000,
@@ -36,6 +37,20 @@ const harness = vi.hoisted(() => ({
   } as ScrollContainer,
   virtualListProps: null as VirtualListHarnessProps | null,
 }));
+
+// Follow measurements and Motion animation values have independent clocks.
+// Keep the real ChatArea/controller and control only the library boundary.
+vi.mock("motion", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("motion")>();
+  return { ...actual, animate: (_from: number, _to: number, options: { onUpdate(value: number): void; onComplete(): void }) => {
+    let active = true;
+    harness.anchorAnimation = {
+      progress(value) { if (active) options.onUpdate(value); },
+      complete() { if (!active) return; options.onUpdate(1); active = false; options.onComplete(); },
+    };
+    return { stop() { active = false; } };
+  } };
+});
 
 const runtimeConfig: AgentRuntimeConfig = {
   executionHost: "localUser",
@@ -184,6 +199,7 @@ beforeEach(() => {
   harness.composerProps = null;
   harness.frameCallbacks.clear();
   harness.nextFrameId = 1;
+  harness.anchorAnimation = null;
   harness.scrollContainer.clientHeight = 400;
   harness.scrollContainer.scrollHeight = 1_000;
   harness.scrollContainer.scrollTop = 600;
@@ -318,8 +334,10 @@ test("a submitted prompt anchors its measured user row instead of jumping to the
   await act(async () => getVirtualListProps().onContentSizeChange(1000, 800, "new-user"));
   await act(async () => runAnimationFrames());
   expect(harness.scrollContainer.scrollTop).toBe(100);
-  await act(async () => runAnimationFrames(0));
-  await act(async () => runAnimationFrames(320));
+  await act(async () => harness.anchorAnimation?.progress(0.5));
+  expect(harness.scrollContainer.scrollTop).toBeGreaterThan(100);
+  expect(harness.scrollContainer.scrollTop).toBeLessThan(700);
+  await act(async () => harness.anchorAnimation?.complete());
   expect(harness.scrollContainer.scrollTop).toBe(700);
   expect(getVirtualListProps().spacerRef.current?.style.height).toBe("100px");
   await act(async () => renderer.unmount());

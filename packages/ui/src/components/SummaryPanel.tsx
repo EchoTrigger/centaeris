@@ -16,7 +16,7 @@ import {
   X,
 } from "lucide-react";
 import { Button } from "./ui/button";
-import { Tooltip } from "./ui/tooltip";
+import { Tooltip, TooltipTrigger, TooltipContent } from "./ui/tooltip";
 import type { DiffPanelData, DiffPanelFile } from "../lib/diffPanel";
 import type { FilePreviewContentKind } from "../lib/workspaceBridge";
 import { renderMarkdownNodes } from "./MarkdownRenderer";
@@ -201,8 +201,8 @@ function DiffPanelFileRow({
           <DiffStats added={file.added} removed={file.removed} compact />
         )}
         {onOpenWorkspacePath ? (
-          <Tooltip align="end" content={t("summaryPanel.openFile")}>
-            <Button
+          <Tooltip>
+<TooltipTrigger render={<Button
               type="button"
               variant="workspace"
               size="workspaceIcon"
@@ -213,8 +213,9 @@ function DiffPanelFileRow({
               }}
             >
               <ExternalLink className="summaryPanelIcon" aria-hidden="true" />
-            </Button>
-          </Tooltip>
+            </Button>} />
+<TooltipContent align="end">{t("summaryPanel.openFile")}</TooltipContent>
+</Tooltip>
         ) : null}
       </div>
     </article>
@@ -385,8 +386,8 @@ export function SummaryPanel({
               );
             })}
             {onAddSummaryTab ? (
-              <Tooltip content={t("summaryPanel.openSummary")}>
-                <Button
+              <Tooltip>
+<TooltipTrigger render={<Button
                   type="button"
                   variant="workspace"
                   size="chromeIcon"
@@ -395,22 +396,24 @@ export function SummaryPanel({
                   aria-label={t("summaryPanel.openSummary")}
                 >
                   <Plus className="summaryPanelIcon" aria-hidden="true" />
-                </Button>
-              </Tooltip>
+                </Button>} />
+<TooltipContent >{t("summaryPanel.openSummary")}</TooltipContent>
+</Tooltip>
             ) : null}
           </div>
           {workspaceRoot && onFiles && onReview && onTerminal ? <WorkspaceAddMenu root={workspaceRoot} sessionId={sessionId ?? null} onFiles={onFiles} onReview={onReview} onTerminal={onTerminal}/> : null}
           {onCollapse ? (
-            <Tooltip align="end" content={t("summaryPanel.collapseRightPanel")}>
-              <button
+            <Tooltip>
+<TooltipTrigger render={<button
                 type="button"
                 className="summaryPanelCollapse"
                 onClick={onCollapse}
                 aria-label={t("summaryPanel.collapseRightPanel")}
               >
                 <PanelRight className="summaryPanelIcon" aria-hidden="true" />
-              </button>
-            </Tooltip>
+              </button>} />
+<TooltipContent align="end">{t("summaryPanel.collapseRightPanel")}</TooltipContent>
+</Tooltip>
           ) : null}
         </div>
       ) : null}

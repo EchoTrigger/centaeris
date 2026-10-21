@@ -7,6 +7,7 @@ import type { AssistantExecutionTurn } from "../src/components/chat/types";
 vi.mock("../src/components/chat/MarkdownContent", () => ({
   MarkdownContent: ({ text }: { text: string }) => <p>{text}</p>,
 }));
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 let renderer: ReactTestRenderer;
 afterEach(() => { act(() => renderer?.unmount()); useChatViewStore.getState().clear(); });
 

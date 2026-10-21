@@ -1,3 +1,4 @@
+vi.mock("../src/components/ui/dropdown-menu", async () => import("./helpers/menuTestDouble"));
 import { act, create } from "react-test-renderer";
 import { expect, test, vi } from "vitest";
 import type { ComponentProps } from "react";
@@ -23,27 +24,6 @@ test("Recents groups projects, sorts newest first and shows empty opened folders
   expect(view.root.findByProps({ "aria-label": "Pinned" }).findAllByType("strong").map(node => node.children.join(""))).toEqual(["pin-b", "pin-a"]);
   await act(async () => view.unmount());
 });
-
-test("pinned rows support keyboard reorder across projects", async () => {
-  const reorder = vi.fn(async () => {});
-  let view!: ReturnType<typeof create>;
-  await act(async () => { view = create(<Sidebar {...props} onReorderPinnedSessions={reorder} />); });
-  await act(async () => view.root.findByProps({ "aria-label": "Reorder pin-a" }).props.onKeyDown({ key: "ArrowUp", preventDefault: noop }));
-  expect(reorder).toHaveBeenCalledWith(["pin-a", "pin-b"]);
-  await act(async () => view.unmount());
-});
-
-test("dropping a pinned handle below another row persists the complete new order", async () => {
-  const reorder = vi.fn(async () => {});
-  let view!: ReturnType<typeof create>;
-  await act(async () => { view = create(<Sidebar {...props} onReorderPinnedSessions={reorder} />); });
-  view.root.findByProps({ "aria-label": "Reorder pin-b" }).props.onDragStart({ dataTransfer: { setData: noop } });
-  const row = view.root.findByProps({ "aria-label": "Reorder pin-a" }).parent!;
-  await act(async () => row.props.onDrop({ preventDefault: noop, clientY: 40, currentTarget: { getBoundingClientRect: () => ({ top: 0, height: 45 }) } }));
-  expect(reorder).toHaveBeenCalledWith(["pin-a", "pin-b"]);
-  await act(async () => view.unmount());
-});
-
 
 test("workspace removal hides its group without removing sessions, and re-add restores them", async () => {
   let view!: ReturnType<typeof create>;

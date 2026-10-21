@@ -8,7 +8,8 @@
     ".": "./src/index.tsx",
     "./contract": "./src/contract.ts",
     "./catalog": "./src/generated.json",
-    "./styles.css": "./src/styles.css"
+    "./styles.css": "./src/styles.css",
+    "./renderer": "./src/Renderer.tsx"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json"

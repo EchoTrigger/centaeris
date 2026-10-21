@@ -1,0 +1,45 @@
+/* Desktop palette and component density follow the accepted light reference. */
+:root[data-theme="light"] {
+  --surface-color: #fcfcfc;
+  --surface-variant: #f4f4f4;
+  --surface-container: #eeeeee;
+  --surface-hover: #ededed;
+  --surface-active: #e5e5e5;
+  --on-surface: #171717;
+  --process-text: #666;
+  --outline: #dedede;
+  --outline-variant: #e5e5e5;
+  --background: 0 0% 99%;
+  --foreground: 0 0% 9%;
+  --secondary: 0 0% 96%;
+  --secondary-foreground: 0 0% 9%;
+  --muted: 0 0% 95%;
+  --muted-foreground: 0 0% 40%;
+  --accent: 0 0% 93%;
+  --accent-foreground: 0 0% 9%;
+  --border: 0 0% 87%;
+  --input: 0 0% 87%;
+}
+
+[data-slot="popover-content"].contextWindowPanel {
+  position: relative;
+  inset: auto;
+  width: min(360px, calc(100vw - 32px));
+  max-height: min(480px, 70vh);
+  overflow: auto;
+}
+
+/* Composer density suppresses the default ring; keep keyboard focus explicit. */
+[data-slot="select-trigger"].composer-chip:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-slot="tooltip-content"], [data-slot="dialog-content"],
+  [data-slot="dialog-overlay"], [data-slot="popover-content"],
+  [data-slot="select-content"], [data-slot="dropdown-menu-content"] {
+    animation: none;
+    transition: none;
+  }
+}

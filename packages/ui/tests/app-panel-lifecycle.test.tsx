@@ -1,3 +1,4 @@
+vi.mock("../src/components/ui/dropdown-menu", async () => import("./helpers/menuTestDouble"));
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { beforeEach, expect, test, vi } from "vitest";
 import type { DesktopFilePreviewReadResponse } from "../src/lib/workspaceBridge";
@@ -176,43 +177,18 @@ test("workspace overview stays open when the user clicks outside", async () => {
   await act(async () => renderer.unmount());
 });
 
-test("workspace split starts balanced, resizes by pointer and keyboard, and survives sidebar toggles", async () => {
+test("sidebar toggles preserve the open preview and its selected tab", async () => {
   let renderer!: ReactTestRenderer;
-  await act(async () => {
-    renderer = create(<App />);
-  });
+  await act(async () => { renderer = create(<App />); });
   await act(async () => getChatProps().onOpenAgentSession("agent-1", "Agent"));
-  const handle = () => renderer.root.findByProps({ role: "separator" });
-  expect(handle().props["aria-valuenow"]).toBe(50);
-  const target = {
-    setPointerCapture: vi.fn(),
-    releasePointerCapture: vi.fn(),
-    hasPointerCapture: () => true,
-    parentElement: { getBoundingClientRect: () => ({ left: 200, width: 1000 }) },
-  };
-  await act(async () =>
-    handle().props.onPointerDown({
-      button: 0,
-      pointerId: 1,
-      preventDefault: vi.fn(),
-      currentTarget: target,
-    }),
-  );
-  await act(async () =>
-    handle().props.onPointerMove({ pointerId: 1, clientX: 600, currentTarget: target }),
-  );
-  expect(handle().props["aria-valuenow"]).toBe(60);
-  await act(async () => handle().props.onPointerUp({ pointerId: 1, currentTarget: target }));
-  await act(async () =>
-    renderer.root.findByProps({ "aria-label": "Hide left sidebar" }).props.onClick(),
-  );
-  expect(handle().props["aria-valuenow"]).toBe(60);
-  await act(async () =>
-    handle().props.onKeyDown({ key: "ArrowRight", preventDefault: vi.fn(), currentTarget: target }),
-  );
-  expect(handle().props["aria-valuenow"]).toBe(58);
-  await act(async () => handle().props.onDoubleClick());
-  expect(handle().props["aria-valuenow"]).toBe(50);
+  const before = getSummaryProps().tabs;
+  await act(async () => renderer.root.findByProps({ "aria-label": "Hide left sidebar" }).props.onClick());
+  expect(getSummaryProps().tabs).toEqual(before);
+  expect(getSummaryProps().activeTabId).toBe("agent:agent-1");
+  expect(renderer.root.findByProps({ "aria-label": "Preview" }).props["aria-hidden"]).toBe(false);
+  await act(async () => renderer.root.findByProps({ "aria-label": "Show left sidebar" }).props.onClick());
+  expect(getSummaryProps().tabs).toEqual(before);
+  expect(renderer.root.findByProps({ "aria-label": "Preview" }).props["aria-hidden"]).toBe(false);
   await act(async () => renderer.unmount());
 });
 

@@ -1,5 +1,6 @@
 import { memo, useEffect, useMemo, useRef } from "react";
 import { VisualMarkdown } from "@centaeris/visualization-react";
+import { renderDesktopVisual } from "./desktopVisuals";
 import {
   renderMarkdownNodes,
   type OpenWorkspacePathHandler,
@@ -12,7 +13,7 @@ export function MarkdownContent(props: {
   onOpenWorkspacePath?: OpenWorkspacePathHandler;
 }) {
   if (props.allowVisuals) {
-    return <VisualMarkdown text={props.text} finalized={!props.isStreaming}
+    return <VisualMarkdown text={props.text} finalized={!props.isStreaming} renderVisual={renderDesktopVisual}
       renderMarkdown={(text) => <OrdinaryMarkdownContent text={text} isStreaming={props.isStreaming} onOpenWorkspacePath={props.onOpenWorkspacePath} />} />;
   }
   return <OrdinaryMarkdownContent {...props} />;

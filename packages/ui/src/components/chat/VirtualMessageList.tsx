@@ -15,7 +15,7 @@ import {
 } from "./chatViewStore";
 import { formatUserMessageTimestamp } from "./chatRuntimeModel";
 import { Button } from "../ui/button";
-import { Tooltip } from "../ui/tooltip";
+import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import type { ChatMessage } from "./types";
 
 type VirtualMessageListProps = {
@@ -111,8 +111,8 @@ const UserMessageRow = memo(function UserMessageRow({
             <span className="user-message-time">
               {formatUserMessageTimestamp(message.timestamp)}
             </span>
-            <Tooltip content={t("virtualMessageList.copy")}>
-              <Button
+            <Tooltip>
+<TooltipTrigger render={<Button
                 type="button"
                 variant="ghost"
                 size="icon"
@@ -126,11 +126,12 @@ const UserMessageRow = memo(function UserMessageRow({
                 ) : (
                   <Copy className="user-message-action-icon" aria-hidden="true" />
                 )}
-              </Button>
-            </Tooltip>
+              </Button>} />
+<TooltipContent >{t("virtualMessageList.copy")}</TooltipContent>
+</Tooltip>
             {canEdit && !loading && !paged ? (
-                  <Tooltip content={t("chatArea.edit")}>
-                    <Button
+                  <Tooltip>
+<TooltipTrigger render={<Button
                       type="button"
                       variant="ghost"
                       size="icon"
@@ -142,8 +143,9 @@ const UserMessageRow = memo(function UserMessageRow({
                         className="user-message-action-icon"
                         aria-hidden="true"
                       />
-                    </Button>
-                  </Tooltip>
+                    </Button>} />
+<TooltipContent >{t("chatArea.edit")}</TooltipContent>
+</Tooltip>
             ) : null}
           </div>
         </div>

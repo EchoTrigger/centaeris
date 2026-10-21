@@ -16,6 +16,9 @@ import {
   type WorkspaceSnapshot,
 } from "../../lib/workspaceBridge";
 import { sessionViewCacheStore } from "../chat/chatRuntimeCore";
+import { useStore } from "zustand";
+import { useShallow } from "zustand/react/shallow";
+import { createSessionCatalogViewStore } from "./sessionCatalogViewStore";
 
 export type SessionSelectionResult = {
   workspaceSnapshot: WorkspaceSnapshot | null;
@@ -62,26 +65,25 @@ export function useSessionController({
   const catalogRef = useRef<SessionCatalogClient | null>(null);
   if (!catalogRef.current) catalogRef.current = new SessionCatalogClient(querySessionCatalog);
   const catalog = catalogRef.current;
-  const [catalogRevision, setCatalogRevision] = useState(0);
-  const [sessions, setSessions] = useState<UiSession[]>([]);
-  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
-  const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(new Set());
-  const [completedSessionIds, setCompletedSessionIds] = useState<Set<string>>(new Set());
+  const [store] = useState(createSessionCatalogViewStore);
+  const getViewState = store.getState;
+  const { catalogRevision, sessions, currentSessionId, runningSessionIds, completedSessionIds } = useStore(
+    store,
+    useShallow(state => ({
+      catalogRevision: state.catalogRevision,
+      sessions: state.sessions,
+      currentSessionId: state.currentSessionId,
+      runningSessionIds: state.runningSessionIds,
+      completedSessionIds: state.completedSessionIds,
+    })),
+  );
+  const { setSessions, setCurrentSession, setRunningSessionIds, setCompletedSessionIds, advanceCatalogRevision } = getViewState();
   const inputsRef = useRef({ activeWorkspaceRoot, reportError });
-  const sessionsRef = useRef(sessions);
-  const currentSessionIdRef = useRef(currentSessionId);
   const selectionEpochRef = useRef(0);
   const refreshRequestIdRef = useRef(0);
   const catalogMutationRef = useRef(0);
   const pendingPins = useRef(new Set<string>());
   inputsRef.current = { activeWorkspaceRoot, reportError };
-  sessionsRef.current = sessions;
-  currentSessionIdRef.current = currentSessionId;
-
-  const setCurrentSession = useCallback((sessionId: string | null) => {
-    currentSessionIdRef.current = sessionId;
-    setCurrentSessionId(sessionId);
-  }, []);
 
   const clearSelection = useCallback(() => {
     selectionEpochRef.current += 1;
@@ -99,7 +101,6 @@ export function useSessionController({
         catalogMutationRef.current += 1;
         selectionEpochRef.current += 1;
         const mapped = sortSessions(items.map(toUiSession));
-        sessionsRef.current = mapped;
         setSessions(mapped);
         const preferred = preferredSessionId
           ? mapped.find(
@@ -110,26 +111,26 @@ export function useSessionController({
         return true;
       },
     };
-  }, [catalog, setCurrentSession]);
+  }, [catalog, setCurrentSession, setSessions]);
 
   const refresh = useCallback(async (preferredSessionId?: string | null) => {
     const requestId = refreshRequestIdRef.current + 1;
     refreshRequestIdRef.current = requestId;
     const selectionEpoch = selectionEpochRef.current;
-    const selectedSessionId = currentSessionIdRef.current;
+    const selectedSessionId = getViewState().currentSessionId;
     const items = (await catalog.sync()).map(toUiSession);
-    const selected = sessionsRef.current.find(item => item.id === currentSessionIdRef.current);
+    const view = getViewState();
+    const selected = view.sessions.find(item => item.id === view.currentSessionId);
     if (selected && !items.some(item => item.id === selected.id)) {
       const found = (await querySessionCatalog({mode:"lookup",sessionId:selected.id})).items[0];
       if (found) items.push(toUiSession(found));
     }
     const fetched = sortSessions(items);
     if (refreshRequestIdRef.current !== requestId) return;
-    sessionsRef.current = fetched;
     setSessions(fetched);
     if (
       selectionEpochRef.current !== selectionEpoch
-      || currentSessionIdRef.current !== selectedSessionId
+      || getViewState().currentSessionId !== selectedSessionId
     ) {
       return;
     }
@@ -145,7 +146,7 @@ export function useSessionController({
     );
     const next = preferred ?? workspaceMatch ?? null;
     setCurrentSession(next?.id ?? null);
-  }, [catalog, setCurrentSession]);
+  }, [catalog, setCurrentSession, getViewState, setSessions]);
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof document === "undefined") return;
@@ -158,19 +159,19 @@ export function useSessionController({
       const requestId = ++refreshRequestIdRef.current;
       try {
         const items = (await catalog.sync()).map(toUiSession);
-    const selected = sessionsRef.current.find(item => item.id === currentSessionIdRef.current);
-    if (selected && !items.some(item => item.id === selected.id)) {
-      const found = (await querySessionCatalog({mode:"lookup",sessionId:selected.id})).items[0];
-      if (found) items.push(toUiSession(found));
-    }
-    const fetched = sortSessions(items);
+        const view = getViewState();
+        const selected = view.sessions.find(item => item.id === view.currentSessionId);
+        if (selected && !items.some(item => item.id === selected.id)) {
+          const found = (await querySessionCatalog({ mode: "lookup", sessionId: selected.id })).items[0];
+          if (found) items.push(toUiSession(found));
+        }
+        const fetched = sortSessions(items);
         if (disposed || mutation !== catalogMutationRef.current || requestId !== refreshRequestIdRef.current) return;
-        const previous = sessionsRef.current;
+        const previous = getViewState().sessions;
         const unchanged = previous.length === fetched.length && fetched.every((session, index) =>
           (Object.keys(session) as (keyof UiSession)[]).every((key) => session[key] === previous[index][key]),
         );
         if (!unchanged) {
-          sessionsRef.current = fetched;
           setSessions(fetched);
         }
         // Discovery updates the catalog only: never select another session or erase a draft.
@@ -190,20 +191,19 @@ export function useSessionController({
       window.removeEventListener("focus", onVisible);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [catalog]);
+  }, [catalog, setSessions, getViewState]);
 
   const selectSession = useCallback(async (
     sessionId: string,
   ): Promise<SessionSelectionResult | null> => {
     const selectionEpoch = selectionEpochRef.current + 1;
     selectionEpochRef.current = selectionEpoch;
-    let target = sessionsRef.current.find((session) => session.id === sessionId);
+    let target = getViewState().sessions.find((session) => session.id === sessionId);
     if (!target) {
       try {
         const fetched = sortSessions((await querySessionCatalog({ mode: "lookup", sessionId })).items.map(toUiSession));
         if (selectionEpochRef.current !== selectionEpoch) return null;
-        const merged = sortSessions([...sessionsRef.current.filter(i => i.id !== sessionId), ...fetched]);
-        sessionsRef.current = merged;
+        const merged = sortSessions([...getViewState().sessions.filter(i => i.id !== sessionId), ...fetched]);
         setSessions(merged);
         target = fetched.find((session) => session.id === sessionId);
       } catch (error) {
@@ -246,7 +246,7 @@ export function useSessionController({
     }
     void activateSession(sessionId, Date.now() * 1_000).catch(() => undefined);
     return { workspaceSnapshot };
-  }, [setCurrentSession]);
+  }, [setCurrentSession, getViewState, setCompletedSessionIds, setSessions]);
 
   const renameSession = useCallback(async (sessionId: string, title: string) => {
     try {
@@ -259,17 +259,16 @@ export function useSessionController({
       inputsRef.current.reportError(errorMessage(error, t("useSessionController.unableToRenameConversation")));
       throw error;
     }
-  }, []);
+  }, [setSessions]);
 
   const pinSession = useCallback(async (sessionId: string, isPinned: boolean) => {
     if (pendingPins.current.has(sessionId)) return;
-    const previous = sessionsRef.current.find(item => item.id === sessionId);
+    const previous = getViewState().sessions.find(item => item.id === sessionId);
     if (!previous) return;
     pendingPins.current.add(sessionId);
     const apply = (item: UiSession) => {
       catalogMutationRef.current += 1;
-      const next = sortSessions(sessionsRef.current.map(s => s.id === sessionId ? item : s));
-      sessionsRef.current = next;
+      const next = sortSessions(getViewState().sessions.map(s => s.id === sessionId ? item : s));
       setSessions(next);
     };
     apply({ ...previous, isPinned });
@@ -289,10 +288,10 @@ export function useSessionController({
     } finally {
       pendingPins.current.delete(sessionId);
     }
-  }, []);
+  }, [getViewState, setSessions]);
 
   const reorderPinnedSessions = useCallback(async (ids: string[]) => {
-    const pinned = sessionsRef.current.filter(session => session.isPinned && session.sessionKind === "main");
+    const pinned = getViewState().sessions.filter(session => session.isPinned && session.sessionKind === "main");
     if (pendingPins.current.size || ids.length !== pinned.length || new Set(ids).size !== ids.length || ids.some(id => !pinned.some(session => session.id === id))) {
       const error = new Error("Pinned chats changed; try sorting again");
       inputsRef.current.reportError(error.message);
@@ -301,14 +300,13 @@ export function useSessionController({
     const previousOrders = new Map(pinned.map(session => [session.id, session.sortOrder]));
     const apply = (next: UiSession[]) => {
       catalogMutationRef.current += 1;
-      sessionsRef.current = sortSessions(next);
-      setSessions(sessionsRef.current);
+      setSessions(sortSessions(next));
     };
     ids.forEach(id => pendingPins.current.add(id));
-    apply(sessionsRef.current.map(session => ids.includes(session.id) ? { ...session, sortOrder: ids.indexOf(session.id) } : session));
+    apply(getViewState().sessions.map(session => ids.includes(session.id) ? { ...session, sortOrder: ids.indexOf(session.id) } : session));
     try {
       const saved = new Map((await reorderSessions("pinned", ids)).map(item => [item.id, toUiSession(item)]));
-      apply(sessionsRef.current.map(session => saved.get(session.id) ?? session));
+      apply(getViewState().sessions.map(session => saved.get(session.id) ?? session));
     } catch (error) {
       try {
         const observed = (await catalog.initialize()).map(toUiSession);
@@ -316,18 +314,18 @@ export function useSessionController({
         const actual = sortSessions(observed).filter(session => session.isPinned && session.sessionKind === "main").map(session => session.id);
         if (actual.length === ids.length && actual.every((id, index) => id === ids[index])) return;
       } catch {
-        apply(sessionsRef.current.map(session => previousOrders.has(session.id) ? { ...session, sortOrder: previousOrders.get(session.id) } : session));
+        apply(getViewState().sessions.map(session => previousOrders.has(session.id) ? { ...session, sortOrder: previousOrders.get(session.id) } : session));
       }
       inputsRef.current.reportError(errorMessage(error, "Unable to save pinned order"));
       throw error;
     } finally {
       ids.forEach(id => pendingPins.current.delete(id));
     }
-  }, [catalog]);
+  }, [catalog, getViewState, setSessions]);
 
   const removeSession = useCallback(async (sessionId: string): Promise<ReadonlySet<string>> => {
     try {
-      const currentSessions = sessionsRef.current;
+      const currentSessions = getViewState().sessions;
       const target = currentSessions.find((session) => session.id === sessionId);
       if (!target) throw new Error(t("useSessionController.conversationToDeleteDoesNotExistValue", { value1: sessionId }));
       const response = await deleteSession(sessionId);
@@ -349,17 +347,14 @@ export function useSessionController({
         deletedIds.forEach((id) => next.delete(id));
         return next;
       });
-      await refresh(
-        currentSessionIdRef.current && !deletedIds.has(currentSessionIdRef.current)
-          ? currentSessionIdRef.current
-          : null,
-      );
+      const selectedSessionId = getViewState().currentSessionId;
+      await refresh(selectedSessionId && !deletedIds.has(selectedSessionId) ? selectedSessionId : null);
       return deletedIds;
     } catch (error) {
       inputsRef.current.reportError(errorMessage(error, t("useSessionController.unableToDeleteConversation")));
       throw error;
     }
-  }, [refresh]);
+  }, [refresh, getViewState, setRunningSessionIds, setCompletedSessionIds]);
 
   const resolveSession = useCallback((session: UiSession, options?: { activate?: boolean }) => {
     catalogMutationRef.current += 1;
@@ -371,7 +366,7 @@ export function useSessionController({
       selectionEpochRef.current += 1;
       setCurrentSession(session.id);
     }
-  }, [setCurrentSession]);
+  }, [setCurrentSession, setSessions]);
 
   const setRunning = useCallback((sessionId: string, running: boolean) => {
     setRunningSessionIds((previous) => {
@@ -380,7 +375,7 @@ export function useSessionController({
       else next.delete(sessionId);
       return next;
     });
-  }, []);
+  }, [setRunningSessionIds]);
 
   const completeSession = useCallback((sessionId: string) => {
     setRunningSessionIds((previous) => {
@@ -388,29 +383,29 @@ export function useSessionController({
       next.delete(sessionId);
       return next;
     });
-    if (currentSessionIdRef.current !== sessionId) {
+    if (getViewState().currentSessionId !== sessionId) {
       setCompletedSessionIds((previous) => new Set(previous).add(sessionId));
       setSessions((items) => items.map(
         (session) => session.id === sessionId ? { ...session, isUnread: true } : session,
       ));
     }
-    void refresh(currentSessionIdRef.current).catch(() => undefined);
-  }, [refresh]);
+    void refresh(getViewState().currentSessionId).catch(() => undefined);
+  }, [refresh, getViewState, setSessions, setRunningSessionIds, setCompletedSessionIds]);
 
   const expandWorkspace = useCallback(async (root: string) => {
     try {
       const items = await catalog.expand(root);
       setSessions(previous => sortSessions([...previous.filter(p => !items.some(i => i.id === p.id)), ...items.map(toUiSession)]));
-      setCatalogRevision(value => value + 1);
+      advanceCatalogRevision();
     } catch(error) { inputsRef.current.reportError(errorMessage(error, "Unable to load chats")); }
-  }, [catalog]);
+  }, [catalog, setSessions, advanceCatalogRevision]);
   const loadMore = useCallback(async (root: string) => {
     try {
       const items = await catalog.more(root);
       setSessions(previous => sortSessions([...previous.filter(p => !items.some(i => i.id === p.id)), ...items.map(toUiSession)]));
-      setCatalogRevision(value => value + 1);
+      advanceCatalogRevision();
     } catch(error) { inputsRef.current.reportError(errorMessage(error, "Unable to load chats")); }
-  }, [catalog]);
+  }, [catalog, setSessions, advanceCatalogRevision]);
   useEffect(() => { if (activeWorkspaceRoot) void expandWorkspace(activeWorkspaceRoot); }, [activeWorkspaceRoot, expandWorkspace]);
 
   const actions = useMemo(() => ({

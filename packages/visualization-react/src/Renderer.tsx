@@ -50,7 +50,7 @@ function container(name: string) {
 		);
 	};
 }
-const registry = {
+export const visualRegistry = {
 	Card: container("card"),
 	Group: container("group"),
 	Columns: ({ element, children }: Props) => (
@@ -105,9 +105,12 @@ const registry = {
 	VisualComponentName,
 	ComponentRenderer<Record<string, string>>
 >;
-export function VisualRenderer({ visual }: { visual: VisualEnvelope }) {
+export type VisualRegistry = typeof visualRegistry;
+export type VisualRenderProps = Props;
+
+export function VisualRenderer({ visual, registry = visualRegistry, className = "" }: { visual: VisualEnvelope; registry?: VisualRegistry; className?: string }) {
 	return (
-		<div className="centaeris-visual">
+		<div className={className ? "centaeris-visual " + className : "centaeris-visual"}>
 			<JSONUIProvider registry={registry}>
 				<Renderer spec={visual.spec} registry={registry} />
 			</JSONUIProvider>

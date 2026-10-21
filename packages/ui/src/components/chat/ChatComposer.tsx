@@ -179,7 +179,7 @@ const ChatComposerLifecycle = memo(function ChatComposerLifecycle({
   }, [commandQuery]);
 
   useEffect(() => {
-    if (!activePanel) {
+    if (!activePanel || activePanel === "model" || activePanel === "reasoning" || activePanel === "context") {
       return;
     }
     const closeOnOutsidePointer = (event: PointerEvent) => {
@@ -203,8 +203,8 @@ const ChatComposerLifecycle = memo(function ChatComposerLifecycle({
     };
   }, [activePanel]);
 
-  const handleRuntimePanelToggle = useCallback((panel: Exclude<RuntimeComposerPanel, null>) => {
-    setActivePanel((current) => current === panel ? null : panel);
+  const handleRuntimePanelChange = useCallback((panel: RuntimeComposerPanel) => {
+    setActivePanel(panel);
   }, []);
 
   const handleRuntimeModelSelect = useCallback((model: SelectableModel) => {
@@ -376,7 +376,7 @@ const ChatComposerLifecycle = memo(function ChatComposerLifecycle({
         reasoningEfforts={reasoningEfforts}
         contextUsage={contextUsage}
         runtimeConfigError={runtimeConfigError}
-        onTogglePanel={handleRuntimePanelToggle}
+        onPanelChange={handleRuntimePanelChange}
         onModelSelect={handleRuntimeModelSelect}
         onReasoningEffortSelect={handleRuntimeReasoningEffortSelect}
       />

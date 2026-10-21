@@ -27,7 +27,7 @@ import {
   type SessionReplayCursors,
 } from "../../lib/sessionViewCache";
 import { Button } from "../ui/button";
-import { Tooltip } from "../ui/tooltip";
+import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { ChatComposer } from "./ChatComposer";
 import { PendingQuestionPanel } from "./ChatPendingPanels";
 import {
@@ -1032,8 +1032,8 @@ export function ChatArea({
                   {queuedNextPrompt.trim()}
                 </div>
                 <div className="queuedNextPromptActions">
-                  <Tooltip content={t("chatArea.edit")}>
-                    <Button
+                  <Tooltip>
+<TooltipTrigger render={<Button
                       type="button"
                       variant="composerIcon"
                       size="composerIcon"
@@ -1045,10 +1045,11 @@ export function ChatArea({
                         className="composerLucideIcon"
                         aria-hidden="true"
                       />
-                    </Button>
-                  </Tooltip>
-                  <Tooltip align="end" content={t("chatArea.sendNow")}>
-                    <Button
+                    </Button>} />
+<TooltipContent >{t("chatArea.edit")}</TooltipContent>
+</Tooltip>
+                  <Tooltip>
+<TooltipTrigger render={<Button
                       type="button"
                       variant="composerIcon"
                       size="composerIcon"
@@ -1060,8 +1061,9 @@ export function ChatArea({
                         className="composerLucideIcon"
                         aria-hidden="true"
                       />
-                    </Button>
-                  </Tooltip>
+                    </Button>} />
+<TooltipContent align="end">{t("chatArea.sendNow")}</TooltipContent>
+</Tooltip>
                 </div>
               </div>
             ) : null}

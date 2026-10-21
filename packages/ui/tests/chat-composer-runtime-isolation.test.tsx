@@ -1,3 +1,4 @@
+vi.mock("../src/components/ui/tooltip", async () => import("./helpers/tooltipTestDouble"));
 import { useState, type ChangeEvent, type ComponentProps } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { expect, test, vi } from "vitest";

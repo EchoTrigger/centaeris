@@ -1,3 +1,4 @@
+import { createStore } from "zustand/vanilla";
 import {
   getTranscriptContentRange,
   TRANSCRIPT_PROJECTION_VERSION_V1,
@@ -19,10 +20,11 @@ const pages = new Map<string, TranscriptContentRangeV1>();
 const pageKeysByRef = new Map<string, string[]>();
 let cachedBytes = 0;
 let cacheEpoch = 0;
-const listeners = new Set<() => void>();
-
-function notify() {
-  for (const listener of listeners) listener();
+// The bounded range cache owns its I/O and eviction rules. Zustand exposes the
+// shared usage snapshot and subscriptions without another listener registry.
+const cacheUsageStore = createStore(() => ({ cachedBytes: 0 }));
+function publishCacheUsage() {
+  cacheUsageStore.setState({ cachedBytes });
 }
 
 function refKey(identity: Identity) {
@@ -48,7 +50,7 @@ function remember(key: string, identity: Identity, page: TranscriptContentRangeV
   while (cachedBytes > TRANSCRIPT_CONTENT_CACHE_MAX_BYTES && pages.size > 0) {
     remove(pages.keys().next().value as string);
   }
-  notify();
+  publishCacheUsage();
 }
 
 function remove(key: string) {
@@ -109,16 +111,13 @@ export function clearTranscriptContentRangeCache() {
   pages.clear();
   pageKeysByRef.clear();
   cachedBytes = 0;
-  notify();
+  publishCacheUsage();
 }
 
 export function transcriptContentRangeCacheBytes() {
-  return cachedBytes;
+  return cacheUsageStore.getState().cachedBytes;
 }
 
 export function subscribeTranscriptContentRangeCache(listener: () => void) {
-  listeners.add(listener);
-  return () => {
-    listeners.delete(listener);
-  };
+  return cacheUsageStore.subscribe(listener);
 }

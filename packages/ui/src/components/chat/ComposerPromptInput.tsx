@@ -9,7 +9,7 @@ import {
 } from "react";
 import { ArrowUp, Square } from "lucide-react";
 import { Button } from "../ui/button";
-import { Tooltip } from "../ui/tooltip";
+import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
 
@@ -116,11 +116,8 @@ export const ComposerPromptInput = forwardRef<
           lastCompositionEndAtRef.current = Date.now();
         }}
       />
-      <Tooltip
-        align="end"
-        content={!hasInput && isStreaming ? t("composerPromptInput.stopThisConversation") : t("composerPromptInput.send")}
-      >
-        <Button
+      <Tooltip>
+<TooltipTrigger render={<Button
           type="button"
           variant={!hasInput && isStreaming ? "composerStop" : "composerSend"}
           size="composerSend"
@@ -143,8 +140,9 @@ export const ComposerPromptInput = forwardRef<
               aria-hidden="true"
             />
           )}
-        </Button>
-      </Tooltip>
+        </Button>} />
+<TooltipContent align="end">{!hasInput && isStreaming ? t("composerPromptInput.stopThisConversation") : t("composerPromptInput.send")}</TooltipContent>
+</Tooltip>
     </div>
   );
 });

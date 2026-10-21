@@ -1,10 +1,10 @@
 import { recentWorkspaceGroups, sortSessionCatalog } from "./sidebarSessions";
 import { SidebarWorkspaceGroup } from "./SidebarWorkspaceGroup";
 import { t } from "../i18n";
-import { useRef, useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
+import { SortablePinnedSessions } from "./SortablePinnedSessions";
 import {
   Clock,
-  GripVertical,
   Settings,
 
 
@@ -130,17 +130,7 @@ export function Sidebar({
   };
 
   const pinnedSessions = sortSessionCatalog(sessions.filter(session => session.isPinned));
-  const draggedSession = useRef<string | null>(null);
-  const [reordering, setReordering] = useState(false);
-  const reorderPending = useRef(false);
-  const savePinnedOrder = async (ids: string[]) => {
-    if (!onReorderPinnedSessions || reorderPending.current) return;
-    reorderPending.current = true;
-    setReordering(true);
-    try { await onReorderPinnedSessions(ids); } catch { /* Controller reports and reconciles failed writes. */ }
-    finally { reorderPending.current = false; setReordering(false); }
-  };
-  const renderSession = (session: UiSession) => {
+  const renderSession = (session: UiSession, dragHandle?: ReactNode) => {
 
     const isCurrent = activePage === "chat" && session.id === currentSessionId;
     const isRunning = runningSessionIds.has(session.id);
@@ -211,30 +201,8 @@ export function Sidebar({
       <div
         className={`thinSessionRow ${isCurrent ? "is-active" : ""}`}
         key={session.id}
-        onDragOver={event => { if (session.isPinned && draggedSession.current) event.preventDefault(); }}
-        onDrop={event => {
-          event.preventDefault();
-          const source = draggedSession.current;
-          draggedSession.current = null;
-          if (!source || !session.isPinned || source === session.id) return;
-          const bounds = event.currentTarget.getBoundingClientRect();
-          const ids = pinnedSessions.map(item => item.id).filter(id => id !== source);
-          ids.splice(ids.indexOf(session.id) + (event.clientY > bounds.top + bounds.height / 2 ? 1 : 0), 0, source);
-          void savePinnedOrder(ids);
-        }}
       >
-        {session.isPinned && onReorderPinnedSessions && !hasMore?.("pinned") ? <button type="button" className="pinnedDragHandle" aria-label={`Reorder ${session.title}`} disabled={reordering} draggable={!reordering}
-          onDragStart={event => { draggedSession.current = session.id; event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", session.id); }}
-          onDragEnd={() => { draggedSession.current = null; }}
-          onKeyDown={event => {
-            if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
-            event.preventDefault();
-            const ids = pinnedSessions.map(item => item.id);
-            const from = ids.indexOf(session.id), to = from + (event.key === "ArrowUp" ? -1 : 1);
-            if (to < 0 || to >= ids.length) return;
-            [ids[from], ids[to]] = [ids[to], ids[from]];
-            void savePinnedOrder(ids);
-          }}><GripVertical aria-hidden="true" /></button> : null}
+        {dragHandle}
         <button
           type="button"
           className="thinSessionSelect"
@@ -300,13 +268,15 @@ export function Sidebar({
 
       <section className="thinSessionRegion" aria-label="Pinned">
         <div className="thinSectionHeader"><span>Pinned</span></div>
-        <div className="thinSessionList">{pinnedSessions.map(renderSession)}{hasMore?.("pinned") ? <button type="button" onClick={() => onLoadMore?.("pinned")}>Load more</button> : null}</div>
+        <div className="thinSessionList">{onReorderPinnedSessions && !hasMore?.("pinned") ? <SortablePinnedSessions sessions={pinnedSessions}
+          disabled={Boolean(renameSessionId || deleteSessionId || pendingSessionId || collapsed)}
+          onReorder={onReorderPinnedSessions} renderSession={renderSession} /> : pinnedSessions.map(session => renderSession(session))}{hasMore?.("pinned") ? <button type="button" onClick={() => onLoadMore?.("pinned")}>Load more</button> : null}</div>
       </section>
       <section className="thinSessionRegion" aria-label="Recents">
         <div className="thinSectionHeader"><span>Recents</span></div>
         <div className="thinSessionList">{recentWorkspaceGroups(sessions, workspaces).map(group => (
           <SidebarWorkspaceGroup key={group.root} root={group.root} name={group.name} onRename={onRenameWorkspace} onRemove={onRemoveWorkspace} onExpand={onExpandWorkspace} initiallyExpanded={!onExpandWorkspace || group.root === activeWorkspaceRoot}>
-            {group.sessions.map(renderSession)}
+            {group.sessions.map(session => renderSession(session))}
             {hasMore?.(group.root) ? <button type="button" onClick={() => onLoadMore?.(group.root)}>Load more</button> : null}
           </SidebarWorkspaceGroup>
         ))}</div>
