@@ -53,6 +53,10 @@ fn release_race(release_before_yield: bool) {
         prepare(&store, &waiting, &host, limits(1, 1)).unwrap_err(),
         RESIDENT_CAPACITY_WAIT
     );
+    assert_eq!(
+        prepare(&store, &unrelated, &host, limits(1, 1)).unwrap_err(),
+        RESIDENT_CAPACITY_WAIT
+    );
     let mut db = Client::connect(&url, NoTls).unwrap();
     let at = now(&mut db);
     yield_until(&store, &unrelated, at, "question_wait");
