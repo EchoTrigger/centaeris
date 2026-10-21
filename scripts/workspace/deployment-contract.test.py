@@ -322,6 +322,8 @@ sys.stdout.write(re.sub(pattern,replace,text))
         environment = compose_config()["services"]["runtime"]["environment"]
         self.assertEqual(environment["RUNTIME_POSTGRES_POOL_SIZE"], "10")
         self.assertEqual(environment["RUNTIME_POSTGRES_CONTROL_POOL_SIZE"], "2")
+        self.assertEqual(environment["RUNTIME_POSTGRES_CLEANUP_POOL_SIZE"], "2")
+        self.assertEqual(environment["RUNTIME_HTTP_CLEANUP_LIMIT"], "2")
         self.assertEqual(environment["RUNTIME_POSTGRES_LISTENER_LIMIT"], "8")
         self.assertEqual(environment["RUNTIME_POSTGRES_CHECKOUT_TIMEOUT_MS"], "5000")
         self.assertEqual(environment["RUNTIME_POSTGRES_CONNECT_TIMEOUT_MS"], "3000")

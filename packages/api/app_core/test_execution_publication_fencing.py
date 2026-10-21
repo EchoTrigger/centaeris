@@ -56,7 +56,7 @@ class ExecutionPublicationFixture:
             cursor.execute("CREATE SCHEMA IF NOT EXISTS runtime")
             cursor.execute(
                 "CREATE TABLE IF NOT EXISTS runtime.runtime_jobs("
-                "job_id text PRIMARY KEY, job_kind text NOT NULL, status text NOT NULL, "
+                "job_id text PRIMARY KEY, job_kind text NOT NULL, status text NOT NULL, lease_purpose text NOT NULL DEFAULT 'execute', "
                 "lease_owner text, lease_expires_at_ms bigint, idempotency_key text NOT NULL, "
                 "session_id text, payload_ref text)"
             )

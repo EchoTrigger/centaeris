@@ -1,5 +1,7 @@
 use super::*;
+mod control;
 pub(crate) mod retained_cleanup;
+pub(super) use control::advance as advance_control;
 
 pub(super) fn cleanup_receipt(
     state: HttpServerState,
@@ -388,6 +390,12 @@ pub(super) fn step(
             return json_error_response(400, error.as_str());
         }
     };
+    if job_store
+        .require_execute_lease(&agent_run_step.job_id, &agent_run_step.lease_owner)
+        .is_err()
+    {
+        return json_error_response(409, "agent_run_execute_lease_required");
+    }
     if let Err(error) = validate_agent_run_lifecycle_job(
         agent_run_step.job_id.as_str(),
         agent_run_step.lease_owner.as_str(),

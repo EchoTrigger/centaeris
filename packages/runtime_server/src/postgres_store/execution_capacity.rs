@@ -15,7 +15,7 @@ use crate::execution_capacity::ExecutionCapacity;
 pub(super) const ACTIVE_EXECUTIONS: &str = "WITH active AS MATERIALIZED (
     SELECT t.workspace_id FROM runtime_jobs j
     LEFT JOIN execution_job_tenants t ON t.job_id=j.job_id
-    WHERE j.job_kind='agent_run.lifecycle' AND j.status IN ('leased','running')
+    WHERE j.job_kind='agent_run.lifecycle' AND j.status IN ('leased','running') AND j.lease_purpose='execute'
 ), tenant_usage AS MATERIALIZED (
     SELECT workspace_id,COUNT(*) AS used FROM active GROUP BY workspace_id
 )";
@@ -106,13 +106,13 @@ impl PostgresRuntimeStore {
                 .map(|(tenant, _)| tenant.clone()).collect::<Vec<_>>();
             let now = tx.query_one("SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint", &[])
                 .map_err(|error| error.to_string())?.get::<_, i64>(0);
-            let candidates = tx.query("SELECT j.job_id,t.workspace_id FROM runtime_jobs j
+            let candidates = tx.query(&format!("SELECT j.job_id,t.workspace_id FROM runtime_jobs j
                 JOIN execution_job_tenants t ON t.job_id=j.job_id
                 WHERE j.status='queued' AND j.job_kind='agent_run.lifecycle' AND j.run_at_ms<=$1
                 AND COALESCE(j.lease_reclaim_not_before_ms,j.run_at_ms)<=$1
                 AND ($2::text IS NULL OR j.job_id=$2) AND ($3::text IS NULL OR j.session_id=$3)
-                AND NOT(t.workspace_id=ANY($4))
-                ORDER BY j.run_at_ms,j.created_at_ms,j.job_id FOR UPDATE OF j SKIP LOCKED LIMIT $5",
+                AND NOT(t.workspace_id=ANY($4)) AND NOT({})
+                ORDER BY j.run_at_ms,j.created_at_ms,j.job_id FOR UPDATE OF j SKIP LOCKED LIMIT $5", super::lifecycle_control::PENDING),
                 &[&now, &req.job_id, &req.session_id, &full, &(available as i64)])
                 .map_err(|error| error.to_string())?;
             let until = now.checked_add(i64::try_from(req.lease_ms).map_err(|error| error.to_string())?)
@@ -123,7 +123,7 @@ impl PostgresRuntimeStore {
                 let tenant: String = row.get(1);
                 let tenant_used = tenants.entry(tenant).or_default();
                 if *tenant_used >= limits.tenant { continue; }
-                tx.execute("UPDATE runtime_jobs SET status='leased',lease_owner=gen_random_uuid()::text,lease_expires_at_ms=$1,updated_at_ms=$2,heartbeat_at_ms=$2 WHERE job_id=$3 AND status='queued'",
+                tx.execute("UPDATE runtime_jobs SET status='leased',lease_owner=gen_random_uuid()::text,lease_expires_at_ms=$1,updated_at_ms=$2,heartbeat_at_ms=$2,lease_purpose='execute',lease_control_stage=NULL WHERE job_id=$3 AND status='queued'",
                     &[&until,&now,&id]).map_err(|error| error.to_string())?;
                 *tenant_used += 1;
                 jobs.push(load_job(&mut tx, &id)?.ok_or("claimed execution job missing")?);

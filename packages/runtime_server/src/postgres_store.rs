@@ -88,6 +88,7 @@ pub(crate) mod execution_instances;
 mod external_context;
 mod host_retirement;
 pub(crate) mod lease_renewal;
+pub(crate) mod lifecycle_control;
 pub(crate) mod maintenance;
 pub(crate) mod pre_admission_failure;
 pub(crate) mod provision;
@@ -105,6 +106,7 @@ pub(crate) mod turn_supplement;
 pub struct PostgresRuntimeStore {
     ordinary_connections: Arc<PostgresConnectionPool>,
     control_connections: Arc<PostgresConnectionPool>,
+    cleanup_connections: Arc<PostgresConnectionPool>,
     listener_connections: Arc<PostgresConnectionPool>,
 }
 
@@ -153,6 +155,7 @@ impl PostgresRuntimeStore {
         Self {
             ordinary_connections: pool.clone(),
             control_connections: pool.clone(),
+            cleanup_connections: pool.clone(),
             listener_connections: pool,
         }
     }
@@ -162,7 +165,16 @@ impl PostgresRuntimeStore {
     pub(crate) fn execution_control_view(&self) -> Self {
         Self {
             ordinary_connections: self.control_connections.clone(),
+            cleanup_connections: self.cleanup_connections.clone(),
             control_connections: self.control_connections.clone(),
+            listener_connections: self.listener_connections.clone(),
+        }
+    }
+    pub(crate) fn cleanup_view(&self) -> Self {
+        Self {
+            ordinary_connections: self.cleanup_connections.clone(),
+            control_connections: self.control_connections.clone(),
+            cleanup_connections: self.cleanup_connections.clone(),
             listener_connections: self.listener_connections.clone(),
         }
     }
@@ -211,6 +223,15 @@ impl PostgresRuntimeStore {
                 limits.execution_control,
                 limits.checkout_timeout,
             )),
+            cleanup_connections: Arc::new(PostgresConnectionPool::new(
+                postgres_config(
+                    database_url,
+                    limits.connect_timeout,
+                    "centaeris-runtime-cleanup",
+                )?,
+                crate::request_capacity::capacity("RUNTIME_POSTGRES_CLEANUP_POOL_SIZE", 2)?,
+                limits.checkout_timeout,
+            )),
             listener_connections: Arc::new(PostgresConnectionPool::new(
                 postgres_config(
                     database_url,
@@ -252,6 +273,15 @@ impl PostgresRuntimeStore {
                     database_url,
                     DEFAULT_POSTGRES_CONNECT_TIMEOUT,
                     "centaeris-runtime-control",
+                )?,
+                1,
+                checkout_timeout,
+            )),
+            cleanup_connections: Arc::new(PostgresConnectionPool::new(
+                postgres_config(
+                    database_url,
+                    DEFAULT_POSTGRES_CONNECT_TIMEOUT,
+                    "centaeris-runtime-cleanup",
                 )?,
                 1,
                 checkout_timeout,

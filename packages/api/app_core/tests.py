@@ -1182,7 +1182,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
             cursor.execute("CREATE SCHEMA IF NOT EXISTS runtime")
             cursor.execute(
                 "CREATE TABLE IF NOT EXISTS runtime.runtime_jobs("
-                "job_id text PRIMARY KEY, job_kind text NOT NULL, status text NOT NULL, "
+                "job_id text PRIMARY KEY, job_kind text NOT NULL, status text NOT NULL, lease_purpose text NOT NULL DEFAULT 'execute', "
                 "lease_owner text, lease_expires_at_ms bigint, idempotency_key text NOT NULL, "
                 "session_id text, payload_ref text)"
             )
@@ -2262,6 +2262,8 @@ class ApiVerticalSliceTests(TransactionTestCase):
             prompt="hello",
         )
         authorization = create_agent_run_authorization(agent_run)
+        from app_core.testing import leased_lifecycle_job_fixture
+        leased_lifecycle_job_fixture(self, agent_run)
 
         unauthorized = self.client.post(
             "/internal/model-runs",
@@ -2334,6 +2336,8 @@ class ApiVerticalSliceTests(TransactionTestCase):
             prompt="hello",
         )
         authorization = create_agent_run_authorization(agent_run)
+        from app_core.testing import leased_lifecycle_job_fixture
+        leased_lifecycle_job_fixture(self, agent_run)
         body = {
             "schema": MODEL_RUN_SCHEMA,
             "agentRunId": agent_run.id,
@@ -2381,6 +2385,8 @@ class ApiVerticalSliceTests(TransactionTestCase):
             prompt="hello",
         )
         authorization = create_agent_run_authorization(agent_run)
+        from app_core.testing import leased_lifecycle_job_fixture
+        leased_lifecycle_job_fixture(self, agent_run)
 
         response = self.client.post(
             "/internal/model-runs",
@@ -2421,6 +2427,8 @@ class ApiVerticalSliceTests(TransactionTestCase):
             prompt="hello",
         )
         authorization = create_agent_run_authorization(agent_run)
+        from app_core.testing import leased_lifecycle_job_fixture
+        leased_lifecycle_job_fixture(self, agent_run)
 
         response = self.client.post(
             "/internal/model-runs",
@@ -2479,6 +2487,8 @@ class ApiVerticalSliceTests(TransactionTestCase):
             prompt="hello",
         )
         authorization = create_agent_run_authorization(agent_run)
+        from app_core.testing import leased_lifecycle_job_fixture
+        leased_lifecycle_job_fixture(self, agent_run)
         response = self.client.post(
             "/internal/model-runs",
             data=json.dumps(
@@ -2522,6 +2532,8 @@ class ApiVerticalSliceTests(TransactionTestCase):
             prompt="strict",
         )
         authorization = create_agent_run_authorization(agent_run)
+        from app_core.testing import leased_lifecycle_job_fixture
+        leased_lifecycle_job_fixture(self, agent_run)
 
         def submit(preparedPrompt: dict, **extraFields):
             return self.client.post(
@@ -5122,6 +5134,8 @@ class ModelAdminAcceptanceTests(TestCase):
             prompt="hello",
         )
         authorization = create_agent_run_authorization(agent_run)
+        from app_core.testing import leased_lifecycle_job_fixture
+        leased_lifecycle_job_fixture(self, agent_run)
         model.enabled = False
         model.save()
         response = self.client.post(

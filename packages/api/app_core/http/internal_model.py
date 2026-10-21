@@ -4,6 +4,7 @@ import threading
 
 from asgiref.sync import sync_to_async
 from django.http import JsonResponse
+from django.db import connection
 from ninja import Router
 
 from app_core.model_adapter import (
@@ -181,6 +182,16 @@ def _validate_model_run(body):
             {"error": "agent_run_authorization_binding_mismatch"},
             status=409,
         )
+    run = authorization.agent_run
+    job_id = f"agent_run.lifecycle:{run.pk}"
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT 1 FROM runtime.runtime_jobs WHERE job_id=%s "
+            "AND job_kind='agent_run.lifecycle' AND lease_purpose='execute' AND status='running' "
+            "AND session_id=%s AND idempotency_key=%s "
+            "AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint",
+            [job_id, run.session_id, f"{job_id}:{authorization.digest}"])
+        if cursor.fetchone() is None:
+            return JsonResponse({"error": "model_execution_lease_required"}, status=409)
     max_output_tokens = body.get("maxOutputTokens")
     if (
         not isinstance(max_output_tokens, int)
