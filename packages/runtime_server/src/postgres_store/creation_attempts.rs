@@ -76,5 +76,6 @@ CREATE TRIGGER environment_creation_attempt_facts BEFORE INSERT OR UPDATE OR DEL
 
 #[cfg(test)]
 pub(super) fn restore_previous_fixture(db: &mut postgres::Client) {
+    super::lifecycle_control::restore_previous_fixture(db);
     db.batch_execute("DROP TABLE IF EXISTS runtime.environment_creation_attempts; DROP FUNCTION IF EXISTS runtime.protect_environment_creation_attempt(); DELETE FROM runtime.schema_migrations WHERE version=14;").unwrap();
 }

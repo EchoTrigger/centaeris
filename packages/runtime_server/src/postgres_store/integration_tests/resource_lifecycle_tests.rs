@@ -54,7 +54,7 @@ fn cancellation_at_capacity(global_full: bool) {
     db.batch_execute(
         "DROP TABLE IF EXISTS public.app_core_sessionevent,public.app_core_session CASCADE;
          CREATE TABLE public.app_core_session(id text PRIMARY KEY,workspace_id text NOT NULL);
-         CREATE TABLE public.app_core_sessionevent(agent_run_id text,session_level boolean NOT NULL);",
+         CREATE TABLE public.app_core_sessionevent(agent_run_id text,session_id text,session_level boolean NOT NULL,payload jsonb);",
     )
     .unwrap();
     let now: i64 = db
@@ -110,7 +110,73 @@ fn cancellation_at_capacity(global_full: bool) {
     let ready = store
         .wait_for_runtime_jobs(&[LIFECYCLE.into()], Duration::from_millis(10))
         .unwrap();
-    let control_candidates = claim(&store, &target, now);
+    assert!(
+        !ready.ready,
+        "ordinary readiness remains capacity constrained"
+    );
+    assert!(claim(&store, &target, now).is_empty());
+    let (status, body) = crate::runtime_http_tests::stored_request(
+        store.clone(),
+        "POST",
+        "/internal/jobs/control/ready",
+        br#"{"schema":"runtime.job.control.ready.v1","stage":"advance"}"#,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["ready"],
+        true
+    );
+    let request = serde_json::to_vec(&serde_json::json!({
+        "schema": "runtime.job.control.claim.v1", "workerId": "worker:control-regression",
+        "jobId": target, "jobKind": LIFECYCLE, "nowMs": now,
+        "leaseMs": 120000, "limit": 1, "stage": "advance"
+    }))
+    .unwrap();
+    let (status, body) = crate::runtime_http_tests::stored_request(
+        store.clone(),
+        "POST",
+        "/internal/jobs/control/claim",
+        &request,
+    );
+    assert_eq!(
+        status, 200,
+        "control claim must have its own authenticated route"
+    );
+    let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let control_candidates = response["jobs"].as_array().unwrap();
+    assert_eq!(control_candidates.len(), 1);
+    let owner = control_candidates[0]["leaseOwner"].as_str().unwrap();
+    assert_eq!(control_candidates[0]["leasePurpose"], "control");
+    assert_eq!(
+        db.query_one(
+            "SELECT lease_purpose FROM runtime.runtime_jobs WHERE job_id=$1",
+            &[&target]
+        )
+        .unwrap()
+        .get::<_, String>(0),
+        "control"
+    );
+    assert!(
+        store
+            .start_runtime_job(StartRuntimeJobRequest {
+                job_id: target.clone(),
+                lease_owner: owner.into(),
+                started_at_ms: now
+            })
+            .is_err(),
+        "ordinary start must reject a control lease"
+    );
+    let (status, body) = crate::runtime_http_tests::stored_request(
+        store.clone(),
+        "POST",
+        "/internal/jobs/control/claim",
+        &request,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["jobs"],
+        serde_json::json!([])
+    );
     for (id, owner) in blockers {
         let retained = store.get_runtime_job(&id).unwrap().unwrap();
         assert_eq!(retained.status, RuntimeJobStatus::Running);
@@ -123,7 +189,7 @@ fn cancellation_at_capacity(global_full: bool) {
         0
     );
     assert!(
-        ready.ready && control_candidates.len() == 1,
+        !ready.ready && control_candidates.len() == 1,
         "persisted cancellation must remain ready and claimable while all {count} execution owners stay running: ready={}, claimed={}",
         ready.ready,
         control_candidates.len()
@@ -475,7 +541,7 @@ fn postgres_creation_attempt_forward_migration_keeps_historical_unknown_charged(
         db.query_one("SELECT max(version) FROM runtime.schema_migrations", &[])
             .unwrap()
             .get::<_, i64>(0),
-        14
+        15
     );
     assert_eq!(
         db.query_one(
@@ -592,5 +658,447 @@ fn postgres_pre_dispatch_failure_cannot_settle_after_controller_takeover() {
         .get::<_, i64>(0),
         1,
         "the expired controller cannot settle the current owner's resources"
+    );
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL"]
+fn postgres_control_cancellation_completes_without_taking_foreign_environment() {
+    use super::retained_instance_tests as fixture;
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_url, store, mut db) = fixture::setup();
+    let target = fixture::run(&store, &mut db, "control-cancel-target", 1);
+    let other = fixture::run(&store, &mut db, "foreign-environment-owner", 2);
+    db.batch_execute("ALTER TABLE public.app_core_sessionevent ADD COLUMN sequence integer, ADD COLUMN agent_run_sequence integer;").unwrap();
+    db.execute("UPDATE runtime.runtime_jobs SET status='queued',lease_owner=NULL,lease_expires_at_ms=NULL WHERE job_id=$1", &[&target.fence.job_id]).unwrap();
+    let grant_digest = target.original.digest().unwrap();
+    let now: i64 = db
+        .query_one(
+            "SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    store
+        .request_agent_run_cancellation(
+            &target.original.agent_run_id,
+            &target.original.session_id,
+            &grant_digest,
+            now,
+        )
+        .unwrap();
+    std::env::set_var(
+        "AGENT_RUN_AUTHORIZATION_SIGNING_KEY",
+        std::str::from_utf8(fixture::KEY).unwrap(),
+    );
+    let invoke = |path: &str, body: serde_json::Value| {
+        let (status, wire) = crate::runtime_http_tests::stored_request(
+            store.clone(),
+            "POST",
+            path,
+            &serde_json::to_vec(&body).unwrap(),
+        );
+        (
+            status,
+            serde_json::from_slice::<serde_json::Value>(&wire).unwrap(),
+        )
+    };
+    let (status, claimed) = invoke(
+        "/internal/jobs/control/claim",
+        serde_json::json!({"schema":"runtime.job.control.claim.v1","workerId":"worker:control-terminal-test","jobId":target.fence.job_id,"jobKind":LIFECYCLE,"nowMs":now,"leaseMs":120000,"limit":1,"stage":"advance"}),
+    );
+    assert_eq!(status, 200, "{claimed}");
+    let owner = claimed["jobs"][0]["leaseOwner"].as_str().unwrap();
+    let complete = serde_json::json!({"schema":"runtime.job.complete.v1","jobId":target.fence.job_id,"leaseOwner":owner,"completedAtMs":now,"outputRefs":[]});
+    assert_eq!(
+        invoke("/internal/jobs/complete", complete.clone()).0,
+        409,
+        "a lease alone cannot complete a lifecycle Job"
+    );
+    assert_eq!(invoke("/internal/jobs/control/start",serde_json::json!({"schema":"runtime.job.control.start.v1","jobId":target.fence.job_id,"leaseOwner":owner,"atMs":now})).0,200);
+    let control = serde_json::json!({"agentRunId":target.original.agent_run_id,"authorizationDigest":grant_digest,"authorizationSignature":target.original.signature(fixture::KEY).unwrap(),"authorization":target.original});
+    let execute_start = serde_json::json!({"schema":"workspace.agent_run.start.v1","agentRunId":target.original.agent_run_id,"turnId":"turn-control-probe","prompt":"probe","initialInput":{"type":"userMessage"},"agentInstructions":"","modelContextTokens":131072,"modelMaxOutputTokens":4096,"authorizationDigest":grant_digest,"authorizationSignature":target.original.signature(fixture::KEY).unwrap(),"authorization":target.original,"environmentAuthorization":target.grant,"tailAction":{"type":"append"}});
+    let (status, rejected) = invoke(
+        "/agent-runs/step",
+        serde_json::json!({"schema":"runtime.agent_run.step.v1","jobId":target.fence.job_id,"leaseOwner":owner,"agentRunStart":execute_start}),
+    );
+    assert_eq!(status, 409, "{rejected}");
+    assert_eq!(rejected["error"], "agent_run_execute_lease_required");
+    let request = serde_json::json!({"schema":"runtime.agent_run.control.v1","jobId":target.fence.job_id,"leaseOwner":owner,"agentRunControl":control});
+    let (status, result) = invoke("/agent-runs/control", request.clone());
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(result["terminalState"], "cancelled");
+    assert_eq!(result["disposition"], "released");
+    assert_eq!(
+        invoke("/agent-runs/control", request).1,
+        result,
+        "lost replies replay the same receipts"
+    );
+    let saved_receipt: String = db
+        .query_one(
+            "SELECT payload_json FROM runtime.runtime_events WHERE event_id=$1",
+            &[&format!(
+                "agent_run_no_effects:{}",
+                target.original.agent_run_id
+            )],
+        )
+        .unwrap()
+        .get(0);
+    for invalid in [serde_json::json!({}), {
+        let mut receipt: serde_json::Value = serde_json::from_str(&saved_receipt).unwrap();
+        receipt["authorizationDigest"] = serde_json::json!(format!("sha256:{}", "f".repeat(64)));
+        receipt
+    }] {
+        db.execute(
+            "UPDATE runtime.runtime_events SET payload_json=$2 WHERE event_id=$1",
+            &[
+                &format!("agent_run_no_effects:{}", target.original.agent_run_id),
+                &invalid.to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            invoke("/internal/jobs/complete", complete.clone()).0,
+            409,
+            "missing or foreign no-effects facts cannot authorize completion"
+        );
+    }
+    db.execute(
+        "UPDATE runtime.runtime_events SET payload_json=$2 WHERE event_id=$1",
+        &[
+            &format!("agent_run_no_effects:{}", target.original.agent_run_id),
+            &saved_receipt,
+        ],
+    )
+    .unwrap();
+    assert_eq!(invoke("/internal/jobs/complete", complete).0, 200);
+    let environment=db.query_one("SELECT controller_run_id,controller_epoch,controller_lease_owner,controller_released FROM public.app_core_sessionenvironment WHERE id='environment'",&[]).unwrap();
+    assert_eq!(environment.get::<_, String>(0), other.original.agent_run_id);
+    assert_eq!(environment.get::<_, i64>(1), 2);
+    assert_eq!(environment.get::<_, String>(2), other.fence.lease_owner);
+    assert!(!environment.get::<_, bool>(3));
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM public.app_core_sessionevent", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        0,
+        "never admitted cancellation must not invent Core history"
+    );
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.execution_instances", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL"]
+fn postgres_control_leases_require_intent_bound_capacity_and_survive_reclaim_exhaustion() {
+    use super::retained_instance_tests as fixture;
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_url, store, mut db) = fixture::setup();
+    let now: i64 = db
+        .query_one(
+            "SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    let mut runs = vec![];
+    for index in 0..6 {
+        let run = fixture::run(
+            &store,
+            &mut db,
+            &format!("control-budget-{index}"),
+            index + 1,
+        );
+        db.execute("UPDATE runtime.runtime_jobs SET status='queued',lease_owner=NULL,lease_expires_at_ms=NULL WHERE job_id=$1", &[&run.fence.job_id]).unwrap();
+        runs.push(run);
+    }
+    let claim = |stage: &str| {
+        store
+            .claim_control_jobs(
+                ClaimDueRuntimeJobsRequest {
+                    now_ms: now,
+                    worker_id: "worker:control-budget-test".into(),
+                    job_id: None,
+                    job_kind: Some(LIFECYCLE.into()),
+                    session_id: None,
+                    limit: 2,
+                    lease_ms: 120000,
+                },
+                stage,
+            )
+            .unwrap()
+    };
+    assert!(!store.control_ready("advance").unwrap());
+    assert!(
+        claim("advance").is_empty(),
+        "a requested purpose alone is not authorization"
+    );
+    for (index, run) in runs.iter().enumerate() {
+        store
+            .request_agent_run_cancellation(
+                &run.original.agent_run_id,
+                &run.original.session_id,
+                &run.original.digest().unwrap(),
+                now,
+            )
+            .unwrap();
+        if index >= 3 {
+            db.execute("UPDATE public.app_core_agentrun SET \"preAdmissionCancelledAt\"=clock_timestamp() WHERE id=$1",&[&run.original.agent_run_id]).unwrap();
+        }
+    }
+    assert!(store.control_ready("advance").unwrap());
+    let short = claim("advance");
+    assert_eq!(short.len(), 2);
+    assert!(!store.control_ready("advance").unwrap());
+    assert!(claim("advance").is_empty());
+    assert!(store.control_ready("cleanup").unwrap());
+    assert_eq!(claim("cleanup").len(), 2);
+    assert!(db.execute("UPDATE runtime.runtime_jobs SET lease_purpose='execute',lease_control_stage=NULL WHERE job_id=$1",&[&short[0].job_id]).is_err(),"an active lease cannot change its purpose");
+    let owner = short[0].lease_owner.as_ref().unwrap();
+    assert!(store
+        .require_execute_lease(&short[0].job_id, owner)
+        .is_err());
+    assert!(
+        store
+            .claim_worker_jobs(ClaimDueRuntimeJobsRequest {
+                now_ms: now,
+                worker_id: "ordinary".into(),
+                job_id: None,
+                job_kind: Some(LIFECYCLE.into()),
+                session_id: None,
+                limit: 8,
+                lease_ms: 120000
+            })
+            .unwrap()
+            .is_empty(),
+        "ordinary claim cannot execute pending control work"
+    );
+    db.execute("UPDATE runtime.runtime_jobs SET lease_expires_at_ms=$2,lease_reclaim_count=100 WHERE job_id=$1",&[&short[0].job_id,&(now-1)]).unwrap();
+    assert_eq!(store.reclaim_expired_runtime_job_leases(now).unwrap(), 1);
+    assert_eq!(
+        store
+            .get_runtime_job(&short[0].job_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        RuntimeJobStatus::Queued,
+        "control responsibility survives ordinary reclaim exhaustion"
+    );
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL"]
+fn postgres_control_lease_forward_migration_preserves_active_execution_authority() {
+    use super::retained_instance_tests as fixture;
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (url, store, mut db) = fixture::setup();
+    let run = fixture::run(&store, &mut db, "historical-execute-owner", 1);
+    let before =
+        serde_json::to_value(store.get_runtime_job(&run.fence.job_id).unwrap().unwrap()).unwrap();
+    super::super::lifecycle_control::restore_previous_fixture(&mut db);
+    let historical: Vec<(i64, i64)> = db
+        .query(
+            "SELECT version,applied_at_ms FROM runtime.schema_migrations ORDER BY version",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    let reopened = PostgresRuntimeStore::new(&url).unwrap();
+    assert_eq!(
+        serde_json::to_value(
+            reopened
+                .get_runtime_job(&run.fence.job_id)
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap(),
+        before
+    );
+    assert_eq!(
+        db.query_one(
+            "SELECT lease_purpose,lease_control_stage FROM runtime.runtime_jobs WHERE job_id=$1",
+            &[&run.fence.job_id]
+        )
+        .unwrap()
+        .get::<_, String>(0),
+        "execute"
+    );
+    let after:Vec<(i64,i64)>=db.query("SELECT version,applied_at_ms FROM runtime.schema_migrations WHERE version<15 ORDER BY version",&[]).unwrap().iter().map(|row|(row.get(0),row.get(1))).collect();
+    assert_eq!(after, historical);
+    assert!(reopened
+        .require_execute_lease(&run.fence.job_id, &run.fence.lease_owner)
+        .is_ok());
+    db.batch_execute(
+        "ALTER TABLE runtime.runtime_jobs DROP CONSTRAINT runtime_jobs_lease_purpose_check",
+    )
+    .unwrap();
+    assert!(
+        PostgresRuntimeStore::new(&url).is_err(),
+        "missing purpose enforcement is unsupported schema drift"
+    );
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL"]
+fn postgres_control_cancellation_after_yield_preserves_history_and_requires_cleanup() {
+    use super::retained_instance_tests as fixture;
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (url, store, mut db) = fixture::setup();
+    let run = fixture::run(&store, &mut db, "control-after-yield", 1);
+    db.batch_execute(r#"DROP TABLE public.app_core_sessionevent;
+    CREATE TABLE public.app_core_sessionevent("eventId" text PRIMARY KEY,workspace_id text NOT NULL,session_id text NOT NULL,agent_run_id text NOT NULL,sequence integer NOT NULL,agent_run_sequence integer,session_level boolean NOT NULL DEFAULT false,projects_to_agent_run_stream boolean NOT NULL,payload jsonb NOT NULL,"createdAtMs" bigint NOT NULL,"insertedAt" timestamptz NOT NULL DEFAULT clock_timestamp(),UNIQUE(session_id,sequence),UNIQUE(agent_run_id,agent_run_sequence));"#).unwrap();
+    let now = crate::now_ms().unwrap();
+    let digest = run.original.digest().unwrap();
+    let mut state =
+        centaeris_core::session::AgentRunSessionState::new("sess_1", &run.original.agent_run_id)
+            .unwrap();
+    let mut records = state
+        .start("turn-before-yield", "already admitted", vec![], now)
+        .unwrap();
+    records.push(
+        state
+            .start_execution(
+                "turn-before-yield",
+                "execution-before-yield",
+                &digest,
+                None,
+                now,
+            )
+            .unwrap(),
+    );
+    store
+        .session_log("ws_1".into(), "sess_1".into(), "already admitted".into())
+        .append_session_records_with_runtime_job_lease_blocking(
+            &run.original.agent_run_id,
+            &records,
+            &run.fence,
+        )
+        .unwrap();
+    let before: Vec<String> = db
+        .query(
+            "SELECT payload::text FROM public.app_core_sessionevent ORDER BY sequence",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    store
+        .yield_runtime_job(
+            centaeris_core::session::reliability::YieldRuntimeJobRequest {
+                job_id: run.fence.job_id.clone(),
+                lease_owner: run.fence.lease_owner.clone(),
+                yielded_at_ms: now,
+                run_at_ms: now,
+                transition_reason: "fixture_wait".into(),
+            },
+        )
+        .unwrap();
+    store
+        .request_agent_run_cancellation(&run.original.agent_run_id, "sess_1", &digest, now)
+        .unwrap();
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    let lease = store
+        .claim_control_jobs(
+            ClaimDueRuntimeJobsRequest {
+                now_ms: now,
+                worker_id: "worker:post-yield-control".into(),
+                job_id: Some(run.fence.job_id.clone()),
+                job_kind: Some(LIFECYCLE.into()),
+                session_id: None,
+                limit: 1,
+                lease_ms: 120000,
+            },
+            "advance",
+        )
+        .unwrap()
+        .remove(0);
+    let owner = lease.lease_owner.unwrap();
+    store.start_control_job(&run.fence.job_id, &owner).unwrap();
+    std::env::set_var(
+        "AGENT_RUN_AUTHORIZATION_SIGNING_KEY",
+        std::str::from_utf8(fixture::KEY).unwrap(),
+    );
+    let body = serde_json::json!({"schema":"runtime.agent_run.control.v1","jobId":run.fence.job_id,"leaseOwner":owner,"agentRunControl":{"agentRunId":run.original.agent_run_id,"authorizationDigest":digest,"authorizationSignature":run.original.signature(fixture::KEY).unwrap(),"authorization":run.original}});
+    let (status, wire) = crate::runtime_http_tests::stored_request(
+        store.clone(),
+        "POST",
+        "/agent-runs/control",
+        &serde_json::to_vec(&body).unwrap(),
+    );
+    let result: serde_json::Value = serde_json::from_slice(&wire).unwrap();
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(result["terminalState"], "cancelled");
+    assert_eq!(result["disposition"], "terminal");
+    let after: Vec<String> = db
+        .query(
+            "SELECT payload::text FROM public.app_core_sessionevent ORDER BY sequence LIMIT 3",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(before, after);
+    assert_eq!(db.query_one("SELECT count(*) FROM public.app_core_sessionevent WHERE payload->>'type'='agent_run_interrupted'",&[]).unwrap().get::<_,i64>(0),1);
+    assert_eq!(db.query_one("SELECT count(*) FROM runtime.runtime_events WHERE event_id LIKE 'agent_run_no_effects:%'",&[]).unwrap().get::<_,i64>(0),0,"a yielded Run with history cannot use NoEffectsForRun");
+    assert!(
+        store
+            .complete_runtime_job(
+                centaeris_core::session::reliability::CompleteRuntimeJobRequest {
+                    job_id: run.fence.job_id,
+                    lease_owner: owner,
+                    output_refs: vec![],
+                    completed_at_ms: crate::now_ms().unwrap()
+                }
+            )
+            .is_err(),
+        "terminal alone cannot conceal pending cleanup"
+    );
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL"]
+fn postgres_control_lease_rejects_host_creation_with_prior_execute_grant() {
+    use super::retained_instance_tests as fixture;
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_url, store, mut db) = fixture::setup();
+    let run = fixture::run(&store, &mut db, "control-host-authority", 1);
+    // Keep a previously valid signed execute grant and matching controller fence.
+    // Only the current Job lease purpose changes across a new lease boundary.
+    db.execute(
+        "UPDATE runtime.runtime_jobs SET lease_owner=NULL WHERE job_id=$1",
+        &[&run.fence.job_id],
+    )
+    .unwrap();
+    db.execute("UPDATE runtime.runtime_jobs SET lease_owner=$2,lease_purpose='control',lease_control_stage='advance' WHERE job_id=$1",&[&run.fence.job_id,&run.fence.lease_owner]).unwrap();
+    let physical_calls = std::sync::atomic::AtomicUsize::new(0);
+    let profile = run.original.environment_profile.digest().unwrap();
+    let result = store.prepare_retained_instance(
+        &run.request("forbidden-control-execution", &profile),
+        fixture::limits(&run),
+        || Ok(vec![]),
+        |_, _| Ok(()),
+        |_| {
+            physical_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok("a".repeat(64))
+        },
+    );
+    assert!(
+        result.is_err(),
+        "control lease plus a prior execute grant must not create an instance"
+    );
+    assert_eq!(physical_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.execution_instances", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        0
     );
 }

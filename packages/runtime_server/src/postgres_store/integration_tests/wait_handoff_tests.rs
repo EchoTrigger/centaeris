@@ -651,7 +651,7 @@ fn postgres_completion_delivery_upgrade_preserves_records_and_accepts_core_obser
     let upgraded = PostgresRuntimeStore::new(&test_url()).unwrap();
     assert_eq!(
         observation_versions(&f),
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     );
     assert_eq!(legacy_retained_rows(&f), before);
     upgraded.with_client(|db| db.execute(
@@ -698,7 +698,7 @@ fn postgres_current_schema_reopen_retains_sealed_wait_handoff() {
     let reopened = PostgresRuntimeStore::new(&test_url()).unwrap();
     assert_eq!(
         observation_versions(&f),
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     );
     assert_eq!(retained_rows(&f), before);
     assert_eq!(
@@ -771,6 +771,15 @@ fn legacy_retained_rows(f: &Fixture) -> std::collections::BTreeMap<String, Strin
     let mut values: Vec<serde_json::Value> = serde_json::from_str(jobs).unwrap();
     for value in &mut values {
         let value = value.as_object_mut().unwrap();
+        if let Some(purpose) = value.remove("lease_purpose") {
+            assert_eq!(
+                purpose, "execute",
+                "historical leases retain execution authority"
+            );
+        }
+        if let Some(stage) = value.remove("lease_control_stage") {
+            assert!(stage.is_null());
+        }
         if let Some(count) = value.remove("lease_reclaim_count") {
             assert_eq!(count, 0);
         }

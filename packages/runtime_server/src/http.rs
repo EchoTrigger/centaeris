@@ -40,6 +40,10 @@ pub(super) fn router(state: HttpServerState) -> Router {
             on_blocking(MethodFilter::POST, agent_runs::step),
         )
         .route(
+            "/agent-runs/control",
+            on_blocking(MethodFilter::POST, agent_runs::advance_control),
+        )
+        .route(
             "/agent-runs/cancel",
             on_blocking(MethodFilter::POST, agent_runs::cancel),
         )
@@ -89,6 +93,18 @@ pub(super) fn router(state: HttpServerState) -> Router {
         )
         .route("/internal/jobs/schedule", post_job(job_protocol::schedule))
         .route("/internal/jobs/claim", post_job(job_protocol::claim))
+        .route(
+            "/internal/jobs/control/ready",
+            post_job(job_protocol::control_ready),
+        )
+        .route(
+            "/internal/jobs/control/claim",
+            post_job(job_protocol::control_claim),
+        )
+        .route(
+            "/internal/jobs/control/start",
+            post_job(job_protocol::control_start),
+        )
         .route("/internal/jobs/wait", post_job(job_protocol::wait))
         .route("/internal/jobs/start", post_job(job_protocol::start))
         .route(
@@ -321,7 +337,9 @@ where
             ));
         }
         let mut state = state;
-        if lane.control {
+        if lane.cleanup {
+            state.job_store = Arc::new(state.job_store.cleanup_view());
+        } else if lane.control {
             state.job_store = Arc::new(state.job_store.execution_control_view());
         }
         operation(state, request)

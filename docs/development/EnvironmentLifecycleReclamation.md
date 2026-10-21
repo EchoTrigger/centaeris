@@ -8,8 +8,8 @@ Queued cancellation and physical resource settlement must continue independently
 
 | Boundary | Current evidence | Required behavior |
 | --- | --- | --- |
-| Workspace execution capacity exhausted | Four running lifecycle owners remain unchanged; cancellation intent persists, but the cancelled queued job is neither ready nor claimable. | An independent bounded control path commits the cancellation without waiting for an unrelated execution slot or granting execution authority. |
-| Global execution capacity exhausted | Eight running owners across two Workspaces remain unchanged; a cancelled job in an otherwise empty third Workspace is neither ready nor claimable. | The same control progress must hold independently of the global execution limit. |
+| Workspace execution capacity exhausted | The deployed baseline could not claim a cancelled queued Job while four owners remained active. The control-lease implementation below now claims it independently. | An independent bounded control path commits the cancellation without waiting for an unrelated execution slot or granting execution authority. |
+| Global execution capacity exhausted | The deployed baseline could not claim a cancelled Job while eight owners across two Workspaces remained active. The same independent control path now handles it. | The same control progress must hold independently of the global execution limit. |
 | Failure before physical creation | The initial regression left a reservation charged after a fresh pre-create callback failed. The undispatched settlement below now closes this case. | Preserve allocation history and atomically settle the proven unmaterialized attempt, its holding and subsequent obligations. |
 | Cleanup proof lost at the host boundary | A controlled host callback removes its own synchronous attempt but returns only a string failure. The ledger retains the reservation. | Carry typed physical evidence to durable settlement. A string error or an empty inventory cannot authorize release. |
 | Historical reserved allocations | Earlier records may have no attempt evidence or container ID. | Recover a durable investigation obligation; never infer non-creation from age, lease expiry or an empty observation. |
@@ -17,7 +17,7 @@ Queued cancellation and physical resource settlement must continue independently
 
 The database regressions are in
 [`resource_lifecycle_tests.rs`](../../packages/runtime_server/src/postgres_store/integration_tests/resource_lifecycle_tests.rs).
-The two capacity tests isolate the storage claim/ready boundary. They do not establish a complete Worker cancellation, teardown and release result. The pre-create settlement regression now passes and is included in the required PostgreSQL gate.
+The two capacity regressions check ordinary exclusion, control readiness/claim, persisted purpose and unchanged execution owners. Separate Runtime HTTP tests cover terminal history, receipt replay and completion gates; the service-chain measurement below covers a never-admitted queued Run. Physical cleanup remains a separate acceptance boundary.
 
 Existing unknown-create regressions continue to require charged resources and adoption of the exact late instance after reopening. Any settlement fix must preserve those protections. A known failure and an unknown physical outcome must never share an unconditional release path.
 
@@ -29,7 +29,7 @@ Successful preparation commits `dispatched` before entering the host callback, t
 
 Cleanup recognizes an unmaterialized allocation by durable evidence rather than treating it as `NeverAllocated` or environment loss. Its receipt retains the planned instance identity without claiming physical deletion. Both lifetime policies replay that receipt after reopening. Observation reports `notMaterialized`, and a later Run can obtain a fresh allocation without recreating the old execution.
 
-Runtime schema migration 14 adds the dispatch journal without inventing evidence for historical reservations. Historical unknowns remain charged and cannot dispatch again through ordinary AgentRun preparation. No-Run provision dispatch, typed post-create removal evidence, interrupted-attempt investigation and the independent cancellation control path remain follow-up boundaries.
+Runtime schema migration 14 adds the dispatch journal without inventing evidence for historical reservations. Historical unknowns remain charged and cannot dispatch again through ordinary AgentRun preparation. No-Run provision dispatch, typed post-create removal evidence and interrupted-attempt investigation remain follow-up boundaries. The bounded cancellation path is described below.
 
 ## Workspace creation is a separate boundary
 
@@ -38,6 +38,20 @@ A bare Docker create/start probe does not perform the host's workspace preparati
 Acceptance must exercise the real preparation and task path before judging workspace availability. It must then identify the workspace mount/backing, enforce its configured limits, verify file visibility across supported lifecycle operations, and distinguish workspace data from temporary directories. A write to `/tmp` cannot certify the `/mnt/data` contract.
 
 The opt-in `export_owned_runsc_storage_probe_request` test exports a request from the production container request builder for an explicitly owned physical probe. Probe drivers, private configuration and artifacts remain outside the source checkout. A separate Docker daemon must also run in a separate Linux network namespace; a different socket/data root alone does not isolate Docker's host network management.
+
+## Bounded lifecycle control leases
+
+Runtime schema 15 adds a persistent `execute/control` purpose and, for control leases, an `advance/cleanup` stage to the existing lifecycle Job. Missing historical purposes become `execute`; existing signed grants, owners and job history are preserved. The purpose and stage cannot change while the same lease owner remains current. Upgrade API, Worker and Runtime together after draining incompatible live consumers, following [Session environment upgrades](SessionEnvironments.md#persistence-and-upgrades).
+
+Ordinary ready/claim excludes Jobs with a digest-bound durable cancellation or terminal-control intent. Control ready and claim share the same server predicate: queued, due, no current owner, matching durable intent and the appropriate authoritative terminal state. Requesting `control` alone grants nothing. Execute capacity stays global 8 and Workspace 4, with eight ordinary Worker threads. Independent control threads and global control-lease budgets provide two advance and two cleanup slots. Reclaim exhaustion retains a pending control Job for investigation/retry rather than deleting its intent.
+
+The control API reads the original signed Run authorization without acquiring an Environment controller. Runtime restores Core Session state and uses Core's termination operations. A never-admitted Run with no allocation or owned controller receives a durable `noEffectsForRun` fact containing its no-operation cleanup and release receipt identities. It does not acquire another Run's controller. A Run with prior Core history or an allocation cannot use that shortcut: it yields the same Job to the cleanup stage and follows existing cleanup/release authority.
+
+Server boundaries reject control authority at ordinary start, API execute-controller/start resolution, Runtime step, model requests, ordinary record append and host execution-controller validation. An old signed execute grant does not override a current control lease. `complete` verifies an authoritative terminal plus matching cleanup/release facts, including on successful reply replay. Missing or altered no-effects evidence and unresolved physical cleanup are rejected.
+
+Short Runtime control HTTP/DB budgets remain four/two. Slow teardown uses a separate HTTP limit and DB pool, both defaulting to two (`RUNTIME_HTTP_CLEANUP_LIMIT`, `RUNTIME_POSTGRES_CLEANUP_POOL_SIZE`). It retains the existing authority pins across physical cleanup. This separation prevents slow teardown from consuming the short-control pools; it does not establish fixed completion times under database, host or shared-executor failure.
+
+This boundary repairs queued cancellation under ordinary execution saturation. Active-owner failure handoff, historical terminal/dead-letter reconciliation, HTTP/DB combined saturation, physical cleanup under pressure, no-Run provision recovery, storage quotas and target-host acceptance still require their own tests. Retained is not yet the default.
 
 ## Runtime HTTP cancellation measurements
 
@@ -55,7 +69,7 @@ Each condition ran three times. Full-capacity cases retained their original four
 
 Every target had exactly one durable cancellation-intent event. Targets had no authoritative terminal event during this experiment; even the idle result proves claimability only. Physical allocations and resident holdings remained zero. A read-only Docker proxy prevented host mutations, owned containers/network were removed, and the existing application containers retained their exact IDs, image IDs and start times.
 
-The first demonstrated obstruction is execution-capacity eligibility at ready/claim: cancellation is acknowledged promptly but cannot obtain processing while ordinary execution is full. Releasing one unrelated execution owner removes that obstruction immediately. The next implementation boundary is a persisted, capability-restricted control lease and corresponding ready/claim eligibility, followed by a real Worker control path. This experiment does not measure physical cleanup or Job completion latency.
+The first demonstrated obstruction is execution-capacity eligibility at ready/claim: cancellation is acknowledged promptly but cannot obtain processing while ordinary execution is full. Releasing one unrelated execution owner removes that obstruction immediately. The control-lease implementation above and service-chain follow-up below address that obstruction. This experiment does not measure physical cleanup or Job completion latency.
 
 ## Reclamation completion conditions
 
@@ -91,4 +105,4 @@ The implemented undispatched-allocation boundary passed 108 named tests against 
 
 The final Runtime unit suite passed 467 tests with 199 opt-in tests ignored. Core `query_loop` passed 129 tests. Warning-denied Runtime Clippy, formatting, whitespace, all 11 gate-driver unit tests and discovery of the 106 required identities in the final binary passed. Local HTTP fixtures required a process-local loopback proxy exclusion; no application network configuration changed.
 
-The two saturated-capacity cancellation regressions were executed separately and still fail at `ready=false, claimed=0` while the original four/eight execution owners remain running. They are unfinished control-path acceptance, not part of the passing settlement result. No-Run attempt unification, complete enforcement, full service-chain cancellation, real storage enforcement, target Linux physical acceptance and the default lifetime transition remain open.
+At that settlement-only revision, the two saturated-capacity cancellation regressions still failed at `ready=false, claimed=0` while the original four/eight execution owners remained running. The later control implementation supersedes those results; its evidence is recorded separately. No-Run attempt unification, physical storage enforcement, target Linux physical acceptance and the default lifetime transition remain open.

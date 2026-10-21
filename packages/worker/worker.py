@@ -1324,6 +1324,108 @@ def _run_job_loop(slot_index, stopped):
                 stopped.wait(delay)
 
 
+def claim_control_job(stage, worker_id):
+    if stage not in {"advance", "cleanup"}:
+        raise RuntimeError("control_stage_invalid")
+    response = runtime_request("/internal/jobs/control/claim", {
+        "schema": "runtime.job.control.claim.v1", "workerId": worker_id,
+        "jobId": None, "jobKind": "agent_run.lifecycle", "nowMs": now_ms(),
+        "leaseMs": LEASE_MS, "limit": 1, "stage": stage,
+    })
+    if not isinstance(response, dict) or set(response) != {"jobs"}:
+        raise RuntimeError("control_claim_response_invalid")
+    jobs = response["jobs"]
+    if not isinstance(jobs, list) or len(jobs) > 1:
+        raise RuntimeError("control_claim_response_invalid")
+    if not jobs:
+        return None
+    job = jobs[0]
+    if (not isinstance(job, dict) or job.get("jobKind") != "agent_run.lifecycle"
+            or job.get("status") != "leased" or job.get("leasePurpose") != "control"
+            or job.get("controlStage") != stage or not valid_runtime_job_id(job.get("jobId"))
+            or not valid_lease_owner(job.get("leaseOwner"))):
+        raise RuntimeError("control_claim_response_invalid")
+    agent_run_lifecycle_binding(job)
+    return job
+
+
+def execute_control_job(job):
+    run_id, digest = agent_run_lifecycle_binding(job)
+    owner = job["leaseOwner"]
+    try:
+        runtime_request("/internal/jobs/control/start", {
+            "schema": "runtime.job.control.start.v1", "jobId": job["jobId"],
+            "leaseOwner": owner, "atMs": now_ms(),
+        })
+        with lease_heartbeats(job["jobId"], owner) as healthy:
+            resolved = api_request("/internal/agent-run-lifecycle/control", {
+                "schema": "runtime.agent_run_lifecycle.control.resolve.v1",
+                "jobId": job["jobId"], "leaseOwner": owner,
+                "agentRunId": run_id, "authorizationDigest": digest,
+            }, "agent_run_control_unavailable")
+            if (not isinstance(resolved, dict)
+                    or set(resolved) != {"schema", "agentRunControl"}
+                    or resolved["schema"] != "runtime.agent_run_lifecycle.control.resolved.v1"
+                    or not isinstance(resolved["agentRunControl"], dict)
+                    or resolved["agentRunControl"].get("agentRunId") != run_id):
+                raise RuntimeError("agent_run_control_response_invalid")
+            healthy()
+            result = runtime_request("/agent-runs/control", {
+                "schema": "runtime.agent_run.control.v1", "jobId": job["jobId"],
+                "leaseOwner": owner, "agentRunControl": resolved["agentRunControl"],
+            })
+            if (not isinstance(result, dict)
+                    or result.get("schema") != "runtime.agent_run.control.result.v1"
+                    or result.get("agentRunId") != run_id
+                    or result.get("terminalState") not in {"completed", "failed", "cancelled"}
+                    or result.get("disposition") not in {"terminal", "released"}):
+                raise RuntimeError("agent_run_control_response_invalid")
+            healthy()
+            transition_agent_run(run_id, result["terminalState"], "runtime_session_terminal_committed")
+            if result["disposition"] == "released":
+                if (set(result) != {"schema", "agentRunId", "terminalState", "disposition",
+                                   "cleanupReceiptId", "releaseReceiptId"}
+                        or not valid_runtime_job_id(result["cleanupReceiptId"])
+                        or not valid_runtime_job_id(result["releaseReceiptId"])):
+                    raise RuntimeError("agent_run_control_response_invalid")
+                complete_job(job["jobId"], owner, [])
+            else:
+                if set(result) != {"schema", "agentRunId", "terminalState", "disposition"}:
+                    raise RuntimeError("agent_run_control_response_invalid")
+                # The same Job yields before the bounded slow-cleanup workers claim it.
+                # Its authoritative terminal fact determines that lane's eligibility.
+                if job["controlStage"] == "cleanup":
+                    resolved = resolve_agent_run_lifecycle(job, owner, run_id, digest)
+                    if resolved["disposition"] not in {"terminal", "released"}:
+                        raise RuntimeError("control_execution_forbidden")
+                    finish_environment_agent_run(job, owner, run_id, digest, resolved, healthy)
+                else:
+                    yield_job(job["jobId"], owner, now_ms(), "control_cleanup_pending")
+    except RuntimeLeaseLost:
+        return
+    except (RuntimeError, urllib.error.URLError, OSError):
+        # Control failures never manufacture a new business terminal or dead-letter
+        # away the obligation. A later current lease retries the same Job.
+        try:
+            yield_job(job["jobId"], owner, now_ms() + 1000, "control_retry_pending")
+        except (RuntimeError, urllib.error.URLError, OSError):
+            # The persisted lease and durable intent survive an unavailable reply.
+            return
+
+
+def run_control_loop(stage, slot, stopped):
+    worker_id = "worker:control:" + stage + ":" + str(slot) + ":" + uuid.uuid4().hex
+    while not stopped.is_set():
+        try:
+            job = claim_control_job(stage, worker_id)
+            if job is not None:
+                execute_control_job(job)
+                continue
+        except (RuntimeError, urllib.error.URLError, OSError):
+            pass
+        stopped.wait(0.25)
+
+
 def run_worker_service():
     stopped = threading.Event()
 
@@ -1365,7 +1467,12 @@ def run_worker_service():
         )
         for slot_index in range(WORKER_SLOT_COUNT)
     ]
-    for thread in control_threads + job_threads:
+    lifecycle_threads = [
+        threading.Thread(target=run_control_loop, args=(stage, slot, stopped),
+                         name=f"workspace-control-{stage}-{slot}", daemon=True)
+        for stage in ("advance", "cleanup") for slot in range(2)
+    ]
+    for thread in control_threads + job_threads + lifecycle_threads:
         thread.start()
     try:
         stopped.wait()

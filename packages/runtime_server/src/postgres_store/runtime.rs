@@ -1846,6 +1846,7 @@ impl PostgresSessionLog {
             }
             tx.execute("UPDATE app_core_agentrun SET \"preAdmissionCancelledAt\"=COALESCE(\"preAdmissionCancelledAt\",clock_timestamp()) WHERE id=$1", &[&agent_run_id])
                 .map_err(|e| e.to_string())?;
+            super::lifecycle_control::mark_terminal_pending(&mut tx,agent_run_id)?;
             tx.commit().map_err(|e| e.to_string())
         })
         })
@@ -2143,6 +2144,7 @@ impl PostgresSessionLog {
             let finalize_authority = |tx: &mut Transaction<'_>| -> Result<(), String> {
                 if let Some(fence) = fence {
                     lock_current_append_lease(tx, &self.session_id, fence)?;
+                    super::lifecycle_control::require_control_records(tx, fence, events)?;
                 }
                 if let Some(checkpoint) = checkpoint {
                     if checkpoint.kind != CheckpointKindV1::Recovery
@@ -2299,6 +2301,16 @@ impl PostgresSessionLog {
                     &[&self.session_id, &tombstoned_event_ids],
                 )
                 .map_err(|error| crate::session_delivery::postgres_error("update tombstoned session projection failed", error))?;
+            }
+            if events.iter().any(|item| {
+                matches!(
+                    item.event.event_type,
+                    SessionRecordType::AgentRunCompleted
+                        | SessionRecordType::AgentRunFailed
+                        | SessionRecordType::AgentRunInterrupted
+                )
+            }) {
+                super::lifecycle_control::mark_terminal_pending(&mut tx, agent_run_id)?;
             }
             tx.commit().map_err(|error| {
                 crate::session_delivery::postgres_error("commit session log append failed", error)

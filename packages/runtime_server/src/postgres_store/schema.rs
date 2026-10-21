@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use postgres::{Client, GenericClient};
 
-const STORE_SCHEMA_VERSION: i64 = 14;
+const STORE_SCHEMA_VERSION: i64 = 15;
 const MAINTENANCE_COMPLETION_DDL: &str = r#"
 CREATE TABLE runtime.environment_maintenance_completions(
  operation_id text PRIMARY KEY,environment_id text NOT NULL,instance_id text NOT NULL,
@@ -284,6 +284,7 @@ pub(super) fn ensure_schema(client: &mut Client) -> Result<(), String> {
         upgrade_maintenance_completions(client)?;
         upgrade_environment_owners(client)?;
         upgrade_creation_attempts(client)?;
+        upgrade_control_leases(client)?;
     }
     validate_schema_version(client)?;
     validate_schema(client, CURRENT_OBSERVATION_KINDS)
@@ -473,6 +474,29 @@ fn upgrade_environment_retirements(client: &mut Client) -> Result<(), String> {
     tx.commit().map_err(|e| e.to_string())
 }
 
+fn upgrade_control_leases(client: &mut Client) -> Result<(), String> {
+    if schema_versions(client)? != (1..=14).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    let mut tx = client.transaction().map_err(|e| e.to_string())?;
+    super::resource_commit::require_durable_resource_commit(&mut tx)?;
+    tx.batch_execute("LOCK TABLE runtime.schema_migrations IN ACCESS EXCLUSIVE MODE")
+        .map_err(|e| e.to_string())?;
+    if schema_versions(&mut tx)? != (1..=14).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.batch_execute(super::lifecycle_control::DDL)
+        .map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO runtime.schema_migrations(version,applied_at_ms) VALUES(15,$1)",
+        &[&now_ms()?],
+    )
+    .map_err(|e| e.to_string())?;
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
 fn upgrade_creation_attempts(client: &mut Client) -> Result<(), String> {
     if schema_versions(client)? != (1..=13).collect::<Vec<_>>() {
         return Ok(());
@@ -639,6 +663,8 @@ fn create_schema(client: &mut Client) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     tx.batch_execute(super::creation_attempts::DDL)
         .map_err(|e| e.to_string())?;
+    tx.batch_execute(super::lifecycle_control::DDL)
+        .map_err(|e| e.to_string())?;
     for version in 1..=STORE_SCHEMA_VERSION {
         tx.execute(
             "INSERT INTO runtime.schema_migrations(version, applied_at_ms) VALUES($1, $2)",
@@ -675,6 +701,7 @@ fn validate_schema_with_resource_budgets(
     let maintenance_completions = retirements && schema_versions(client)?.contains(&12);
     let typed_owners = maintenance_completions && schema_versions(client)?.contains(&13);
     let creation_attempts = typed_owners && schema_versions(client)?.contains(&14);
+    let control_leases = creation_attempts && schema_versions(client)?.contains(&15);
     let tables = object_names(client, "BASE TABLE")?;
     let expected_tables = RUNTIME_TABLES
         .iter()
@@ -727,6 +754,11 @@ fn validate_schema_with_resource_budgets(
             } else {
                 expected
             };
+        let expected = if control_leases && *table == "runtime_jobs" {
+            format!("{expected},lease_purpose:text:NO,lease_control_stage:text:YES")
+        } else {
+            expected
+        };
         let actual = client.query(
             "SELECT column_name,data_type,is_nullable FROM information_schema.columns WHERE table_schema='runtime' AND table_name=$1 ORDER BY ordinal_position",
             &[table],
@@ -1053,6 +1085,30 @@ fn validate_schema_with_resource_budgets(
             return Err("Postgres creation attempt trigger mismatch".into());
         }
     }
+    if control_leases {
+        expected_functions.insert("protect_lifecycle_lease_purpose".into());
+        let purpose=client.query_opt("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='runtime.runtime_jobs'::regclass AND conname='runtime_jobs_lease_purpose_check' AND contype='c' AND convalidated AND NOT condeferrable",&[]).map_err(|e|e.to_string())?.map(|row|row.get::<_,String>(0));
+        if purpose.as_deref()
+            != Some("CHECK ((lease_purpose = ANY (ARRAY['execute'::text, 'control'::text])))")
+        {
+            return Err("Postgres lifecycle lease purpose constraint mismatch".into());
+        }
+        let stage=client.query_opt("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='runtime.runtime_jobs'::regclass AND conname='runtime_jobs_control_stage_check' AND contype='c' AND convalidated AND NOT condeferrable",&[]).map_err(|e|e.to_string())?.map(|row|row.get::<_,String>(0));
+        if stage.as_deref()!=Some("CHECK ((((lease_purpose = 'execute'::text) AND (lease_control_stage IS NULL)) OR ((lease_purpose = 'control'::text) AND (lease_control_stage = ANY (ARRAY['advance'::text, 'cleanup'::text])) AND (lease_control_stage IS NOT NULL))))") {return Err(format!("Postgres lifecycle control stage constraint mismatch: {stage:?}"));}
+        let default=client.query_one("SELECT column_default FROM information_schema.columns WHERE table_schema='runtime' AND table_name='runtime_jobs' AND column_name='lease_purpose'",&[]).map_err(|e|e.to_string())?.get::<_,Option<String>>(0);
+        if default.as_deref() != Some("'execute'::text") {
+            return Err("Postgres lifecycle lease purpose default mismatch".into());
+        }
+        let expected=super::lifecycle_control::DDL.split_once("CREATE FUNCTION runtime.protect_lifecycle_lease_purpose() RETURNS trigger LANGUAGE plpgsql AS $$").ok_or("lease purpose function missing")?.1.split_once("$$;").ok_or("lease purpose function body missing")?.0;
+        let actual=client.query_one("SELECT prosrc FROM pg_proc WHERE oid='runtime.protect_lifecycle_lease_purpose()'::regprocedure",&[]).map_err(|e|e.to_string())?.get::<_,String>(0);
+        if actual != expected {
+            return Err("Postgres lifecycle lease purpose function mismatch".into());
+        }
+        let trigger=client.query_one("SELECT count(*) FROM pg_trigger WHERE tgrelid='runtime.runtime_jobs'::regclass AND tgname='lifecycle_lease_purpose_facts' AND tgenabled='O' AND NOT tgisinternal AND tgtype=19 AND tgfoid='runtime.protect_lifecycle_lease_purpose()'::regprocedure AND tgqual IS NULL AND tgnargs=0",&[]).map_err(|e|e.to_string())?.get::<_,i64>(0);
+        if trigger != 1 {
+            return Err("Postgres lifecycle lease purpose trigger mismatch".into());
+        }
+    }
     if functions != expected_functions {
         return Err(format!(
             "Postgres runtime function set mismatch: {functions:?}"
@@ -1068,6 +1124,9 @@ fn validate_schema_with_resource_budgets(
         .map(|row| row.get::<_, String>(0))
         .collect::<BTreeSet<_>>();
     let mut expected_triggers = BTreeSet::from(["runtime_jobs_ready_notify_v1".to_string()]);
+    if control_leases {
+        expected_triggers.insert("lifecycle_lease_purpose_facts".into());
+    }
     if typed_owners {
         expected_triggers.insert("environment_provision_completion_facts".into());
         expected_triggers.insert("agent_run_cleanup_receipt_facts".into());
@@ -1232,7 +1291,7 @@ mod tests {
 
     #[test]
     fn transcript_read_model_and_wait_handoff_have_explicit_store_schema() {
-        assert_eq!(STORE_SCHEMA_VERSION, 14);
+        assert_eq!(STORE_SCHEMA_VERSION, 15);
         for table in [
             "transcript_projection_heads",
             "transcript_projection_current_generations",

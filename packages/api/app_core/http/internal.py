@@ -55,7 +55,7 @@ from app_core.runtime_job_client import get_runtime_job
 from app_core.environment_lifecycle import (
     EnvironmentControllerBusy, EnvironmentControllerTerminal,
     acquire_environment_controller, acquire_environment_cleanup_controller,
-    get_environment_release_receipt, release_environment_controller,
+    get_environment_release_receipt, release_environment_controller, read_control_authorization,
 )
 from app_core.session_event import (
     committed_session_terminal_state,
@@ -548,7 +548,7 @@ def _require_workspace_eof(request) -> None:
 def _locked_session_workspace_agent_run(body: dict) -> tuple[AgentRun, Session, dict]:
     lease_query = (
         "SELECT session_id FROM runtime.runtime_jobs "
-        "WHERE job_id=%s AND job_kind='agent_run.lifecycle' AND status='running' "
+        "WHERE job_id=%s AND job_kind='agent_run.lifecycle' AND status='running' AND lease_purpose='execute' "
         "AND lease_owner=%s AND payload_ref=%s AND idempotency_key=%s "
         "AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint"
     )
@@ -1518,6 +1518,22 @@ def materialize_agent_work(request):
         return JsonResponse({"error": error.code}, status=error.status)
     except ValueError:
         return JsonResponse({"error": "agent_work_materialize_invalid"}, status=400)
+
+
+@_internal_post("/agent-run-lifecycle/control")
+def resolve_agent_run_control(request):
+    try:
+        body = decode_json_object(request)
+        _retained_lifecycle_binding(body, "runtime.agent_run_lifecycle.control.resolve.v1")
+        control = read_control_authorization(body["agentRunId"], body["leaseOwner"])
+        if control["authorizationDigest"] != body["authorizationDigest"]:
+            raise ValueError("agent_run_lifecycle_binding_mismatch")
+        return JsonResponse({"schema": "runtime.agent_run_lifecycle.control.resolved.v1",
+                             "agentRunControl": control})
+    except AgentRun.DoesNotExist:
+        return JsonResponse({"error": "agent_run_not_found"}, status=404)
+    except (RuntimeError, ValueError, TypeError, KeyError):
+        return JsonResponse({"error": "agent_run_control_rejected"}, status=409)
 
 
 @_internal_post("/agent-run-lifecycle/resolve")
