@@ -92,9 +92,10 @@ fn next_runtime_job(
     job_kinds: &[String],
 ) -> Result<(i64, Option<i64>), String> {
     let limits = crate::execution_capacity::ExecutionCapacity::from_env()?;
+    let due = super::capacity_wait::DUE_AT;
     let row = client
         .query_one(
-            &format!("{} SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,MIN(GREATEST(j.run_at_ms,COALESCE(j.lease_reclaim_not_before_ms,j.run_at_ms)))
+            &format!("{} SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,MIN(GREATEST({due},COALESCE(j.lease_reclaim_not_before_ms,{due})))
                 FROM runtime_jobs j LEFT JOIN execution_job_tenants t ON t.job_id=j.job_id
                 LEFT JOIN tenant_usage u ON u.workspace_id=t.workspace_id
                 WHERE j.status='queued' AND j.job_kind=ANY($1)
@@ -240,6 +241,11 @@ impl RuntimeJobStorePort for PostgresRuntimeStore {
                 || lease_expires_at_ms.is_none_or(|expires| expires <= r.yielded_at_ms)
             {
                 return Err(format!("yield runtime job lease mismatch or expired: {}", r.job_id));
+            }
+            if r.transition_reason != crate::resident_capacity::RESIDENT_CAPACITY_WAIT {
+                super::capacity_wait::clear(&mut tx,&centaeris_core::session::RuntimeJobLeaseFence {
+                    job_id:r.job_id.clone(), job_kind:"agent_run.lifecycle".into(),lease_owner:r.lease_owner.clone()
+                })?;
             }
             let pending_wake_ids = tx
                 .query(

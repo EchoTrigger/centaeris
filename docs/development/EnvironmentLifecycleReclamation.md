@@ -53,6 +53,14 @@ Short Runtime control HTTP/DB budgets remain four/two. Slow teardown uses a sepa
 
 This boundary repairs queued cancellation under ordinary execution saturation. Active-owner failure handoff, historical terminal/dead-letter reconciliation, HTTP/DB combined saturation, physical cleanup under pressure, no-Run provision recovery, storage quotas and target-host acceptance still require their own tests. Retained is not yet the default.
 
+## Capacity release scheduling contract
+
+The capacity-wake candidate adds Runtime schema 16 with an explicit forward migration from 15. Before attempting resident admission, the current execute owner durably registers the resource-release generation it observed. A transaction which actually deletes a resident holding advances a singleton generation and notifies `runtime_job_ready_v1`. The notification carries no permission: readiness and ordinary claim compare durable generations, then retain the existing global/Workspace execution limits, lease fencing, reclaim embargo and control exclusion. The waiting Job remains the same Job.
+
+The release transaction does constant-size signaling work and does not scan or lock waiting Jobs. A release preceding yield remains visible afterward; missed notifications and Runtime restart do not erase eligibility. A new claim consumes the registration and records the release/claim timestamps; a non-capacity yield clears it. A subsequent failed admission registers the latest generation and waits for another release or the existing periodic fallback. An Unknown physical outcome does not remove its holding and supplies no release signal. Protected retained environments ending a Run keep their holding and supply no release signal either.
+
+PostgreSQL [LISTEN](https://www.postgresql.org/docs/current/sql-listen.html) requires committing the subscription before inspecting current state; the existing listener follows this order. [NOTIFY](https://www.postgresql.org/docs/current/sql-notify.html) is delivered after commit and serves as a hint to inspect durable state. The generation and holding update share one transaction, so a rollback exposes neither a capacity change nor a committed signal. Old queued Jobs without a registered attempt retain their existing fallback deadline until a new attempt records one. Deploy matching schema-aware Runtime binaries; this migration does not establish mixed-version rolling compatibility.
+
 ## Reclamation completion conditions
 
 - Preserve one authoritative lifecycle and one current lease owner. A control lease cannot run the model, allocate a sandbox or invoke ordinary execution.

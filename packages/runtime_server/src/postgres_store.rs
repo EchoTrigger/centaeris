@@ -78,6 +78,7 @@ impl Default for PostgresConnectionLimits {
 }
 
 pub(crate) mod allocation_origin;
+mod capacity_wait;
 pub(crate) mod cleanup_receipts;
 pub(crate) mod controller_authority;
 mod creation_attempts;

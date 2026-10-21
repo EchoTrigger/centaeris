@@ -649,10 +649,7 @@ fn postgres_completion_delivery_upgrade_preserves_records_and_accepts_core_obser
     ).map_err(|error| error.to_string())).unwrap();
     let before = legacy_retained_rows(&f);
     let upgraded = PostgresRuntimeStore::new(&test_url()).unwrap();
-    assert_eq!(
-        observation_versions(&f),
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-    );
+    assert_eq!(observation_versions(&f), (1..=16).collect::<Vec<_>>());
     assert_eq!(legacy_retained_rows(&f), before);
     upgraded.with_client(|db| db.execute(
         "INSERT INTO runtime.model_observation_contents VALUES($1,$2,'required_completion_delivery','{}',2,1)",
@@ -696,10 +693,7 @@ fn postgres_current_schema_reopen_retains_sealed_wait_handoff() {
     append(&mut f).unwrap();
     let before = retained_rows(&f);
     let reopened = PostgresRuntimeStore::new(&test_url()).unwrap();
-    assert_eq!(
-        observation_versions(&f),
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-    );
+    assert_eq!(observation_versions(&f), (1..=16).collect::<Vec<_>>());
     assert_eq!(retained_rows(&f), before);
     assert_eq!(
         reopened
@@ -725,6 +719,19 @@ fn retained_rows(f: &Fixture) -> std::collections::BTreeMap<String, String> {
 
 fn legacy_retained_rows(f: &Fixture) -> std::collections::BTreeMap<String, String> {
     let mut rows = retained_rows(f);
+    if let Some(clock) = rows.remove("runtime.resident_capacity_clock") {
+        let clock: serde_json::Value = serde_json::from_str(&clock).unwrap();
+        assert_eq!(
+            clock,
+            serde_json::json!([{"singleton":true,"generation":0,"changed_at_ms":0}])
+        );
+    }
+    if let Some(waiters) = rows.remove("runtime.resident_capacity_waiters") {
+        assert_eq!(
+            waiters, "[]",
+            "migration must not invent capacity wait evidence"
+        );
+    }
     if let Some(attempts) = rows.remove("runtime.environment_creation_attempts") {
         assert_eq!(
             attempts, "[]",

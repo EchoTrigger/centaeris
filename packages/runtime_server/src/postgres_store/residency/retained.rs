@@ -122,6 +122,13 @@ impl PostgresRuntimeStore {
         prepare: impl FnOnce(&RetainedInstanceAllocation) -> Result<String, String> + Send,
     ) -> Result<RetainedInstanceAllocation, String> {
         self.with_client(|client| {
+            let mut tx = client.transaction().map_err(|e| e.to_string())?;
+            super::super::resource_commit::require_durable_resource_commit(&mut tx)?;
+            verify_controller(&mut tx, r)?;
+            super::super::capacity_wait::register(&mut tx, r.lease)?;
+            tx.commit().map_err(|e| e.to_string())
+        })?;
+        let result = self.with_client(|client| {
             let lock=lock_host(client)?; let physical=inventory()?; reconcile(lock.0,r.host_id,&physical)?;
             let mut tx=lock.0.transaction().map_err(|e|e.to_string())?;
             super::super::resource_commit::require_durable_resource_commit(&mut tx)?; verify_controller(&mut tx,r)?;
@@ -178,6 +185,10 @@ impl PostgresRuntimeStore {
             if container.trim().is_empty() || a.container_id.as_ref().is_some_and(|id|id!=&container) { return Err("retained physical instance reassignment rejected".into()); }
             tx.execute("UPDATE runtime.resident_sandboxes SET container_id=$3,state='resident',updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE host_id=$1 AND execution_id=$2", &[&r.host_id,&a.allocation_execution_id,&container]).map_err(|e|e.to_string())?;
             tx.commit().map_err(|e|e.to_string())?; a.container_id=Some(container); Ok(a)
-        })
+        });
+        if !matches!(&result,Err(error) if error==RESIDENT_CAPACITY_WAIT) {
+            self.with_client(|client| super::super::capacity_wait::clear(client, r.lease))?;
+        }
+        result
     }
 }

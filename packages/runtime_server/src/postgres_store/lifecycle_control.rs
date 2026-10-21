@@ -219,6 +219,7 @@ impl PostgresRuntimeStore {
 
 #[cfg(test)]
 pub(super) fn restore_previous_fixture(db: &mut postgres::Client) {
+    super::capacity_wait::restore_previous_fixture(db);
     let version: i64 = db
         .query_one("SELECT max(version) FROM runtime.schema_migrations", &[])
         .unwrap()
