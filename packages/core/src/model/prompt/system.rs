@@ -39,11 +39,7 @@ pub struct SystemPromptRenderResult {
 }
 
 pub fn render_system_prompt() -> Result<SystemPromptRenderResult, String> {
-    let content = format!(
-        "{}\n\n{}",
-        SYSTEM_PROMPT.trim(),
-        crate::session::visualization::model_instructions()
-    );
+    let content = SYSTEM_PROMPT.trim().to_string();
     let included_sections = parse_section_names(content.as_str())?;
     validate_harness_sections(&included_sections)?;
     let section_metadata = included_sections

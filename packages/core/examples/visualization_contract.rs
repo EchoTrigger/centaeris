@@ -1,4 +1,4 @@
-use centaeris_core::session::visualization::{catalog, parse_visual};
+use centaeris_core::session::visualization::{catalog, model_instructions, parse_visual};
 use serde_json::{json, Value};
 fn main() {
     let fixtures: Vec<Value> =
@@ -9,6 +9,9 @@ fn main() {
     }).collect();
     println!(
         "{}",
-        serde_json::to_string_pretty(&json!({"catalog": catalog(), "cases": cases})).unwrap()
+        serde_json::to_string_pretty(
+            &json!({"catalog": catalog(), "cases": cases, "instructions": model_instructions()})
+        )
+        .unwrap()
     );
 }

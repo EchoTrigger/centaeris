@@ -57,17 +57,15 @@ fn visualizations_project_complete_and_interrupted_streams_from_original_source(
 }
 
 #[test]
-fn visualization_prompt_exposes_the_portable_shape_and_generated_vocabulary() {
-    let prompt = centaeris_core::model::prompt::system::render_system_prompt().unwrap();
-    assert!(prompt
-        .content
-        .contains(centaeris_core::session::visualization::SCHEMA));
-    assert!(prompt.content.contains("centaeris_visual"));
-    let blocks = visual_blocks(&prompt.content);
+fn visualization_skill_reference_exposes_the_portable_shape_and_generated_vocabulary() {
+    let prompt = centaeris_core::session::visualization::model_instructions();
+    assert!(prompt.contains(centaeris_core::session::visualization::SCHEMA));
+    assert!(prompt.contains("centaeris_visual"));
+    let blocks = visual_blocks(&prompt);
     assert_eq!(blocks.len(), 1);
     parse_visual(&blocks[0].json).unwrap();
     let catalog = centaeris_core::session::visualization::catalog();
     for name in catalog["components"].as_object().unwrap().keys() {
-        assert!(prompt.content.contains(name), "Missing component: {name}");
+        assert!(prompt.contains(name), "Missing component: {name}");
     }
 }
