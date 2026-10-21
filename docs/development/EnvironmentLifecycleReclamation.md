@@ -10,14 +10,14 @@ Queued cancellation and physical resource settlement must continue independently
 | --- | --- | --- |
 | Workspace execution capacity exhausted | Four running lifecycle owners remain unchanged; cancellation intent persists, but the cancelled queued job is neither ready nor claimable. | An independent bounded control path commits the cancellation without waiting for an unrelated execution slot or granting execution authority. |
 | Global execution capacity exhausted | Eight running owners across two Workspaces remain unchanged; a cancelled job in an otherwise empty third Workspace is neither ready nor claimable. | The same control progress must hold independently of the global execution limit. |
-| Failure before physical creation | Allocation and reservation commit, the pre-create callback fails, and physical creation is never called; one reservation remains. | Preserve allocation history and atomically settle the proven unmaterialized attempt, its holding and subsequent obligations. |
+| Failure before physical creation | The initial regression left a reservation charged after a fresh pre-create callback failed. The undispatched settlement below now closes this case. | Preserve allocation history and atomically settle the proven unmaterialized attempt, its holding and subsequent obligations. |
 | Cleanup proof lost at the host boundary | A controlled host callback removes its own synchronous attempt but returns only a string failure. The ledger retains the reservation. | Carry typed physical evidence to durable settlement. A string error or an empty inventory cannot authorize release. |
 | Historical reserved allocations | Earlier records may have no attempt evidence or container ID. | Recover a durable investigation obligation; never infer non-creation from age, lease expiry or an empty observation. |
 | Workspace storage budget | The current container request carries the data budget label but no explicit Docker tmpfs or storage option. | Establish the actual writable backing and enforce the declared byte/inode contract at the physical boundary. |
 
 The database regressions are in
 [`resource_lifecycle_tests.rs`](../../packages/runtime_server/src/postgres_store/integration_tests/resource_lifecycle_tests.rs).
-The two capacity tests isolate the storage claim/ready boundary. They do not establish a complete Worker cancellation, teardown and release result. The pre-create settlement test currently fails; it is an opt-in regression, not a passing release gate.
+The two capacity tests isolate the storage claim/ready boundary. They do not establish a complete Worker cancellation, teardown and release result. The pre-create settlement regression now passes and is included in the required PostgreSQL gate.
 
 Existing unknown-create regressions continue to require charged resources and adoption of the exact late instance after reopening. Any settlement fix must preserve those protections. A known failure and an unknown physical outcome must never share an unconditional release path.
 
@@ -38,6 +38,24 @@ A bare Docker create/start probe does not perform the host's workspace preparati
 Acceptance must exercise the real preparation and task path before judging workspace availability. It must then identify the workspace mount/backing, enforce its configured limits, verify file visibility across supported lifecycle operations, and distinguish workspace data from temporary directories. A write to `/tmp` cannot certify the `/mnt/data` contract.
 
 The opt-in `export_owned_runsc_storage_probe_request` test exports a request from the production container request builder for an explicitly owned physical probe. Probe drivers, private configuration and artifacts remain outside the source checkout. A separate Docker daemon must also run in a separate Linux network namespace; a different socket/data root alone does not isolate Docker's host network management.
+
+## Runtime HTTP cancellation measurements
+
+A small WSL experiment used the deployed Runtime image at `b389f6d29411423d494d78d0b94fe4d68fdc54e0` (`sha256:993a7e156a545ac8317342ff92ea2469246db545e51c7e7da248d2881b4e636c`) and its schema 13 against a fresh PostgreSQL 18 container. The measured cancellation handler, ready query and claim capacity logic are unchanged in candidate `b67e04396e9d9613ba864fb2902fb8685f9d76ae`; this remains a deployed-build baseline, not final-candidate acceptance.
+
+The driver issued real authenticated HTTP schedule/claim/start/cancel/wait/heartbeat/yield requests. Synthetic Session/Run rows supplied the database boundary; no API admission, Worker thread, model or sandbox execution was exercised. Execution limits remained global 8 and Workspace 4. The private Runtime had 512 MiB/1 CPU and PostgreSQL 1 GiB/1 CPU; these are local diagnostic timings, not production throughput estimates.
+
+Each condition ran three times. Full-capacity cases retained their original four/eight running lease owners and heartbeats for a 1.5-second observation window, polling every 500 ms. Global saturation used two Workspaces with four owners each and a target in an empty third Workspace.
+
+| Condition | Cancel HTTP acknowledgement, ms (three samples) | Target before releasing a blocker | Yield one blocker through HTTP, then claim target, ms |
+| --- | --- | --- | --- |
+| Idle | 12.74, 6.25, 6.21 | Ready and claimed 26.17, 11.87, 11.94 ms after cancellation request began | Not applicable |
+| Workspace full | 6.19, 6.24, 6.50 | All four observations per trial timed out for ready and claimed zero; target remained queued through at least 1.5 seconds | 6.26, 6.21, 6.59 |
+| Global full | 6.12, 6.55, 6.65 | All four observations per trial timed out for ready and claimed zero; target remained queued through at least 1.5 seconds | 6.46, 6.21, 6.25 |
+
+Every target had exactly one durable cancellation-intent event. Targets had no authoritative terminal event during this experiment; even the idle result proves claimability only. Physical allocations and resident holdings remained zero. A read-only Docker proxy prevented host mutations, owned containers/network were removed, and the existing application containers retained their exact IDs, image IDs and start times.
+
+The first demonstrated obstruction is execution-capacity eligibility at ready/claim: cancellation is acknowledged promptly but cannot obtain processing while ordinary execution is full. Releasing one unrelated execution owner removes that obstruction immediately. The next implementation boundary is a persisted, capability-restricted control lease and corresponding ready/claim eligibility, followed by a real Worker control path. This experiment does not measure physical cleanup or Job completion latency.
 
 ## Reclamation completion conditions
 
@@ -65,7 +83,7 @@ The switch is gated on the following evidence:
 
 The first isolated PostgreSQL run after restoring the test environment executed eight named tests: five passed and three failed at the intended assertions. The four pre-existing cancellation/capacity/unknown-create baselines passed. The three failures are the two saturated-capacity cancellation cases and the pre-create reservation settlement case above. The additional string-failure characterization passed and preserves conservative accounting.
 
-The focused Core query-loop gate passed all 129 selected tests. Rust test compilation, request export, formatting and whitespace checks passed. Production implementations and lifetime defaults have not been changed in this initial regression-only candidate. Full terminal/control-lane behavior, historical migration, actual workspace quota enforcement and target-host acceptance remain open.
+The focused Core query-loop gate passed all 129 selected tests. Rust test compilation, request export, formatting and whitespace checks passed. That initial candidate changed neither production behavior nor lifetime defaults; the settlement implementation and its later validation are recorded below. Full terminal/control-lane behavior, historical migration, actual workspace quota enforcement and target-host acceptance remain open.
 
 ## Verified settlement boundary
 
