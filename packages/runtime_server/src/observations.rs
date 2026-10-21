@@ -489,9 +489,14 @@ pub fn timing(phase: &'static str, start: Instant, outcome: &'static str) {
     if !enabled() {
         return;
     }
-    emit(
-        serde_json::json!({"phase":phase,"elapsedMs":start.elapsed().as_secs_f64()*1000.0,"outcome":outcome}),
-    );
+    emit(serde_json::json!({
+        "phase":phase,
+        "startedAtMs": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
+            .as_millis().saturating_sub(start.elapsed().as_millis()) as u64,
+        "elapsedMs":start.elapsed().as_secs_f64()*1000.0,
+        "outcome":outcome,
+    }));
 }
 
 pub fn route(path: &str) -> &'static str {

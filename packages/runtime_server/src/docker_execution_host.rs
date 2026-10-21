@@ -666,7 +666,7 @@ impl DockerExecutionHostRunner {
         if has_execution_fact {
             runner.quiesce_existing_execution()?;
         }
-        let inventory = runner.input_inventory()?;
+        let inventory = crate::observations::timed("inputInventory", || runner.input_inventory())?;
         *runner
             .materialized_inputs
             .lock()

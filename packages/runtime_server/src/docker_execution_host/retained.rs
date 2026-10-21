@@ -94,16 +94,18 @@ pub(super) fn takeover(
     id: &str,
     fence: &EnvironmentTaskFence,
 ) -> Result<(), String> {
-    let result = relay(
-        expected,
-        id,
-        EnvironmentTaskRequest::Takeover {
-            environment_instance_id: fence.environment_instance_id.clone(),
-            controller_owner: fence.controller_owner.clone(),
-            controller_epoch: fence.controller_epoch,
-            controller_purpose: fence.controller_purpose.clone(),
-        },
-    )?;
+    let result = crate::observations::timed("environmentTakeover", || {
+        relay(
+            expected,
+            id,
+            EnvironmentTaskRequest::Takeover {
+                environment_instance_id: fence.environment_instance_id.clone(),
+                controller_owner: fence.controller_owner.clone(),
+                controller_epoch: fence.controller_epoch,
+                controller_purpose: fence.controller_purpose.clone(),
+            },
+        )
+    })?;
     if matches!(result,EnvironmentTaskResult::TakenOver{fence:ref actual} if actual==fence) {
         use hosted_execution::host_supervisor::{
             HostHelperRequest, HostLaunchTarget, TrustedHelperKind,
@@ -140,13 +142,15 @@ pub(super) fn takeover(
         };
         let mut error = "environment_workspace_preparation_unknown".to_owned();
         for _ in 0..2 {
-            match crate::environment_supervisor::helper(
-                &target,
-                request.clone(),
-                &mut std::io::empty(),
-                &mut Vec::new(),
-                &mut Vec::new(),
-            ) {
+            match crate::observations::timed("workspacePrepareHelper", || {
+                crate::environment_supervisor::helper(
+                    &target,
+                    request.clone(),
+                    &mut std::io::empty(),
+                    &mut Vec::new(),
+                    &mut Vec::new(),
+                )
+            }) {
                 Ok(task) if task.exit_code == Some(0) => return Ok(()),
                 Ok(_) => return Err("environment_workspace_preparation_failed".into()),
                 Err(e) => error = e,
@@ -368,14 +372,20 @@ impl DockerExecutionHostRunner {
             input.len() as u64,
             &format!("sha256:{:x}", Sha256::digest(input)),
         )?;
-        let task = self.start_helper_current(&request, &mut Cursor::new(input))?;
-        let output = self.finish_helper_current(&request, task)?;
+        let task = crate::observations::timed("helperStart", || {
+            self.start_helper_current(&request, &mut Cursor::new(input))
+        })?;
+        let output = crate::observations::timed("helperConfirm", || {
+            self.finish_helper_current(&request, task)
+        })?;
         if output.task.exit_code != Some(0) {
             return Err("environment_helper_failed".into());
         }
         let mut stdout = Vec::new();
         let mut stderr = BoundedDiagnosticWriter(Vec::new());
-        output.copy_to(&mut stdout, &mut stderr)?;
+        crate::observations::timed("helperOutputCopy", || {
+            output.copy_to(&mut stdout, &mut stderr)
+        })?;
         if stdout.len() > output_limit {
             return Err("environment_helper_output_too_large".into());
         }
@@ -389,13 +399,19 @@ impl DockerExecutionHostRunner {
         input_digest: &str,
     ) -> Result<(fs::File, Vec<u8>, Option<i32>), String> {
         let request = self.helper_request(kind, input_length, input_digest)?;
-        let task = self.start_helper_current(&request, input)?;
-        let output = self.finish_helper_current(&request, task)?;
+        let task = crate::observations::timed("helperStart", || {
+            self.start_helper_current(&request, input)
+        })?;
+        let output = crate::observations::timed("helperConfirm", || {
+            self.finish_helper_current(&request, task)
+        })?;
         let exit = output.task.exit_code;
         let mut stdout =
             tempfile::tempfile().map_err(|_| "environment_helper_spool_unavailable")?;
         let mut stderr = BoundedDiagnosticWriter(Vec::new());
-        output.copy_to(&mut stdout, &mut stderr)?;
+        crate::observations::timed("helperOutputCopy", || {
+            output.copy_to(&mut stdout, &mut stderr)
+        })?;
         stdout
             .rewind()
             .map_err(|_| "environment_helper_spool_unavailable")?;

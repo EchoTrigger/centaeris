@@ -210,8 +210,10 @@ fn send(request: HostSupervisorRequest) -> Result<HostSupervisorResult, String> 
     exchange(&mut *connection()?, request)
 }
 fn register(target: &HostLaunchTarget) -> Result<(), String> {
-    match send(HostSupervisorRequest::Register {
-        target: target.clone(),
+    match crate::observations::timed("hostRegister", || {
+        send(HostSupervisorRequest::Register {
+            target: target.clone(),
+        })
     })? {
         HostSupervisorResult::Registered { target: actual } if actual == *target => Ok(()),
         _ => Err("environment_host_registration_rejected".into()),
@@ -462,13 +464,17 @@ fn task_with(
     target.validate()?;
     envelope.validate()?;
     envelope.request.validate_authority()?;
-    match transport(HostSupervisorRequest::Register {
-        target: target.clone(),
+    match crate::observations::timed("hostTaskRegister", || {
+        transport(HostSupervisorRequest::Register {
+            target: target.clone(),
+        })
     })? {
         HostSupervisorResult::Registered { target: actual } if actual == target => {}
         _ => return Err("environment_host_registration_rejected".into()),
     }
-    match transport(HostSupervisorRequest::Task { envelope })? {
+    match crate::observations::timed("hostTaskRequest", || {
+        transport(HostSupervisorRequest::Task { envelope })
+    })? {
         HostSupervisorResult::Task { response } => {
             response.validate()?;
             match response {

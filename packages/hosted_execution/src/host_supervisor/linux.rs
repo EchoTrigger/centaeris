@@ -1,6 +1,7 @@
 use super::*;
 use crate::task_service::linux::{launcher::OciTarget, HelperBinary, NativeManager};
 mod helpers;
+pub(crate) mod observations;
 mod retirement;
 use sha2::{Digest, Sha256};
 use std::{
@@ -131,8 +132,16 @@ pub(crate) fn read_bundle_spec(bundle: &Path) -> Result<serde_json::Value, Strin
     }
     serde_json::from_slice(&bytes).map_err(|_| "host_bundle_unknown".into())
 }
+pub(crate) fn command_lock() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    observations::measure(observations::Phase::CommandLockWait, || {
+        COMMAND_LOCK
+            .lock()
+            .map_err(|_| "host_command_failed".into())
+    })
+}
+
 fn command_json(path: &str, args: &[&str]) -> Result<serde_json::Value, String> {
-    let _lock = COMMAND_LOCK.lock().map_err(|_| "host_command_failed")?;
+    let _lock = command_lock()?;
     command_json_unlocked(path, args)
 }
 pub(crate) fn command_json_unlocked(
@@ -143,6 +152,18 @@ pub(crate) fn command_json_unlocked(
         .map_err(|_| "host_command_response_invalid".into())
 }
 pub(crate) fn command_bytes_unlocked(path: &str, args: &[&str]) -> Result<Vec<u8>, String> {
+    use observations::Phase;
+    let phase = match args.get(2).copied() {
+        Some("inspect") => Phase::DockerInspect,
+        Some("state") => Phase::RuntimeState,
+        Some("read-control") => Phase::RuntimeControlRead,
+        Some("write-control") => Phase::RuntimeControlWrite,
+        _ => Phase::OtherCommand,
+    };
+    observations::measure(phase, || command_bytes_inner(path, args))
+}
+
+fn command_bytes_inner(path: &str, args: &[&str]) -> Result<Vec<u8>, String> {
     let mut child = Command::new(path)
         .args(args)
         .env_clear()
@@ -195,6 +216,15 @@ pub(crate) fn start_time(pid: u32) -> Result<u64, String> {
         .ok_or_else(|| "host_target_unknown".into())
 }
 fn attest(
+    config: &HostSupervisorConfig,
+    target: &HostLaunchTarget,
+) -> Result<Registration, String> {
+    observations::measure(observations::Phase::Attestation, || {
+        attest_inner(config, target)
+    })
+}
+
+fn attest_inner(
     config: &HostSupervisorConfig,
     target: &HostLaunchTarget,
 ) -> Result<Registration, String> {

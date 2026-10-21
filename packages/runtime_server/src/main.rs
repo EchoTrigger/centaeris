@@ -2270,6 +2270,7 @@ fn execute_agent_run(
         }
     };
     let sandbox_ensure_ms = sandbox_started.elapsed().as_millis();
+    observations::timing("sandboxPreparation", sandbox_started, "ok");
     let docker_execution = Arc::new(docker_execution);
     let lifecycle_hooks = match workspace_lifecycle_hook_runtime(
         &agent_run_start.authorization.plugin_activation,
@@ -2853,6 +2854,7 @@ fn execute_agent_run(
         session_start_commit_ms = session_start_commit_started.elapsed().as_millis();
     }
 
+    observations::timing("startupPreparation", startup_started, "ok");
     eprintln!(
         "agent_run_startup_profile: agentRunId={}; serverCount={}; credentialCount={}; mcpConnectionCount={}; runtimePreludeMs={}; sandboxEnsureMs={}; mcpCredentialResolveMs={}; mcpDiscoveryMs={}; workspaceRestoreMs={}; sessionStartCommitMs={}; startupTotalMs={}",
         agent_run_start.agent_run_id,

@@ -74,6 +74,11 @@ pub(super) struct Spawned {
 
 impl OciTarget {
     pub(super) fn verify_identity(&self) -> Result<(), String> {
+        use crate::host_supervisor::linux::observations::{measure, Phase};
+        measure(Phase::RuntimeIdentity, || self.verify_identity_inner())
+    }
+
+    fn verify_identity_inner(&self) -> Result<(), String> {
         use crate::host_supervisor::linux::{command_json_unlocked, start_time};
         if start_time(self.init_pid)? != self.init_start_time {
             return Err("host_registered_target_changed".into());
@@ -124,9 +129,7 @@ impl OciTarget {
             cwd,
             env,
         } = request;
-        let _commands = crate::host_supervisor::linux::COMMAND_LOCK
-            .lock()
-            .map_err(|_| "host_command_failed")?;
+        let _commands = crate::host_supervisor::linux::command_lock()?;
         self.verify_identity()?;
         let process = match trusted {
             Some(launch) => launch.process(&self.process)?,

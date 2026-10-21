@@ -1,5 +1,6 @@
 //! gVisor's private cgroup v2 task domains and sealed, identity-isolated runner.
 use super::*;
+use crate::host_supervisor::linux::observations::{measure, Phase};
 use crate::{
     host_supervisor::HostOciRuntime,
     runsc_task::{RunnerAction, RunnerEvent, RunnerRequest},
@@ -91,9 +92,7 @@ mod tests {
 }
 
 pub(super) fn events(target: &OciTarget, path: &Path) -> Result<String, String> {
-    let _commands = crate::host_supervisor::linux::COMMAND_LOCK
-        .lock()
-        .map_err(|_| "host_command_failed")?;
+    let _commands = crate::host_supervisor::linux::command_lock()?;
     target.verify_identity()?;
     control_unlocked(
         target,
@@ -112,17 +111,13 @@ fn kill_unlocked(target: &OciTarget, id: &str) -> Result<bool, String> {
 }
 
 pub(super) fn kill(target: &OciTarget, path: &Path) -> Result<bool, String> {
-    let _commands = crate::host_supervisor::linux::COMMAND_LOCK
-        .lock()
-        .map_err(|_| "host_command_failed")?;
+    let _commands = crate::host_supervisor::linux::command_lock()?;
     target.verify_identity()?;
     kill_unlocked(target, task_id(path)?)
 }
 
 pub(super) fn initialize(target: &OciTarget) -> Result<(), String> {
-    let _commands = crate::host_supervisor::linux::COMMAND_LOCK
-        .lock()
-        .map_err(|_| "host_command_failed")?;
+    let _commands = crate::host_supervisor::linux::command_lock()?;
     if target.helper_binary.is_none() {
         return Err("host_runsc_runner_required".into());
     }
@@ -263,9 +258,7 @@ pub(super) fn administer(
     path: &Path,
     action: RunnerAction,
 ) -> Result<(), String> {
-    let _commands = crate::host_supervisor::linux::COMMAND_LOCK
-        .lock()
-        .map_err(|_| "host_command_failed")?;
+    let _commands = crate::host_supervisor::linux::command_lock()?;
     target.verify_identity()?;
     let request = RunnerRequest {
         action,
@@ -417,12 +410,22 @@ pub(super) fn spawn(
     domain: &Path,
     trusted: Option<&TrustedLaunch>,
 ) -> Result<Spawned, String> {
+    measure(Phase::RunscLaunch, || {
+        spawn_inner(target, id, request, domain, trusted)
+    })
+}
+
+fn spawn_inner(
+    target: &OciTarget,
+    id: &str,
+    request: launcher::TaskProcess<'_>,
+    domain: &Path,
+    trusted: Option<&TrustedLaunch>,
+) -> Result<Spawned, String> {
     if target.runtime != HostOciRuntime::Runsc {
         return Err("runsc_backend_required".into());
     }
-    let _commands = crate::host_supervisor::linux::COMMAND_LOCK
-        .lock()
-        .map_err(|_| "host_command_failed")?;
+    let _commands = crate::host_supervisor::linux::command_lock()?;
     target.verify_identity()?;
     let process = match trusted {
         Some(launch) => launch.process(&target.process)?,
@@ -471,30 +474,33 @@ pub(super) fn spawn(
         .insert(proxy.id());
     child.proxy = Some(proxy);
     drop(guest);
-    let began = Instant::now();
-    loop {
-        let (ready, failed) = {
-            let state = child.state.lock().map_err(|_| "task_service_failed")?;
-            (state.ready, state.failed)
-        };
-        if ready && !failed {
-            break;
+    measure(Phase::RunscReadyWait, || {
+        let began = Instant::now();
+        loop {
+            let (ready, failed) = {
+                let state = child.state.lock().map_err(|_| "task_service_failed")?;
+                (state.ready, state.failed)
+            };
+            if ready && !failed {
+                break;
+            }
+            if failed
+                || began.elapsed() >= Duration::from_secs(5)
+                || child
+                    .proxy
+                    .as_mut()
+                    .expect("owned proxy")
+                    .try_wait()
+                    .map_err(|_| "task_launch_unknown")?
+                    .is_some()
+            {
+                let _ = kill_unlocked(target, task_id(domain)?);
+                return Err("task_launch_unknown".into());
+            }
+            thread::sleep(Duration::from_millis(5));
         }
-        if failed
-            || began.elapsed() >= Duration::from_secs(5)
-            || child
-                .proxy
-                .as_mut()
-                .expect("owned proxy")
-                .try_wait()
-                .map_err(|_| "task_launch_unknown")?
-                .is_some()
-        {
-            let _ = kill_unlocked(target, task_id(domain)?);
-            return Err("task_launch_unknown".into());
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
+        Ok::<_, String>(())
+    })?;
     if let Err(error) = target.verify_identity() {
         let _ = kill_unlocked(target, id);
         return Err(error);
