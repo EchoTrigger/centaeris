@@ -24,8 +24,12 @@ pub(crate) fn measure<T, E>(
     let enabled =
         *ENABLED.get_or_init(|| std::env::var("WORKSPACE_PERF_OBSERVATIONS").as_deref() == Ok("1"));
     measure_with(enabled, phase, operation, |record| {
-        eprintln!("host_execution_timing: {record}");
+        write_record(&mut std::io::stderr().lock(), &record);
     })
+}
+
+fn write_record(writer: &mut impl std::io::Write, record: &serde_json::Value) {
+    let _ = writeln!(writer, "host_execution_timing: {record}");
 }
 
 fn measure_with<T, E>(
@@ -70,6 +74,28 @@ mod tests {
         );
         assert_eq!(result, Ok(7));
         assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn unavailable_diagnostic_output_does_not_change_the_operation_result() {
+        struct Unavailable;
+        impl std::io::Write for Unavailable {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        assert_eq!(
+            measure_with(
+                true,
+                Phase::DockerInspect,
+                || Ok::<_, ()>(7),
+                |record| { write_record(&mut Unavailable, &record) }
+            ),
+            Ok(7)
+        );
     }
 
     #[test]
