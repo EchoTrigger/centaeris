@@ -10,8 +10,8 @@ def main():
     parser.add_argument("--lane", choices=("ordinary", "control", "cleanup"), required=True)
     args = parser.parse_args()
     try:
-        config = AdapterConfig(api_key=os.environ.get("E2B_API_KEY", ""), domain=os.environ.get("E2B_DOMAIN", ""),
-                               api_url=os.environ.get("E2B_API_URL"),
+        config = AdapterConfig(api_key=os.environ.get("E2B_API_KEY", ""), domain=os.environ.get("E2B_DOMAIN"),
+                               api_url=os.environ.get("E2B_API_URL"), sandbox_url=os.environ.get("E2B_SANDBOX_URL"),
                                idempotency_supported=os.environ.get("E2B_ADAPTER_IDEMPOTENCY_SUPPORTED") == "true", lane=args.lane)
         adapter = Adapter(config)
     except Exception:

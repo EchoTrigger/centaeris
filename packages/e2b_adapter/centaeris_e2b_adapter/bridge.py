@@ -30,25 +30,44 @@ class RequestError(ValueError):
 @dataclass(frozen=True)
 class AdapterConfig:
     api_key: str = field(repr=False)
-    domain: str
+    domain: str | None = None
     api_url: str | None = None
+    sandbox_url: str | None = None
     idempotency_supported: bool = False
     lane: str = "ordinary"
     request_timeout_seconds: float = 30
 
     def __post_init__(self):
-        if not self.api_key or not self.domain or any(c in self.domain for c in "/?#@"):
-            raise ValueError("Explicit API key and domain are required")
+        if not self.api_key:
+            raise ValueError("Explicit API key is required")
+        if self.domain is not None and (not self.domain or any(c in self.domain for c in "/?#@")):
+            raise ValueError("Invalid provider domain")
+        if (self.api_url is None) != (self.sandbox_url is None):
+            raise ValueError("Provider API and sandbox URLs must be configured together")
+        if self.domain is None and self.api_url is None:
+            raise ValueError("Explicit provider domain or paired endpoint URLs are required")
         if self.lane not in ("ordinary", "control", "cleanup"):
             raise ValueError("Unsupported adapter lane")
         if not 0 < self.request_timeout_seconds <= 60:
             raise ValueError("Request timeout must be between zero and 60 seconds")
-        if self.api_url:
-            url = urlsplit(self.api_url)
-            if url.username or url.password or url.query or url.fragment or not url.hostname:
-                raise ValueError("Invalid provider API URL")
-            if url.scheme != "https" and not (url.scheme == "http" and url.hostname in ("localhost", "127.0.0.1", "::1")):
-                raise ValueError("Provider API requires HTTPS except explicit loopback fixtures")
+        for endpoint in (self.api_url, self.sandbox_url):
+            if endpoint is not None:
+                _validate_endpoint_url(endpoint)
+
+
+def _validate_endpoint_url(value):
+    try:
+        if not isinstance(value, str) or any(ord(c) < 32 or ord(c) == 127 for c in value):
+            raise ValueError()
+        url = urlsplit(value)
+        if url.username or url.password or url.query or url.fragment or not url.hostname:
+            raise ValueError()
+        if url.port is not None and not 1 <= url.port <= 65535:
+            raise ValueError()
+        if url.scheme != "https" and not (url.scheme == "http" and url.hostname in ("localhost", "127.0.0.1", "::1")):
+            raise ValueError()
+    except ValueError:
+        raise ValueError("Provider endpoints require credential-free HTTPS URLs or explicit HTTP loopback URLs") from None
 
 
 def _object(value, required, optional=()):
@@ -86,6 +105,9 @@ class Adapter:
         self.config = config
         self._sandboxes = OrderedDict()
         if client is None:
+            if ((config.api_url is None and os.environ.get("E2B_API_URL"))
+                    or (config.sandbox_url is None and os.environ.get("E2B_SANDBOX_URL"))):
+                raise ValueError("Provider endpoint overrides must be selected explicitly in adapter configuration")
             # Each lane is a dedicated process, including its SDK connection pool.
             # A connection failure cannot silently multiply a caller's dispatches.
             os.environ["E2B_CONNECTION_RETRIES"] = "0"
@@ -94,7 +116,7 @@ class Adapter:
             from e2b import E2B
 
             client = E2B(api_key=config.api_key, domain=config.domain,
-                         api_url=config.api_url, retries=0, debug=False,
+                         api_url=config.api_url, sandbox_url=config.sandbox_url, retries=0, debug=False,
                          request_timeout=config.request_timeout_seconds)
         self.client = client
 

@@ -14,9 +14,21 @@ Use separate processes for `ordinary`, `control`, and `cleanup`: the SDK shares
 its sandbox HTTP/2 connection pool within a process. A separate client object
 does not provide lane isolation.
 
-Host-side configuration requires `E2B_API_KEY` and `E2B_DOMAIN`. `E2B_API_URL`
-may explicitly select a self-hosted API; HTTPS is required except for a loopback
-test server. `E2B_ADAPTER_IDEMPOTENCY_SUPPORTED=true` permits create only after
+Host-side configuration requires `E2B_API_KEY`. Public deployments select
+`E2B_DOMAIN`. Self-hosted deployments select both `E2B_API_URL` (control plane)
+and `E2B_SANDBOX_URL` (commands and file traffic); this explicit pair works
+without `E2B_DOMAIN`. For a local Embed installation, the pair can be
+`http://localhost:3000` and `http://localhost:3002`. A sandbox URL is an endpoint,
+not a domain, and is never inferred from the API URL. Both endpoints require
+HTTPS except explicit HTTP loopback endpoints. Credentials, query strings and
+fragments are rejected in endpoint URLs. A partial endpoint pair fails before
+SDK construction, so file traffic cannot silently fall back to a remote host.
+
+The CLI selects these values from host environment configuration and binds them
+to the SDK client. Programmatic callers must select their endpoint overrides in
+`AdapterConfig` too; unselected ambient SDK endpoint variables are rejected.
+Create, connect and control operations inherit the same explicit client routing.
+`E2B_ADAPTER_IDEMPOTENCY_SUPPORTED=true` permits create only after
 the chosen server's idempotency support has been verified. Credentials are
 never sent into a sandbox or included in response diagnostics. The adapter
 disables SDK action and connection retries; the caller manages durable retries.

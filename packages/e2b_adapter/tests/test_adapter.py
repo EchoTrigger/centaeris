@@ -1,8 +1,10 @@
 import base64
 import io
 import json
+import os
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from centaeris_e2b_adapter.bridge import Adapter, AdapterConfig, serve
 
@@ -126,6 +128,61 @@ class AdapterTests(unittest.TestCase):
     def connect(self):
         response = self.adapter.handle(request("connect", {"sandboxId": "sandbox-a", "timeoutSeconds": 300, "onResume": "restore"}))
         self.assertEqual(response["outcome"], "succeeded")
+
+    def test_explicit_self_hosted_urls_are_bound_to_the_sdk_without_a_domain(self):
+        with patch("e2b.E2B", return_value=self.client) as factory:
+            adapter = Adapter(AdapterConfig(api_key="fixture-key", api_url="http://localhost:3000",
+                                            sandbox_url="http://localhost:3002"))
+        self.assertIs(adapter.client, self.client)
+        self.assertEqual(factory.call_args.kwargs["api_url"], "http://localhost:3000")
+        self.assertEqual(factory.call_args.kwargs["sandbox_url"], "http://localhost:3002")
+        self.assertIsNone(factory.call_args.kwargs["domain"])
+
+    def test_partial_self_hosted_url_configuration_fails_before_sdk_construction(self):
+        with patch("e2b.E2B") as factory:
+            for urls in ({"api_url": "http://localhost:3000"}, {"sandbox_url": "http://localhost:3002"}):
+                with self.subTest(urls=urls), self.assertRaises(ValueError):
+                    Adapter(AdapterConfig(api_key="fixture-key", domain="domain.example", **urls))
+            factory.assert_not_called()
+
+    def test_sandbox_endpoint_rejects_credentials_and_unencrypted_non_loopback(self):
+        for endpoint in ("http://remote.example:3002", "https://user:private-probe@host.example",
+                         "https://host.example?secret=private-probe", "https://host.example#private-probe"):
+            with self.subTest(endpoint=endpoint), self.assertRaises(ValueError) as error:
+                AdapterConfig(api_key="fixture-key", domain="domain.example", api_url="http://localhost:3000", sandbox_url=endpoint)
+            self.assertNotIn("private-probe", str(error.exception))
+
+    def test_public_domain_cannot_inherit_unselected_ambient_sdk_endpoints(self):
+        with patch.dict(os.environ, {"E2B_API_URL": "http://localhost:3000", "E2B_SANDBOX_URL": "http://localhost:3002"}), \
+                patch("e2b.E2B") as factory:
+            with self.assertRaises(ValueError):
+                Adapter(AdapterConfig(api_key="fixture-key", domain="public.example"))
+            factory.assert_not_called()
+
+    def test_public_domain_configuration_still_uses_the_explicit_domain(self):
+        with patch.dict(os.environ, {"E2B_API_URL": "", "E2B_SANDBOX_URL": ""}), \
+                patch("e2b.E2B", return_value=self.client) as factory:
+            Adapter(AdapterConfig(api_key="fixture-key", domain="public.example"))
+        self.assertEqual(factory.call_args.kwargs["domain"], "public.example")
+        self.assertIsNone(factory.call_args.kwargs["api_url"])
+        self.assertIsNone(factory.call_args.kwargs["sandbox_url"])
+
+    def test_cli_selects_the_exact_embed_endpoint_pair_without_a_domain(self):
+        from centaeris_e2b_adapter.__main__ import main
+        with patch.dict(os.environ, {"E2B_API_KEY": "fixture-key", "E2B_API_URL": "http://localhost:3000",
+                                     "E2B_SANDBOX_URL": "http://localhost:3002"}, clear=True), \
+                patch("sys.argv", ["adapter", "--lane", "control"]), \
+                patch("sys.stdin", SimpleNamespace(buffer=io.BytesIO())), \
+                patch("sys.stdout", SimpleNamespace(buffer=io.BytesIO())), \
+                patch("centaeris_e2b_adapter.__main__.Adapter", return_value=self.adapter) as factory, \
+                patch("centaeris_e2b_adapter.__main__.serve"):
+            status = main()
+        self.assertEqual(status, 0)
+        selected = factory.call_args.args[0]
+        self.assertEqual(selected.api_url, "http://localhost:3000")
+        self.assertEqual(selected.sandbox_url, "http://localhost:3002")
+        self.assertIsNone(selected.domain)
+        self.assertEqual(selected.lane, "control")
 
     def test_create_uses_persisted_identity_and_immutable_template(self):
         response = self.adapter.handle(request("create", create_payload()))

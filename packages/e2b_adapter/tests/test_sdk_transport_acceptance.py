@@ -5,14 +5,17 @@ control plane, Firecracker, the Core harness, or a physical cleanup acceptance.
 """
 
 from contextlib import contextmanager
+import base64
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.metadata
 import json
+import os
 from pathlib import Path
 import socket
 import sys
 import threading
 import unittest
+from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -108,6 +111,16 @@ def provider_fixture(mode="success"):
 
         def do_GET(self):
             fixture.record("GET", self.path, self.headers, None)
+            if fixture.mode == "fileData" and self.path.startswith("/files?"):
+                content = b"\x00\xffself-hosted-data"
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(len(content)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(content)
+                self.close_connection = True
+                return
             if self.path != "/sandboxes/sandbox-fixture":
                 self.reply(404, {"code": 404, "message": "fixture_route_missing"})
                 return
@@ -165,6 +178,7 @@ def adapter_for(fixture, key="e2b_" + "a" * 64, lane="ordinary"):
         api_key=key,
         domain="fixture.invalid",
         api_url=fixture.api_url,
+        sandbox_url=fixture.api_url,
         idempotency_supported=True,
         lane=lane,
     ))
@@ -180,6 +194,29 @@ def lifecycle_request(operation, **extra):
 
 
 class SdkTransportAcceptanceTests(unittest.TestCase):
+    def test_self_hosted_create_and_connect_keep_binary_traffic_on_explicit_sandbox_url(self):
+        with provider_fixture() as control, provider_fixture("fileData") as data, provider_fixture() as ambient:
+            with patch.dict(os.environ, {"E2B_API_URL": ambient.api_url, "E2B_SANDBOX_URL": ambient.api_url, "E2B_DOMAIN": ""}):
+                adapter = Adapter(AdapterConfig(api_key="e2b_" + "a" * 64, api_url=control.api_url,
+                    sandbox_url=data.api_url, idempotency_supported=True))
+                created = adapter.handle(create_request())
+                self.assertEqual(created["outcome"], "succeeded", created)
+                read = {"schema": "runtime.e2b.adapter.request.v1", "requestId": "read-created",
+                    "operation": "readFile", "payload": {"sandboxId": "sandbox-fixture", "path": "/workspace/binary"}}
+                first = adapter.handle(read)
+                self.assertEqual(first["outcome"], "succeeded", first)
+                self.assertEqual(base64.b64decode(first["result"]["dataBase64"]), b"\x00\xffself-hosted-data")
+                reconnected = adapter.handle(lifecycle_request("connect", timeoutSeconds=120, onResume="restore"))
+                self.assertEqual(reconnected["outcome"], "succeeded", reconnected)
+                second = adapter.handle(read | {"requestId": "read-connected"})
+                self.assertEqual(second["outcome"], "succeeded", second)
+                self.assertEqual(base64.b64decode(second["result"]["dataBase64"]), b"\x00\xffself-hosted-data")
+        self.assertEqual(ambient.requests, [])
+        self.assertEqual([entry["method"] for entry in control.requests], ["POST", "GET", "POST", "GET"])
+        self.assertEqual(len(data.requests), 2)
+        self.assertTrue(all(entry["path"].startswith("/files?") for entry in data.requests))
+        self.assertTrue(all("x-api-key" not in entry["headers"] for entry in data.requests))
+
     def test_pinned_sdk_creates_and_independently_inspects_the_bound_sandbox(self):
         self.assertEqual(importlib.metadata.version("e2b"), "2.58.0")
         with provider_fixture() as fixture:
