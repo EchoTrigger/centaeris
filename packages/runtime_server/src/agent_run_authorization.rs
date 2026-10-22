@@ -17,6 +17,8 @@ mod environment_profile;
 pub use environment_profile::EnvironmentProfile;
 #[cfg(test)]
 pub use environment_profile::EnvironmentResources;
+#[cfg(test)]
+pub use environment_profile::LegacyEnvironmentProfile;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -143,15 +145,21 @@ impl WorkspaceAgentRunAuthorization {
             return Err("environment_profile_binding_mismatch".into());
         }
         validate_plugin_activation_snapshot(&self.plugin_activation)?;
-        if total_input_bytes > self.environment_profile.resources.data_tmpfs_bytes / 2 {
-            return Err("declared inputs must fit within half of dataTmpfsBytes".to_string());
+        if total_input_bytes > self.environment_profile.input_budget_bytes()? {
+            return Err(match self.environment_profile {
+                EnvironmentProfile::Legacy(_) => {
+                    "declared inputs must fit within half of dataTmpfsBytes"
+                }
+                EnvironmentProfile::E2b(_) => "declared inputs exceed inputBudgetBytes",
+            }
+            .to_string());
         }
         Ok(())
     }
 
     pub fn effective_network(&self) -> Result<ExecutionNetwork, String> {
         self.environment_profile.validate()?;
-        Ok(self.environment_profile.network)
+        Ok(self.environment_profile.network())
     }
 
     pub fn validate_agent_run_binding(&self, agent_run_id: &str) -> Result<(), String> {
@@ -409,7 +417,12 @@ mod tests {
     #[test]
     fn authorization_reserves_half_of_data_tmpfs_for_generated_files() {
         let mut authorization = authorization();
-        authorization.environment_profile.resources.data_tmpfs_bytes = 1;
+        authorization
+            .environment_profile
+            .legacy_mut()
+            .unwrap()
+            .resources
+            .data_tmpfs_bytes = 1;
         authorization.environment_profile_digest =
             authorization.environment_profile.digest().unwrap();
         assert_eq!(

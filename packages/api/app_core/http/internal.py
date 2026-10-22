@@ -679,6 +679,7 @@ def _workspace_advanced_by_agent_run(session: Session, frozen: dict, agent_run: 
 
 
 def _workspace_tmpfs_fits(agent_run: AgentRun, expanded_size_bytes: int) -> bool:
+    from ..environment_profile import environment_workspace_transfer_limit_bytes
     inputs_size_bytes = sum(
         item["sizeBytes"] for item in agent_run.authorization.payload["assetRefs"]
     )
@@ -686,7 +687,7 @@ def _workspace_tmpfs_fits(agent_run: AgentRun, expanded_size_bytes: int) -> bool
         expanded_size_bytes
         + inputs_size_bytes
         + SESSION_WORKSPACE_RESTORE_OVERHEAD_BYTES
-        <= agent_run.authorization.payload["environmentProfile"]["resources"]["dataTmpfsBytes"]
+        <= environment_workspace_transfer_limit_bytes(agent_run.authorization.payload['environmentProfile'])
     )
 
 
@@ -799,7 +800,8 @@ def commit_session_workspace(request):
             with transaction.atomic():
                 agent_run, session, frozen = _locked_session_workspace_agent_run(body)
                 protection_observations.bind(sessionId=str(session.id), runId=str(agent_run.id), jobId=body["jobId"])
-                max_bytes = agent_run.authorization.payload["environmentProfile"]["resources"]["dataTmpfsBytes"]
+                from ..environment_profile import environment_workspace_transfer_limit_bytes
+                max_bytes = environment_workspace_transfer_limit_bytes(agent_run.authorization.payload['environmentProfile'])
                 if (
                     body["snapshotSizeBytes"] > max_bytes
                     or body["expandedSizeBytes"] > max_bytes
@@ -1584,6 +1586,8 @@ def _resolve_agent_run(body):
         # rejection permits resolving again. Other authority errors stay errors.
         for attempt in range(2):
             run, terminal = _retained_run_projection(body["agentRunId"], body["authorizationDigest"])
+            from ..environment_profile import validate_environment_lifetime
+            validate_environment_lifetime(run.environment.environment_profile, body['executionMode'])
             receipt = get_environment_release_receipt(run.pk, body["leaseOwner"])
             common = {"schema": "runtime.agent_run_lifecycle.resolved.v1"}
             if receipt is not None:

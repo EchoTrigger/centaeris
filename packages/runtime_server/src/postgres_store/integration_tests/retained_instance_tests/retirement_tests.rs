@@ -453,11 +453,23 @@ fn postgres_retirement_pending_other_environment_does_not_block_healthy_run_clea
     binding.environment_id = "environment-b".into();
     binding.agent_run_authorization_digest = digest;
     b.grant = sign(binding);
-    let two = declared_usage(b.original.environment_profile.resources.sandbox_resources())
-        .checked_add(declared_usage(
-            b.original.environment_profile.resources.sandbox_resources(),
-        ))
-        .unwrap();
+    let two = declared_usage(
+        b.original
+            .environment_profile
+            .legacy()
+            .unwrap()
+            .resources
+            .sandbox_resources(),
+    )
+    .checked_add(declared_usage(
+        b.original
+            .environment_profile
+            .legacy()
+            .unwrap()
+            .resources
+            .sandbox_resources(),
+    ))
+    .unwrap();
     let profile = b.original.environment_profile.digest().unwrap();
     db.execute("UPDATE public.app_core_sessionenvironment SET environment_profile=$1::text::jsonb,environment_profile_digest=$2 WHERE id='environment-b'", &[&serde_json::to_string(&b.original.environment_profile).unwrap(),&profile]).unwrap();
     let second = store
@@ -478,7 +490,12 @@ fn postgres_retirement_pending_other_environment_does_not_block_healthy_run_clea
                     },
                     container_id: "container-b".into(),
                     resources: declared_usage(
-                        b.original.environment_profile.resources.sandbox_resources(),
+                        b.original
+                            .environment_profile
+                            .legacy()
+                            .unwrap()
+                            .resources
+                            .sandbox_resources(),
                     ),
                 });
                 Ok("container-b".into())

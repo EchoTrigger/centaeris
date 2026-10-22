@@ -13,6 +13,7 @@ mod contract;
 mod deferred_input_resolver;
 mod docker_engine;
 mod docker_execution_host;
+pub mod e2b_adapter;
 mod environment_authorization;
 mod environment_stdio;
 mod environment_supervisor;
@@ -1962,6 +1963,7 @@ fn execute_agent_run(
                 data_tmpfs_bytes: agent_run_start
                     .authorization
                     .environment_profile
+                    .legacy()?
                     .resources
                     .data_tmpfs_bytes,
                 input_upper_bound_bytes,
@@ -2145,11 +2147,13 @@ fn execute_agent_run(
                     image_digest: agent_run_start
                         .authorization
                         .environment_profile
+                        .legacy()?
                         .image_digest
                         .clone(),
                     resources: agent_run_start
                         .authorization
                         .environment_profile
+                        .legacy()?
                         .resources
                         .sandbox_resources(),
                     has_execution_fact,
@@ -3407,12 +3411,14 @@ fn execute_agent_run(
                         agent_run_start
                             .authorization
                             .environment_profile
+                            .legacy()?
                             .resources
                             .memory_bytes
                             .min(
                                 agent_run_start
                                     .authorization
                                     .environment_profile
+                                    .legacy()?
                                     .resources
                                     .data_tmpfs_bytes,
                             ),

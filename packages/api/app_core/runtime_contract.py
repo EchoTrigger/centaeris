@@ -74,7 +74,7 @@ def build_agent_run_authorization_payload(
     authorization_id: str,
     message_asset_refs: list[str] | None = None,
     *,
-    image_digest: str,
+    image_digest: str | None = None,
     declared_inputs: list[dict] | None = None,
 ) -> dict:
     from .assets import deferred_input_refs
@@ -232,8 +232,10 @@ def validate_agent_run_authorization_payload(payload: dict) -> None:
     from .environment_profile import environment_profile_digest
     if environment_profile_digest(payload["environmentProfile"]) != payload["environmentProfileDigest"]:
         raise ValueError("environment_profile_digest_invalid")
-    resources = payload["environmentProfile"]["resources"]
-    if sum(item["sizeBytes"] for item in asset_refs) > resources["dataTmpfsBytes"] // 2:
+    from .environment_profile import E2B_PROFILE_SCHEMA, environment_input_budget_bytes
+    if sum(item["sizeBytes"] for item in asset_refs) > environment_input_budget_bytes(payload['environmentProfile']):
+        if payload['environmentProfile']['schema'] == E2B_PROFILE_SCHEMA:
+            raise ValueError('declared inputs exceed inputBudgetBytes')
         raise ValueError("declared inputs must fit within half of dataTmpfsBytes")
 
 

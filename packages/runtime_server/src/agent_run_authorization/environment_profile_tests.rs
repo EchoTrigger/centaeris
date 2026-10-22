@@ -72,8 +72,13 @@ fn generic_environment_profile_accepts_explicit_roots_users_and_networks() {
         let profile: EnvironmentProfile = serde_json::from_value(value).unwrap();
         profile.validate().unwrap();
         assert_eq!(
-            profile.resources.sandbox_resources().memory_bytes,
-            profile.resources.memory_bytes
+            profile
+                .legacy()
+                .unwrap()
+                .resources
+                .sandbox_resources()
+                .memory_bytes,
+            profile.legacy().unwrap().resources.memory_bytes
         );
     }
 }
@@ -109,6 +114,97 @@ fn generic_environment_profile_rejects_unsafe_targets_and_unbounded_resources() 
             if let Ok(profile) = serde_json::from_value::<EnvironmentProfile>(profile) {
                 assert!(profile.validate().is_err(), "{field}");
             }
+        }
+    }
+}
+
+fn e2b_profile() -> Value {
+    serde_json::from_str(include_str!(
+        "../../../../tests/workspace/fixtures/e2b_environment_profile/v1/valid.json"
+    ))
+    .unwrap()
+}
+
+#[test]
+fn e2b_profile_is_explicit_and_never_synthesizes_legacy_resource_promises() {
+    let value = e2b_profile();
+    let profile: EnvironmentProfile = serde_json::from_value(value.clone()).unwrap();
+    profile.validate().unwrap();
+    assert_eq!(serde_json::to_value(&profile).unwrap(), value);
+    assert_eq!(profile.legacy().unwrap_err(), "e2b_execution_unavailable");
+    assert_eq!(profile.input_budget_bytes().unwrap(), 67108864);
+    for (field, value) in [
+        (
+            "resources",
+            serde_json::json!({"storageBytes":4294967296_u64}),
+        ),
+        ("timeoutSeconds", serde_json::json!(86401)),
+        ("inputBudgetBytes", serde_json::json!(67108865)),
+        ("user", serde_json::json!("user; command")),
+        ("provider", serde_json::json!("docker")),
+    ] {
+        let mut changed = e2b_profile();
+        changed[field] = value;
+        if let Ok(parsed) = serde_json::from_value::<EnvironmentProfile>(changed) {
+            assert!(parsed.validate().is_err(), "{field}");
+        }
+    }
+}
+
+#[test]
+fn e2b_authorization_binds_provider_build_and_input_transfer_limit() {
+    let mut value = wire();
+    value["environmentProfile"] = e2b_profile();
+    value["environmentProfileDigest"] = format!(
+        "sha256:{:x}",
+        Sha256::digest(canonical_json(e2b_profile()).unwrap().as_bytes())
+    )
+    .into();
+    let authorization: WorkspaceAgentRunAuthorization =
+        serde_json::from_value(value.clone()).unwrap();
+    authorization.validate().unwrap();
+    let signature = authorization.signature(b"test-key").unwrap();
+    value["environmentProfile"]["templateRef"]["buildId"] =
+        "191c5835-5da7-4cf5-8a7c-cc3f7c4ebfa4".into();
+    let changed: EnvironmentProfile =
+        serde_json::from_value(value["environmentProfile"].clone()).unwrap();
+    value["environmentProfileDigest"] = changed.digest().unwrap().into();
+    let changed: WorkspaceAgentRunAuthorization = serde_json::from_value(value).unwrap();
+    assert!(changed.verify_signature(b"test-key", &signature).is_err());
+}
+
+#[test]
+fn profile_wire_rejects_duplicate_fields_in_both_variants_and_nested_contracts() {
+    for value in [wire()["environmentProfile"].clone(), e2b_profile()] {
+        let raw = serde_json::to_string(&value).unwrap();
+        for (field, content) in value.as_object().unwrap() {
+            let needle = format!(
+                "{}:{}",
+                serde_json::to_string(field).unwrap(),
+                serde_json::to_string(content).unwrap()
+            );
+            let duplicate = raw.replacen(&needle, &format!("{needle},{needle}"), 1);
+            assert!(
+                serde_json::from_str::<EnvironmentProfile>(&duplicate).is_err(),
+                "duplicate {field}"
+            );
+        }
+        let nested_name = if value.get("resources").is_some() {
+            "resources"
+        } else {
+            "templateRef"
+        };
+        for (field, content) in value[nested_name].as_object().unwrap() {
+            let needle = format!(
+                "{}:{}",
+                serde_json::to_string(field).unwrap(),
+                serde_json::to_string(content).unwrap()
+            );
+            let duplicate = raw.replacen(&needle, &format!("{needle},{needle}"), 1);
+            assert!(
+                serde_json::from_str::<EnvironmentProfile>(&duplicate).is_err(),
+                "duplicate {nested_name}.{field}"
+            );
         }
     }
 }

@@ -178,6 +178,14 @@ impl EnvironmentAuthorization {
         {
             return Err("environment_authorization_binding_invalid".into());
         }
+        if let crate::agent_run_authorization::EnvironmentProfile::E2b(profile) =
+            &authorization.environment_profile
+        {
+            profile.validate()?;
+            if self.payload.execution_mode != profile.lifetime {
+                return Err("environment_lifetime_mismatch".into());
+            }
+        }
         let digest = self.payload.digest()?;
         let encoded = self
             .signature
@@ -235,6 +243,43 @@ impl EnvironmentAuthorization {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signed_controller_cannot_override_frozen_provider_lifetime() {
+        let mut authorization: WorkspaceAgentRunAuthorization = serde_json::from_str(include_str!(
+            "../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+        ))
+        .unwrap();
+        authorization.environment_profile = serde_json::from_str(include_str!(
+            "../../../tests/workspace/fixtures/e2b_environment_profile/v1/valid.json"
+        ))
+        .unwrap();
+        authorization.environment_profile_digest =
+            authorization.environment_profile.digest().unwrap();
+        let mut binding = EnvironmentAuthorization::for_test(&authorization, b"test-key");
+        binding
+            .verify(
+                &authorization,
+                &authorization.digest().unwrap(),
+                b"test-key",
+            )
+            .unwrap();
+        binding.payload.execution_mode = "retained".into();
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"test-key").unwrap();
+        mac.update(DOMAIN);
+        mac.update(binding.payload.digest().unwrap().as_bytes());
+        binding.signature = format!("hmac-sha256:{:x}", mac.finalize().into_bytes());
+        assert_eq!(
+            binding
+                .verify(
+                    &authorization,
+                    &authorization.digest().unwrap(),
+                    b"test-key"
+                )
+                .unwrap_err(),
+            "environment_lifetime_mismatch"
+        );
+    }
 
     #[test]
     fn controller_signature_binds_epoch_lease_and_purpose() {

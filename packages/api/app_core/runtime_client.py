@@ -44,16 +44,11 @@ def request_execution_profile() -> dict:
         if isinstance(error, urllib.error.HTTPError):
             error.close()
         raise RuntimeError("runtime_execution_profile_request_failed") from error
-    if (
-        not isinstance(result, dict)
-        or set(result) != {"schema", "imageDigest"}
-        or result["schema"] != RUNTIME_EXECUTION_PROFILE_SCHEMA
-        or not isinstance(result["imageDigest"], str)
-        or len(result["imageDigest"]) != 71
-        or not result["imageDigest"].startswith("sha256:")
-        or any(character not in "0123456789abcdef" for character in result["imageDigest"][7:])
-    ):
-        raise RuntimeError("runtime_execution_profile_response_invalid")
+    from .environment_profile import validate_execution_profile_advertisement
+    try:
+        validate_execution_profile_advertisement(result)
+    except (ValueError, TypeError) as error:
+        raise RuntimeError("runtime_execution_profile_response_invalid") from error
     return result
 
 

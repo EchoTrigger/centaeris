@@ -42,7 +42,7 @@ impl PostgresRuntimeStore {
                 let held:Option<String>=row.get(10);
                 if allocation.is_some()&&held.is_some(){return Err("environment_allocation_ambiguous".into());}
                 if allocation.is_some()&&held.is_none(){continue;}
-                if row.get::<_,String>(5)!=profile.image_digest||row.get::<_,Option<String>>(8).as_deref()!=Some(&digest){return Err("environment_allocation_binding_rejected".into());}
+                if row.get::<_,String>(5)!=profile.legacy()?.image_digest||row.get::<_,Option<String>>(8).as_deref()!=Some(&digest){return Err("environment_allocation_binding_rejected".into());}
                 state=held;
                 allocation=Some(RetainedInstanceAllocation{allocation_execution_id:row.get(0),allocation_agent_run_id:row.get(1),allocation_owner:serde_json::from_str(&row.get::<_,String>(2)).map_err(|_|"allocation_owner_invalid")?,instance_id:row.get(3),environment_id:environment.into(),host_id:row.get(4),image_digest:row.get(5),authorization_digest:row.get(6),binding_digest:row.get(7),profile_digest:digest.clone(),container_id:row.get(9),reused:true});
             }

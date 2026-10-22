@@ -1,0 +1,15 @@
+{
+  "schema": "runtime.e2b_environment_profile.v1",
+  "provider": "e2b",
+  "providerConfigDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "templateRef": {
+    "templateId": "centaeris-core",
+    "buildId": "e8e0d749-b6a4-4985-a50c-a239c77536f1"
+  },
+  "workspaceRoot": "/home/user",
+  "user": "user",
+  "network": "disabled",
+  "lifetime": "perRun",
+  "timeoutSeconds": 3600,
+  "inputBudgetBytes": 67108864
+}

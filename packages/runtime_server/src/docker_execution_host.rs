@@ -75,7 +75,7 @@ use crate::postgres_store::PostgresRuntimeStore;
 use crate::resident_capacity::{declared_usage, ObservedResidentSandbox, ResidentCapacity};
 
 pub(crate) fn environment_policy(profile: &EnvironmentProfile) -> ExecutionPolicy {
-    let mut policy = network::policy(profile.network, &profile.workspace_root);
+    let mut policy = network::policy(profile.network(), profile.workspace_root());
     policy.filesystem.denied_read_paths =
         vec!["/run/centaeris".into(), "/run/centaeris-host".into()];
     policy.filesystem.denied_write_paths = policy.filesystem.denied_read_paths.clone();
@@ -392,9 +392,7 @@ impl DockerExecutionHostRunner {
     pub(crate) fn workspace_root(&self) -> &str {
         self.environment_profile
             .as_ref()
-            .map_or(WORKSPACE_DATA_ROOT, |profile| {
-                profile.workspace_root.as_str()
-            })
+            .map_or(WORKSPACE_DATA_ROOT, |profile| profile.workspace_root())
     }
     pub(crate) fn recovery_continuity(&self) -> OwnedExecutionContinuity {
         match inspect_container(&self.container_name) {
@@ -437,6 +435,9 @@ impl DockerExecutionHostRunner {
         request: DockerExecutionHostRequest<'_>,
         before_create: &mut (dyn FnMut(&mut postgres::Client) -> Result<(), String> + Send),
     ) -> Result<Self, String> {
+        if let Some(profile) = &request.environment_profile {
+            profile.legacy()?;
+        }
         if request.environment_authorization.payload.agent_run_id != request.agent_run_id
             || request
                 .environment_authorization
@@ -449,7 +450,7 @@ impl DockerExecutionHostRunner {
         if request
             .environment_profile
             .as_ref()
-            .is_some_and(|profile| profile.network != request.network)
+            .is_some_and(|profile| profile.network() != request.network)
         {
             return Err("benchmark network differs from signed authorization".into());
         }
@@ -2054,7 +2055,7 @@ impl DockerExecutionHostRunner {
                 && self
                     .environment_profile
                     .as_ref()
-                    .is_none_or(|profile| user != profile.user)
+                    .is_none_or(|profile| user != profile.user())
         }) {
             return Err("environment_helper_user_override_rejected".into());
         }
@@ -3762,7 +3763,7 @@ mod tests {
             retained::profile_digest(&next, &original.plugin_activation).unwrap()
         );
         let mut changed = original.environment_profile.clone();
-        changed.resources.memory_bytes += 1;
+        changed.legacy_mut().unwrap().resources.memory_bytes += 1;
         next.environment_profile = Some(&changed);
         assert_ne!(
             first,
@@ -3837,7 +3838,7 @@ mod tests {
                 .clone(),
         )
         .unwrap();
-        profile.workspace_root = "/app".into();
+        profile.legacy_mut().unwrap().workspace_root = "/app".into();
         runner.environment_profile = Some(profile);
         let read = ExecutionFileSystemOperation::ReadFile { max_bytes: 32 };
         assert!(runner
@@ -5515,8 +5516,8 @@ mod tests {
         runner.resources.cpu_milli = 4000;
         runner.resources.memory_bytes = 8 * 1024 * 1024 * 1024;
         let profile = runner.environment_profile.as_mut().unwrap();
-        profile.resources.cpu_milli = runner.resources.cpu_milli;
-        profile.resources.memory_bytes = runner.resources.memory_bytes;
+        profile.legacy_mut().unwrap().resources.cpu_milli = runner.resources.cpu_milli;
+        profile.legacy_mut().unwrap().resources.memory_bytes = runner.resources.memory_bytes;
         let body = container_create_body(&runner.container_expectation()).unwrap();
         assert_eq!(body["Image"], runner.image_digest);
         assert_eq!(
@@ -5582,7 +5583,13 @@ mod tests {
             ),
         ] {
             runner.network = network;
-            runner.environment_profile.as_mut().unwrap().network = network;
+            runner
+                .environment_profile
+                .as_mut()
+                .unwrap()
+                .legacy_mut()
+                .unwrap()
+                .network = network;
             let body = container_create_body(&runner.container_expectation()).unwrap();
             assert_eq!(body["HostConfig"]["NetworkMode"], mode);
             assert_eq!(body["HostConfig"]["ReadonlyRootfs"], false);
@@ -5618,8 +5625,18 @@ mod tests {
                 "../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
             ))
             .unwrap();
-        runner.resources = original.environment_profile.resources.sandbox_resources();
-        runner.image_digest = original.environment_profile.image_digest.clone();
+        runner.resources = original
+            .environment_profile
+            .legacy()
+            .unwrap()
+            .resources
+            .sandbox_resources();
+        runner.image_digest = original
+            .environment_profile
+            .legacy()
+            .unwrap()
+            .image_digest
+            .clone();
         runner.retained_allocation.as_mut().unwrap().image_digest = runner.image_digest.clone();
         runner.environment_profile = Some(original.environment_profile.clone());
         runner.benchmark_helper = Some("/tmp/execution_agent".into());
@@ -5655,7 +5672,7 @@ mod tests {
             "a new network grant cannot reuse the old physical mode"
         );
         let mut changed_profile = original.environment_profile.clone();
-        changed_profile.network = ExecutionNetwork::PublicInternet;
+        changed_profile.legacy_mut().unwrap().network = ExecutionNetwork::PublicInternet;
         let changed = ContainerExpectation {
             environment_profile: Some(&changed_profile),
             ..changed
@@ -6148,20 +6165,22 @@ mod tests {
             retained_allocation: None,
             environment_authorization: None,
             retained_workspace_id: None,
-            environment_profile: Some(EnvironmentProfile {
-                schema: "runtime.environment_profile.v1".into(),
-                image_digest: format!("sha256:{}", "b".repeat(64)),
-                workspace_root: WORKSPACE_DATA_ROOT.into(),
-                user: AGENT_USER.into(),
-                network: ExecutionNetwork::Disabled,
-                resources: crate::agent_run_authorization::EnvironmentResources {
-                    cpu_milli: 1,
-                    memory_bytes: 1,
-                    pids_limit: 1,
-                    data_tmpfs_bytes: 1,
-                    storage_bytes: 1,
+            environment_profile: Some(EnvironmentProfile::Legacy(
+                crate::agent_run_authorization::LegacyEnvironmentProfile {
+                    schema: "runtime.environment_profile.v1".into(),
+                    image_digest: format!("sha256:{}", "b".repeat(64)),
+                    workspace_root: WORKSPACE_DATA_ROOT.into(),
+                    user: AGENT_USER.into(),
+                    network: ExecutionNetwork::Disabled,
+                    resources: crate::agent_run_authorization::EnvironmentResources {
+                        cpu_milli: 1,
+                        memory_bytes: 1,
+                        pids_limit: 1,
+                        data_tmpfs_bytes: 1,
+                        storage_bytes: 1,
+                    },
                 },
-            }),
+            )),
             benchmark_helper: Some("/tmp/execution_agent".into()),
         }
     }

@@ -59,7 +59,9 @@ fn physical_identity(
     binding: &MaintenanceBinding,
     target: &MaintenanceTarget,
 ) -> bool {
-    let profile = &target.profile;
+    let Ok(profile) = target.profile.legacy() else {
+        return false;
+    };
     let labels = &facts["Config"]["Labels"];
     facts["Id"].as_str() == Some(&target.container_id)
         && facts["Image"].as_str() == Some(&target.image_digest)
@@ -107,6 +109,7 @@ pub(crate) fn provision_environment(
     allocation: &crate::postgres_store::execution_instances::RetainedInstanceAllocation,
 ) -> Result<String, String> {
     let profile = &binding.environment_profile;
+    let legacy = profile.legacy()?;
     let helper = environment_container::helper_path()?;
     let plugin_volume = docker_volume_name_from_environment(PLUGIN_VOLUME_NAME_ENV)?;
     let mounts = plugin_mounts(&binding.plugin_activation);
@@ -118,7 +121,7 @@ pub(crate) fn provision_environment(
     prepare_memory_scope(&memory)?;
     let name = container_name(&allocation.allocation_execution_id);
     let expected = ContainerExpectation {
-        network: profile.network,
+        network: profile.network(),
         environment_profile: Some(profile),
         benchmark_helper: Some(&helper),
         profile_digest: Some(&allocation.profile_digest),
@@ -131,7 +134,7 @@ pub(crate) fn provision_environment(
         binding_digest: &allocation.binding_digest,
         image_digest: &allocation.image_digest,
         oci_runtime: OciRuntime::from_environment()?,
-        resources: profile.resources.sandbox_resources(),
+        resources: legacy.resources.sandbox_resources(),
         plugin_volume_name: &plugin_volume,
         plugin_mounts: &mounts,
     };

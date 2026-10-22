@@ -477,11 +477,16 @@ impl crate::http::agent_runs::retained_cleanup::RetainedCleanupHost
         let origin = self.origin_authorization;
         // resolve_target verifies this immutable origin grant's digest and
         // signature against the allocation while the cleanup guard is held.
-        if origin.environment_profile.image_digest != self.allocation.image_digest
+        if origin.environment_profile.legacy()?.image_digest != self.allocation.image_digest
             || origin.session_id != authorization.payload.session_id
             || origin.workspace_id != self.cleanup.authorization.workspace_id
-            || declared_usage(origin.environment_profile.resources.sandbox_resources())
-                != self.resources
+            || declared_usage(
+                origin
+                    .environment_profile
+                    .legacy()?
+                    .resources
+                    .sandbox_resources(),
+            ) != self.resources
         {
             return Err("retained cleanup origin grant rejected".into());
         }
@@ -508,7 +513,11 @@ impl crate::http::agent_runs::retained_cleanup::RetainedCleanupHost
             binding_digest: &self.allocation.binding_digest,
             image_digest: &self.allocation.image_digest,
             oci_runtime: OciRuntime::from_environment()?,
-            resources: origin.environment_profile.resources.sandbox_resources(),
+            resources: origin
+                .environment_profile
+                .legacy()?
+                .resources
+                .sandbox_resources(),
             plugin_volume_name: &plugin_volume_name,
             plugin_mounts: &mounts,
         };

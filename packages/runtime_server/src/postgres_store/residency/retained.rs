@@ -29,11 +29,17 @@ fn verify_controller(
         },
     )?;
     if verified.authorization.environment_profile_digest != r.profile_digest
-        || verified.authorization.environment_profile.image_digest != r.image_digest
+        || verified
+            .authorization
+            .environment_profile
+            .legacy()?
+            .image_digest
+            != r.image_digest
         || crate::resident_capacity::declared_usage(
             verified
                 .authorization
                 .environment_profile
+                .legacy()?
                 .resources
                 .sandbox_resources(),
         ) != r.resources

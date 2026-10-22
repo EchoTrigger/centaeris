@@ -15,7 +15,8 @@ def create_agent_run_authorization(
     agent_run: AgentRun,
     message_asset_refs: list[str] | None = None,
     *,
-    image_digest: str,
+    image_digest: str | None = None,
+    execution_profile: dict | None = None,
     declared_inputs: list[dict] | None = None,
 ) -> AgentRunAuthorization:
     with plugin_lifecycle_lock():
@@ -24,7 +25,7 @@ def create_agent_run_authorization(
         if not agent_run_environment_matches(agent_run):
             raise ValueError("AgentRun environment binding mismatch")
         from .environment_profile import freeze_run_environment_profile
-        freeze_run_environment_profile(agent_run, image_digest)
+        freeze_run_environment_profile(agent_run, image_digest, execution_profile=execution_profile)
         authorization_id = new_agent_run_authorization_id()
         payload = build_agent_run_authorization_payload(
             agent_run,

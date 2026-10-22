@@ -38,6 +38,9 @@ def sign_environment_authorization(payload, signing_key):
 
 def build_environment_authorization(agent_run, authorization, authority, *, execution_mode="perRun"):
     from .session_environments import agent_run_environment_matches
+    from .environment_profile import validate_environment_lifetime
+    profile = getattr(agent_run.environment, 'environment_profile', None)
+    validate_environment_lifetime(profile, execution_mode)
     if (not agent_run_environment_matches(agent_run)
             or set(authority) != {"environmentId", "controllerId", "controllerEpoch", "controllerLeaseDigest", "controllerPurpose"}
             or authority["environmentId"] != agent_run.environment_id

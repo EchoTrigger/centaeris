@@ -430,6 +430,7 @@ fn resolve_target(
         || crate::resident_capacity::declared_usage(
             origin_authorization
                 .environment_profile
+                .legacy()?
                 .resources
                 .sandbox_resources(),
         ) != resources
