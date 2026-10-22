@@ -14,6 +14,30 @@ spec.loader.exec_module(ci)
 
 
 class PortableCITests(unittest.TestCase):
+    def test_sdk_transport_rust_fixtures_get_the_direct_gate_interpreter(self):
+        with patch.dict(os.environ, {key: value for key, value in os.environ.items()
+                                   if key != "E2B_ADAPTER_TEST_PYTHON"}, clear=True), \
+                patch.object(ci.subprocess, "run") as command:
+            ci.run("Rust tests runtime_server", ["cargo", "test", "--locked", "-p", "runtime_server"])
+            self.assertEqual(command.call_args.kwargs["env"]["E2B_ADAPTER_TEST_PYTHON"], sys.executable)
+            self.assertNotIn("E2B_ADAPTER_TEST_PYTHON", os.environ)
+
+    def test_e2b_adapter_behavior_runs_in_python_stage_with_its_pinned_package(self):
+        expected = ["uv", "run", "--frozen", "--package", "centaeris-e2b-adapter", "python", "-B",
+                    "-m", "unittest", "discover", "-s", "packages/e2b_adapter/tests", "-v"]
+        config = {"services": {"document-processor": {}, "workspace-general": {},
+                  "runtime": {"depends_on": {"workspace-general": {"condition": "service_completed_successfully"}}},
+                  "material-worker": {"depends_on": {"document-processor": {"condition": "service_completed_successfully"}}}}}
+        for stage in ("Python", "All", "Rust", "Web"):
+            with self.subTest(stage=stage):
+                calls = []
+                def record(label, args, **kwargs):
+                    calls.append(args)
+                    return json.dumps(config)
+                with patch.object(ci, "run", record):
+                    ci.main(stage=stage)
+                self.assertEqual(calls.count(expected), 1 if stage in ("Python", "All") else 0)
+
     def test_workspace_harbor_runs_with_pinned_dependency_early_in_python_stage(self):
         harbor = ["uv", "run", "--no-project", "--with", "harbor==0.21.0", "python", "-B",
                   "-m", "unittest", "discover", "-s", "scripts/harbor", "-p", "test_workspace*.py"]

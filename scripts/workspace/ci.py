@@ -17,6 +17,7 @@ finally:
 def run(label, args, capture=False):
     print(f"==> {label}", flush=True)
     env = {**os.environ, "CARGO_BUILD_JOBS": os.environ.get("CARGO_BUILD_JOBS", "2")}
+    env.setdefault("E2B_ADAPTER_TEST_PYTHON", sys.executable)
     if args[:2] == ["docker", "compose"]:
         env["CENTAERIS_SOURCE_REVISION"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
         # Synthetic source-gate inputs only; deployments still choose each budget.
@@ -62,6 +63,8 @@ def main(skip_frontend_tests=False, stage="All"):
         ("Deployment identity contracts", [*api, "scripts/workspace/deployment-contract.test.py"]),
         ("Python discovery gate regressions", [py, "scripts/workspace/python_test_gate.py", "gate"]),
         ("Worker tests", [py, "scripts/workspace/python_test_gate.py", "worker"]),
+        ("E2B SDK adapter behavior", ["uv", "run", "--frozen", "--package", "centaeris-e2b-adapter", "python", "-B",
+            "-m", "unittest", "discover", "-s", "packages/e2b_adapter/tests", "-v"]),
         ("Retained acceptance fixture guards", [py, "-m", "unittest", "discover", "-s", "scripts/workspace/retained_acceptance", "-p", "test_*.py"]),
         ("Performance harness isolation", [py, "-m", "unittest", "discover", "-s", "perf/tests", "-v"]),
         ("Performance workload metrics", ["node", "--test", "perf/tests/k6-metrics.test.mjs"]),
