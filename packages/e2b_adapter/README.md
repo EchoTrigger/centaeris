@@ -78,22 +78,63 @@ information for a different sandbox ID while retaining the original known ID.
 | Operation | Payload | Result / constraint |
 | --- | --- | --- |
 | `capabilities` | `{}` | Limits and unsupported guarantees. Allowed in all lanes. |
-| `create` | `attemptId`, `idempotencyKey`, `templateRef: {templateId, buildId}`, string `metadata`, `timeoutSeconds`, `allowInternetAccess`, `onTimeout` (`kill` or `pause`) | Ordinary only. Sends `templateId:buildId` and `Idempotency-Key`; binds `centaerisAttemptId` metadata. Reports provider info and exact sandbox ID. |
+| `create` | `attemptId`, `idempotencyKey`, `templateRef: {templateId, buildId}`, string `metadata`, `timeoutSeconds`, `allowInternetAccess`, `onTimeout` (`kill` or `pause`) | Ordinary only. Sends `templateId:buildId`, `Idempotency-Key`, and explicit `auto_resume: false`; binds `centaerisAttemptId` metadata. Reports provider info and exact sandbox ID. |
 | `connect` | `sandboxId`, `timeoutSeconds`, `onResume: "restore"` | Ordinary only. Explicitly allows provider resume; never hidden inside another operation. |
 | `inspect` | `sandboxId` | All lanes. SDK control-plane information, without connecting or resuming. |
 | `kill` | `sandboxId` | Cleanup only. Exact-ID delete acknowledgement; no physical settlement proof. |
 | `pause` | `sandboxId`, `mode` (`full` or `filesystem`) | Cleanup only. Reports requested mode and provider acceptance, without asserting verified snapshot contents. |
 | `readFile` | `sandboxId`, absolute `path`, optional `user`, `maxBytes` | Ordinary, explicitly connected sandbox. Streams bounded bytes and returns `dataBase64`. |
 | `writeFile` | `sandboxId`, absolute `path`, `dataBase64`, optional `user` | Ordinary, explicitly connected sandbox. Includes empty binary files. |
+| `uploadFile` | `sandboxId`, absolute guest `path`, `transferId`, `byteLength`, `sha256`, optional `user` | Ordinary, explicit connection and private spool. Streams `<transferId>.upload` once, enforcing expected length and SHA-256. Returns integrity metadata. |
+| `downloadFile` | `sandboxId`, absolute guest `path`, `transferId`, `maxBytes`, optional `user` | Ordinary, explicit connection and private spool. Streams into an exclusive new `<transferId>.download`; returns integrity metadata. |
 | `runCommand` | `sandboxId`, `command`, `timeoutSeconds`, optional absolute `cwd`, `user`, string `envs` | Ordinary. Starts in background, returns PID, and retains the original output stream within the bounded command evidence cache. |
 | `waitCommand`, `recoverCommand` | `sandboxId`, `pid`, `timeoutSeconds`, optional `maxOutputBytes` | Ordinary. Drains the original retained stream or replays a retained complete result. Returns exact `stdoutBytesBase64` / `stderrBytesBase64` and `stdoutByteLength` / `stderrByteLength`, exit code, and display text. Missing output evidence returns Unknown, without reconnecting or reexecuting the command. |
 | `cancelCommand` | `sandboxId`, `pid` | Ordinary connected handle only. Reports SIGKILL request result for the PID; it is not process-tree cleanup evidence. |
+| `invokeControlHelper` | `sandboxId`, `helper`, `expectedTemplateId`, `expectedMetadata`, `workspaceRoot`, `workspaceUser`, `timeoutSeconds`, `maxOutputBytes` | Control only. Fresh read-only provider attachment, then one fixed trusted helper with bounded raw output. No generic shell, connection/resume or TTL-extension request. |
 
-The request limit is 1 MiB, file transfer limit 256 KiB, and combined command
+The request limit is 1 MiB, inline file transfer limit 256 KiB, and combined command
 output limit 64 KiB of original stdout and stderr bytes. The same raw-byte limit
 applies to replay. An output limit disconnects the stream and returns unknown
 completion with the PID retained. It does not silently kill or restart work.
 At most 128 connected handles are cached; eviction does not delete a sandbox.
+
+Bulk transfers are disabled unless the trusted host explicitly supplies
+`AdapterConfig.spool_root` or the CLI's `E2B_ADAPTER_SPOOL_ROOT`. The host must
+provision an existing absolute private directory owned by the Runtime account,
+with only trusted writers. The adapter rejects symlink/reparse directory
+ancestry and changed root identity; it does not inspect or change host ACLs.
+Programmatic callers do not inherit the CLI's spool variable implicitly.
+
+A host-generated canonical lowercase UUID selects only fixed `.upload` and
+`.download` names under that root. Payloads cannot supply a local path. Guest
+or model input must not choose transfer IDs. Upload sources must be regular,
+single-link files, with matching size at admission. The SDK receives a binary
+IO object whose reads are bounded to 64 KiB; length and hash are checked during
+that one pass. Its regular-file descriptor preserves SDK size discovery without
+seeking, buffering or rereading the source. This preserves the SDK's known-length
+binary upload behavior on direct connections without relying on proxy buffering. The source stays owned by the host. An integrity failure after
+SDK dispatch returns Unknown and may leave guest staging bytes: the caller must
+use a private guest staging destination and must not invoke its helper unless
+the successful length and hash match the owned request.
+
+Downloads admit only an exclusive new regular file and write streamed SDK data
+in slices no larger than 64 KiB. `byteLength` and `maxBytes` are bounded by
+128 MiB; an upload may be empty. Results contain only `sandboxId`, `transferId`,
+`byteLength`, and lowercase `sha256`, never a host path or inline file body.
+This carries Core's bounded file/helper frames without Base64 expansion or a
+per-chunk RPC protocol; it does not replace Core's own framing, authorization,
+or snapshot-integrity validation.
+
+Normal download failure closes its file and removes only the matching owned
+partial file; preexisting and replacement files are preserved. Successful
+spool files remain the caller's responsibility. Process death or a Runtime
+transport deadline can leave a private partial, so the caller must retain its
+transfer identity and reclaim it. The host also owns aggregate spool capacity
+and file retention. These operations establish neither durable snapshot
+storage nor physical storage quotas. SDK streamed uploads have no whole-upload
+deadline; the Runtime's bounded adapter-process deadline remains required.
+Capabilities report `bulkFileTransfer`, `maxTransferBytes`, and
+`transferChunkBytes`; request and response JSON limits stay unchanged.
 
 Command output uses the generated Process RPC client shipped with the exact
 pinned official SDK, through its scoped connection configuration and sandbox
@@ -140,12 +181,48 @@ response declares `commandOutputRestartRecovery: false`,
 `waitBudgetMustCoverOriginalStream: true`. Durable guest output protection is
 required before claiming recovery across adapter restarts.
 
-The public SDK has no verified no-resume attachment interface. A fresh control
-process cannot acquire a command handle without potentially resuming an
-environment, so it rejects that action. Run process-tree cancellation, storage
-quotas, command-start idempotency, and full-memory pause verification are
-explicitly unsupported. Retained lifecycle acceptance must remain gated until
-its required process and retention semantics are demonstrated.
+Fixed control helpers support only the trusted template contract: workspace
+`/mnt/data`, account `agent`, UID:GID `10001:10001`, and root-owned executable
+`/opt/centaeris/bin/execution_agent`. The allowed modes are `prepare-workspace`,
+`agent-process-state`, and `quiesce-agent-processes`. Preparation and observation
+run as root; quiesce runs as `agent` because the existing helper requires the
+workload identity and excludes its own PID. The working directory is always
+`/`, and the two workspace environment variables are fixed internally. Other
+workspace identities fail before provider access. Snapshot and filesystem
+helpers are excluded from this inline control interface.
+
+`expectedMetadata` must contain exactly the frozen creation keys
+`centaerisAttemptId`, `environmentId`, `instanceId`, `executionId`, `agentRunId`,
+`sessionId`, `workspaceId`, `profileDigest`, `authorizationDigest`, and
+`processingJobId`. These refer to the original creation binding; they do not
+replace the caller's current lease/controller authorization. The Runtime must
+validate that authorization before requesting helper work.
+
+A fresh control process uses the pinned SDK's generated read-only SandboxDetail
+GET to recover the secure envd token in memory. Before starting any helper it
+checks exact sandbox/template identity, an exact frozen metadata map, running state,
+explicit timeout action `kill`, and literal `autoResume: false`. Missing,
+ambiguous, paused or auto-resumable policy is rejected without starting a
+helper. It neither constructs/connects a Sandbox execution handle nor calls
+resume, create or set-timeout. The generated Process client uses the scoped
+sandbox endpoint/token and fixed user; the provider API key is not forwarded
+to the data plane. Tokens are not cached, persisted or returned. These internal
+SDK surfaces are protected by the exact version pin and real protocol tests.
+
+The helper timeout is 1 to 60 seconds; raw stdout and stderr share the 64 KiB
+budget. Results preserve bytes, lengths and the known exit code, including
+nonzero exits; callers must require exit zero and validate the existing helper
+protocol before advancing. Lost replies, incomplete streams and output overflow
+remain Unknown with the known PID. No helper retry or generic PID control is
+introduced. As with ordinary commands, closing a stream does not prove process
+or resource cleanup.
+
+Generic control-lane commands, file access, connect/resume and PID cancellation
+remain unsupported. Run process-tree cancellation, storage quotas, command-start
+idempotency, and full-memory pause verification are also unsupported. A fixed
+quiesce helper's UID-scoped result does not by itself settle an allocation or
+establish retained task semantics. Retained lifecycle acceptance remains gated
+until its required process and retention semantics are demonstrated.
 
 Run isolated behavioral tests without provider credentials:
 

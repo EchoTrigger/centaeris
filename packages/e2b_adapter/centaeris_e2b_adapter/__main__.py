@@ -12,6 +12,7 @@ def main():
     try:
         config = AdapterConfig(api_key=os.environ.get("E2B_API_KEY", ""), domain=os.environ.get("E2B_DOMAIN"),
                                api_url=os.environ.get("E2B_API_URL"), sandbox_url=os.environ.get("E2B_SANDBOX_URL"),
+                               spool_root=os.environ.get("E2B_ADAPTER_SPOOL_ROOT"),
                                idempotency_supported=os.environ.get("E2B_ADAPTER_IDEMPOTENCY_SUPPORTED") == "true", lane=args.lane)
         adapter = Adapter(config)
     except Exception:

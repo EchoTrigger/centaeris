@@ -13,6 +13,11 @@ from typing import BinaryIO
 from urllib.parse import urlsplit
 from uuid import UUID
 
+from .attach import attach_existing
+from .bulk import BulkSpool, BulkTransferError, MAX_TRANSFER_BYTES, TRANSFER_CHUNK_BYTES
+from .control import (CONTROL_HELPERS, EXPECTED_METADATA_KEYS, WORKSPACE_ROOT, WORKSPACE_USER,
+                      ControlHelperError, start_control_helper)
+
 SDK_VERSION = "2.58.0"
 REQUEST_SCHEMA = "runtime.e2b.adapter.request.v1"
 RESPONSE_SCHEMA = "runtime.e2b.adapter.response.v1"
@@ -73,7 +78,7 @@ class _RawCommandHandle:
         self.events.close()
 
 
-def _start_command_stream(sandbox, envd_version, payload):
+def _open_process_stream(url, connection, envd_version, user, process, timeout_seconds):
     # This is the generated protocol shipped by the exact pinned official SDK.
     # Its public CommandHandle decodes bytes before exposing output callbacks.
     from e2b.connection_config import KEEPALIVE_PING_HEADER, KEEPALIVE_PING_INTERVAL_SEC
@@ -82,14 +87,12 @@ def _start_command_stream(sandbox, envd_version, payload):
     from e2b.envd.utils import authentication_header, extract_start_pid, timeout_to_ms
     from packaging.version import Version
 
-    rpc = create_rpc_client(process_connect.ProcessClientSync, sandbox.envd_api_url, sandbox.connection_config)
+    rpc = create_rpc_client(process_connect.ProcessClientSync, url, connection)
     events = as_stream(rpc.start(
-        process_pb.StartRequest(process=process_pb.ProcessConfig(
-            cmd="/bin/bash", args=["-l", "-c", payload["command"]],
-            cwd=payload.get("cwd"), envs=payload.get("envs")), stdin=False),
-        headers={**authentication_header(Version(envd_version), payload.get("user")),
+        process_pb.StartRequest(process=process, stdin=False),
+        headers={**authentication_header(Version(envd_version), user),
                  KEEPALIVE_PING_HEADER: str(KEEPALIVE_PING_INTERVAL_SEC)},
-        timeout_ms=timeout_to_ms(payload["timeoutSeconds"])))
+        timeout_ms=timeout_to_ms(timeout_seconds)))
     try:
         pid = extract_start_pid(next(events), "start process")
         if type(pid) is not int or not 1 <= pid <= 2**31 - 1:
@@ -98,6 +101,16 @@ def _start_command_stream(sandbox, envd_version, payload):
     except BaseException:
         events.close()
         raise
+
+
+
+def _start_command_stream(sandbox, envd_version, payload):
+    from e2b.envd.process import process_pb
+
+    process = process_pb.ProcessConfig(cmd="/bin/bash", args=["-l", "-c", payload["command"]],
+                                      cwd=payload.get("cwd"), envs=payload.get("envs"))
+    return _open_process_stream(sandbox.envd_api_url, sandbox.connection_config, envd_version,
+                                payload.get("user"), process, payload["timeoutSeconds"])
 
 
 @dataclass
@@ -113,6 +126,7 @@ class AdapterConfig:
     domain: str | None = None
     api_url: str | None = None
     sandbox_url: str | None = None
+    spool_root: str | None = field(default=None, repr=False)
     idempotency_supported: bool = False
     lane: str = "ordinary"
     request_timeout_seconds: float = 30
@@ -185,6 +199,7 @@ class Adapter:
         self.config = config
         self._sandboxes = OrderedDict()
         self._commands = OrderedDict()
+        self._spool = BulkSpool(config.spool_root) if config.spool_root is not None else None
         self._command_stream_factory = command_stream_factory or _start_command_stream
         if client is None:
             if ((config.api_url is None and os.environ.get("E2B_API_URL"))
@@ -205,6 +220,7 @@ class Adapter:
     def handle(self, request):
         request_id = None
         known = {}
+        transfer = None
         try:
             value = _object(request, ("schema", "requestId", "operation", "payload"))
             request_id = _text(value["requestId"], 128)
@@ -213,10 +229,14 @@ class Adapter:
             operation = _text(value["operation"], 64)
             payload = self._validate(operation, value["payload"])
             self._check_lane(operation)
-            if operation in ("readFile", "writeFile", "runCommand", "waitCommand", "recoverCommand", "cancelCommand"):
+            if operation in ("readFile", "writeFile", "uploadFile", "downloadFile", "runCommand", "waitCommand", "recoverCommand", "cancelCommand"):
                 if payload["sandboxId"] not in self._sandboxes:
                     raise RequestError("connectionRequired", "Explicit connect is required in this adapter process")
-            known = {k: payload[k] for k in ("attemptId", "sandboxId", "pid") if k in payload}
+            known = {k: payload[k] for k in ("attemptId", "sandboxId", "pid", "transferId") if k in payload}
+            if operation in ("uploadFile", "downloadFile"):
+                if self._spool is None:
+                    raise RequestError("bulkUnavailable", "Bulk file transfer requires an explicitly configured private host spool")
+                transfer = self._spool.prepare(operation, payload)
             if operation == "runCommand":
                 self._admit_command()
             if operation in ("waitCommand", "recoverCommand"):
@@ -224,16 +244,26 @@ class Adapter:
                 if evidence is not None and evidence.handle is not None:
                     if payload["timeoutSeconds"] < evidence.deadline - monotonic():
                         raise RequestError("waitBudgetInsufficient", "Wait budget must cover the original command stream's remaining deadline")
-        except (RequestError, UnicodeError, TypeError) as error:
-            return self._response(request_id, "notDispatched", **({"result": known} if known else {}), error={"code": getattr(error, "code", "invalidRequest"), "message": str(error) if isinstance(error, RequestError) else "Invalid request"})
+        except (RequestError, BulkTransferError, OSError, UnicodeError, TypeError) as error:
+            return self._response(request_id, "notDispatched", **({"result": known} if known else {}), error={"code": getattr(error, "code", "invalidRequest"), "message": str(error) if isinstance(error, (RequestError, BulkTransferError)) else "Invalid request or unavailable private spool"})
         try:
-            result = self._execute(operation, payload, known)
+            result = self._execute(operation, payload, known, transfer)
+            if transfer is not None:
+                transfer.close()
+                transfer = None
             return self._response(request_id, "succeeded", result=result)
-        except RequestError as error:
+        except (RequestError, BulkTransferError, ControlHelperError) as error:
             return self._response(request_id, "unknown", result=known, error={"code": error.code, "message": str(error)})
         except Exception:
             # Provider diagnostics may contain credentials, URLs or user content.
             return self._response(request_id, "unknown", result=known, error={"code": "providerRequestFailed", "message": "The provider result is unknown; retain the operation responsibility."})
+        finally:
+            if transfer is not None:
+                try:
+                    transfer.close()
+                except OSError:
+                    # Its trusted host owner still has the transfer identity.
+                    pass
 
     @staticmethod
     def _response(request_id, outcome, **extra):
@@ -241,8 +271,8 @@ class Adapter:
 
     def _check_lane(self, operation):
         allowed = {
-            "ordinary": {"capabilities", "create", "connect", "inspect", "readFile", "writeFile", "runCommand", "waitCommand", "recoverCommand", "cancelCommand"},
-            "control": {"capabilities", "inspect"},
+            "ordinary": {"capabilities", "create", "connect", "attach", "inspect", "readFile", "writeFile", "uploadFile", "downloadFile", "runCommand", "waitCommand", "recoverCommand", "cancelCommand"},
+            "control": {"capabilities", "inspect", "invokeControlHelper"},
             "cleanup": {"capabilities", "inspect", "kill", "pause"},
         }
         if operation not in allowed[self.config.lane]:
@@ -254,14 +284,18 @@ class Adapter:
             "create": (("attemptId", "idempotencyKey", "templateRef", "metadata", "timeoutSeconds", "allowInternetAccess", "onTimeout"), ()),
             "connect": (("sandboxId", "timeoutSeconds", "onResume"), ()),
             "inspect": (("sandboxId",), ()),
+            "attach": (("sandboxId", "expectedTemplateId", "expectedMetadata", "workspaceRoot", "workspaceUser"), ()),
             "kill": (("sandboxId",), ()),
             "pause": (("sandboxId", "mode"), ()),
             "readFile": (("sandboxId", "path"), ("user", "maxBytes")),
             "writeFile": (("sandboxId", "path", "dataBase64"), ("user",)),
+            "uploadFile": (("sandboxId", "path", "transferId", "byteLength", "sha256"), ("user",)),
+            "downloadFile": (("sandboxId", "path", "transferId", "maxBytes"), ("user",)),
             "runCommand": (("sandboxId", "command", "timeoutSeconds"), ("user", "cwd", "envs")),
             "waitCommand": (("sandboxId", "pid", "timeoutSeconds"), ("maxOutputBytes",)),
             "recoverCommand": (("sandboxId", "pid", "timeoutSeconds"), ("maxOutputBytes",)),
             "cancelCommand": (("sandboxId", "pid"), ()),
+            "invokeControlHelper": (("sandboxId", "helper", "expectedTemplateId", "expectedMetadata", "workspaceRoot", "workspaceUser", "timeoutSeconds", "maxOutputBytes"), ()),
         }
         if operation not in specs:
             raise RequestError("unsupportedOperation", "Unsupported adapter operation")
@@ -278,11 +312,31 @@ class Adapter:
             _integer(value["timeoutSeconds"])
         if "pid" in value:
             _integer(value["pid"], 1, 2**31 - 1)
-        for key, maximum in (("maxBytes", MAX_FILE_BYTES), ("maxOutputBytes", MAX_OUTPUT_BYTES)):
+        for key, maximum in (("maxBytes", MAX_TRANSFER_BYTES if operation == "downloadFile" else MAX_FILE_BYTES), ("maxOutputBytes", MAX_OUTPUT_BYTES)):
             if key in value:
                 _integer(value[key], 1, maximum)
         if "envs" in value:
             value["envs"] = _strings(value["envs"])
+        if operation in ("uploadFile", "downloadFile"):
+            transfer_id = _text(value["transferId"], 36)
+            try:
+                if str(UUID(transfer_id)) != transfer_id:
+                    raise ValueError()
+            except ValueError:
+                raise RequestError("invalidRequest", "Transfer identity requires a canonical lowercase UUID") from None
+            if operation == "uploadFile":
+                _integer(value["byteLength"], 0, MAX_TRANSFER_BYTES)
+                if not re.fullmatch(r"[a-f0-9]{64}", _text(value["sha256"], 64)):
+                    raise RequestError("invalidRequest", "Upload requires an exact lowercase SHA-256 digest")
+        if operation == "invokeControlHelper":
+            _choice(value["helper"], CONTROL_HELPERS)
+            _integer(value["timeoutSeconds"], 1, 60)
+        if operation in ("invokeControlHelper", "attach"):
+            if value["workspaceRoot"] != WORKSPACE_ROOT or value["workspaceUser"] != WORKSPACE_USER:
+                raise RequestError("invalidRequest", "Fixed control helpers require the supported template workspace identity")
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", _text(value["expectedTemplateId"], 128)):
+                raise RequestError("invalidRequest", "Fixed control helpers require a canonical expected template ID")
+            value["expectedMetadata"] = _strings(_object(value["expectedMetadata"], EXPECTED_METADATA_KEYS))
         if operation == "create":
             if not re.fullmatch(r"[a-z0-9-]+", _text(value["idempotencyKey"], 255)):
                 raise RequestError("invalidRequest", "Create idempotencyKey requires 1 to 255 lowercase ASCII letters, digits or hyphens")
@@ -340,15 +394,27 @@ class Adapter:
         state = getattr(info.state, "value", info.state)
         return {"sandboxId": info.sandbox_id, "templateId": info.template_id, "metadata": info.metadata, "state": state}
 
-    def _execute(self, operation, payload, known):
-        sdk = self.client.Sandbox
+    def _execute(self, operation, payload, known, transfer=None):
         if operation == "capabilities":
             return {"sdkVersion": SDK_VERSION, "lane": self.config.lane, "createIdempotencyConfigured": self.config.idempotency_supported,
+                    "readOnlyAttach": True,
                     "commandStartIdempotency": False, "runProcessTreeCancellation": False, "controlCommandCancellation": False,
                     "commandOutputBytes": True, "commandOutputRestartRecovery": False, "commandOutputRecovery": "adapterLifetime",
                     "waitBudgetMustCoverOriginalStream": True, "maxCommandEvidence": MAX_COMMANDS,
+                    "fixedControlHelpers": list(CONTROL_HELPERS) if self.config.lane == "control" else [],
+                    "bulkFileTransfer": self._spool is not None, "maxTransferBytes": MAX_TRANSFER_BYTES, "transferChunkBytes": TRANSFER_CHUNK_BYTES,
                     "storageQuota": False, "fullMemoryPauseVerified": False,
                     "maxFileBytes": MAX_FILE_BYTES, "maxOutputBytes": MAX_OUTPUT_BYTES}
+        if operation == "invokeControlHelper":
+            known["helper"] = payload["helper"]
+            handle = start_control_helper(self.config, payload, _open_process_stream)
+            known["pid"] = handle.pid
+            return {"helper": payload["helper"], **_collect_command_output(handle, payload["sandboxId"], handle.pid, payload["maxOutputBytes"])}
+        if operation == "attach":
+            sandbox, detail = attach_existing(self.config, payload)
+            self._remember(sandbox, detail.envd_version)
+            return self._info(detail, payload["sandboxId"])
+        sdk = self.client.Sandbox
         if operation == "create":
             # The caller durably admits one fresh dispatch before invoking us.
             # Configured provider idempotency neither grants dispatch authority
@@ -356,7 +422,7 @@ class Adapter:
             ref = payload["templateRef"]
             sandbox = sdk.create(template=f"{ref['templateId']}:{ref['buildId']}", timeout=payload["timeoutSeconds"],
                                  metadata=payload["metadata"], allow_internet_access=payload["allowInternetAccess"],
-                                 lifecycle={"on_timeout": payload["onTimeout"]},
+                                 lifecycle={"on_timeout": payload["onTimeout"], "auto_resume": False},
                                  api_headers={"Idempotency-Key": payload["idempotencyKey"]}, retries=0)
             known["sandboxId"] = sandbox.sandbox_id
             provider_info = sandbox.get_info()
@@ -385,6 +451,8 @@ class Adapter:
         connection = self._sandboxes[sandbox_id]
         sandbox = connection.sandbox
         user = {"user": payload["user"]} if "user" in payload else {}
+        if operation in ("uploadFile", "downloadFile"):
+            return transfer.execute(sandbox, self.config.request_timeout_seconds)
         if operation == "readFile":
             data = bytearray()
             with sandbox.files.read(payload["path"], format="stream", request_timeout=self.config.request_timeout_seconds, **user) as stream:
@@ -419,38 +487,43 @@ class Adapter:
             self._commands.move_to_end(key)
             return dict(evidence.result)
         handle = evidence.handle
-        stdout, stderr = bytearray(), bytearray()
-        end = None
         try:
-            for out, err, completion in handle:
-                if end is not None:
-                    raise RequestError("commandStreamInvalid", "Command data followed its completion event")
-                for chunk, target in ((out, stdout), (err, stderr)):
-                    if chunk is not None:
-                        if not isinstance(chunk, bytes):
-                            raise RequestError("commandStreamInvalid", "Command output must contain raw bytes")
-                        if len(stdout) + len(stderr) + len(chunk) > payload.get("maxOutputBytes", MAX_OUTPUT_BYTES):
-                            raise RequestError("outputLimitExceeded", "Output limit reached; process completion is unknown")
-                        target.extend(chunk)
-                if completion is not None:
-                    if (completion.exited is not True
-                            or type(completion.exit_code) is not int or not -(2**31) <= completion.exit_code <= 2**31 - 1):
-                        raise RequestError("commandOutputIncomplete", "Provider did not establish a complete process exit")
-                    end = completion
-            if end is None:
-                raise RequestError("commandOutputIncomplete", "Command stream ended without a complete exit event")
-            completed = {"sandboxId": sandbox_id, "pid": payload["pid"], "exitCode": end.exit_code,
-                         "stdout": stdout.decode("utf-8", errors="replace"), "stderr": stderr.decode("utf-8", errors="replace"),
-                         "stdoutBytesBase64": base64.b64encode(stdout).decode("ascii"),
-                         "stderrBytesBase64": base64.b64encode(stderr).decode("ascii"),
-                         "stdoutByteLength": len(stdout), "stderrByteLength": len(stderr)}
+            completed = _collect_command_output(handle, sandbox_id, payload["pid"], payload.get("maxOutputBytes", MAX_OUTPUT_BYTES))
         finally:
-            try:
-                handle.disconnect()
-            finally:
-                self._commands.pop(key, None)
+            self._commands.pop(key, None)
         self._commands[key] = _CommandEvidence(handle=None, deadline=0, result=completed)
         return dict(completed)
+
+
+def _collect_command_output(handle, sandbox_id, pid, max_output_bytes):
+    stdout, stderr = bytearray(), bytearray()
+    end = None
+    try:
+        for out, err, completion in handle:
+            if end is not None:
+                raise RequestError("commandStreamInvalid", "Command data followed its completion event")
+            for chunk, target in ((out, stdout), (err, stderr)):
+                if chunk is not None:
+                    if not isinstance(chunk, bytes):
+                        raise RequestError("commandStreamInvalid", "Command output must contain raw bytes")
+                    if len(stdout) + len(stderr) + len(chunk) > max_output_bytes:
+                        raise RequestError("outputLimitExceeded", "Output limit reached; process completion is unknown")
+                    target.extend(chunk)
+            if completion is not None:
+                if (completion.exited is not True
+                        or type(completion.exit_code) is not int or not -(2**31) <= completion.exit_code <= 2**31 - 1):
+                    raise RequestError("commandOutputIncomplete", "Provider did not establish a complete process exit")
+                end = completion
+        if end is None:
+            raise RequestError("commandOutputIncomplete", "Command stream ended without a complete exit event")
+        completed = {"sandboxId": sandbox_id, "pid": pid, "exitCode": end.exit_code,
+                     "stdout": stdout.decode("utf-8", errors="replace"), "stderr": stderr.decode("utf-8", errors="replace"),
+                     "stdoutBytesBase64": base64.b64encode(stdout).decode("ascii"),
+                     "stderrBytesBase64": base64.b64encode(stderr).decode("ascii"),
+                     "stdoutByteLength": len(stdout), "stderrByteLength": len(stderr)}
+    finally:
+        handle.disconnect()
+    return completed
 
 
 def _strict_object(pairs):

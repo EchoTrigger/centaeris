@@ -208,7 +208,7 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(call[1]["retries"], 0)
         self.assertEqual(call[1]["template"], "template-a:123e4567-e89b-12d3-a456-426614174000")
         self.assertEqual(call[1]["metadata"]["centaerisAttemptId"], "attempt-a")
-        self.assertEqual(call[1]["lifecycle"], {"on_timeout": "kill"})
+        self.assertEqual(call[1]["lifecycle"], {"on_timeout": "kill", "auto_resume": False})
         self.assertFalse(call[1]["allow_internet_access"])
         self.assertEqual(response["result"]["sandboxId"], "sandbox-a")
 

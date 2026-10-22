@@ -28,6 +28,8 @@ class ProviderFixture:
         self.requests = []
         self.metadata = {}
         self.lock = threading.Lock()
+        self.command_started = threading.Event()
+        self.command_release = threading.Event()
 
     def record(self, method, path, headers, body):
         with self.lock:
@@ -120,7 +122,15 @@ def provider_fixture(mode="success"):
                 self.send_header("Content-Length", str(len(wire) + (100 if fixture.mode == "commandRawDisconnect" else 0)))
                 self.send_header("Connection", "close")
                 self.end_headers()
-                self.wfile.write(wire)
+                if fixture.mode == "blockedOrdinary" and body["process"]["cmd"] == "/bin/bash":
+                    first_size = 5 + len(chunks[0])
+                    self.wfile.write(wire[:first_size])
+                    self.wfile.flush()
+                    fixture.command_started.set()
+                    fixture.command_release.wait(10)
+                    self.wfile.write(wire[first_size:])
+                else:
+                    self.wfile.write(wire)
                 self.close_connection = True
                 return
             body = json.loads(raw) if size else None
@@ -192,6 +202,7 @@ def provider_fixture(mode="success"):
     try:
         yield fixture
     finally:
+        fixture.command_release.set()
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
@@ -354,6 +365,7 @@ class SdkTransportAcceptanceTests(unittest.TestCase):
         # request above uses the public camelCase contract.
         self.assertIs(creation["body"]["allow_internet_access"], False)
         self.assertIs(creation["body"]["autoPause"], False)
+        self.assertEqual(creation["body"]["autoResume"], {"enabled": False})
         self.assertEqual(creation["body"]["metadata"], {
             "environmentId": "environment-fixture", "centaerisAttemptId": "attempt-fixture",
         })
