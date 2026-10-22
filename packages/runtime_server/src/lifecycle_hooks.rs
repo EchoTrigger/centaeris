@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use centaeris_core::extension::hooks::{
     LifecycleHookAuditSink, LifecycleHookEngineV1, LifecycleHookEventNameV1,
-    LifecycleHookRunStatusV1, LifecycleHookRunV1, LifecycleHookSourceKindV1,
+    LifecycleHookRunStatusV1, LifecycleHookRunV1, LifecycleHookRunner, LifecycleHookSourceKindV1,
 };
 use centaeris_core::extension::{
     load_plugin_registry_from_manifests, PluginActivationSnapshotV1, PluginRegistryV1,
@@ -14,7 +14,6 @@ use centaeris_core::runtime::QueryLifecycleHookRuntime;
 use centaeris_core::session::store::{RuntimeStore, RuntimeStoreActor};
 use serde::Serialize;
 
-use crate::docker_execution_host::DockerExecutionHostRunner;
 use crate::skill_projection::{verified_plugin_package_roots_at, PLUGIN_CATALOG_ROOT};
 
 const WORKSPACE_HOOK_CATALOG_RESULT_SCHEMA: &str = "workspace.hook.catalog.result.v1";
@@ -80,15 +79,33 @@ impl LifecycleHookAuditSink for WorkspaceHookAuditSink {
 
 pub(crate) fn workspace_lifecycle_hook_runtime(
     activation: &PluginActivationSnapshotV1,
-    docker: Arc<DockerExecutionHostRunner>,
+    runner: Arc<dyn LifecycleHookRunner + Send + Sync>,
     store: Arc<RuntimeStoreActor>,
     session_id: String,
     agent_run_id: String,
 ) -> Result<QueryLifecycleHookRuntime, String> {
-    let registry = workspace_plugin_registry_at(activation, Path::new(PLUGIN_CATALOG_ROOT))?;
+    workspace_lifecycle_hook_runtime_at(
+        activation,
+        runner,
+        store,
+        session_id,
+        agent_run_id,
+        Path::new(PLUGIN_CATALOG_ROOT),
+    )
+}
+
+fn workspace_lifecycle_hook_runtime_at(
+    activation: &PluginActivationSnapshotV1,
+    runner: Arc<dyn LifecycleHookRunner + Send + Sync>,
+    store: Arc<RuntimeStoreActor>,
+    session_id: String,
+    agent_run_id: String,
+    catalog_root: &Path,
+) -> Result<QueryLifecycleHookRuntime, String> {
+    let registry = workspace_plugin_registry_at(activation, catalog_root)?;
     Ok(QueryLifecycleHookRuntime::new(
         LifecycleHookEngineV1::new(registry.hook_handlers)?,
-        docker,
+        runner,
         Some(Arc::new(WorkspaceHookAuditSink {
             store,
             session_id,
@@ -197,8 +214,12 @@ fn workspace_hook_run_event(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::Mutex;
 
     use centaeris_core::extension::build_plugin_activation_snapshot;
+    use centaeris_core::extension::hooks::{
+        LifecycleHookCommandResultV1, LifecycleHookEventV1, LifecycleHookHandlerV1,
+    };
     use serde_json::json;
 
     use super::*;
@@ -287,5 +308,121 @@ mod tests {
         assert!(!event.payload_json.contains("toolInput"));
         assert!(!event.payload_json.contains("stdout"));
         assert!(!event.payload_json.contains("path"));
+    }
+
+    #[test]
+    fn hook_audit_rejects_foreign_sources_and_mismatched_handler_identity() {
+        let mut run = LifecycleHookRunV1 {
+            hook_run_id: "hook-run".into(),
+            handler_id: "wiki:guard_write".into(),
+            event: LifecycleHookEventNameV1::PreToolUse,
+            source: centaeris_core::extension::hooks::LifecycleHookSourceV1 {
+                kind: LifecycleHookSourceKindV1::User,
+                name: "wiki".into(),
+            },
+            status: LifecycleHookRunStatusV1::Succeeded,
+            started_at_ms: 10,
+            completed_at_ms: 15,
+            exit_code: Some(0),
+            diagnostic: None,
+        };
+        assert!(workspace_hook_run_event("session", "run", &run).is_err());
+        run.source.kind = LifecycleHookSourceKindV1::Plugin;
+        run.handler_id = "another-plugin:guard_write".into();
+        assert!(workspace_hook_run_event("session", "run", &run).is_err());
+    }
+
+    #[test]
+    fn host_neutral_hook_runner_preserves_core_decision_and_durable_audit() {
+        struct Runner {
+            observed: Mutex<Vec<(LifecycleHookHandlerV1, LifecycleHookEventV1)>>,
+        }
+        impl LifecycleHookRunner for Runner {
+            fn run_hook(
+                &self,
+                handler: &LifecycleHookHandlerV1,
+                event: &LifecycleHookEventV1,
+            ) -> LifecycleHookCommandResultV1 {
+                self.observed
+                    .lock()
+                    .unwrap()
+                    .push((handler.clone(), event.clone()));
+                LifecycleHookCommandResultV1 {
+                    exit_code: Some(0),
+                    stdout: json!({
+                        "schema": "lifecycle_hook_result_v1",
+                        "blockReason": "writes disabled",
+                    })
+                    .to_string(),
+                    stderr: String::new(),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                    timed_out: false,
+                    spawn_error: None,
+                }
+            }
+        }
+
+        let catalog = tempfile::tempdir().unwrap();
+        let package = catalog.path().join("wiki");
+        fs::create_dir_all(package.join(".centaeris-plugin")).unwrap();
+        fs::create_dir_all(package.join("hooks")).unwrap();
+        fs::write(
+            package.join(".centaeris-plugin/plugin.json"),
+            r#"{"name":"wiki","version":"1.0.0","paths":{"hooks":["hooks/hooks.json"]}}"#,
+        )
+        .unwrap();
+        fs::write(package.join("hooks/hooks.json"),
+            r#"{"schema":"plugin_hooks_v1","handlers":[{"id":"guard_write","event":"PreToolUse","matcher":"write","program":"node","args":["hooks/guard.mjs"],"timeoutMs":5000}]}"#).unwrap();
+        fs::write(package.join("hooks/guard.mjs"), "").unwrap();
+        let activation = build_plugin_activation_snapshot(&[package]).unwrap();
+        let executor = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let backend = centaeris_runtime_sqlite::SqliteRuntimeStore::new(
+            catalog.path().join("runtime.sqlite"),
+        )
+        .unwrap();
+        let store = Arc::new({
+            let _guard = executor.enter();
+            RuntimeStoreActor::start(backend).unwrap()
+        });
+        let runner = Arc::new(Runner {
+            observed: Mutex::new(Vec::new()),
+        });
+        let hooks = workspace_lifecycle_hook_runtime_at(
+            &activation,
+            runner.clone(),
+            store.clone(),
+            "session-fixture".into(),
+            "run-fixture".into(),
+            catalog.path(),
+        )
+        .unwrap();
+        let decision = hooks
+            .run_pre_tool_use(
+                "session-fixture",
+                Some("/mnt/data".into()),
+                "write",
+                json!({"path":"result.txt"}),
+            )
+            .unwrap();
+        assert!(decision.blocked);
+        assert_eq!(decision.block_reason.as_deref(), Some("writes disabled"));
+        let observed = runner.observed.lock().unwrap();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].0.id, "wiki:guard_write");
+        assert_eq!(observed[0].1.tool_name.as_deref(), Some("write"));
+        let events = RuntimeStore::list_events(store.as_ref(), "session-fixture", 10, 0).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].task_id.as_deref(), Some("run-fixture"));
+        let audit: serde_json::Value = serde_json::from_str(&events[0].payload_json).unwrap();
+        assert_eq!(audit["plugin"], "wiki");
+        assert_eq!(audit["handler"], "guard_write");
+        assert_eq!(audit["status"], "Blocked");
+        assert!(audit.get("toolInput").is_none());
+        assert!(audit.get("stdout").is_none());
     }
 }
