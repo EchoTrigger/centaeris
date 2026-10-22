@@ -7,6 +7,8 @@ use super::PostgresRuntimeStore;
 use crate::agent_run_authorization::EnvironmentProfile;
 use postgres::{GenericClient, Row};
 
+pub mod cleanup;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCreationIdentity {
     pub attempt_id: String,
@@ -363,8 +365,16 @@ CREATE TRIGGER provider_creation_operation_facts BEFORE INSERT OR UPDATE OR DELE
 "#;
 
 pub(super) fn validate(db: &mut impl GenericClient) -> Result<(), String> {
-    let body = DDL
-        .split_once("CREATE FUNCTION runtime.protect_provider_creation_operation() RETURNS trigger LANGUAGE plpgsql AS $$")
+    let cleanup = db
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM runtime.schema_migrations WHERE version=18)",
+            &[],
+        )
+        .map_err(|e| e.to_string())?
+        .get::<_, bool>(0);
+    let guard = if cleanup { cleanup::GUARD_DDL } else { DDL };
+    let body = guard
+        .split_once("FUNCTION runtime.protect_provider_creation_operation() RETURNS trigger LANGUAGE plpgsql AS $$")
         .ok_or("provider creation function missing")?
         .1
         .split_once("$$;")
@@ -408,9 +418,10 @@ pub(super) fn validate(db: &mut impl GenericClient) -> Result<(), String> {
             &[],
         )
         .map_err(|error| error.to_string())?;
-    if constraints.get::<_, i64>(0) != 6
+    if constraints.get::<_, i64>(0) != if cleanup { 8 } else { 6 }
         || !constraints.get::<_, bool>(1)
-        || (2..=7).any(|column| constraints.get::<_, i64>(column) != 1)
+        || (2..=6).any(|column| constraints.get::<_, i64>(column) != 1)
+        || constraints.get::<_, i64>(7) != if cleanup { 2 } else { 1 }
     {
         return Err("Postgres provider creation identity constraints mismatch".into());
     }
@@ -448,7 +459,7 @@ pub(super) fn validate(db: &mut impl GenericClient) -> Result<(), String> {
     if index.is_none_or(|row| {
         !row.get::<_, bool>(0)
             || row.get::<_, Option<String>>(1).as_deref()
-                != Some("(dispatch_state = ANY (ARRAY['prepared'::text, 'dispatched'::text]))")
+                != Some(if cleanup { "((dispatch_state = ANY (ARRAY['prepared'::text, 'dispatched'::text])) AND (settlement_id IS NULL))" } else { "(dispatch_state = ANY (ARRAY['prepared'::text, 'dispatched'::text]))" })
     }) {
         return Err("Postgres provider creation open intent index mismatch".into());
     }
@@ -457,6 +468,7 @@ pub(super) fn validate(db: &mut impl GenericClient) -> Result<(), String> {
 
 #[cfg(test)]
 pub(super) fn restore_previous_fixture(db: &mut postgres::Client) {
+    cleanup::restore_previous_fixture(db);
     let version: i64 = db
         .query_one("SELECT max(version) FROM runtime.schema_migrations", &[])
         .unwrap()

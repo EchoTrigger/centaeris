@@ -65,6 +65,7 @@ impl RequestCapacity {
                     | "/internal/environments/retire"
                     | "/internal/environments/maintenance/task"
                     | "/internal/environments/observe"
+                    | "/internal/agent-runs/cleanup-receipt"
             ))
             || (method == "GET" && path.starts_with("/internal/jobs/"));
         let listener = method == "POST" && path == "/internal/jobs/wait";
@@ -131,6 +132,45 @@ mod tests {
             .try_acquire_owned()
             .expect("slow cleanup must leave short control available");
         drop(control);
+    }
+
+    #[test]
+    fn cleanup_receipt_query_uses_short_control_while_execution_and_cleanup_are_full() {
+        let limits = RequestCapacity::for_http_tests(Duration::from_secs(2));
+        let _ordinary = limits
+            .lane("POST", "/agent-runs/step")
+            .slots
+            .try_acquire_owned()
+            .unwrap();
+        let _cleanup = limits
+            .lane("POST", "/agent-runs/teardown")
+            .slots
+            .try_acquire_owned()
+            .unwrap();
+        let receipt = limits.lane("POST", "/internal/agent-runs/cleanup-receipt");
+        assert!(
+            receipt.control,
+            "receipt reads must retain short control capacity"
+        );
+        assert!(!receipt.cleanup);
+        assert_eq!(receipt.deadline, Some(Duration::from_secs(2)));
+        let _receipt = receipt
+            .slots
+            .try_acquire_owned()
+            .expect("full ordinary and slow cleanup must not block receipt queries");
+        assert!(
+            limits
+                .lane("POST", "/agent-runs/cancel")
+                .slots
+                .try_acquire_owned()
+                .is_err(),
+            "receipt queries share the bounded short control budget"
+        );
+        assert!(
+            !limits
+                .lane("GET", "/internal/agent-runs/cleanup-receipt")
+                .control
+        );
     }
 
     #[test]

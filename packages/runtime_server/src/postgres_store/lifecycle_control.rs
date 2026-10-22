@@ -163,8 +163,12 @@ pub(super) fn require_lifecycle_completion(
     if !terminal {
         return Err("lifecycle terminal receipt required".into());
     }
+    let provider_effects = tx.query_one("SELECT EXISTS(SELECT 1 FROM runtime.provider_creation_operations WHERE agent_run_id=$1)", &[&run]).map_err(|e| e.to_string())?.get::<_, bool>(0);
     let no_effects=tx.query_opt("SELECT payload_json FROM runtime_events WHERE event_id='agent_run_no_effects:'||$1 AND session_id=$2 AND task_id=$1", &[&run,&session]).map_err(|e|e.to_string())?;
     if let Some(row) = no_effects {
+        if provider_effects {
+            return Err("lifecycle no-effects conflicts with provider responsibility".into());
+        }
         let value: serde_json::Value =
             serde_json::from_str(&row.get::<_, String>(0)).map_err(|e| e.to_string())?;
         if value["schema"] == "runtime.agent_run.no_effects.v1"
@@ -179,6 +183,10 @@ pub(super) fn require_lifecycle_completion(
             return Ok(());
         }
         return Err("lifecycle no-effects receipt invalid".into());
+    }
+    let provider_profile = tx.query_one("SELECT EXISTS(SELECT 1 FROM public.app_core_agentrunauthorization WHERE agent_run_id=$1 AND payload->'environmentProfile'->>'schema'='runtime.e2b_environment_profile.v1')", &[&run]).map_err(|e| e.to_string())?.get::<_, bool>(0);
+    if provider_effects || provider_profile {
+        return super::provider_operations::cleanup::require_lifecycle_receipt(tx, run, digest);
     }
     let complete=tx.query_one("SELECT EXISTS(SELECT 1 FROM runtime.agent_run_cleanup_receipts c JOIN public.app_core_agentrunenvironmentrelease r ON r.agent_run_id=c.agent_run_id AND r.environment_id=c.environment_id AND r.authorization_digest=c.authorization_digest WHERE c.agent_run_id=$1 AND c.authorization_digest=$2 AND c.cleanup_complete AND r.controller_epoch>=c.controller_epoch)", &[&run,&digest]).map_err(|e|e.to_string())?.get::<_,bool>(0);
     if !complete {
@@ -204,7 +212,7 @@ impl PostgresRuntimeStore {
             let rows=tx.query_opt("SELECT r.environment_id,e.controller_run_id,e.controller_released FROM public.app_core_agentrun r JOIN public.app_core_sessionenvironment e ON e.id=r.environment_id WHERE r.id=$1 AND r.session_id=$2 FOR SHARE OF r,e", &[&run,&control.authorization.session_id]).map_err(|e|e.to_string())?.ok_or("no-effects Run missing")?;
             let current=tx.query_opt("SELECT 1 FROM runtime_jobs WHERE job_id=$1 AND lease_owner=$2 AND job_kind='agent_run.lifecycle' AND lease_purpose='control' AND status='running' AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint FOR SHARE", &[&job,&owner]).map_err(|e|e.to_string())?;
             if current.is_none() {return Err("no-effects lease rejected".into());}
-            let has_effects=tx.query_one("SELECT EXISTS(SELECT 1 FROM public.app_core_sessionevent WHERE agent_run_id=$1 AND NOT session_level) OR EXISTS(SELECT 1 FROM runtime.execution_instances WHERE agent_run_id=$1)", &[&run]).map_err(|e|e.to_string())?.get::<_,bool>(0);
+            let has_effects=tx.query_one("SELECT EXISTS(SELECT 1 FROM public.app_core_sessionevent WHERE agent_run_id=$1 AND NOT session_level) OR EXISTS(SELECT 1 FROM runtime.execution_instances WHERE agent_run_id=$1) OR EXISTS(SELECT 1 FROM runtime.provider_creation_operations WHERE agent_run_id=$1)", &[&run]).map_err(|e|e.to_string())?.get::<_,bool>(0);
             let owns_controller=rows.get::<_,Option<String>>(1).as_deref()==Some(run.as_str()) && !rows.get::<_,bool>(2);
             if has_effects || owns_controller {return Ok(None);}
             let payload=serde_json::json!({"schema":"runtime.agent_run.no_effects.v1","agentRunId":run,"sessionId":control.authorization.session_id,"environmentId":rows.get::<_,String>(0),"authorizationDigest":control.authorization_digest,"jobId":job,"scope":"noEffectsForRun","cleanupReceiptId":format!("cleanup:noEffects:{run}"),"releaseReceiptId":format!("release:noOperation:{run}")});

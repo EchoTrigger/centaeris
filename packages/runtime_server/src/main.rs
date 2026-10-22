@@ -15,6 +15,8 @@ mod docker_engine;
 mod docker_execution_host;
 pub mod e2b_adapter;
 pub mod e2b_creation;
+mod e2b_execution_host;
+mod e2b_session_workspace;
 mod environment_authorization;
 mod environment_stdio;
 mod environment_supervisor;

@@ -541,7 +541,7 @@ fn postgres_creation_attempt_forward_migration_keeps_historical_unknown_charged(
         db.query_one("SELECT max(version) FROM runtime.schema_migrations", &[])
             .unwrap()
             .get::<_, i64>(0),
-        17
+        18
     );
     assert_eq!(
         db.query_one(

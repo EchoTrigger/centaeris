@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 const CONFIG: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const REQUEST: &str = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
+mod cleanup_tests;
 mod creation_driver_tests;
 
 struct Run {
@@ -518,6 +519,7 @@ fn postgres_provider_creation_schema_upgrade_preserves_legacy_grants_and_job_his
         .unwrap()
         .get::<_, bool>(0)
     {
+        crate::postgres_store::provider_operations::cleanup::restore_previous_fixture(&mut db);
         db.batch_execute("DROP TABLE runtime.provider_creation_operations; DROP FUNCTION runtime.protect_provider_creation_operation(); DELETE FROM runtime.schema_migrations WHERE version=17;").unwrap();
     }
     let reopened = PostgresRuntimeStore::new(&url).unwrap();
@@ -525,7 +527,7 @@ fn postgres_provider_creation_schema_upgrade_preserves_legacy_grants_and_job_his
         db.query_one("SELECT max(version) FROM runtime.schema_migrations", &[])
             .unwrap()
             .get::<_, i64>(0),
-        17
+        18
     );
     assert_eq!(db.query("SELECT version,applied_at_ms FROM runtime.schema_migrations WHERE version<=16 ORDER BY version",&[]).unwrap().iter().map(|row|(row.get(0),row.get(1))).collect::<Vec<(i64,i64)>>(),prior);
     let after=db.query_one("SELECT payload::text,signature,(SELECT row_to_json(j)::text FROM runtime.runtime_jobs j WHERE j.job_id=$2) FROM public.app_core_agentrunauthorization WHERE agent_run_id=$1",&[&legacy.original.agent_run_id,&legacy.fence.job_id]).unwrap();

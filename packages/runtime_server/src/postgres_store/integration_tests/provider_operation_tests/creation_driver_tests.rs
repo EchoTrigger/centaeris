@@ -97,6 +97,11 @@ fn postgres_e2b_creation_driver_sends_exact_payload_once_and_reopens_without_sen
         operation.reported_sandbox_id.as_deref(),
         Some("opaque-sandbox")
     );
+    assert_eq!(
+        db.query_one("SELECT verified_sandbox_id FROM runtime.provider_creation_operations WHERE attempt_id=$1", &[&operation.identity.attempt_id]).unwrap().get::<_, Option<String>>(0).as_deref(),
+        Some("opaque-sandbox"),
+        "the actual successful create inspection must survive VM expiry before cleanup"
+    );
     let payload = adapter.calls.lock().unwrap()[0].clone();
     assert_eq!(payload["attemptId"], "attempt-provider");
     assert_eq!(payload["idempotencyKey"], "key-provider");
@@ -339,6 +344,8 @@ fn postgres_e2b_creation_driver_retains_candidate_when_sdk_inspection_failed() {
         operation.reported_sandbox_id.as_deref(),
         Some("opaque-sandbox")
     );
+    assert!(db.query_one("SELECT verified_sandbox_id FROM runtime.provider_creation_operations WHERE attempt_id=$1", &[&operation.identity.attempt_id]).unwrap().get::<_, Option<String>>(0).is_none(),
+        "a locator returned with Unknown must not authorize execution or deletion");
     assert_eq!(adapter.calls.lock().unwrap().len(), 1);
 }
 
@@ -532,6 +539,10 @@ sys.path.insert(0,str(root/'packages/e2b_adapter'))
 from test_sdk_transport_acceptance import provider_fixture
 from centaeris_e2b_adapter.bridge import Adapter, AdapterConfig
 with provider_fixture() as fixture:
+ # This fixture must expose the actual template bound by this signed profile.
+ # The generic Python fixture otherwise reports its own template-fixture ID.
+ original_sandbox=fixture.sandbox
+ fixture.sandbox=lambda:{**original_sandbox(), 'templateID':'centaeris-core'}
  adapter=Adapter(AdapterConfig(api_key='owned-loopback-fixture',domain='fixture.invalid',api_url=fixture.api_url,sandbox_url=fixture.api_url,idempotency_supported=False))
  for line in sys.stdin:
   response=adapter.handle(json.loads(line))

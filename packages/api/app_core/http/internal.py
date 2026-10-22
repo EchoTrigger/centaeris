@@ -1631,7 +1631,20 @@ def release_agent_run_lifecycle(request):
             raise ValueError("agent_run_semantic_terminal_missing")
         released = get_environment_release_receipt(run.pk, body["leaseOwner"])
         if released is None:
-            receipt = get_agent_run_cleanup_receipt(run.pk, body["authorizationDigest"], body["cleanupReceiptId"])
+            from ..environment_profile import E2B_PROFILE_SCHEMA, environment_profile_digest
+            profile = run.environment.environment_profile
+            signed_profile = run.authorization.payload.get('environmentProfile')
+            provider_profile = any(isinstance(value, dict) and value.get('schema') == E2B_PROFILE_SCHEMA
+                for value in (profile, signed_profile))
+            receipt_binding = {}
+            if provider_profile:
+                profile_digest = environment_profile_digest(profile)
+                if (profile != signed_profile or profile_digest != run.environment.environment_profile_digest
+                        or profile_digest != run.authorization.payload.get('environmentProfileDigest')):
+                    raise ValueError("agent_run_cleanup_receipt_invalid")
+                receipt_binding = {'frozen_profile': profile, 'frozen_profile_digest': profile_digest}
+            receipt = get_agent_run_cleanup_receipt(run.pk, body["authorizationDigest"], body["cleanupReceiptId"],
+                **receipt_binding)
             if (receipt["environmentId"] != run.environment_id
                     or not 1 <= receipt["controllerEpoch"] <= body["controllerEpoch"] or receipt["cleanupComplete"] is not True):
                 raise ValueError("agent_run_cleanup_receipt_invalid")

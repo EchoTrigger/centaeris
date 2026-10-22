@@ -7,9 +7,59 @@ pub(super) fn cleanup_receipt(
     state: HttpServerState,
     request: Request<Bytes>,
 ) -> Result<Response<Body>, String> {
-    cleanup_receipt_response(request.into_body().as_ref(), |query| {
-        state.job_store.get_cleanup_receipt(query)
-    })
+    cleanup_receipt_dispatch_response(
+        request.into_body().as_ref(),
+        |query| state.job_store.get_cleanup_receipt(query),
+        |query| state.job_store.get_provider_cleanup_receipt(query),
+    )
+}
+
+fn cleanup_receipt_dispatch_response(
+    body: &[u8],
+    read_legacy: impl FnOnce(
+        &crate::postgres_store::cleanup_receipts::CleanupReceiptQuery,
+    ) -> Result<
+        Option<crate::postgres_store::cleanup_receipts::CleanupReceipt>,
+        String,
+    >,
+    read_provider: impl FnOnce(
+        &crate::postgres_store::provider_operations::cleanup::ProviderCleanupReceiptQuery,
+    ) -> Result<
+        Option<crate::postgres_store::provider_operations::cleanup::ProviderCleanupReceipt>,
+        String,
+    >,
+) -> Result<Response<Body>, String> {
+    #[derive(serde::Deserialize)]
+    struct QueryVersion {
+        schema: String,
+    }
+    let version = match serde_json::from_slice::<QueryVersion>(body) {
+        Ok(version) => version,
+        Err(_) => return json_error_response(400, "cleanup_receipt_query_invalid"),
+    };
+    match version.schema.as_str() {
+        "runtime.agent_run.cleanup_receipt.get.v1" => cleanup_receipt_response(body, read_legacy),
+        "runtime.agent_run.cleanup_receipt.get.v2" => {
+            let query = match serde_json::from_slice::<
+                crate::postgres_store::provider_operations::cleanup::ProviderCleanupReceiptQuery,
+            >(body)
+            {
+                Ok(query) if query.validate().is_ok() => query,
+                _ => return json_error_response(400, "cleanup_receipt_query_invalid"),
+            };
+            match read_provider(&query) {
+                Ok(Some(receipt)) => Ok(http_response(
+                    200,
+                    "application/json",
+                    serde_json::to_vec(&receipt)
+                        .map_err(|_| "cleanup receipt response encoding failed")?,
+                )),
+                Ok(None) => json_error_response(404, "cleanup_receipt_not_found"),
+                Err(_) => json_error_response(503, "cleanup_receipt_unavailable"),
+            }
+        }
+        _ => json_error_response(400, "cleanup_receipt_query_invalid"),
+    }
 }
 
 fn cleanup_receipt_response(
@@ -554,6 +604,142 @@ mod cleanup_receipt_http_tests {
         assert_eq!(value["schema"], "runtime.agent_run.step.result.v1");
         assert_eq!(value["terminalState"], "completed");
     }
+    fn query(schema: &str) -> serde_json::Value {
+        json!({"schema":schema,"agentRunId":"run-1",
+            "authorizationDigest":format!("sha256:{}","a".repeat(64)),"cleanupReceiptId":"receipt-1"})
+    }
+
+    fn provider_receipt(
+    ) -> crate::postgres_store::provider_operations::cleanup::ProviderCleanupReceipt {
+        serde_json::from_value(json!({"schema":"runtime.agent_run.cleanup_receipt.v2",
+            "receiptId":"receipt-1","agentRunId":"run-1","environmentId":"environment-1",
+            "authorizationDigest":format!("sha256:{}","a".repeat(64)),"controllerEpoch":3,
+            "cleanupComplete":true,"provider":"e2b","profileDigest":format!("sha256:{}","b".repeat(64)),
+            "providerConfigDigest":format!("sha256:{}","c".repeat(64)),
+            "settlementDigest":format!("sha256:{}","d".repeat(64)),"operationCount":1})).unwrap()
+    }
+
+    fn response_json(response: Response<Body>) -> serde_json::Value {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let bytes = runtime
+            .block_on(axum::body::to_bytes(response.into_body(), 4096))
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn provider_receipt_query_routes_exact_identity_and_serializes_provider_evidence() {
+        let expected = provider_receipt();
+        let response = cleanup_receipt_dispatch_response(
+            &serde_json::to_vec(&query("runtime.agent_run.cleanup_receipt.get.v2")).unwrap(),
+            |_| panic!("provider query reached legacy storage"),
+            |query| {
+                assert_eq!(query.agent_run_id, "run-1");
+                assert_eq!(query.cleanup_receipt_id, "receipt-1");
+                assert_eq!(
+                    query.authorization_digest,
+                    format!("sha256:{}", "a".repeat(64))
+                );
+                Ok(Some(expected.clone()))
+            },
+        )
+        .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response_json(response),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn provider_receipt_missing_or_unavailable_has_existing_bounded_errors() {
+        let body = serde_json::to_vec(&query("runtime.agent_run.cleanup_receipt.get.v2")).unwrap();
+        let missing = cleanup_receipt_dispatch_response(
+            &body,
+            |_| panic!("provider query reached legacy storage"),
+            |_| Ok(None),
+        )
+        .unwrap();
+        assert_eq!(missing.status(), 404);
+        assert_eq!(
+            response_json(missing),
+            json!({"error":"cleanup_receipt_not_found"})
+        );
+        let unavailable = cleanup_receipt_dispatch_response(
+            &body,
+            |_| panic!("provider query reached legacy storage"),
+            |_| Err("private connection diagnostic".into()),
+        )
+        .unwrap();
+        assert_eq!(unavailable.status(), 503);
+        assert_eq!(
+            response_json(unavailable),
+            json!({"error":"cleanup_receipt_unavailable"})
+        );
+    }
+
+    #[test]
+    fn provider_receipt_invalid_queries_never_read_either_store() {
+        let good = query("runtime.agent_run.cleanup_receipt.get.v2");
+        let mut invalid = Vec::new();
+        for field in [
+            "schema",
+            "agentRunId",
+            "authorizationDigest",
+            "cleanupReceiptId",
+        ] {
+            let mut missing = good.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            invalid.push(serde_json::to_vec(&missing).unwrap());
+        }
+        for (field, value) in [
+            ("schema", json!("runtime.agent_run.cleanup_receipt.get.v3")),
+            ("agentRunId", json!("bad/path")),
+            ("authorizationDigest", json!("not-a-digest")),
+            ("cleanupReceiptId", json!("bad/path")),
+            ("extra", json!(true)),
+            ("agent_run_id", json!("run-1")),
+            ("allocation", json!({"kind":"neverAllocated"})),
+        ] {
+            let mut changed = good.clone();
+            changed[field] = value;
+            invalid.push(serde_json::to_vec(&changed).unwrap());
+        }
+        invalid.push(br#"{"schema":"runtime.agent_run.cleanup_receipt.get.v2","schema":"runtime.agent_run.cleanup_receipt.get.v2","agentRunId":"run-1","authorizationDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","cleanupReceiptId":"receipt-1"}"#.to_vec());
+        for body in invalid {
+            let response = cleanup_receipt_dispatch_response(
+                &body,
+                |_| panic!("invalid query reached legacy storage"),
+                |_| panic!("invalid query reached provider storage"),
+            )
+            .unwrap();
+            assert_eq!(response.status(), 400);
+            assert_eq!(
+                response_json(response),
+                json!({"error":"cleanup_receipt_query_invalid"})
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_receipt_dispatch_keeps_exact_response_and_never_calls_provider_store() {
+        let expected = serde_json::from_value::<crate::postgres_store::cleanup_receipts::CleanupReceipt>(json!({
+            "schema":"runtime.agent_run.cleanup_receipt.v1","receiptId":"receipt-1","agentRunId":"run-1",
+            "environmentId":"environment-1","allocation":{"kind":"neverAllocated"},
+            "authorizationDigest":format!("sha256:{}","a".repeat(64)),"controllerEpoch":3,"cleanupComplete":true})).unwrap();
+        let response = cleanup_receipt_dispatch_response(
+            &serde_json::to_vec(&query("runtime.agent_run.cleanup_receipt.get.v1")).unwrap(),
+            |_| Ok(Some(expected.clone())),
+            |_| panic!("legacy query reached provider storage"),
+        )
+        .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response_json(response),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+
     #[test]
     fn receipt_query_rejects_unsupported_schema_and_unknown_fields_before_storage() {
         let good = json!({"schema":"runtime.agent_run.cleanup_receipt.get.v1","agentRunId":"run-1",

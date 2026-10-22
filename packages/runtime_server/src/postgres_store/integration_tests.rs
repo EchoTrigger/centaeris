@@ -2944,8 +2944,10 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
             DROP TABLE IF EXISTS public.app_core_sessionevent;
             DROP TABLE IF EXISTS public.app_core_session CASCADE;
             DROP TABLE IF EXISTS public.app_core_agentrunenvironmentrelease;
+            DROP TABLE IF EXISTS public.app_core_agentrunauthorization;
             DROP TABLE IF EXISTS public.app_core_agentrun CASCADE;
             CREATE TABLE public.app_core_agentrun(id text PRIMARY KEY,session_id text NOT NULL,"preAdmissionCancelledAt" timestamptz);
+            CREATE TABLE public.app_core_agentrunauthorization(agent_run_id text PRIMARY KEY,digest text NOT NULL,payload jsonb NOT NULL,signature text NOT NULL);
             CREATE TABLE public.app_core_agentrunenvironmentrelease(agent_run_id text PRIMARY KEY,environment_id text NOT NULL,authorization_digest text NOT NULL,controller_epoch bigint NOT NULL);
             CREATE TABLE public.app_core_session(
                 id varchar(64) PRIMARY KEY,
@@ -3014,6 +3016,10 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
         coordination_session_id: None,
         native_coordination_session_id: None,
     };
+    store.with_client(|db| {
+        db.execute("INSERT INTO public.app_core_agentrunauthorization(agent_run_id,digest,payload,signature) VALUES($1,$2,$3::text::jsonb,$4)", &[&start.agent_run_id, &start.authorization_digest, &serde_json::to_string(&start.authorization).unwrap(), &start.authorization_signature]).map_err(|e| e.to_string())?;
+        Ok(())
+    }).expect("persist original signed lifecycle grant");
     let mut lifecycle_job = job(
         "agent_run.lifecycle:agent_run_fenced_terminal",
         &format!(

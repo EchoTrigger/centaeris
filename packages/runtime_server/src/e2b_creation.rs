@@ -4,6 +4,7 @@ use crate::agent_run_authorization::{
 };
 use crate::e2b_adapter::{AdapterFailure, AdapterOutcome, AdapterProcess, AdapterResponse};
 use crate::postgres_store::controller_authority::ControllerAuthorityRequest;
+use crate::postgres_store::provider_operations::cleanup::ProviderSandboxObservation;
 use crate::postgres_store::provider_operations::{
     FreshProviderCreationDispatchPermit, ProviderCreationDispatchState, ProviderCreationIdentity,
     ProviderCreationOperation, ProviderCreationRequest,
@@ -113,7 +114,7 @@ impl<'a, A: E2bCreationAdapter + ?Sized> E2bCreationDriver<'a, A> {
             .store
             .dispatch_provider_creation(authority, &operation.identity)
             .map_err(E2bCreationError::Store)?;
-        self.send_create(permit, planned, request.transport_timeout)
+        self.send_create(authority, permit, planned, request.transport_timeout)
     }
 
     pub fn record_late_candidate(
@@ -131,6 +132,7 @@ impl<'a, A: E2bCreationAdapter + ?Sized> E2bCreationDriver<'a, A> {
 
     fn send_create(
         &self,
+        authority: &ControllerAuthorityRequest<'_>,
         permit: FreshProviderCreationDispatchPermit,
         planned: PlannedCreation,
         timeout: Duration,
@@ -190,6 +192,33 @@ impl<'a, A: E2bCreationAdapter + ?Sized> E2bCreationDriver<'a, A> {
                 "e2b_creation_response_identity_rejected",
             ));
         }
+        if response.outcome == AdapterOutcome::Succeeded {
+            let template_id = candidate
+                .template_id
+                .ok_or(E2bCreationError::Rejected("e2b_creation_response_invalid"))?;
+            let metadata = candidate
+                .metadata
+                .ok_or(E2bCreationError::Rejected("e2b_creation_response_invalid"))?;
+            if candidate.state.as_deref() != Some("running") {
+                return Err(E2bCreationError::Rejected("e2b_creation_response_invalid"));
+            }
+            // Preserve the provider's actual successful GET observation before
+            // any ordinary effect. A requested metadata echo or candidate-only
+            // Unknown cannot establish this fact. Current authority is checked
+            // again by the store; a stale owner only contributes the locator.
+            self.store
+                .record_provider_execution_target(
+                    authority,
+                    &operation.identity,
+                    &operation.identity.provider_config_digest,
+                    &ProviderSandboxObservation {
+                        sandbox_id,
+                        template_id,
+                        metadata,
+                    },
+                )
+                .map_err(E2bCreationError::Store)?;
+        }
         Ok(recorded)
     }
 }
@@ -218,11 +247,9 @@ struct TemplateReference<'a> {
 struct CreateCandidate {
     attempt_id: String,
     sandbox_id: Option<String>,
-    #[serde(rename = "templateId")]
-    _template_id: Option<String>,
+    template_id: Option<String>,
     metadata: Option<BTreeMap<String, String>>,
-    #[serde(rename = "state")]
-    _state: Option<String>,
+    state: Option<String>,
 }
 
 struct PlannedCreation {
