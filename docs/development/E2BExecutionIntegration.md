@@ -26,11 +26,13 @@ lifetime, timeout and input-transfer budget. Later Runtime advertisements
 cannot replace a bound Environment profile. Legacy payloads, digests and
 signatures retain their exact meaning.
 
-The current bridge bounds each file transfer at 256 KiB and command text output
-at 64 KiB. These limits do not satisfy Core's full binary I/O contract. The
-production runner must add lossless bulk transport or reject unsupported
-requirements before side effects. SDK-decoded text must not be presented as
-original process-byte evidence.
+The bridge keeps inline files at 256 KiB and command output at 64 KiB.
+Larger binary files use a separate bounded spool protocol with a 128 MiB
+per-transfer ceiling, stable file identity, byte counts and SHA-256 verification.
+The host filesystem port retains Core's existing 64 MiB binary contract.
+Transport limits are independent of the signed input-transfer budget.
+Original command streams preserve stdout/stderr bytes, including invalid UTF-8;
+a restarted adapter cannot reconstruct a lost stream and must return Unknown.
 
 These components do not yet replace production Core execution. Runtime startup,
 physical allocation, command recovery and teardown still use the legacy host.
@@ -50,8 +52,9 @@ flowchart TD
     D --> E["Official E2B SDK adapter"]
     E --> F["E2B sandbox"]
     F --> G["Existing Core: files, tools and delivery"]
-    G --> H["Authoritative Run terminal"]
-    H --> I["Scoped cleanup and environment retention"]
+    G --> H["Protect final workspace and delivery"]
+    H --> T["Authoritative Run terminal"]
+    T --> I["Scoped cleanup and environment retention"]
     I --> J["Verify cleanup, release and Job completion"]
     K["Cancellation intent"] --> C
     E --> L["Unknown: retain identity and investigation duty"]
@@ -65,8 +68,9 @@ these records; they do not become another node-placement or VM state machine.
 
 A retry first resolves the same attempt. A timeout, empty lookup or expired
 idempotency window never authorizes a replacement create or refund.
-SDK action and connection retries are disabled. Provider idempotency must be
-verified on the selected server before create is enabled.
+SDK action and connection retries are disabled. A fresh successful durable
+dispatch CAS grants a single send. Provider idempotency is an optional additional
+capability; a client configuration flag neither verifies it nor authorizes retries.
 
 ## Signed policy
 
@@ -96,9 +100,12 @@ Short control must remain available when ordinary work or slow cleanup is
 saturated. A control lease does not authorize ordinary execution, create or resume.
 
 The current adapter supports exact-sandbox deletion in the cleanup lane.
-Ordinary PID signaling is not process-tree cleanup proof. The pinned public SDK
-does not provide a verified no-resume attachment for a fresh control process.
-Retained Run-scoped cancellation is not accepted yet.
+Ordinary PID signaling is not process-tree cleanup proof. A fresh control
+process verifies exact provider metadata, template, running state and explicit
+kill/no-auto-resume policy through GET, then uses the pinned generated process
+protocol for a fixed helper. It does not connect, resume or extend timeout.
+The fixed helper can quiesce the workload UID; unresolved root-helper effects
+remain Unknown. Retained Run-scoped cancellation is not accepted yet.
 
 Begin product cutover with explicitly supported perRun policy. Retained requires
 verified Run-versus-Environment task cleanup, file/session continuity and the
@@ -127,11 +134,41 @@ PostgreSQL, real-provider and performance results are recorded separately.
 Use the existing loopback model and actual Core tool events for deterministic
 product acceptance without external model requests.
 
-The development host was probed without running Embed setup: WSL2 kernel
-6.18.54.1, 4096-byte pages, cgroup v2 and TUN are present, but /dev/kvm is absent.
-Opening it returns ENOENT, so this host cannot currently run Embed. Real-provider
-acceptance awaits an owned KVM host or E2B endpoint. Global kernel, hugepage and
-network configuration must not change as incidental test setup.
+After the host reboot, the WSL2 development host exposes `/dev/kvm`, `svm` and
+`kvm_amd`. Opening KVM, reading API version 12 and creating then closing an empty
+VM all pass. The host has kernel 6.18.54.1, 4096-byte pages, cgroup v2, TUN and
+an available NBD module. This KVM check preceded Embed deployment. The authorized
+host setup now
+provides NBD, 1 GiB of hugepages and the required system and network configuration.
+
+Self-hosted SDK configuration selects both the control-plane API URL and the
+sandbox data URL. The pair is passed explicitly to the SDK client, without
+inferring one from the other or inheriting unselected ambient endpoints. Tests
+use separate loopback control, data and interference servers to verify actual
+binary-file routing. Provider creation idempotency remains unverified for this
+deployment.
+Setting a client capability flag does not enable it on the server; the Runtime
+fresh-dispatch boundary and zero retries provide the required single-send rule.
+
+Local Embed smoke uses the pinned official SDK and one 512 MiB, 2-vCPU
+sandbox at a time. The fixed template includes the existing execution agent and
+workload UID/GID 10001. The latest physical probe verifies prepare-workspace,
+binary filesystem frames, create-only conflict, concurrent ordinary wait and
+fresh control quiescence, unchanged sandbox expiry and exact-ID deletion followed
+by provider NotFound. The test sandbox was removed; this is not yet the
+API/Worker/Core product lifecycle acceptance.
+
+A separate command-contract probe preserves NUL and invalid UTF-8 bytes. Killing
+a parent PID did not stop its detached descendant, so PID acknowledgement is not
+tree-cleanup evidence. A bulk probe also transfers more than 1 MiB with an exact
+hash. Earlier single-sandbox create responses were 426–539 ms and delete
+acknowledgements 10–22 ms. These smoke samples establish neither percentiles nor
+physical memory reclamation time.
+
+Deployment uses the authorized download proxy, separate Redis port and scoped
+WSL DNS forwarding. No provider source was changed. Each physical smoke used a
+single recorded create attempt with retries disabled. Provider creation
+idempotency remains unverified for this deployment.
 
 Measure release builds after the product route works: queue wait, prepare,
 first useful tool, Run terminal, Job complete and environment settlement.
@@ -145,18 +182,36 @@ execute/control isolation, server-checked completion, durable release wakeups
 and forward migrations. Retained reuse and Unknown outcomes stay conservative.
 
 Backend-neutral hook and artifact ports enable reuse of existing product
-behavior. Remaining Docker dependencies include startup, allocation/observation,
+behavior. SessionWorkspace resolution and uncertain-commit reconciliation now
+share their existing authorization and HTTP contract outside the Docker host.
+Remaining Docker dependencies include startup, allocation/observation,
 SessionWorkspace protection, command recovery, MCP stdio, background tasks and
 teardown. Reuse host-agnostic guest file/input/artifact codecs where appropriate;
 the runsc launcher and host supervisor are not an E2B lifecycle implementation.
 
-The next local boundary is a provider effect ledger and the existing Core host
-facade: persist create/command/remove attempts, route the same AgentRun through
-E2B, protect the final SessionWorkspace, then verify a provider cleanup receipt
-before release and complete. NoEffects and complete must inspect the appropriate
-provider facts as well as legacy records. A perRun policy still requires final
+The provider creation ledger persists exact Environment, instance, profile,
+configuration, attempt and lifecycle Job identities before dispatch. A durable
+CAS grants one send or closes a proven unsent operation; dispatched Unknown
+cannot be refunded or replaced with another attempt. Late reported sandbox IDs
+remain candidate evidence and do not grant execution authority. Migration 16 to
+17 preserves signed grants and Job facts; migration 17 to 18 adds verified
+provider identity and settlement facts to the same operation record.
+
+Cleanup verifies the full binding before deletion and persists it before the
+physical call. Only proven non-dispatch or exact verified removal can settle an
+operation. Settlement, the versioned provider cleanup receipt, controller release
+and Job completion remain separate facts. NoEffects and complete inspect provider
+obligations as well as legacy records. Unknown cannot disappear behind a legacy
+receipt, a timeout or an empty observation.
+
+The remaining product boundary is the Core host facade and production factory:
+route the same AgentRun through E2B, protect the final SessionWorkspace, then
+verify cleanup before release and complete. A perRun policy still requires final
 workspace export and commit; it cannot bypass protection by pretending to retain
-an instance.
+an instance. The shared snapshot codec and uncertain-commit HTTP protocol are
+reused. Unknown helper effects must survive recovery before a reconstructed
+runner can declare the workspace safe. The current bounded command-stream cache
+supports only the same adapter process.
 
 Delete legacy execution after replacement behavior is tested and no live binding
 or pending cleanup duty needs it. Keep historical authorization and settlement
@@ -170,19 +225,25 @@ independent.
 
 ## Local verification
 
-The SDK/profile foundation passed the local Rust source gate (including 129
-Core query-loop tests), warning-denied hosted Runtime Clippy, hosted Rust
-checks/tests and Compose validation. Hosted Runtime ran 485 tests; 211 tests
-requiring separate fixtures were ignored by that ordinary command. The
-separate owned PostgreSQL gate executed all 178 selected lifecycle/migration
-tests without skips. The API affected suite passed 112 tests, Worker passed
-101 tests, and the SDK suite passed 36 tests, including nine using the actual
-pinned SDK against loopback HTTP.
+The earlier foundation at `b35389da` passed 129 Core query-loop tests,
+488 ordinary hosted Runtime tests (233 fixture-dependent tests ignored), and a
+separate owned PostgreSQL gate of 200 selected tests. Those results apply to
+that source boundary, not to unfinished production routing.
 
-The test processes cleared inherited SOCKS proxy variables so loopback fixtures
-received their requests. No product proxy configuration changed. Real E2B
-creation, the new Core/provider product route and legacy removal remain pending;
-these foundation results do not activate either E2B or retained policy.
+The later SDK transfer/attachment commit passes 93 tests. The affected API
+suite passes 36 tests. On the integrated Linux test executable, 84 selected
+ordinary tests and 54 distinct owned-PostgreSQL tests pass, covering host
+execution, exact binary SDK transport, SessionWorkspace, receipts, authority,
+old cleanup and forward migrations. The required 129 Core query-loop tests
+also pass. An archive fixture generator remains explicitly ignored; it is not
+an acceptance result. These are affected-boundary results, not a completed full
+release gate. Production factory wiring and the full product chain remain open.
+
+Fixtures clear inherited proxy variables only in their own processes. Real E2B
+helper smoke passes. The Core/provider product route, complete restart and
+cancellation chain, and legacy removal remain pending. No retained policy or
+production cutover is activated by these component results.
+
 ## References
 
 - [Pinned official Python SDK](https://pypi.org/project/e2b/2.58.0/)
