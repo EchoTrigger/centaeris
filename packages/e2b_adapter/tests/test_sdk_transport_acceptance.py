@@ -82,7 +82,38 @@ def provider_fixture(mode="success"):
 
         def do_POST(self):
             size = int(self.headers.get("Content-Length", "0"))
-            body = json.loads(self.rfile.read(size)) if size else None
+            if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
+                raw = bytearray()
+                while True:
+                    chunk_size = int(self.rfile.readline().split(b";", 1)[0], 16)
+                    if chunk_size == 0:
+                        self.rfile.readline()
+                        break
+                    raw.extend(self.rfile.read(chunk_size))
+                    self.rfile.read(2)
+                raw = bytes(raw)
+            else:
+                raw = self.rfile.read(size)
+            if self.path in ("/process.Process/Start", "/process.Process/Connect"):
+                body = json.loads(raw[5:5 + int.from_bytes(raw[1:5], "big")])
+                fixture.record("POST", self.path, self.headers, body)
+                events = [{"event": {"start": {"pid": 71}}}]
+                if self.path.endswith("/Start"):
+                    events.append({"event": {"data": {"stdout": base64.b64encode(b"centaeris-adapter-ok\n").decode()}}})
+                # A new connection observes completion without replaying output.
+                events.append({"event": {"end": {"exitCode": 7 if fixture.mode == "commandExit" else 0, "exited": True, "status": "success"}}})
+                chunks = [json.dumps(event).encode() for event in events]
+                wire = b"".join(b"\x00" + len(chunk).to_bytes(4, "big") + chunk for chunk in chunks)
+                wire += b"\x02\x00\x00\x00\x02{}"
+                self.send_response(200)
+                self.send_header("Content-Type", "application/connect+json")
+                self.send_header("Content-Length", str(len(wire)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(wire)
+                self.close_connection = True
+                return
+            body = json.loads(raw) if size else None
             fixture.record("POST", self.path, self.headers, body)
             if self.path == "/v2/sandboxes/sandbox-fixture/connect":
                 self.reply(200, fixture.sandbox())
@@ -194,6 +225,22 @@ def lifecycle_request(operation, **extra):
 
 
 class SdkTransportAcceptanceTests(unittest.TestCase):
+    def test_started_command_keeps_its_output_when_a_new_stream_does_not_replay(self):
+        for mode, exit_code in (("success", 0), ("commandExit", 7)):
+            with self.subTest(exit_code=exit_code), provider_fixture(mode) as fixture:
+                adapter = adapter_for(fixture)
+                self.assertEqual(adapter.handle(create_request())["outcome"], "succeeded")
+                started = adapter.handle({"schema": "runtime.e2b.adapter.request.v1", "requestId": "start",
+                    "operation": "runCommand", "payload": {"sandboxId": "sandbox-fixture", "command": "echo centaeris-adapter-ok", "timeoutSeconds": 10}})
+                self.assertEqual(started["outcome"], "succeeded", started)
+                completed = adapter.handle({"schema": "runtime.e2b.adapter.request.v1", "requestId": "wait",
+                    "operation": "waitCommand", "payload": {"sandboxId": "sandbox-fixture", "pid": started["result"]["pid"], "timeoutSeconds": 10}})
+                self.assertEqual(completed["outcome"], "succeeded", completed)
+                self.assertEqual(completed["result"]["stdout"], "centaeris-adapter-ok\n")
+                self.assertEqual(completed["result"]["exitCode"], exit_code)
+                self.assertEqual(sum(entry["path"] == "/process.Process/Start" for entry in fixture.requests), 1)
+                self.assertEqual(sum(entry["path"] == "/process.Process/Connect" for entry in fixture.requests), 0)
+
     def test_self_hosted_create_and_connect_keep_binary_traffic_on_explicit_sandbox_url(self):
         with provider_fixture() as control, provider_fixture("fileData") as data, provider_fixture() as ambient:
             with patch.dict(os.environ, {"E2B_API_URL": ambient.api_url, "E2B_SANDBOX_URL": ambient.api_url, "E2B_DOMAIN": ""}):

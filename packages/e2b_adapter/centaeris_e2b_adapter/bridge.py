@@ -8,6 +8,7 @@ import importlib.metadata
 import json
 import os
 import re
+from time import monotonic
 from typing import BinaryIO
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -19,12 +20,20 @@ MAX_FRAME_BYTES = 1024 * 1024
 MAX_FILE_BYTES = 256 * 1024
 MAX_OUTPUT_BYTES = 64 * 1024
 MAX_CONNECTED_SANDBOXES = 128
+MAX_COMMANDS = 128
 
 
 class RequestError(ValueError):
     def __init__(self, code, message):
         super().__init__(message)
         self.code = code
+
+
+@dataclass
+class _CommandEvidence:
+    handle: object | None
+    deadline: float
+    result: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -104,6 +113,7 @@ class Adapter:
     def __init__(self, config: AdapterConfig, *, client=None):
         self.config = config
         self._sandboxes = OrderedDict()
+        self._commands = OrderedDict()
         if client is None:
             if ((config.api_url is None and os.environ.get("E2B_API_URL"))
                     or (config.sandbox_url is None and os.environ.get("E2B_SANDBOX_URL"))):
@@ -137,8 +147,15 @@ class Adapter:
                 if payload["sandboxId"] not in self._sandboxes:
                     raise RequestError("connectionRequired", "Explicit connect is required in this adapter process")
             known = {k: payload[k] for k in ("attemptId", "sandboxId", "pid") if k in payload}
+            if operation == "runCommand":
+                self._admit_command()
+            if operation in ("waitCommand", "recoverCommand"):
+                evidence = self._commands.get((payload["sandboxId"], payload["pid"]))
+                if evidence is not None and evidence.handle is not None:
+                    if payload["timeoutSeconds"] < evidence.deadline - monotonic():
+                        raise RequestError("waitBudgetInsufficient", "Wait budget must cover the original command stream's remaining deadline")
         except (RequestError, UnicodeError, TypeError) as error:
-            return self._response(request_id, "notDispatched", error={"code": getattr(error, "code", "invalidRequest"), "message": str(error) if isinstance(error, RequestError) else "Invalid request"})
+            return self._response(request_id, "notDispatched", **({"result": known} if known else {}), error={"code": getattr(error, "code", "invalidRequest"), "message": str(error) if isinstance(error, RequestError) else "Invalid request"})
         try:
             result = self._execute(operation, payload, known)
             return self._response(request_id, "succeeded", result=result)
@@ -236,6 +253,14 @@ class Adapter:
         if len(self._sandboxes) > MAX_CONNECTED_SANDBOXES:
             self._sandboxes.popitem(last=False)
 
+    def _admit_command(self):
+        if len(self._commands) < MAX_COMMANDS:
+            return
+        completed = next((key for key, evidence in self._commands.items() if evidence.result is not None), None)
+        if completed is None:
+            raise RequestError("commandCapacityUnavailable", "All bounded command evidence slots hold pending streams")
+        self._commands.pop(completed)
+
     @staticmethod
     def _info(info, expected_sandbox_id):
         if info.sandbox_id != expected_sandbox_id:
@@ -248,6 +273,8 @@ class Adapter:
         if operation == "capabilities":
             return {"sdkVersion": SDK_VERSION, "lane": self.config.lane, "createIdempotencyConfigured": self.config.idempotency_supported,
                     "commandStartIdempotency": False, "runProcessTreeCancellation": False, "controlCommandCancellation": False,
+                    "commandOutputRestartRecovery": False, "commandOutputRecovery": "adapterLifetime",
+                    "waitBudgetMustCoverOriginalStream": True, "maxCommandEvidence": MAX_COMMANDS,
                     "storageQuota": False, "fullMemoryPauseVerified": False,
                     "maxFileBytes": MAX_FILE_BYTES, "maxOutputBytes": MAX_OUTPUT_BYTES}
         if operation == "create":
@@ -295,11 +322,26 @@ class Adapter:
             options = {key: payload[key] for key in ("cwd", "envs", "user") if key in payload}
             handle = sandbox.commands.run(payload["command"], background=True, timeout=payload["timeoutSeconds"], **options)
             known["pid"] = handle.pid
-            handle.disconnect()
+            key = sandbox_id, handle.pid
+            previous = self._commands.get(key)
+            if previous is not None and previous.handle is not None:
+                handle.disconnect()
+                raise RequestError("commandIdentityConflict", "A new command conflicts with an existing pending process identity")
+            self._commands.pop(key, None)
+            self._commands[key] = _CommandEvidence(handle=handle, deadline=monotonic() + payload["timeoutSeconds"])
             return {"sandboxId": sandbox_id, "pid": handle.pid}
         if operation == "cancelCommand":
             return {"sandboxId": sandbox_id, "pid": payload["pid"], "signalSent": sandbox.commands.kill(payload["pid"], request_timeout=self.config.request_timeout_seconds)}
-        handle = sandbox.commands.connect(payload["pid"], timeout=payload["timeoutSeconds"])
+        key = sandbox_id, payload["pid"]
+        evidence = self._commands.get(key)
+        if evidence is None:
+            raise RequestError("commandOutputUnavailable", "Original command output evidence is unavailable; do not reexecute the command")
+        if evidence.result is not None:
+            if len((evidence.result["stdout"] + evidence.result["stderr"]).encode("utf-8")) > payload.get("maxOutputBytes", MAX_OUTPUT_BYTES):
+                raise RequestError("outputLimitExceeded", "Recorded command output exceeds the requested output budget")
+            self._commands.move_to_end(key)
+            return dict(evidence.result)
+        handle = evidence.handle
         stdout, stderr = [], []
         size = 0
         try:
@@ -317,9 +359,14 @@ class Adapter:
                 if not isinstance(error, CommandExitException):
                     raise
                 result = error
-            return {"sandboxId": sandbox_id, "pid": payload["pid"], "exitCode": result.exit_code, "stdout": "".join(stdout), "stderr": "".join(stderr)}
+            completed = {"sandboxId": sandbox_id, "pid": payload["pid"], "exitCode": result.exit_code, "stdout": "".join(stdout), "stderr": "".join(stderr)}
         finally:
-            handle.disconnect()
+            try:
+                handle.disconnect()
+            finally:
+                self._commands.pop(key, None)
+        self._commands[key] = _CommandEvidence(handle=None, deadline=0, result=completed)
+        return dict(completed)
 
 
 def _strict_object(pairs):

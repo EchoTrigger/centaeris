@@ -31,8 +31,10 @@ class Handle:
         self.output = output or [("ok", None, None)]
         self.exit_code = exit_code
         self.disconnected = False
+        self.iterations = 0
 
     def __iter__(self):
+        self.iterations += 1
         return iter(self.output)
 
     def disconnect(self):
@@ -128,6 +130,15 @@ class AdapterTests(unittest.TestCase):
     def connect(self):
         response = self.adapter.handle(request("connect", {"sandboxId": "sandbox-a", "timeoutSeconds": 300, "onResume": "restore"}))
         self.assertEqual(response["outcome"], "succeeded")
+
+    def start(self, pid=71):
+        self.client.sandbox.handle.pid = pid
+        response = self.adapter.handle(request("runCommand", {"sandboxId": "sandbox-a", "command": "echo ok", "timeoutSeconds": 10}))
+        self.assertEqual(response["outcome"], "succeeded", response)
+        return self.client.sandbox.handle
+
+    def wait(self, pid=71, **extra):
+        return self.adapter.handle(request("waitCommand", {"sandboxId": "sandbox-a", "pid": pid, "timeoutSeconds": 10, **extra}))
 
     def test_explicit_self_hosted_urls_are_bound_to_the_sdk_without_a_domain(self):
         with patch("e2b.E2B", return_value=self.client) as factory:
@@ -278,29 +289,160 @@ class AdapterTests(unittest.TestCase):
         response = self.adapter.handle(request("runCommand", {"sandboxId": "sandbox-a", "command": "echo ok", "timeoutSeconds": 10, "cwd": "/workspace", "envs": {"LANG": "C"}}))
         self.assertEqual(response["result"], {"sandboxId": "sandbox-a", "pid": 71})
         self.assertTrue(self.client.sandbox.calls[-1][1]["background"])
+        self.assertFalse(self.client.sandbox.handle.disconnected)
 
     def test_recover_known_pid_never_reexecutes(self):
         self.connect()
+        self.start()
         response = self.adapter.handle(request("recoverCommand", {"sandboxId": "sandbox-a", "pid": 71, "timeoutSeconds": 10}))
         self.assertEqual(response["result"]["stdout"], "ok")
         self.assertEqual(response["result"]["exitCode"], 0)
-        self.assertFalse(any(call[0] == "run" for call in self.client.sandbox.calls))
+        self.assertEqual(sum(call[0] == "run" for call in self.client.sandbox.calls), 1)
+        self.assertFalse(any(call[0] == "commandConnect" for call in self.client.sandbox.calls))
 
-    def test_recovery_failure_retains_pid(self):
+    def test_cold_recovery_retains_pid_without_claiming_output_replay(self):
         self.connect()
-        self.client.sandbox.commands.connect = lambda *a, **kw: (_ for _ in ()).throw(LookupError())
         response = self.adapter.handle(request("recoverCommand", {"sandboxId": "sandbox-a", "pid": 71, "timeoutSeconds": 10}))
         self.assertEqual(response["outcome"], "unknown")
         self.assertEqual(response["result"]["pid"], 71)
+        self.assertEqual(response["error"]["code"], "commandOutputUnavailable")
+        self.assertFalse(any(call[0] in ("commandConnect", "run") for call in self.client.sandbox.calls))
 
     def test_output_limit_disconnects_unsettled_process(self):
         self.connect()
         self.client.sandbox.handle = Handle([("12345", None, None)])
-        response = self.adapter.handle(request("waitCommand", {"sandboxId": "sandbox-a", "pid": 71, "timeoutSeconds": 10, "maxOutputBytes": 4}))
+        self.start()
+        response = self.wait(maxOutputBytes=4)
         self.assertEqual(response["outcome"], "unknown")
         self.assertEqual(response["error"]["code"], "outputLimitExceeded")
         self.assertEqual(response["result"]["pid"], 71)
         self.assertTrue(self.client.sandbox.handle.disconnected)
+
+    def test_completed_output_replays_without_consuming_or_restarting_the_command(self):
+        self.connect()
+        handle = self.start()
+        completed = self.wait()
+        replay = self.adapter.handle(request("recoverCommand", {"sandboxId": "sandbox-a", "pid": 71, "timeoutSeconds": 10}))
+        self.assertEqual(completed["outcome"], "succeeded", completed)
+        self.assertEqual(replay["result"], completed["result"])
+        self.assertEqual(handle.iterations, 1)
+        self.assertTrue(handle.disconnected)
+        self.assertEqual(sum(call[0] == "run" for call in self.client.sandbox.calls), 1)
+
+    def test_insufficient_wait_budget_keeps_the_original_stream_waitable(self):
+        self.connect()
+        with patch("centaeris_e2b_adapter.bridge.monotonic", return_value=1000):
+            handle = self.start()
+            rejected = self.adapter.handle(request("waitCommand", {"sandboxId": "sandbox-a", "pid": 71, "timeoutSeconds": 1}))
+            self.assertEqual(rejected["outcome"], "notDispatched")
+            self.assertEqual(rejected["error"]["code"], "waitBudgetInsufficient")
+            self.assertEqual(rejected["result"]["pid"], 71)
+            self.assertEqual(handle.iterations, 0)
+            self.assertFalse(handle.disconnected)
+            completed = self.wait()
+        self.assertEqual(completed["result"]["stdout"], "ok")
+
+    def test_cached_completion_respects_a_smaller_requested_output_budget(self):
+        self.connect()
+        self.start()
+        self.assertEqual(self.wait()["outcome"], "succeeded")
+        rejected = self.wait(maxOutputBytes=1)
+        self.assertEqual(rejected["outcome"], "unknown")
+        self.assertEqual(rejected["error"]["code"], "outputLimitExceeded")
+        self.assertEqual(self.wait(maxOutputBytes=2)["result"]["stdout"], "ok")
+
+    def test_live_command_capacity_is_checked_before_another_start(self):
+        self.connect()
+        with patch("centaeris_e2b_adapter.bridge.MAX_COMMANDS", 2):
+            first = self.start(71)
+            self.client.sandbox.handle = Handle()
+            second = self.start(72)
+            before = len(self.client.sandbox.calls)
+            response = self.adapter.handle(request("runCommand", {"sandboxId": "sandbox-a", "command": "third", "timeoutSeconds": 10}))
+        self.assertEqual(response["outcome"], "notDispatched")
+        self.assertEqual(response["error"]["code"], "commandCapacityUnavailable")
+        self.assertEqual(len(self.client.sandbox.calls), before)
+        self.assertFalse(first.disconnected)
+        self.assertFalse(second.disconnected)
+
+    def test_conflicting_process_identity_preserves_the_existing_pending_stream(self):
+        self.connect()
+        original = self.start()
+        replacement = Handle()
+        self.client.sandbox.handle = replacement
+        response = self.adapter.handle(request("runCommand", {"sandboxId": "sandbox-a", "command": "conflict", "timeoutSeconds": 10}))
+        self.assertEqual(response["outcome"], "unknown")
+        self.assertEqual(response["error"]["code"], "commandIdentityConflict")
+        self.assertEqual(response["result"]["pid"], 71)
+        self.assertFalse(original.disconnected)
+        self.assertTrue(replacement.disconnected)
+        self.assertEqual(self.wait()["result"]["stdout"], "ok")
+
+    def test_only_completed_evidence_can_be_evicted_for_new_command_capacity(self):
+        self.connect()
+        with patch("centaeris_e2b_adapter.bridge.MAX_COMMANDS", 2):
+            self.start(71)
+            self.wait(71)
+            self.client.sandbox.handle = Handle([("second", None, None)])
+            live = self.start(72)
+            self.client.sandbox.handle = Handle([("third", None, None)])
+            self.start(73)
+            old = self.wait(71)
+            current = self.wait(72)
+        self.assertEqual(old["outcome"], "unknown")
+        self.assertEqual(old["error"]["code"], "commandOutputUnavailable")
+        self.assertEqual(current["result"]["stdout"], "second")
+        self.assertTrue(live.disconnected)
+
+    def test_reconnect_does_not_drop_the_original_pending_output_stream(self):
+        self.connect()
+        handle = self.start()
+        self.connect()
+        completed = self.wait()
+        self.assertEqual(completed["result"]["stdout"], "ok")
+        self.assertEqual(handle.iterations, 1)
+        self.assertTrue(handle.disconnected)
+
+    def test_connection_cache_eviction_requires_explicit_reconnect_without_losing_command_output(self):
+        with patch("centaeris_e2b_adapter.bridge.MAX_CONNECTED_SANDBOXES", 1):
+            self.connect()
+            original = self.client.sandbox
+            self.start()
+            self.client.sandbox = FakeSandbox()
+            self.client.sandbox.sandbox_id = "sandbox-b"
+            connected = self.adapter.handle(request("connect", {"sandboxId": "sandbox-b", "timeoutSeconds": 300, "onResume": "restore"}))
+            self.assertEqual(connected["outcome"], "succeeded")
+            rejected = self.wait()
+            self.assertEqual(rejected["outcome"], "notDispatched")
+            self.assertEqual(rejected["error"]["code"], "connectionRequired")
+            self.client.sandbox = original
+            self.connect()
+            completed = self.wait()
+        self.assertEqual(completed["result"]["stdout"], "ok")
+
+    def test_stdout_and_stderr_share_one_output_budget(self):
+        self.connect()
+        self.client.sandbox.handle = Handle([("ab", None, None), (None, "cd", None)])
+        handle = self.start()
+        response = self.wait(maxOutputBytes=3)
+        self.assertEqual(response["outcome"], "unknown")
+        self.assertEqual(response["error"]["code"], "outputLimitExceeded")
+        self.assertTrue(handle.disconnected)
+        self.assertEqual(self.wait()["error"]["code"], "commandOutputUnavailable")
+
+    def test_broken_original_stream_is_closed_and_never_replaced_by_a_fresh_stream(self):
+        def broken_stream():
+            yield "partial", None, None
+            raise ConnectionError("fixture-secret")
+        self.connect()
+        self.client.sandbox.handle = Handle(broken_stream())
+        handle = self.start()
+        response = self.wait()
+        self.assertEqual(response["outcome"], "unknown")
+        self.assertEqual(response["result"]["pid"], 71)
+        self.assertTrue(handle.disconnected)
+        self.assertFalse(any(call[0] == "commandConnect" for call in self.client.sandbox.calls))
+        self.assertEqual(self.wait()["error"]["code"], "commandOutputUnavailable")
 
     def test_cancel_reports_signal_not_tree_cleanup(self):
         self.connect()

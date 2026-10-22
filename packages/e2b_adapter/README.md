@@ -70,14 +70,39 @@ information for a different sandbox ID while retaining the original known ID.
 | `pause` | `sandboxId`, `mode` (`full` or `filesystem`) | Cleanup only. Reports requested mode and provider acceptance, without asserting verified snapshot contents. |
 | `readFile` | `sandboxId`, absolute `path`, optional `user`, `maxBytes` | Ordinary, explicitly connected sandbox. Streams bounded bytes and returns `dataBase64`. |
 | `writeFile` | `sandboxId`, absolute `path`, `dataBase64`, optional `user` | Ordinary, explicitly connected sandbox. Includes empty binary files. |
-| `runCommand` | `sandboxId`, `command`, `timeoutSeconds`, optional absolute `cwd`, `user`, string `envs` | Ordinary. Starts in background, returns PID, and disconnects the local output stream. |
-| `waitCommand`, `recoverCommand` | `sandboxId`, `pid`, `timeoutSeconds`, optional `maxOutputBytes` | Ordinary. Connects to a known PID and returns completed output. Failure never reexecutes the command or proves non-admission. |
+| `runCommand` | `sandboxId`, `command`, `timeoutSeconds`, optional absolute `cwd`, `user`, string `envs` | Ordinary. Starts in background, returns PID, and retains the original output stream within the bounded command evidence cache. |
+| `waitCommand`, `recoverCommand` | `sandboxId`, `pid`, `timeoutSeconds`, optional `maxOutputBytes` | Ordinary. Drains the original retained stream or replays a retained complete result. Missing output evidence returns Unknown, without reconnecting or reexecuting the command. |
 | `cancelCommand` | `sandboxId`, `pid` | Ordinary connected handle only. Reports SIGKILL request result for the PID; it is not process-tree cleanup evidence. |
 
 The request limit is 1 MiB, file transfer limit 256 KiB, and combined command
 output limit 64 KiB. An output limit disconnects the stream and returns unknown
 completion with the PID retained. It does not silently kill or restart work.
 At most 128 connected handles are cached; eviction does not delete a sandbox.
+
+Command recovery is limited to the current adapter process. A new provider
+command connection can report exit status without replaying earlier output, so
+it cannot establish a complete result. The adapter retains the original started
+stream until completion or error, then disconnects it. It caches complete
+stdout, stderr and exit code for repeated wait/recover requests. An adapter
+restart, missing handle or evicted completion returns Unknown with
+`commandOutputUnavailable` and the known sandbox/PID. It never returns empty
+successful output merely because a fresh connection did not replay it.
+
+Pending streams and completed receipts share 128 command evidence slots.
+Admission can evict completed receipts; it never evicts pending streams to start
+another command. When all slots are pending, the next start fails before SDK
+dispatch. Reconnecting a sandbox does not replace its pending command streams.
+The separate connected-sandbox cache still requires an explicit connect in this
+process. Completed output must also fit a replay request's output budget.
+
+The SDK fixes the original stream deadline at command start. A wait/recover
+budget must cover that stream's remaining deadline; a smaller budget is rejected
+before reading, while the pending handle and PID remain available. Runtime
+transport deadlines independently bound each adapter call. The capabilities
+response declares `commandOutputRestartRecovery: false`,
+`commandOutputRecovery: "adapterLifetime"`, and
+`waitBudgetMustCoverOriginalStream: true`. Durable guest output protection is
+required before claiming recovery across adapter restarts.
 
 The public SDK has no verified no-resume attachment interface. A fresh control
 process cannot acquire a command handle without potentially resuming an
