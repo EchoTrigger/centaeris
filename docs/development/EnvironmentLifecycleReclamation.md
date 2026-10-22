@@ -1,5 +1,16 @@
 # Environment lifecycle reclamation
 
+The hosted execution direction is now [E2B execution integration](E2BExecutionIntegration.md).
+This document retains the legacy backend's correctness requirements and bounded
+measurements. Existing allocation, authorization, retention and cleanup obligations
+remain valid while that backend drains. Further custom node placement, VM management,
+snapshot infrastructure and host-specific performance work are outside the new
+integration scope. Historical experiments below are not E2B acceptance evidence.
+The private lifecycle timing builds used Cargo's dev profile with optimization
+disabled; their absolute timings do not establish release deployment performance.
+The [later measurement record](https://github.com/EchoTrigger/centaeris/blob/1a48cc548c37bd449bd81fafa1246bffd6192008/docs/development/EnvironmentLifecycleReclamation.md)
+contains the subsequent IO observations and build-profile limitations.
+
 Callers submit Agent invocations; the platform owns queuing, admission, environment reuse and reclamation. Reliable resource facts are the prerequisite for automated placement and elastic capacity supply.
 
 Queued cancellation and physical resource settlement must continue independently of ordinary execution capacity. Complete that lifecycle before making retained environments the default for ordinary Sessions. Execution limits remain eight globally, four per Workspace and eight slots per Worker process.
