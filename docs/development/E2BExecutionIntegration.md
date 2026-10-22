@@ -1,156 +1,192 @@
 # E2B execution integration
 
-Centaeris provides an open Agent control plane. It owns Workspace access, task
-intent, fair queueing, cancellation, delivery and usage attribution. Core owns the
-native Centaeris Agent's reasoning, tools, events, checkpoints and continuation.
-External harnesses retain their native sessions and execution loops. Managed
-execution should reuse the complete E2B platform rather than expand the custom
-Docker/runsc backend into a node, VM or snapshot-management product.
+The hosted product reuses the official E2B SDK for environment lifecycle.
+Centaeris owns task admission, queueing, authorization, cancellation intent,
+cleanup obligations and delivery. Core remains the authority for the native
+Agent's tools, events, checkpoints and continuation. E2B owns its sandboxes,
+physical admission and snapshot implementation.
 
-This draft carries existing lifecycle correctness fixes and defines the first
-integration boundary. The E2B adapter, deployment and end-to-end acceptance are
-not implemented by the initial revision.
+This work is limited to hosted lifecycle with the existing Core harness.
+External harness validation follows hosted acceptance. Subscription interfaces,
+account sharing, billing redesign, Desktop isolation and a workflow engine
+are separate work.
 
-## Ownership and reuse
+## Current implementation
 
-| Boundary | Centaeris owns | Reused implementation |
-| --- | --- | --- |
-| Product control | Workspace authorization, Run intent, queueing, approval and delivery | Existing API, Worker and product surfaces |
-| Native Agent | Core session, tool and continuation semantics | Existing Core |
-| External harness | Identity binding, capability negotiation and sourced event projections | The harness's native protocol and recovery |
-| Managed environment | Provider binding, policy, observations and outstanding control obligations | E2B lifecycle, templates, snapshots and sandbox runtime |
-| Usage | Source, task/environment attribution, budget and reconciliation | Provider, gateway and harness usage evidence |
+The [host adapter](../../packages/e2b_adapter/README.md) pins Python SDK 2.58.0.
+Runtime has bounded persistent-process transport. Ordinary, short control and
+slow cleanup require independent process instances because the SDK shares its
+sandbox connection pool within a process. Transport deadlines cover blocked
+stdin and response reads. Losing a response closes that transport without
+replaying the request; it does not prove the provider operation stopped.
 
-The business database remains authoritative for business authorization and pending
-control responsibility. E2B remains authoritative for its sandbox's physical state.
-Persist provider identities and observations without recreating E2B's internal
-placement, node-capacity or snapshot state machines.
+API and Runtime validate a distinct signed E2B profile. It freezes provider
+configuration identity, template/build identity, workspace/user/network,
+lifetime, timeout and input-transfer budget. Later Runtime advertisements
+cannot replace a bound Environment profile. Legacy payloads, digests and
+signatures retain their exact meaning.
 
-## First integration boundary
+The current bridge bounds each file transfer at 256 KiB and command text output
+at 64 KiB. These limits do not satisfy Core's full binary I/O contract. The
+production runner must add lossless bulk transport or reject unsupported
+requirements before side effects. SDK-decoded text must not be presented as
+original process-byte evidence.
 
-Run one real task through the existing product admission path, Worker, Runtime,
-Core and E2B, then preserve or destroy the environment according to its frozen
-policy. The initial integration must include file operations, command execution,
-cancellation, reconnect, cleanup and usage attribution.
+These components do not yet replace production Core execution. Runtime startup,
+physical allocation, command recovery and teardown still use the legacy host.
+An E2B profile fails explicitly at that host boundary. The production
+advertisement remains legacy. No retained default or provider cutover is enabled.
 
-`ExecutionHostRunner` is the starting point for Core's command and filesystem
-operations. It is not the environment lifecycle interface or an external harness
-protocol. Runtime startup, residency reconciliation, execution creation and
-teardown currently call Docker directly; these entry points must dispatch through
-the selected provider without requiring a Docker daemon for an E2B-only instance.
-Use the smallest lifecycle seam required for this provider. Keep Core independent
-of the concrete SDK, transport and deployment.
+## Target flow
 
-Select and pin the E2B SDK, runtime, template and deployment versions. E2B Embed
-is the first self-hosted candidate on a Linux host with verified KVM support. Its
-single-machine deployment is separate from cluster provisioning or autoscaling.
-Existing runsc availability does not establish Firecracker/KVM compatibility.
+The same existing AgentRun and lifecycle Job advance through the new host.
+There is no second Agent loop.
 
-## Lifecycle safety
+~~~mermaid
+flowchart TD
+    A["API: authorize Workspace and freeze policy"] --> B["Existing queue and lifecycle Job"]
+    B --> C["Worker: one execute or control lease"]
+    C --> D["Runtime: verify owner and persist provider attempt"]
+    D --> E["Official E2B SDK adapter"]
+    E --> F["E2B sandbox"]
+    F --> G["Existing Core: files, tools and delivery"]
+    G --> H["Authoritative Run terminal"]
+    H --> I["Scoped cleanup and environment retention"]
+    I --> J["Verify cleanup, release and Job completion"]
+    K["Cancellation intent"] --> C
+    E --> L["Unknown: retain identity and investigation duty"]
+    L --> D
+~~~
 
-Before a provider side effect, persist the business attempt, scoped provider
-request identity and responsible owner. Record the returned sandbox identity when
-known. A create timeout remains uncertain; do not change the request key and
-create another sandbox or release a commitment solely because a query is empty.
-Verify the selected deployment's idempotency route, retention and lookup behavior.
-Keep an unresolved attempt recoverable after adapter restart.
+Before a provider effect, the business store commits the attempt, stable
+idempotency key, provider configuration digest and responsible owner. A known
+sandbox ID is immutable within that attempt. Provider observations supplement
+these records; they do not become another node-placement or VM state machine.
 
-Preserve independent bounded control processing. Ordinary capacity exhaustion must
-not prevent cancellation intent, terminal advancement or short control requests.
-Slow provider cleanup has its own bounded processing capacity. Control authority
-cannot acquire ordinary execution capability. Completion requires the appropriate
-terminal, cleanup and release facts; a worker's claim of success is insufficient.
+A retry first resolves the same attempt. A timeout, empty lookup or expired
+idempotency window never authorizes a replacement create or refund.
+SDK action and connection retries are disabled. Provider idempotency must be
+verified on the selected server before create is enabled.
 
-Cancelling a Run does not by itself authorize destroying its Environment. Separate
-the Run's execution-slot release from environment retention, provider cleanup and
-remaining cost. Keep uncertain operations charged according to their applicable
-business commitment while investigation responsibility remains pending.
+## Signed policy
 
-## Retention and resource policy
+The new schema is runtime.e2b_environment_profile.v1. Its shared fixture is
+[the profile contract](../../tests/workspace/fixtures/e2b_environment_profile/v1/valid.json).
+The profile binds templateRef.templateId and a canonical build UUID, passed
+to the SDK as templateId:buildId. Mutable tags cannot substitute for a build.
 
-Represent preservation of files/artifacts, native harness sessions, process-memory
-snapshots and continuously online services as distinct capabilities. Do not infer
-that a paused service remains online or that a filesystem-only restore preserves
-process state. Persist the actual provider result and any allowed degradation.
+The providerConfigDigest identifies configured provider/account scope without
+including credentials. The host must match this digest before dispatch.
+The inputBudgetBytes field limits Centaeris input/restore traffic; it is not a
+filesystem quota. The profile makes no byte, inode, PID or tmpfs hard-limit claim.
 
-The proposed default for new environments is preserved work products and a
-recoverable harness session. It requires explicit policy, supported capabilities
-and acceptance before activation. Existing retained environments keep their
-original same-instance and process-continuity obligations. No default changes in
-this draft.
+The profile's lifetime controls authorization. Worker configuration cannot
+reinterpret an existing Environment. Network mismatch fails before freezing.
+Unknown fields and unsupported schemas fail explicitly. Adapter and Runtime wire decoders also reject duplicate fields.
+Existing immutable profile columns preserve the binding; signed legacy
+records are not rewritten.
 
-Keep the current 8 global / 4 Workspace / 8 ordinary Worker execution settings as
-the acceptance baseline. Distinguish business execution policy from provider
-physical admission. Hosted allocations continue using full resource reservations;
-the carried Core limits/reservation contract does not enable hosted overcommit.
-Advertise byte, inode or private-writable limits only when the selected provider
-actually enforces them. Unsupported required limits fail explicitly rather than
-becoming size observations or a new custom storage implementation.
+## Control and retention
 
-## Legacy transition
+Keep global 8 / Workspace 4 / ordinary Worker 8 as the acceptance baseline.
+These are business execution limits. Physical admission belongs to E2B;
+Centaeris does not reproduce its host-capacity ledger.
 
-The integration branch retains the existing correctness source through
-`67db3b70e816cb0a95f0e5c5c977a9789ea66f12`, including:
+Short control must remain available when ordinary work or slow cleanup is
+saturated. A control lease does not authorize ordinary execution, create or resume.
 
-- Proven non-dispatch settlement, with resident reuse and Unknown protections.
-- Execute/control lease purpose and independent control processing.
-- Server-verified terminal, cleanup and release prerequisites for completion.
-- Durable waiter wakeups after confirmed capacity release.
-- Supporting behavior tests and Runtime schema 13 through 16 forward migrations.
-- The Core resource-limit/admission-commitment distinction, with hosted full charging.
+The current adapter supports exact-sandbox deletion in the cleanup lane.
+Ordinary PID signaling is not process-tree cleanup proof. The pinned public SDK
+does not provide a verified no-resume attachment for a fresh control process.
+Retained Run-scoped cancellation is not accepted yet.
 
-The later opt-in timing and target-bound host transport optimization series stays
-on the original branch. Its diagnostic failure fix applies to that omitted timing
-path and is not needed by this baseline. The original published history remains
-available; no commits are rewritten or removed.
+Begin product cutover with explicitly supported perRun policy. Retained requires
+verified Run-versus-Environment task cleanup, file/session continuity and the
+promised retention capability. Files, native harness sessions, memory snapshots
+and online services remain distinct promises. Accepted pause requests do not
+verify full-memory preservation. Existing retained environments keep their
+original obligations.
 
-New environments freeze their provider and policy revision. Old Docker/runsc
-environments remain with the matching legacy backend until their obligations are
-settled. Do not switch active Runs, reinterpret signed grants, or claim that live
-processes can be converted to Firecracker snapshots. File transfer requires
-verification. Retire the legacy path only after no live bindings or pending
-cleanup obligations require it.
+## Behavioral acceptance
 
-## Acceptance
+| Boundary | Required evidence |
+| --- | --- |
+| SDK requests | Real pinned SDK with isolated HTTP fixtures: exact template/build/key, no retry after lost response, 429 or 503, known identity retained, secret redaction |
+| Host transport | Process reuse, bounded frames, response correlation, blocked-input deadline and control progress while ordinary remains blocked |
+| Authorization | Shared Python/Rust fixtures, immutable provider/build/policy, transfer budget, unsupported quota rejection, unchanged legacy signatures |
+| Persistence | Real PostgreSQL first-use freeze, later defaults ignored, mismatch rollback and old Environment/grant preservation |
+| Core execution | Existing API, Worker, Runtime, Core and SDK write/read a unique marker, execute a deterministic command and publish the actual artifact |
+| Recovery | Adapter/Runtime restart and lost create/command replies preserve identity and duty without repeating accepted effects |
+| Cancellation | Ordinary execution, Worker, HTTP, DB and SDK lanes remain saturated while correct cleanup, release and complete finish |
+| Retention | Only supported policy is accepted; continuity or restored state is verified rather than inferred from pause acceptance |
+| Retirement | Exact provider identity is removed and remaining duties settled; unknown creates cannot be hidden by successful deletion |
+| Transition | Old duties drain safely; replacement production path works without the legacy host socket, runtime or supervisor |
 
-- A real Core task performs preparation, file read/write, command execution and
-  delivery in the exact E2B sandbox selected for its Workspace.
-- Cancelling with ordinary execution and connection pools saturated completes
-  the correct Run-scoped cleanup and release without extra execution authority.
-- A lost creation reply does not cause duplicate creation or early settlement.
-- Restarting Runtime or the adapter recovers the provider identity and pending
-  obligations; command recovery does not blindly repeat accepted effects.
-- Retention/reconnect preserves the promised files and session state. A reduced
-  pause mode cannot be reported as full-memory retention.
-- Provider refusal and capacity limits produce classified waiting or failure,
-  not an additional Centaeris node-placement subsystem.
-- Usage retains measured, confirmed, estimated and unknown provenance. Native
-  subscription usage that is unavailable is not recorded as zero.
-- New provider bindings coexist with legacy environments without changing old
-  signatures, authorization or retention policy.
+SDK fixtures do not establish Firecracker or full product acceptance. Unit,
+PostgreSQL, real-provider and performance results are recorded separately.
+Use the existing loopback model and actual Core tool events for deterministic
+product acceptance without external model requests.
 
-Record release build identities and separate queue wait, preparation, first useful
-tool, Run terminal, Job completion and environment settlement. Compare IO under
-equivalent persistence semantics. Earlier dev-profile Docker/runsc timings are
-diagnostic historical evidence, not E2B performance results.
+The development host was probed without running Embed setup: WSL2 kernel
+6.18.54.1, 4096-byte pages, cgroup v2 and TUN are present, but /dev/kvm is absent.
+Opening it returns ENOENT, so this host cannot currently run Embed. Real-provider
+acceptance awaits an owned KVM host or E2B endpoint. Global kernel, hugepage and
+network configuration must not change as incidental test setup.
 
-## Subsequent integration
+Measure release builds after the product route works: queue wait, prepare,
+first useful tool, Run terminal, Job complete and environment settlement.
+Compare direct SDK with the product route under equal persistence semantics.
+Earlier Docker/runsc dev-profile timings are historical diagnostics.
 
-After the Core/E2B path passes, connect one external harness. Evaluate T3's public
-host interface before choosing a native adapter, checking execution location,
-events, approval, cancellation, resume and usage attribution. T3 is optional and
-must not become another mandatory Workspace/authorization authority.
+## Retiring the legacy implementation
 
-Then validate one bounded plan/edit/review/approve workflow with explicit writer
-ownership, cancellation propagation and effect-safe recovery. Desktop isolation
-and broader billing follow their actual platform and provider capabilities. A
-general workflow language and new VM, snapshot or filesystem infrastructure are
-outside this integration.
+Preserve the carried correctness fixes: proven non-dispatch settlement,
+execute/control isolation, server-checked completion, durable release wakeups
+and forward migrations. Retained reuse and Unknown outcomes stay conservative.
 
+Backend-neutral hook and artifact ports enable reuse of existing product
+behavior. Remaining Docker dependencies include startup, allocation/observation,
+SessionWorkspace protection, command recovery, MCP stdio, background tasks and
+teardown. Reuse host-agnostic guest file/input/artifact codecs where appropriate;
+the runsc launcher and host supervisor are not an E2B lifecycle implementation.
+
+The next local boundary is a provider effect ledger and the existing Core host
+facade: persist create/command/remove attempts, route the same AgentRun through
+E2B, protect the final SessionWorkspace, then verify a provider cleanup receipt
+before release and complete. NoEffects and complete must inspect the appropriate
+provider facts as well as legacy records. A perRun policy still requires final
+workspace export and commit; it cannot bypass protection by pretending to retain
+an instance.
+
+Delete legacy execution after replacement behavior is tested and no live binding
+or pending cleanup duty needs it. Keep historical authorization and settlement
+records. Do not switch active Runs, reinterpret old grants or claim that runsc
+process state converts to Firecracker snapshots. File migration requires hashes.
+
+Removal acceptance is behavioral: a hosted stack without the legacy socket,
+runsc and supervisor completes the same supported Core workflow. Do not enforce
+source-name or file-name blacklists. Local Desktop/TUI dependency graphs remain
+independent.
+
+## Local verification
+
+The SDK/profile foundation passed the local Rust source gate (including 129
+Core query-loop tests), warning-denied hosted Runtime Clippy, hosted Rust
+checks/tests and Compose validation. Hosted Runtime ran 485 tests; 211 tests
+requiring separate fixtures were ignored by that ordinary command. The
+separate owned PostgreSQL gate executed all 178 selected lifecycle/migration
+tests without skips. The API affected suite passed 112 tests, Worker passed
+101 tests, and the SDK suite passed 36 tests, including nine using the actual
+pinned SDK against loopback HTTP.
+
+The test processes cleared inherited SOCKS proxy variables so loopback fixtures
+received their requests. No product proxy configuration changed. Real E2B
+creation, the new Core/provider product route and legacy removal remain pending;
+these foundation results do not activate either E2B or retained policy.
 ## References
 
-- [E2B Embed](https://e2b.dev/resources/introducing-e2b-embed)
-- [E2B deployment models](https://docs.e2b.dev/byoc)
+- [Pinned official Python SDK](https://pypi.org/project/e2b/2.58.0/)
+- [E2B template builds](https://docs.e2b.dev/template/tags)
+- [E2B Embed requirements](https://github.com/e2b-dev/runtime/blob/main/embed/compose/README.md)
 - [E2B persistence](https://docs.e2b.dev/sandbox/persistence)
-- [E2B runtime architecture](https://github.com/e2b-dev/runtime/blob/main/docs/ARCHITECTURE.md)
-- [T3 external control](https://github.com/pingdotgg/t3code/blob/main/docs/user/outside-agents.md)
+- [Provider idempotency](https://github.com/e2b-dev/runtime/blob/main/docs/ARCHITECTURE.md)

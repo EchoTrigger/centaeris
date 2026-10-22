@@ -200,3 +200,15 @@ revision. A passing dirty working tree does not prove that ignored files,
 adjacent repositories, or previously built binaries are unnecessary.
 
 Work-return publication changes protect three behavior boundaries: history-independent normal job traffic; shared audit leasing, restart cursors and stale-owner rejection; and omitted/unknown schedule repair without losing source records. The immutable previous publisher characterization and history-count RED establish the replaced behavior; worker/API tests cover deadlines, partial progress, cancellation and transport outcomes. No source-name absence checks enforce this change.
+## Hosted E2B acceptance
+
+The hosted Python gate runs the pinned E2B SDK adapter suite. Its loopback HTTP
+fixtures exercise actual SDK requests, response loss and retry behavior without
+provider credentials. Runtime process-transport tests exercise framing, deadlines
+and independent lanes using the gate's Python interpreter. PostgreSQL tests
+separately verify immutable provider/profile binding and authorization rollback.
+
+These tests do not establish real sandbox creation, process-tree cleanup,
+retention or legacy-backend removal. The product route and physical gates in
+[E2B execution integration](E2BExecutionIntegration.md) must pass before cutover.
+A provider DELETE acknowledgement is not an allocation settlement receipt.
