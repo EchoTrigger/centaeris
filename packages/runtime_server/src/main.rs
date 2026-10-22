@@ -14,6 +14,7 @@ mod deferred_input_resolver;
 mod docker_engine;
 mod docker_execution_host;
 pub mod e2b_adapter;
+pub mod e2b_creation;
 mod environment_authorization;
 mod environment_stdio;
 mod environment_supervisor;

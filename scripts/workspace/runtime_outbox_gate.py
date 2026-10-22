@@ -144,6 +144,9 @@ def main():
     commands.append(['cargo', 'test', '--locked', '-p', 'runtime_server',
                      'postgres_store::integration_tests::environment_observation_tests',
                      '--'])
+    commands.append(['cargo', 'test', '--locked', '-p', 'runtime_server',
+                     'postgres_store::integration_tests::provider_operation_tests',
+                     '--'])
     names = []
     for command in commands:
         discovered = subprocess.run([*command, '--ignored', '--list'], cwd=root,

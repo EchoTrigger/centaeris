@@ -49,6 +49,7 @@ mod lease_renewal_tests;
 mod maintenance_authority_tests;
 mod maintenance_completion_schema_tests;
 mod owned_database;
+mod provider_operation_tests;
 mod provision_authority_tests;
 mod residency_tests;
 mod resource_lifecycle_tests;

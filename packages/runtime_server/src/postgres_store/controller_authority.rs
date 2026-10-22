@@ -4,8 +4,8 @@ use crate::environment_authorization::EnvironmentAuthorization;
 use centaeris_core::session::RuntimeJobLeaseFence;
 use sha2::{Digest, Sha256};
 
-pub(crate) struct ControllerAuthorityRequest<'a> {
-    pub environment_authorization: &'a EnvironmentAuthorization,
+pub struct ControllerAuthorityRequest<'a> {
+    pub(crate) environment_authorization: &'a EnvironmentAuthorization,
     pub signing_key: &'a [u8],
     pub workspace_id: &'a str,
     pub lease: &'a RuntimeJobLeaseFence,
@@ -13,7 +13,7 @@ pub(crate) struct ControllerAuthorityRequest<'a> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ControllerPurpose {
+pub enum ControllerPurpose {
     Execute,
     Cleanup,
 }

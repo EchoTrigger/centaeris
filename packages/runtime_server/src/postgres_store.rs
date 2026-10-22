@@ -92,6 +92,7 @@ pub(crate) mod lease_renewal;
 pub(crate) mod lifecycle_control;
 pub(crate) mod maintenance;
 pub(crate) mod pre_admission_failure;
+pub mod provider_operations;
 pub(crate) mod provision;
 mod reliability;
 pub(crate) mod residency;

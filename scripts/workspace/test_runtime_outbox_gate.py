@@ -13,6 +13,23 @@ def discovery_output(command):
 
 
 class OutboxGateTests(unittest.TestCase):
+    def test_provider_creation_cases_are_required_and_discovered_before_database_creation(self):
+        group = 'postgres_store::integration_tests::provider_operation_tests::'
+        expected = {name for name in gate.required_tests() if name.startswith(group)}
+        self.assertTrue(expected, 'provider creation evidence must be part of the required gate')
+        discovered = set()
+
+        def discover(command, **kwargs):
+            output = discovery_output(command)
+            discovered.update(gate.discovered_tests(output.stdout))
+            return output
+
+        driver = SimpleNamespace(connect=lambda **kwargs: (_ for _ in ()).throw(RuntimeError('discovery complete')), sql=SimpleNamespace())
+        with patch.dict(sys.modules, {'psycopg': driver}), patch.object(gate.subprocess, 'run', discover):
+            with self.assertRaisesRegex(RuntimeError, 'discovery complete'):
+                gate.main()
+        self.assertTrue(expected.issubset(discovered))
+
     def test_host_retirement_cases_are_required_and_discovered_before_database_creation(self):
         group = 'postgres_store::integration_tests::host_retirement_tests::'
         expected = {name for name in gate.required_tests() if name.startswith(group)}
