@@ -35,13 +35,15 @@ class Handle:
 
     def __iter__(self):
         self.iterations += 1
-        return iter(self.output)
+        def events():
+            for out, err, _ in self.output:
+                yield (out.encode("utf-8") if isinstance(out, str) else out,
+                       err.encode("utf-8") if isinstance(err, str) else err, None)
+            yield None, None, SimpleNamespace(exit_code=self.exit_code, exited=True, error=None)
+        return events()
 
     def disconnect(self):
         self.disconnected = True
-
-    def wait(self):
-        return SimpleNamespace(exit_code=self.exit_code, stdout="", stderr="")
 
 
 class FakeSandbox:
@@ -57,7 +59,7 @@ class FakeSandbox:
 
     def get_info(self):
         self.calls.append(("info", {}))
-        return SimpleNamespace(sandbox_id=self.sandbox_id, template_id="template-a", metadata=self.metadata, state="running")
+        return SimpleNamespace(sandbox_id=self.sandbox_id, template_id="template-a", metadata=self.metadata, state="running", envd_version="0.3.0")
 
     def run(self, command, **kwargs):
         self.calls.append(("run", {"command": command, **kwargs}))
@@ -125,7 +127,9 @@ def create_payload(**extra):
 class AdapterTests(unittest.TestCase):
     def setUp(self):
         self.client = FakeClient()
-        self.adapter = Adapter(AdapterConfig(api_key="do-not-expose", domain="self.example", idempotency_supported=True), client=self.client)
+        self.adapter = Adapter(AdapterConfig(api_key="do-not-expose", domain="self.example", idempotency_supported=True), client=self.client,
+                               command_stream_factory=lambda sandbox, version, payload: sandbox.run(payload["command"], background=True,
+                                   timeout=payload["timeoutSeconds"], **{key: payload[key] for key in ("cwd", "envs", "user") if key in payload}))
 
     def connect(self):
         response = self.adapter.handle(request("connect", {"sandboxId": "sandbox-a", "timeoutSeconds": 300, "onResume": "restore"}))
@@ -208,11 +212,23 @@ class AdapterTests(unittest.TestCase):
         self.assertFalse(call[1]["allow_internet_access"])
         self.assertEqual(response["result"]["sandboxId"], "sandbox-a")
 
-    def test_create_requires_verified_provider_idempotency_configuration(self):
+    def test_create_without_configured_idempotency_preserves_one_explicit_dispatch(self):
         adapter = Adapter(AdapterConfig(api_key="key", domain="self.example", idempotency_supported=False), client=self.client)
         response = adapter.handle(request("create", create_payload()))
-        self.assertEqual(response["outcome"], "notDispatched")
-        self.assertEqual(self.client.calls, [])
+        self.assertEqual(response["outcome"], "succeeded", response)
+        self.assertEqual([call[0] for call in self.client.calls], ["create"])
+        self.assertEqual(self.client.calls[0][1]["api_headers"], {"Idempotency-Key": "key-a"})
+        self.assertEqual(self.client.calls[0][1]["retries"], 0)
+        self.assertFalse(adapter.handle(request("capabilities"))["result"]["createIdempotencyConfigured"])
+
+    def test_provider_key_grammar_does_not_narrow_attempt_or_sandbox_identity(self):
+        self.client.sandbox.sandbox_id = "Sandbox_A:42"
+        response = self.adapter.handle(request("create", create_payload(attemptId="Attempt_A:42", idempotencyKey="key-42")))
+        self.assertEqual(response["outcome"], "succeeded", response)
+        self.assertEqual(response["result"]["attemptId"], "Attempt_A:42")
+        inspected = self.adapter.handle(request("inspect", {"sandboxId": "Sandbox_A:42"}))
+        self.assertEqual(inspected["outcome"], "succeeded", inspected)
+        self.assertEqual(inspected["result"]["sandboxId"], "Sandbox_A:42")
 
     def test_create_rejects_mutable_builds_and_noncanonical_template_identity(self):
         refs = [{"templateId": "template-a", "buildId": "latest"},
@@ -473,6 +489,8 @@ class AdapterTests(unittest.TestCase):
 
     def test_capabilities_expose_unsupported_guarantees(self):
         result = self.adapter.handle(request("capabilities"))["result"]
+        self.assertTrue(result["createIdempotencyConfigured"])
+        self.assertTrue(result["commandOutputBytes"])
         self.assertFalse(result["commandStartIdempotency"])
         self.assertFalse(result["runProcessTreeCancellation"])
         self.assertFalse(result["storageQuota"])

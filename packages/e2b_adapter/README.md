@@ -28,10 +28,21 @@ The CLI selects these values from host environment configuration and binds them
 to the SDK client. Programmatic callers must select their endpoint overrides in
 `AdapterConfig` too; unselected ambient SDK endpoint variables are rejected.
 Create, connect and control operations inherit the same explicit client routing.
-`E2B_ADAPTER_IDEMPOTENCY_SUPPORTED=true` permits create only after
-the chosen server's idempotency support has been verified. Credentials are
-never sent into a sandbox or included in response diagnostics. The adapter
-disables SDK action and connection retries; the caller manages durable retries.
+`E2B_ADAPTER_IDEMPOTENCY_SUPPORTED` is a configured capability declaration,
+reported as `createIdempotencyConfigured`; it does not verify the server or grant
+dispatch or retry permission. A stock Embed server can receive one fresh create
+when this setting is false or unverified. Credentials are never sent into a
+sandbox or included in response diagnostics. The adapter disables SDK action
+and connection retries.
+
+Before calling create, the Runtime must atomically claim a fresh durable attempt
+and persist its identity and cleanup responsibility. Each admitted invocation
+makes one SDK create call with the explicit idempotency key and immutable build.
+The adapter owns no durable dispatch ledger and cannot enforce this admission
+across requests or restarts. An unresolved attempt must not be reopened or sent
+again because an idempotency header was supplied, a capability is configured, or
+a lookup is empty. A lost reply or provider refusal remains Unknown for the
+caller's investigation and settlement protocol.
 
 Each stdin line is one bounded UTF-8 JSON request:
 
@@ -44,6 +55,10 @@ Each stdout line is a response with schema
 `result` or `error`. Unknown fields, duplicate JSON keys, and unsupported schemas
 fail before dispatch. Template IDs use the signed profile's canonical identifier
 grammar; build IDs must be immutable lowercase UUIDs, never moving aliases.
+Create `idempotencyKey` follows the [pinned provider OpenAPI contract](https://github.com/e2b-dev/runtime/blob/6b82caf690b06fb983254714187dc496ac4d0cec/spec/openapi.yml#L3533-L3548):
+1 to 255 ASCII lowercase letters, digits or hyphens (`^[a-z0-9-]+$`). Invalid
+keys fail before SDK dispatch regardless of configured idempotency support.
+Attempt and sandbox identities retain their own broader bounded-string rules.
 
 | Outcome | Meaning |
 | --- | --- |
@@ -71,13 +86,34 @@ information for a different sandbox ID while retaining the original known ID.
 | `readFile` | `sandboxId`, absolute `path`, optional `user`, `maxBytes` | Ordinary, explicitly connected sandbox. Streams bounded bytes and returns `dataBase64`. |
 | `writeFile` | `sandboxId`, absolute `path`, `dataBase64`, optional `user` | Ordinary, explicitly connected sandbox. Includes empty binary files. |
 | `runCommand` | `sandboxId`, `command`, `timeoutSeconds`, optional absolute `cwd`, `user`, string `envs` | Ordinary. Starts in background, returns PID, and retains the original output stream within the bounded command evidence cache. |
-| `waitCommand`, `recoverCommand` | `sandboxId`, `pid`, `timeoutSeconds`, optional `maxOutputBytes` | Ordinary. Drains the original retained stream or replays a retained complete result. Missing output evidence returns Unknown, without reconnecting or reexecuting the command. |
+| `waitCommand`, `recoverCommand` | `sandboxId`, `pid`, `timeoutSeconds`, optional `maxOutputBytes` | Ordinary. Drains the original retained stream or replays a retained complete result. Returns exact `stdoutBytesBase64` / `stderrBytesBase64` and `stdoutByteLength` / `stderrByteLength`, exit code, and display text. Missing output evidence returns Unknown, without reconnecting or reexecuting the command. |
 | `cancelCommand` | `sandboxId`, `pid` | Ordinary connected handle only. Reports SIGKILL request result for the PID; it is not process-tree cleanup evidence. |
 
 The request limit is 1 MiB, file transfer limit 256 KiB, and combined command
-output limit 64 KiB. An output limit disconnects the stream and returns unknown
+output limit 64 KiB of original stdout and stderr bytes. The same raw-byte limit
+applies to replay. An output limit disconnects the stream and returns unknown
 completion with the PID retained. It does not silently kill or restart work.
 At most 128 connected handles are cached; eviction does not delete a sandbox.
+
+Command output uses the generated Process RPC client shipped with the exact
+pinned official SDK, through its scoped connection configuration and sandbox
+endpoint. This generated API is an internal SDK surface; upgrades require the
+real protocol fixture to pass. The adapter caches the envd version from the
+already required create/connect inspection and starts no extra inspection or
+command connection to read output. It does not inspect CommandHandle internals
+or introduce a guest launcher.
+
+`commandOutputBytes: true` means a successful complete result preserves the
+original stdout/stderr bytes, including NUL, invalid UTF-8 and code points split
+across events. The existing `stdout` and `stderr` fields are display text,
+decoded once as UTF-8 with replacement from each complete captured byte stream.
+Consumers needing Core encoding diagnostics must decode the Base64 bytes with
+Core's decoder; display text cannot establish original bytes or encoding.
+An exited terminal event retains its exit code, including a nonzero exit;
+provider error/status diagnostics are discarded. A missing exit event,
+non-exited terminal event, malformed stream or disconnect returns Unknown with
+the known PID, without fabricating successful completion.
+Stream disconnection does not kill the process or establish tree cleanup.
 
 Command recovery is limited to the current adapter process. A new provider
 command connection can report exit status without replaying earlier output, so

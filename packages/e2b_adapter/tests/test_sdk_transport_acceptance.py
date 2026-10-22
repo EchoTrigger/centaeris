@@ -45,6 +45,7 @@ class ProviderFixture:
             "clientID": "client-fixture",
             "envdVersion": "0.3.0",
             "domain": "fixture.invalid",
+            "envdAccessToken": "fixture-envd-access-token",
         }
 
     def detail(self):
@@ -99,15 +100,24 @@ def provider_fixture(mode="success"):
                 fixture.record("POST", self.path, self.headers, body)
                 events = [{"event": {"start": {"pid": 71}}}]
                 if self.path.endswith("/Start"):
-                    events.append({"event": {"data": {"stdout": base64.b64encode(b"centaeris-adapter-ok\n").decode()}}})
+                    if fixture.mode.startswith("commandRaw"):
+                        for stream, content in (("stdout", b"\x00\xffA\xc3"), ("stderr", b"\xfe\x00B"), ("stdout", b"\xa9\x80")):
+                            events.append({"event": {"data": {stream: base64.b64encode(content).decode()}}})
+                    else:
+                        events.append({"event": {"data": {"stdout": base64.b64encode(b"centaeris-adapter-ok\n").decode()}}})
                 # A new connection observes completion without replaying output.
-                events.append({"event": {"end": {"exitCode": 7 if fixture.mode == "commandExit" else 0, "exited": True, "status": "success"}}})
+                if fixture.mode not in ("commandRawMissingEnd", "commandRawDisconnect"):
+                    exit_code = 7 if fixture.mode in ("commandExit", "commandRawExit") else 0
+                    completion = {"exitCode": exit_code, "exited": fixture.mode != "commandRawNotExited", "status": "exited"}
+                    if exit_code:
+                        completion["error"] = "fixture-private-diagnostic: exit status 7"
+                    events.append({"event": {"end": completion}})
                 chunks = [json.dumps(event).encode() for event in events]
                 wire = b"".join(b"\x00" + len(chunk).to_bytes(4, "big") + chunk for chunk in chunks)
                 wire += b"\x02\x00\x00\x00\x02{}"
                 self.send_response(200)
                 self.send_header("Content-Type", "application/connect+json")
-                self.send_header("Content-Length", str(len(wire)))
+                self.send_header("Content-Length", str(len(wire) + (100 if fixture.mode == "commandRawDisconnect" else 0)))
                 self.send_header("Connection", "close")
                 self.end_headers()
                 self.wfile.write(wire)
@@ -204,13 +214,13 @@ def create_request(attempt="attempt-fixture", key="request-key-fixture"):
     }
 
 
-def adapter_for(fixture, key="e2b_" + "a" * 64, lane="ordinary"):
+def adapter_for(fixture, key="e2b_" + "a" * 64, lane="ordinary", idempotency_supported=True):
     return Adapter(AdapterConfig(
         api_key=key,
         domain="fixture.invalid",
         api_url=fixture.api_url,
         sandbox_url=fixture.api_url,
-        idempotency_supported=True,
+        idempotency_supported=idempotency_supported,
         lane=lane,
     ))
 
@@ -240,6 +250,68 @@ class SdkTransportAcceptanceTests(unittest.TestCase):
                 self.assertEqual(completed["result"]["exitCode"], exit_code)
                 self.assertEqual(sum(entry["path"] == "/process.Process/Start" for entry in fixture.requests), 1)
                 self.assertEqual(sum(entry["path"] == "/process.Process/Connect" for entry in fixture.requests), 0)
+
+    def test_command_output_preserves_raw_bytes_across_chunks_and_streams(self):
+        for mode, exit_code in (("commandRaw", 0), ("commandRawExit", 7)):
+            with self.subTest(mode=mode), provider_fixture(mode) as fixture:
+                adapter = adapter_for(fixture)
+                self.assertEqual(adapter.handle(create_request())["outcome"], "succeeded")
+                started = adapter.handle(lifecycle_request("runCommand", command="printf raw", timeoutSeconds=10, user="user", cwd="/workspace", envs={"LANG": "C"}))
+                self.assertEqual(started["outcome"], "succeeded", started)
+                completed = adapter.handle(lifecycle_request("waitCommand", pid=started["result"]["pid"], timeoutSeconds=10, maxOutputBytes=9))
+                self.assertEqual(completed["outcome"], "succeeded", completed)
+                result = completed["result"]
+                self.assertEqual(base64.b64decode(result["stdoutBytesBase64"]), b"\x00\xffA\xc3\xa9\x80")
+                self.assertEqual(base64.b64decode(result["stderrBytesBase64"]), b"\xfe\x00B")
+                self.assertEqual((result["stdoutByteLength"], result["stderrByteLength"]), (6, 3))
+                self.assertEqual(result["stdout"], "\x00\ufffdA\xe9\ufffd")
+                self.assertEqual(result["stderr"], "\ufffd\x00B")
+                self.assertEqual(result["exitCode"], exit_code)
+                self.assertNotIn("fixture-private-diagnostic", json.dumps(completed))
+                replay = adapter.handle(lifecycle_request("recoverCommand", pid=started["result"]["pid"], timeoutSeconds=10, maxOutputBytes=9))
+                self.assertEqual(replay["result"], result)
+                self.assertEqual([(entry["method"], entry["path"]) for entry in fixture.requests],
+                                 [("POST", "/v2/sandboxes"), ("GET", "/sandboxes/sandbox-fixture"),
+                                  ("POST", "/process.Process/Start")])
+                process_calls = [entry for entry in fixture.requests if entry["path"].startswith("/process.Process/")]
+                self.assertEqual([entry["path"] for entry in process_calls], ["/process.Process/Start"])
+                self.assertEqual(process_calls[0]["body"]["process"], {"cmd": "/bin/bash", "args": ["-l", "-c", "printf raw"], "envs": {"LANG": "C"}, "cwd": "/workspace"})
+                self.assertFalse(process_calls[0]["body"].get("stdin", False))
+                self.assertNotIn("x-api-key", process_calls[0]["headers"])
+                self.assertEqual(process_calls[0]["headers"]["x-access-token"], "fixture-envd-access-token")
+                self.assertEqual(process_calls[0]["headers"]["e2b-sandbox-id"], "sandbox-fixture")
+                self.assertEqual(process_calls[0]["headers"]["authorization"], "Basic dXNlcjo=")
+                self.assertNotIn("fixture-envd-access-token", json.dumps(completed))
+
+    def test_command_output_without_a_complete_end_event_is_unknown(self):
+        for mode in ("commandRawMissingEnd", "commandRawDisconnect", "commandRawNotExited"):
+            with self.subTest(mode=mode), provider_fixture(mode) as fixture:
+                adapter = adapter_for(fixture)
+                self.assertEqual(adapter.handle(create_request())["outcome"], "succeeded")
+                started = adapter.handle(lifecycle_request("runCommand", command="printf raw", timeoutSeconds=10))
+                self.assertEqual(started["outcome"], "succeeded", started)
+                completed = adapter.handle(lifecycle_request("waitCommand", pid=71, timeoutSeconds=10))
+                self.assertEqual(completed["outcome"], "unknown", completed)
+                self.assertEqual(completed["result"]["pid"], 71)
+                self.assertNotIn("exitCode", completed["result"])
+                retry = adapter.handle(lifecycle_request("recoverCommand", pid=71, timeoutSeconds=10))
+                self.assertEqual(retry["error"]["code"], "commandOutputUnavailable")
+                self.assertEqual(sum(entry["path"] == "/process.Process/Start" for entry in fixture.requests), 1)
+                self.assertEqual(sum(entry["path"] == "/process.Process/Connect" for entry in fixture.requests), 0)
+
+    def test_raw_stdout_and_stderr_share_the_original_byte_budget(self):
+        with provider_fixture("commandRaw") as fixture:
+            adapter = adapter_for(fixture)
+            self.assertEqual(adapter.handle(create_request())["outcome"], "succeeded")
+            started = adapter.handle(lifecycle_request("runCommand", command="printf raw", timeoutSeconds=10))
+            self.assertEqual(started["outcome"], "succeeded", started)
+            completed = adapter.handle(lifecycle_request("waitCommand", pid=71, timeoutSeconds=10, maxOutputBytes=8))
+            self.assertEqual(completed["outcome"], "unknown", completed)
+            self.assertEqual(completed["error"]["code"], "outputLimitExceeded")
+            self.assertEqual(completed["result"]["pid"], 71)
+            retry = adapter.handle(lifecycle_request("recoverCommand", pid=71, timeoutSeconds=10))
+            self.assertEqual(retry["error"]["code"], "commandOutputUnavailable")
+            self.assertEqual(sum(entry["path"] == "/process.Process/Start" for entry in fixture.requests), 1)
 
     def test_self_hosted_create_and_connect_keep_binary_traffic_on_explicit_sandbox_url(self):
         with provider_fixture() as control, provider_fixture("fileData") as data, provider_fixture() as ambient:
@@ -288,31 +360,76 @@ class SdkTransportAcceptanceTests(unittest.TestCase):
         self.assertEqual(creation["headers"]["idempotency-key"], "request-key-fixture")
         self.assertEqual(creation["headers"]["x-api-key"], "e2b_" + "a" * 64)
 
-    def test_disconnected_creation_response_is_unknown_and_never_retried(self):
-        with provider_fixture("lostCreateReply") as fixture:
-            response = adapter_for(fixture).handle(create_request())
-        self.assertEqual(response["outcome"], "unknown", response)
-        self.assertEqual(response["error"]["code"], "providerRequestFailed")
-        self.assertEqual(
-            [(item["method"], item["path"]) for item in fixture.requests],
-            [("POST", "/v2/sandboxes")],
-        )
+    def test_invalid_provider_idempotency_keys_fail_before_any_http_request(self):
+        keys = ("a" * 256, "Uppercase", "under_score", "dot.key", "colon:key", "has space", "slash/key", "line\nbreak", "\u00e9", "")
+        for configured in (False, True):
+            for key in keys:
+                with self.subTest(configured=configured, key=key), provider_fixture() as fixture:
+                    response = adapter_for(fixture, idempotency_supported=configured).handle(create_request(key=key))
+                    self.assertEqual(response["outcome"], "notDispatched", response)
+                    self.assertEqual(response["error"]["code"], "invalidRequest")
+                    self.assertEqual(fixture.requests, [])
 
-    def test_provider_refusal_does_not_retry_or_become_non_dispatch_evidence(self):
-        for mode in ("refused503", "refused429"):
-            with self.subTest(mode=mode), provider_fixture(mode) as fixture:
-                response = adapter_for(fixture).handle(create_request())
-            self.assertEqual(response["outcome"], "unknown", response)
-            self.assertEqual(len(fixture.requests), 1)
-            self.assertEqual(fixture.requests[0]["method"], "POST")
+    def test_provider_idempotency_key_boundaries_keep_the_exact_header(self):
+        for key in ("-", "a" * 255):
+            with self.subTest(length=len(key)), provider_fixture() as fixture:
+                response = adapter_for(fixture, idempotency_supported=False).handle(create_request(key=key))
+                self.assertEqual(response["outcome"], "succeeded", response)
+                self.assertEqual([(item["method"], item["path"]) for item in fixture.requests],
+                                 [("POST", "/v2/sandboxes"), ("GET", "/sandboxes/sandbox-fixture")])
+                self.assertEqual(fixture.requests[0]["headers"]["idempotency-key"], key)
 
-    def test_lost_inspection_response_preserves_the_known_sandbox_identity(self):
-        with provider_fixture("lostInspectionReply") as fixture:
-            response = adapter_for(fixture).handle(create_request())
-        self.assertEqual(response["outcome"], "unknown", response)
+    def test_unverified_idempotency_create_sends_one_request_with_bound_identity(self):
+        with provider_fixture() as fixture:
+            response = adapter_for(fixture, idempotency_supported=False).handle(create_request())
+        self.assertEqual(response["outcome"], "succeeded", response)
         self.assertEqual(response["result"]["sandboxId"], "sandbox-fixture")
         self.assertEqual(response["result"]["attemptId"], "attempt-fixture")
-        self.assertEqual(len(fixture.requests), 2)
+        self.assertEqual([(item["method"], item["path"]) for item in fixture.requests],
+                         [("POST", "/v2/sandboxes"), ("GET", "/sandboxes/sandbox-fixture")])
+        creation = fixture.requests[0]
+        self.assertEqual(creation["body"]["templateID"], "template-fixture:123e4567-e89b-12d3-a456-426614174000")
+        self.assertEqual(creation["body"]["metadata"]["centaerisAttemptId"], "attempt-fixture")
+        self.assertEqual(creation["headers"]["idempotency-key"], "request-key-fixture")
+
+    def test_disconnected_creation_response_is_unknown_and_never_retried(self):
+        for configured in (False, True):
+            with self.subTest(configured=configured), provider_fixture("lostCreateReply") as fixture:
+                response = adapter_for(fixture, idempotency_supported=configured).handle(create_request())
+            self.assertEqual(response["outcome"], "unknown", response)
+            self.assertEqual(response["error"]["code"], "providerRequestFailed")
+            self.assertEqual(response["result"]["attemptId"], "attempt-fixture")
+            self.assertEqual([(item["method"], item["path"]) for item in fixture.requests],
+                             [("POST", "/v2/sandboxes")])
+
+    def test_provider_refusal_does_not_retry_or_become_non_dispatch_evidence(self):
+        for configured in (False, True):
+            for mode in ("refused503", "refused429"):
+                with self.subTest(mode=mode, configured=configured), provider_fixture(mode) as fixture:
+                    response = adapter_for(fixture, idempotency_supported=configured).handle(create_request())
+                self.assertEqual(response["outcome"], "unknown", response)
+                self.assertEqual(response["result"]["attemptId"], "attempt-fixture")
+                self.assertEqual([(item["method"], item["path"]) for item in fixture.requests],
+                                 [("POST", "/v2/sandboxes")])
+
+    def test_control_and_cleanup_lanes_cannot_dispatch_create(self):
+        for configured in (False, True):
+            for lane in ("control", "cleanup"):
+                with self.subTest(configured=configured, lane=lane), provider_fixture() as fixture:
+                    response = adapter_for(fixture, lane=lane, idempotency_supported=configured).handle(create_request())
+                self.assertEqual(response["outcome"], "notDispatched", response)
+                self.assertEqual(response["error"]["code"], "laneForbidden")
+                self.assertEqual(fixture.requests, [])
+
+    def test_lost_inspection_response_preserves_the_known_sandbox_identity(self):
+        for configured in (False, True):
+            with self.subTest(configured=configured), provider_fixture("lostInspectionReply") as fixture:
+                response = adapter_for(fixture, idempotency_supported=configured).handle(create_request())
+            self.assertEqual(response["outcome"], "unknown", response)
+            self.assertEqual(response["result"]["sandboxId"], "sandbox-fixture")
+            self.assertEqual(response["result"]["attemptId"], "attempt-fixture")
+            self.assertEqual([(item["method"], item["path"]) for item in fixture.requests],
+                             [("POST", "/v2/sandboxes"), ("GET", "/sandboxes/sandbox-fixture")])
 
     def test_explicit_clients_keep_account_headers_and_attempts_isolated(self):
         with provider_fixture() as first, provider_fixture() as second:

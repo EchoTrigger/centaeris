@@ -29,6 +29,77 @@ class RequestError(ValueError):
         self.code = code
 
 
+@dataclass(frozen=True)
+class _ConnectedSandbox:
+    sandbox: object
+    envd_version: str
+
+
+@dataclass(frozen=True)
+class _CommandEnd:
+    exit_code: int
+    exited: bool
+
+
+class _RawCommandHandle:
+    def __init__(self, pid, events):
+        self.pid = pid
+        self.events = events
+
+    def __iter__(self):
+        from protobuf import Oneof
+
+        for response in self.events:
+            match response.event.event if response.event is not None else None:
+                case Oneof(field="data", value=data):
+                    match data.output:
+                        case Oneof(field="stdout", value=chunk):
+                            yield chunk, None, None
+                        case Oneof(field="stderr", value=chunk):
+                            yield None, chunk, None
+                        case _:
+                            raise RequestError("commandStreamInvalid", "Unsupported command output event")
+                case Oneof(field="end", value=end):
+                    # A normal nonzero exit carries provider error text too.
+                    # The explicit exit evidence is useful; its diagnostics are
+                    # not returned or retained in the adapter receipt.
+                    yield None, None, _CommandEnd(end.exit_code, end.exited)
+                case Oneof(field="keepalive"):
+                    continue
+                case _:
+                    raise RequestError("commandStreamInvalid", "Unsupported command stream event")
+
+    def disconnect(self):
+        self.events.close()
+
+
+def _start_command_stream(sandbox, envd_version, payload):
+    # This is the generated protocol shipped by the exact pinned official SDK.
+    # Its public CommandHandle decodes bytes before exposing output callbacks.
+    from e2b.connection_config import KEEPALIVE_PING_HEADER, KEEPALIVE_PING_INTERVAL_SEC
+    from e2b.envd.client_sync import as_stream, create_rpc_client
+    from e2b.envd.process import process_connect, process_pb
+    from e2b.envd.utils import authentication_header, extract_start_pid, timeout_to_ms
+    from packaging.version import Version
+
+    rpc = create_rpc_client(process_connect.ProcessClientSync, sandbox.envd_api_url, sandbox.connection_config)
+    events = as_stream(rpc.start(
+        process_pb.StartRequest(process=process_pb.ProcessConfig(
+            cmd="/bin/bash", args=["-l", "-c", payload["command"]],
+            cwd=payload.get("cwd"), envs=payload.get("envs")), stdin=False),
+        headers={**authentication_header(Version(envd_version), payload.get("user")),
+                 KEEPALIVE_PING_HEADER: str(KEEPALIVE_PING_INTERVAL_SEC)},
+        timeout_ms=timeout_to_ms(payload["timeoutSeconds"])))
+    try:
+        pid = extract_start_pid(next(events), "start process")
+        if type(pid) is not int or not 1 <= pid <= 2**31 - 1:
+            raise RequestError("commandStreamInvalid", "Provider returned an invalid process identity")
+        return _RawCommandHandle(pid, events)
+    except BaseException:
+        events.close()
+        raise
+
+
 @dataclass
 class _CommandEvidence:
     handle: object | None
@@ -110,10 +181,11 @@ def _strings(value):
 
 
 class Adapter:
-    def __init__(self, config: AdapterConfig, *, client=None):
+    def __init__(self, config: AdapterConfig, *, client=None, command_stream_factory=None):
         self.config = config
         self._sandboxes = OrderedDict()
         self._commands = OrderedDict()
+        self._command_stream_factory = command_stream_factory or _start_command_stream
         if client is None:
             if ((config.api_url is None and os.environ.get("E2B_API_URL"))
                     or (config.sandbox_url is None and os.environ.get("E2B_SANDBOX_URL"))):
@@ -141,8 +213,6 @@ class Adapter:
             operation = _text(value["operation"], 64)
             payload = self._validate(operation, value["payload"])
             self._check_lane(operation)
-            if operation == "create" and not self.config.idempotency_supported:
-                raise RequestError("idempotencyUnavailable", "Create requires verified provider idempotency support")
             if operation in ("readFile", "writeFile", "runCommand", "waitCommand", "recoverCommand", "cancelCommand"):
                 if payload["sandboxId"] not in self._sandboxes:
                     raise RequestError("connectionRequired", "Explicit connect is required in this adapter process")
@@ -196,7 +266,7 @@ class Adapter:
         if operation not in specs:
             raise RequestError("unsupportedOperation", "Unsupported adapter operation")
         value = _object(payload, *specs[operation])
-        for key in ("sandboxId", "attemptId", "idempotencyKey", "user"):
+        for key in ("sandboxId", "attemptId", "user"):
             if key in value:
                 _text(value[key], 256)
         for key in ("path", "cwd"):
@@ -214,6 +284,8 @@ class Adapter:
         if "envs" in value:
             value["envs"] = _strings(value["envs"])
         if operation == "create":
+            if not re.fullmatch(r"[a-z0-9-]+", _text(value["idempotencyKey"], 255)):
+                raise RequestError("invalidRequest", "Create idempotencyKey requires 1 to 255 lowercase ASCII letters, digits or hyphens")
             ref = _object(value["templateRef"], ("templateId", "buildId"))
             _text(ref["templateId"], 128)
             _text(ref["buildId"], 36)
@@ -247,8 +319,8 @@ class Adapter:
                 raise RequestError("invalidRequest", "Invalid or oversized base64 file content") from None
         return value
 
-    def _remember(self, sandbox):
-        self._sandboxes[sandbox.sandbox_id] = sandbox
+    def _remember(self, sandbox, envd_version):
+        self._sandboxes[sandbox.sandbox_id] = _ConnectedSandbox(sandbox, envd_version)
         self._sandboxes.move_to_end(sandbox.sandbox_id)
         if len(self._sandboxes) > MAX_CONNECTED_SANDBOXES:
             self._sandboxes.popitem(last=False)
@@ -273,27 +345,32 @@ class Adapter:
         if operation == "capabilities":
             return {"sdkVersion": SDK_VERSION, "lane": self.config.lane, "createIdempotencyConfigured": self.config.idempotency_supported,
                     "commandStartIdempotency": False, "runProcessTreeCancellation": False, "controlCommandCancellation": False,
-                    "commandOutputRestartRecovery": False, "commandOutputRecovery": "adapterLifetime",
+                    "commandOutputBytes": True, "commandOutputRestartRecovery": False, "commandOutputRecovery": "adapterLifetime",
                     "waitBudgetMustCoverOriginalStream": True, "maxCommandEvidence": MAX_COMMANDS,
                     "storageQuota": False, "fullMemoryPauseVerified": False,
                     "maxFileBytes": MAX_FILE_BYTES, "maxOutputBytes": MAX_OUTPUT_BYTES}
         if operation == "create":
+            # The caller durably admits one fresh dispatch before invoking us.
+            # Configured provider idempotency neither grants dispatch authority
+            # nor permits replay of an unresolved request.
             ref = payload["templateRef"]
             sandbox = sdk.create(template=f"{ref['templateId']}:{ref['buildId']}", timeout=payload["timeoutSeconds"],
                                  metadata=payload["metadata"], allow_internet_access=payload["allowInternetAccess"],
                                  lifecycle={"on_timeout": payload["onTimeout"]},
                                  api_headers={"Idempotency-Key": payload["idempotencyKey"]}, retries=0)
             known["sandboxId"] = sandbox.sandbox_id
-            info = self._info(sandbox.get_info(), sandbox.sandbox_id)
-            self._remember(sandbox)
+            provider_info = sandbox.get_info()
+            info = self._info(provider_info, sandbox.sandbox_id)
+            self._remember(sandbox, provider_info.envd_version)
             return {**info, "attemptId": payload["attemptId"]}
         sandbox_id = payload["sandboxId"]
         if operation == "connect":
             sandbox = sdk.connect(sandbox_id, timeout=payload["timeoutSeconds"], on_resume=payload["onResume"])
             if sandbox.sandbox_id != sandbox_id:
                 raise RequestError("identityMismatch", "Provider returned a different sandbox identity")
-            info = self._info(sandbox.get_info(), sandbox_id)
-            self._remember(sandbox)
+            provider_info = sandbox.get_info()
+            info = self._info(provider_info, sandbox_id)
+            self._remember(sandbox, provider_info.envd_version)
             return info
         if operation == "inspect":
             return self._info(sdk.get_info(sandbox_id), sandbox_id)
@@ -305,7 +382,8 @@ class Adapter:
             changed = sdk.pause(sandbox_id, mode=payload["mode"])
             self._sandboxes.pop(sandbox_id, None)
             return {"sandboxId": sandbox_id, "requestedMode": payload["mode"], "changed": changed}
-        sandbox = self._sandboxes[sandbox_id]
+        connection = self._sandboxes[sandbox_id]
+        sandbox = connection.sandbox
         user = {"user": payload["user"]} if "user" in payload else {}
         if operation == "readFile":
             data = bytearray()
@@ -319,8 +397,7 @@ class Adapter:
             sandbox.files.write(payload["path"], payload["data"], request_timeout=self.config.request_timeout_seconds, **user)
             return {"sandboxId": sandbox_id, "bytesWritten": len(payload["data"])}
         if operation == "runCommand":
-            options = {key: payload[key] for key in ("cwd", "envs", "user") if key in payload}
-            handle = sandbox.commands.run(payload["command"], background=True, timeout=payload["timeoutSeconds"], **options)
+            handle = self._command_stream_factory(sandbox, connection.envd_version, payload)
             known["pid"] = handle.pid
             key = sandbox_id, handle.pid
             previous = self._commands.get(key)
@@ -337,29 +414,36 @@ class Adapter:
         if evidence is None:
             raise RequestError("commandOutputUnavailable", "Original command output evidence is unavailable; do not reexecute the command")
         if evidence.result is not None:
-            if len((evidence.result["stdout"] + evidence.result["stderr"]).encode("utf-8")) > payload.get("maxOutputBytes", MAX_OUTPUT_BYTES):
+            if evidence.result["stdoutByteLength"] + evidence.result["stderrByteLength"] > payload.get("maxOutputBytes", MAX_OUTPUT_BYTES):
                 raise RequestError("outputLimitExceeded", "Recorded command output exceeds the requested output budget")
             self._commands.move_to_end(key)
             return dict(evidence.result)
         handle = evidence.handle
-        stdout, stderr = [], []
-        size = 0
+        stdout, stderr = bytearray(), bytearray()
+        end = None
         try:
-            for out, err, _ in handle:
+            for out, err, completion in handle:
+                if end is not None:
+                    raise RequestError("commandStreamInvalid", "Command data followed its completion event")
                 for chunk, target in ((out, stdout), (err, stderr)):
-                    if chunk:
-                        size += len(chunk.encode("utf-8"))
-                        if size > payload.get("maxOutputBytes", MAX_OUTPUT_BYTES):
+                    if chunk is not None:
+                        if not isinstance(chunk, bytes):
+                            raise RequestError("commandStreamInvalid", "Command output must contain raw bytes")
+                        if len(stdout) + len(stderr) + len(chunk) > payload.get("maxOutputBytes", MAX_OUTPUT_BYTES):
                             raise RequestError("outputLimitExceeded", "Output limit reached; process completion is unknown")
-                        target.append(chunk)
-            try:
-                result = handle.wait()
-            except Exception as error:
-                from e2b.sandbox.commands.command_handle import CommandExitException
-                if not isinstance(error, CommandExitException):
-                    raise
-                result = error
-            completed = {"sandboxId": sandbox_id, "pid": payload["pid"], "exitCode": result.exit_code, "stdout": "".join(stdout), "stderr": "".join(stderr)}
+                        target.extend(chunk)
+                if completion is not None:
+                    if (completion.exited is not True
+                            or type(completion.exit_code) is not int or not -(2**31) <= completion.exit_code <= 2**31 - 1):
+                        raise RequestError("commandOutputIncomplete", "Provider did not establish a complete process exit")
+                    end = completion
+            if end is None:
+                raise RequestError("commandOutputIncomplete", "Command stream ended without a complete exit event")
+            completed = {"sandboxId": sandbox_id, "pid": payload["pid"], "exitCode": end.exit_code,
+                         "stdout": stdout.decode("utf-8", errors="replace"), "stderr": stderr.decode("utf-8", errors="replace"),
+                         "stdoutBytesBase64": base64.b64encode(stdout).decode("ascii"),
+                         "stderrBytesBase64": base64.b64encode(stderr).decode("ascii"),
+                         "stdoutByteLength": len(stdout), "stderrByteLength": len(stderr)}
         finally:
             try:
                 handle.disconnect()
