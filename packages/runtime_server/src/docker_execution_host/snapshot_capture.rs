@@ -1,8 +1,10 @@
 use super::*;
+use crate::session_workspace::snapshot::SESSION_WORKSPACE_MANIFEST_LIMIT;
 use hosted_execution::protocol::{
-    SandboxSnapshotBaseline, SandboxSnapshotCaptureRequest, SandboxSnapshotCaptureResponse,
-    SnapshotCaptureDisposition, SANDBOX_SNAPSHOT_CAPTURE_SCHEMA,
+    SandboxSnapshotBaseline, SandboxSnapshotCaptureRequest, SANDBOX_SNAPSHOT_CAPTURE_SCHEMA,
 };
+#[cfg(test)]
+use hosted_execution::protocol::{SandboxSnapshotCaptureResponse, SnapshotCaptureDisposition};
 
 #[derive(Clone)]
 pub(super) struct SnapshotCaptureCache {
@@ -173,104 +175,6 @@ fn finish_capture(
         return Err(helper_failure("snapshot-capture", exit_code, stderr));
     }
     result
-}
-
-impl From<&SessionWorkspace> for WorkspaceSnapshotDescriptor {
-    fn from(value: &SessionWorkspace) -> Self {
-        Self {
-            sha256: value.snapshot_sha256.clone(),
-            size_bytes: value.snapshot_size_bytes,
-            expanded_size_bytes: value.expanded_size_bytes,
-            file_count: value.file_count,
-        }
-    }
-}
-
-impl From<&RecoveryWorkspaceSnapshotV1> for WorkspaceSnapshotDescriptor {
-    fn from(value: &RecoveryWorkspaceSnapshotV1) -> Self {
-        Self {
-            sha256: value.snapshot_sha256.clone(),
-            size_bytes: value.snapshot_size_bytes,
-            expanded_size_bytes: value.expanded_size_bytes,
-            file_count: value.file_count,
-        }
-    }
-}
-
-pub(super) enum SnapshotCaptureResult {
-    Snapshot(ImmutableWorkspaceSnapshot),
-    Unchanged,
-}
-
-fn read_capture<R: Read>(
-    source: &mut R,
-    request: &SandboxSnapshotCaptureRequest,
-    spool: impl FnOnce(&mut R) -> Result<ImmutableWorkspaceSnapshot, String>,
-) -> Result<SnapshotCaptureResult, String> {
-    let mut length = [0_u8; 4];
-    source
-        .read_exact(&mut length)
-        .map_err(|error| format!("read snapshot capture response length failed: {error}"))?;
-    let length = u32::from_be_bytes(length) as usize;
-    if length == 0 || length > 1024 {
-        return Err("snapshot capture response length is invalid".into());
-    }
-    let mut bytes = vec![0; length];
-    source
-        .read_exact(&mut bytes)
-        .map_err(|error| format!("read snapshot capture response failed: {error}"))?;
-    let response: SandboxSnapshotCaptureResponse = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("decode snapshot capture response failed: {error}"))?;
-    if response.schema != SANDBOX_SNAPSHOT_CAPTURE_SCHEMA
-        || response.capture_id != request.capture_id
-    {
-        return Err("snapshot capture response binding mismatch".into());
-    }
-    match response.disposition {
-        SnapshotCaptureDisposition::Unchanged => {
-            let baseline = request
-                .baseline
-                .as_ref()
-                .ok_or("snapshot capture receipt has no baseline")?;
-            if response.baseline_snapshot_sha256.as_deref()
-                != Some(baseline.snapshot_sha256.as_str())
-                || response.manifest_sha256 != manifest_digest(&baseline.manifest)?
-            {
-                return Err("snapshot capture receipt baseline mismatch".into());
-            }
-            let mut trailing = [0; 1];
-            if source
-                .read(&mut trailing)
-                .map_err(|error| format!("read snapshot capture trailing bytes failed: {error}"))?
-                != 0
-            {
-                return Err("snapshot capture receipt has trailing bytes".into());
-            }
-            Ok(SnapshotCaptureResult::Unchanged)
-        }
-        SnapshotCaptureDisposition::Snapshot => {
-            if response.baseline_snapshot_sha256.is_some() {
-                return Err("full snapshot capture response has a baseline receipt".into());
-            }
-            let artifact = spool(source)?;
-            let empty = SandboxWorkspaceSnapshotManifest {
-                schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA.into(),
-                files: vec![],
-            };
-            if response.manifest_sha256
-                != manifest_digest(artifact.manifest.as_ref().unwrap_or(&empty))?
-            {
-                return Err("snapshot capture manifest binding mismatch".into());
-            }
-            Ok(SnapshotCaptureResult::Snapshot(artifact))
-        }
-    }
-}
-
-fn manifest_digest(manifest: &SandboxWorkspaceSnapshotManifest) -> Result<String, String> {
-    let bytes = serde_json::to_vec(manifest)
-        .map_err(|error| format!("encode snapshot capture manifest failed: {error}"))?;
-    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
 #[cfg(test)]

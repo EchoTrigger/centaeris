@@ -181,3 +181,7 @@ pub(crate) fn resolved_resolution(
         )),
     }
 }
+
+pub(crate) mod snapshot;
+
+mod commit;
