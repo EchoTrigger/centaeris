@@ -1481,8 +1481,9 @@ fn postgres_resident_legal_question_and_runtime_job_waits_reuse_their_live_execu
 #[ignore = "requires destructive dedicated Postgres test database"]
 fn postgres_resident_unavailable_or_corrupt_restore_source_preserves_old_execution() {
     use crate::docker_execution_host::{
-        prepare_recovery_workspace_restore, RecoveryRestoreBinding, SessionWorkspaceLease,
+        prepare_recovery_workspace_restore, RecoveryRestoreBinding,
     };
+    use crate::session_workspace::SessionWorkspaceLease;
     use centaeris_core::runtime::contracts::RecoveryWorkspaceSnapshotV1;
     use sha2::{Digest, Sha256};
     use std::io::{Read, Write};

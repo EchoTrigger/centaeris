@@ -4,6 +4,8 @@ mod maintenance;
 mod network;
 mod retained;
 mod retained_commands;
+#[cfg(test)]
+mod session_workspace_tests;
 mod snapshot_capture;
 pub(crate) use maintenance::{
     maintenance_helper, maintenance_task, observe_environment, provision_environment,
@@ -72,6 +74,15 @@ use unicode_normalization::UnicodeNormalization;
 use crate::agent_run_authorization::SessionWorkspace;
 use crate::agent_run_authorization::{EnvironmentProfile, ExecutionNetwork, SandboxResources};
 use crate::postgres_store::PostgresRuntimeStore;
+#[cfg(test)]
+use crate::session_workspace::SESSION_WORKSPACE_RESOLVED_SCHEMA;
+use crate::session_workspace::{
+    resolved_resolution, SessionWorkspaceApi, SessionWorkspaceApiError,
+    SessionWorkspaceCommitOutcome, SessionWorkspaceLease, SessionWorkspaceLeaseRequest,
+    SessionWorkspaceResolution, SessionWorkspaceResolveResponse, SESSION_WORKSPACE_DOWNLOAD_SCHEMA,
+    SESSION_WORKSPACE_RESOLVE_SCHEMA,
+};
+
 use crate::resident_capacity::{declared_usage, ObservedResidentSandbox, ResidentCapacity};
 
 pub(crate) fn environment_policy(profile: &EnvironmentProfile) -> ExecutionPolicy {
@@ -95,9 +106,6 @@ const WORKSPACE_GENERAL_IMAGE_ENV: &str = "WORKSPACE_GENERAL_IMAGE";
 const MEMORY_RUNTIME_VOLUME_ROOT: &str = "/var/lib/centaeris-agent-memory";
 const BASE_COMMAND_PATH: &str =
     "/opt/centaeris/bin:/opt/centaeris/venv/bin:/usr/local/bin:/usr/bin:/bin";
-const SESSION_WORKSPACE_RESOLVE_SCHEMA: &str = "runtime.session_workspace.resolve.v1";
-const SESSION_WORKSPACE_RESOLVED_SCHEMA: &str = "runtime.session_workspace.resolved.v1";
-const SESSION_WORKSPACE_DOWNLOAD_SCHEMA: &str = "runtime.session_workspace.download.v1";
 const SESSION_WORKSPACE_COMMIT_SCHEMA: &str = "runtime.session_workspace.commit.v1";
 const SESSION_WORKSPACE_COMMIT_RESULT_SCHEMA: &str = "runtime.session_workspace.commit.result.v1";
 const EXECUTION_WORKSPACE_STAGE_SCHEMA: &str = "runtime.execution_workspace.stage.v1";
@@ -106,35 +114,6 @@ const EXECUTION_WORKSPACE_DOWNLOAD_SCHEMA: &str = "runtime.execution_workspace.d
 const SESSION_WORKSPACE_MANIFEST_LIMIT: usize = 1024 * 1024;
 const SESSION_WORKSPACE_IO_BUFFER_BYTES: usize = 64 * 1024;
 const SESSION_WORKSPACE_RESTORE_OVERHEAD_BYTES: u64 = 64 * 1024;
-
-#[derive(Debug, Clone)]
-pub(crate) struct SessionWorkspaceLease {
-    pub job_id: String,
-    pub lease_owner: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SessionWorkspaceResolution {
-    RetainedLive,
-    Empty,
-    Download,
-    Advanced,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SessionWorkspaceApiError {
-    Rejected(String),
-    Unavailable(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SessionWorkspaceCommitOutcome {
-    ProtectionDeferred,
-    Accepted,
-    Unchanged,
-    Rejected(String),
-    Pending,
-}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1063,50 +1042,22 @@ impl DockerExecutionHostRunner {
         Ok((metadata, bytes.to_vec()))
     }
 
+    fn session_workspace_api(&self) -> SessionWorkspaceApi<'_> {
+        SessionWorkspaceApi {
+            client: &self.api_client,
+            api_url: &self.api_url,
+            api_token: &self.api_token,
+            agent_run_id: &self.agent_run_id,
+            authorization_digest: &self.authorization_digest,
+        }
+    }
+
     pub(crate) fn resolve_session_workspace(
         &self,
         lease: &SessionWorkspaceLease,
         frozen: &SessionWorkspace,
     ) -> Result<SessionWorkspaceResolution, SessionWorkspaceApiError> {
-        let response = self
-            .api_client
-            .post(format!(
-                "{}/internal/agent-runs/session-workspace/resolve",
-                self.api_url
-            ))
-            .header("X-Internal-Token", self.api_token.as_str())
-            .json(&SessionWorkspaceLeaseRequest::new(
-                SESSION_WORKSPACE_RESOLVE_SCHEMA,
-                self,
-                lease,
-            ))
-            .timeout(Duration::from_secs(10))
-            .send()
-            .map_err(|error| {
-                SessionWorkspaceApiError::Unavailable(format!(
-                    "resolve session workspace failed: {error}"
-                ))
-            })?;
-        if response.status().is_server_error() {
-            return Err(SessionWorkspaceApiError::Unavailable(format!(
-                "resolve session workspace returned {}",
-                response.status().as_u16()
-            )));
-        }
-        if !response.status().is_success() {
-            return Err(SessionWorkspaceApiError::Rejected(format!(
-                "resolve session workspace returned {}",
-                response.status().as_u16()
-            )));
-        }
-        let resolved = response
-            .json::<SessionWorkspaceResolveResponse>()
-            .map_err(|error| {
-                SessionWorkspaceApiError::Rejected(format!(
-                    "decode session workspace resolve failed: {error}"
-                ))
-            })?;
-        resolved_resolution(&resolved, frozen)
+        self.session_workspace_api().resolve(lease, frozen)
     }
 
     pub(crate) fn restore_session_workspace(
@@ -1148,7 +1099,8 @@ impl DockerExecutionHostRunner {
             .header("X-Internal-Token", self.api_token.as_str())
             .json(&SessionWorkspaceLeaseRequest::new(
                 SESSION_WORKSPACE_DOWNLOAD_SCHEMA,
-                self,
+                self.agent_run_id.as_str(),
+                self.authorization_digest.as_str(),
                 lease,
             ))
             .timeout(Duration::from_secs(30))
@@ -1755,23 +1707,7 @@ impl DockerExecutionHostRunner {
         lease: &SessionWorkspaceLease,
         frozen: &SessionWorkspace,
     ) -> Result<SessionWorkspaceCommitOutcome, String> {
-        match self.resolve_session_workspace(lease, frozen) {
-            Ok(SessionWorkspaceResolution::RetainedLive) => {
-                Ok(SessionWorkspaceCommitOutcome::ProtectionDeferred)
-            }
-            Ok(SessionWorkspaceResolution::Advanced) => Ok(SessionWorkspaceCommitOutcome::Accepted),
-            Ok(SessionWorkspaceResolution::Empty | SessionWorkspaceResolution::Download) => {
-                Ok(SessionWorkspaceCommitOutcome::Rejected(
-                    "session workspace commit was not accepted".to_string(),
-                ))
-            }
-            Err(SessionWorkspaceApiError::Unavailable(_)) => {
-                Ok(SessionWorkspaceCommitOutcome::Pending)
-            }
-            Err(SessionWorkspaceApiError::Rejected(reason)) => {
-                Ok(SessionWorkspaceCommitOutcome::Rejected(reason))
-            }
-        }
+        self.session_workspace_api().reconcile_commit(lease, frozen)
     }
 
     fn require_workspace_capacity(
@@ -2968,32 +2904,6 @@ fn filesystem_unavailable(message: impl Into<String>) -> ExecutionFileSystemErro
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SessionWorkspaceLeaseRequest<'a> {
-    schema: &'a str,
-    job_id: &'a str,
-    lease_owner: &'a str,
-    agent_run_id: &'a str,
-    authorization_digest: &'a str,
-}
-
-impl<'a> SessionWorkspaceLeaseRequest<'a> {
-    fn new(
-        schema: &'a str,
-        runner: &'a DockerExecutionHostRunner,
-        lease: &'a SessionWorkspaceLease,
-    ) -> Self {
-        Self {
-            schema,
-            job_id: lease.job_id.as_str(),
-            lease_owner: lease.lease_owner.as_str(),
-            agent_run_id: runner.agent_run_id.as_str(),
-            authorization_digest: runner.authorization_digest.as_str(),
-        }
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 struct SessionWorkspaceCommitRequest<'a> {
     schema: &'a str,
     job_id: &'a str,
@@ -3041,14 +2951,6 @@ struct ExecutionWorkspaceDownloadRequest<'a> {
     agent_run_id: &'a str,
     authorization_digest: &'a str,
     checkpoint_id: &'a str,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SessionWorkspaceResolveResponse {
-    schema: String,
-    disposition: String,
-    session_workspace: SessionWorkspace,
 }
 
 #[derive(Deserialize)]
@@ -3246,34 +3148,6 @@ fn require_workspace_capacity_for_limit(
         return Err("session workspace exceeds sandbox dataTmpfsBytes".into());
     }
     Ok(())
-}
-
-fn resolved_resolution(
-    resolved: &SessionWorkspaceResolveResponse,
-    frozen: &SessionWorkspace,
-) -> Result<SessionWorkspaceResolution, SessionWorkspaceApiError> {
-    if resolved.schema != SESSION_WORKSPACE_RESOLVED_SCHEMA {
-        return Err(SessionWorkspaceApiError::Rejected(
-            "session workspace resolve schema mismatch".into(),
-        ));
-    }
-    match resolved.disposition.as_str() {
-        "empty" if &resolved.session_workspace == frozen && frozen.snapshot_size_bytes == 0 => {
-            Ok(SessionWorkspaceResolution::Empty)
-        }
-        "download" if &resolved.session_workspace == frozen && frozen.snapshot_size_bytes != 0 => {
-            Ok(SessionWorkspaceResolution::Download)
-        }
-        "advanced"
-            if Some(resolved.session_workspace.generation) == frozen.generation.checked_add(1)
-                && resolved.session_workspace.validate().is_ok() =>
-        {
-            Ok(SessionWorkspaceResolution::Advanced)
-        }
-        _ => Err(SessionWorkspaceApiError::Rejected(
-            "session workspace resolve binding mismatch".into(),
-        )),
-    }
 }
 
 pub(crate) struct PreparedRecoveryWorkspace {

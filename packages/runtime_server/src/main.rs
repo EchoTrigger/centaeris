@@ -41,6 +41,7 @@ mod retained_tasks;
 #[cfg(test)]
 mod runtime_http_tests;
 mod session_delivery;
+mod session_workspace;
 mod skill_projection;
 mod terminal_subagents;
 mod transcript_capture;
@@ -135,8 +136,6 @@ use contract::{
 use deferred_input_resolver::{ApiDeferredInputResolver, ApiModelInputImageResolver};
 use docker_execution_host::{
     resolve_workspace_image_digest, DockerExecutionHostRequest, DockerExecutionHostRunner,
-    SessionWorkspaceApiError, SessionWorkspaceCommitOutcome, SessionWorkspaceLease,
-    SessionWorkspaceResolution,
 };
 use file_mutation_commit::WorkspaceFileMutationCommitPort;
 use http::router as http_router;
@@ -147,6 +146,10 @@ use lifecycle_hooks::{workspace_hook_catalog, workspace_lifecycle_hook_runtime};
 use postgres_store::{PostgresConnectionLimits, PostgresRuntimeStore, PostgresSessionLog};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use session_workspace::{
+    SessionWorkspaceApiError, SessionWorkspaceCommitOutcome, SessionWorkspaceLease,
+    SessionWorkspaceResolution,
+};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::Semaphore;

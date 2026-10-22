@@ -27,7 +27,7 @@ pub(crate) struct WaitHandoffPublisher<'a> {
     pub host: &'a crate::docker_execution_host::DockerExecutionHostRunner,
     pub start: &'a crate::contract::AgentRunStart,
     pub fence: &'a centaeris_core::session::RuntimeJobLeaseFence,
-    pub workspace_lease: &'a crate::docker_execution_host::SessionWorkspaceLease,
+    pub workspace_lease: &'a crate::session_workspace::SessionWorkspaceLease,
     pub input_upper_bound_bytes: u64,
 }
 
