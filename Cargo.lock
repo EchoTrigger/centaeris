@@ -2586,6 +2586,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rmcp",
  "rusqlite",
+ "same-file",
  "schemars",
  "serde",
  "serde_json",
@@ -2594,6 +2595,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "unicode-normalization",
+ "uuid",
  "zstd",
 ]
 

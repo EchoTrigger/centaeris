@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod bulk;
 #[cfg(test)]
 mod tests;
 
@@ -229,11 +230,37 @@ impl AdapterProcess {
     }
 
     pub fn close(&self) {
+        let _ = self.stop_and_wait();
+    }
+
+    pub(super) fn stop_and_wait(&self) -> Result<(), &'static str> {
         self.closed.store(true, Ordering::Release);
-        if let Ok(mut child) = self.child.lock() {
-            let _ = child.kill();
-            let _ = child.wait();
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|_| "adapter_child_lock_unavailable")?;
+        if child
+            .try_wait()
+            .map_err(|_| "adapter_child_status_unavailable")?
+            .is_some()
+        {
+            return Ok(());
         }
+        if child.kill().is_err() {
+            return if child
+                .try_wait()
+                .map_err(|_| "adapter_child_status_unavailable")?
+                .is_some()
+            {
+                Ok(())
+            } else {
+                Err("adapter_child_stop_unconfirmed")
+            };
+        }
+        child
+            .wait()
+            .map(|_| ())
+            .map_err(|_| "adapter_child_wait_unconfirmed")
     }
 }
 
