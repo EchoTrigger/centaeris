@@ -77,25 +77,23 @@ test("Read endpoint revocation clears previously authorized history", async cont
   assert.deepEqual(messages(subject.tree), []); subject.unmount();
 });
 
-test("automatic tail refresh is read-only, bounded and stops on unmount", async () => {
-  const originalSet = globalThis.setTimeout; const originalClear = globalThis.clearTimeout;
-  const timers = new Map(); let index = 0; const gets = [];
-  globalThis.setTimeout = (callback, delay) => { assert.equal(delay, 5000); timers.set(++index, callback); return index; };
-  globalThis.clearTimeout = id => timers.delete(id);
-  let subject;
+test("authoritative tail invalidation is read-only, deduplicated and stops on unmount", async context => {
+  const refresh = tailRefreshFixture(context);
+  const gets = [];
+  const subject = renderer(AgentChatPageContent, { agentId: "agent" }, environment({ request: async (path, options) => {
+    assert.equal(options?.method || "GET", "GET"); gets.push(path);
+    return path.includes("/history") ? page(gets.length === 1 ? [row] : []) : { schema: "agent.inputs.v1", agentId: "agent", sessionId: "coord", inputs: [input], nextAfterSequence: null };
+  } }));
   try {
-    subject = renderer(AgentChatPageContent, { agentId: "agent" }, environment({ request: async (path, options) => {
-      assert.equal(options?.method || "GET", "GET"); gets.push(path);
-      return path.includes("/history") ? page(gets.length === 1 ? [row] : []) : { schema: "agent.inputs.v1", agentId: "agent", sessionId: "coord", inputs: [input], nextAfterSequence: null };
-    } }));
-    await subject.settle(); assert.equal(timers.size, 1);
-    [...timers.values()][0](); await subject.settle();
+    await subject.settle();
+    assert.equal(gets.filter(path => path.includes("/history")).length, 1);
+    await refresh(subject);
     assert.equal(gets.filter(path => path.includes("/history")).length, 2);
     assert.equal(gets.filter(path => path.includes("/inputs?")).length, 2);
-    subject.unmount(); assert.equal(timers.size, 0);
-  } finally { subject?.unmount(); globalThis.setTimeout = originalSet; globalThis.clearTimeout = originalClear; }
+    await subject.settle();
+    assert.equal(gets.filter(path => path.includes("/history")).length, 2, "same revision never rereads");
+  } finally { subject.unmount(); }
 });
-
 test("empty history tail refreshes the already loaded latest input Read without moving it", async context => {
   const refresh = tailRefreshFixture(context);
   let historyGets = 0; let consumed = false; const gets = [];

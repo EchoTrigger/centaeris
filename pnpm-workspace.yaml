@@ -3,6 +3,7 @@ packages:
   - packages/desktop
   - packages/web
   - packages/visualization-react
+  - packages/frontend-foundations
 
 enablePrePostScripts: true
 storeDir: .cache/pnpm

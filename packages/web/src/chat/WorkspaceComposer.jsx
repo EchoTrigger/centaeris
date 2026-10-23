@@ -32,6 +32,7 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
   uploadingAttachment,
   onUploadAttachment,
   sessionId,
+  contextRevision,
   currentModel,
   thinkingMode,
   onThinkingModeChange,
@@ -89,7 +90,7 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
           <span className="workspaceComposerControl isPending" data-tooltip={t("appRoute.settingsComingSoon")} role="img" aria-label={t("appRoute.settingsComingSoon2")}>
             <SlidersHorizontal aria-hidden="true" />
           </span>
-          <ContextUsagePicker sessionId={sessionId} isRunning={hasActiveAgentRun} />
+          <ContextUsagePicker sessionId={sessionId} contextRevision={contextRevision} />
         </div>
         <input ref={fileInputRef} className="srOnly" type="file" multiple aria-label={t("appRoute.selectOneOrMoreMaterials")} onChange={onUploadAttachment} />
         <div className="workspaceComposerControlGroup isRuntime">

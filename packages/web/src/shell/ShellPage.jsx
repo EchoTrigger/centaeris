@@ -10,8 +10,8 @@ import { SessionNavigationRow } from "./SessionNavigationRow";
 import { useSessionNavigationActions } from "./useSessionNavigationActions";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 
-/** @param {{ children: import("react").ReactNode, initialTab?: string, activeAgent?: import("../router").AgentSummary | null, mainClassName?: string, showRecentSessions?: boolean, recentRevision?: string }} props */
-export function ShellPage({ children, initialTab = "home", activeAgent = null, mainClassName = "", showRecentSessions = false, recentRevision = "" }) {
+/** @param {{ children: import("react").ReactNode, initialTab?: string, activeAgent?: import("../router").AgentSummary | null, mainClassName?: string, showRecentSessions?: boolean, recentRevision?: string, presentationNavigation?: readonly import("../chat/workspacePresentationProtocol").PresentationSession[] | null, onNavigationRetry?: () => void }} props */
+export function ShellPage({ children, initialTab = "home", activeAgent = null, mainClassName = "", showRecentSessions = false, recentRevision = "", presentationNavigation, onNavigationRetry }) {
   const { t } = useTranslation();
   const location = useLocation();
   const { workspace, agents } = useRouteLoaderData("workspace");
@@ -22,6 +22,7 @@ export function ShellPage({ children, initialTab = "home", activeAgent = null, m
   const selectedAgentId = activeAgent?.id || "";
   const scope = JSON.stringify([workspace.id, activeAgent?.id || ""]);
   const refreshKey = JSON.stringify([recentRevision, retry]);
+  const pushedNavigation = presentationNavigation !== undefined;
   useEffect(() => {
     if (!showRecentSessions) return undefined;
     const controller = new AbortController();
@@ -29,7 +30,7 @@ export function ShellPage({ children, initialTab = "home", activeAgent = null, m
     // each record's owner identity; never substitute the selected Agent's id.
     const query = new URLSearchParams({ agentId: selectedAgentId });
     void Promise.all([
-      apiJson(`/api/workspaces/${encodeURIComponent(workspace.id)}/sessions?${query}`, { signal: controller.signal }),
+      pushedNavigation ? Promise.resolve({ sessions: [] }) : apiJson(`/api/workspaces/${encodeURIComponent(workspace.id)}/sessions?${query}`, { signal: controller.signal }),
       apiJson(`/api/workspaces/${encodeURIComponent(workspace.id)}/session-projects?${query}`, { signal: controller.signal }),
     ]).then(([result, projectData]) => {
         if (controller.signal.aborted) return;
@@ -38,13 +39,21 @@ export function ShellPage({ children, initialTab = "home", activeAgent = null, m
           || typeof row.agentId !== "string" || !row.agentId.trim() || row.agentId.trim() !== row.agentId
           || typeof row.title !== "string" || !row.title.trim() || typeof row.updatedAt !== "string" || !Number.isFinite(Date.parse(row.updatedAt)))) throw new Error("session_navigation_response_invalid");
         if (new Set(result.sessions.map(row => row.id)).size !== result.sessions.length) throw new Error("session_navigation_response_invalid");
-        setRecent({ scope, refreshKey, projects: projectData.projects, sessions: sortSessionNavigation(result.sessions), loading: false, error: false });
+        setRecent(previous => ({ scope, refreshKey, projects: projectData.projects,
+          sessions: pushedNavigation ? (previous.scope === scope ? previous.sessions : []) : sortSessionNavigation(result.sessions),
+          loading: pushedNavigation && previous.scope !== scope, error: false }));
       })
       .catch(() => { if (!controller.signal.aborted) setRecent({ scope, refreshKey, sessions: [], projects: [], loading: false, error: true }); });
     return () => controller.abort();
-  }, [showRecentSessions, workspace.id, selectedAgentId, scope, refreshKey]);
+  }, [showRecentSessions, workspace.id, selectedAgentId, scope, refreshKey, pushedNavigation]);
+  useEffect(() => {
+    if (!showRecentSessions || presentationNavigation === undefined || presentationNavigation === null) return;
+    setRecent(previous => ({ scope, refreshKey,
+      projects: previous.scope === scope ? previous.projects : [],
+      sessions: sortSessionNavigation(presentationNavigation), loading: false, error: false }));
+  }, [showRecentSessions, presentationNavigation, scope, refreshKey]);
   const recentNavigation = showRecentSessions ? {
-    ...(recent.scope === scope ? recent : { sessions: [], projects: [], loading: true, error: false }), onRetry: () => setRetry(value => value + 1),
+    ...(recent.scope === scope ? recent : { sessions: [], projects: [], loading: true, error: false }), onRetry: () => { onNavigationRetry?.(); setRetry(value => value + 1); },
   } : undefined;
   const sessionActions = useSessionNavigationActions({ scopeKey: scope, sessions: recentNavigation?.sessions || [], onError: setActionError,
     onChangeSessions: update => setRecent(previous => previous.scope === scope ? { ...previous, sessions: update(previous.sessions) } : previous),

@@ -58,6 +58,11 @@ class PortableGateTests(unittest.TestCase):
         ci.run_gate("Node", lambda args, **kw: calls.append(args) or "", platform="linux")
         self.assertIn(["pnpm", "--filter", "@centaeris/visualization-react", "run", "typecheck"], calls)
 
+    def test_node_gate_checks_shared_frontend_types(self):
+        calls = []
+        ci.run_gate("Node", lambda args, **kw: calls.append(args) or "", platform="linux")
+        self.assertIn(["pnpm", "--filter", "@centaeris/frontend-foundations", "run", "typecheck"], calls)
+
     def test_node_gate_uses_a_frozen_pnpm_install_on_every_platform(self):
         for platform, command in (("win32", "pnpm.cmd"), ("linux", "pnpm"), ("darwin", "pnpm")):
             calls = []

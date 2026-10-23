@@ -42,6 +42,13 @@ class ScopeTests(unittest.TestCase):
         selected = select_products(["packages/visualization-react/src/Renderer.tsx"])
         self.assertEqual({key for key, value in selected.items() if value}, {"localNode"})
 
+    def test_frontend_foundations_check_both_consumers_and_web_image(self):
+        for path in ("packages/frontend-foundations/src/theme-store.ts",
+                     "packages/frontend-foundations/src/components/dialog.tsx"):
+            selected = select_products([path])
+            self.assertEqual({key for key, value in selected.items() if value},
+                             {"localNode", "web", "docker"})
+
     def test_documentation_can_return_a_result_without_product_builds(self):
         self.assertFalse(any(select_products(["docs/workspace/Product.md"]).values()))
 

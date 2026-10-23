@@ -2,9 +2,37 @@
 
 Desktop and Web should use upstream implementations for common frontend
 capabilities so product work can concentrate on agent execution, useful views
-and delivery. Desktop is the integration target first. Web adopts the verified
-foundation only after maintainer acceptance of the complete Desktop candidate.
-The accepted compact light visualization reference is the visual baseline.
+and delivery. Desktop established the accepted foundation. Web now shares its
+underlying primitives without adopting Desktop page or chat interaction policies.
+The accepted compact light visualization reference remains the Desktop visual baseline.
+
+## Shared package and host policy
+
+`packages/frontend-foundations` owns the upstream-derived Nova components,
+headless Base UI entry points, Motion and panel-library entry points, theme
+declarations, the document-scoped theme store and platform-preference provider.
+Consumers import explicit package subpaths. React remains a peer dependency;
+host controllers own their business state and asynchronous request lifetimes.
+
+Desktop's existing component modules forward to the shared Nova components.
+Web composes the headless primitives with its existing CSS, labels and layout;
+it does not import Desktop's Tailwind reset or palette overrides. Shared theme
+declarations retain their existing values. Icon defaults remain 1.5 in Desktop
+and 2 in Web. The provider respects the platform's reduced-motion preference.
+
+Web retains its independent model and effort controls, confirmation flow,
+centered/new-conversation input behavior, navigation, attachment flow and draft
+ownership. Its transcript still folds process details on the first final answer
+and respects manual reopening and closing. The disclosure component retains
+Web's lazy mounting, reading-anchor behavior and animation timing while using
+Motion mini underneath. Sharing components does not change Web's stream,
+authority reconciliation, virtual-list controller or execution environment.
+
+Real DOM tests protect menu selection, dismissal, focus, disabled states,
+confirmation and drafts. Browser disclosure tests protect visible reading
+position, close/reopen continuity and reduced motion. Both product gates check
+the shared package; the Web image and standalone build install its workspace
+dependency closure.
 
 ## Capability ownership
 
@@ -28,7 +56,7 @@ changing this setting alone does not migrate existing components.
 
 ## Desktop integration
 
-`packages/ui/src/components/ui` contains the upstream-derived Nova primitives.
+`packages/ui/src/components/ui` exposes the shared upstream-derived Nova primitives.
 Business components compose these primitives. Focus trapping, keyboard selection,
 outside dismissal and floating positioning belong to Base UI. The shadcn MIT
 notice is preserved in `THIRD_PARTY_NOTICES.md`. Element resets stay in the CSS
@@ -124,6 +152,14 @@ reply space is retained until the response consumes it or the reader takes contr
 and scrollbar interaction pause following before the viewport moves. A downward
 gesture already at the real end leaves following enabled. Detail expansion also
 pauses immediately.
+
+The Web transcript view separates input intent from actual movement. Inert wheel,
+touch or navigation-key input does not detach following. Actual upward movement
+or a requested older-history page pauses it. Chromium can apply scrolling before
+a passive wheel listener runs, so input timestamps do not overwrite the last
+observed position; native scroll and programmatic positioning maintain that
+baseline. Latest-answer visibility and read acknowledgements remain independent
+of automatic following.
 
 TanStack owns virtual measurements, ranges and stable row keys. One content-anchor
 controller preserves reading position while older pages are inserted, including
@@ -255,6 +291,13 @@ CodeMirror and xterm retain their internal state. Server authority, execution
 cancellation and persistence contracts remain in Core and the existing hosts.
 Migrating a subscription mechanism does not redefine those contracts.
 
+Web's shared presentation subscription also carries scoped revision invalidation.
+Context usage, Agent history and visible work lists use the owned
+`useRevisionRefresh` lifecycle instead of periodic component timers. Shared
+primitives do not change Web's terminal folding, reader position, drafts or
+transcript ownership. See [Web presentation delivery](../workspace/architecture/WebPresentation.md)
+for retry budgets, database observation costs and deployment requirements.
+
 ## Inline visualizations
 
 The built-in `inline-visualizations` System Skill teaches when and how to emit
@@ -263,18 +306,23 @@ contracts; the ordinary root prompt keeps general policy. The System Skill bundl
 is packaged with Desktop and discovered through the existing Runtime mechanism.
 
 The shared adapter validates content before delegating presentation to a host.
-Desktop lazily loads its Nova mapping and the accepted compact visual language.
+Desktop and Web lazily load the same Nova mapping and accepted compact visual
+language from `frontend-foundations`. Transport, message ownership and host
+interaction stay outside that adapter.
 Ordered explanations use a thin left guide and neutral circular nodes without progress
 states or number circles. The centered reference resource chain keeps its arrows;
-actual containment uses nested surfaces. Desktop visuals inherit the application
+actual containment uses nested surfaces. Both clients inherit their application
 surface, text, boundary and semantic status colors in both themes. Labels can
 wrap in narrow panels. Icons use the same Lucide dependency
-as other Desktop components. The preview uses the production Markdown and
+as other application components. The preview uses the production Markdown and
 renderer path, rather than example-specific presentation overrides.
 
-Web keeps its default renderer until Desktop acceptance. TUI continues to use
-Core text projection of the same portable content; React dependencies do not
-enter the terminal renderer. See [Inline visualizations](InlineVisualizations.md)
+Web rendering consumes the portable answer content independently of skill
+installation. Hosted deployments discover `inline-visualizations` only when
+the skill is installed in the Runtime catalog and execution environment;
+updating the Web container does not change either catalog or pinned environment.
+TUI continues to use Core text projection of the same portable content; React
+dependencies do not enter the terminal renderer. See [Inline visualizations](InlineVisualizations.md)
 for the content contract and validation limits.
 
 ## Acceptance

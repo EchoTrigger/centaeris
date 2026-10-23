@@ -1,21 +1,15 @@
-import { useSyncExternalStore } from "react";
+import { useStore, createThemeStore, serverThemeStore, THEME_STORAGE_KEY, type ThemePreference } from "@centaeris/frontend-foundations/theme-store";
+export { THEME_STORAGE_KEY, type ThemePreference } from "@centaeris/frontend-foundations/theme-store";
 
-export type ThemePreference = "system" | "dark" | "light";
-export const THEME_STORAGE_KEY = "centaeris:theme:v1";
-function snapshot(): ThemePreference {
-  const value = typeof document === "undefined" ? "system" : document.documentElement.dataset.themePreference;
-  return value === "dark" || value === "light" ? value : "system";
-}
-function subscribe(listener: () => void) {
-  if (typeof window === "undefined") return () => {};
-  window.addEventListener("centaeris-theme-change", listener);
-  window.addEventListener("storage", listener);
-  window.addEventListener("centaeris-theme-applied", listener);
-  return () => {
-    window.removeEventListener("centaeris-theme-change", listener);
-    window.removeEventListener("storage", listener);
-    window.removeEventListener("centaeris-theme-applied", listener);
-  };
+const themeStores = new WeakMap<Document, ReturnType<typeof createThemeStore>>();
+function currentThemeStore() {
+  if (typeof document === "undefined" || typeof window === "undefined") return serverThemeStore;
+  let store = themeStores.get(document);
+  if (!store) {
+    store = createThemeStore(document, window);
+    themeStores.set(document, store);
+  }
+  return store;
 }
 export function changeTheme(value: ThemePreference) {
   document.documentElement.dataset.themePreference = value;
@@ -23,11 +17,10 @@ export function changeTheme(value: ThemePreference) {
   window.dispatchEvent(new Event("centaeris-theme-change"));
 }
 export function useThemePreference() {
-  return useSyncExternalStore(subscribe, snapshot, () => "system" as const);
+  return useStore(currentThemeStore(), state => state.preference);
 }
-
 export function useResolvedTheme() {
-  return useSyncExternalStore(subscribe, () => typeof document !== "undefined" && document.documentElement.dataset.theme === "dark" ? "dark" : "light", () => "light");
+  return useStore(currentThemeStore(), state => state.resolved);
 }
 let transition: ViewTransition | undefined;
 export function changeThemeAnimated(value: ThemePreference, origin: { x: number; y: number }) {

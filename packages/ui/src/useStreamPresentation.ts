@@ -1,4 +1,4 @@
-import { frame as motionFrame, cancelFrame } from "motion";
+import { frame as motionFrame, cancelFrame } from "@centaeris/frontend-foundations/motion";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 const STREAM_PRESENTATION_FRAME_MS = 1_000 / 60;

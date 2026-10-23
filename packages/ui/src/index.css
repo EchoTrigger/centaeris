@@ -3,6 +3,7 @@
 @import "./styles/frontend-foundations.css";
 @import "tailwindcss";
 @import "tw-animate-css";
+@source "../../frontend-foundations/src";
 @import "./assets/fonts/noto-sans-cjk-sc.css";
 @import "./styles/typography.css";
 @import "./styles/chat.css";

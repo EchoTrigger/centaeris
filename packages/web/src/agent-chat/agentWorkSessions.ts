@@ -1,7 +1,8 @@
+import { validateSessionAttention } from "../sessionAttentionContract";
 import { parseReferencedSession, type ReferencedSession } from "./agentOutputFeed";
 import type { TranscriptInitialInputOrigin } from "../chat/TranscriptBlockContent";
 
-const SESSION_KEYS = "id|workspaceId|agentId|projectId|title|origin|status|deletedAt|isPinned|isUnread|hasActiveAgentRun|updatedAt|initialInputOrigin|currentEnvironmentId|executionMode";
+const SESSION_KEYS = "id|workspaceId|agentId|projectId|title|origin|status|deletedAt|isPinned|isUnread|hasActiveAgentRun|updatedAt|initialInputOrigin|currentEnvironmentId|executionMode|isManuallyUnread|latestAttentionSequence|readThroughSequence|attentionRevision";
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("agent_work_sessions_invalid");
   return value as Record<string, unknown>;
@@ -41,7 +42,7 @@ export function parseAgentWorkSessionsPage(value: unknown, agentId: string, work
       || !opaque(session.currentEnvironmentId) || session.executionMode !== "perRun"
       || session.deletedAt !== null || typeof session.isPinned !== "boolean" || typeof session.isUnread !== "boolean"
       || (session.projectId !== null && !opaque(session.projectId)) || typeof session.updatedAt !== "string" || !Number.isFinite(Date.parse(session.updatedAt))) throw new Error("agent_work_sessions_invalid");
-    ids.add(session.id); inputOrigin(session.initialInputOrigin);
+    ids.add(session.id); inputOrigin(session.initialInputOrigin); validateSessionAttention(session);
     return parseReferencedSession({ session }, workspaceId, session.id);
   });
   const next = page.nextAfterSessionId;

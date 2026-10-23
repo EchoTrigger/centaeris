@@ -29,15 +29,47 @@ const output = (id: string, sourceSequence: number, body: string, sessionRefs: s
   body, sessionRefs, fileRefs: [],
 });
 configureApi({ apiBaseUrl: location.origin } as Parameters<typeof configureApi>[0]);
+const presentationStreams = new Map<string, Set<ReadableStreamDefaultController<Uint8Array>>>();
+const historyRevisions = new Map<string, number>();
+function notifyHistory(agentId = "fixture-main") {
+  const revision = (historyRevisions.get(agentId) || 0) + 1; historyRevisions.set(agentId, revision);
+  const item = { schema: "workspace.presentation.v1", kind: "viewRevision", workspaceId: workspace.id, agentId, sessionId: null,
+    contextRevision: "0", historyRevision: String(revision), workRevision: "0" };
+  const frame = new TextEncoder().encode(`data: ${JSON.stringify(item)}\n\n`);
+  for (const stream of presentationStreams.get(agentId) || []) stream.enqueue(frame);
+}
+
 window.fetch = async (input, init) => {
   const url = new URL(String(input), location.origin);
   const method = init?.method || "GET";
   requests.push({ path: `${url.pathname}${url.search}`, method });
   if (method !== "GET") throw new Error("Synthetic readonly Agent route must not mutate application data");
   const json = (body: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } }));
+  if (url.pathname === `/api/workspaces/${workspace.id}/presentation/events`) {
+    const agentId = url.searchParams.get("agentId")!;
+    const identity = { schema: "workspace.presentation.v1", workspaceId: workspace.id, agentId, sessionId: null };
+    const sessions = [{ id: "fixture-work-session", currentEnvironmentId: "environment-fixture-work", executionMode: "perRun", workspaceId: workspace.id,
+      agentId, title: "Synthetic work session", origin: "user", isPinned: false, projectId: null, status: "active", deletedAt: null,
+      isUnread: false, isManuallyUnread: false, latestAttentionSequence: "0", readThroughSequence: "0", attentionRevision: "0",
+      updatedAt: "2026-09-30T14:35:00Z", initialInputOrigin: null, hasActiveAgentRun: true }];
+    let selected: ReadableStreamDefaultController<Uint8Array>;
+    const streams = presentationStreams.get(agentId) || new Set<ReadableStreamDefaultController<Uint8Array>>(); presentationStreams.set(agentId, streams);
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        selected = controller; streams.add(controller);
+        const emit = (item: unknown) => controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(item)}\n\n`));
+        emit({ ...identity, kind: "navigation", snapshotId: "fixture-navigation", offset: 0, hasMore: false, sessions });
+        emit({ ...identity, kind: "viewRevision", contextRevision: "0", historyRevision: String(historyRevisions.get(agentId) || 0), workRevision: "0" });
+      },
+      cancel() { streams.delete(selected); },
+    });
+    init?.signal?.addEventListener("abort", () => { streams.delete(selected); try { selected.close(); } catch { /* already cancelled */ } }, { once: true });
+    return new Response(body, { headers: { "Content-Type": "text/event-stream" } });
+  }
+
   if (url.pathname === "/api/library") return json({ objects: [] });
   if (/^\/api\/sessions\/fixture-work-session\/outputs\/fixture-report\/(preview|download)$/.test(url.pathname)) return new Response("Synthetic output only.\n".repeat(64), { headers: { "Content-Type": "text/plain" } });
-  if (url.pathname === `/api/workspaces/${workspace.id}/sessions`) return json({ sessions: [{ id: "fixture-work-session", workspaceId: workspace.id, agentId: "fixture-worker", title: "Synthetic work session", origin: "user", isPinned: false, projectId: null, status: "active", updatedAt: "2026-09-30T14:35:00Z" }] });
+  if (url.pathname === `/api/workspaces/${workspace.id}/sessions`) return json({ sessions: [{ id: "fixture-work-session", currentEnvironmentId: "environment-fixture-work", executionMode: "perRun", workspaceId: workspace.id, agentId: "fixture-worker", title: "Synthetic work session", origin: "user", isPinned: false, projectId: null, status: "active", deletedAt: null, isUnread: false, isManuallyUnread: false, latestAttentionSequence: "0", readThroughSequence: "0", attentionRevision: "0", updatedAt: "2026-09-30T14:35:00Z", initialInputOrigin: null, hasActiveAgentRun: true }] });
   if (url.pathname === `/api/workspaces/${workspace.id}/session-projects`) return json({ projects: [] });
   const model = url.pathname.match(/^\/api\/agents\/(fixture-[^/]+)\/model-settings$/);
   if (model) return json({ schema: "agent.model_settings.v1", agentId: model[1], modelConfigRef: null, thinkingMode: null, status: "unconfigured" });
@@ -45,7 +77,7 @@ window.fetch = async (input, init) => {
   if (binding) return binding[1] === "fixture-empty" ? json({ error: "coordination_session_not_found" }, 404) : json({ schema: "agent.coordination_session.v1", agentId: binding[1], sessionId: `fixture-coordination-${binding[1]}` });
   const workSessions = url.pathname.match(/^\/api\/agents\/(fixture-[^/]+)\/work-sessions$/);
   if (workSessions) return json({ schema: "agent.work_sessions.v1", agentId: workSessions[1], workspaceId: workspace.id,
-    sessions: workSessions[1] === "fixture-main" ? [{ id: "fixture-work-session", currentEnvironmentId: "environment-fixture-work", executionMode: "perRun", workspaceId: workspace.id, agentId: "fixture-worker", projectId: null, title: "Synthetic work session", origin: "automation", status: "active", deletedAt: null, isPinned: false, isUnread: false, hasActiveAgentRun: true, updatedAt: "2026-09-30T14:35:00Z", initialInputOrigin: { messageId: "fixture-initial-work", agentId: "fixture-main", agentName: "Synthetic main" } }] : [],
+    sessions: workSessions[1] === "fixture-main" ? [{ id: "fixture-work-session", currentEnvironmentId: "environment-fixture-work", executionMode: "perRun", workspaceId: workspace.id, agentId: "fixture-worker", projectId: null, title: "Synthetic work session", origin: "automation", status: "active", deletedAt: null, isPinned: false, isUnread: false, isManuallyUnread: false, latestAttentionSequence: "0", readThroughSequence: "0", attentionRevision: "0", hasActiveAgentRun: true, updatedAt: "2026-09-30T14:35:00Z", initialInputOrigin: { messageId: "fixture-initial-work", agentId: "fixture-main", agentName: "Synthetic main" } }] : [],
     nextAfterSessionId: null, hasMore: false });
   const inputPage = url.pathname.match(/^\/api\/agents\/(fixture-[^/]+)\/inputs$/);
   if (inputPage) return json({ schema: "agent.inputs.v1", agentId: inputPage[1], sessionId: `fixture-coordination-${inputPage[1]}`, inputs: [{ inputId: "fixture-input", sequence: 80, createdAtMs: Date.parse("2026-09-30T14:35:00Z"), body: "Synthetic exact input", attachments: [], read: null }], nextAfterSequence: null });
@@ -119,10 +151,10 @@ window.fetch = async (input, init) => {
     return json(page);
   }
   if (url.pathname === "/api/sessions/fixture-work-session") return json({ session: {
-    id: "fixture-work-session", workspaceId: workspace.id, agentId: "fixture-worker", title: "Synthetic work session", origin: "user", isPinned: false, projectId: null, status: "active", hasActiveAgentRun: true,
+    id: "fixture-work-session", currentEnvironmentId: "environment-fixture-work", executionMode: "perRun", workspaceId: workspace.id, agentId: "fixture-worker", title: "Synthetic work session", origin: "user", isPinned: false, projectId: null, status: "active", deletedAt: null, isUnread: false, isManuallyUnread: false, latestAttentionSequence: "0", readThroughSequence: "0", attentionRevision: "0", updatedAt: "2026-09-30T14:35:00Z", initialInputOrigin: null, hasActiveAgentRun: true,
   } });
   if (url.pathname === "/api/sessions/fixture-older-work-session") {
-    const metadata = { session: { id: "fixture-older-work-session", workspaceId: workspace.id, agentId: "fixture-worker", title: "Synthetic older work session", origin: "user", isPinned: false, projectId: null, status: "active", hasActiveAgentRun: false } };
+    const metadata = { session: { id: "fixture-older-work-session", currentEnvironmentId: "environment-fixture-older-work", executionMode: "perRun", workspaceId: workspace.id, agentId: "fixture-worker", title: "Synthetic older work session", origin: "user", isPinned: false, projectId: null, status: "active", hasActiveAgentRun: false, deletedAt: null, isUnread: false, isManuallyUnread: false, latestAttentionSequence: "0", readThroughSequence: "0", attentionRevision: "0", updatedAt: "2026-09-30T14:35:00Z", initialInputOrigin: null } };
     if (delayedHistory.olderReference) return new Promise<Response>(resolve => {
       delayedHistory.releaseOlderReference = () => { delayedHistory.olderReference = false; delayedHistory.releaseOlderReference = null; void json(metadata).then(resolve); };
     });
@@ -407,6 +439,7 @@ if (new URLSearchParams(location.search).has("review")) {
   }, 0);
   delayedHistory.newer = true;
   replies.scrollTop = replies.scrollHeight - replies.clientHeight;
+  notifyHistory();
   await waitFor(() => delayedHistory.releaseNewer !== null);
   check("background tail history request has no loading status message", document.querySelector(".agentChatContentWidth > [role=status]"), null);
   replies.scrollTop = Math.max(200, replies.scrollTop - 320);
@@ -417,11 +450,13 @@ if (new URLSearchParams(location.search).has("review")) {
   await waitFor(() => document.querySelectorAll("article").length === 4);
   check("newer page does not force a reader back to the bottom", replies.scrollTop, newerReadingScroll);
   check("newer page preserves the content selected during its request", Math.abs(newerReadingAnchor.getBoundingClientRect().top - newerReadingTop) < 1, true);
-  check("polling uses newest cursor independently of older pagination", requests.some(item => new URL(item.path, location.origin).searchParams.get("afterCursor") === "fixture-output-position"), true);
+  check("revision refresh uses newest cursor independently of older pagination", requests.some(item => new URL(item.path, location.origin).searchParams.get("afterCursor") === "fixture-output-position"), true);
+  notifyHistory();
   await waitFor(() => requests.some(item => new URL(item.path, location.origin).searchParams.get("afterCursor") === "fixture-arrival-position"));
   check("empty tail refresh preserves loaded rows", document.querySelectorAll("article").length, 4);
   delayedHistory.newer = true;
   replies.scrollTop = replies.scrollHeight - replies.clientHeight;
+  notifyHistory();
   await waitFor(() => delayedHistory.releaseNewer !== null);
   delayedHistory.releaseNewer!();
   await waitFor(() => document.querySelectorAll("article").length === 5);

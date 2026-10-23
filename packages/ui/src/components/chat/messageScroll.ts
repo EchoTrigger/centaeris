@@ -1,4 +1,4 @@
-import { animate } from "motion";
+import { animate } from "@centaeris/frontend-foundations/motion";
 
 type Geometry = { height: number; contentEnd: number; anchorTop: number; scrollTop: number };
 type Port = {

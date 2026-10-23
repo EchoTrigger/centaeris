@@ -1,8 +1,8 @@
 import { useTranslation } from "../i18n";
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { matchPath, useNavigate, useRouteLoaderData } from "react-router";
-import { apiResponse } from "../api";
-import { OperationClient, acceptedConversationReviewLink, consumeReviewedOperation, loadAcceptedConversation } from "../chat/operationReceipts";
+import { apiJson, apiResponse } from "../api";
+import { OperationClient, acceptedConversationReviewLink, consumeReviewedOperation } from "../chat/operationReceipts";
 import { WorkspaceContextPanel } from "../components/WorkspaceContextPanel";
 import { DocumentPreview } from "../components/DocumentPreview";
 import { officeFileType } from "../chat/officeFormats.mjs";
@@ -10,13 +10,13 @@ import { officePreviewUrl } from "../chat/attachments.mjs";
 import { codePreviewCanRender } from "../chat/codePreviewFormats.mjs";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { useModalDialog } from "../components/useModalDialog";
-import { streamWorkspaceAgentRun } from "../chat/workspaceWebTransport";
+import { streamWorkspacePresentation } from "../chat/workspacePresentationTransport";
 import { createTranscriptViewStore } from "../chat/transcriptViewStore";
 import { compareTranscriptBlocks } from "../chat/transcriptContract";
 import { hasCommittedPendingMessage } from "../chat/transcriptTurns";
 import { TranscriptToolOperationRegistry } from "../chat/transcriptToolOperations";
 import { createWorkspaceTranscriptTransport } from "../chat/transcriptTransport";
-import { WorkspaceTranscriptController } from "../chat/workspaceTranscriptController";
+import { WorkspacePresentationController } from "../chat/workspacePresentationController";
 import { TranscriptBlockList } from "../chat/TranscriptBlockList";
 import { parseSessionInputOrigin } from "../agent-chat/agentWorkSessions";
 import {
@@ -45,7 +45,7 @@ import { ShellSidebar } from "../shell/ShellSidebar";
 import { groupSessionNavigation, sortSessionNavigation as sortSessions } from "../shell/sessionNavigation.mjs";
 import { SessionNavigationRow } from "../shell/SessionNavigationRow";
 import { useSessionNavigationActions } from "../shell/useSessionNavigationActions";
-import { useSessionNavigationRefresh } from "../shell/useSessionNavigationRefresh";
+import { SessionReadController, mergeSessionAttention, mergeSessionNavigation } from "../shell/sessionReadState";
 import {
   Image as ImageIcon,
   PanelLeft,
@@ -103,6 +103,8 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   const requestScopeKey = JSON.stringify([workspace.id, activeAgent.id, workspaceDraft, requestedSessionId, startFresh, requestedProjectId]);
   const requestScopeRef = useRef({ key: requestScopeKey, active: true });
   if (requestScopeRef.current.key !== requestScopeKey) requestScopeRef.current = { key: requestScopeKey, active: true };
+  const navigationSnapshotRef = useRef({ scope: requestScopeKey, sessions: null });
+  if (navigationSnapshotRef.current.scope !== requestScopeKey) navigationSnapshotRef.current = { scope: requestScopeKey, sessions: null };
   const streamAbortRef = useRef(null);
   const chatControllerRef = useRef(null);
   const acceptedSessionRef = useRef(null);
@@ -126,6 +128,16 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   const [sessions, setSessions] = useState([]);
   const [projects, setProjects] = useState([]);
   const [sessionId, setSessionId] = useState("");
+  const [presentationAttempt, setPresentationAttempt] = useState(0);
+  const [contextVersion, setContextVersion] = useState(null);
+  const [readableThrough, setReadableThrough] = useState("0");
+  const [readingLatest, setReadingLatest] = useState(true);
+  const [pageVisible, setPageVisible] = useState(() => typeof document === "undefined" || !document.hidden);
+  const enteredReadRef = useRef({ sessionId: "", handled: false });
+  if (enteredReadRef.current.sessionId !== sessionId) enteredReadRef.current = { sessionId, handled: false };
+  const presentationScopeKey = JSON.stringify([workspace.id, activeAgent.id, sessionId]);
+  const presentationScopeRef = useRef(presentationScopeKey);
+  presentationScopeRef.current = presentationScopeKey;
   const [initialInputOrigin, setInitialInputOrigin] = useState(null);
   const [assets, setAssets] = useState([]);
   const [pendingAttachmentIds, setPendingAttachmentIds] = useState([]);
@@ -142,7 +154,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [attachmentPreview, setAttachmentPreview] = useState(null);
   const sessionActions = useSessionNavigationActions({ scopeKey: JSON.stringify([workspace.id, activeAgent.id]), sessions, onChangeSessions: setSessions, onError: setError, onDeleted: onSessionDeleted });
-  const { deletingSessionId, deleteConfirmationSessionId, setDeleteConfirmationSessionId, setEditingSessionId, setOpenSessionMenuId, updateSession, markSessionRead, deleteSession } = sessionActions;
+  const { deletingSessionId, deleteConfirmationSessionId, setDeleteConfirmationSessionId, setEditingSessionId, setOpenSessionMenuId, markSessionRead, deleteSession } = sessionActions;
   const [cancellingAgentRunId, setCancellingRunId] = useState("");
   const [loadingHistory, setLoadingHistory] = useState(!workspaceDraft);
   const [loadingOlderHistory, setLoadingOlderHistory] = useState(false);
@@ -177,7 +189,8 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     transcriptContentRangeCacheBytes,
     transcriptContentRangeCacheBytes,
   );
-  const transcriptManagedBytes = transcriptBlockBytes + transcriptReferencedContentBytes;
+  const transcriptPushedContentBytes = useSyncExternalStore(transcriptStore.subscribePresentationContent, transcriptStore.presentationContentBytes, transcriptStore.presentationContentBytes);
+  const transcriptManagedBytes = transcriptBlockBytes + transcriptReferencedContentBytes + transcriptPushedContentBytes;
   const currentModel = useMemo(() => models.find((model) => model.id === modelId), [models, modelId]);
   const modelGroups = useMemo(() => {
     const groups = new Map();
@@ -257,8 +270,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   }, []);
   const reportLoadError = useEffectEvent((key) => setError(t(key)));
   const markSelectedSessionRead = useEffectEvent(markSessionRead);
-  const connectLoadedAgentRun = useEffectEvent(connectAgentRun);
-  const handleLoadedAgentRunStreamFailure = useEffectEvent(handleAgentRunStreamFailure);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: The version is an explicit refresh signal from retained settings routes.
   useEffect(() => {
@@ -306,6 +317,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     }
     let active = true;
     setInitialInputOrigin(null);
+    setError("");
     const navigationScopeKey = requestScopeKey;
     setLoadingHistory(!workspaceDraft);
     acceptedSessionRef.current = null;
@@ -323,22 +335,22 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       apiResponse(`/api/workspaces/${workspace.id}/session-projects?agentId=${encodeURIComponent(activeAgent.id)}`).then((response) => response.json()),
     ])
       .then(([data, projectData]) => {
-        if (!active || requestScopeRef.current.key !== navigationScopeKey) return;
+        if (!active || !requestScopeRef.current.active || requestScopeRef.current.key !== navigationScopeKey) return;
         if (!Array.isArray(data.sessions) || !Array.isArray(projectData.projects)) throw new Error("session_navigation_response_invalid");
-        setSessions(data.sessions);
+        const navigation = navigationSnapshotRef.current.sessions ?? data.sessions;
+        if (navigationSnapshotRef.current.sessions === null) setSessions(items => sortSessions(mergeSessionNavigation(items, navigation)));
         setProjects(projectData.projects);
         const selectedSession = workspaceDraft || startFresh
           ? null
-          : data.sessions.find((session) => session.id === requestedSessionId)
-            || data.sessions[0]
+          : navigation.find((session) => session.id === requestedSessionId)
+            || navigation[0]
             || null;
         const selectedSessionId = selectedSession?.id || "";
         setSessionId(selectedSessionId);
-        if (selectedSession?.isUnread) markSelectedSessionRead(selectedSession);
         if (!selectedSessionId) setLoadingHistory(false);
       })
       .catch(() => {
-        if (!active || requestScopeRef.current.key !== navigationScopeKey) return;
+        if (!active || !requestScopeRef.current.active || requestScopeRef.current.key !== navigationScopeKey) return;
         reportLoadError("appRoute.unableToLoadConversationsRefreshThePageAndTry");
         setLoadingHistory(false);
       });
@@ -354,276 +366,174 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     window.requestAnimationFrame(() => document.getElementById("messageDraft")?.focus());
   }, [loadingHistory, modelId, startFresh, workspace]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Pending acknowledgements and their cache retire when the reader identity changes.
+  const readController = useMemo(() => new SessionReadController({
+    send: async (session, throughSequence, signal) => {
+      const data = await apiJson(`/api/sessions/${encodeURIComponent(session.id)}/read`, {
+        method: "POST", body: JSON.stringify({ throughSequence }), signal,
+      });
+      return data.session;
+    },
+    onAcknowledged: record => setSessions(items => items.map(item => {
+      if (item.id !== record.id) return item;
+      const attention = Object.fromEntries(["latestAttentionSequence", "readThroughSequence", "attentionRevision", "isManuallyUnread", "isUnread"].map(key => [key, record[key]]));
+      return mergeSessionAttention(item, { ...item, ...attention });
+    })),
+  }), [user.id, workspace.id, activeAgent.id]);
+  useEffect(() => () => readController.dispose(), [readController]);
   useEffect(() => {
-    if (!sessionId) {
-      clearConversationProjection();
-      return;
+    if (typeof document === "undefined") return undefined;
+    const visibilityTarget = document;
+    const focusTarget = window;
+    const update = () => setPageVisible(!visibilityTarget.hidden);
+    visibilityTarget.addEventListener("visibilitychange", update);
+    focusTarget.addEventListener("focus", update);
+    return () => { visibilityTarget.removeEventListener("visibilitychange", update); focusTarget.removeEventListener("focus", update); };
+  }, []);
+  useEffect(() => {
+    const visible = pageVisible && !loadingHistory;
+    if (activeSession && visible && readingLatest && BigInt(readableThrough) >= BigInt(activeSession.latestAttentionSequence)) {
+      const entered = enteredReadRef.current;
+      if (entered.sessionId === sessionId && !entered.handled) {
+        entered.handled = true;
+        if (activeSession.isManuallyUnread) markSelectedSessionRead(activeSession);
+      }
     }
-    acceptedSessionRef.current = null;
-    stopActiveStream();
-    const controller = new AbortController();
-    streamAbortRef.current = controller;
-    let active = true;
-    const originScopeKey = requestScopeRef.current.key;
-    setInitialInputOrigin(null);
-    transcriptStore.clear();
-    toolOperations.clear();
-    updateActiveTranscriptRun(null);
-    setLoadingHistory(true);
-    setError("");
-    Promise.all([
-      transcriptTransport.loadTail(sessionId, controller.signal),
-      apiResponse(`/api/sessions/${sessionId}/assets`, { signal: controller.signal }),
-      apiResponse(`/api/sessions/${encodeURIComponent(sessionId)}`, { signal: controller.signal }),
-    ])
-      .then(async ([tailPage, assetsResponse, sessionResponse]) => {
-        const assetData = await assetsResponse.json();
-        const origin = parseSessionInputOrigin(await sessionResponse.json(), workspace.id, activeAgent.id, sessionId);
-        if (!active || controller.signal.aborted || requestScopeRef.current.key !== originScopeKey) return;
-        const viewEpoch = transcriptStore.openTail(tailPage);
-        const identity = {
-          sessionId,
-          projectionVersion: tailPage.projectionVersion,
-          projectionGeneration: tailPage.projectionGeneration,
-        };
-        await transcriptTransport.loadPatches({
-          ...identity,
-          afterSourceHighWater: transcriptStore.getListSnapshot().appliedSourceHighWater,
-        }, controller.signal, (patchPage) => {
-          if (!transcriptStore.applyPatchPage(patchPage, viewEpoch)) {
-            throw new Error("transcript view epoch changed while loading the tail");
-          }
-        });
-        const appliedSourceHighWater = transcriptStore.getListSnapshot().appliedSourceHighWater;
-        const activeEnvelope = await transcriptTransport.loadActiveAgentRun({
-          ...identity,
-          sourceHighWater: appliedSourceHighWater,
-        }, controller.signal);
-        if (!active || controller.signal.aborted || activeSessionIdRef.current !== sessionId) return;
-        setInitialInputOrigin({ scope: originScopeKey, sessionId, value: origin });
-        setAssets(assetData.assets);
-        setPendingAttachmentIds([]);
-        setPendingUploadFiles([]);
-        updateActiveTranscriptRun(activeEnvelope.agentRun);
-        const pendingOperation = operations.pending();
-        if (pendingOperation?.receipt?.sessionId === sessionId) operations.complete(pendingOperation.operationId);
-        if (activeEnvelope.agentRun) {
-          connectLoadedAgentRun(activeEnvelope.agentRun.agentRunId, workspace.id, sessionId, controller, {
-            cursor: activeEnvelope.agentRun.streamCursor,
-            viewEpoch,
-            identity,
-          }).catch((streamError) => {
-            handleLoadedAgentRunStreamFailure(streamError, activeEnvelope.agentRun.agentRunId);
-          });
-        }
-      })
-      .catch(errorValue => {
-        if (!active || controller.signal.aborted) return;
-        setInitialInputOrigin(null);
-        if ([401, 403, 404, 409, 410].includes(errorValue?.status)) clearConversationProjection();
-        reportLoadError("appRoute.unableToLoadConversationHistoryRefreshThePageAnd");
-      })
-      .finally(() => active && setLoadingHistory(false));
-    return () => {
-      active = false;
-      controller.abort();
-      chatControllerRef.current?.dispose();
-    };
-  }, [sessionId, workspace?.id, activeAgent.id, operations, clearConversationProjection, stopActiveStream, transcriptStore, transcriptTransport, toolOperations, updateActiveTranscriptRun]);
+    readController.observe({ session: activeSession ?? null, visible, readingLatest, appliedSourceHighWater: readableThrough });
+  }, [activeSession, loadingHistory, pageVisible, readingLatest, readableThrough, readController, sessionId]);
 
-  function showStreamError(errorValue) {
+  const showStreamError = useCallback((errorValue) => {
     if (errorValue?.name === "AbortError") return;
     setError(t("appRoute.theActionCouldNotBeCompletedPleaseTryAgain"));
-  }
+  }, [t]);
 
-  function handleAgentRunStreamFailure(errorValue, agentRunId) {
-    if (errorValue?.name === "AbortError") return;
-    if (activeTranscriptRunRef.current?.agentRunId === agentRunId) {
-      if ([401, 403, 404, 410].includes(errorValue?.status)) {
-        clearConversationProjection();
-        setStreamIssue(null);
-        setWorkTime(null);
-        setError(t("appRoute.unableToLoadConversationHistoryRefreshThePageAnd"));
-        return;
-      }
-      console.error("Transcript stream stopped", { agentRunId, error: errorValue });
-      if (errorValue?.message === "agent_run_not_admitted") {
-        const pending = pendingUserMessageRef.current;
-        if (pending) setDraft((value) => value ? `${pending.text}\n\n${value}` : pending.text);
-        setPendingUserMessage(null);
-        updateActiveTranscriptRun(null);
-        setStreamIssue(null);
-        setWorkTime(null);
-        setError(t("appRoute.runNotAdmitted"));
-        return;
-      }
-      setStreamIssue({ sessionId: activeSessionIdRef.current, agentRunId, error: errorValue, reconnecting: false });
+  const handlePresentationFailure = useCallback((errorValue, targetSessionId) => {
+    if (errorValue?.name === "AbortError" || (targetSessionId || "") !== activeSessionIdRef.current) return;
+    if ([401, 403, 404, 410].includes(errorValue?.status)) {
+      requestScopeRef.current.active = false;
+      stopActiveStream();
+      readController.dispose();
+      navigationSnapshotRef.current.sessions = [];
+      setSessions([]); setProjects([]); setReadableThrough("0");
+      clearConversationProjection(); setStreamIssue(null); setWorkTime(null); setLoadingHistory(false);
+      setError(t("appRoute.unableToLoadConversationHistoryRefreshThePageAnd"));
+      return;
     }
-  }
+    setLoadingHistory(false);
+    setStreamIssue({ sessionId: targetSessionId || "", error: errorValue, reconnecting: false });
+  }, [clearConversationProjection, stopActiveStream, readController, t]);
 
-  async function reloadTranscriptStream(agentRunId, targetSessionId, signal) {
+  const restorePresentationSnapshot = useCallback(async (tail, signal, isCurrent) => {
     const previous = transcriptStore.getListSnapshot();
+    const boundary = transcriptStore.getBlockSnapshot(previous.blockIds[0]);
     const stillCurrent = () => {
-      if (signal.aborted || activeSessionIdRef.current !== targetSessionId
-        || transcriptStore.getListSnapshot().viewEpoch !== previous.viewEpoch) {
+      if (signal.aborted || !isCurrent() || transcriptStore.getListSnapshot().viewEpoch !== previous.viewEpoch) {
         throw new DOMException("Aborted", "AbortError");
       }
     };
-    const tail = await transcriptTransport.loadTail(targetSessionId, signal);
-    stillCurrent();
-    const identity = {
-      sessionId: targetSessionId,
-      projectionVersion: tail.projectionVersion,
-      projectionGeneration: tail.projectionGeneration,
-    };
-    const envelope = await transcriptTransport.loadActiveAgentRun({
-      ...identity, sourceHighWater: tail.sourceHighWater,
-    }, signal);
-    stillCurrent();
-    const olderPages = [];
-    const cursors = new Set();
-    let oldest = tail.blocks[0];
-    let cursor = tail.olderCursor;
-    while (cursor !== null) {
-      stillCurrent();
-      const current = transcriptStore.getListSnapshot();
-      const boundary = transcriptStore.getBlockSnapshot(current.blockIds[0]);
-      if (!boundary || (oldest && compareTranscriptBlocks(oldest, boundary) <= 0)) break;
-      if (cursors.has(cursor)) throw new Error("transcript recovery older cursor made no progress");
-      cursors.add(cursor);
-      const olderPage = await transcriptTransport.loadOlder({ ...identity, sourceHighWater: tail.sourceHighWater }, cursor, signal);
-      stillCurrent();
-      if ((olderPage.blocks.length === 0 && olderPage.hasOlder) || olderPage.olderCursor === cursor) {
-        throw new Error("transcript recovery older page made no progress");
-      }
-      const last = olderPage.blocks.at(-1);
-      if (last && oldest && compareTranscriptBlocks(last, oldest) >= 0) {
-        throw new Error("transcript recovery older pages overlap");
-      }
-      olderPages.push(olderPage);
-      oldest = olderPage.blocks[0] ?? oldest;
-      cursor = olderPage.olderCursor;
-    }
-    stillCurrent();
-    // Re-read just the loaded range from this frozen authority. Publishing the
-    // tail and its older pages together preserves the user's reading position.
-    const viewEpoch = transcriptStore.openTail(tail, olderPages);
     olderHistoryRequestRef.current?.controller.abort();
     olderHistoryRequestRef.current = null;
     setLoadingOlderHistory(false);
-    updateActiveTranscriptRun(envelope.agentRun);
-    setStreamIssue(null);
-    if (!envelope.agentRun || envelope.agentRun.agentRunId !== agentRunId) return null;
-    return { identity, viewEpoch, cursor: envelope.agentRun.streamCursor };
-  }
+    const identity = { sessionId: tail.sessionId, projectionVersion: tail.projectionVersion, projectionGeneration: tail.projectionGeneration, sourceHighWater: tail.sourceHighWater };
+    const olderPages = [];
+    const seen = new Set();
+    let oldest = tail.blocks[0];
+    let cursor = tail.olderCursor;
+    while (boundary && cursor !== null && (!oldest || compareTranscriptBlocks(oldest, boundary) > 0)) {
+      stillCurrent();
+      if (seen.has(cursor)) throw new Error("transcript recovery cursor made no progress");
+      seen.add(cursor);
+      const page = await transcriptTransport.loadOlder(identity, cursor, signal);
+      stillCurrent();
+      if ((!page.blocks.length && page.hasOlder) || page.olderCursor === cursor) throw new Error("transcript recovery page made no progress");
+      const last = page.blocks.at(-1);
+      if (last && oldest && compareTranscriptBlocks(last, oldest) >= 0) throw new Error("transcript recovery pages overlap");
+      olderPages.push(page); oldest = page.blocks[0] ?? oldest; cursor = page.olderCursor;
+    }
+    stillCurrent();
+    return transcriptStore.openTail(tail, olderPages);
+  }, [transcriptStore, transcriptTransport]);
 
-  async function retryTranscriptStream() {
-    const issue = streamIssue;
-    if (!issue || issue.reconnecting || issue.sessionId !== activeSessionIdRef.current) return;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: presentationAttempt intentionally restarts the same subscription when Retry is chosen.
+  useEffect(() => {
     stopActiveStream();
     const abortController = new AbortController();
     streamAbortRef.current = abortController;
-    setStreamIssue({ ...issue, reconnecting: true });
-    try {
-      const resume = await reloadTranscriptStream(issue.agentRunId, issue.sessionId, abortController.signal);
-      if (resume) await connectAgentRun(issue.agentRunId, workspace.id, issue.sessionId, abortController, resume);
-    } catch (errorValue) {
-      handleAgentRunStreamFailure(errorValue, issue.agentRunId);
+    let active = true;
+    const scope = presentationScopeKey;
+    const isCurrent = () => active && requestScopeRef.current.active && !abortController.signal.aborted && presentationScopeRef.current === scope;
+    const selectedSessionId = sessionId || null;
+    const current = transcriptStore.getListSnapshot();
+    if (current.sessionId !== selectedSessionId) {
+      clearConversationProjection();
+      setReadableThrough("0");
+      setReadingLatest(true);
     }
-  }
-
-  useSessionNavigationRefresh({
-    scopeKey: requestScopeKey,
-    enabled: isSidebarOpen && !loadingHistory && !sessionActions.savingSessionId && !sessionActions.deletingSessionId && !sessionActions.editingSessionId,
-    onRefresh: signal => refreshSessions(workspace.id, signal),
-  });
-
-  async function refreshSessions(targetWorkspaceId, signal) {
-    const scope = requestScopeRef.current;
-    const response = await apiResponse(`/api/workspaces/${targetWorkspaceId}/sessions?agentId=${encodeURIComponent(activeAgent.id)}`, { signal });
-    const data = await response.json();
-    if (!signal?.aborted && scope.active && requestScopeRef.current === scope) setSessions(data.sessions);
-    return data.sessions;
-  }
-
-  async function refreshAgentRunResumeState(agentRunId, _targetWorkspaceId, targetSessionId) {
-    const snapshot = transcriptStore.getListSnapshot();
-    const envelope = await transcriptTransport.loadActiveAgentRun({
-      sessionId: targetSessionId,
-      projectionVersion: snapshot.projectionVersion,
-      projectionGeneration: snapshot.projectionGeneration,
-      sourceHighWater: snapshot.appliedSourceHighWater,
-    }, streamAbortRef.current?.signal || new AbortController().signal);
-    if (activeSessionIdRef.current === targetSessionId
-      && activeTranscriptRunRef.current?.agentRunId === agentRunId) {
-      updateActiveTranscriptRun(envelope.agentRun);
+    setLoadingHistory(Boolean(selectedSessionId && current.sessionId !== selectedSessionId));
+    if (selectedSessionId) {
+      Promise.all([
+        apiResponse(`/api/sessions/${encodeURIComponent(selectedSessionId)}/assets`, { signal: abortController.signal }).then(response => response.json()),
+        apiResponse(`/api/sessions/${encodeURIComponent(selectedSessionId)}`, { signal: abortController.signal }).then(response => response.json()),
+      ]).then(([assetData, sessionData]) => {
+        if (!isCurrent()) return;
+        const origin = parseSessionInputOrigin(sessionData, workspace.id, activeAgent.id, selectedSessionId);
+        setInitialInputOrigin({ scope: requestScopeRef.current.key, sessionId: selectedSessionId, value: origin });
+        setAssets(assetData.assets);
+      }).catch(errorValue => { if (isCurrent() && errorValue?.name !== "AbortError") showStreamError(errorValue); });
     }
-  }
-
-  async function connectAgentRun(agentRunId, targetWorkspaceId, targetSessionId, abortController, resume = {}) {
-    chatControllerRef.current?.dispose();
-    if (!resume.identity || !Number.isInteger(resume.viewEpoch)) {
-      throw new Error("transcript stream identity is missing");
-    }
-    const createController = (snapshot) => new WorkspaceTranscriptController({
-      store: transcriptStore,
-      viewEpoch: snapshot.viewEpoch,
-      identity: snapshot.identity,
-      agentRunId,
-      initialCursor: snapshot.cursor || "0-0",
-      transport: transcriptTransport,
-      signal: abortController.signal,
-      onCommittedEvent: (event) => toolOperations.applyEvent(event),
-      onTerminal: () => {
-        if (activeSessionIdRef.current === targetSessionId) setWorkTime((value) => value ? { ...value, completedAtMs: Date.now() } : null);
-        if (activeSessionIdRef.current === targetSessionId) updateActiveTranscriptRun(null);
+    const controller = new WorkspacePresentationController({
+      workspaceId: workspace.id, agentId: activeAgent.id, sessionId: selectedSessionId,
+      store: transcriptStore, signal: abortController.signal, isCurrent,
+      applySnapshot: (page, signal) => restorePresentationSnapshot(page, signal, isCurrent),
+      onSnapshot: () => {
+        if (!isCurrent()) return;
+        setLoadingHistory(false);
+        const pending = operations.pending();
+        if (pending?.receipt?.sessionId === selectedSessionId) operations.complete(pending.operationId);
+      },
+      onNavigation: next => {
+        if (!isCurrent()) return;
+        navigationSnapshotRef.current.sessions = next;
+        setSessions(items => sortSessions(mergeSessionNavigation(items, next)));
+        if (selectedSessionId === null && !workspaceDraft && !startFresh) {
+          setSessionId(next.find(session => session.id === requestedSessionId)?.id || next[0]?.id || "");
+        }
+      },
+      onViewRevision: revision => { if (isCurrent()) setContextVersion({ sessionId: selectedSessionId, revision: revision.contextRevision }); },
+      onOperation: detail => { if (isCurrent()) toolOperations.applyPresentationDetail(detail); },
+      onCheckpoint: checkpoint => {
+        if (!isCurrent() || selectedSessionId === null) return;
+        const run = checkpoint.agentRun;
+        if (run && ["queued", "running"].includes(run.status)) {
+          updateActiveTranscriptRun(run);
+          if (run.startedAt) setWorkTime(value => ({ ...value, sessionId: selectedSessionId, startedAtMs: Date.parse(run.startedAt), completedAtMs: null }));
+        } else {
+          updateActiveTranscriptRun(null);
+          if (run?.completedAt) setWorkTime(value => ({ ...value, sessionId: selectedSessionId, completedAtMs: Date.parse(run.completedAt) }));
+        }
+      },
+      onApplied: checkpoint => {
+        if (!isCurrent()) return;
+        setReadableThrough(checkpoint.sourceHighWater);
+        setLoadingHistory(false);
+        setStreamIssue(null);
       },
     });
-    let controller = createController(resume);
     chatControllerRef.current = controller;
-    let streamCompleted = false;
-    try {
-      await streamWorkspaceAgentRun({
-        controller,
-        signal: abortController.signal,
-        onConnection: (connection) => {
-          if (abortController.signal.aborted || activeSessionIdRef.current !== targetSessionId) return;
-          setStreamIssue(connection === "reconnecting"
-            ? { sessionId: targetSessionId, agentRunId, reconnecting: true } : null);
-        },
-        recover: async (errorValue) => {
-          console.error("Transcript stream resynchronizing", {
-            sessionId: targetSessionId, agentRunId, cursor: controller.lastCursor, error: errorValue,
-          });
-          await controller.whenIdle().catch(() => {});
-          controller.dispose();
-          const snapshot = await reloadTranscriptStream(agentRunId, targetSessionId, abortController.signal);
-          if (!snapshot) return null;
-          controller = createController(snapshot);
-          chatControllerRef.current = controller;
-          return controller;
-        },
-      });
-      streamCompleted = true;
-    } finally {
-      try {
-        if (streamCompleted && !abortController.signal.aborted) {
-          if (activeTranscriptRunRef.current?.agentRunId === agentRunId) updateActiveTranscriptRun(null);
-          try {
-            const nextSessions = await refreshSessions(targetWorkspaceId);
-            const current = nextSessions.find((item) => item.id === targetSessionId);
-            if (activeSessionIdRef.current === targetSessionId && current?.isUnread) {
-              await updateSession(targetSessionId, { isUnread: false });
-            }
-          } catch {
-            setError(t("appRoute.unableToRefreshConversations"));
-          }
-        }
-      } finally {
-        if (chatControllerRef.current === controller) chatControllerRef.current = null;
-        controller.dispose();
-      }
-    }
+    void streamWorkspacePresentation({
+      workspaceId: workspace.id, agentId: activeAgent.id, sessionId: selectedSessionId,
+      controller, signal: abortController.signal,
+      onConnection: connection => {
+        if (isCurrent()) setStreamIssue(connection === "reconnecting"
+          ? { sessionId: selectedSessionId || "", reconnecting: true } : null);
+      },
+    }).catch(errorValue => { if (isCurrent()) handlePresentationFailure(errorValue, selectedSessionId); });
+    return () => { active = false; abortController.abort(); controller.dispose(); };
+  }, [presentationScopeKey, presentationAttempt, sessionId, workspace.id, activeAgent.id, operations, transcriptStore, toolOperations, clearConversationProjection, stopActiveStream, updateActiveTranscriptRun, restorePresentationSnapshot, handlePresentationFailure, showStreamError, workspaceDraft, startFresh, requestedSessionId]);
+
+  function retryTranscriptStream() {
+    if (streamIssue?.reconnecting) return;
+    setPresentationAttempt(value => value + 1);
   }
 
   function startNewChat(projectId = "", sidebarTab = "chat") {
@@ -818,15 +728,8 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         setSending(false);
         onSessionAccepted(`/w/${encodeURIComponent(workspace.id)}/agents/${encodeURIComponent(activeAgent.id)}?sessionId=${encodeURIComponent(resolvedSessionId)}`);
       } else {
-        stopActiveStream();
-        const controller = new AbortController();
-        streamAbortRef.current = controller;
-        const resume = await loadAcceptedConversation(resolvedSessionId, { transport: transcriptTransport, store: transcriptStore, setActive: updateActiveTranscriptRun, isCurrent: isCurrentRequest }, controller.signal);
         operations.complete(messageData.operationId);
-        if (!resume || resume.agentRunId !== messageData.agentRunId) setPendingUserMessage(null);
-        if (resume) connectAgentRun(resume.agentRunId, workspace.id, resolvedSessionId, controller, resume).catch((streamError) => {
-          handleAgentRunStreamFailure(streamError, resume.agentRunId);
-        });
+        if (streamIssue && !streamIssue.reconnecting) setPresentationAttempt(value => value + 1);
       }
     } catch (errorValue) {
       if (!isCurrentRequest()) return;
@@ -872,14 +775,9 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         if (!isCurrent()) return;
         if (session?.id !== accepted.sessionId || typeof session.agentId !== "string" || !session.agentId) throw new Error("session_response_invalid");
         if (session.id === activeSessionIdRef.current && session.agentId === activeAgent.id) {
-          stopActiveStream();
-          const controller = new AbortController();
-          streamAbortRef.current = controller;
-          const resume = await loadAcceptedConversation(session.id, { transport: transcriptTransport, store: transcriptStore, setActive: updateActiveTranscriptRun, isCurrent }, controller.signal);
-          if (!isCurrent()) return;
           operations.complete(accepted.operationId);
           setError(preserveChangedDraft ? t("operations.inputUnconfirmed") : "");
-          if (resume) connectAgentRun(resume.agentRunId, workspace.id, session.id, controller, resume).catch((failure) => handleAgentRunStreamFailure(failure, resume.agentRunId));
+          setPresentationAttempt(value => value + 1);
         } else {
           setOperationReviewLink({ operationId: accepted.operationId, ...acceptedConversationReviewLink(workspace.id, session) });
           setError(t("operations.inputUnconfirmed"));
@@ -1248,6 +1146,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         <div className={`workspaceConversationPlane ${isHome ? "isEmpty" : ""}`}>
           <TranscriptBlockList
             store={transcriptStore}
+          onReadingLatestChange={(targetSessionId, following) => { if (targetSessionId === activeSessionIdRef.current) setReadingLatest(following); }}
             toolOperations={toolOperations}
             sessionId={sessionId || null}
             initialInputOrigin={initialInputOrigin?.scope === requestScopeKey && initialInputOrigin.sessionId === sessionId ? initialInputOrigin.value : null}
@@ -1286,6 +1185,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
             uploadingAttachment={uploadingAttachment}
             onUploadAttachment={uploadAttachment}
             sessionId={sessionId}
+            contextRevision={contextVersion?.sessionId === sessionId ? contextVersion.revision : "0"}
             currentModel={currentModel}
             thinkingMode={thinkingMode}
             onThinkingModeChange={selectThinkingMode}

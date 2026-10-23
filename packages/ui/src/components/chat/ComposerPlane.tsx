@@ -1,5 +1,5 @@
 import { useLayoutEffect, type ReactNode } from "react";
-import { motion, useMotionValue, useReducedMotion } from "motion/react";
+import { motion, useMotionValue, useReducedMotion } from "@centaeris/frontend-foundations/motion-react";
 
 export type ComposerPlaneProps = { welcome: boolean; animateDocking: boolean; children: ReactNode };
 

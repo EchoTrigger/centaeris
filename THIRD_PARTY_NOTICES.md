@@ -29,7 +29,7 @@ covered by the project's AGPL-3.0-only license.
 
 ## shadcn/ui components
 
-Desktop foundational components (Button, Input, Textarea, Tooltip, Card, Badge,
+Shared foundational components in `packages/frontend-foundations` (Button, Input, Textarea, Tooltip, Card, Badge,
 Separator, Dialog, Popover, Select, Dropdown Menu, Switch, Checkbox, Tabs and Scroll Area) are adapted from the official Base UI + Nova
 registry at https://ui.shadcn.com/r/styles/base-nova/.
 

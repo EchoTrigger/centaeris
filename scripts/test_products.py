@@ -32,6 +32,11 @@ class ProductEntryTests(unittest.TestCase):
         self.assertTrue(any("web" in command for command in commands))
         self.assertFalse(any("packages/desktop" in command for command in commands))
 
+    def test_web_install_includes_its_workspace_dependencies(self):
+        commands = self.plan("web")
+        install = next(command for command in commands if "install" in command)
+        self.assertIn("web...", install)
+
     def test_unknown_product_fails_without_running_a_build(self):
         result = subprocess.run([sys.executable, "scripts/products.py", "build", "unknown", "--dry-run"],
                                 cwd=ROOT, capture_output=True)

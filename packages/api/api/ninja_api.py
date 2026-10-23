@@ -32,6 +32,7 @@ from app_core.http.model_management import router as model_management_router
 from app_core.http.plugin_lifecycle import router as plugin_lifecycle_router
 from app_core.http.sources import router as sources_router
 from app_core.http.streaming import router as streaming_router
+from app_core.http.presentation import router as presentation_router
 from app_core.http.trash import router as trash_router
 from app_core.http.workspace_members import router as workspace_members_router
 from app_core.http.workspaces import router as workspaces_router
@@ -74,6 +75,7 @@ api.add_router("/api", artifacts_router)
 api.add_router("/api", downloads_router)
 api.add_router("/api", office_preview_router)
 api.add_router("/api", streaming_router)
+api.add_router("/api", presentation_router)
 api.add_router("/api", trash_router)
 api.add_router("/internal", internal_router)
 api.add_router("/internal", environment_profiles_router)

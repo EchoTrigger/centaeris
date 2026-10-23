@@ -3,6 +3,7 @@ import { useTranslation } from "../i18n";
 import { useEffect, useRef, useState } from "react";
 import { apiJson } from "../api";
 import { dismissDetailsOnOutsideInteraction } from "./detailsDismissal";
+import { useRevisionRefresh } from "../chat/useRevisionRefresh";
 
 function formatTokens(value) {
   if (!Number.isFinite(value)) return "0";
@@ -10,9 +11,10 @@ function formatTokens(value) {
   return String(value);
 }
 
-export function ContextUsagePicker({ sessionId, isRunning }) {
+export function ContextUsagePicker({ sessionId, contextRevision = "0" }) {
   const { t } = useTranslation();
-  const [contextUsage, setContextUsage] = useState(null);
+  const [snapshot, setSnapshot] = useState(null);
+  const contextUsage = snapshot?.sessionId === sessionId ? snapshot.value : null;
   const pickerRef = useRef(null);
 
   useEffect(() => {
@@ -21,29 +23,17 @@ export function ContextUsagePicker({ sessionId, isRunning }) {
     return dismissDetailsOnOutsideInteraction(pickerRef.current);
   }, [sessionId]);
 
-  useEffect(() => {
-    let active = true;
-    let timer;
-    setContextUsage(null);
-    if (!sessionId) return () => { active = false; };
-    async function refresh() {
-      try {
-        const result = await apiJson(`/api/sessions/${sessionId}/context-usage`);
-        if (result.schema !== "session.context_usage.v1" || result.sessionId !== sessionId) {
-          throw new Error("session_context_usage_identity_mismatch");
-        }
-        if (active) setContextUsage(result.contextUsage);
-      } catch {
-        // Keep the latest committed request boundary during transient reads.
+  useRevisionRefresh(sessionId || "", contextRevision, Boolean(sessionId), async signal => {
+    try {
+      const result = await apiJson(`/api/sessions/${sessionId}/context-usage`, { signal });
+      if (result.schema !== "session.context_usage.v1" || result.sessionId !== sessionId) {
+        throw new Error("session_context_usage_identity_mismatch");
       }
+      if (!signal.aborted) setSnapshot({ sessionId, value: result.contextUsage });
+    } catch {
+      // Keep the last committed request boundary until the next invalidation.
     }
-    void refresh();
-    if (isRunning) timer = window.setInterval(refresh, 1000);
-    return () => {
-      active = false;
-      if (timer) window.clearInterval(timer);
-    };
-  }, [sessionId, isRunning]);
+  });
 
   if (!sessionId) return null;
   const usedTokens = contextUsage?.usedTokens || 0;

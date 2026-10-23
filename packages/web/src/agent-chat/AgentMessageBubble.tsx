@@ -22,7 +22,7 @@ export function AgentMessageBubble({ message, readLabel, locale, timeZone, onPre
   return <div className={`agentChatMessageGroup agentChatMessageGroup--${message.role}`}>
     <article className={`agentChatMessage agentChatMessage--${message.role}`} aria-label={message.authorLabel}>
     <div className="agentChatMessageBody">
-      {message.role === "agent" ? <MarkdownContent text={message.text} /> : <div className="agentChatUserText">{message.text}</div>}
+      {message.role === "agent" ? <MarkdownContent text={message.text} allowVisuals /> : <div className="agentChatUserText">{message.text}</div>}
     </div>
     {message.role === "user" && message.attachments?.length && message.attachmentBinding ? <AgentInputAttachments attachments={message.attachments} {...message.attachmentBinding} /> : null}
     {message.role === "agent" && message.fileBinding && onPreviewFile ? <AgentMessageFiles messageId={message.messageId} binding={message.fileBinding} onPreviewFile={onPreviewFile} /> : null}

@@ -8,13 +8,15 @@ from app_core.deleted_resource_gc import (
     collect_orphaned_library_gc,
     expire_trash,
 )
+from app_core.presentation_changes import drain_pending_changes
+from app_core.models import PresentationChangeOutbox
 from app_core.trash_retention import trash_cutoff
 from app_core.workspace_snapshot_gc import collect_workspace_snapshot_gc
 from app_core.note_history import collect_note_history_gc
 
 
 class Command(BaseCommand):
-    help = "Reclaim permanently deleted workspace snapshots and tombstoned resources after retention."
+    help = "Reclaim expired resources and project one bounded presentation invalidation batch."
 
     def add_arguments(self, parser):
         parser.add_argument("--older-than-seconds", type=int, default=30 * 24 * 60 * 60)
@@ -36,6 +38,7 @@ class Command(BaseCommand):
             ("Note history GC", lambda: self.note_history(dry_run)),
             ("Deleted resource GC", lambda: self.deleted(cutoff, dry_run)),
             ("Workspace snapshot GC", lambda: self.snapshots(cutoff, dry_run)),
+            ("Presentation invalidation relay", lambda: self.presentation(dry_run)),
         ]
         if options["orphaned_library"]:
             collectors.append(("Orphaned library GC", lambda: self.orphans(cutoff, dry_run)))
@@ -50,6 +53,18 @@ class Command(BaseCommand):
                     failures.append(f"{label} failed for {count} resources")
         if failures:
             raise CommandError("; ".join(failures))
+
+    def presentation(self, dry_run):
+        # This existing low-frequency maintenance path also works without any
+        # browser subscriptions. Never loop through an unbounded historical queue.
+        limit = 4096
+        if dry_run:
+            pending = PresentationChangeOutbox.objects.order_by("id").values_list("id", flat=True)[:limit].count()
+            self.stdout.write(f"Would project up to {pending} retained presentation invalidations")
+        else:
+            consumed = drain_pending_changes(limit)
+            self.stdout.write(f"Projected {consumed} retained presentation invalidations")
+        return 0
 
     def expire(self, dry_run):
         expired = expire_trash(trash_cutoff(), dry_run)

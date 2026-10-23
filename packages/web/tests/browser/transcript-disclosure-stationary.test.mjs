@@ -171,3 +171,57 @@ test("nested output scrolling keeps the outer disclosure anchor until the reader
     await rm(resolved, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
+
+
+for (const scenario of [
+  { width: 1280, height: 900, theme: "light", language: "en" },
+  { width: 390, height: 844, theme: "dark", language: "zh-CN" },
+]) test(`opening process and reasoning disclosures settles the final answer without a reverse frame (${scenario.width}px)`, async () => {
+  const profile = await mkdtemp(join(tmpdir(), "centaeris-disclosure-stationary-"));
+  const server = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), server: { host: "127.0.0.1", port: 0 } });
+  try {
+    await server.listen();
+    const query = new URLSearchParams({ noHistory: "1", compact: "1", theme: scenario.theme, language: scenario.language });
+    await runBrowser(`${server.resolvedUrls.local[0]}tests/browser/transcript-disclosure-direction.html?${query}`,
+      scenario, profile, async ({ evaluate }) => {
+        await waitFor(() => evaluate("window.disclosureFixture?.ready"), "opening disclosure fixture");
+        for (const kind of ["work", "reasoning", "group", "node"]) {
+          await evaluate(`disclosureFixture.prepare('${kind}')`);
+          const before = await evaluate(`disclosureFixture.geometry('${kind}')`);
+          if (kind === "reasoning") {
+            const title = await evaluate(`(() => {
+              const button = document.querySelector(disclosureFixture.selectors.reasoning);
+              const label = button.querySelector('span');
+              const arrow = button.querySelector('svg:last-of-type');
+              const preview = button.querySelector('[aria-hidden="true"] span');
+              const labelBounds = label.getBoundingClientRect(), arrowBounds = arrow.getBoundingClientRect(), previewBounds = preview.getBoundingClientRect();
+              const first = document.createRange(); first.setStart(preview.firstChild, 0); first.setEnd(preview.firstChild, 1);
+              return { labelReadable: label.scrollWidth <= label.clientWidth,
+                arrowBesideTitle: arrowBounds.left >= labelBounds.right && arrowBounds.left - labelBounds.right < labelBounds.height,
+                previewAfterTitle: previewBounds.left >= arrowBounds.right,
+                firstCharacterVisible: first.getBoundingClientRect().left >= previewBounds.left - 1,
+                previewFits: previewBounds.right <= button.getBoundingClientRect().right + 1 };
+            })()`);
+            assert.deepEqual(title, { labelReadable: true, arrowBesideTitle: true, previewAfterTitle: true, firstCharacterVisible: true, previewFits: true },
+              "the real transcript keeps its reasoning title and arrow compact while its preview shrinks independently");
+          }
+          await evaluate(`disclosureFixture.track('${kind}'); document.querySelector(disclosureFixture.selectors['${kind}']).click()`);
+          await evaluate("disclosureFixture.settle()");
+          const frames = await evaluate("disclosureFrames.stop()");
+          const after = await evaluate(`disclosureFixture.geometry('${kind}')`);
+          const reverse = Math.max(before.answerY, ...frames.map(frame => frame.answerY)) - after.answerY;
+          console.log(JSON.stringify({ width: scenario.width, opening: kind, frames: frames.length, maximumReverseMovement: reverse }));
+          assert.ok(reverse <= 1, `${kind} opening must not move the answer past its settled position then flash back ${reverse}px`);
+          assert.equal(after.scrollTop, before.scrollTop, "opening does not scroll the settled conversation");
+          assert.equal(await evaluate("[...document.querySelectorAll('.workspaceTranscriptBlock')].every(row => getComputedStyle(row).contentVisibility === 'auto')"), true,
+            "natural-height measurement restores normal deferred transcript layout before painting");
+        }
+      });
+  } finally {
+    await server.close();
+    const resolved = await realpath(profile);
+    assert.equal(dirname(resolved).toLowerCase(), (await realpath(tmpdir())).toLowerCase());
+    assert.ok(basename(resolved).startsWith("centaeris-disclosure-stationary-"));
+    await rm(resolved, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});

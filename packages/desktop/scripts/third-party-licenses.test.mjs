@@ -60,18 +60,20 @@ test("third-party license assembly is complete and deterministic", async () => {
         `missing audited fallback ${key}`,
       );
     }
-    const uiRoot = path.join(repoRoot, "packages/ui");
-    const uiManifest = JSON.parse(await fs.readFile(path.join(uiRoot, "package.json"), "utf8"));
-    for (const [name, requested] of Object.entries(uiManifest.dependencies)) {
-      if (requested.startsWith("workspace:")) continue;
-      const installed = JSON.parse(await fs.readFile(
-        path.join(packageDirectory(name, uiRoot), "package.json"), "utf8",
-      ));
-      assert.ok(
-        index.packages.some((item) => item.ecosystem === "npm"
-          && item.name === installed.name && item.version === installed.version),
-        `Desktop production dependency is missing its license: ${installed.name}@${installed.version}`,
-      );
+    for (const relativeRoot of ["packages/ui", "packages/frontend-foundations"]) {
+      const dependencyRoot = path.join(repoRoot, relativeRoot);
+      const manifest = JSON.parse(await fs.readFile(path.join(dependencyRoot, "package.json"), "utf8"));
+      for (const [name, requested] of Object.entries(manifest.dependencies)) {
+        if (requested.startsWith("workspace:")) continue;
+        const installed = JSON.parse(await fs.readFile(
+          path.join(packageDirectory(name, dependencyRoot), "package.json"), "utf8",
+        ));
+        assert.ok(
+          index.packages.some((item) => item.ecosystem === "npm"
+            && item.name === installed.name && item.version === installed.version),
+          `Desktop production dependency is missing its license: ${installed.name}@${installed.version}`,
+        );
+      }
     }
     assert.ok(
       index.packages.some((item) => item.ecosystem === "npm"

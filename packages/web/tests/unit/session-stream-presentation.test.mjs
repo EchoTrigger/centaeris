@@ -12,7 +12,7 @@ const loader = subjectLoader({ extraOverrides: [
   ["../chat/operationReceipts", stub(`import {context} from ${JSON.stringify(harness)}; export class OperationClient {pending(){return context.pendingOperation ?? null;} submit(...args){return context.submit(...args);} complete(){}} export const acceptedConversationReviewLink=()=>null; export const consumeReviewedOperation=()=>{}; export {loadAcceptedConversation} from ${JSON.stringify(new URL("../../src/chat/operationReceipts.ts", import.meta.url).href)};`)],
   ["../preferences", stub("export const useEnterStartsNewLine=()=>false; export const readModelThinkingMode=()=>''; export const readPreferredModelIdentity=()=>''; export const writeModelThinkingMode=()=>{}; export const writePreferredModelIdentity=()=>{};")],
   ["../chat/transcriptTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const createWorkspaceTranscriptTransport=()=>context.transport;`)],
-  ["../chat/workspaceWebTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const streamWorkspaceAgentRun=options=>context.stream(options);`)],
+  ["../chat/workspacePresentationTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const streamWorkspacePresentation=options=>context.stream(options);`)],
   ...["../components/WorkspaceContextPanel", "../components/DocumentPreview", "../chat/WorkspaceComposer", "../chat/TranscriptBlockList", "../agent-chat/SessionAgentBreadcrumb", "../shell/ShellSidebar"].map(specifier => [specifier, stub(`export const ${specifier.split("/").at(-1)}=()=>null;`)]),
   ["../shell/HomePlane", stub("export const HomePlane=()=>null; export const HomeQuickActions=()=>null;")],
 ] });
@@ -26,25 +26,33 @@ const page = text => ({
 });
 
 async function setup(context, tailPage = page("Retained authoritative answer"), idle = false) {
-  const oldWindow = globalThis.window;
+  const oldWindow = globalThis.window, oldDocument = globalThis.document;
   globalThis.window = { addEventListener() {}, removeEventListener() {}, requestAnimationFrame() {}, location: { pathname: "/w/workspace/agents/agent" } };
-  context.after(() => { globalThis.window = oldWindow; });
-  const failures = [];
-  context.mock.method(console, "error", (...values) => failures.push(values));
+  globalThis.document = { hidden: false, addEventListener() {}, removeEventListener() {} };
+  context.after(() => { globalThis.window = oldWindow; globalThis.document = oldDocument; });
   const attempt = deferred();
-  const session = { id: "session", workspaceId: "workspace", agentId: "agent", projectId: null, title: "Synthetic Session", origin: "user", status: "active", deletedAt: null, isPinned: false, isUnread: false, hasActiveAgentRun: true, updatedAt: "2026-10-05T00:00:00Z", initialInputOrigin: null };
+  const session = { id: "session", workspaceId: "workspace", agentId: "agent", projectId: null, title: "Synthetic Session", origin: "user", status: "active", deletedAt: null, isPinned: false, isUnread: false, hasActiveAgentRun: true, updatedAt: "2026-10-05T00:00:00Z", initialInputOrigin: null, currentEnvironmentId: null, executionMode: "perRun", latestAttentionSequence: "0", readThroughSequence: "0", attentionRevision: "0", isManuallyUnread: false };
   const env = environment({ location: { search: "?sessionId=session", state: null },
     request: async path => ({ json: async () => path === "/api/models" ? { models: idle ? [{ id: "model", providerId: "provider", modelName: "synthetic", displayName: "Synthetic", thinkingModes: [] }] : [] }
       : path.includes("session-projects") ? { projects: [] }
       : path.endsWith("/assets") ? { assets: [] }
       : path === "/api/sessions/session" ? { session } : { sessions: [session] } }),
-    transport: { loadTail: async () => tailPage, loadPatches: async () => "99",
-      loadActiveAgentRun: async () => ({ agentRun: idle ? null : { agentRunId: "run", streamCursor: "99" } }) },
-    stream: options => { env.streamOptions = options; return attempt.promise; },
+    transport: { loadOlder: async () => { throw new Error("unexpected older history request"); } },
+    stream: options => { env.streamOptions = options; const pending = env.nextAttempt ?? attempt; env.nextAttempt = null; return pending.promise; },
   });
   const subject = renderer(AppPageContent, { agentId: "agent", workspaceDraft: false, location: env.location, modelsVersion: 0 }, env);
   await subject.settle();
-  if (!idle) assert.ok(env.streamOptions, `the selected Session started its stream; ${JSON.stringify(nodes(subject.tree, node => node.props.className === 'errorBanner').map(node => node.props.children))}`);
+  assert.ok(env.streamOptions, `the selected Session started its stream; ${JSON.stringify(nodes(subject.tree, node => node.props.className === 'errorBanner').map(node => node.props.children))}`);
+  const frame = (kind, body, cursor = null) => ({ cursor, item: {
+    schema: "workspace.presentation.v1", workspaceId: "workspace", agentId: "agent", sessionId: "session", kind, ...body,
+  } });
+  const send = async (kind, body, cursor = null) => {
+    await env.streamOptions.controller.acceptWithBackpressure(frame(kind, body, cursor));
+    await subject.settle();
+  };
+  await send("snapshot", { page: tailPage });
+  await send("checkpoint", { projectionGeneration: tailPage.projectionGeneration, sourceHighWater: tailPage.sourceHighWater,
+    agentRun: idle ? null : { agentRunId: "run", status: "running", startedAt: null, completedAt: null } }, `applied:${tailPage.sourceHighWater}`);
   const list = () => component(subject.tree, "TranscriptBlockList");
   const composer = () => component(subject.tree, "WorkspaceComposer");
   const store = list().props.store;
@@ -54,33 +62,29 @@ async function setup(context, tailPage = page("Retained authoritative answer"), 
     assert.equal(composer().props.draft, "Unsent draft");
   };
   context.after(() => subject.unmount());
-  return { subject, env, attempt, failures, preserved, store, list, composer };
+  return { subject, env, attempt, preserved, store, list, composer, send, frame };
 }
 
-test("Session send binds its pending input to the accepted run before replacing a shorter tail", async context => {
+test("Session send binds its pending input to the accepted run before the stream replaces a shorter tail", async context => {
   const previous = [1, 2, 3].map(index => ({ blockId: `old-${index}:user`, blockRevision: "1",
     orderKey: { sourceSequence: String(index), ordinal: 0 }, body: { kind: "userText", content: { inlineContent: "same input", sourceRef: null } } }));
-  const { subject, env, list, composer, store } = await setup(context, historyPage(previous, null), true);
-  const acceptance = deferred(); const tail = deferred();
+  const { subject, env, list, composer, store, send } = await setup(context, historyPage(previous, null), true);
+  const acceptance = deferred();
   env.submit = () => acceptance.promise;
   composer().props.onDraftChange("same input"); await subject.settle();
-  const send = composer().props.onSubmit({ preventDefault() {} }); await subject.settle();
+  const submission = composer().props.onSubmit({ preventDefault() {} }); await subject.settle();
   const startedAtMs = list().props.pendingUserMessage.startedAtMs;
   assert.equal(list().props.pendingUserMessage.agentRunId, null);
-  env.transport.loadTail = () => tail.promise;
-  env.transport.loadActiveAgentRun = async () => ({ agentRun: { agentRunId: "accepted-run", streamCursor: "100" } });
   acceptance.resolve({ sessionId: "session", agentRunId: "accepted-run", operationId: "operation" });
-  await subject.settle();
+  await submission; await subject.settle();
   assert.deepEqual(list().props.pendingUserMessage, { text: "same input", startedAtMs, sessionId: "session", agentRunId: "accepted-run" });
   assert.equal(store.getListSnapshot().blockIds.length, 3, "acceptance alone preserves the displayed history and pending input");
-  tail.resolve(historyPage([{ ...previous[0], blockId: "new:user", orderKey: { sourceSequence: "100", ordinal: 0 },
-    presentation: { agentRunId: "accepted-run", sourceType: "user_message", observedAtMs: 1000, displayTarget: null, durationMs: null, operation: null } }], null, "100"));
-  await send; await subject.settle();
+  await send("snapshot", { page: historyPage([{ ...previous[0], blockId: "new:user", orderKey: { sourceSequence: "100", ordinal: 0 },
+    presentation: { agentRunId: "accepted-run", sourceType: "user_message", observedAtMs: 1000, displayTarget: null, durationMs: null, operation: null } }], null, "100") });
   assert.equal(list().props.pendingUserMessage, null);
   assert.deepEqual(store.getListSnapshot().blockIds, ["new:user"]);
   assert.equal(list().props.startedAtMs, startedAtMs, "the running timer keeps its original start through admission");
 });
-
 test("normal submission receipt states never add a status banner or recovery buttons", async context => {
   const { subject, env } = await setup(context);
   for (const receipt of [null, { sessionId: "session", operationId: "accepted", agentRunId: "run" }]) {
@@ -126,29 +130,35 @@ async function pagedHistory(context) {
   assert.deepEqual(fixture.store.getListSnapshot().blockIds, ["reading", "deleted", "middle", "answer"]);
   const reads = [];
   const nextPage = deferred();
-  fixture.env.transport.loadTail = async () => historyPage([historyBlock("answer", 99, "Fresh authoritative answer", "2"), historyBlock("latest", 150, "New answer")], "fresh-1", "155", "generation-new");
+  const replacementPage = historyPage([historyBlock("answer", 99, "Fresh authoritative answer", "2"), historyBlock("latest", 150, "New answer")], "fresh-1", "155", "generation-new");
   fixture.env.transport.loadOlder = async (identity, cursor, signal) => {
     reads.push({ identity, cursor, signal });
     if (cursor === "fresh-1") return historyPage([historyTool("2", "Fresh middle text")], "fresh-2", "155", "generation-new");
     if (cursor === "fresh-2") return nextPage.promise;
     throw new Error("must not load beyond the previously loaded range");
   };
-  fixture.env.transport.loadActiveAgentRun = async () => ({ agentRun: null });
-  return { ...fixture, reads, nextPage };
+  return { ...fixture, reads, nextPage, replacementPage };
+}
+
+function resynchronize({ env, frame, replacementPage }) {
+  const controller = env.streamOptions.controller;
+  return controller.acceptWithBackpressure(frame("reset", { reason: "projectionInvalidated" }))
+    .then(() => controller.acceptWithBackpressure(frame("snapshot", { page: replacementPage })));
 }
 
 test("successful Session resynchronization atomically reloads the loaded older range from the new frozen projection", async context => {
-  const { subject, env, store, reads, nextPage, composer } = await pagedHistory(context);
+  const fixture = await pagedHistory(context);
+  const { subject, store, reads, nextPage, composer } = fixture;
   const before = store.getListSnapshot();
   const published = [];
   store.subscribeList(() => published.push(store.getListSnapshot().blockIds));
-  const recovery = env.streamOptions.recover(new Error("transcript_view_invalidated"));
+  const recovery = resynchronize(fixture);
   await subject.settle();
   assert.deepEqual(reads.map(read => read.cursor), ["fresh-1", "fresh-2"], "reload stops at the loaded oldest order rather than downloading all history");
   assert.equal(store.getListSnapshot(), before, "no partially read replacement is visible");
   assert.equal(composer().props.draft, "Unsent draft");
   nextPage.resolve(historyPage([historyBlock("reading", 50, "Fresh older message", "2")], "fresh-3", "155", "generation-new"));
-  assert.equal(await recovery, null);
+  assert.equal(await recovery, undefined);
   await subject.settle();
   assert.deepEqual(store.getListSnapshot().blockIds, ["reading", "middle", "answer", "latest"]);
   assert.equal(store.getBlockSnapshot("reading").body.content.inlineContent, "Fresh older message");
@@ -162,9 +172,10 @@ test("successful Session resynchronization atomically reloads the loaded older r
 });
 
 test("failed older-page resynchronization preserves every loaded message and draft", async context => {
-  const { subject, env, store, reads, nextPage, composer } = await pagedHistory(context);
+  const fixture = await pagedHistory(context);
+  const { subject, store, reads, nextPage, composer } = fixture;
   const before = store.getListSnapshot();
-  const recovery = env.streamOptions.recover(new Error("transcript_view_invalidated"));
+  const recovery = resynchronize(fixture);
   await subject.settle();
   assert.deepEqual(reads.map(read => read.cursor), ["fresh-1", "fresh-2"]);
   const unavailable = new Error("transcript_page_unavailable");
@@ -178,7 +189,8 @@ test("failed older-page resynchronization preserves every loaded message and dra
 });
 
 test("successful resynchronization cancels an older request and ignores its late old-waterline page", async context => {
-  const { subject, env, store, nextPage, list } = await pagedHistory(context);
+  const fixture = await pagedHistory(context);
+  const { subject, env, store, nextPage, list } = fixture;
   const oldRequest = deferred();
   const freshRead = env.transport.loadOlder;
   let oldSignal;
@@ -189,7 +201,7 @@ test("successful resynchronization cancels an older request and ignores its late
   };
   const oldLoad = list().props.onLoadOlderHistory();
   await subject.settle();
-  const recovery = env.streamOptions.recover(new Error("transcript_view_invalidated"));
+  const recovery = resynchronize(fixture);
   await subject.settle();
   nextPage.resolve(historyPage([historyBlock("reading", 50, "Fresh older message", "2")], "fresh-3", "155", "generation-new"));
   await recovery; await subject.settle();
@@ -200,9 +212,9 @@ test("successful resynchronization cancels an older request and ignores its late
   assert.equal(store.getListSnapshot().olderCursor, "fresh-3");
 });
 
-for (const unavailable of ["tail", "active run"]) test(`failed ${unavailable} recovery keeps the snapshot and offers a header retry`, async context => {
-  const { subject, env, attempt, failures, preserved, store } = await setup(context);
-  const stopped = new Error("transcript_page_unavailable");
+for (const unavailable of ["snapshot", "checkpoint"]) test(`failed ${unavailable} recovery keeps the snapshot and offers a header retry`, async context => {
+  const { subject, env, attempt, preserved, store, frame } = await setup(context);
+  const stopped = new Error("presentation_stream_unavailable");
   attempt.reject(stopped); await subject.settle();
   preserved();
   const retry = button(subject.tree, "appRoute.retryStream");
@@ -210,16 +222,59 @@ for (const unavailable of ["tail", "active run"]) test(`failed ${unavailable} re
   assert.ok(retry, "exhausted recovery remains actionable");
   assert.ok(nodes(header, node => node === retry).length, "retry belongs in the existing header");
   assert.equal(nodes(subject.tree, node => node.props.className === "transcriptStreamStatus").length, 0);
-  assert.equal(failures[0][0], "Transcript stream stopped");
-  assert.equal(failures[0][1].error, stopped);
   const before = store.getListSnapshot().viewEpoch;
-  if (unavailable === "tail") env.transport.loadTail = async () => { throw stopped; };
-  else {
-    env.transport.loadTail = async () => page("Uncommitted replacement answer");
-    env.transport.loadActiveAgentRun = async () => { throw stopped; };
-  }
+  const next = deferred(); env.nextAttempt = next;
   await retry.props.onClick(); await subject.settle();
+  const invalid = unavailable === "snapshot"
+    ? frame("snapshot", { page: { ...page("Uncommitted replacement answer"), sourceHighWater: "unsupported" } })
+    : frame("checkpoint", { projectionGeneration: "wrong-generation", sourceHighWater: "99", agentRun: null }, "unapplied");
+  await assert.rejects(env.streamOptions.controller.acceptWithBackpressure(invalid));
+  next.reject(stopped); await subject.settle();
   preserved();
-  assert.equal(store.getListSnapshot().viewEpoch, before, "failed replacement reads do not publish a new view");
+  assert.equal(store.getListSnapshot().viewEpoch, before, "failed replacement delivery does not publish a new view");
   assert.ok(button(subject.tree, "appRoute.retryStream"));
+});
+
+
+test("revoked selected delivery cannot be restored by late Session metadata", async context => {
+  const { subject, env, attempt, list, store } = await setup(context);
+  attempt.reject(new TypeError("synthetic connection loss")); await subject.settle();
+  const metadata = deferred(), retry = deferred();
+  const request = env.request;
+  const original = await (await request("/api/sessions/session")).json();
+  let waiting = false;
+  env.request = path => path === "/api/sessions/session"
+    ? (waiting = true, metadata.promise) : request(path);
+  env.nextAttempt = retry;
+  button(subject.tree, "appRoute.retryStream").props.onClick(); await subject.settle();
+  assert.equal(waiting, true);
+  retry.reject(Object.assign(new Error("synthetic authority revoked"), { status: 403 })); await subject.settle();
+  assert.equal(store.getListSnapshot().blockIds.length, 0);
+  const lateOrigin = { messageId: "late-private-input", agentId: "agent", agentName: "Private sender" };
+  metadata.resolve({ json: async () => ({ session: { ...original.session, initialInputOrigin: lateOrigin } }) });
+  await subject.settle();
+  assert.deepEqual({ origin: list().props.initialInputOrigin,
+    sessions: component(subject.tree, "ShellSidebar").props.sessionProps.sessions.map(row => row.id) },
+  { origin: null, sessions: [] }, "a rejected authority retires both pending metadata and cached navigation");
+});
+
+test("revoked navigation-only delivery cannot be restored by late bootstrap HTTP", async context => {
+  const { subject, env } = await setup(context);
+  const request = env.request, bootstrap = deferred(), navigation = deferred();
+  const original = await (await request("/api/sessions/session")).json();
+  let waiting = false;
+  env.request = path => path.includes("/workspaces/") && path.includes("/sessions?")
+    ? (waiting = true, bootstrap.promise) : request(path);
+  env.stream = options => { env.streamOptions = options; return navigation.promise; };
+  env.location.search = "?new=1"; await subject.settle();
+  assert.equal(waiting, true); assert.equal(env.streamOptions.sessionId, null);
+  await env.streamOptions.controller.acceptWithBackpressure({ cursor: null, item: {
+    schema: "workspace.presentation.v1", workspaceId: "workspace", agentId: "agent", sessionId: null,
+    kind: "navigation", snapshotId: "before-revocation", offset: 0, hasMore: false, sessions: [original.session],
+  } });
+  await subject.settle();
+  navigation.reject(Object.assign(new Error("synthetic authority revoked"), { status: 403 })); await subject.settle();
+  bootstrap.resolve({ json: async () => ({ sessions: [original.session] }) }); await subject.settle();
+  assert.deepEqual(component(subject.tree, "ShellSidebar").props.sessionProps.sessions, [],
+    "navigation rejection remains retired even when the earlier HTTP list completes");
 });
