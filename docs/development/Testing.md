@@ -151,6 +151,33 @@ Real HTTPS/ASGI tests retain coverage for ORM connection return, caller-owned
 transactions and stream cancellation. See the
 [hosted model gateway boundary](../workspace/architecture/HostedModelAdmission.md).
 
+## Web presentation delivery
+
+[Web presentation delivery](../workspace/architecture/WebPresentation.md) defines
+command acceptance, execution, applied SSE cursors, navigation snapshots and
+owner read acknowledgements. Its fault matrix distinguishes local synthetic
+coverage from production/WAF acceptance. Use an isolated synthetic PostgreSQL
+instance configured through `TEST_POSTGRES_*`, never an application database.
+
+```sh
+uv run --frozen --package api python packages/api/manage.py test \
+  app_core.test_presentation_stream app_core.test_session_attention \
+  app_core.test_session_attention_migration app_core.test_schema_wire_contract \
+  app_core.test_workspace_session_list_queries app_core.test_session_projection_concurrency \
+  --settings=api.test_settings --noinput
+pnpm --filter web exec node --test \
+  tests/unit/workspace-presentation-stream.test.mjs \
+  tests/unit/api-deadlines.test.ts tests/unit/operation-receipts.test.mjs \
+  tests/unit/session-read-state.test.ts
+```
+
+The notification migration reconstructs durable watermarks while preserving the
+ambiguous legacy unread boolean as an explicit manual choice. Migration tests
+must protect existing facts, read history and the forward-only reversal guard.
+Concurrent HTTP ACKs and repeated terminal projection must not regress read state.
+The ordinary Session-list query-growth test also protects batched discovery from
+introducing one database query per Session.
+
 ## Focused Core gate
 
 Rust implementation changes run at least:

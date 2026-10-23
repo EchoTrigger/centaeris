@@ -1,0 +1,290 @@
+{
+  "schema": "workspace.presentation.fixtures.v1",
+  "scope": {
+    "workspaceId": "workspace",
+    "agentId": "agent",
+    "sessionId": "session"
+  },
+  "frames": [
+    {
+      "schema": "workspace.presentation.v1",
+      "kind": "navigation",
+      "workspaceId": "workspace",
+      "agentId": "agent",
+      "sessionId": "session",
+      "snapshotId": "333d9a6c76bd03f9d932047a67a9e0b0d94d04a0122620b20d2e16f5eadd8eae",
+      "offset": 0,
+      "hasMore": false,
+      "sessions": [
+        {
+          "id": "session",
+          "workspaceId": "workspace",
+          "agentId": "agent",
+          "projectId": null,
+          "currentEnvironmentId": null,
+          "executionMode": "perRun",
+          "title": "Fixture conversation",
+          "origin": "user",
+          "initialInputOrigin": null,
+          "status": "active",
+          "deletedAt": null,
+          "isPinned": false,
+          "isUnread": false,
+          "isManuallyUnread": false,
+          "latestAttentionSequence": "0",
+          "readThroughSequence": "0",
+          "attentionRevision": "0",
+          "hasActiveAgentRun": false,
+          "updatedAt": "2026-10-23T00:00:00+00:00"
+        }
+      ]
+    },
+    {
+      "schema": "workspace.presentation.v1",
+      "kind": "snapshot",
+      "workspaceId": "workspace",
+      "agentId": "agent",
+      "sessionId": "session",
+      "page": {
+        "schema": "transcript.page.v1",
+        "sessionId": "session",
+        "projectionVersion": "transcript.projection.v1",
+        "projectionGeneration": "generation",
+        "sourceHighWater": "2",
+        "blocks": [
+          {
+            "blockId": "message",
+            "blockRevision": "1",
+            "orderKey": {
+              "sourceSequence": "2",
+              "ordinal": 0
+            },
+            "body": {
+              "kind": "assistantText",
+              "content": {
+                "inlineContent": "Ready",
+                "sourceRef": null
+              },
+              "status": "completed"
+            }
+          }
+        ],
+        "olderCursor": null,
+        "hasOlder": false,
+        "resumeCursors": [
+          {
+            "streamId": "workspace-transcript.v1",
+            "cursor": "2"
+          }
+        ]
+      }
+    },
+    {
+      "schema": "workspace.presentation.v1",
+      "kind": "patches",
+      "workspaceId": "workspace",
+      "agentId": "agent",
+      "sessionId": "session",
+      "page": {
+        "schema": "transcript.patch.page.v1",
+        "sessionId": "session",
+        "projectionVersion": "transcript.projection.v1",
+        "projectionGeneration": "generation",
+        "throughSourceHighWater": "2",
+        "patches": [],
+        "nextSourceHighWater": "2",
+        "hasMore": false
+      }
+    },
+    {
+      "schema": "workspace.presentation.v1",
+      "kind": "content",
+      "workspaceId": "workspace",
+      "agentId": "agent",
+      "sessionId": "session",
+      "range": {
+        "schema": "transcript.content.range.v1",
+        "sessionId": "session",
+        "projectionVersion": "transcript.projection.v1",
+        "projectionGeneration": "generation",
+        "refId": "session-event:event",
+        "revision": "1",
+        "byteLength": "3",
+        "startOffset": "0",
+        "endOffset": "3",
+        "content": "one",
+        "hasMore": false
+      }
+    },
+    {
+      "schema": "workspace.presentation.v1",
+      "kind": "live",
+      "workspaceId": "workspace",
+      "agentId": "agent",
+      "sessionId": "session",
+      "agentRunId": "run",
+      "live": {
+        "afterSequence": 2,
+        "revision": 1,
+        "turnId": "turn",
+        "messageId": "live-message",
+        "text": "Live answer"
+      }
+    },
+    {
+      "schema": "workspace.presentation.v1",
+      "kind": "checkpoint",
+      "workspaceId": "workspace",
+      "agentId": "agent",
+      "sessionId": "session",
+      "projectionGeneration": "generation",
+      "sourceHighWater": "2",
+      "agentRun": {
+        "agentRunId": "run",
+        "status": "completed",
+        "startedAt": null,
+        "completedAt": null
+      }
+    },
+    {
+      "schema": "workspace.presentation.v1",
+      "kind": "reset",
+      "workspaceId": "workspace",
+      "agentId": "agent",
+      "sessionId": "session",
+      "reason": "projectionInvalidated"
+    },
+    {
+      "schema": "workspace.presentation.v1",
+      "kind": "operation",
+      "workspaceId": "workspace",
+      "agentId": "agent",
+      "sessionId": "session",
+      "detail": {
+        "kind": "result",
+        "callId": "call",
+        "toolName": "edit",
+        "normalizedInput": null,
+        "resultState": "successWithOutput",
+        "operations": [
+          {
+            "callId": "call",
+            "toolName": "edit",
+            "status": "completed",
+            "resultState": "successWithOutput",
+            "path": "a.py",
+            "diffPreview": "+fixed"
+          }
+        ],
+        "previewTruncated": false,
+        "sourceEventId": "operation-event"
+      }
+    }
+  ],
+  "initialFrames": [
+    {
+      "schema": "workspace.presentation.v1",
+      "kind": "navigation",
+      "workspaceId": "workspace",
+      "agentId": "agent",
+      "sessionId": "session",
+      "snapshotId": "333d9a6c76bd03f9d932047a67a9e0b0d94d04a0122620b20d2e16f5eadd8eae",
+      "offset": 0,
+      "hasMore": false,
+      "sessions": [
+        {
+          "id": "session",
+          "workspaceId": "workspace",
+          "agentId": "agent",
+          "projectId": null,
+          "currentEnvironmentId": null,
+          "executionMode": "perRun",
+          "title": "Fixture conversation",
+          "origin": "user",
+          "initialInputOrigin": null,
+          "status": "active",
+          "deletedAt": null,
+          "isPinned": false,
+          "isUnread": false,
+          "isManuallyUnread": false,
+          "latestAttentionSequence": "0",
+          "readThroughSequence": "0",
+          "attentionRevision": "0",
+          "hasActiveAgentRun": false,
+          "updatedAt": "2026-10-23T00:00:00+00:00"
+        }
+      ]
+    },
+    {
+      "schema": "workspace.presentation.v1",
+      "kind": "checkpoint",
+      "workspaceId": "workspace",
+      "agentId": "agent",
+      "sessionId": "session",
+      "projectionGeneration": null,
+      "sourceHighWater": "2",
+      "agentRun": {
+        "agentRunId": "run",
+        "status": "completed",
+        "startedAt": null,
+        "completedAt": null
+      }
+    },
+    {
+      "schema": "workspace.presentation.v1",
+      "kind": "snapshot",
+      "workspaceId": "workspace",
+      "agentId": "agent",
+      "sessionId": "session",
+      "page": {
+        "schema": "transcript.page.v1",
+        "sessionId": "session",
+        "projectionVersion": "transcript.projection.v1",
+        "projectionGeneration": "generation",
+        "sourceHighWater": "2",
+        "blocks": [
+          {
+            "blockId": "message",
+            "blockRevision": "1",
+            "orderKey": {
+              "sourceSequence": "2",
+              "ordinal": 0
+            },
+            "body": {
+              "kind": "assistantText",
+              "content": {
+                "inlineContent": "Ready",
+                "sourceRef": null
+              },
+              "status": "completed"
+            }
+          }
+        ],
+        "olderCursor": null,
+        "hasOlder": false,
+        "resumeCursors": [
+          {
+            "streamId": "workspace-transcript.v1",
+            "cursor": "2"
+          }
+        ]
+      }
+    },
+    {
+      "schema": "workspace.presentation.v1",
+      "kind": "checkpoint",
+      "workspaceId": "workspace",
+      "agentId": "agent",
+      "sessionId": "session",
+      "projectionGeneration": "generation",
+      "sourceHighWater": "2",
+      "agentRun": {
+        "agentRunId": "run",
+        "status": "completed",
+        "startedAt": null,
+        "completedAt": null
+      }
+    }
+  ],
+  "initialCursor": "p1.eyJhZ2VudElkIjoiYWdlbnQiLCJwcm9qZWN0aW9uR2VuZXJhdGlvbiI6ImdlbmVyYXRpb24iLCJzY2hlbWEiOiJ3b3Jrc3BhY2UucHJlc2VudGF0aW9uLmN1cnNvci52MSIsInNlc3Npb25JZCI6InNlc3Npb24iLCJzb3VyY2VIaWdoV2F0ZXIiOiIyIiwid29ya3NwYWNlSWQiOiJ3b3Jrc3BhY2UifQ"
+}

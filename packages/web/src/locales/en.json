@@ -886,6 +886,7 @@
   "spreadsheetPreview.printView": "Print view",
   "spreadsheetPreview.sheets": "Worksheets",
   "transcriptBlockContent.unableToLoadContent": "Unable to load content.",
+  "transcriptBlockContent.contentPreviewLimited": "This content is long; showing a partial preview.",
   "transcriptBlockContent.previousOutput": "Previous output",
   "transcriptBlockContent.nextOutput": "Next output",
   "transcriptBlockContent.toolOutput": "Tool output",

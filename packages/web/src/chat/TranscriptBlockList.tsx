@@ -34,6 +34,7 @@ type Props = Readonly<{
   pendingUserMessage?: PendingTranscriptMessage | null;
   historyMemoryPressure?: boolean;
   onReleaseLoadedHistory?(): void;
+  onReadingLatestChange?(sessionId: string | null, following: boolean): void;
   initialInputOrigin?: TranscriptInitialInputOrigin | null;
   onShowCitation?(citation: CitationSummary, origin: { elementId: string }): void;
   onShowArtifact?(artifact: import("./useTranscriptTurnMetadata").PublishedArtifact): void;
@@ -107,6 +108,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   pendingUserMessage,
   historyMemoryPressure = false,
   onReleaseLoadedHistory,
+  onReadingLatestChange,
   initialInputOrigin,
   onShowArtifact,
   onShowCitation,
@@ -148,6 +150,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   const followingLatestRef = useRef(true);
   const previousCountRef = useRef(blockIds.length);
   const [followingLatest, setFollowingLatest] = useState(true);
+  useEffect(() => { if (!loadingHistory) onReadingLatestChange?.(sessionId, followingLatest); }, [followingLatest, loadingHistory, onReadingLatestChange, sessionId]);
   useEffect(() => {
     if (shouldReleaseLoadedHistory(historyMemoryPressure, followingLatest, loadingOlderHistory)) onReleaseLoadedHistory?.();
   }, [historyMemoryPressure, followingLatest, loadingOlderHistory, onReleaseLoadedHistory]);
@@ -499,11 +502,12 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
                 <div className="workspaceUserMessageMeta workspaceUserMessageMetaPlaceholder" aria-hidden="true" />
               </div> : turn.userBlockId ? <TranscriptBlockRow store={store} blockId={turn.userBlockId} initialInputOrigin={initialInputOrigin} /> : null}
               {hasWork ? <WorkProgress key="work" running={Boolean(isPending || (isLast && running))} finalStarted={turn.answerIds.length > 0}
+                response={turnLive ? <TranscriptLiveTail live={turnLive} mode="text" /> : null}
                 startedAtMs={isPending ? pendingStartedAt : time?.startedAtMs ?? (isLast ? startedAtMs : undefined)} completedAtMs={isPending ? undefined : time?.completedAtMs ?? (isLast ? completedAtMs : undefined)}>
                 {groupTranscriptBlocks(store, turn.processIds).map((entry) => entry.kind === "tool"
                   ? <TranscriptToolGroupCard store={store} blockIds={entry.blockIds} toolOperations={toolOperations} citations={citations.citations} onShowCitation={onShowCitation} runEnded={runEnded} key={`tool:${entry.blockIds[0]}`} />
                   : <TranscriptBlockRow store={store} blockId={entry.blockId} key={entry.blockId} />)}
-                {turnLive ? <TranscriptLiveTail live={turnLive} /> : null}
+                {turnLive ? <TranscriptLiveTail live={turnLive} mode="reasoning" /> : null}
               </WorkProgress> : null}
               {turn.answerIds.map((blockId) => <TranscriptBlockRow store={store} blockId={blockId} key={blockId} />)}
               {time?.artifacts.length ? <div className="workspaceArtifactInline" aria-label={t("agentRunRow.generatedFiles")}>

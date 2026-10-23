@@ -886,6 +886,7 @@
   "spreadsheetPreview.printView": "打印视图",
   "spreadsheetPreview.sheets": "工作表",
   "transcriptBlockContent.unableToLoadContent": "内容加载失败。",
+  "transcriptBlockContent.contentPreviewLimited": "内容较长，当前显示部分预览。",
   "transcriptBlockContent.previousOutput": "上一段输出",
   "transcriptBlockContent.nextOutput": "下一段输出",
   "transcriptBlockContent.toolOutput": "工具输出",
