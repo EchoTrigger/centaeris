@@ -719,6 +719,19 @@ fn retained_rows(f: &Fixture) -> std::collections::BTreeMap<String, String> {
 
 fn legacy_retained_rows(f: &Fixture) -> std::collections::BTreeMap<String, String> {
     let mut rows = retained_rows(f);
+    for table in [
+        "runtime.provider_environment_bindings",
+        "runtime.provider_environment_run_uses",
+        "runtime.provider_environment_retirements",
+        "runtime.provider_environment_power_operations",
+    ] {
+        if let Some(facts) = rows.remove(table) {
+            assert_eq!(
+                facts, "[]",
+                "forward migration must not invent {table} facts"
+            );
+        }
+    }
     if let Some(receipts) = rows.remove("runtime.provider_run_cleanup_receipts") {
         assert_eq!(
             receipts, "[]",

@@ -533,16 +533,35 @@ fn postgres_creation_attempt_forward_migration_keeps_historical_unknown_charged(
             |_| Err("unknown create acknowledgement".into()),
         )
         .unwrap_err();
+    let allocation_facts = |db: &mut Client| {
+        db.query(
+            "SELECT 'allocation' AS kind,to_jsonb(i)::text AS fact FROM runtime.execution_instances i
+             UNION ALL SELECT 'resident',to_jsonb(s)::text FROM runtime.resident_sandboxes s
+             ORDER BY kind,fact",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
+        .collect::<Vec<_>>()
+    };
+    let before_facts = allocation_facts(&mut db);
     drop(store);
     // Reconstruct the released schema with an evidence-free historical reservation.
     super::super::creation_attempts::restore_previous_fixture(&mut db);
     let store = PostgresRuntimeStore::new(&url).unwrap();
     assert_eq!(
-        db.query_one("SELECT max(version) FROM runtime.schema_migrations", &[])
-            .unwrap()
-            .get::<_, i64>(0),
-        18
+        db.query(
+            "SELECT version FROM runtime.schema_migrations ORDER BY version",
+            &[]
+        )
+        .unwrap()
+        .iter()
+        .map(|row| row.get::<_, i64>(0))
+        .collect::<Vec<_>>(),
+        (1..=20).collect::<Vec<_>>()
     );
+    assert_eq!(allocation_facts(&mut db), before_facts);
     assert_eq!(
         db.query_one(
             "SELECT count(*) FROM runtime.environment_creation_attempts",
@@ -571,6 +590,7 @@ fn postgres_creation_attempt_forward_migration_keeps_historical_unknown_charged(
             |_| panic!("historical unknown cannot dispatch again"),
         )
         .is_err());
+    assert_eq!(allocation_facts(&mut db), before_facts);
 }
 
 #[test]
