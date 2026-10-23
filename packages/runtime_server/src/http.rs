@@ -8,6 +8,7 @@ use axum::Router;
 pub(crate) mod agent_runs;
 mod catalogs;
 pub(crate) mod environment_maintenance;
+mod environment_power;
 mod environment_provision;
 mod environment_retirement;
 
@@ -30,6 +31,10 @@ pub(super) fn router(state: HttpServerState) -> Router {
         .route(
             "/internal/environments/maintenance/task",
             on_blocking(MethodFilter::POST, environment_maintenance::task),
+        )
+        .route(
+            "/internal/environments/power",
+            on_blocking(MethodFilter::POST, environment_power::power),
         )
         .route(
             "/internal/environments/retire",

@@ -72,6 +72,9 @@ def _locked_binding(run_id, lease_owner, *, acquiring, lease_purpose=None):
         current = cursor.fetchone()
         if current is None or (lease_purpose is not None and current[0] != lease_purpose):
             raise ValueError("environment_controller_lease_rejected")
+    if acquiring:
+        from .environment_profile import require_environment_admission
+        require_environment_admission(environment, for_execution=True)
     return run, environment
 
 

@@ -7,7 +7,7 @@ import re
 import unicodedata
 from uuid import UUID
 
-from django.db import transaction
+from django.db import connection, transaction
 from django.utils import timezone
 
 PROFILE_SCHEMA = 'runtime.environment_profile.v1'
@@ -26,6 +26,10 @@ class EnvironmentProfileError(ValueError):
         super().__init__(code)
         self.code = code
         self.status = status
+
+
+class EnvironmentPowerPending(ValueError):
+    """A valid execution claimant must wait for provider power control."""
 
 
 def validate_environment_profile(value):
@@ -134,6 +138,24 @@ def validate_environment_lifetime(value, execution_mode):
             raise ValueError('environment_lifetime_mismatch')
 
 
+def require_environment_admission(environment, *, for_execution=False):
+    """The locked Environment may accept queued work while execution is blocked."""
+    profile = environment.environment_profile
+    if (isinstance(profile, dict) and profile.get('schema') == E2B_PROFILE_SCHEMA
+            and profile.get('lifetime') == 'retained'):
+        if environment_profile_digest(profile) != environment.environment_profile_digest:
+            raise ValueError('environment_profile_digest_invalid')
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT EXISTS(SELECT 1 FROM runtime.provider_environment_retirements '
+                'WHERE environment_id=%s), COALESCE((SELECT blocked FROM '
+                'runtime.provider_environment_power_admission WHERE environment_id=%s),false)',
+                [environment.pk, environment.pk])
+            state = cursor.fetchone()
+            if state[0]:
+                raise ValueError('environment_retiring')
+            if for_execution and state[1]:
+                raise EnvironmentPowerPending('environment_power_pending')
+
 def environment_profile_digest(value):
     validate_environment_profile(value)
     return 'sha256:' + hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
@@ -185,6 +207,7 @@ def freeze_run_environment_profile(agent_run, image_digest=None, *, execution_pr
                 'environment_profile_operation_id', 'environment_profile_bound_at'])
         if environment_profile_digest(environment.environment_profile) != environment.environment_profile_digest:
             raise ValueError('environment_profile_digest_invalid')
+        require_environment_admission(environment)
         agent_run.environment = environment
         if agent_run.session.current_environment_id == environment.pk:
             agent_run.session.current_environment = environment

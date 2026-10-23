@@ -206,18 +206,28 @@ impl<'a, A: E2bCreationAdapter + ?Sized> E2bCreationDriver<'a, A> {
             // any ordinary effect. A requested metadata echo or candidate-only
             // Unknown cannot establish this fact. Current authority is checked
             // again by the store; a stale owner only contributes the locator.
-            self.store
-                .record_provider_execution_target(
+            let observation = ProviderSandboxObservation {
+                sandbox_id,
+                template_id,
+                metadata,
+            };
+            let result = if authority.environment_authorization.payload.execution_mode == "retained"
+            {
+                self.store.record_retained_provider_execution_target(
                     authority,
                     &operation.identity,
                     &operation.identity.provider_config_digest,
-                    &ProviderSandboxObservation {
-                        sandbox_id,
-                        template_id,
-                        metadata,
-                    },
+                    &observation,
                 )
-                .map_err(E2bCreationError::Store)?;
+            } else {
+                self.store.record_provider_execution_target(
+                    authority,
+                    &operation.identity,
+                    &operation.identity.provider_config_digest,
+                    &observation,
+                )
+            };
+            result.map_err(E2bCreationError::Store)?;
         }
         Ok(recorded)
     }
@@ -286,7 +296,7 @@ impl PlannedCreation {
                 "e2b_creation_requires_e2b_profile",
             ));
         };
-        if profile.lifetime != "perRun"
+        if !matches!(profile.lifetime.as_str(), "perRun" | "retained")
             || profile.provider_config_digest != request.configured_provider_config_digest
             || request.authorization.workspace_id != authority.workspace_id
         {

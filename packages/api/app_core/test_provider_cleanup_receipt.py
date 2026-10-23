@@ -1,12 +1,15 @@
 """Provider cleanup evidence is bound to frozen API records before business release."""
 import copy
 import json
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Thread
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.db import connection
-from django.test import RequestFactory, SimpleTestCase, TransactionTestCase
+from django.test import RequestFactory, SimpleTestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
 from .environment_profile import environment_profile_digest
@@ -27,6 +30,51 @@ def provider_receipt():
         'controllerEpoch': 7, 'cleanupComplete': True, 'provider': 'e2b',
         'profileDigest': environment_profile_digest(profile), 'providerConfigDigest': profile['providerConfigDigest'],
         'settlementDigest': 'sha256:' + 'd' * 64, 'operationCount': 1}
+
+
+def no_provider_effects_receipt():
+    physical = provider_receipt()
+    return {name: value for name, value in physical.items()
+        if name not in {'operationCount', 'settlementDigest'}} | {
+        'schema': 'runtime.agent_run.cleanup_receipt.no_provider_effects.v1',
+        'scope': 'noProviderEffectsForRun'}
+
+
+@contextmanager
+def runtime_receipt_http(receipt, *, status=200):
+    """Exercise the production JSON read without a provider or model call."""
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get('Content-Length', '0'))
+            assert 0 < length <= 4096
+            requests.append((self.path, json.loads(self.rfile.read(length)),
+                self.headers.get('X-Internal-Token')))
+            body = json.dumps(receipt).encode()
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    server.daemon_threads = True
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with override_settings(RUNTIME_URL=f'http://127.0.0.1:{server.server_port}'), \
+                patch.dict('os.environ', {'NO_PROXY': 'localhost,127.0.0.1', 'no_proxy': 'localhost,127.0.0.1'}):
+            yield requests
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
 
 
 class ProviderCleanupReceiptContractTests(SimpleTestCase):
@@ -72,6 +120,24 @@ class ProviderCleanupReceiptContractTests(SimpleTestCase):
                     get_agent_run_cleanup_receipt('run-1', 'sha256:' + 'a' * 64, 'receipt-1',
                         frozen_profile=frozen, frozen_profile_digest=digest)
                 transport.assert_not_called()
+
+    def test_owned_no_provider_effects_is_an_explicit_variant_of_the_frozen_provider_read(self):
+        receipt = no_provider_effects_receipt()
+        actual, transport = self.query(receipt)
+        self.assertEqual(actual, receipt)
+        self.assertEqual(transport.call_args.args[1]['schema'], 'runtime.agent_run.cleanup_receipt.get.v2')
+
+    def test_no_provider_effects_rejects_fake_physical_facts_and_no_operation_release_scope(self):
+        receipt = no_provider_effects_receipt()
+        for change in ({'scope': 'noEffectsForRun'}, {'scope': None}, {'operationCount': 0},
+                {'settlementDigest': 'sha256:' + 'd' * 64}, {'allocation': {'kind': 'neverAllocated'}},
+                {'sandboxId': 'fake'}, {'profileDigest': 'sha256:' + 'b' * 64},
+                {'providerConfigDigest': 'sha256:' + 'b' * 64}, {'cleanupComplete': 1}):
+            with self.subTest(change=change), self.assertRaisesMessage(ValueError, 'agent_run_cleanup_receipt_invalid'):
+                self.query(receipt | change)
+        for field in receipt:
+            with self.subTest(missing=field), self.assertRaisesMessage(ValueError, 'agent_run_cleanup_receipt_invalid'):
+                self.query({name: value for name, value in receipt.items() if name != field})
 
     def test_legacy_receipt_protocol_is_exact_and_never_inferred_from_a_response(self):
         legacy = {'schema': 'runtime.agent_run.cleanup_receipt.v1', 'receiptId': 'receipt-1',
@@ -233,6 +299,46 @@ class ProviderCleanupPersistenceTests(ExecutionPublicationFixture, TransactionTe
             return self.receipt()
         with patch('app_core.runtime_client.request_json', side_effect=receipt_read):
             self.assertEqual(self.release().status_code, 409)
+        self.assertFalse(AgentRunEnvironmentRelease.objects.filter(agent_run=self.run).exists())
+        self.run.environment.refresh_from_db()
+        self.assertFalse(self.run.environment.controller_released)
+
+
+    def test_owned_terminal_before_provider_create_reads_absence_receipt_over_http_and_releases_once(self):
+        from .models import AgentRunEnvironmentRelease
+        physical = self.receipt()
+        receipt = {name: value for name, value in physical.items()
+            if name not in {'operationCount', 'settlementDigest'}} | {
+            'schema': 'runtime.agent_run.cleanup_receipt.no_provider_effects.v1',
+            'scope': 'noProviderEffectsForRun'}
+        self.run.environment.refresh_from_db()
+        self.assertEqual(self.run.environment.controller_run_id, self.run.pk)
+        self.assertEqual(self.run.environment.controller_purpose, 'cleanup')
+        self.assertFalse(self.run.environment.controller_released)
+        with runtime_receipt_http(receipt) as reads:
+            response = self.release()
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(len(reads), 1)
+        path, query, token = reads[0]
+        self.assertEqual(path, '/internal/agent-runs/cleanup-receipt')
+        self.assertEqual(query, {'schema': 'runtime.agent_run.cleanup_receipt.get.v2',
+            'agentRunId': self.run.pk, 'authorizationDigest': self.authorization.digest,
+            'cleanupReceiptId': 'receipt-1'})
+        self.assertEqual(token, 'test-internal-token')
+        released = AgentRunEnvironmentRelease.objects.get(agent_run=self.run)
+        self.assertEqual(released.controller_epoch, self.grant['controllerEpoch'])
+        self.run.environment.refresh_from_db()
+        self.assertTrue(self.run.environment.controller_released)
+        with patch('app_core.runtime_client.request_json', side_effect=AssertionError('released replay queried Runtime')):
+            self.assertEqual(self.release().json(), response.json())
+        self.assertEqual(AgentRunEnvironmentRelease.objects.filter(agent_run=self.run).count(), 1)
+
+    def test_missing_runtime_receipt_is_not_inferred_as_no_provider_effects(self):
+        from .models import AgentRunEnvironmentRelease
+        with runtime_receipt_http({'error': 'cleanup_receipt_not_found'}, status=404) as reads:
+            response = self.release()
+        self.assertEqual(response.status_code, 503, response.content)
+        self.assertEqual(len(reads), 1)
         self.assertFalse(AgentRunEnvironmentRelease.objects.filter(agent_run=self.run).exists())
         self.run.environment.refresh_from_db()
         self.assertFalse(self.run.environment.controller_released)

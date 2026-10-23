@@ -8,6 +8,7 @@ use crate::agent_run_authorization::EnvironmentProfile;
 use postgres::{GenericClient, Row};
 
 pub mod cleanup;
+pub mod retained;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCreationIdentity {
@@ -90,6 +91,7 @@ impl PostgresRuntimeStore {
             if profile.provider_config_digest != request.configured_provider_config_digest {
                 return Err("provider_creation_configuration_rejected".into());
             }
+            let retained_lifetime = profile.lifetime == "retained";
             let identity = ProviderCreationIdentity {
                 attempt_id: request.attempt_id.into(),
                 execution_id: request.execution_id.into(),
@@ -107,6 +109,7 @@ impl PostgresRuntimeStore {
             };
             if let Some(existing) = load(&mut tx, request.attempt_id, true)? {
                 require_identity(&existing, &identity)?;
+                if retained_lifetime { retained::bind_creation(&mut tx, &identity)?; }
                 tx.commit().map_err(|error| error.to_string())?;
                 return Ok(existing);
             }
@@ -126,6 +129,7 @@ impl PostgresRuntimeStore {
                 ],
             ).map_err(|_| "provider_creation_identity_or_open_operation_conflict")?;
             let operation = load(&mut tx, request.attempt_id, false)?.ok_or("provider_creation_missing")?;
+            if retained_lifetime { retained::bind_creation(&mut tx, &identity)?; }
             tx.commit().map_err(|error| error.to_string())?;
             Ok(operation)
         })

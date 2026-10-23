@@ -178,7 +178,7 @@ pub(crate) fn workspace_mcp_catalog(
     workspace_mcp_catalog_at(activation, Path::new(PLUGIN_CATALOG_ROOT))
 }
 
-fn workspace_mcp_catalog_at(
+pub(crate) fn workspace_mcp_catalog_at(
     activation: &PluginActivationSnapshotV1,
     catalog_root: &Path,
 ) -> Result<WorkspaceMcpCatalogResult, String> {
@@ -398,7 +398,17 @@ struct WorkspaceMcpConnector {
     plugin_name: String,
     server: McpServerDeclarationV1,
     authorization: Arc<McpDispatchAuthorization>,
-    docker: Arc<DockerExecutionHostRunner>,
+    docker: Option<Arc<DockerExecutionHostRunner>>,
+}
+
+fn require_mcp_transport_host(
+    transport: &McpTransportV1,
+    has_legacy_stdio_host: bool,
+) -> Result<(), String> {
+    if matches!(transport, McpTransportV1::Stdio { .. }) && !has_legacy_stdio_host {
+        return Err("mcp_stdio_transport_unsupported".into());
+    }
+    Ok(())
 }
 
 impl McpServerConnector for WorkspaceMcpConnector {
@@ -412,6 +422,10 @@ impl McpServerConnector for WorkspaceMcpConnector {
         >,
     > {
         Box::pin(async move {
+            // Unsupported stdio must fail before asking for any credentials or
+            // entering either network transport.
+            require_mcp_transport_host(&self.server.transport, self.docker.is_some())
+                .map_err(McpConnectError::Unavailable)?;
             let credential_started = Instant::now();
             let bearer_token = self
                 .authorization
@@ -432,6 +446,10 @@ impl McpServerConnector for WorkspaceMcpConnector {
                 McpTransportV1::Stdio { program, args } => {
                     let request = self
                         .docker
+                        .as_ref()
+                        .ok_or_else(|| {
+                            McpConnectError::Unavailable("MCP stdio host unavailable".into())
+                        })?
                         .mcp_exec_request(
                             self.plugin_name.as_str(),
                             program.as_str(),
@@ -549,8 +567,13 @@ fn prepare_mcp_servers_at(
 
 pub(crate) async fn connect_mcp_servers(
     prepared: PreparedMcpServers,
-    docker: Arc<DockerExecutionHostRunner>,
+    docker: Option<Arc<DockerExecutionHostRunner>>,
 ) -> Result<(McpBindings, McpStartupMetrics), String> {
+    // Reject the entire unsupported declaration set before returning partial
+    // lazy bindings. Empty and HTTP-only declarations need no stdio host.
+    for (_, server) in &prepared.servers {
+        require_mcp_transport_host(&server.transport, docker.is_some())?;
+    }
     let server_count = prepared.servers.len();
     let mut contracts = Vec::new();
     let mut providers: Vec<Arc<dyn DynamicToolProvider + Send + Sync>> = Vec::new();
@@ -1657,3 +1680,6 @@ mod tests {
         assert_eq!(contracts[0].provider_id, "mcp:banana:banana-source");
     }
 }
+
+#[cfg(test)]
+mod host_independent_tests;

@@ -432,7 +432,7 @@ fn postgres_e2b_creation_driver_validates_provider_key_before_preparation_and_ac
 
 #[test]
 #[ignore = "requires destructive dedicated Postgres test database"]
-fn postgres_e2b_creation_driver_rejects_retained_policy_before_preparing_or_sending() {
+fn postgres_e2b_creation_driver_rejects_lifetime_grant_mismatch_before_preparing_or_sending() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (_, store, mut db) = retained::setup();
     let mut run = run(&store, &mut db);
@@ -444,20 +444,69 @@ fn postgres_e2b_creation_driver_rejects_retained_policy_before_preparing_or_send
     profile.lifetime = "retained".into();
     run.original.environment_profile_digest = run.original.environment_profile.digest().unwrap();
     run.grant.payload.agent_run_authorization_digest = run.original.digest().unwrap();
-    run.grant.payload.execution_mode = "retained".into();
     run.grant = retained::sign(run.grant.payload);
     let adapter = RecordingAdapter::new("success");
-    assert!(E2bCreationDriver::new(&store, &adapter)
-        .create_or_reopen(
+    assert!(matches!(
+        E2bCreationDriver::new(&store, &adapter).create_or_reopen(
             &run.authority(ControllerPurpose::Execute),
             &creation_request(&run)
-        )
-        .is_err());
+        ),
+        Err(crate::e2b_creation::E2bCreationError::Rejected(
+            "e2b_creation_authorization_invalid"
+        ))
+    ));
     assert!(store
         .provider_creation_operation("attempt-provider")
         .unwrap()
         .is_none());
     assert!(adapter.calls.lock().unwrap().is_empty());
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_e2b_creation_driver_accepts_explicit_retained_policy_and_preserves_verified_target() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_, store, mut db) = retained::setup();
+    let mut profile: crate::agent_run_authorization::EnvironmentProfile =
+        serde_json::from_str(include_str!(
+            "../../../../../../tests/workspace/fixtures/e2b_environment_profile/v1/valid.json"
+        ))
+        .unwrap();
+    let crate::agent_run_authorization::EnvironmentProfile::E2b(value) = &mut profile else {
+        unreachable!()
+    };
+    value.lifetime = "retained".into();
+    let mut run = run_with_profile(&store, &mut db, profile);
+    run.grant.payload.execution_mode = "retained".into();
+    run.grant = retained::sign(run.grant.payload.clone());
+    let adapter = RecordingAdapter::new("success");
+    let operation = E2bCreationDriver::new(&store, &adapter)
+        .create_or_reopen(
+            &run.authority(ControllerPurpose::Execute),
+            &creation_request(&run),
+        )
+        .unwrap();
+    assert_eq!(
+        operation.reported_sandbox_id.as_deref(),
+        Some("opaque-sandbox")
+    );
+    assert_eq!(adapter.calls.lock().unwrap().len(), 1);
+    let target = db.query_one("SELECT p.verified_sandbox_id,b.creation_attempt_id FROM runtime.provider_creation_operations p JOIN runtime.provider_environment_bindings b ON b.creation_attempt_id=p.attempt_id WHERE p.attempt_id=$1", &[&operation.identity.attempt_id]).unwrap();
+    assert_eq!(
+        target.get::<_, Option<String>>(0).as_deref(),
+        Some("opaque-sandbox")
+    );
+    assert_eq!(target.get::<_, String>(1), operation.identity.attempt_id);
+    assert_eq!(
+        db.query_one(
+            "SELECT count(*) FROM runtime.provider_environment_run_uses",
+            &[]
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        0,
+        "the Driver owns physical creation evidence; Runtime separately binds the first consumer"
+    );
 }
 
 #[test]

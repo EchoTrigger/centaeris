@@ -207,20 +207,35 @@ def _get_provider_cleanup_receipt(agent_run_id, digest, receipt_id, profile, pro
     result = request_json('/internal/agent-runs/cleanup-receipt', {
         'schema': 'runtime.agent_run.cleanup_receipt.get.v2', 'agentRunId': agent_run_id,
         'authorizationDigest': digest, 'cleanupReceiptId': receipt_id}, timeout=10)
-    if (not isinstance(result, dict) or set(result) != {'schema', 'receiptId', 'agentRunId',
-            'environmentId', 'authorizationDigest', 'controllerEpoch', 'cleanupComplete', 'provider',
-            'profileDigest', 'providerConfigDigest', 'settlementDigest', 'operationCount'}
-            or result['schema'] != 'runtime.agent_run.cleanup_receipt.v2'
+    common = {'schema', 'receiptId', 'agentRunId', 'environmentId', 'authorizationDigest',
+        'controllerEpoch', 'cleanupComplete', 'provider', 'profileDigest', 'providerConfigDigest'}
+    if not isinstance(result, dict):
+        raise ValueError('agent_run_cleanup_receipt_invalid')
+    physical = result.get('schema') == 'runtime.agent_run.cleanup_receipt.v2'
+    absent = result.get('schema') == 'runtime.agent_run.cleanup_receipt.no_provider_effects.v1'
+    retained = result.get('schema') == 'runtime.agent_run.cleanup_receipt.retained_provider.v1'
+    expected = common | ({'settlementDigest', 'operationCount'} if physical else
+        {'scope', 'providerUseId', 'providerUseDigest'} if retained else {'scope'})
+    if (not (physical or absent or retained) or set(result) != expected
+            or (retained and profile['lifetime'] != 'retained')
             or result['receiptId'] != receipt_id or result['agentRunId'] != agent_run_id
             or result['authorizationDigest'] != digest or result['cleanupComplete'] is not True
             or result['provider'] != 'e2b' or result['profileDigest'] != profile_digest
             or result['providerConfigDigest'] != profile['providerConfigDigest']
-            or type(result['controllerEpoch']) is not int or not 1 <= result['controllerEpoch'] <= 2**63 - 1
-            or type(result['operationCount']) is not int or not 1 <= result['operationCount'] <= 2**32 - 1):
+            or type(result['controllerEpoch']) is not int or not 1 <= result['controllerEpoch'] <= 2**63 - 1):
+        raise ValueError('agent_run_cleanup_receipt_invalid')
+    if physical:
+        if type(result['operationCount']) is not int or not 1 <= result['operationCount'] <= 2**32 - 1:
+            raise ValueError('agent_run_cleanup_receipt_invalid')
+    elif result['scope'] != ('runEffectsOnly' if retained else 'noProviderEffectsForRun'):
         raise ValueError('agent_run_cleanup_receipt_invalid')
     try:
         require_opaque_ref('environmentId', result['environmentId'])
-        require_sha256('settlementDigest', result['settlementDigest'])
+        if physical:
+            require_sha256('settlementDigest', result['settlementDigest'])
+        elif retained:
+            require_opaque_ref('providerUseId', result['providerUseId'])
+            require_sha256('providerUseDigest', result['providerUseDigest'])
     except (ValueError, TypeError):
         raise ValueError('agent_run_cleanup_receipt_invalid') from None
     return result

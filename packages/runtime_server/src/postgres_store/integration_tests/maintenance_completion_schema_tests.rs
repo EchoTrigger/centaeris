@@ -99,7 +99,7 @@ fn postgres_maintenance_completion_v11_migration_preserves_existing_facts_and_hi
     drop(PostgresRuntimeStore::new(&url).unwrap());
     assert_eq!(
         history(&mut db).iter().map(|row| row.0).collect::<Vec<_>>(),
-        (1..=18).collect::<Vec<_>>()
+        (1..=20).collect::<Vec<_>>()
     );
     assert_eq!(&history(&mut db)[..11], previous.as_slice());
     assert_eq!(

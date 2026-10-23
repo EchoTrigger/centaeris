@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+mod no_effects;
+pub use no_effects::NoProviderEffectsReceipt;
+
 #[derive(Debug, Clone)]
 pub struct ProviderSandboxObservation {
     pub sandbox_id: String,
@@ -72,6 +75,53 @@ pub struct ProviderCleanupReceipt {
     pub provider_config_digest: String,
     pub settlement_digest: String,
     pub operation_count: u32,
+}
+
+/// The schema in each exact response is its explicit wire discriminator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum ProviderRunCleanupReceipt {
+    Settled(ProviderCleanupReceipt),
+    NoProviderEffects(NoProviderEffectsReceipt),
+    RetainedProvider(super::retained::RetainedProviderCleanupReceipt),
+}
+
+impl From<ProviderCleanupReceipt> for ProviderRunCleanupReceipt {
+    fn from(value: ProviderCleanupReceipt) -> Self {
+        Self::Settled(value)
+    }
+}
+impl From<NoProviderEffectsReceipt> for ProviderRunCleanupReceipt {
+    fn from(value: NoProviderEffectsReceipt) -> Self {
+        Self::NoProviderEffects(value)
+    }
+}
+impl ProviderRunCleanupReceipt {
+    pub fn receipt_id(&self) -> &str {
+        self.binding().0
+    }
+    fn binding(&self) -> (&str, &str, &str, i64) {
+        match self {
+            Self::Settled(value) => (
+                &value.receipt_id,
+                &value.authorization_digest,
+                &value.environment_id,
+                value.controller_epoch,
+            ),
+            Self::RetainedProvider(value) => (
+                &value.receipt_id,
+                &value.authorization_digest,
+                &value.environment_id,
+                value.controller_epoch,
+            ),
+            Self::NoProviderEffects(value) => (
+                &value.receipt_id,
+                &value.authorization_digest,
+                &value.environment_id,
+                value.controller_epoch,
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -251,7 +301,9 @@ impl PostgresRuntimeStore {
         self.with_execution_control_client(|client| {
             let mut tx = client.transaction().map_err(|e| e.to_string())?;
             super::super::resource_commit::require_durable_resource_commit(&mut tx)?;
-            let grant = require_cleanup(&mut tx, authority, Some(identity), None)?;
+            let grant = if authority.environment_authorization.payload.execution_mode == "retained" {
+                super::retained::require_unsent_cleanup(&mut tx,authority,identity)?
+            } else { require_cleanup(&mut tx, authority, Some(identity), None)? };
             let operation = super::load(&mut tx, &identity.attempt_id, true)?.ok_or("provider_creation_missing")?;
             require_identity(&operation, identity)?;
             if let Some(settlement) = load_settlement(&mut tx, &identity.attempt_id)? {
@@ -277,8 +329,17 @@ impl PostgresRuntimeStore {
         self.with_execution_control_client(|client| {
             let mut tx = client.transaction().map_err(|e| e.to_string())?;
             super::super::resource_commit::require_durable_resource_commit(&mut tx)?;
-            let grant = require_cleanup(&mut tx, authority, None, None)?;
+            let grant = if authority.environment_authorization.payload.execution_mode == "retained" {
+                if authority.purpose!=ControllerPurpose::Cleanup { return Err("provider_cleanup_requires_cleanup_authority".into()); }
+                super::retained::require_authority(&mut tx,authority,None)?
+            } else { require_cleanup(&mut tx, authority, None, None)? };
             let run = &grant.authorization.agent_run_id;
+            if authority.environment_authorization.payload.execution_mode == "retained" {
+                super::retained::require_only_unsent_settlements(&mut tx,run,&authority.environment_authorization.payload.environment_id)?;
+            }
+            if no_effects::load_no_effects_receipt(&mut tx, run)?.is_some() {
+                return Err("provider_cleanup_receipt_scope_conflict".into());
+            }
             if let Some(receipt) = load_receipt(&mut tx, run)? {
                 if !(1..=grant.controller_epoch).contains(&receipt.controller_epoch) {
                     return Err("provider_cleanup_receipt_epoch_rejected".into());
@@ -300,21 +361,42 @@ impl PostgresRuntimeStore {
         })
     }
 
+    /// Read observations only. Each subsequent action rechecks its own authority.
+    pub fn provider_creation_operations_for_cleanup(
+        &self,
+        authority: &ControllerAuthorityRequest<'_>,
+        configured_digest: &str,
+    ) -> Result<Vec<ProviderCreationOperation>, String> {
+        self.with_execution_control_client(|client| {
+            let mut tx = client.transaction().map_err(|error| error.to_string())?;
+            super::super::resource_commit::require_durable_resource_commit(&mut tx)?;
+            let grant = require_cleanup(&mut tx, authority, None, Some(configured_digest))?;
+            let attempts = tx.query("SELECT attempt_id FROM runtime.provider_creation_operations WHERE agent_run_id=$1 ORDER BY attempt_id", &[&grant.authorization.agent_run_id]).map_err(|error| error.to_string())?;
+            let mut operations = Vec::with_capacity(attempts.len());
+            for attempt in attempts {
+                let operation = super::load(&mut tx, &attempt.get::<_,String>(0), false)?
+                    .ok_or("provider_creation_missing")?;
+                require_current_binding(&grant, authority, &operation.identity)?;
+                operations.push(operation);
+            }
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(operations)
+        })
+    }
+
     pub fn get_provider_cleanup_receipt(
         &self,
         request: &ProviderCleanupReceiptQuery,
-    ) -> Result<Option<ProviderCleanupReceipt>, String> {
+    ) -> Result<Option<ProviderRunCleanupReceipt>, String> {
         request.validate()?;
         self.with_execution_control_client(|client| {
-            let Some(receipt) = load_receipt(client, &request.agent_run_id)? else {
+            let Some(receipt) = load_run_receipt(client, &request.agent_run_id)? else {
                 return Ok(None);
             };
-            if receipt.receipt_id != request.cleanup_receipt_id
-                || receipt.authorization_digest != request.authorization_digest
-            {
+            let (id, authorization, _, _) = receipt.binding();
+            if id != request.cleanup_receipt_id || authorization != request.authorization_digest {
                 return Ok(None);
             }
-            require_receipt_facts(client, &receipt)?;
             Ok(Some(receipt))
         })
     }
@@ -362,7 +444,7 @@ fn require_unsettled_dispatch(
     Ok(())
 }
 
-fn observed_target(
+pub(super) fn observed_target(
     grant: &VerifiedOriginalGrant,
     identity: &ProviderCreationIdentity,
     configured_digest: &str,
@@ -378,17 +460,11 @@ fn observed_target(
     {
         return Err("provider_cleanup_observation_binding_rejected".into());
     }
-    // This hash domain is shared with already persisted cleanup ownership
-    // evidence. Execute records the same fact earlier, without changing it.
-    let verification_digest = digest(
-        "runtime:provider-cleanup-target:v1",
-        &serde_json::json!({
-            "sandboxId": observation.sandbox_id,
-            "templateId": observation.template_id,
-            "metadata": observation.metadata,
-            "requestDigest": identity.request_digest,
-            "providerConfigDigest": configured_digest,
-        }),
+    let verification_digest = target_verification_digest(
+        identity,
+        &observation.template_id,
+        configured_digest,
+        &observation.sandbox_id,
     )?;
     Ok(ProviderVerifiedTarget {
         identity: identity.clone(),
@@ -397,7 +473,26 @@ fn observed_target(
     })
 }
 
-fn persist_verified_target(
+pub(super) fn target_verification_digest(
+    identity: &ProviderCreationIdentity,
+    template_id: &str,
+    configured_digest: &str,
+    sandbox_id: &str,
+) -> Result<String, String> {
+    // Preserve the canonical hash domain of already persisted ownership evidence.
+    digest(
+        "runtime:provider-cleanup-target:v1",
+        &serde_json::json!({
+            "sandboxId": sandbox_id,
+            "templateId": template_id,
+            "metadata": expected_metadata(identity),
+            "requestDigest": identity.request_digest,
+            "providerConfigDigest": configured_digest,
+        }),
+    )
+}
+
+pub(super) fn persist_verified_target(
     tx: &mut postgres::Transaction<'_>,
     target: &ProviderVerifiedTarget,
 ) -> Result<ProviderVerifiedTarget, String> {
@@ -450,7 +545,7 @@ fn require_cleanup(
     Ok(grant)
 }
 
-fn expected_metadata(identity: &ProviderCreationIdentity) -> BTreeMap<String, String> {
+pub(crate) fn expected_metadata(identity: &ProviderCreationIdentity) -> BTreeMap<String, String> {
     BTreeMap::from([
         ("centaerisAttemptId".into(), identity.attempt_id.clone()),
         ("environmentId".into(), identity.environment_id.clone()),
@@ -476,7 +571,7 @@ fn digest(domain: &str, value: &serde_json::Value) -> Result<String, String> {
     Ok(format!("sha256:{:x}", hash.finalize()))
 }
 
-fn load_target(
+pub(super) fn load_target(
     db: &mut impl GenericClient,
     identity: &ProviderCreationIdentity,
 ) -> Result<Option<ProviderVerifiedTarget>, String> {
@@ -493,7 +588,7 @@ fn load_target(
     }))
 }
 
-fn load_settlement(
+pub(super) fn load_settlement(
     db: &mut impl GenericClient,
     attempt: &str,
 ) -> Result<Option<ProviderCreationSettlement>, String> {
@@ -519,7 +614,7 @@ fn load_settlement(
     }))
 }
 
-fn insert_settlement(
+pub(super) fn insert_settlement(
     db: &mut impl GenericClient,
     identity: &ProviderCreationIdentity,
     kind: ProviderSettlementKind,
@@ -605,11 +700,21 @@ fn require_receipt_facts(
         || original.get::<_, String>(1) != receipt.authorization_digest
         || original.get::<_, Option<String>>(2).as_deref() != Some(&receipt.profile_digest)
         || original.get::<_, Option<String>>(3).as_deref() != Some(&receipt.provider_config_digest)
-        || original.get::<_, Option<String>>(4).as_deref() != Some("perRun")
+        || !matches!(
+            original.get::<_, Option<String>>(4).as_deref(),
+            Some("perRun" | "retained")
+        )
         || original.get::<_, Option<String>>(5).as_deref()
             != Some("runtime.e2b_environment_profile.v1")
     {
         return Err("provider_cleanup_receipt_original_binding_rejected".into());
+    }
+    if original.get::<_, Option<String>>(4).as_deref() == Some("retained") {
+        super::retained::require_only_unsent_settlements(
+            db,
+            &receipt.agent_run_id,
+            &receipt.environment_id,
+        )?;
     }
     let (count, digest) = settlement_summary(
         db,
@@ -626,17 +731,39 @@ fn require_receipt_facts(
     Ok(())
 }
 
+fn load_run_receipt(
+    db: &mut impl GenericClient,
+    run: &str,
+) -> Result<Option<ProviderRunCleanupReceipt>, String> {
+    let physical = load_receipt(db, run)?;
+    let no_effects = no_effects::load_no_effects_receipt(db, run)?;
+    let retained = super::retained::receipts::load_receipt(db, run)?;
+    match (physical, no_effects, retained) {
+        (Some(receipt), None, None) => {
+            require_receipt_facts(db, &receipt)?;
+            Ok(Some(receipt.into()))
+        }
+        (None, Some(receipt), None) => Ok(Some(receipt.into())),
+        (None, None, Some(receipt)) => {
+            Ok(Some(ProviderRunCleanupReceipt::RetainedProvider(receipt)))
+        }
+        (None, None, None) => Ok(None),
+        _ => Err("provider_cleanup_receipt_scope_conflict".into()),
+    }
+}
+
 pub(crate) fn require_lifecycle_receipt(
     db: &mut impl GenericClient,
     run: &str,
     authorization: &str,
 ) -> Result<(), String> {
-    let receipt = load_receipt(db, run)?.ok_or("lifecycle provider cleanup receipt required")?;
-    if receipt.authorization_digest != authorization {
+    let receipt =
+        load_run_receipt(db, run)?.ok_or("lifecycle provider cleanup receipt required")?;
+    let (_, original, environment, epoch) = receipt.binding();
+    if original != authorization {
         return Err("lifecycle provider cleanup binding rejected".into());
     }
-    require_receipt_facts(db, &receipt)?;
-    let released = db.query_one("SELECT EXISTS(SELECT 1 FROM public.app_core_agentrunenvironmentrelease WHERE agent_run_id=$1 AND environment_id=$2 AND authorization_digest=$3 AND controller_epoch>=$4)", &[&run, &receipt.environment_id, &authorization, &receipt.controller_epoch]).map_err(|e| e.to_string())?.get::<_, bool>(0);
+    let released = db.query_one("SELECT EXISTS(SELECT 1 FROM public.app_core_agentrunenvironmentrelease WHERE agent_run_id=$1 AND environment_id=$2 AND authorization_digest=$3 AND controller_epoch>=$4)", &[&run, &environment, &authorization, &epoch]).map_err(|e| e.to_string())?.get::<_, bool>(0);
     if !released {
         return Err("lifecycle provider release receipt required".into());
     }
@@ -720,6 +847,7 @@ pub(crate) fn validate(db: &mut impl GenericClient) -> Result<(), String> {
 
 #[cfg(test)]
 pub(crate) fn restore_previous_fixture(db: &mut postgres::Client) {
+    super::retained::restore_previous_fixture(db);
     if !db
         .query_one(
             "SELECT EXISTS(SELECT 1 FROM runtime.schema_migrations WHERE version=18)",

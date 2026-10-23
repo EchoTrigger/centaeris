@@ -57,6 +57,7 @@ from app_core.environment_lifecycle import (
     acquire_environment_controller, acquire_environment_cleanup_controller,
     get_environment_release_receipt, release_environment_controller, read_control_authorization,
 )
+from app_core.environment_profile import EnvironmentPowerPending
 from app_core.session_event import (
     committed_session_terminal_state,
     project_committed_agent_run,
@@ -1609,6 +1610,9 @@ def _resolve_agent_run(body):
                 "agentRunStart": build_agent_run_start(run, controller_authority=authority, execution_mode=body["executionMode"])})
     except AgentRun.DoesNotExist:
         return JsonResponse({"error": "agent_run_not_found"}, status=404)
+    except EnvironmentPowerPending:
+        return JsonResponse({"schema": "runtime.agent_run_lifecycle.resolved.v1",
+            "disposition": "waiting", "waitReason": "environment_power_pending"})
     except EnvironmentControllerBusy:
         return JsonResponse({"error": "environment_controller_busy"}, status=409)
     except (RuntimeError, ValueError, TypeError) as error:

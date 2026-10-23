@@ -608,7 +608,7 @@ class WorkerContractTests(unittest.TestCase):
             re.DOTALL,
         )
         self.assertIsNotNone(declaration, "Runtime waiting reason contract must be discoverable")
-        reasons = re.findall(r'"([a-z_]+)"', declaration.group(1))
+        reasons = re.findall(r'"([a-z][a-z0-9_]*)"', declaration.group(1))
         self.assertTrue(reasons)
         self.assertEqual(len(reasons), len(set(reasons)))
         self.assertEqual(set(reasons), worker.AGENT_RUN_WAITING_TRANSITION_REASONS)

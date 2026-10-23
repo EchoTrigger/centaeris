@@ -43,6 +43,9 @@ if not 1 <= WORKER_SLOT_COUNT <= 16:
     raise ValueError("WORKER_SLOT_COUNT must be an integer between 1 and 16")
 AGENT_RUN_WAITING_TRANSITION_REASONS = {
     "execution_resident_capacity_wait",
+    "e2b_live_context_capacity_wait",
+    "e2b_environment_already_active",
+    "e2b_step_already_active",
     "execution_recovery_checkpoint_committed",
     "question_wait",
     "runtime_job_wait",
@@ -556,6 +559,14 @@ def agent_run_lifecycle_binding(job):
 def execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
     agent_run_id, digest = agent_run_lifecycle_binding(job)
     resolved = resolve_agent_run_lifecycle(job, lease_owner, agent_run_id, digest)
+    if resolved["disposition"] == "waiting":
+        require_healthy_lease()
+        # Provider ACK wakes this Job durably; this deadline only bounds a
+        # missed notification. Waiting releases the ordinary slot and lease.
+        yield_job(job["jobId"], lease_owner,
+                  now_ms() + AGENT_RUN_LIFECYCLE_RECHECK_MS,
+                  resolved["waitReason"])
+        return False
     if resolved["disposition"] in {"terminal", "released"}:
         require_healthy_lease()
         finish_environment_agent_run(job, lease_owner, agent_run_id, digest, resolved, require_healthy_lease)
@@ -656,13 +667,17 @@ def resolve_agent_run_lifecycle(job, lease_owner, agent_run_id, digest):
     if (
         not isinstance(resolved, dict)
         or resolved.get("schema") != "runtime.agent_run_lifecycle.resolved.v1"
-        or resolved.get("disposition") not in {"ready", "terminal", "released"}
+        or resolved.get("disposition") not in {"ready", "waiting", "terminal", "released"}
     ):
         raise RuntimeError("agent_run_lifecycle_resolve_response_invalid")
     disposition = resolved["disposition"]
     expected = {"schema", "disposition"}
     if disposition == "ready":
         expected.add("agentRunStart")
+    elif disposition == "waiting":
+        expected.add("waitReason")
+        if resolved.get("waitReason") != "environment_power_pending":
+            raise RuntimeError("agent_run_lifecycle_resolve_response_invalid")
     else:
         expected |= {"terminalState", "releaseReceiptId" if disposition == "released" else "agentRunCleanup"}
         if resolved.get("terminalState") not in {"completed", "failed", "cancelled"}:

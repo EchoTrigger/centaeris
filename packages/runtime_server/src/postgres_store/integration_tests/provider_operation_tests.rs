@@ -15,6 +15,9 @@ const REQUEST: &str = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddd
 
 mod cleanup_tests;
 mod creation_driver_tests;
+mod e2b_runtime_tests;
+mod retained_provider_tests;
+mod zero_creation_cleanup_tests;
 
 struct Run {
     original: WorkspaceAgentRunAuthorization,
@@ -35,14 +38,23 @@ impl Run {
 }
 
 fn run(store: &PostgresRuntimeStore, db: &mut Client) -> Run {
+    let profile = serde_json::from_str(include_str!(
+        "../../../../../tests/workspace/fixtures/e2b_environment_profile/v1/valid.json"
+    ))
+    .unwrap();
+    run_with_profile(store, db, profile)
+}
+
+fn run_with_profile(
+    store: &PostgresRuntimeStore,
+    db: &mut Client,
+    profile: crate::agent_run_authorization::EnvironmentProfile,
+) -> Run {
     let mut original: WorkspaceAgentRunAuthorization = serde_json::from_str(include_str!(
         "../../../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
     ))
     .unwrap();
-    original.environment_profile = serde_json::from_str(include_str!(
-        "../../../../../tests/workspace/fixtures/e2b_environment_profile/v1/valid.json"
-    ))
-    .unwrap();
+    original.environment_profile = profile;
     original.environment_profile_digest = original.environment_profile.digest().unwrap();
     original.agent_run_id = "provider-run".into();
     original.id = "provider-authorization".into();
@@ -527,7 +539,7 @@ fn postgres_provider_creation_schema_upgrade_preserves_legacy_grants_and_job_his
         db.query_one("SELECT max(version) FROM runtime.schema_migrations", &[])
             .unwrap()
             .get::<_, i64>(0),
-        18
+        20
     );
     assert_eq!(db.query("SELECT version,applied_at_ms FROM runtime.schema_migrations WHERE version<=16 ORDER BY version",&[]).unwrap().iter().map(|row|(row.get(0),row.get(1))).collect::<Vec<(i64,i64)>>(),prior);
     let after=db.query_one("SELECT payload::text,signature,(SELECT row_to_json(j)::text FROM runtime.runtime_jobs j WHERE j.job_id=$2) FROM public.app_core_agentrunauthorization WHERE agent_run_id=$1",&[&legacy.original.agent_run_id,&legacy.fence.job_id]).unwrap();

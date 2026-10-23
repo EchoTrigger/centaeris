@@ -558,7 +558,7 @@ fn postgres_provider_cleanup_unsent_and_removed_settlements_form_one_replayable_
             .unwrap()
             .get_provider_cleanup_receipt(&query)
             .unwrap(),
-        Some(receipt.clone())
+        Some(receipt.clone().into())
     );
     assert_eq!(
         store

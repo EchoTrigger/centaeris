@@ -16,10 +16,13 @@ mod docker_execution_host;
 pub mod e2b_adapter;
 pub mod e2b_creation;
 mod e2b_execution_host;
+mod e2b_run_registry;
+mod e2b_runtime;
 mod e2b_session_workspace;
 mod environment_authorization;
 mod environment_stdio;
 mod environment_supervisor;
+mod execution_backend_config;
 mod execution_capacity;
 mod execution_recovery_coordinator;
 mod execution_recovery_policy;
@@ -27,6 +30,7 @@ mod execution_recovery_schedule;
 mod failure_diagnostics;
 mod file_mutation_commit;
 mod host_retirement;
+mod hosted_execution_context;
 mod http;
 mod job_protocol;
 mod lifecycle_hooks;
@@ -165,6 +169,9 @@ const HTTP_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 const HTTP_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const AGENT_RUN_WAITING_TRANSITION_REASONS: &[&str] = &[
     "execution_resident_capacity_wait",
+    "e2b_live_context_capacity_wait",
+    "e2b_environment_already_active",
+    "e2b_step_already_active",
     "execution_recovery_checkpoint_committed",
     "question_wait",
     "runtime_job_wait",
@@ -409,10 +416,18 @@ fn cached_execution_control_reason(
 }
 
 fn main() -> Result<(), String> {
-    DockerExecutionHostRunner::validate_host()?;
-    let execution_profile = Arc::new(RuntimeExecutionProfile {
-        schema: RUNTIME_EXECUTION_PROFILE_SCHEMA,
-        image_digest: resolve_workspace_image_digest()?,
+    let backend_configuration = execution_backend_config::ExecutionBackendConfig::from_env()?;
+    let execution_profile = Arc::new(match &backend_configuration {
+        execution_backend_config::ExecutionBackendConfig::Legacy => {
+            DockerExecutionHostRunner::validate_host()?;
+            RuntimeExecutionProfile::Legacy {
+                schema: RUNTIME_EXECUTION_PROFILE_SCHEMA,
+                image_digest: resolve_workspace_image_digest()?,
+            }
+        }
+        execution_backend_config::ExecutionBackendConfig::E2b(config) => {
+            RuntimeExecutionProfile::for_e2b(config.profile())?
+        }
     });
     let bind_address = env::var("RUNTIME_BIND_ADDRESS")
         .map_err(|_| "RUNTIME_BIND_ADDRESS is required".to_string())?;
@@ -432,11 +447,20 @@ fn main() -> Result<(), String> {
     };
     let store = Arc::new(store);
     let job_store = Arc::new(job_store);
-    DockerExecutionHostRunner::reconcile_residency(job_store.as_ref())?;
-    runtime.spawn(host_retirement::run(
-        job_store.clone(),
-        docker_execution_host::resident_host_context()?.0,
-    ));
+    let e2b_runtime = match backend_configuration {
+        execution_backend_config::ExecutionBackendConfig::Legacy => {
+            DockerExecutionHostRunner::reconcile_residency(job_store.as_ref())?;
+            runtime.spawn(host_retirement::run(
+                job_store.clone(),
+                docker_execution_host::resident_host_context()?.0,
+            ));
+            docker_engine::create_limit_from_env()?;
+            None
+        }
+        execution_backend_config::ExecutionBackendConfig::E2b(config) => Some(Arc::new(
+            e2b_runtime::E2bRuntime::new((*job_store).clone(), *config),
+        )),
+    };
     let tool_layers = Arc::new(Mutex::new(HashMap::<String, HostedRuntimeContext>::new()));
     let resolver_layers = tool_layers.clone();
     let resolver_jobs = job_store.clone();
@@ -455,13 +479,14 @@ fn main() -> Result<(), String> {
         tool_layers.clone(),
     ));
     execution_capacity::ExecutionCapacity::from_env()?;
-    docker_engine::create_limit_from_env()?;
     let state = HttpServerState {
         runtime: runtime.clone(),
         store,
         job_store,
         tool_layers,
         execution_profile,
+        e2b_runtime,
+        e2b_runs: Arc::new(e2b_run_registry::E2bRunRegistry::default()),
         request_capacity: request_capacity::RequestCapacity::from_env()?,
     };
     runtime.block_on(serve_http(listener, state))
@@ -1080,16 +1105,44 @@ struct HttpServerState {
     job_store: Arc<PostgresRuntimeStore>,
     tool_layers: ToolLayerRegistry,
     execution_profile: Arc<RuntimeExecutionProfile>,
+    e2b_runtime: Option<Arc<e2b_runtime::E2bRuntime>>,
+    e2b_runs: Arc<e2b_run_registry::E2bRunRegistry>,
     request_capacity: request_capacity::RequestCapacity,
 }
 
 const RUNTIME_EXECUTION_PROFILE_SCHEMA: &str = "runtime.execution_profile.v1";
 
 #[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RuntimeExecutionProfile {
-    schema: &'static str,
-    image_digest: String,
+#[serde(untagged)]
+enum RuntimeExecutionProfile {
+    Legacy {
+        schema: &'static str,
+        #[serde(rename = "imageDigest")]
+        image_digest: String,
+    },
+    E2b {
+        schema: &'static str,
+        #[serde(rename = "environmentProfile")]
+        environment_profile: crate::agent_run_authorization::EnvironmentProfile,
+    },
+}
+
+impl RuntimeExecutionProfile {
+    fn for_e2b(
+        profile: &crate::agent_run_authorization::EnvironmentProfile,
+    ) -> Result<Self, String> {
+        profile.validate()?;
+        if !matches!(
+            profile,
+            crate::agent_run_authorization::EnvironmentProfile::E2b(_)
+        ) {
+            return Err("e2b_execution_profile_required".into());
+        }
+        Ok(Self::E2b {
+            schema: "runtime.execution_profile.v2",
+            environment_profile: profile.clone(),
+        })
+    }
 }
 
 async fn serve_http(
@@ -1421,6 +1474,10 @@ fn requires_session_workspace_restore(has_started_fact: bool, completing_recover
     !has_started_fact && !completing_recovery
 }
 
+fn e2b_workspace_is_live(has_execution_fact: bool, reused_live: bool) -> bool {
+    has_execution_fact || reused_live
+}
+
 fn resolve_instance_workspace(
     hot_reuse: bool,
     restore: impl FnOnce() -> Result<SessionWorkspaceResolution, SessionWorkspaceApiError>,
@@ -1731,6 +1788,174 @@ fn register_workspace_agent_tool_providers(
     Ok(())
 }
 
+fn require_e2b_product_capabilities(start: &AgentRunStart) -> Result<(), String> {
+    require_e2b_product_capabilities_at(start, Path::new(PLUGIN_CATALOG_ROOT))
+}
+
+fn require_e2b_product_capabilities_at(
+    start: &AgentRunStart,
+    catalog_root: &Path,
+) -> Result<(), String> {
+    hosted_execution_context::HostedExecutionContext::require_no_lifecycle_hooks(
+        &start.authorization.plugin_activation,
+    )?;
+    if !start.authorization.asset_refs.is_empty() {
+        return Err("e2b_declared_inputs_unsupported".into());
+    }
+    if start
+        .authorization
+        .plugin_activation
+        .packages
+        .iter()
+        .any(|package| !package.skills.is_empty() || !package.cli.is_empty())
+    {
+        return Err("e2b_plugin_file_projection_unsupported".into());
+    }
+    let catalog =
+        mcp::workspace_mcp_catalog_at(&start.authorization.plugin_activation, catalog_root)?;
+    if catalog
+        .plugins
+        .into_iter()
+        .flat_map(|plugin| plugin.servers)
+        .any(|server| server.transport.r#type == "stdio")
+    {
+        return Err("mcp_stdio_transport_unsupported".into());
+    }
+    Ok(())
+}
+
+fn prepare_e2b_product_host(
+    provider: &e2b_runtime::E2bRuntime,
+    context: &mut Option<e2b_run_registry::E2bLiveContext>,
+    environment: Option<&mut Option<Arc<e2b_runtime::E2bPreparedHost>>>,
+    start: &AgentRunStart,
+    lease: &RuntimeJobLeaseFence,
+    execution_id: &str,
+    api: session_workspace::SessionWorkspaceApi<'_>,
+) -> Result<hosted_execution_context::HostedExecutionContext, String> {
+    use postgres_store::controller_authority::{ControllerAuthorityRequest, ControllerPurpose};
+    let signing_key = env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY")
+        .map_err(|_| "AGENT_RUN_AUTHORIZATION_SIGNING_KEY is required")?;
+    let authority = ControllerAuthorityRequest {
+        environment_authorization: &start.environment_authorization,
+        signing_key: signing_key.as_bytes(),
+        workspace_id: &start.authorization.workspace_id,
+        lease,
+        purpose: ControllerPurpose::Execute,
+    };
+    let runner = prepare_e2b_live_host_with_environment(
+        provider,
+        context,
+        &authority,
+        &start.authorization,
+        execution_id,
+        environment,
+    )?;
+    let workspace = Arc::new(e2b_session_workspace::E2bSessionWorkspace::new(
+        start.authorization.environment_profile.clone(),
+        api,
+        runner.clone(),
+    )?);
+    let logical_execution_id = context
+        .as_ref()
+        .ok_or("e2b_execution_context_unavailable")?
+        .host
+        .logical_execution_id();
+    hosted_execution_context::HostedExecutionContext::e2b(
+        runner,
+        workspace,
+        logical_execution_id,
+        &start.authorization.plugin_activation,
+    )
+}
+
+#[cfg(test)]
+fn prepare_e2b_live_host(
+    provider: &e2b_runtime::E2bRuntime,
+    context: &mut Option<e2b_run_registry::E2bLiveContext>,
+    authority: &postgres_store::controller_authority::ControllerAuthorityRequest<'_>,
+    authorization: &agent_run_authorization::WorkspaceAgentRunAuthorization,
+    execution_id: &str,
+) -> Result<Arc<e2b_execution_host::E2bExecutionHostRunner>, String> {
+    prepare_e2b_live_host_with_environment(
+        provider,
+        context,
+        authority,
+        authorization,
+        execution_id,
+        None,
+    )
+}
+
+fn prepare_e2b_live_host_with_environment(
+    provider: &e2b_runtime::E2bRuntime,
+    context: &mut Option<e2b_run_registry::E2bLiveContext>,
+    authority: &postgres_store::controller_authority::ControllerAuthorityRequest<'_>,
+    authorization: &agent_run_authorization::WorkspaceAgentRunAuthorization,
+    execution_id: &str,
+    environment: Option<&mut Option<Arc<e2b_runtime::E2bPreparedHost>>>,
+) -> Result<Arc<e2b_execution_host::E2bExecutionHostRunner>, String> {
+    if let Some(live) = context.as_ref() {
+        provider
+            .attempt_key(authority, authorization, execution_id)
+            .map_err(e2b_runtime_error_code)?;
+        live.host
+            .rebind(authority)
+            .map_err(e2b_runtime_error_code)?;
+    } else {
+        let previous = environment.as_deref().and_then(|entry| entry.as_deref());
+        let host = match provider
+            .prepare_with_environment(authority, authorization, execution_id, previous)
+            .map_err(e2b_runtime_error_code)?
+        {
+            e2b_runtime::E2bPrepareOutcome::Prepared(host) => host,
+            e2b_runtime::E2bPrepareOutcome::Pending { operation, reason } => {
+                eprintln!(
+                    "e2b_creation_pending: attemptId={}; reason={reason:?}",
+                    operation.identity.attempt_id
+                );
+                // The durable operation keeps physical settlement responsibility.
+                // Business failure never permits replaying an unknown create.
+                return Err("e2b_execution_context_unavailable".into());
+            }
+        };
+        // Keep the original SDK streams and uncertainty latch even if fixed
+        // preparation fails. Cleanup is driven under a separate signed grant.
+        *context = Some(e2b_run_registry::E2bLiveContext::new(host.clone()));
+        if let Some(environment) = environment {
+            *environment = Some(host);
+        }
+    }
+    let live = context
+        .as_mut()
+        .ok_or("e2b_execution_context_unavailable")?;
+    if !live.workspace_prepared {
+        live.host
+            .runner()
+            .prepare_workspace()
+            .map_err(|_| "e2b_workspace_preparation_unconfirmed")?;
+        live.workspace_prepared = true;
+    }
+    if !live.host.runner().helper_effects_known() {
+        return Err("e2b_prior_helper_effects_unknown".into());
+    }
+    Ok(live.host.runner())
+}
+
+fn e2b_runtime_error_code(error: e2b_runtime::E2bRuntimeError) -> String {
+    match error {
+        e2b_runtime::E2bRuntimeError::Rejected(code)
+        | e2b_runtime::E2bRuntimeError::Unavailable(code)
+        | e2b_runtime::E2bRuntimeError::Unknown(code) => code.into(),
+    }
+}
+
+struct AgentRunExecutionState {
+    tool_layers: ToolLayerRegistry,
+    e2b_runtime: Option<Arc<e2b_runtime::E2bRuntime>>,
+    e2b_runs: Arc<e2b_run_registry::E2bRunRegistry>,
+}
+
 fn execute_agent_run(
     agent_run_start: AgentRunStart,
     runtime: Arc<tokio::runtime::Runtime>,
@@ -1738,8 +1963,13 @@ fn execute_agent_run(
     job_store: Arc<PostgresRuntimeStore>,
     lifecycle_job_id: String,
     lifecycle_lease_owner: String,
-    tool_layers: ToolLayerRegistry,
+    execution_state: AgentRunExecutionState,
 ) -> Result<AgentRunStepOutcome, String> {
+    let AgentRunExecutionState {
+        tool_layers,
+        e2b_runtime,
+        e2b_runs,
+    } = execution_state;
     let startup_started = Instant::now();
     let redis_url = env::var("REDIS_URL").map_err(|_| "REDIS_URL is required".to_string())?;
     let ttl_seconds = env::var("RUNTIME_STREAM_TTL_SECONDS")
@@ -1904,8 +2134,88 @@ fn execute_agent_run(
         execution_id =
             next_recovery_execution_id(&agent_run_start, &sequence, &checkpoint.checkpoint_id);
     }
-    let workspace_skill_catalog_config =
-        workspace_skill_catalog_config(&agent_run_start.authorization.plugin_activation)?;
+    let e2b_selected = matches!(
+        agent_run_start.authorization.environment_profile,
+        crate::agent_run_authorization::EnvironmentProfile::E2b(_)
+    );
+    if e2b_selected && recovery_checkpoint.is_some() {
+        return Err("e2b_cold_execution_recovery_unsupported".into());
+    }
+    if e2b_selected {
+        require_e2b_product_capabilities(&agent_run_start)?;
+    }
+    let e2b_environment_slot = match &agent_run_start.authorization.environment_profile {
+        agent_run_authorization::EnvironmentProfile::E2b(profile)
+            if profile.lifetime == "retained" =>
+        {
+            let binding = e2b_run_registry::E2bEnvironmentBinding {
+                environment_id: agent_run_start
+                    .environment_authorization
+                    .payload
+                    .environment_id
+                    .clone(),
+                profile_digest: agent_run_start
+                    .authorization
+                    .environment_profile_digest
+                    .clone(),
+                provider_config_digest: profile.provider_config_digest.clone(),
+            };
+            match e2b_runs.environment(binding)? {
+                Some(slot) => Some(slot),
+                None => {
+                    return Ok(recovery_preparation_waiting(
+                        "e2b_live_context_capacity_wait",
+                    ))
+                }
+            }
+        }
+        _ => None,
+    };
+    // Environment then Run, always nonblocking. The same order is used during
+    // retained cleanup and exact retirement before taking store authority pins.
+    let mut e2b_environment = if let Some(slot) = e2b_environment_slot.as_ref() {
+        match slot.try_enter()? {
+            Some(context) => Some(context),
+            None => {
+                return Ok(recovery_preparation_waiting(
+                    "e2b_environment_already_active",
+                ))
+            }
+        }
+    } else {
+        None
+    };
+    let e2b_slot = if e2b_selected {
+        match e2b_runs.get_or_insert(e2b_run_registry::E2bRunBinding {
+            agent_run_id: agent_run_start.agent_run_id.clone(),
+            authorization_digest: agent_run_start.authorization_digest.clone(),
+            execution_id: execution_id.clone(),
+        })? {
+            Some(slot) => Some(slot),
+            None => {
+                return Ok(recovery_preparation_waiting(
+                    "e2b_live_context_capacity_wait",
+                ))
+            }
+        }
+    } else {
+        None
+    };
+    let mut e2b_context = if let Some(slot) = e2b_slot.as_ref() {
+        match slot.try_enter()? {
+            Some(context) => Some(context),
+            None => return Ok(recovery_preparation_waiting("e2b_step_already_active")),
+        }
+    } else {
+        None
+    };
+    let workspace_skill_catalog_config = if e2b_selected {
+        // Template-projected skills are a separate declared capability. The
+        // helper-only template must not advertise unreadable host paths.
+        centaeris_core::extension::skills::SkillCatalogLoadConfig::default()
+    } else {
+        workspace_skill_catalog_config(&agent_run_start.authorization.plugin_activation)?
+    };
     let mcp_credential_resolver = match McpCredentialResolver::new(
         api_url.clone(),
         token.clone(),
@@ -2047,130 +2357,156 @@ fn execute_agent_run(
     let mut recovery_reservation_error = None;
     let mut recovery_retirement_error = None;
     let mut recovery_projection_receipt = None;
-    let docker_execution = prepare_execution_host_with_recovery(
-        || {
-            if let Some((_, checkpoint)) = recovery_checkpoint.as_ref() {
-                let sequence = sequence_guard(&session_record_sequence)?.clone();
-                let result = retire_recovery_preparation(
-                    &agent_run_start,
-                    &sequence,
-                    &checkpoint.checkpoint_id,
-                    &checkpoint.execution_id,
-                    |execution_id| {
-                        DockerExecutionHostRunner::retire_recovery_execution(
-                            &agent_run_start.agent_run_id,
-                            execution_id,
-                            job_store.as_ref(),
-                            &terminal_lease_fence,
-                        )
-                    },
-                    |execution_id, pending| {
-                        discard_unstarted_recovery_execution(
-                            job_store.as_ref(),
-                            &agent_run_start,
-                            &terminal_lease_fence,
-                            execution_id,
-                            pending,
-                        )
-                    },
-                );
-                if let Err(error) = &result {
-                    recovery_retirement_error = Some(error.clone());
-                }
-                result?;
-            }
-            Ok(())
-        },
-        |mut admitted_client| {
-            let result = (|| {
-                let Some((_, checkpoint)) = recovery_checkpoint.as_ref() else {
-                    return Ok(());
-                };
-                commit_execution_recovery_attempt(
-                    &mut *sequence_guard(&session_record_sequence)?,
-                    agent_run_start.turn_id.as_str(),
-                    checkpoint.checkpoint_id.as_str(),
-                    recovery_schedule.maximum_attempts,
-                    now_ms()?,
-                    |sequence, reserved| {
-                        let receipt = match admitted_client.as_deref_mut() {
-                            Some(client) => {
-                                let receipt = session_log
-                                    .append_session_records_with_runtime_job_lease_on_client(
-                                        client,
-                                        agent_run_start.agent_run_id.as_str(),
-                                        std::slice::from_ref(reserved),
-                                        &terminal_lease_fence,
-                                    )
-                                    .map_err(|error| {
-                                        if error == RUNTIME_JOB_LEASE_FENCE_REJECTED {
-                                            "agent_run_lifecycle_lease_lost".to_string()
-                                        } else {
-                                            error
-                                        }
-                                    })?;
-                                recovery_projection_receipt = Some(receipt.clone());
-                                receipt
-                            }
-                            None => append_agent_run_session_records(
-                                runtime.as_ref(),
-                                &session_log,
-                                &agent_run_start,
-                                std::slice::from_ref(reserved),
-                                &terminal_lease_fence,
-                            )?,
-                        };
-                        accept_session_commit(
-                            sequence,
-                            &mut *session_stream_guard(&session_stream)?,
-                            &receipt,
-                        )
-                    },
-                )
-            })();
-            if let Err(error) = &result {
-                recovery_reservation_error = Some(error.clone());
-            }
-            result
-        },
-        |admitted| {
-            DockerExecutionHostRunner::new_with_admitted(
-                DockerExecutionHostRequest {
-                    network: agent_run_start.authorization.effective_network()?,
-                    environment_profile: Some(
-                        agent_run_start.authorization.environment_profile.clone(),
-                    ),
-                    workspace_id: agent_run_start.authorization.workspace_id.clone(),
-                    lifecycle_job_id: lifecycle_job_id.clone(),
-                    lifecycle_lease_owner: lifecycle_lease_owner.clone(),
-                    resident_store: job_store.clone(),
-                    agent_run_id: agent_run_start.agent_run_id.clone(),
-                    execution_id: execution_id.clone(),
-                    user_id: agent_run_start.authorization.user_id.clone(),
-                    agent_id: agent_run_start.authorization.agent_id.clone(),
-                    authorization_digest: agent_run_start.authorization_digest.clone(),
-                    environment_authorization: agent_run_start.environment_authorization.clone(),
-                    image_digest: agent_run_start
-                        .authorization
-                        .environment_profile
-                        .legacy()?
-                        .image_digest
-                        .clone(),
-                    resources: agent_run_start
-                        .authorization
-                        .environment_profile
-                        .legacy()?
-                        .resources
-                        .sandbox_resources(),
-                    has_execution_fact,
-                    api_url: api_url.clone(),
-                    api_token: token.clone(),
-                    plugin_activation: &agent_run_start.authorization.plugin_activation,
+    let prepared_execution = if let Some(context) = e2b_context.as_mut() {
+        (|| {
+            let client = reqwest::blocking::Client::builder()
+                .build()
+                .map_err(|_| "e2b_workspace_client_unavailable")?;
+            prepare_e2b_product_host(
+                e2b_runtime.as_deref().ok_or("e2b_runtime_not_configured")?,
+                context,
+                e2b_environment.as_deref_mut(),
+                &agent_run_start,
+                &terminal_lease_fence,
+                &execution_id,
+                session_workspace::SessionWorkspaceApi {
+                    client: &client,
+                    api_url: &api_url,
+                    api_token: &token,
+                    agent_run_id: &agent_run_start.agent_run_id,
+                    authorization_digest: &agent_run_start.authorization_digest,
                 },
-                &mut |client| admitted(Some(client)),
             )
-        },
-    );
+        })()
+    } else {
+        prepare_execution_host_with_recovery(
+            || {
+                if let Some((_, checkpoint)) = recovery_checkpoint.as_ref() {
+                    let sequence = sequence_guard(&session_record_sequence)?.clone();
+                    let result = retire_recovery_preparation(
+                        &agent_run_start,
+                        &sequence,
+                        &checkpoint.checkpoint_id,
+                        &checkpoint.execution_id,
+                        |execution_id| {
+                            DockerExecutionHostRunner::retire_recovery_execution(
+                                &agent_run_start.agent_run_id,
+                                execution_id,
+                                job_store.as_ref(),
+                                &terminal_lease_fence,
+                            )
+                        },
+                        |execution_id, pending| {
+                            discard_unstarted_recovery_execution(
+                                job_store.as_ref(),
+                                &agent_run_start,
+                                &terminal_lease_fence,
+                                execution_id,
+                                pending,
+                            )
+                        },
+                    );
+                    if let Err(error) = &result {
+                        recovery_retirement_error = Some(error.clone());
+                    }
+                    result?;
+                }
+                Ok(())
+            },
+            |mut admitted_client| {
+                let result = (|| {
+                    let Some((_, checkpoint)) = recovery_checkpoint.as_ref() else {
+                        return Ok(());
+                    };
+                    commit_execution_recovery_attempt(
+                        &mut *sequence_guard(&session_record_sequence)?,
+                        agent_run_start.turn_id.as_str(),
+                        checkpoint.checkpoint_id.as_str(),
+                        recovery_schedule.maximum_attempts,
+                        now_ms()?,
+                        |sequence, reserved| {
+                            let receipt = match admitted_client.as_deref_mut() {
+                                Some(client) => {
+                                    let receipt = session_log
+                                        .append_session_records_with_runtime_job_lease_on_client(
+                                            client,
+                                            agent_run_start.agent_run_id.as_str(),
+                                            std::slice::from_ref(reserved),
+                                            &terminal_lease_fence,
+                                        )
+                                        .map_err(|error| {
+                                            if error == RUNTIME_JOB_LEASE_FENCE_REJECTED {
+                                                "agent_run_lifecycle_lease_lost".to_string()
+                                            } else {
+                                                error
+                                            }
+                                        })?;
+                                    recovery_projection_receipt = Some(receipt.clone());
+                                    receipt
+                                }
+                                None => append_agent_run_session_records(
+                                    runtime.as_ref(),
+                                    &session_log,
+                                    &agent_run_start,
+                                    std::slice::from_ref(reserved),
+                                    &terminal_lease_fence,
+                                )?,
+                            };
+                            accept_session_commit(
+                                sequence,
+                                &mut *session_stream_guard(&session_stream)?,
+                                &receipt,
+                            )
+                        },
+                    )
+                })();
+                if let Err(error) = &result {
+                    recovery_reservation_error = Some(error.clone());
+                }
+                result
+            },
+            |admitted| {
+                DockerExecutionHostRunner::new_with_admitted(
+                    DockerExecutionHostRequest {
+                        network: agent_run_start.authorization.effective_network()?,
+                        environment_profile: Some(
+                            agent_run_start.authorization.environment_profile.clone(),
+                        ),
+                        workspace_id: agent_run_start.authorization.workspace_id.clone(),
+                        lifecycle_job_id: lifecycle_job_id.clone(),
+                        lifecycle_lease_owner: lifecycle_lease_owner.clone(),
+                        resident_store: job_store.clone(),
+                        agent_run_id: agent_run_start.agent_run_id.clone(),
+                        execution_id: execution_id.clone(),
+                        user_id: agent_run_start.authorization.user_id.clone(),
+                        agent_id: agent_run_start.authorization.agent_id.clone(),
+                        authorization_digest: agent_run_start.authorization_digest.clone(),
+                        environment_authorization: agent_run_start
+                            .environment_authorization
+                            .clone(),
+                        image_digest: agent_run_start
+                            .authorization
+                            .environment_profile
+                            .legacy()?
+                            .image_digest
+                            .clone(),
+                        resources: agent_run_start
+                            .authorization
+                            .environment_profile
+                            .legacy()?
+                            .resources
+                            .sandbox_resources(),
+                        has_execution_fact,
+                        api_url: api_url.clone(),
+                        api_token: token.clone(),
+                        plugin_activation: &agent_run_start.authorization.plugin_activation,
+                    },
+                    &mut |client| admitted(Some(client)),
+                )
+            },
+        )
+        .map(|host| hosted_execution_context::HostedExecutionContext::from_legacy(Arc::new(host)))
+    };
     if let Some(receipt) = recovery_projection_receipt {
         session_log.catch_up_transcript_projection_after_append(&receipt);
     }
@@ -2183,7 +2519,7 @@ fn execute_agent_run(
             "execution_resident_capacity_wait",
         ));
     }
-    let docker_execution = match docker_execution {
+    let execution = match prepared_execution {
         Ok(runner) => runner,
         Err(error) if error == resident_capacity::RESIDENT_CAPACITY_WAIT => {
             return Ok(AgentRunStepOutcome {
@@ -2280,10 +2616,15 @@ fn execute_agent_run(
         }
     };
     let sandbox_ensure_ms = sandbox_started.elapsed().as_millis();
-    let docker_execution = Arc::new(docker_execution);
+    let execution = Arc::new(execution);
+    let e2b_reused_live = e2b_context
+        .as_ref()
+        .and_then(|context| context.as_ref())
+        .is_some_and(|live| live.host.workspace_reused_live());
+    let legacy_execution = execution.legacy().cloned();
     let lifecycle_hooks = match workspace_lifecycle_hook_runtime(
         &agent_run_start.authorization.plugin_activation,
-        docker_execution.clone(),
+        execution.hook_runner(),
         store.clone(),
         agent_run_start.authorization.session_id.clone(),
         agent_run_start.agent_run_id.clone(),
@@ -2334,7 +2675,7 @@ fn execute_agent_run(
     };
     let (mcp_bindings, mcp_startup_metrics) = match runtime.block_on(connect_mcp_servers(
         prepared_mcp_servers,
-        docker_execution.clone(),
+        legacy_execution.clone(),
     )) {
         Ok(bindings) => bindings,
         Err(error) => {
@@ -2352,13 +2693,13 @@ fn execute_agent_run(
         }
     };
     let artifact_publication = Arc::new(WorkspaceArtifactPublicationPort::new(
-        docker_execution.clone(),
+        execution.artifact_reader(),
         api_url.clone(),
         token.clone(),
         agent_run_start.agent_run_id.clone(),
         agent_run_start.authorization_digest.clone(),
     )?);
-    let workspace_root = PathBuf::from(docker_execution.workspace_root());
+    let workspace_root = PathBuf::from(execution.workspace_root());
     #[cfg(test)]
     let workspace_root = if native_consumption_tests::owns_run(&agent_run_start.agent_run_id) {
         std::env::temp_dir()
@@ -2367,9 +2708,9 @@ fn execute_agent_run(
     };
     let execution_host_binding = Arc::new(ExecutionHostBinding::new(
         ExecutionHostMode::Remote,
-        docker_execution.clone(),
+        execution.runner(),
         workspace_root.clone(),
-        docker_execution.execution_policy(),
+        execution.execution_policy(),
     )?);
     let resolved_input_manifest = ResolvedInputManifest {
         schema: centaeris_core::tool::inputs::RESOLVED_INPUT_MANIFEST_SCHEMA.to_string(),
@@ -2427,7 +2768,9 @@ fn execute_agent_run(
         }
     };
     let mut dynamic_tool_contracts = workspace_agent_tool_contracts(&agent_run_start);
-    dynamic_tool_contracts.extend(retained_tasks::retained_task_contracts());
+    if legacy_execution.is_some() {
+        dynamic_tool_contracts.extend(retained_tasks::retained_task_contracts());
+    }
     if let Some(provider) = &platform_materials {
         dynamic_tool_contracts.extend(provider.contracts.clone());
     }
@@ -2463,7 +2806,9 @@ fn execute_agent_run(
         artifact_publication,
     )))?;
     register_workspace_agent_tool_providers(&mut tool_layer, &agent_run_start, &api_url, &token)?;
-    register_retained_task_provider(&mut tool_layer, docker_execution.clone())?;
+    if let Some(host) = &legacy_execution {
+        register_retained_task_provider(&mut tool_layer, host.clone())?;
+    }
     for provider in mcp_bindings.providers {
         tool_layer.register_dynamic_tool_provider(provider)?;
     }
@@ -2544,23 +2889,31 @@ fn execute_agent_run(
     )?;
     let completing_recovery = completed_projection.is_some();
     let workspace_restore_started = Instant::now();
-    let workspace_resolution = match if docker_execution.is_hot_reuse() {
+    let workspace_resolution = match if legacy_execution
+        .as_ref()
+        .is_some_and(|host| host.is_hot_reuse())
+        || (e2b_selected && e2b_workspace_is_live(has_execution_fact, e2b_reused_live))
+    {
         resolve_instance_workspace(true, || unreachable!("hot reuse cannot restore old files"))
     } else if let Some(prepared) = prepared_recovery_restore.as_mut() {
-        docker_execution
+        legacy_execution
+            .as_ref()
+            .ok_or("e2b_cold_execution_recovery_unsupported")?
             .restore_prepared_recovery_workspace(prepared, workspace_input_upper_bound_bytes)
     } else if let Some((_, checkpoint)) = recovery_checkpoint.as_ref() {
         if recovery_uses_session_workspace(
             &checkpoint.workspace_snapshot,
             &agent_run_start.authorization.session_workspace,
         )? {
-            docker_execution.restore_session_workspace(
+            execution.restore_session_workspace(
                 &workspace_lease,
                 &agent_run_start.authorization.session_workspace,
                 workspace_input_upper_bound_bytes,
             )
         } else {
-            docker_execution
+            legacy_execution
+                .as_ref()
+                .ok_or("e2b_cold_execution_recovery_unsupported")?
                 .restore_recovery_workspace(
                     &workspace_lease,
                     checkpoint.checkpoint_id.as_str(),
@@ -2570,13 +2923,13 @@ fn execute_agent_run(
                 .map(|_| SessionWorkspaceResolution::Download)
         }
     } else if requires_session_workspace_restore(has_started_fact, completing_recovery) {
-        docker_execution.restore_session_workspace(
+        execution.restore_session_workspace(
             &workspace_lease,
             &agent_run_start.authorization.session_workspace,
             workspace_input_upper_bound_bytes,
         )
     } else {
-        docker_execution.resolve_session_workspace(
+        execution.resolve_session_workspace(
             &workspace_lease,
             &agent_run_start.authorization.session_workspace,
         )
@@ -2626,7 +2979,7 @@ fn execute_agent_run(
                     )
                 },
                 || {
-                    docker_execution.collect_and_commit_session_workspace(
+                    execution.collect_and_commit_session_workspace(
                         &workspace_lease,
                         &agent_run_start.authorization.session_workspace,
                         workspace_input_upper_bound_bytes,
@@ -2781,7 +3134,7 @@ fn execute_agent_run(
             started_session_records(&agent_run_start, &mut committed_sequence, started_at_ms)?;
         events.push(committed_sequence.start_execution(
             agent_run_start.turn_id.as_str(),
-            docker_execution.execution_id(),
+            execution.execution_id(),
             agent_run_start.authorization_digest.as_str(),
             None,
             started_at_ms,
@@ -2814,6 +3167,9 @@ fn execute_agent_run(
             std::thread::sleep,
         );
         let receipt = session_delivery::admission(admission_result, || {
+            if e2b_selected {
+                return Err("e2b_cleanup_requires_terminal_authority".into());
+            }
             DockerExecutionHostRunner::teardown(
                 agent_run_start.agent_run_id.as_str(),
                 job_store.as_ref(),
@@ -2842,7 +3198,7 @@ fn execute_agent_run(
         let mut committed_sequence = sequence_guard(&session_record_sequence)?.clone();
         let event = committed_sequence.start_execution(
             agent_run_start.turn_id.as_str(),
-            docker_execution.execution_id(),
+            execution.execution_id(),
             agent_run_start.authorization_digest.as_str(),
             Some(checkpoint_id),
             now_ms()?,
@@ -2979,7 +3335,7 @@ fn execute_agent_run(
                 reason: "active execution has no recovery checkpoint generation".to_string(),
             })
     } else {
-        observed_workspace_generation(docker_execution.as_ref())
+        observed_workspace_generation(execution.runner().as_ref())
     };
     let recovery_boundary_committed = AtomicBool::new(false);
     let recovery_budget_exhausted = AtomicBool::new(false);
@@ -3056,11 +3412,14 @@ fn execute_agent_run(
                     .take()
                     .expect("completed upload binding");
                 let snapshot = upload_result?;
-                let current_generation = observed_workspace_generation(docker_execution.as_ref());
+                let current_generation = observed_workspace_generation(execution.runner().as_ref());
                 let generation_stable = pending.generation.token().is_none()
                     || workspace_generations_match(&pending.generation, &current_generation);
                 if generation_stable
-                    && docker_execution.accept_captured_recovery_workspace(pending.evidence)?
+                    && legacy_execution
+                        .as_ref()
+                        .ok_or("legacy_recovery_host_required")?
+                        .accept_captured_recovery_workspace(pending.evidence)?
                 {
                     let (checkpoint, checkpoint_sequence) = uploaded_recovery_checkpoint(
                         &pending,
@@ -3122,7 +3481,10 @@ fn execute_agent_run(
                             "recovery checkpoint requires an empty in-flight tool set".to_string()
                         );
                     }
-                    if docker_execution.keeps_instance() {
+                    let Some(recovery_host) = legacy_execution.as_ref() else {
+                        break 'checkpoint events;
+                    };
+                    if recovery_host.keeps_instance() {
                         // Live tasks may still write. Preserve the model fact without
                         // claiming an uncoordinated file image is a recovery checkpoint.
                         break 'checkpoint events;
@@ -3147,10 +3509,10 @@ fn execute_agent_run(
                         .ok_or_else(|| "model request start turnId is missing".to_string())?;
                     let checkpoint_id =
                         recovery_checkpoint_id(execution_id.as_str(), model_request_id);
-                    let witness = docker_execution.recovery_workspace_evidence()?;
+                    let witness = recovery_host.recovery_workspace_evidence()?;
                     // Only a typed dispatch gate can trigger replacement. Docker text,
                     // `executed: false`, and model output are never sufficient proof.
-                    let pre_dispatch_loss = docker_execution.recovery_failure_evidence()
+                    let pre_dispatch_loss = recovery_host.recovery_failure_evidence()
                     == execution_recovery_policy::HostFailureEvidence::PreDispatchProcessNotStarted;
                     if pre_dispatch_loss {
                         if committed_sequence
@@ -3169,7 +3531,7 @@ fn execute_agent_run(
                             ExecutionWorkspaceGeneration::Known { .. }
                         );
                         let evidence = execution_recovery_policy::RecoveryEvidence {
-                            failure: docker_execution.recovery_failure_evidence(),
+                            failure: recovery_host.recovery_failure_evidence(),
                             receipt_reported_executed: recovery_suffix.receipt_executed,
                             durable_receipt_sequence: committed_sequence
                                 .committed_session_sequence(),
@@ -3188,7 +3550,7 @@ fn execute_agent_run(
                         };
                         execution_recovery_coordinator::validate_sandbox_loss_recovery(
                             &evidence,
-                            docker_execution.recovery_continuity(),
+                            recovery_host.recovery_continuity(),
                             committed_sequence
                                 .recovery_attempt()
                                 .map_or(0, |attempt| attempt.number),
@@ -3199,7 +3561,7 @@ fn execute_agent_run(
                     let current_generation = if ending_lost_execution {
                         recovery_workspace_generation.clone()
                     } else {
-                        observed_workspace_generation(docker_execution.as_ref())
+                        observed_workspace_generation(execution.runner().as_ref())
                     };
                     let witness_stable = witness.is_some_and(|evidence| {
                         evidence.snapshot_activity_epoch == evidence.current_activity_epoch
@@ -3212,7 +3574,7 @@ fn execute_agent_run(
                                 &current_generation,
                             ));
                     let workspace_snapshot = if should_collect {
-                        let Some(prepared) = docker_execution.prepare_recovery_workspace(
+                        let Some(prepared) = recovery_host.prepare_recovery_workspace(
                             &workspace_lease,
                             checkpoint_id.as_str(),
                             &recovery_workspace_snapshot,
@@ -3224,11 +3586,11 @@ fn execute_agent_run(
                             break 'checkpoint events;
                         };
                         let after_collect =
-                            observed_workspace_generation(docker_execution.as_ref());
+                            observed_workspace_generation(execution.runner().as_ref());
                         let generation =
                             stable_workspace_generation(&current_generation, after_collect);
                         let evidence = prepared.evidence();
-                        let upload_host = docker_execution.clone();
+                        let upload_host = recovery_host.clone();
                         let upload_context = serde_json::to_vec(&serde_json::json!({
                             "jobId": workspace_lease.job_id,
                             "agentRunStart": {"agentRunId": agent_run_start.agent_run_id},
@@ -3251,7 +3613,7 @@ fn execute_agent_run(
                     };
                     let checkpoint_generation = if should_collect {
                         let after_collect =
-                            observed_workspace_generation(docker_execution.as_ref());
+                            observed_workspace_generation(execution.runner().as_ref());
                         stable_workspace_generation(&current_generation, after_collect)
                     } else {
                         current_generation
@@ -3406,31 +3768,33 @@ fn execute_agent_run(
                 committed_sequence;
             // Capture publication is downstream of the durable Core event and
             // must never change its successful tool outcome or trigger replay.
-            if let Ok(mut capture) = docker_execution.transcript_capture.lock() {
-                transcript_capture::publish_committed(
-                    job_store.as_ref().clone(),
-                    docker_execution.execution_id().to_string(),
-                    docker_execution.transcript_publisher.clone(),
-                    &mut capture,
-                    &receipt,
-                    usize::try_from(
-                        agent_run_start
-                            .authorization
-                            .environment_profile
-                            .legacy()?
-                            .resources
-                            .memory_bytes
-                            .min(
-                                agent_run_start
-                                    .authorization
-                                    .environment_profile
-                                    .legacy()?
-                                    .resources
-                                    .data_tmpfs_bytes,
-                            ),
-                    )
-                    .unwrap_or(usize::MAX),
-                );
+            if let Some(transcript_host) = &legacy_execution {
+                if let Ok(mut capture) = transcript_host.transcript_capture.lock() {
+                    transcript_capture::publish_committed(
+                        job_store.as_ref().clone(),
+                        execution.execution_id().to_string(),
+                        transcript_host.transcript_publisher.clone(),
+                        &mut capture,
+                        &receipt,
+                        usize::try_from(
+                            agent_run_start
+                                .authorization
+                                .environment_profile
+                                .legacy()?
+                                .resources
+                                .memory_bytes
+                                .min(
+                                    agent_run_start
+                                        .authorization
+                                        .environment_profile
+                                        .legacy()?
+                                        .resources
+                                        .data_tmpfs_bytes,
+                                ),
+                        )
+                        .unwrap_or(usize::MAX),
+                    );
+                }
             }
             if let Some((checkpoint, workspace_snapshot, workspace_generation)) =
                 recovery_checkpoint
@@ -3855,7 +4219,10 @@ fn execute_agent_run(
                 &terminal_lease_fence,
                 &mut *session_stream_guard(&session_stream)?,
             )?;
-            if response.stop == AgentRunStop::RuntimeJobWait {
+            if let Some(wait_host) = legacy_execution
+                .as_ref()
+                .filter(|_| response.stop == AgentRunStop::RuntimeJobWait)
+            {
                 let turn = response
                     .last_turn
                     .as_ref()
@@ -3863,7 +4230,7 @@ fn execute_agent_run(
                 wait_recovery::WaitHandoffPublisher {
                     store: job_store.as_ref(),
                     log: &session_log,
-                    host: docker_execution.as_ref(),
+                    host: wait_host.as_ref(),
                     start: &agent_run_start,
                     fence: &terminal_lease_fence,
                     workspace_lease: &workspace_lease,
@@ -3945,7 +4312,7 @@ fn execute_agent_run(
                 );
             }
             let final_workspace_generation =
-                observed_workspace_generation(docker_execution.as_ref());
+                observed_workspace_generation(execution.runner().as_ref());
             if !workspace_generations_match(
                 &recovery_workspace_generation,
                 &final_workspace_generation,
@@ -3953,7 +4320,7 @@ fn execute_agent_run(
                 &recovery_workspace_snapshot,
                 &agent_run_start.authorization.session_workspace,
             ) {
-                match docker_execution.collect_and_commit_session_workspace(
+                match execution.collect_and_commit_session_workspace(
                     &workspace_lease,
                     &agent_run_start.authorization.session_workspace,
                     workspace_input_upper_bound_bytes,
@@ -5064,7 +5431,7 @@ fn completed_session_records(
     Ok(events)
 }
 
-fn observed_workspace_generation(host: &impl ExecutionHostRunner) -> ExecutionWorkspaceGeneration {
+fn observed_workspace_generation(host: &dyn ExecutionHostRunner) -> ExecutionWorkspaceGeneration {
     let generation = host.workspace_generation();
     if let Err(reason) = generation.validate() {
         eprintln!(
@@ -6357,7 +6724,7 @@ mod tests {
 
     #[test]
     fn execution_profile_response_uses_exact_runtime_v1_contract() {
-        let profile = RuntimeExecutionProfile {
+        let profile = RuntimeExecutionProfile::Legacy {
             schema: RUNTIME_EXECUTION_PROFILE_SCHEMA,
             image_digest: format!("sha256:{}", "a".repeat(64)),
         };
@@ -6367,6 +6734,150 @@ mod tests {
                 "schema": "runtime.execution_profile.v1",
                 "imageDigest": format!("sha256:{}", "a".repeat(64)),
             })
+        );
+    }
+
+    #[test]
+    fn e2b_execution_profile_advertisement_preserves_the_exact_frozen_contract() {
+        let profile: crate::agent_run_authorization::EnvironmentProfile = serde_json::from_str(
+            include_str!("../../../tests/workspace/fixtures/e2b_environment_profile/v1/valid.json"),
+        )
+        .unwrap();
+        let advertised = RuntimeExecutionProfile::for_e2b(&profile).unwrap();
+        assert_eq!(
+            serde_json::to_value(advertised).unwrap(),
+            json!({
+                "schema": "runtime.execution_profile.v2",
+                "environmentProfile": serde_json::to_value(profile).unwrap(),
+            })
+        );
+        let legacy = agent_run_start().authorization.environment_profile;
+        assert!(RuntimeExecutionProfile::for_e2b(&legacy).is_err());
+    }
+
+    #[test]
+    fn e2b_preflight_accepts_core_work_but_rejects_unavailable_inputs_before_creation() {
+        let mut start = agent_run_start();
+        assert!(require_e2b_product_capabilities(&start).is_ok());
+        let fixture: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
+            serde_json::from_str(include_str!(
+                "../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+            ))
+            .unwrap();
+        assert!(!fixture.asset_refs.is_empty());
+        start.authorization.asset_refs = fixture.asset_refs;
+        assert_eq!(
+            require_e2b_product_capabilities(&start),
+            Err("e2b_declared_inputs_unsupported".into())
+        );
+    }
+
+    #[test]
+    fn e2b_preflight_rejects_plugin_files_that_are_not_projected_into_the_template() {
+        for resource in ["skills", "cli"] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir(root.path().join(".centaeris-plugin")).unwrap();
+            std::fs::write(
+                root.path().join(".centaeris-plugin/plugin.json"),
+                serde_json::to_vec(&json!({
+                    "name":"fixture", "version":"1.0.0", "paths":{resource:["resource.txt"]},
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            std::fs::write(root.path().join("resource.txt"), b"fixture").unwrap();
+            let mut start = agent_run_start();
+            start.authorization.plugin_activation =
+                centaeris_core::extension::build_plugin_activation_snapshot(&[root
+                    .path()
+                    .to_path_buf()])
+                .unwrap();
+            assert_eq!(
+                require_e2b_product_capabilities(&start),
+                Err("e2b_plugin_file_projection_unsupported".into())
+            );
+        }
+    }
+
+    fn e2b_mcp_preflight_fixture(stdio: bool) -> (tempfile::TempDir, AgentRunStart) {
+        use centaeris_core::extension::{
+            build_plugin_activation_snapshot, mcp_model_contract_digest, McpToolDeclarationV1,
+        };
+        let catalog = tempfile::tempdir().unwrap();
+        let package = catalog.path().join("fixture");
+        std::fs::create_dir_all(package.join(".centaeris-plugin")).unwrap();
+        std::fs::create_dir_all(package.join("mcp")).unwrap();
+        std::fs::write(
+            package.join(".centaeris-plugin/plugin.json"),
+            serde_json::to_vec(&json!({
+                "name":"fixture", "version":"1.0.0", "paths":{"mcpServers":["mcp/servers.json"]},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let tools = vec![McpToolDeclarationV1 {
+            source_name: "search".into(),
+            name: "fixture_search".into(),
+            description: "Search fixture".into(),
+            input_schema: json!({"type":"object"}),
+            concurrency_safe: true,
+            scopes: Vec::new(),
+        }];
+        let transport = if stdio {
+            json!({"type":"stdio", "program":"bin/never-spawn", "args":[]})
+        } else {
+            json!({"type":"streamableHttp", "url":"https://fixture.invalid/mcp"})
+        };
+        std::fs::write(
+            package.join("mcp/servers.json"),
+            serde_json::to_vec(&json!({
+                "schema":"mcp_servers_v1", "servers":[{
+                    "id":"source", "modelContractDigest":mcp_model_contract_digest("source", &tools).unwrap(),
+                    "transport":transport, "lifecycle":"auto", "startupTimeoutMs":1000,
+                    "toolTimeoutMs":1000, "tools":tools,
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut start = agent_run_start();
+        start.authorization.environment_profile = serde_json::from_str(include_str!(
+            "../../../tests/workspace/fixtures/e2b_environment_profile/v1/valid.json"
+        ))
+        .unwrap();
+        start.authorization.plugin_activation =
+            build_plugin_activation_snapshot(&[package]).unwrap();
+        (catalog, start)
+    }
+
+    #[test]
+    fn e2b_product_mcp_preflight_rejects_stdio_only_plugin_before_physical_preparation() {
+        let (catalog, start) = e2b_mcp_preflight_fixture(true);
+        assert_eq!(
+            require_e2b_product_capabilities_at(&start, catalog.path()),
+            Err("mcp_stdio_transport_unsupported".into())
+        );
+    }
+
+    #[test]
+    fn e2b_product_mcp_preflight_accepts_verified_http_only_plugin() {
+        let (catalog, start) = e2b_mcp_preflight_fixture(false);
+        require_e2b_product_capabilities_at(&start, catalog.path()).unwrap();
+    }
+
+    #[test]
+    fn e2b_product_mcp_preflight_rejects_changed_frozen_plugin_declaration() {
+        let (catalog, start) = e2b_mcp_preflight_fixture(false);
+        let declaration = catalog.path().join("fixture/mcp/servers.json");
+        let bytes = std::fs::read_to_string(&declaration).unwrap();
+        std::fs::write(
+            declaration,
+            bytes.replace("fixture.invalid", "changed.invalid"),
+        )
+        .unwrap();
+        assert_eq!(
+            require_e2b_product_capabilities_at(&start, catalog.path()),
+            Err("plugin_activation_package_mismatch".into())
         );
     }
 
@@ -6920,6 +7431,33 @@ mod tests {
         .unwrap();
         assert_eq!(resolution, SessionWorkspaceResolution::RetainedLive);
         assert_eq!(std::fs::read(&file).unwrap(), b"new live contents");
+    }
+
+    #[test]
+    fn verified_e2b_successor_does_not_restore_an_older_archive_before_its_first_execution() {
+        let workspace = tempfile::tempdir().unwrap();
+        let file = workspace.path().join("result.txt");
+        std::fs::write(&file, b"new live environment contents").unwrap();
+        let resolution = resolve_instance_workspace(e2b_workspace_is_live(false, true), || {
+            std::fs::write(&file, b"older frozen archive").unwrap();
+            Ok(SessionWorkspaceResolution::Download)
+        })
+        .unwrap();
+        assert_eq!(resolution, SessionWorkspaceResolution::RetainedLive);
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"new live environment contents"
+        );
+    }
+
+    #[test]
+    fn e2b_without_verified_live_reuse_keeps_cold_restore_and_errors() {
+        let error = SessionWorkspaceApiError::Unavailable("restore unavailable".into());
+        assert_eq!(
+            resolve_instance_workspace(e2b_workspace_is_live(false, false), || Err(error.clone())),
+            Err(error)
+        );
+        assert!(e2b_workspace_is_live(true, false));
     }
 
     #[test]
