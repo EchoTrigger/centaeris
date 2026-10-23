@@ -1,7 +1,11 @@
 //! Opt-in, bounded timing records; no bodies, credentials or error messages.
+pub(crate) mod helper;
+pub(crate) mod lifecycle;
 pub(crate) mod power;
+pub(crate) mod provider_dispatch;
+pub(crate) mod sdk;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 #[cfg(test)]
@@ -418,7 +422,12 @@ fn capture_protection_records<T>(operation: impl FnOnce() -> T) -> (T, Protectio
     (result, records)
 }
 
-thread_local! { static JOB: RefCell<Option<String>> = const { RefCell::new(None) }; }
+thread_local! {
+    static JOB: RefCell<Option<String>> = const { RefCell::new(None) };
+    // An owned Run's explicit absence must not adopt a reused adapter's creator.
+    // This flag controls diagnostic attribution only, never business authority.
+    static OWNED_CONTEXT: Cell<bool> = const { Cell::new(false) };
+}
 #[cfg(test)]
 type TimingLog = std::rc::Rc<RefCell<Vec<serde_json::Value>>>;
 #[cfg(test)]
@@ -459,12 +468,18 @@ pub fn enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("WORKSPACE_PERF_OBSERVATIONS").as_deref() == Ok("1"))
 }
 
-fn emit(mut event: serde_json::Value) {
+fn emit(event: serde_json::Value) {
+    emit_from(event, "runtime");
+}
+fn emit_sdk(event: serde_json::Value) {
+    emit_from(event, "sdk");
+}
+fn emit_from(mut event: serde_json::Value, source: &'static str) {
     if !enabled() {
         return;
     }
     event["schema"] = "workspace.perf.v1".into();
-    event["source"] = "runtime".into();
+    event["source"] = source.into();
     event["atUnixMs"] = (SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -507,23 +522,47 @@ pub(crate) fn capture_timings<T>(
     (result, records)
 }
 
-pub struct Context(Option<String>);
-/// A safe identity already admitted by Context, owned by one adapter instance.
-pub(crate) struct ContextSnapshot(Option<String>);
+pub struct Context(Option<String>, bool);
+/// Safe diagnostic context admitted by Context; an owned absence is explicit.
+pub(crate) struct ContextSnapshot(Option<String>, bool);
 impl Context {
     pub(crate) fn snapshot() -> ContextSnapshot {
-        ContextSnapshot(JOB.with(|job| job.borrow().clone()))
+        ContextSnapshot(
+            JOB.with(|job| job.borrow().clone()),
+            OWNED_CONTEXT.with(Cell::get),
+        )
     }
 
     pub(crate) fn enter_if_absent(snapshot: &ContextSnapshot) -> Self {
-        Self(JOB.with(|job| {
+        let previous_owned = OWNED_CONTEXT.with(Cell::get);
+        Self(
+            JOB.with(|job| {
+                let mut current = job.borrow_mut();
+                let previous = current.clone();
+                if current.is_none() && !previous_owned {
+                    *current = snapshot.0.clone();
+                    OWNED_CONTEXT.with(|owned| owned.set(snapshot.1));
+                }
+                previous
+            }),
+            previous_owned,
+        )
+    }
+
+    /// Prefer an existing ambient context. Otherwise use this Run's immutable
+    /// snapshot, including explicit None, and suppress transport-creator fallback.
+    pub(crate) fn enter_owned(snapshot: &ContextSnapshot) -> Self {
+        let previous_owned = OWNED_CONTEXT.with(Cell::get);
+        let previous = JOB.with(|job| {
             let mut current = job.borrow_mut();
             let previous = current.clone();
-            if current.is_none() {
+            if current.is_none() && !previous_owned {
                 *current = snapshot.0.clone();
             }
             previous
-        }))
+        });
+        OWNED_CONTEXT.with(|owned| owned.set(true));
+        Self(previous, previous_owned)
     }
 
     pub fn enter(body: &[u8]) -> Self {
@@ -551,12 +590,16 @@ impl Context {
         } else {
             None
         };
-        Self(JOB.with(|job| job.replace(identity)))
+        Self(
+            JOB.with(|job| job.replace(identity)),
+            OWNED_CONTEXT.with(|owned| owned.replace(false)),
+        )
     }
 }
 impl Drop for Context {
     fn drop(&mut self) {
         JOB.with(|job| job.replace(self.0.take()));
+        OWNED_CONTEXT.with(|owned| owned.set(self.1));
     }
 }
 

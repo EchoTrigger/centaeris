@@ -1973,6 +1973,10 @@ fn execute_agent_run(
         e2b_runs,
     } = execution_state;
     let startup_started = Instant::now();
+    let mut first_tool_timing = observations::lifecycle::FirstToolTiming::new(
+        &agent_run_start.agent_run_id,
+        &agent_run_start.authorization.session_id,
+    );
     let redis_url = env::var("REDIS_URL").map_err(|_| "REDIS_URL is required".to_string())?;
     let ttl_seconds = env::var("RUNTIME_STREAM_TTL_SECONDS")
         .map_err(|_| "RUNTIME_STREAM_TTL_SECONDS is required".to_string())?
@@ -3360,6 +3364,7 @@ fn execute_agent_run(
     };
     let mut commit_tool_safe_point = |safe_point: ToolSafePoint| {
         let safe_point_started = Instant::now();
+        let first_receipt = first_tool_timing.receipt_ready(&safe_point);
         let stage = match &safe_point {
             ToolSafePoint::ModelRequestStarted(_) => "model_request_safe_point",
             ToolSafePoint::DurableToolCall { .. } => "tool_call_safe_point",
@@ -3768,6 +3773,7 @@ fn execute_agent_run(
                 .lock()
                 .map_err(|_| "session record sequence lock poisoned".to_string())? =
                 committed_sequence;
+            first_tool_timing.receipt_committed(first_receipt.as_deref());
             // Capture publication is downstream of the durable Core event and
             // must never change its successful tool outcome or trigger replay.
             if let Some(transcript_host) = &legacy_execution {

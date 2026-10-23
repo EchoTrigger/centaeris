@@ -10,6 +10,7 @@ import time
 import re
 import json
 import math
+from .e2b_execution_timing_test_support import ExecutionTimingCollector
 
 
 _PATHS = {
@@ -132,6 +133,13 @@ def feed_runtime_line(collector, line):
             collector._transport_observation_failed()
         except BaseException:
             pass
+    try:
+        collector.feed_execution_line(line)
+    except BaseException:
+        try:
+            collector._note_error()
+        except BaseException:
+            pass
 
 
 def observe_first_successor_tool_followup(collector, index, ordinal):
@@ -232,6 +240,8 @@ class LifecycleCallCollector:
         if not callable(self._monotonic_ns) or not callable(self._wall_time_ns):
             raise ValueError("lifecycle measurement clocks must be callable")
         self._max_records = max_records
+        execution_options = {} if monotonic_ns is None else {"clock_domain": None}
+        self._execution_timings = ExecutionTimingCollector(max_records=max_records, max_runs=max_startup_runs, **execution_options)
         self._lock = threading.Lock()
         self._records, self._endpoints = [], {}
         self._startup_bindings, self._startup_profiles = set(), {}
@@ -250,8 +260,12 @@ class LifecycleCallCollector:
         except BaseException:
             pass
 
+    def feed_execution_line(self, line):
+        self._execution_timings.feed_line(line)
+
     def bind_run(self, run_id):
         """Bind only the fixture's admitted A/B identities, before its Run step."""
+        self._execution_timings.bind_run(run_id)
         try:
             with self._lock:
                 if type(run_id) is not str or _STARTUP_IDENTITY.fullmatch(run_id) is None:
@@ -480,6 +494,12 @@ class LifecycleCallCollector:
 
     def summary(self):
         try:
+            execution = self._execution_timings.summary()
+        except BaseException:
+            self._note_error()
+            execution = {"schema": "e2b.executionTimings.v1", "coverageStatus": "incomplete",
+                "observationStatus": "unavailable", "clockDomain": None, "records": [], "aggregates": [], "counters": None, "runCoverage": []}
+        try:
             with self._lock:
                 records = deepcopy(sorted(self._records, key=lambda row: row["sequence"]))
                 endpoints = deepcopy([self._endpoints[key] for key in sorted(self._endpoints)])
@@ -495,6 +515,7 @@ class LifecycleCallCollector:
                 "callsStarted": None, "callsCompleted": None, "inFlightCalls": None,
                 "droppedRecords": None, "rejectedMarkers": None, "durationsAdditive": False,
                 "unavailableMetrics": list(_UNAVAILABLE), "endpoints": [], "records": [],
+                "executionTimings": execution,
                 "startupProfiles": {"schema": "e2b.runStartupProfiles.v1", "scope": "agentRunStartup",
                     "coverageStatus": "incomplete", "observationStatus": "unavailable",
                     "missingRunIds": None, "records": []},
@@ -509,4 +530,5 @@ class LifecycleCallCollector:
             "callsStarted": started, "callsCompleted": completed, "inFlightCalls": in_flight,
             "droppedRecords": dropped, "observationErrors": errors, "rejectedMarkers": rejected,
             "durationsAdditive": False, "unavailableMetrics": list(_UNAVAILABLE),
-            "endpoints": endpoints, "records": records, "startupProfiles": startup, "transportSpans": transport}
+            "endpoints": endpoints, "records": records, "startupProfiles": startup, "transportSpans": transport,
+            "executionTimings": execution}

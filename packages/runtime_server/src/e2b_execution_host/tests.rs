@@ -721,3 +721,185 @@ fn workspace_preparation_not_dispatched_remains_known_and_can_retry() {
     assert!(runner.helper_effects_known());
     assert_eq!(fixture.helpers.load(Ordering::SeqCst), 2);
 }
+
+struct ContextScopeAuthority;
+impl E2bDispatchAuthority for ContextScopeAuthority {
+    fn dispatch(
+        &self,
+        operation: &mut (dyn FnMut() -> Result<E2bDispatchResult, E2bHostError> + Send),
+    ) -> Result<E2bDispatchResult, E2bHostError> {
+        std::thread::scope(|scope| scope.spawn(operation).join().unwrap())
+    }
+}
+
+struct RetainedContextTransport {
+    inner: FixtureTransport,
+    spawn_context: crate::observations::ContextSnapshot,
+    events: Mutex<Vec<(&'static str, Option<String>)>>,
+}
+impl RetainedContextTransport {
+    fn observe(&self, operation: &'static str) {
+        let (_, records) = crate::observations::capture_timings(true, || {
+            let _spawn_fallback =
+                crate::observations::Context::enter_if_absent(&self.spawn_context);
+            crate::observations::timed("retainedContextProbe", || Ok(())).unwrap();
+        });
+        assert_eq!(records.len(), 1);
+        self.events
+            .lock()
+            .unwrap()
+            .push((operation, records[0]["jobId"].as_str().map(str::to_string)));
+    }
+}
+impl E2bHostTransport for RetainedContextTransport {
+    fn inspect(&self, binding: &E2bSandboxBinding) -> Result<E2bSandboxObservation, E2bHostError> {
+        self.observe("inspect");
+        self.inner.inspect(binding)
+    }
+    fn helper(
+        &self,
+        binding: &E2bSandboxBinding,
+        kind: TrustedHelperKind,
+        input: &[u8],
+        limit: usize,
+    ) -> Result<Vec<u8>, E2bHostError> {
+        self.observe("helper");
+        self.inner.helper(binding, kind, input, limit)
+    }
+    fn start(
+        &self,
+        binding: &E2bSandboxBinding,
+        request: &ExecutionCommandRequest,
+    ) -> Result<i32, E2bHostError> {
+        self.observe("start");
+        self.inner.start(binding, request)
+    }
+    fn wait(
+        &self,
+        binding: &E2bSandboxBinding,
+        pid: i32,
+        timeout: Duration,
+    ) -> Result<E2bCommandOutput, E2bHostError> {
+        self.observe("wait");
+        self.inner.wait(binding, pid, timeout)
+    }
+    fn quiesce(&self, binding: &E2bSandboxBinding) -> Result<(), E2bHostError> {
+        self.observe("quiesce");
+        self.inner.quiesce(binding)
+    }
+}
+
+fn retained_context_fixture() -> (E2bExecutionHostRunner, Arc<RetainedContextTransport>) {
+    let _creator =
+        crate::observations::Context::enter(br#"{"jobId":"agent_run.lifecycle:context-A"}"#);
+    let mut retained = profile();
+    let EnvironmentProfile::E2b(value) = &mut retained else {
+        unreachable!()
+    };
+    value.lifetime = "retained".into();
+    let mut target = binding();
+    target
+        .metadata
+        .insert("profileDigest".into(), retained.digest().unwrap());
+    let inner = FixtureTransport::new();
+    inner.inspect.lock().unwrap().binding = target.clone();
+    let transport = Arc::new(RetainedContextTransport {
+        inner,
+        spawn_context: crate::observations::Context::snapshot(),
+        events: Mutex::new(Vec::new()),
+    });
+    let runner = E2bExecutionHostRunner::new(
+        retained,
+        target,
+        transport.clone(),
+        Arc::new(ContextScopeAuthority),
+    )
+    .unwrap();
+    (runner, transport)
+}
+
+#[test]
+fn retained_run_context_successor_restores_b_across_authority_and_wait_threads() {
+    let _ = crate::observations::capture_timings(true, || {
+        let (original, transport) = retained_context_fixture();
+        let successor = {
+            let _current = crate::observations::Context::enter(
+                br#"{"jobId":"agent_run.lifecycle:context-B"}"#,
+            );
+            original.successor(Arc::new(ContextScopeAuthority)).unwrap()
+        };
+        successor.prepare_workspace().unwrap();
+        successor.status(&successor.execution_policy()).unwrap();
+        successor
+            .run_host_command(Some("context-command"), command(&successor), None)
+            .unwrap();
+        successor
+            .confirm_run_quiescence_under_cleanup_pins("instanceId-owned", "sandbox-owned")
+            .unwrap();
+        let events = transport.events.lock().unwrap();
+        assert_eq!(
+            events.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            ["helper", "inspect", "start", "wait", "quiesce", "helper"]
+        );
+        assert!(events.iter().all(|(_, job)| job.as_deref() == Some("agent_run.lifecycle:context-B")), "successor observations must not use the shared transport's creator context: {events:?}");
+        assert_eq!(transport.inner.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(transport.inner.waits.load(Ordering::SeqCst), 1);
+        assert_eq!(transport.inner.helpers.load(Ordering::SeqCst), 2);
+    });
+}
+
+#[test]
+fn retained_run_context_preserves_existing_ambient_context_over_host_snapshot() {
+    let _ = crate::observations::capture_timings(true, || {
+        let (original, transport) = retained_context_fixture();
+        let successor = {
+            let _current = crate::observations::Context::enter(
+                br#"{"jobId":"agent_run.lifecycle:context-B"}"#,
+            );
+            original.successor(Arc::new(ContextScopeAuthority)).unwrap()
+        };
+        {
+            let _ambient = crate::observations::Context::enter(
+                br#"{"jobId":"agent_run.lifecycle:context-C"}"#,
+            );
+            successor.prepare_workspace().unwrap();
+            successor
+                .run_host_command(Some("ambient-command"), command(&successor), None)
+                .unwrap();
+            transport.observe("ambient-after");
+        }
+        assert!(transport
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, job)| job.as_deref() == Some("agent_run.lifecycle:context-C")));
+        transport.observe("outside");
+        assert_eq!(
+            transport
+                .events
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .1
+                .as_deref(),
+            Some("agent_run.lifecycle:context-A"),
+            "entry and callback guards must restore their previous contexts"
+        );
+    });
+}
+
+#[test]
+fn retained_run_context_unbound_successor_suppresses_creator_fallback_without_guessing() {
+    let _ = crate::observations::capture_timings(true, || {
+        let (original, transport) = retained_context_fixture();
+        let successor = original.successor(Arc::new(ContextScopeAuthority)).unwrap();
+        successor.prepare_workspace().unwrap();
+        transport.observe("after-unbound");
+        assert_eq!(*transport.events.lock().unwrap(), [
+            ("helper", None),
+            ("after-unbound", Some("agent_run.lifecycle:context-A".into())),
+        ], "an unbound Run must not inherit the physical creator's Job or leak its diagnostic barrier");
+    });
+}

@@ -40,6 +40,9 @@ unicode-normalization.workspace = true
 uuid = { version = "=1.23.1", features = ["v4"] }
 zstd.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 centaeris-runtime-sqlite.workspace = true
 rmcp = { workspace = true, features = ["macros", "server", "transport-streamable-http-server"] }

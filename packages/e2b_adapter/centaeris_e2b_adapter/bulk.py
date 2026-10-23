@@ -148,26 +148,32 @@ class PreparedTransfer:
         self.identity = identity
         self.complete = False
 
-    def execute(self, sandbox, request_timeout):
+    def execute(self, sandbox, request_timeout, timing):
         user = {"user": self.payload["user"]} if "user" in self.payload else {}
         if self.operation == "uploadFile":
             reader = HashingReader(self.file, self.payload["byteLength"], self.payload["sha256"])
-            sandbox.files.write(self.payload["path"], reader, request_timeout=request_timeout, **user)
+            # The SDK consumes this existing one-pass spool/hash reader. This
+            # boundary includes that consumption, not provider-internal time.
+            with timing.span("sdkFileUpload"):
+                sandbox.files.write(self.payload["path"], reader, request_timeout=request_timeout, **user)
             reader.verify()
             length, digest = reader.count, reader.hash.hexdigest()
         else:
             length = 0
             hash = hashlib.sha256()
-            with sandbox.files.read(self.payload["path"], format="stream", request_timeout=request_timeout, **user) as stream:
-                for chunk in stream:
-                    if not isinstance(chunk, bytes) or length + len(chunk) > self.payload["maxBytes"]:
-                        raise BulkTransferError("transferLimitExceeded", "Download exceeded its bounded byte budget")
-                    for offset in range(0, len(chunk), TRANSFER_CHUNK_BYTES):
-                        part = chunk[offset:offset + TRANSFER_CHUNK_BYTES]
-                        if self.file.write(part) != len(part):
-                            raise BulkTransferError("transferWriteFailed", "Download could not write its complete chunk")
-                        hash.update(part)
-                        length += len(part)
+            # Streaming consumption includes the existing bounded spool writes
+            # and hash work. Host admission and final flush/close stay outside.
+            with timing.span("sdkFileDownload"):
+                with sandbox.files.read(self.payload["path"], format="stream", request_timeout=request_timeout, **user) as stream:
+                    for chunk in stream:
+                        if not isinstance(chunk, bytes) or length + len(chunk) > self.payload["maxBytes"]:
+                            raise BulkTransferError("transferLimitExceeded", "Download exceeded its bounded byte budget")
+                        for offset in range(0, len(chunk), TRANSFER_CHUNK_BYTES):
+                            part = chunk[offset:offset + TRANSFER_CHUNK_BYTES]
+                            if self.file.write(part) != len(part):
+                                raise BulkTransferError("transferWriteFailed", "Download could not write its complete chunk")
+                            hash.update(part)
+                            length += len(part)
             self.file.flush()
             self.file.close()
             digest = hash.hexdigest()

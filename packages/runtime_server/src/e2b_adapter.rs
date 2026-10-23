@@ -86,9 +86,12 @@ impl AdapterProcess {
         mut command: Command,
         observation: Option<crate::observations::power::PowerObservation>,
     ) -> Result<Self, String> {
-        let diagnostics = observation
-            .filter(|value| value.is_enabled())
-            .and_then(power_observations::start_reader);
+        let observation = observation.filter(|value| value.is_enabled());
+        let diagnostics = if observation.is_some() || crate::observations::enabled() {
+            power_observations::start_reader(observation, crate::observations::Context::snapshot())
+        } else {
+            None
+        };
         if diagnostics.is_some() {
             command.env("CENTAERIS_E2B_POWER_OBSERVATIONS", "1");
         } else {

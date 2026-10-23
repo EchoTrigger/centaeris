@@ -25,15 +25,20 @@ fn process_with_capture_outcome(
 import base64,hashlib,json,os,sys
 from pathlib import Path
 root=Path(os.environ['E2B_ADAPTER_SPOOL_ROOT']); log=Path(sys.argv[1]); output=bytes.fromhex(sys.argv[2]); pid=100; contexts={}; mode=sys.argv[3]
-for line in sys.stdin:
+for sequence, line in enumerate(sys.stdin, 1):
  request=json.loads(line); p=request['payload']; op=request['operation']
  with log.open('a',encoding='utf-8') as stream:stream.write(json.dumps(request)+'\n')
+ failure_at={'mkdirUnknown':1,'uploadUnknown':3,'executeUnknown':4,'waitUnknown':5,'downloadUnknown':6,'cleanupUnknown':7,'controlUnknown':1}.get(mode)
+ if sequence==failure_at:
+  print(json.dumps({'schema':'runtime.e2b.adapter.response.v1','requestId':request['requestId'],'outcome':'unknown','error':{'code':'fixtureUnknown','message':'private diagnostic /secret/path token=hidden'}}),flush=True)
+  continue
  if op=='runCommand':
   pid+=1;contexts[pid]=p.get('envs',{});result={'sandboxId':p['sandboxId'],'pid':pid}
  elif op in ('waitCommand','invokeControlHelper'):
   data=b'{"activeProcessCount":0}' if op=='invokeControlHelper' and p['helper']=='agent-process-state' else b''
   result={'sandboxId':p['sandboxId'],'pid':p.get('pid',999),'exitCode':0,'stdout':data.decode(),'stderr':'','stdoutBytesBase64':base64.b64encode(data).decode(),'stderrBytesBase64':'','stdoutByteLength':len(data),'stderrByteLength':0}
   if op=='invokeControlHelper':result['helper']=p['helper']
+  if mode=='helperExitError' and sequence==5:result['exitCode']=7
   env=contexts.get(p.get('pid'),{})
   if env.get('WORKSPACE_PERF_OBSERVATIONS')=='1' and mode!='default':
    stderr=b'private diagnostic and credential must never be forwarded\n'
@@ -360,6 +365,309 @@ fn observed_capture_forwards_only_valid_numeric_guest_records_even_on_helper_fai
             }
         );
     }
+}
+
+fn helper_timings(events: Vec<Value>) -> Vec<Value> {
+    events
+        .into_iter()
+        .filter(|event| event["phase"] == "e2bHelper")
+        .collect()
+}
+
+#[test]
+fn helper_timing_records_each_frame_kind_and_serial_stage_without_extra_requests() {
+    use crate::observations::{capture_timings, Context};
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("ordinary.jsonl");
+    let control_log = temp.path().join("control.jsonl");
+    let kinds = [
+        TrustedHelperKind::FileSystem,
+        TrustedHelperKind::InputInventory,
+        TrustedHelperKind::MaterializeInput,
+        TrustedHelperKind::RevokeInput,
+        TrustedHelperKind::ReadArtifact,
+        TrustedHelperKind::SnapshotCollect,
+        TrustedHelperKind::SnapshotCapture,
+        TrustedHelperKind::SnapshotRestore,
+        TrustedHelperKind::WorkspaceGeneration,
+    ];
+    let (_, events) = capture_timings(true, || {
+        let _context = Context::enter(br#"{"jobId":"agent_run.lifecycle:helper-timing"}"#);
+        let transport = E2bSdkTransport::new(
+            process(&log, b"private response bytes"),
+            process(&control_log, b""),
+        );
+        for kind in kinds {
+            let input = if kind.input_limit() == 0 {
+                b"".as_slice()
+            } else {
+                b"private request /secret/path".as_slice()
+            };
+            assert_eq!(
+                transport.helper(&binding(), kind, input, 1024).unwrap(),
+                b"private response bytes"
+            );
+        }
+    });
+    let events = helper_timings(events);
+    assert_eq!(events.len(), kinds.len() * 7);
+    let mut identities = std::collections::HashSet::new();
+    for (records, kind) in events.chunks_exact(7).zip(kinds) {
+        identities.insert(records[0]["operationId"].as_str().unwrap().to_owned());
+        for (record, metric) in records.iter().zip([
+            "mkdirElapsedMs",
+            "uploadElapsedMs",
+            "executeElapsedMs",
+            "waitElapsedMs",
+            "downloadElapsedMs",
+            "cleanupElapsedMs",
+            "totalElapsedMs",
+        ]) {
+            assert_eq!(record["schema"], "workspace.perf.v1");
+            assert_eq!(record["source"], "runtime");
+            assert_eq!(record["helperKind"], serde_json::to_value(kind).unwrap());
+            assert_eq!(record["metric"], metric);
+            assert_eq!(record["outcome"], "ok");
+            assert_eq!(record["operationId"], records[0]["operationId"]);
+            assert_eq!(record["jobId"], "agent_run.lifecycle:helper-timing");
+            assert!(record["value"]
+                .as_f64()
+                .is_some_and(|value| value.is_finite() && value >= 0.0));
+            assert!(record["atUnixMs"].as_u64().is_some());
+            assert_eq!(record.as_object().unwrap().len(), 10);
+        }
+    }
+    assert_eq!(identities.len(), kinds.len());
+    let seen = requests(&log);
+    assert_eq!(seen.len(), kinds.len() * 8);
+    for frame in seen.chunks_exact(8) {
+        assert_eq!(
+            frame
+                .iter()
+                .map(|r| r["operation"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "runCommand",
+                "waitCommand",
+                "uploadFile",
+                "runCommand",
+                "waitCommand",
+                "downloadFile",
+                "runCommand",
+                "waitCommand"
+            ]
+        );
+    }
+    assert!(!control_log.exists());
+    assert!(!serde_json::to_string(&events).unwrap().contains("private"));
+}
+
+#[test]
+fn helper_timing_controls_are_counted_once_per_actual_kind_without_frame_staging() {
+    use crate::observations::{capture_timings, Context};
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("ordinary.jsonl");
+    let control_log = temp.path().join("control.jsonl");
+    let (_, events) = capture_timings(true, || {
+        let _context = Context::enter(br#"{"jobId":"agent_run.lifecycle:helper-control"}"#);
+        let transport = E2bSdkTransport::new(process(&log, b""), process(&control_log, b""));
+        for kind in [
+            TrustedHelperKind::PrepareWorkspace,
+            TrustedHelperKind::AgentProcessState,
+            TrustedHelperKind::QuiesceAgentProcesses,
+        ] {
+            transport.helper(&binding(), kind, b"", 1024).unwrap();
+        }
+        transport.inspect(&binding()).unwrap();
+        transport.quiesce(&binding()).unwrap();
+    });
+    let events = helper_timings(events);
+    assert_eq!(events.len(), 10);
+    for (records, kind) in events.chunks_exact(2).zip([
+        "prepareWorkspace",
+        "agentProcessState",
+        "quiesceAgentProcesses",
+        "agentProcessState",
+        "quiesceAgentProcesses",
+    ]) {
+        assert_eq!(records[0]["metric"], "controlElapsedMs");
+        assert_eq!(records[1]["metric"], "totalElapsedMs");
+        assert_eq!(records[0]["operationId"], records[1]["operationId"]);
+        assert!(records.iter().all(|record| record["helperKind"] == kind
+            && record["outcome"] == "ok"
+            && record["jobId"] == "agent_run.lifecycle:helper-control"));
+    }
+    assert_eq!(requests(&control_log).len(), 5);
+    assert!(!log.exists());
+}
+
+#[test]
+fn helper_timing_failure_records_only_reached_stages_and_preserves_unknown_without_retry() {
+    use crate::observations::capture_timings;
+    let stages = [
+        "mkdirElapsedMs",
+        "uploadElapsedMs",
+        "executeElapsedMs",
+        "waitElapsedMs",
+        "downloadElapsedMs",
+        "cleanupElapsedMs",
+    ];
+    for (mode, reached, calls, error) in [
+        ("mkdirUnknown", 1, 1, "e2b_adapter_result_unknown"),
+        (
+            "uploadUnknown",
+            2,
+            3,
+            "e2b_helper_input_staging_unconfirmed",
+        ),
+        ("executeUnknown", 3, 4, "e2b_adapter_result_unknown"),
+        ("waitUnknown", 4, 5, "e2b_adapter_result_unknown"),
+        ("helperExitError", 4, 5, "e2b_helper_process_failed"),
+        (
+            "downloadUnknown",
+            5,
+            6,
+            "e2b_helper_output_staging_unconfirmed",
+        ),
+        ("cleanupUnknown", 6, 7, "e2b_adapter_result_unknown"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("ordinary.jsonl");
+        let control_log = temp.path().join("control.jsonl");
+        let (result, events) = capture_timings(true, || {
+            let transport = E2bSdkTransport::new(
+                process_with_capture_outcome(&log, b"result", mode),
+                process(&control_log, b""),
+            );
+            transport.helper(
+                &binding(),
+                TrustedHelperKind::FileSystem,
+                b"private input",
+                1024,
+            )
+        });
+        assert_eq!(result, Err(E2bHostError::Unknown(error)), "{mode}");
+        let events = helper_timings(events);
+        assert_eq!(events.len(), reached + 1, "{mode}");
+        for (index, event) in events[..reached].iter().enumerate() {
+            assert_eq!(event["metric"], stages[index], "{mode}");
+            assert_eq!(
+                event["outcome"],
+                if index + 1 == reached { "error" } else { "ok" },
+                "{mode}"
+            );
+        }
+        assert_eq!(events[reached]["metric"], "totalElapsedMs");
+        assert_eq!(events[reached]["outcome"], "error");
+        assert_eq!(
+            requests(&log).len(),
+            calls,
+            "failed or unknown helper must never retry or perform later cleanup"
+        );
+        assert!(!control_log.exists());
+        assert!(!serde_json::to_string(&events).unwrap().contains("private"));
+    }
+}
+
+#[test]
+fn helper_timing_rejection_and_opt_out_preserve_existing_dispatch_and_results() {
+    use crate::observations::capture_timings;
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("ordinary.jsonl");
+    let control_log = temp.path().join("control.jsonl");
+    let (_, events) = capture_timings(true, || {
+        let transport = E2bSdkTransport::new(process(&log, b""), process(&control_log, b""));
+        for kind in [
+            TrustedHelperKind::WorkspaceWatch,
+            TrustedHelperKind::WorkspaceGenerationRpc,
+        ] {
+            assert_eq!(
+                transport.helper(&binding(), kind, b"", 1024),
+                Err(E2bHostError::NotDispatched("e2b_helper_budget_unsupported"))
+            );
+        }
+        assert_eq!(
+            transport.helper(&binding(), TrustedHelperKind::FileSystem, b"", 0),
+            Err(E2bHostError::NotDispatched("e2b_helper_budget_unsupported"))
+        );
+        assert_eq!(
+            transport.helper(
+                &binding(),
+                TrustedHelperKind::PrepareWorkspace,
+                b"invalid control input",
+                1024
+            ),
+            Err(E2bHostError::NotDispatched(
+                "e2b_control_helper_input_invalid"
+            ))
+        );
+    });
+    let events = helper_timings(events);
+    assert_eq!(events.len(), 4);
+    assert!(events
+        .iter()
+        .all(|event| event["metric"] == "totalElapsedMs" && event["outcome"] == "error"));
+    assert!(!log.exists() && !control_log.exists());
+    let (_, events) = capture_timings(false, || {
+        let transport = E2bSdkTransport::new(process(&log, b"result"), process(&control_log, b""));
+        assert_eq!(
+            transport
+                .helper(&binding(), TrustedHelperKind::FileSystem, b"input", 1024)
+                .unwrap(),
+            b"result"
+        );
+        assert!(transport.inspect(&binding()).unwrap().running);
+        transport.quiesce(&binding()).unwrap();
+    });
+    assert!(events.is_empty());
+    assert_eq!(requests(&log).len(), 8);
+    assert_eq!(requests(&control_log).len(), 2);
+}
+
+#[test]
+fn helper_timing_carries_safe_job_context_across_threads_and_restores_the_worker_context() {
+    use crate::observations::{capture_timings, Context, Span};
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("ordinary.jsonl");
+    let control_log = temp.path().join("control.jsonl");
+    let (transport, _) = capture_timings(true, || {
+        let _context = Context::enter(br#"{"jobId":"agent_run.lifecycle:helper-owner"}"#);
+        E2bSdkTransport::new(process(&log, b"result"), process(&control_log, b""))
+    });
+    let events = std::thread::spawn(move || {
+        let (_, events) = capture_timings(true, || {
+            transport
+                .helper(&binding(), TrustedHelperKind::FileSystem, b"input", 1024)
+                .unwrap();
+            let mut after = Span::new("afterHelper");
+            after.finished(true);
+            drop(after);
+            {
+                let _context = Context::enter(br#"{"jobId":"agent_run.lifecycle:current"}"#);
+                transport.inspect(&binding()).unwrap();
+            }
+            let mut restored = Span::new("afterControlHelper");
+            restored.finished(true);
+        });
+        events
+    })
+    .join()
+    .unwrap();
+    let helper_events = events
+        .iter()
+        .filter(|e| e["phase"] == "e2bHelper")
+        .collect::<Vec<_>>();
+    assert_eq!(helper_events.len(), 9);
+    assert!(helper_events[..7]
+        .iter()
+        .all(|event| event["jobId"] == "agent_run.lifecycle:helper-owner"));
+    assert!(helper_events[7..]
+        .iter()
+        .all(|event| event["jobId"] == "agent_run.lifecycle:current"));
+    assert!(events
+        .iter()
+        .filter(|e| e["phase"] == "afterHelper" || e["phase"] == "afterControlHelper")
+        .all(|e| e.get("jobId").is_none()));
 }
 
 #[cfg(target_os = "linux")]

@@ -3,6 +3,7 @@
 use super::*;
 use crate::e2b_adapter::bulk::{BulkFileRequest, SpoolingAdapterProcess, MAX_TRANSFER_BYTES};
 use crate::e2b_adapter::{AdapterFailure, AdapterOutcome};
+use crate::observations::helper::{HelperMetric, HelperObservation};
 use base64::Engine;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -14,6 +15,7 @@ const HELPER_PATH: &str = "/opt/centaeris/bin/execution_agent";
 pub(crate) struct E2bSdkTransport {
     ordinary: Arc<SpoolingAdapterProcess>,
     control: Arc<SpoolingAdapterProcess>,
+    observation_context: crate::observations::ContextSnapshot,
 }
 
 impl E2bSdkTransport {
@@ -21,14 +23,20 @@ impl E2bSdkTransport {
         ordinary: Arc<SpoolingAdapterProcess>,
         control: Arc<SpoolingAdapterProcess>,
     ) -> Self {
-        Self { ordinary, control }
+        Self {
+            ordinary,
+            control,
+            observation_context: crate::observations::Context::snapshot(),
+        }
     }
 
     fn control_helper(
         &self,
         binding: &E2bSandboxBinding,
         kind: TrustedHelperKind,
+        timing: &HelperObservation,
     ) -> Result<E2bCommandOutput, E2bHostError> {
+        timing.timed(HelperMetric::Control, || {
         if !matches!(
             kind,
             TrustedHelperKind::PrepareWorkspace
@@ -51,6 +59,7 @@ impl E2bSdkTransport {
             return Err(E2bHostError::Unknown("e2b_control_receipt_invalid"));
         }
         receipt.output(&binding.sandbox_id, None)
+        })
     }
 
     fn shell(
@@ -106,6 +115,22 @@ impl E2bSdkTransport {
         output_limit: usize,
         observation: Option<&WorkspaceProtection>,
     ) -> Result<Vec<u8>, E2bHostError> {
+        let _context = crate::observations::Context::enter_if_absent(&self.observation_context);
+        let timing = HelperObservation::new(kind);
+        timing.timed(HelperMetric::Total, || {
+            self.helper_frame_inner(binding, kind, input, output_limit, observation, &timing)
+        })
+    }
+
+    fn helper_frame_inner(
+        &self,
+        binding: &E2bSandboxBinding,
+        kind: TrustedHelperKind,
+        input: &[u8],
+        output_limit: usize,
+        observation: Option<&WorkspaceProtection>,
+        timing: &HelperObservation,
+    ) -> Result<Vec<u8>, E2bHostError> {
         let mut helper_stderr = Vec::new();
         let mut downloaded_bytes = None;
         let result = (|| {
@@ -120,7 +145,7 @@ impl E2bSdkTransport {
                         "e2b_control_helper_input_invalid",
                     ));
                 }
-                let output = self.control_helper(binding, kind)?;
+                let output = self.control_helper(binding, kind, timing)?;
                 if output.exit_code != 0 || output.stdout.len() > output_limit {
                     return Err(E2bHostError::Unknown("e2b_control_helper_failed"));
                 }
@@ -143,23 +168,27 @@ impl E2bSdkTransport {
             let response_path = format!("{directory}/response");
             // No recursive operation: the parent is root0700, the fresh directory
             // is create-only, and all three paths are generated here, never by users.
-            self.completed_shell(
-                binding,
-                format!("umask 077; mkdir -m 700 -- {}", quote(&directory)),
-                CONTROL_TIMEOUT,
-            )?;
-            self.ordinary
-                .upload_reader(
-                    &BulkFileRequest {
-                        sandbox_id: &binding.sandbox_id,
-                        path: &request_path,
-                        user: Some("root"),
-                        max_bytes: input.len() as u64,
-                        timeout,
-                    },
-                    &mut Cursor::new(input),
+            timing.timed(HelperMetric::Mkdir, || {
+                self.completed_shell(
+                    binding,
+                    format!("umask 077; mkdir -m 700 -- {}", quote(&directory)),
+                    CONTROL_TIMEOUT,
                 )
-                .map_err(|_| E2bHostError::Unknown("e2b_helper_input_staging_unconfirmed"))?;
+            })?;
+            timing.timed(HelperMetric::Upload, || {
+                self.ordinary
+                    .upload_reader(
+                        &BulkFileRequest {
+                            sandbox_id: &binding.sandbox_id,
+                            path: &request_path,
+                            user: Some("root"),
+                            max_bytes: input.len() as u64,
+                            timeout,
+                        },
+                        &mut Cursor::new(input),
+                    )
+                    .map_err(|_| E2bHostError::Unknown("e2b_helper_input_staging_unconfirmed"))
+            })?;
             // Bound only the helper's stdout, independently of files restored or
             // written in the workspace. One extra byte detects a complete but
             // oversized response; the SDK download keeps the original exact cap.
@@ -197,39 +226,48 @@ impl E2bSdkTransport {
                 environment["WORKSPACE_PERF_OBSERVATIONS"] = "1".into();
                 environment["WORKSPACE_PERF_OPERATION_ID"] = observation.operation_id().into();
             }
-            let pid = self.shell(binding, script, "root", environment, timeout)?;
-            let completed =
-                self.wait(binding, pid, timeout.saturating_add(Duration::from_secs(5)))?;
-            helper_stderr = completed.stderr;
-            if completed.exit_code != 0 {
-                return Err(E2bHostError::Unknown("e2b_helper_process_failed"));
-            }
+            let pid = timing.timed(HelperMetric::Execute, || {
+                self.shell(binding, script, "root", environment, timeout)
+            })?;
+            timing.timed(HelperMetric::Wait, || {
+                let completed =
+                    self.wait(binding, pid, timeout.saturating_add(Duration::from_secs(5)))?;
+                helper_stderr = completed.stderr;
+                if completed.exit_code != 0 {
+                    return Err(E2bHostError::Unknown("e2b_helper_process_failed"));
+                }
+                Ok(())
+            })?;
             let mut output = Vec::new();
-            self.ordinary
-                .download_into(
-                    &BulkFileRequest {
-                        sandbox_id: &binding.sandbox_id,
-                        path: &response_path,
-                        user: Some("root"),
-                        max_bytes: output_limit as u64,
-                        timeout,
-                    },
-                    &mut output,
-                )
-                .map_err(|_| E2bHostError::Unknown("e2b_helper_output_staging_unconfirmed"))?;
+            timing.timed(HelperMetric::Download, || {
+                self.ordinary
+                    .download_into(
+                        &BulkFileRequest {
+                            sandbox_id: &binding.sandbox_id,
+                            path: &response_path,
+                            user: Some("root"),
+                            max_bytes: output_limit as u64,
+                            timeout,
+                        },
+                        &mut output,
+                    )
+                    .map_err(|_| E2bHostError::Unknown("e2b_helper_output_staging_unconfirmed"))
+            })?;
             downloaded_bytes = Some(output.len() as u64);
             // Only a verified, fully downloaded result permits normal staging-file
             // cleanup. Unknown branches keep their files for whole-VM finalization.
-            self.completed_shell(
-                binding,
-                format!(
-                    "rm -- {} {}; rmdir -- {}",
-                    quote(&request_path),
-                    quote(&response_path),
-                    quote(&directory)
-                ),
-                CONTROL_TIMEOUT,
-            )?;
+            timing.timed(HelperMetric::Cleanup, || {
+                self.completed_shell(
+                    binding,
+                    format!(
+                        "rm -- {} {}; rmdir -- {}",
+                        quote(&request_path),
+                        quote(&response_path),
+                        quote(&directory)
+                    ),
+                    CONTROL_TIMEOUT,
+                )
+            })?;
             Ok(output)
         })();
         if let Some(observation) = observation {
@@ -250,25 +288,30 @@ impl E2bSdkTransport {
 
 impl E2bHostTransport for E2bSdkTransport {
     fn inspect(&self, binding: &E2bSandboxBinding) -> Result<E2bSandboxObservation, E2bHostError> {
-        // The fixed operation performs fresh GET and validates exact identity,
-        // running state, kill policy and literal auto-resume=false before Start.
-        let output = self.control_helper(binding, TrustedHelperKind::AgentProcessState)?;
-        if output.exit_code != 0 {
-            return Err(E2bHostError::Unknown("e2b_helper_health_failed"));
-        }
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase", deny_unknown_fields)]
-        struct State {
-            active_process_count: u64,
-        }
-        let state: State = serde_json::from_slice(&output.stdout)
-            .map_err(|_| E2bHostError::Unknown("e2b_helper_health_invalid"))?;
-        let _ = state.active_process_count;
-        Ok(E2bSandboxObservation {
-            binding: binding.clone(),
-            running: true,
-            on_timeout_kill: true,
-            auto_resume: false,
+        let _context = crate::observations::Context::enter_if_absent(&self.observation_context);
+        let timing = HelperObservation::new(TrustedHelperKind::AgentProcessState);
+        timing.timed(HelperMetric::Total, || {
+            // The fixed operation performs fresh GET and validates exact identity,
+            // running state, kill policy and literal auto-resume=false before Start.
+            let output =
+                self.control_helper(binding, TrustedHelperKind::AgentProcessState, &timing)?;
+            if output.exit_code != 0 {
+                return Err(E2bHostError::Unknown("e2b_helper_health_failed"));
+            }
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+            struct State {
+                active_process_count: u64,
+            }
+            let state: State = serde_json::from_slice(&output.stdout)
+                .map_err(|_| E2bHostError::Unknown("e2b_helper_health_invalid"))?;
+            let _ = state.active_process_count;
+            Ok(E2bSandboxObservation {
+                binding: binding.clone(),
+                running: true,
+                on_timeout_kill: true,
+                auto_resume: false,
+            })
         })
     }
     fn helper(
@@ -329,11 +372,16 @@ impl E2bHostTransport for E2bSdkTransport {
         receipt.output(&binding.sandbox_id, Some(pid))
     }
     fn quiesce(&self, binding: &E2bSandboxBinding) -> Result<(), E2bHostError> {
-        let output = self.control_helper(binding, TrustedHelperKind::QuiesceAgentProcesses)?;
-        if output.exit_code != 0 {
-            return Err(E2bHostError::Unknown("e2b_quiescence_unconfirmed"));
-        }
-        Ok(())
+        let _context = crate::observations::Context::enter_if_absent(&self.observation_context);
+        let timing = HelperObservation::new(TrustedHelperKind::QuiesceAgentProcesses);
+        timing.timed(HelperMetric::Total, || {
+            let output =
+                self.control_helper(binding, TrustedHelperKind::QuiesceAgentProcesses, &timing)?;
+            if output.exit_code != 0 {
+                return Err(E2bHostError::Unknown("e2b_quiescence_unconfirmed"));
+            }
+            Ok(())
+        })
     }
 }
 

@@ -173,31 +173,52 @@ impl PostgresRuntimeStore {
         configured_digest: &str,
         dispatch: impl FnOnce(&ProviderVerifiedTarget) -> Result<T, E> + Send,
     ) -> Result<T, ProviderExecutionDispatchError<E>> {
+        use crate::observations::provider_dispatch::{DispatchMetric, DispatchObservation};
+        let mut observation = DispatchObservation::new();
         let mut callback_started = false;
         let result: Result<T, ProviderExecutionDispatchError<E>> =
             self.with_client_error(|client| {
-                let mut tx = client.transaction().map_err(|error| error.to_string())?;
-                super::super::resource_commit::require_durable_resource_commit(&mut tx)?;
-                require_execution(&mut tx, authority, identity, configured_digest)?;
-                let operation = super::load(&mut tx, &identity.attempt_id, true)?
-                    .ok_or_else(|| "provider_creation_missing".to_string())?;
-                require_identity(&operation, identity)?;
-                require_unsettled_dispatch(&mut tx, &operation)?;
-                let target = load_target(&mut tx, identity)?
-                    .ok_or_else(|| "provider_execution_verified_target_required".to_string())?;
-                require_execution(&mut tx, authority, identity, configured_digest)?;
+                observation.entered_client();
+                let result = (|| {
+                    let (mut tx, target) =
+                        observation.timed(DispatchMetric::AuthorityBefore, || {
+                            let mut tx = client.transaction().map_err(|error| error.to_string())?;
+                            super::super::resource_commit::require_durable_resource_commit(
+                                &mut tx,
+                            )?;
+                            require_execution(&mut tx, authority, identity, configured_digest)?;
+                            let operation = super::load(&mut tx, &identity.attempt_id, true)?
+                                .ok_or_else(|| "provider_creation_missing".to_string())?;
+                            require_identity(&operation, identity)?;
+                            require_unsettled_dispatch(&mut tx, &operation)?;
+                            let target = load_target(&mut tx, identity)?.ok_or_else(|| {
+                                "provider_execution_verified_target_required".to_string()
+                            })?;
+                            require_execution(&mut tx, authority, identity, configured_digest)?;
+                            Ok::<_, ProviderExecutionDispatchError<E>>((tx, target))
+                        })?;
 
-                // The callback only starts the SDK operation. Process waits occur
-                // after these existing authority pins and the ordinary DB slot end.
-                callback_started = true;
-                let output = dispatch(&target).map_err(ProviderExecutionDispatchError::Callback)?;
-                require_execution(&mut tx, authority, identity, configured_digest)
-                    .map_err(ProviderExecutionDispatchError::AfterDispatch)?;
-                tx.commit().map_err(|error| {
-                    ProviderExecutionDispatchError::AfterDispatch(error.to_string())
-                })?;
-                Ok(output)
+                    // Preserve the existing authority and transaction scope. A
+                    // framed-helper callback includes all of its process waits.
+                    callback_started = true;
+                    let output = observation.callback(|| {
+                        dispatch(&target).map_err(ProviderExecutionDispatchError::Callback)
+                    })?;
+                    observation.timed(DispatchMetric::AuthorityAfter, || {
+                        require_execution(&mut tx, authority, identity, configured_digest)
+                            .map_err(ProviderExecutionDispatchError::AfterDispatch)
+                    })?;
+                    observation.timed(DispatchMetric::Commit, || {
+                        tx.commit().map_err(|error| {
+                            ProviderExecutionDispatchError::AfterDispatch(error.to_string())
+                        })
+                    })?;
+                    Ok(output)
+                })();
+                observation.leaving_client();
+                result
             });
+        observation.finish(result.is_ok());
         match result {
             // Pool-return and scoped blocking errors can occur after the
             // callback. They cannot prove that its physical effect was absent.

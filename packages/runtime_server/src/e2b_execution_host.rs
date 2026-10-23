@@ -133,6 +133,8 @@ pub(crate) struct E2bExecutionHostRunner {
     environment: Arc<E2bEnvironmentState>,
     transport: Arc<dyn E2bHostTransport>,
     authority: Arc<dyn E2bDispatchAuthority>,
+    // Run-owned diagnostics; physical bindings/transports can outlive this Run.
+    observation_context: crate::observations::ContextSnapshot,
     commands: Mutex<HashMap<String, Arc<CommandRecord>>>,
 }
 
@@ -212,6 +214,7 @@ impl E2bExecutionHostRunner {
             }),
             transport,
             authority,
+            observation_context: crate::observations::Context::snapshot(),
             commands: Mutex::new(HashMap::new()),
         })
     }
@@ -238,6 +241,7 @@ impl E2bExecutionHostRunner {
             environment: self.environment.clone(),
             transport: self.transport.clone(),
             authority,
+            observation_context: crate::observations::Context::snapshot(),
             commands: Mutex::new(HashMap::new()),
         })
     }
@@ -274,6 +278,7 @@ impl E2bExecutionHostRunner {
         expected_instance_id: &str,
         expected_sandbox_id: &str,
     ) -> Result<(), E2bHostError> {
+        let _context = crate::observations::Context::enter_owned(&self.observation_context);
         if self.binding.metadata.get("instanceId").map(String::as_str) != Some(expected_instance_id)
             || self.binding.sandbox_id != expected_sandbox_id
         {
@@ -328,6 +333,7 @@ impl E2bExecutionHostRunner {
     }
 
     pub(crate) fn prepare_workspace(&self) -> Result<(), E2bHostError> {
+        let _context = crate::observations::Context::enter_owned(&self.observation_context);
         // Keep dispatch activity through semantic validation, so an uncertain
         // response cannot become an idle workspace observation in between.
         let _activity = self.begin_activity()?;
@@ -375,8 +381,11 @@ impl E2bExecutionHostRunner {
         &self,
         operation: impl FnOnce() -> Result<E2bDispatchResult, E2bHostError> + Send,
     ) -> Result<E2bDispatchResult, E2bHostError> {
+        let _context = crate::observations::Context::enter_owned(&self.observation_context);
+        let observation_context = crate::observations::Context::snapshot();
         let mut once = Some(operation);
         self.authority.dispatch(&mut || {
+            let _context = crate::observations::Context::enter_if_absent(&observation_context);
             once.take()
                 .ok_or(E2bHostError::Unknown("e2b_dispatch_callback_replayed"))?()
         })
@@ -391,6 +400,7 @@ impl E2bExecutionHostRunner {
         input: &[u8],
         output_limit: usize,
     ) -> Result<Vec<u8>, E2bHostError> {
+        let _context = crate::observations::Context::enter_owned(&self.observation_context);
         // Retain the activity guard until the result and uncertainty latch have
         // both been committed in this runner.
         let _activity = self.begin_activity()?;
@@ -415,6 +425,7 @@ impl E2bExecutionHostRunner {
         output_limit: usize,
         observation: Option<&WorkspaceProtection>,
     ) -> Result<Vec<u8>, E2bHostError> {
+        let _context = crate::observations::Context::enter_owned(&self.observation_context);
         if !self.helper_effects_known()
             && !matches!(
                 kind,
@@ -559,8 +570,10 @@ impl E2bExecutionHostRunner {
         let timeout =
             Duration::from_millis(request.timeout_ms).saturating_add(Duration::from_secs(5));
         let (sender, receiver) = mpsc::sync_channel(1);
+        let observation_context = crate::observations::Context::snapshot();
         std::thread::scope(|scope| {
             scope.spawn(|| {
+                let _context = crate::observations::Context::enter_if_absent(&observation_context);
                 let _ = sender.send(self.transport.wait(&self.binding, pid, timeout));
             });
             let mut cancelled = false;
@@ -646,6 +659,7 @@ impl ExecutionHostRunner for E2bExecutionHostRunner {
         ExecutionHostKind::RemoteHost
     }
     fn status(&self, policy: &ExecutionPolicy) -> Result<ExecutionHostStatus, ExecutionError> {
+        let _context = crate::observations::Context::enter_owned(&self.observation_context);
         self.validate_policy(policy)?;
         if !self.helper_effects_known() {
             return Err(unavailable("e2b_prior_helper_effects_unknown"));
@@ -681,6 +695,7 @@ impl ExecutionHostRunner for E2bExecutionHostRunner {
         &self,
         request: ExecutionFileSystemRequest,
     ) -> Result<ExecutionFileSystemOutput, ExecutionFileSystemError> {
+        let _context = crate::observations::Context::enter_owned(&self.observation_context);
         self.validate_policy(&request.policy).map_err(|_| {
             ExecutionFileSystemError::new(
                 ExecutionFileSystemErrorKind::PermissionDenied,
@@ -712,6 +727,7 @@ impl ExecutionHostRunner for E2bExecutionHostRunner {
         request: ExecutionCommandRequest,
         probe: Option<&ExecutionCancellationProbe>,
     ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
+        let _context = crate::observations::Context::enter_owned(&self.observation_context);
         let digest = self.request_digest(&request)?;
         let operation_id =
             operation_id.ok_or_else(|| unavailable("e2b_command_operation_required"))?;
@@ -792,6 +808,7 @@ impl ExecutionHostRunner for E2bExecutionHostRunner {
         request: ExecutionCommandRequest,
         _probe: Option<&ExecutionCancellationProbe>,
     ) -> Result<ExecutionHostCommandRecovery, ExecutionError> {
+        let _context = crate::observations::Context::enter_owned(&self.observation_context);
         let digest = self.request_digest(&request)?;
         let record = self.record(operation_id, &digest, false)?;
 

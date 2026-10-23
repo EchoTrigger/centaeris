@@ -27,7 +27,7 @@ class _Span:
         if self._enabled:
             try:
                 self._started = self._timing.clock()
-            except Exception:
+            except BaseException:
                 pass
         return self
 
@@ -38,22 +38,27 @@ class _Span:
             try:
                 elapsed_ms = (self._timing.clock() - self._started) * 1000
                 self._timing.emit(self._stage, elapsed_ms, self.outcome, self._request_id, self._operation)
-            except Exception:
+            except BaseException:
                 # Timing clocks and writers cannot change provider execution.
                 pass
         return False
 
 
 class _RequestContext:
-    def __init__(self, timing, request_id=None, operation=None, enabled=False):
+    def __init__(self, timing, request_id=None, operation=None, enabled=False, stages=_REQUEST_STAGES):
         self._timing = timing
         self._request_id = request_id
         self._operation = operation
         self._enabled = enabled
+        self._stages = stages
+
+    @property
+    def enabled(self):
+        return self._enabled
 
     def span(self, stage):
         return _Span(self._timing, stage, self._request_id, self._operation,
-                     self._enabled and stage in _REQUEST_STAGES)
+                     self._enabled and stage in self._stages)
 
 
 class PowerTiming:
@@ -93,4 +98,44 @@ class PowerTiming:
                 self._writer.write(line)
                 self._writer.flush()
         except Exception:
+            pass
+
+
+_SDK_STAGE_OPERATIONS = {
+    "sdkHandle": frozenset(("create", "runCommand", "waitCommand", "recoverCommand", "uploadFile", "downloadFile")),
+    "sdkCreate": frozenset(("create",)),
+    "sdkCreateVerifyGet": frozenset(("create",)),
+    "sdkCommandStart": frozenset(("runCommand",)),
+    "sdkCommandWait": frozenset(("waitCommand", "recoverCommand")),
+    "sdkFileUpload": frozenset(("uploadFile",)),
+    "sdkFileDownload": frozenset(("downloadFile",)),
+}
+
+
+class SdkTiming(PowerTiming):
+    """Separate closed SDK boundaries; the existing power wire stays unchanged."""
+    def request_context(self, request):
+        if self._enabled and type(request) is dict:
+            request_id, operation = request.get("requestId"), request.get("operation")
+            if (type(request_id) is str and _REQUEST_ID.fullmatch(request_id)
+                    and type(operation) is str and operation in _SDK_STAGE_OPERATIONS["sdkHandle"]):
+                stages = frozenset(stage for stage, operations in _SDK_STAGE_OPERATIONS.items() if operation in operations)
+                return _RequestContext(self, request_id, operation, True, stages)
+        return _RequestContext(self, stages=frozenset())
+
+    def emit(self, stage, value, outcome, request_id, operation):
+        if (not self._enabled or type(stage) is not str or type(operation) is not str
+                or operation not in _SDK_STAGE_OPERATIONS.get(stage, ())
+                or type(request_id) is not str or not _REQUEST_ID.fullmatch(request_id)
+                or type(value) not in (int, float) or not math.isfinite(value) or value < 0
+                or type(outcome) is not str or outcome not in ("ok", "error")):
+            return
+        record = {"schema": "runtime.e2b.sdk_timing.v1", "stage": stage, "value": value,
+            "outcome": outcome, "requestId": request_id, "operation": operation}
+        try:
+            line = json.dumps(record, ensure_ascii=True, allow_nan=False, separators=(",", ":")) + "\n"
+            if len(line.encode("ascii")) <= _MAX_LINE_BYTES:
+                self._writer.write(line)
+                self._writer.flush()
+        except BaseException:
             pass

@@ -15,7 +15,7 @@ from uuid import UUID
 
 from .attach import attach_existing
 from .bulk import BulkSpool, BulkTransferError, MAX_TRANSFER_BYTES, TRANSFER_CHUNK_BYTES
-from .observations import PowerTiming
+from .observations import PowerTiming, SdkTiming
 from .control import (CONTROL_HELPERS, EXPECTED_METADATA_KEYS, WORKSPACE_ROOT, WORKSPACE_USER,
                       ControlHelperError, start_control_helper)
 
@@ -201,6 +201,7 @@ class Adapter:
                  timing_writer=None, timing_clock=None):
         self.config = config
         self._power_timing = PowerTiming(config.power_observations, writer=timing_writer, clock=timing_clock)
+        self._sdk_timing = SdkTiming(config.power_observations, writer=timing_writer, clock=timing_clock)
         self._sandboxes = OrderedDict()
         self._commands = OrderedDict()
         self._spool = BulkSpool(config.spool_root) if config.spool_root is not None else None
@@ -224,7 +225,9 @@ class Adapter:
         self.client = client
 
     def handle(self, request):
-        timing = self._power_timing.request_context(request)
+        timing = self._sdk_timing.request_context(request)
+        if not timing.enabled:
+            timing = self._power_timing.request_context(request)
         with timing.span("sdkHandle") as span:
             response = self._handle(request, timing)
             if response["outcome"] != "succeeded":
@@ -445,13 +448,15 @@ class Adapter:
             # Configured provider idempotency neither grants dispatch authority
             # nor permits replay of an unresolved request.
             ref = payload["templateRef"]
-            sandbox = sdk.create(template=f"{ref['templateId']}:{ref['buildId']}", timeout=payload["timeoutSeconds"],
-                                 metadata=payload["metadata"], allow_internet_access=payload["allowInternetAccess"],
-                                 lifecycle={"on_timeout": payload["onTimeout"], "auto_resume": False},
-                                 api_headers={"Idempotency-Key": payload["idempotencyKey"]}, retries=0)
+            with timing.span("sdkCreate"):
+                sandbox = sdk.create(template=f"{ref['templateId']}:{ref['buildId']}", timeout=payload["timeoutSeconds"],
+                                     metadata=payload["metadata"], allow_internet_access=payload["allowInternetAccess"],
+                                     lifecycle={"on_timeout": payload["onTimeout"], "auto_resume": False},
+                                     api_headers={"Idempotency-Key": payload["idempotencyKey"]}, retries=0)
             known["sandboxId"] = sandbox.sandbox_id
-            provider_info = sandbox.get_info()
-            info = self._info(provider_info, sandbox.sandbox_id)
+            with timing.span("sdkCreateVerifyGet"):
+                provider_info = sandbox.get_info()
+                info = self._info(provider_info, sandbox.sandbox_id)
             self._remember(sandbox, provider_info.envd_version)
             return {**info, "attemptId": payload["attemptId"]}
         sandbox_id = payload["sandboxId"]
@@ -487,7 +492,7 @@ class Adapter:
         sandbox = connection.sandbox
         user = {"user": payload["user"]} if "user" in payload else {}
         if operation in ("uploadFile", "downloadFile"):
-            return transfer.execute(sandbox, self.config.request_timeout_seconds)
+            return transfer.execute(sandbox, self.config.request_timeout_seconds, timing)
         if operation == "readFile":
             data = bytearray()
             with sandbox.files.read(payload["path"], format="stream", request_timeout=self.config.request_timeout_seconds, **user) as stream:
@@ -500,7 +505,8 @@ class Adapter:
             sandbox.files.write(payload["path"], payload["data"], request_timeout=self.config.request_timeout_seconds, **user)
             return {"sandboxId": sandbox_id, "bytesWritten": len(payload["data"])}
         if operation == "runCommand":
-            handle = self._command_stream_factory(sandbox, connection.envd_version, payload)
+            with timing.span("sdkCommandStart"):
+                handle = self._command_stream_factory(sandbox, connection.envd_version, payload)
             known["pid"] = handle.pid
             key = sandbox_id, handle.pid
             previous = self._commands.get(key)
@@ -523,7 +529,10 @@ class Adapter:
             return dict(evidence.result)
         handle = evidence.handle
         try:
-            completed = _collect_command_output(handle, sandbox_id, payload["pid"], payload.get("maxOutputBytes", MAX_OUTPUT_BYTES))
+            # Only draining the original SDK stream is timed. Replaying the
+            # cached receipt above performs no SDK wait and emits no wait span.
+            with timing.span("sdkCommandWait"):
+                completed = _collect_command_output(handle, sandbox_id, payload["pid"], payload.get("maxOutputBytes", MAX_OUTPUT_BYTES))
         finally:
             self._commands.pop(key, None)
         self._commands[key] = _CommandEvidence(handle=None, deadline=0, result=completed)

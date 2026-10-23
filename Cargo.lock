@@ -2581,6 +2581,7 @@ dependencies = [
  "hosted_execution",
  "hyper",
  "hyper-util",
+ "libc",
  "postgres",
  "redis",
  "reqwest 0.12.28",
