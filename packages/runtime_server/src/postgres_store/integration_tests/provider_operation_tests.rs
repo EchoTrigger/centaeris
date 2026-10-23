@@ -539,7 +539,7 @@ fn postgres_provider_creation_schema_upgrade_preserves_legacy_grants_and_job_his
         db.query_one("SELECT max(version) FROM runtime.schema_migrations", &[])
             .unwrap()
             .get::<_, i64>(0),
-        20
+        21
     );
     assert_eq!(db.query("SELECT version,applied_at_ms FROM runtime.schema_migrations WHERE version<=16 ORDER BY version",&[]).unwrap().iter().map(|row|(row.get(0),row.get(1))).collect::<Vec<(i64,i64)>>(),prior);
     let after=db.query_one("SELECT payload::text,signature,(SELECT row_to_json(j)::text FROM runtime.runtime_jobs j WHERE j.job_id=$2) FROM public.app_core_agentrunauthorization WHERE agent_run_id=$1",&[&legacy.original.agent_run_id,&legacy.fence.job_id]).unwrap();
