@@ -3055,3 +3055,19 @@ class WorkReturnAuditCursor(models.Model):
     nextPageAtMs = models.BigIntegerField(default=0)
     leaseOwner = models.CharField(max_length=64, blank=True, default="")
     leaseExpiresAtMs = models.BigIntegerField(default=0)
+
+
+class PresentationChange(models.Model):
+    """Durable invalidation positions, never execution facts or delivered content."""
+    key = models.CharField(primary_key=True, max_length=192)
+    revision = models.PositiveBigIntegerField(default=0)
+
+
+class PresentationChangeOutbox(models.Model):
+    """One pending invalidation per source transaction and scoped reader key."""
+    key = models.CharField(max_length=192)
+    transactionId = models.PositiveBigIntegerField()
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["key", "transactionId"],
+            name="presentation_change_transaction_unique")]
