@@ -37,8 +37,10 @@ completion does not close the subscription; later Runs can use the same feed.
 The browser receives updates directly rather than fetching transcript patches
 after each notification. Older-history pages, attachments, evicted history
 content, and explicitly expanded tool details remain demand reads. The hosted
-adapter uses bounded reads of existing PostgreSQL/Runtime projections; its
-internal observation cadence is not a browser business-state polling loop.
+adapter reads existing PostgreSQL/Runtime projections on scoped invalidation.
+Navigation, metadata and unchanged transcript state are not fetched on a per-tab
+timer. Agent history and work lists retain their existing demand-read endpoints;
+one agent-scoped feed invalidates those reads without replacing their UI logic.
 
 ## Stream and recovery contract
 
@@ -55,6 +57,7 @@ is consumed by the server and browser tests.
 | `content` | Ordered UTF-8 ranges belonging to a referenced normal display block | None |
 | `operation` | Bounded tool call/result display data | None |
 | `live` | Replaceable, complete ephemeral text/reasoning snapshot | None |
+| `viewRevision` | Decimal-string context, Agent history and work invalidation versions | None |
 | `checkpoint` without SSE `id` | Current authoritative Run state and its target water | None |
 | `checkpoint` with SSE `id` | Delivery boundary after preceding projection/content application | Scoped durable cursor |
 | `reset` | Explicit `cursorInvalid` or `projectionInvalidated` recovery | Clears the old cursor |
@@ -106,6 +109,60 @@ range stream. Arbitrarily large live-snapshot fragmentation is outside this
 contract. Navigation discovery also reads the current scoped list and retains
 authorization checks; chunking bounds wire frames, not the cost of evaluating
 and serializing an actual navigation snapshot.
+
+## Shared invalidation and bounded database work
+
+Migration `0028_presentation_changes` installs PostgreSQL triggers that append
+scoped keys to `PresentationChangeOutbox` in the same transaction as source
+changes. Runtime's direct event writes are covered without a second execution
+loop. Keys contain identities and change kinds, never message bodies. Source
+writes do not take locks on shared version rows; a separate relay advances
+`PresentationChange` versions and consumes its bounded batch atomically in a
+stable key order. These versions are display projections, never authorization
+fences or substitutes for transcript source water.
+
+Each ASGI application owns one lazy dedicated LISTEN connection, independent of
+the ORM transaction pool. The configured database endpoint must preserve the
+listener session; a transaction-pooling proxy cannot stand in for that session.
+Source notifications and the shared 30-second fallback
+consume at most four batches of 256 pending keys per source hint or reconciliation. Already
+projected notifications only refresh versions, so relay notifications cannot
+recursively trigger more draining. Lost notifications recover from durable
+outbox/version state. Large backlogs do not block a fresh authoritative tail;
+remaining rows wait for another bounded observation or maintenance invocation.
+
+The existing resource-GC command consumes at most 4096 pending rows per run;
+its dry-run does not mutate them. `drain_presentation_changes --limit 4096`
+provides the same explicit maintenance boundary. Deployments must run resource
+maintenance even when no browser is connected. These bounds limit one invocation;
+they do not guarantee drain capacity for an arbitrarily high write rate.
+
+A hub has at most 128 exact-grant observations, 512 subscriptions and 16
+subscriptions per owner per process. Identical bindings share initial navigation,
+state, versions and one blocking Redis signal waiter; different user, delegation,
+credential version, branch and browser-session identities cannot share that
+cache. The last subscriber cancels its owned tasks and closes the listener.
+Listener recovery permits five reconnects; source SQL, connects, LISTEN and
+cleanup have finite deadlines. Redis failure leaves committed recovery active.
+
+A quiet hub reconciles version rows once per active scope every 30 seconds.
+It does not reload unchanged navigation/transcript business data. Original full
+authorization reads remain independent every five seconds per subscription and
+before each payload; they are neither cached by a projected version nor merged
+across frames. SSE still uses a long-lived HTTP request and a dedicated database
+listener. Hosting it on request-billed serverless infrastructure is therefore not
+a zero-idle-cost design; pool sizing and provider request-duration limits require
+deployment acceptance.
+
+`viewRevision` invalidates context usage, Agent history and the visible work-list
+window. Duplicate/stale revisions do not fetch data. Hidden views pause reads;
+returning visible calibrates once. In-flight invalidations collapse into a
+following read. Errors await a new observation or explicit retry. A work refresh
+visits only the user's already opened work-list page window. Agent history
+catch-up reads at most four pages per invalidation or explicit continuation,
+stops between pages while hidden, and retains a visible continuation control
+and its cursor when newer pages remain. Note-save receipt retention and S3
+object/history lifecycle remain separate storage changes.
 
 ## Attention and explicit read acknowledgement
 
@@ -171,9 +228,15 @@ liveness only; they do not mean execution progressed and do not acknowledge data
 A clean EOF is an interruption of this long-lived subscription, including after
 an individual Run has completed.
 
-Recoverable interruptions reconnect with bounded exponential backoff and the
-last applied cursor. Online/visibility wakeups can revive a stale connection.
-Authorization or protocol rejection is surfaced instead of retried forever.
+Recoverable interruptions resume from the last applied cursor with jittered
+exponential backoff. The default permits at most five automatic reconnects in
+one minute and five consecutive unsuccessful reconnects. Duplicate navigation,
+checkpoints and immediate EOF do not replenish that budget. Only a connection
+that stays live for at least 30 seconds can reset consecutive failures.
+Online/visibility wakeups use the same budget. Offline tabs wait for an online
+signal. Retry-After is respected; a server delay above 60 seconds stops automatic
+recovery. Authorization, protocol rejection and an exhausted budget surface an
+explicit retry instead of an automatic request loop.
 The producer has one pending frame, and the fetch reader awaits each application,
 so slow rendering cannot create an unbounded application event queue.
 
@@ -223,6 +286,9 @@ old-schema databases. Set `PGCONNECT_TIMEOUT` to bound a missing test service.
 ```sh
 uv run --frozen --package api python packages/api/manage.py test \
   app_core.test_presentation_stream app_core.test_presentation_authority \
+  app_core.test_presentation_changes app_core.test_presentation_changes_migration \
+  app_core.test_presentation_observer app_core.test_presentation_notifications \
+  app_core.test_presentation_service \
   app_core.test_session_attention \
   app_core.test_session_attention_migration app_core.test_schema_wire_contract \
   app_core.test_workspace_session_list_queries app_core.test_session_projection_concurrency \
@@ -231,6 +297,8 @@ uv run --frozen --package api python packages/api/manage.py test \
 
 pnpm --filter web exec node --test \
   tests/unit/workspace-presentation-stream.test.mjs \
+  tests/unit/workspace-presentation-reconnect-budget.test.mjs \
+  tests/unit/presentation-view-revision.test.mjs \
   tests/unit/api-deadlines.test.ts tests/unit/operation-receipts.test.mjs \
   tests/unit/session-read-state.test.ts
 pnpm --filter web run test:components
@@ -245,6 +313,10 @@ pnpm --filter web run test:components
 | Invalid binding/generation or projection rebuild | Explicit reset; no cross-Session application. |
 | Redis unavailable, slow consumer, or cancellation | Durable state remains authoritative; bounded work and owned resources are released. |
 | Grant revoked during a pending read | No subsequent protected payload is emitted. |
+| Duplicate successful frames followed by EOF | The shared reconnect budget still exhausts. |
+| Quiet or duplicate-hint subscriptions | Business data is read once until its scoped version changes. |
+| Concurrent relay, source rollback, missed notification or forward migration | Durable invalidation commits atomically and resumes without cross-source lock ordering. |
+| Two readers switch active Runs concurrently | One owned live waiter survives, and old-Run text cannot populate the new-Run cache. |
 | Navigation authorization repeated with empty or growing Session lists | Access decisions and rejection contracts hold without loading rows or updating attention. |
 | Cached credential rotates, membership is replaced, or a business branch changes | Fresh authority checks preserve the original credential, definition and branch boundaries. |
 | Split navigation interrupted before its last chunk | Existing complete list remains; no fabricated truncation. |

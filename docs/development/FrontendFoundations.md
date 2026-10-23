@@ -291,6 +291,13 @@ CodeMirror and xterm retain their internal state. Server authority, execution
 cancellation and persistence contracts remain in Core and the existing hosts.
 Migrating a subscription mechanism does not redefine those contracts.
 
+Web's shared presentation subscription also carries scoped revision invalidation.
+Context usage, Agent history and visible work lists use the owned
+`useRevisionRefresh` lifecycle instead of periodic component timers. Shared
+primitives do not change Web's terminal folding, reader position, drafts or
+transcript ownership. See [Web presentation delivery](../workspace/architecture/WebPresentation.md)
+for retry budgets, database observation costs and deployment requirements.
+
 ## Inline visualizations
 
 The built-in `inline-visualizations` System Skill teaches when and how to emit
