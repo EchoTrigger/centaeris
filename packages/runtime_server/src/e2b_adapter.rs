@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod bulk;
+mod power_observations;
 #[cfg(test)]
 mod tests;
 
@@ -69,14 +70,43 @@ pub struct AdapterProcess {
 }
 
 impl AdapterProcess {
-    pub fn spawn(mut command: Command) -> Result<Self, String> {
+    pub(crate) fn spawn_observed(
+        command: Command,
+        observation: crate::observations::power::PowerObservation,
+    ) -> Result<Self, String> {
+        Self::spawn_inner(command, Some(observation))
+    }
+
+    pub fn spawn(command: Command) -> Result<Self, String> {
+        Self::spawn_inner(command, None)
+    }
+
+    fn spawn_inner(
+        mut command: Command,
+        observation: Option<crate::observations::power::PowerObservation>,
+    ) -> Result<Self, String> {
+        let diagnostics = observation
+            .filter(|value| value.is_enabled())
+            .and_then(power_observations::start_reader);
+        if diagnostics.is_some() {
+            command.env("CENTAERIS_E2B_POWER_OBSERVATIONS", "1");
+        } else {
+            command.env_remove("CENTAERIS_E2B_POWER_OBSERVATIONS");
+        }
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // Diagnostics may contain credentials or workload data.
-            .stderr(Stdio::null())
+            .stderr(if diagnostics.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .spawn()
             .map_err(|_| "e2b_adapter_start_failed".to_string())?;
+        if let (Some(sender), Some(stderr)) = (diagnostics, child.stderr.take()) {
+            let _ = sender.send(stderr);
+        }
         let mut input = child.stdin.take().expect("piped adapter stdin");
         let output = child.stdout.take().expect("piped adapter stdout");
         let (send_response, responses) = mpsc::sync_channel(1);

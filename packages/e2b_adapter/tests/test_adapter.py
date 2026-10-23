@@ -7,6 +7,16 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from centaeris_e2b_adapter.bridge import Adapter, AdapterConfig, serve
+from centaeris_e2b_adapter.control import EXPECTED_METADATA_KEYS
+
+
+def expected_metadata():
+    return {key: "original-" + key for key in EXPECTED_METADATA_KEYS}
+
+
+def bound_payload(**extra):
+    return {"sandboxId": "sandbox-a", "expectedTemplateId": "template-a",
+            "expectedMetadata": expected_metadata(), **extra}
 
 
 class FileReader:
@@ -51,13 +61,13 @@ class FakeSandbox:
 
     def __init__(self):
         self.calls = []
-        self.metadata = {"centaerisAttemptId": "attempt-a"}
+        self.metadata = expected_metadata()
         self.handle = Handle()
         self.reader = FileReader([b"\x00\xff", b"abc"])
         self.commands = SimpleNamespace(run=self.run, connect=self.command_connect, kill=self.command_kill)
         self.files = SimpleNamespace(read=self.read, write=self.write)
 
-    def get_info(self):
+    def get_info(self, **kwargs):
         self.calls.append(("info", {}))
         return SimpleNamespace(sandbox_id=self.sandbox_id, template_id="template-a", metadata=self.metadata, state="running", envd_version="0.3.0")
 
@@ -99,7 +109,7 @@ class FakeClient:
         self.calls.append(("connect", {"sandboxId": sandbox_id, **kwargs}))
         return self.sandbox
 
-    def get_info(self, sandbox_id):
+    def get_info(self, sandbox_id, **kwargs):
         self.calls.append(("inspect", {"sandboxId": sandbox_id}))
         if self.failure:
             raise self.failure
@@ -132,7 +142,7 @@ class AdapterTests(unittest.TestCase):
                                    timeout=payload["timeoutSeconds"], **{key: payload[key] for key in ("cwd", "envs", "user") if key in payload}))
 
     def connect(self):
-        response = self.adapter.handle(request("connect", {"sandboxId": "sandbox-a", "timeoutSeconds": 300, "onResume": "restore"}))
+        response = self.adapter.handle(request("connect", bound_payload(timeoutSeconds=300, onResume="restore")))
         self.assertEqual(response["outcome"], "succeeded")
 
     def start(self, pid=71):
@@ -256,11 +266,11 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(response["result"]["attemptId"], "attempt-a")
 
     def test_provider_info_identity_mismatch_never_rebinds_the_requested_sandbox(self):
-        self.client.sandbox.get_info = lambda: SimpleNamespace(
+        self.client.sandbox.get_info = lambda **kwargs: SimpleNamespace(
             sandbox_id="another-sandbox", template_id="template-a", metadata={}, state="running")
         values = [request("create", create_payload()),
                   request("inspect", {"sandboxId": "sandbox-a"}),
-                  request("connect", {"sandboxId": "sandbox-a", "timeoutSeconds": 300, "onResume": "restore"})]
+                  request("connect", bound_payload(timeoutSeconds=300, onResume="restore"))]
         for value in values:
             with self.subTest(operation=value["operation"]):
                 response = self.adapter.handle(value)
@@ -291,9 +301,10 @@ class AdapterTests(unittest.TestCase):
 
     def test_pause_reports_request_without_claiming_continuity(self):
         adapter = Adapter(AdapterConfig(api_key="key", domain="self.example", lane="cleanup"), client=self.client)
-        response = adapter.handle(request("pause", {"sandboxId": "sandbox-a", "mode": "filesystem"}))
+        response = adapter.handle(request("pause", bound_payload(mode="filesystem")))
         self.assertEqual(response["result"], {"sandboxId": "sandbox-a", "requestedMode": "filesystem", "changed": False})
-        self.assertEqual(self.client.calls[0][0], "pause")
+        self.assertEqual([call[0] for call in self.client.calls], ["inspect", "pause"])
+        self.assertEqual(self.client.calls[1][1]["retries"], 0)
 
     def test_commands_require_explicit_connect(self):
         response = self.adapter.handle(request("runCommand", {"sandboxId": "sandbox-a", "command": "echo ok", "timeoutSeconds": 10}))
@@ -426,7 +437,7 @@ class AdapterTests(unittest.TestCase):
             self.start()
             self.client.sandbox = FakeSandbox()
             self.client.sandbox.sandbox_id = "sandbox-b"
-            connected = self.adapter.handle(request("connect", {"sandboxId": "sandbox-b", "timeoutSeconds": 300, "onResume": "restore"}))
+            connected = self.adapter.handle(request("connect", bound_payload(sandboxId="sandbox-b", timeoutSeconds=300, onResume="restore")))
             self.assertEqual(connected["outcome"], "succeeded")
             rejected = self.wait()
             self.assertEqual(rejected["outcome"], "notDispatched")
@@ -498,7 +509,7 @@ class AdapterTests(unittest.TestCase):
     def test_control_cannot_create_execute_write_or_resume(self):
         adapter = Adapter(AdapterConfig(api_key="key", domain="self.example", lane="control", idempotency_supported=True), client=self.client)
         values = [request("create", create_payload()),
-                  request("connect", {"sandboxId": "sandbox-a", "timeoutSeconds": 300, "onResume": "restore"}),
+                  request("connect", bound_payload(timeoutSeconds=300, onResume="restore")),
                   request("runCommand", {"sandboxId": "sandbox-a", "command": "echo ok", "timeoutSeconds": 10}),
                   request("writeFile", {"sandboxId": "sandbox-a", "path": "/data/a", "dataBase64": "YQ=="})]
         for value in values:

@@ -38,6 +38,7 @@ struct FixtureTransport {
     start_error: Mutex<Option<E2bHostError>>,
     wait_error: Mutex<Option<E2bHostError>>,
     helper_error: Mutex<Option<E2bHostError>>,
+    prepare_response: Mutex<Vec<u8>>,
 }
 impl FixtureTransport {
     fn new() -> Self {
@@ -70,6 +71,7 @@ impl FixtureTransport {
             start_error: Mutex::new(None),
             wait_error: Mutex::new(None),
             helper_error: Mutex::new(None),
+            prepare_response: Mutex::new(Vec::new()),
         }
     }
 }
@@ -94,6 +96,10 @@ impl E2bHostTransport for FixtureTransport {
         }
         if let Some(error) = *self.helper_error.lock().unwrap() {
             return Err(error);
+        }
+        if kind == TrustedHelperKind::PrepareWorkspace {
+            assert!(input.is_empty());
+            return Ok(self.prepare_response.lock().unwrap().clone());
         }
         assert_eq!(kind, TrustedHelperKind::FileSystem);
         let request =
@@ -154,13 +160,19 @@ pub(super) fn binding() -> E2bSandboxBinding {
     .map(|k| (k.into(), format!("{k}-owned")))
     .collect();
     metadata.insert("profileDigest".into(), profile().digest().unwrap());
+    // Independent tests must not claim the same physical execution in the
+    // process-wide activity registry. Rebuilt runners in one test still share it.
+    metadata.insert(
+        "executionId".into(),
+        format!("execution-{:?}", std::thread::current().id()),
+    );
     E2bSandboxBinding {
         sandbox_id: "sandbox-owned".into(),
         template_id: "core-template".into(),
         metadata,
     }
 }
-fn profile() -> EnvironmentProfile {
+pub(crate) fn profile() -> EnvironmentProfile {
     serde_json::from_value(serde_json::json!({"schema":"runtime.e2b_environment_profile.v1","provider":"e2b","providerConfigDigest":format!("sha256:{}","a".repeat(64)),"templateRef":{"templateId":"core-template","buildId":"123e4567-e89b-12d3-a456-426614174000"},"workspaceRoot":"/mnt/data","user":"agent","network":"disabled","lifetime":"perRun","timeoutSeconds":120,"inputBudgetBytes":67108864})).unwrap()
 }
 fn host(transport: Arc<FixtureTransport>) -> E2bExecutionHostRunner {
@@ -171,6 +183,16 @@ fn host(transport: Arc<FixtureTransport>) -> E2bExecutionHostRunner {
         Arc::new(FixtureAuthority::new()),
     )
     .unwrap()
+}
+
+pub(crate) fn fixture_host() -> E2bExecutionHostRunner {
+    host(Arc::new(FixtureTransport::new()))
+}
+pub(super) fn successor_for_same_environment(
+    original: &E2bExecutionHostRunner,
+    authority: Arc<dyn E2bDispatchAuthority>,
+) -> E2bExecutionHostRunner {
+    original.successor(authority).unwrap()
 }
 fn command(host: &E2bExecutionHostRunner) -> ExecutionCommandRequest {
     ExecutionCommandRequest {
@@ -421,10 +443,32 @@ fn authority_denial_proves_no_start_but_never_grants_default_authority() {
     assert_eq!(fixture.helpers.load(Ordering::SeqCst), 0);
 }
 #[test]
+fn retained_profile_constructs_a_bound_runner_without_provider_side_effects() {
+    let fixture = Arc::new(FixtureTransport::new());
+    let mut retained = serde_json::to_value(profile()).unwrap();
+    retained["lifetime"] = "retained".into();
+    let retained: EnvironmentProfile = serde_json::from_value(retained).unwrap();
+    let mut bound = binding();
+    bound
+        .metadata
+        .insert("profileDigest".into(), retained.digest().unwrap());
+    let runner = E2bExecutionHostRunner::new(
+        retained,
+        bound,
+        fixture.clone(),
+        Arc::new(FixtureAuthority::new()),
+    )
+    .expect("an explicitly frozen retained profile supports the same bounded host tools");
+    assert_eq!(runner.workspace_root(), "/mnt/data");
+    assert_eq!(fixture.starts.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.helpers.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn unsupported_profile_and_binding_fail_before_any_provider_action() {
     let fixture = Arc::new(FixtureTransport::new());
     for (field, value) in [
-        ("lifetime", "retained"),
+        ("lifetime", "unsupported"),
         ("user", "root"),
         ("workspaceRoot", "/another"),
     ] {
@@ -579,4 +623,101 @@ fn definitely_undispatched_helper_does_not_invent_unknown_side_effects() {
     assert!(runner
         .run_file_system_operation(read_request(&runner))
         .is_ok());
+}
+
+#[test]
+fn unknown_mutating_helper_prevents_new_bash_without_dispatching() {
+    let fixture = Arc::new(FixtureTransport::new());
+    let runner = host(fixture.clone());
+    *fixture.helper_error.lock().unwrap() =
+        Some(E2bHostError::Unknown("fixture_filesystem_reply_lost"));
+    let mut write = read_request(&runner);
+    write.operation = ExecutionFileSystemOperation::WriteFile {
+        content: b"possibly-still-writing".to_vec(),
+        observed_file_hash: None,
+        create_only: true,
+    };
+    assert!(runner.run_file_system_operation(write).is_err());
+    assert!(!runner.helper_effects_known());
+    let result = runner.run_host_command(
+        Some("new-command-after-unknown-helper"),
+        command(&runner),
+        None,
+    );
+    assert!(
+        result.is_err(),
+        "a root helper may still mutate the workspace"
+    );
+    assert_eq!(fixture.starts.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.waits.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn unknown_mutating_helper_cannot_report_ready_or_be_cleared_by_fixed_control() {
+    let fixture = Arc::new(FixtureTransport::new());
+    let runner = host(fixture.clone());
+    *fixture.helper_error.lock().unwrap() =
+        Some(E2bHostError::Unknown("fixture_filesystem_reply_lost"));
+    let mut write = read_request(&runner);
+    write.operation = ExecutionFileSystemOperation::WriteFile {
+        content: b"possibly-still-writing".to_vec(),
+        observed_file_hash: None,
+        create_only: true,
+    };
+    assert!(runner.run_file_system_operation(write).is_err());
+    assert!(
+        runner.status(&runner.execution_policy()).is_err(),
+        "running provider evidence is insufficient while helper effects remain uncertain"
+    );
+    for kind in [
+        TrustedHelperKind::AgentProcessState,
+        TrustedHelperKind::QuiesceAgentProcesses,
+    ] {
+        assert!(runner.invoke_helper(kind, &[], 1024).is_ok());
+    }
+    assert!(!runner.helper_effects_known());
+    assert_eq!(fixture.helpers.load(Ordering::SeqCst), 3);
+    assert_eq!(fixture.starts.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn workspace_preparation_requires_fixed_helper_and_exact_empty_output() {
+    let fixture = Arc::new(FixtureTransport::new());
+    let runner = host(fixture.clone());
+    assert_eq!(runner.prepare_workspace(), Ok(()));
+    assert_eq!(fixture.helpers.load(Ordering::SeqCst), 1);
+    assert!(runner.helper_effects_known());
+    *fixture.prepare_response.lock().unwrap() = b"unexpected-output".to_vec();
+    assert_eq!(
+        runner.prepare_workspace(),
+        Err(E2bHostError::Unknown(
+            "e2b_workspace_preparation_output_invalid"
+        ))
+    );
+    assert!(!runner.helper_effects_known());
+    assert_eq!(fixture.helpers.load(Ordering::SeqCst), 2);
+    assert!(runner.prepare_workspace().is_err());
+    assert_eq!(
+        fixture.helpers.load(Ordering::SeqCst),
+        2,
+        "an uncertain preparation cannot be retried as a fresh physical effect"
+    );
+}
+
+#[test]
+fn workspace_preparation_not_dispatched_remains_known_and_can_retry() {
+    let fixture = Arc::new(FixtureTransport::new());
+    let runner = host(fixture.clone());
+    *fixture.helper_error.lock().unwrap() =
+        Some(E2bHostError::NotDispatched("fixture_authority_expired"));
+    assert_eq!(
+        runner.prepare_workspace(),
+        Err(E2bHostError::NotDispatched("fixture_authority_expired"))
+    );
+    assert!(runner.helper_effects_known());
+    assert_eq!(fixture.helpers.load(Ordering::SeqCst), 1);
+    *fixture.helper_error.lock().unwrap() = None;
+    assert_eq!(runner.prepare_workspace(), Ok(()));
+    assert!(runner.helper_effects_known());
+    assert_eq!(fixture.helpers.load(Ordering::SeqCst), 2);
 }

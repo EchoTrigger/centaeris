@@ -57,7 +57,21 @@ pub struct SpoolingAdapterProcess {
 }
 
 impl SpoolingAdapterProcess {
-    pub fn spawn(mut command: Command) -> Result<Self, BulkTransferError> {
+    pub fn spawn(command: Command) -> Result<Self, BulkTransferError> {
+        Self::spawn_inner(command, None)
+    }
+
+    pub(crate) fn spawn_observed(
+        command: Command,
+        observation: crate::observations::power::PowerObservation,
+    ) -> Result<Self, BulkTransferError> {
+        Self::spawn_inner(command, Some(observation))
+    }
+
+    fn spawn_inner(
+        mut command: Command,
+        observation: Option<crate::observations::power::PowerObservation>,
+    ) -> Result<Self, BulkTransferError> {
         let spool = tempfile::Builder::new()
             .prefix("centaeris-e2b-bulk-")
             .tempdir()
@@ -68,8 +82,11 @@ impl SpoolingAdapterProcess {
             .canonicalize()
             .map_err(|_| BulkTransferError::NotDispatched("bulk_spool_unavailable"))?;
         command.env("E2B_ADAPTER_SPOOL_ROOT", &root);
-        let process = AdapterProcess::spawn(command)
-            .map_err(|_| BulkTransferError::NotDispatched("bulk_adapter_unavailable"))?;
+        let process = match observation {
+            Some(observation) => AdapterProcess::spawn_observed(command, observation),
+            None => AdapterProcess::spawn(command),
+        }
+        .map_err(|_| BulkTransferError::NotDispatched("bulk_adapter_unavailable"))?;
         Ok(Self {
             process,
             spool: Some(spool),

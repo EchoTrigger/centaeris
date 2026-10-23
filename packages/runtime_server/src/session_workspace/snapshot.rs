@@ -13,6 +13,7 @@ use std::io::{Cursor, Read, Seek, Write};
 use unicode_normalization::UnicodeNormalization;
 pub(crate) const SESSION_WORKSPACE_MANIFEST_LIMIT: usize = 1024 * 1024;
 const SESSION_WORKSPACE_IO_BUFFER_BYTES: usize = 64 * 1024;
+pub(crate) mod capture_cache;
 #[cfg(test)]
 mod tests;
 

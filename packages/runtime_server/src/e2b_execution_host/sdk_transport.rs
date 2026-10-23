@@ -98,6 +98,154 @@ impl E2bSdkTransport {
         }
         Ok(())
     }
+    fn helper_frame(
+        &self,
+        binding: &E2bSandboxBinding,
+        kind: TrustedHelperKind,
+        input: &[u8],
+        output_limit: usize,
+        observation: Option<&WorkspaceProtection>,
+    ) -> Result<Vec<u8>, E2bHostError> {
+        let mut helper_stderr = Vec::new();
+        let mut downloaded_bytes = None;
+        let result = (|| {
+            if matches!(
+                kind,
+                TrustedHelperKind::PrepareWorkspace
+                    | TrustedHelperKind::AgentProcessState
+                    | TrustedHelperKind::QuiesceAgentProcesses
+            ) {
+                if !input.is_empty() {
+                    return Err(E2bHostError::NotDispatched(
+                        "e2b_control_helper_input_invalid",
+                    ));
+                }
+                let output = self.control_helper(binding, kind)?;
+                if output.exit_code != 0 || output.stdout.len() > output_limit {
+                    return Err(E2bHostError::Unknown("e2b_control_helper_failed"));
+                }
+                return Ok(output.stdout);
+            }
+            if matches!(
+                kind,
+                TrustedHelperKind::WorkspaceWatch | TrustedHelperKind::WorkspaceGenerationRpc
+            ) || input.len() as u64 > kind.input_limit()
+                || input.len() as u64 > MAX_TRANSFER_BYTES
+                || output_limit == 0
+                || output_limit as u64 > kind.output_limit()
+                || output_limit as u64 > MAX_TRANSFER_BYTES
+            {
+                return Err(E2bHostError::NotDispatched("e2b_helper_budget_unsupported"));
+            }
+            let timeout = Duration::from_millis(kind.timeout_ms());
+            let directory = format!("/run/centaeris/e2b-{}", Uuid::new_v4());
+            let request_path = format!("{directory}/request");
+            let response_path = format!("{directory}/response");
+            // No recursive operation: the parent is root0700, the fresh directory
+            // is create-only, and all three paths are generated here, never by users.
+            self.completed_shell(
+                binding,
+                format!("umask 077; mkdir -m 700 -- {}", quote(&directory)),
+                CONTROL_TIMEOUT,
+            )?;
+            self.ordinary
+                .upload_reader(
+                    &BulkFileRequest {
+                        sandbox_id: &binding.sandbox_id,
+                        path: &request_path,
+                        user: Some("root"),
+                        max_bytes: input.len() as u64,
+                        timeout,
+                    },
+                    &mut Cursor::new(input),
+                )
+                .map_err(|_| E2bHostError::Unknown("e2b_helper_input_staging_unconfirmed"))?;
+            // Bound only the helper's stdout, independently of files restored or
+            // written in the workspace. One extra byte detects a complete but
+            // oversized response; the SDK download keeps the original exact cap.
+            let capture_limit = output_limit + 1;
+            // The root broker opens the request before exec and owns the private
+            // output sink. Filesystem operations run as the frozen workload
+            // identity, matching Bash writes and restored snapshot ownership.
+            let helper = if matches!(kind, TrustedHelperKind::FileSystem) {
+                [
+                    "/usr/bin/setpriv",
+                    "--reuid=10001",
+                    "--regid=10001",
+                    "--clear-groups",
+                    "--",
+                    HELPER_PATH,
+                ]
+                .into_iter()
+                .map(quote)
+                .collect::<Vec<_>>()
+                .join(" ")
+            } else {
+                quote(HELPER_PATH)
+            };
+            let script = format!(
+                "set -e -o pipefail; ( exec {} {} < {} ) | /usr/bin/head -c {capture_limit} > {}; test \"$(/usr/bin/wc -c < {})\" -le {output_limit}",
+                helper,
+                quote(kind.entrypoint()),
+                quote(&request_path),
+                quote(&response_path),
+                quote(&response_path)
+            );
+            let mut environment = helper_environment();
+            if let Some(observation) = observation.filter(|value| !value.operation_id().is_empty())
+            {
+                environment["WORKSPACE_PERF_OBSERVATIONS"] = "1".into();
+                environment["WORKSPACE_PERF_OPERATION_ID"] = observation.operation_id().into();
+            }
+            let pid = self.shell(binding, script, "root", environment, timeout)?;
+            let completed =
+                self.wait(binding, pid, timeout.saturating_add(Duration::from_secs(5)))?;
+            helper_stderr = completed.stderr;
+            if completed.exit_code != 0 {
+                return Err(E2bHostError::Unknown("e2b_helper_process_failed"));
+            }
+            let mut output = Vec::new();
+            self.ordinary
+                .download_into(
+                    &BulkFileRequest {
+                        sandbox_id: &binding.sandbox_id,
+                        path: &response_path,
+                        user: Some("root"),
+                        max_bytes: output_limit as u64,
+                        timeout,
+                    },
+                    &mut output,
+                )
+                .map_err(|_| E2bHostError::Unknown("e2b_helper_output_staging_unconfirmed"))?;
+            downloaded_bytes = Some(output.len() as u64);
+            // Only a verified, fully downloaded result permits normal staging-file
+            // cleanup. Unknown branches keep their files for whole-VM finalization.
+            self.completed_shell(
+                binding,
+                format!(
+                    "rm -- {} {}; rmdir -- {}",
+                    quote(&request_path),
+                    quote(&response_path),
+                    quote(&directory)
+                ),
+                CONTROL_TIMEOUT,
+            )?;
+            Ok(output)
+        })();
+        if let Some(observation) = observation {
+            // The existing strict forwarder accepts only two bound numeric
+            // counters. Bounded command stderr is never printed or returned.
+            observation.forward_sandbox(&helper_stderr);
+            if let Some(bytes) = downloaded_bytes {
+                observation.count(ProtectionMetric::SdkDownloadFrameBytes, bytes, true);
+            } else {
+                // SDK/Python staging and failed partial transfers are not
+                // inferred from the intended output cap or current buffer.
+                observation.unavailable(ProtectionMetric::SdkDownloadFrameBytes);
+            }
+        }
+        result
+    }
 }
 
 impl E2bHostTransport for E2bSdkTransport {
@@ -130,94 +278,17 @@ impl E2bHostTransport for E2bSdkTransport {
         input: &[u8],
         output_limit: usize,
     ) -> Result<Vec<u8>, E2bHostError> {
-        if matches!(
-            kind,
-            TrustedHelperKind::PrepareWorkspace
-                | TrustedHelperKind::AgentProcessState
-                | TrustedHelperKind::QuiesceAgentProcesses
-        ) {
-            if !input.is_empty() {
-                return Err(E2bHostError::NotDispatched(
-                    "e2b_control_helper_input_invalid",
-                ));
-            }
-            let output = self.control_helper(binding, kind)?;
-            if output.exit_code != 0 || output.stdout.len() > output_limit {
-                return Err(E2bHostError::Unknown("e2b_control_helper_failed"));
-            }
-            return Ok(output.stdout);
-        }
-        if matches!(
-            kind,
-            TrustedHelperKind::WorkspaceWatch | TrustedHelperKind::WorkspaceGenerationRpc
-        ) || input.len() as u64 > kind.input_limit()
-            || input.len() as u64 > MAX_TRANSFER_BYTES
-            || output_limit == 0
-            || output_limit as u64 > kind.output_limit()
-            || output_limit as u64 > MAX_TRANSFER_BYTES
-        {
-            return Err(E2bHostError::NotDispatched("e2b_helper_budget_unsupported"));
-        }
-        let timeout = Duration::from_millis(kind.timeout_ms());
-        let directory = format!("/run/centaeris/e2b-{}", Uuid::new_v4());
-        let request_path = format!("{directory}/request");
-        let response_path = format!("{directory}/response");
-        // No recursive operation: the parent is root0700, the fresh directory
-        // is create-only, and all three paths are generated here, never by users.
-        self.completed_shell(
-            binding,
-            format!("umask 077; mkdir -m 700 -- {}", quote(&directory)),
-            CONTROL_TIMEOUT,
-        )?;
-        self.ordinary
-            .upload_reader(
-                &BulkFileRequest {
-                    sandbox_id: &binding.sandbox_id,
-                    path: &request_path,
-                    user: Some("root"),
-                    max_bytes: input.len() as u64,
-                    timeout,
-                },
-                &mut Cursor::new(input),
-            )
-            .map_err(|_| E2bHostError::Unknown("e2b_helper_input_staging_unconfirmed"))?;
-        // Bash's file-size limit bounds the output while the helper writes it;
-        // the bounded bulk download also enforces the exact requested byte cap.
-        let blocks = (output_limit as u64).div_ceil(1024);
-        let script = format!(
-            "set -e; ulimit -f {blocks}; exec {} {} < {} > {}",
-            quote(HELPER_PATH),
-            quote(kind.entrypoint()),
-            quote(&request_path),
-            quote(&response_path)
-        );
-        self.completed_shell(binding, script, timeout)?;
-        let mut output = Vec::new();
-        self.ordinary
-            .download_into(
-                &BulkFileRequest {
-                    sandbox_id: &binding.sandbox_id,
-                    path: &response_path,
-                    user: Some("root"),
-                    max_bytes: output_limit as u64,
-                    timeout,
-                },
-                &mut output,
-            )
-            .map_err(|_| E2bHostError::Unknown("e2b_helper_output_staging_unconfirmed"))?;
-        // Only a verified, fully downloaded result permits normal staging-file
-        // cleanup. Unknown branches keep their files for whole-VM finalization.
-        self.completed_shell(
-            binding,
-            format!(
-                "rm -- {} {}; rmdir -- {}",
-                quote(&request_path),
-                quote(&response_path),
-                quote(&directory)
-            ),
-            CONTROL_TIMEOUT,
-        )?;
-        Ok(output)
+        self.helper_frame(binding, kind, input, output_limit, None)
+    }
+    fn helper_observed(
+        &self,
+        binding: &E2bSandboxBinding,
+        kind: TrustedHelperKind,
+        input: &[u8],
+        output_limit: usize,
+        observation: &WorkspaceProtection,
+    ) -> Result<Vec<u8>, E2bHostError> {
+        self.helper_frame(binding, kind, input, output_limit, Some(observation))
     }
     fn start(
         &self,

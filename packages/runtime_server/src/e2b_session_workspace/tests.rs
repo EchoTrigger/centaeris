@@ -64,6 +64,33 @@ fn service(url: &str, run: &str, port: Arc<Helper>, limit: u64) -> E2bSessionWor
     )
     .unwrap()
 }
+
+#[test]
+fn retained_profile_constructs_workspace_transfer_without_restoring_live_files() {
+    let mut retained = serde_json::to_value(profile(OVERHEAD + 1024)).unwrap();
+    retained["lifetime"] = json!("retained");
+    let retained = serde_json::from_value(retained).unwrap();
+    let helper = Helper::new(b"live files", Fault::None);
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap();
+    E2bSessionWorkspace::new(
+        retained,
+        SessionWorkspaceApi {
+            client: &client,
+            api_url: "http://127.0.0.1:1",
+            api_token: "fixture-only",
+            agent_run_id: "run-successor",
+            authorization_digest: "successor-authorization",
+        },
+        helper.clone(),
+    )
+    .expect("retained lifetime still uses the existing archive protection contract");
+    assert!(helper.events.lock().unwrap().is_empty());
+    assert!(helper.restored.lock().unwrap().is_empty());
+}
+
 fn frame(data: &[u8]) -> (Vec<u8>, SandboxWorkspaceSnapshotManifest) {
     let manifest = SandboxWorkspaceSnapshotManifest {
         schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA.into(),
@@ -143,6 +170,22 @@ impl WorkspaceHelperPort for Helper {
     }
 }
 impl WorkspaceHelperSession for Held<'_> {
+    // Legacy transfer-only fixtures do not model a live runner cache; the
+    // conditional_capture module exercises persistence through the real guard.
+    fn take_capture_baseline(
+        &self,
+        _: &WorkspaceSnapshotDescriptor,
+        _: &str,
+    ) -> Result<Option<SnapshotCaptureCache>, E2bHostError> {
+        Ok(None)
+    }
+    fn set_capture_baseline(
+        &self,
+        _: Option<SnapshotCaptureCache>,
+        _: &str,
+    ) -> Result<(), E2bHostError> {
+        Ok(())
+    }
     fn require_quiescent(&self) -> Result<(), E2bHostError> {
         assert!(self.0.held.load(Ordering::SeqCst));
         self.0.events.lock().unwrap().push("requireQuiescent");
@@ -181,6 +224,7 @@ impl WorkspaceHelperSession for Held<'_> {
         &self,
         request: &SandboxSnapshotCaptureRequest,
         output_limit: u64,
+        _observation: &WorkspaceProtection,
     ) -> Result<File, E2bHostError> {
         assert!(self.0.held.load(Ordering::SeqCst));
         self.0.events.lock().unwrap().push("capture");
@@ -400,12 +444,32 @@ fn one_session_new_run_restores_previous_committed_binary_bytes_over_actual_http
         }
         _ => panic!("unexpected workspace request"),
     });
-    assert_eq!(
+    let (outcome, measurements) = crate::observations::capture_protection(|| {
         service(&server.url, "run-a", helper_a.clone(), 64 * 1024 * 1024)
             .collect_and_commit(&lease("run-a"), &empty(), 0)
-            .unwrap(),
-        SessionWorkspaceCommitOutcome::Accepted
-    );
+            .unwrap()
+    });
+    assert_eq!(outcome, SessionWorkspaceCommitOutcome::Accepted);
+    let disposition = measurements
+        .iter()
+        .find(|e| e["metric"] == "workspaceCommitDisposition")
+        .unwrap();
+    assert_eq!(disposition["value"], "full");
+    assert!(measurements
+        .iter()
+        .all(|e| e["operationId"] == disposition["operationId"]
+            && e["runId"] == "run-a"
+            && e["jobId"] == lease("run-a").job_id));
+    let spool = measurements
+        .iter()
+        .find(|e| e["metric"] == "runtimeSpoolWrittenBytes")
+        .unwrap();
+    assert_eq!(spool["value"], helper_a.wire.len());
+    let duration = measurements
+        .iter()
+        .find(|e| e["metric"] == "workspaceCommitElapsedMs")
+        .unwrap();
+    assert_eq!(duration["outcome"], "ok");
     assert_eq!(
         *helper_a.events.lock().unwrap(),
         vec!["exclusive", "quiesce", "capture", "release"]
@@ -493,7 +557,7 @@ fn fixed_profile_and_transfer_budget_reject_without_claiming_a_filesystem_quota(
         .build()
         .unwrap();
     for (field, value) in [
-        ("lifetime", json!("retained")),
+        ("lifetime", json!("unsupported")),
         ("user", json!("root")),
         ("workspaceRoot", json!("/elsewhere")),
     ] {
@@ -669,3 +733,72 @@ fn lost_commit_reply_reconciles_once_and_keeps_unresolved_work_pending() {
         assert_eq!(server.finish().len(), 3);
     }
 }
+
+#[test]
+fn resolve_only_queries_bound_api_without_acquiring_helpers_or_restoring_bytes() {
+    let helper = Helper::new(b"preserved", Fault::Busy);
+    let expected = frozen(&helper.wire, 9);
+    let returned = expected.clone();
+    let server = Server::new(move |request| {
+        assert_eq!(
+            request.path,
+            "/internal/agent-runs/session-workspace/resolve"
+        );
+        query(request, "runtime.session_workspace.resolve.v1", "run-b");
+        Some(resolved(&returned, "download"))
+    });
+    assert_eq!(
+        service(&server.url, "run-b", helper.clone(), 64 * 1024 * 1024)
+            .resolve(&lease("run-b"), &expected)
+            .unwrap(),
+        SessionWorkspaceResolution::Download
+    );
+    assert!(helper.events.lock().unwrap().is_empty());
+    assert!(helper.restored.lock().unwrap().is_empty());
+    assert_eq!(server.finish().len(), 1);
+}
+
+#[test]
+fn complete_commit_measurements_include_resolve_and_correlate_early_outcomes() {
+    for mode in ["alreadyAdvanced", "pending", "rejected"] {
+        let helper = Helper::new(b"unused", Fault::Busy);
+        let expected = frozen(&helper.wire, 6);
+        let server = Server::new(move |_| {
+            std::thread::sleep(Duration::from_millis(25));
+            Some(match mode {
+                "alreadyAdvanced" => resolved(&expected, "advanced"),
+                "pending" => resolved(&empty(), "empty"),
+                _ => Reply {
+                    status: 400,
+                    body: Vec::new(),
+                    hash: None,
+                    length: None,
+                },
+            })
+        });
+        let (_, events) = crate::observations::capture_protection(|| {
+            service(&server.url, "run-a", helper, 64 * 1024 * 1024)
+                .collect_and_commit(&lease("run-a"), &empty(), 0)
+                .unwrap()
+        });
+        let duration = events
+            .iter()
+            .find(|e| e["metric"] == "workspaceCommitElapsedMs")
+            .expect("full commit timing");
+        assert!(duration["value"].as_f64().unwrap() >= 20.0);
+        let disposition = events
+            .iter()
+            .find(|e| e["metric"] == "workspaceCommitDisposition")
+            .expect("commit disposition");
+        assert_eq!(disposition["value"], mode);
+        assert_eq!(duration["operationId"], disposition["operationId"]);
+        for event in &events {
+            assert_eq!(event["runId"], "run-a");
+            assert_eq!(event["jobId"], lease("run-a").job_id);
+            assert_eq!(event["trigger"], "terminalCommit");
+        }
+        assert_eq!(server.finish().len(), 1);
+    }
+}
+
+mod conditional_capture;

@@ -16,7 +16,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 
 from centaeris_e2b_adapter.bridge import Adapter, AdapterConfig, serve
-from test_adapter import FakeClient, FileReader, request
+from test_adapter import FakeClient, FileReader, bound_payload, request
 from test_sdk_transport_acceptance import create_request, provider_fixture
 
 TRANSFER_ID = "123e4567-e89b-12d3-a456-426614174001"
@@ -115,7 +115,7 @@ class BulkTransferTests(unittest.TestCase):
         adapter = Adapter(AdapterConfig(api_key="fixture-key", domain="fixture.invalid", lane=lane,
             spool_root=str(self.root) if enabled else None), client=self.client)
         if lane == "ordinary":
-            self.assertEqual(adapter.handle(request("connect", {"sandboxId": "sandbox-a", "timeoutSeconds": 120, "onResume": "restore"}))["outcome"], "succeeded")
+            self.assertEqual(adapter.handle(request("connect", bound_payload(timeoutSeconds=120, onResume="restore")))["outcome"], "succeeded")
         return adapter
 
     def source(self, data=BINARY):

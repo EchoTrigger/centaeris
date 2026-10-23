@@ -20,6 +20,11 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from centaeris_e2b_adapter.bridge import Adapter, AdapterConfig
+from centaeris_e2b_adapter.control import EXPECTED_METADATA_KEYS
+
+
+def expected_metadata():
+    return {key: "original-" + key for key in EXPECTED_METADATA_KEYS}
 
 
 class ProviderFixture:
@@ -135,11 +140,24 @@ def provider_fixture(mode="success"):
                 return
             body = json.loads(raw) if size else None
             fixture.record("POST", self.path, self.headers, body)
-            if self.path == "/v2/sandboxes/sandbox-fixture/connect":
-                self.reply(200, fixture.sandbox())
-                return
-            if self.path == "/sandboxes/sandbox-fixture/pause":
-                self.reply(204, {})
+            if self.path in ("/v2/sandboxes/sandbox-fixture/connect", "/sandboxes/sandbox-fixture/pause"):
+                action = "Connect" if self.path.endswith("/connect") else "Pause"
+                if fixture.mode == "lost" + action + "Reply":
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                    self.connection.close()
+                    self.close_connection = True
+                    return
+                if fixture.mode in ("refused" + action + "503", "refused" + action + "429"):
+                    status = 503 if fixture.mode.endswith("503") else 429
+                    self.reply(status, {"code": status, "message": "fixture-private-provider-diagnostic"})
+                    return
+                if action == "Pause":
+                    if fixture.mode == "alreadyPaused":
+                        self.reply(409, {"code": 409, "message": "already paused"})
+                    else:
+                        self.reply(204, {})
+                else:
+                    self.reply(200, fixture.sandbox())
                 return
             if self.path != "/v2/sandboxes":
                 self.reply(404, {"code": 404, "message": "fixture_route_missing"})
@@ -329,20 +347,23 @@ class SdkTransportAcceptanceTests(unittest.TestCase):
             with patch.dict(os.environ, {"E2B_API_URL": ambient.api_url, "E2B_SANDBOX_URL": ambient.api_url, "E2B_DOMAIN": ""}):
                 adapter = Adapter(AdapterConfig(api_key="e2b_" + "a" * 64, api_url=control.api_url,
                     sandbox_url=data.api_url, idempotency_supported=True))
-                created = adapter.handle(create_request())
+                create = create_request()
+                create["payload"]["metadata"] = expected_metadata() | {"centaerisAttemptId": "attempt-fixture"}
+                created = adapter.handle(create)
                 self.assertEqual(created["outcome"], "succeeded", created)
                 read = {"schema": "runtime.e2b.adapter.request.v1", "requestId": "read-created",
                     "operation": "readFile", "payload": {"sandboxId": "sandbox-fixture", "path": "/workspace/binary"}}
                 first = adapter.handle(read)
                 self.assertEqual(first["outcome"], "succeeded", first)
                 self.assertEqual(base64.b64decode(first["result"]["dataBase64"]), b"\x00\xffself-hosted-data")
-                reconnected = adapter.handle(lifecycle_request("connect", timeoutSeconds=120, onResume="restore"))
+                reconnected = adapter.handle(lifecycle_request("connect", timeoutSeconds=120, onResume="restore",
+                    expectedTemplateId="template-fixture", expectedMetadata=control.metadata))
                 self.assertEqual(reconnected["outcome"], "succeeded", reconnected)
                 second = adapter.handle(read | {"requestId": "read-connected"})
                 self.assertEqual(second["outcome"], "succeeded", second)
                 self.assertEqual(base64.b64decode(second["result"]["dataBase64"]), b"\x00\xffself-hosted-data")
         self.assertEqual(ambient.requests, [])
-        self.assertEqual([entry["method"] for entry in control.requests], ["POST", "GET", "POST", "GET"])
+        self.assertEqual([entry["method"] for entry in control.requests], ["POST", "GET", "GET", "POST", "GET"])
         self.assertEqual(len(data.requests), 2)
         self.assertTrue(all(entry["path"].startswith("/files?") for entry in data.requests))
         self.assertTrue(all("x-api-key" not in entry["headers"] for entry in data.requests))
@@ -462,32 +483,36 @@ class SdkTransportAcceptanceTests(unittest.TestCase):
 
     def test_connect_preserves_requested_identity_and_sdk_default_restore(self):
         with provider_fixture() as fixture:
+            fixture.metadata = expected_metadata()
             response = adapter_for(fixture).handle(lifecycle_request(
                 "connect", timeoutSeconds=120, onResume="restore",
+                expectedTemplateId="template-fixture", expectedMetadata=fixture.metadata,
             ))
         self.assertEqual(response["outcome"], "succeeded", response)
         self.assertEqual(response["result"]["sandboxId"], "sandbox-fixture")
         self.assertEqual(
             [(item["method"], item["path"]) for item in fixture.requests],
-            [("POST", "/v2/sandboxes/sandbox-fixture/connect"),
+            [("GET", "/sandboxes/sandbox-fixture"),
+             ("POST", "/v2/sandboxes/sandbox-fixture/connect"),
              ("GET", "/sandboxes/sandbox-fixture")],
         )
         # SDK restore uses the provider default; memory=False requests a reboot.
-        self.assertEqual(fixture.requests[0]["body"], {"timeout": 120})
+        self.assertEqual(fixture.requests[1]["body"], {"timeout": 120})
 
     def test_pause_sends_the_explicit_memory_policy_without_claiming_a_snapshot(self):
         for mode, memory in (("full", True), ("filesystem", False)):
             with self.subTest(mode=mode), provider_fixture() as fixture:
+                fixture.metadata = expected_metadata()
                 response = adapter_for(fixture, lane="cleanup").handle(
-                    lifecycle_request("pause", mode=mode)
+                    lifecycle_request("pause", mode=mode, expectedTemplateId="template-fixture", expectedMetadata=fixture.metadata)
                 )
             self.assertEqual(response["outcome"], "succeeded", response)
             self.assertEqual(response["result"], {
                 "sandboxId": "sandbox-fixture", "requestedMode": mode, "changed": True,
             })
-            self.assertEqual(len(fixture.requests), 1)
-            self.assertEqual(fixture.requests[0]["path"], "/sandboxes/sandbox-fixture/pause")
-            self.assertEqual(fixture.requests[0]["body"], {"memory": memory})
+            self.assertEqual(len(fixture.requests), 2)
+            self.assertEqual(fixture.requests[1]["path"], "/sandboxes/sandbox-fixture/pause")
+            self.assertEqual(fixture.requests[1]["body"], {"memory": memory})
 
     def test_cleanup_targets_only_the_exact_id_and_handles_provider_absence(self):
         for mode, killed in (("success", True), ("alreadyAbsent", False)):

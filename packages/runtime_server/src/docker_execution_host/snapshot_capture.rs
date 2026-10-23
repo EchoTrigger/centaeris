@@ -1,28 +1,10 @@
 use super::*;
 use crate::session_workspace::snapshot::SESSION_WORKSPACE_MANIFEST_LIMIT;
-use hosted_execution::protocol::{
-    SandboxSnapshotBaseline, SandboxSnapshotCaptureRequest, SANDBOX_SNAPSHOT_CAPTURE_SCHEMA,
-};
 #[cfg(test)]
-use hosted_execution::protocol::{SandboxSnapshotCaptureResponse, SnapshotCaptureDisposition};
-
-#[derive(Clone)]
-pub(super) struct SnapshotCaptureCache {
-    descriptor: WorkspaceSnapshotDescriptor,
-    manifest: SandboxWorkspaceSnapshotManifest,
-}
-
-impl SnapshotCaptureCache {
-    fn baseline_for(
-        &self,
-        expected: &WorkspaceSnapshotDescriptor,
-    ) -> Option<SandboxSnapshotBaseline> {
-        (&self.descriptor == expected).then(|| SandboxSnapshotBaseline {
-            snapshot_sha256: self.descriptor.sha256.clone(),
-            manifest: self.manifest.clone(),
-        })
-    }
-}
+use hosted_execution::protocol::{
+    SandboxSnapshotBaseline, SandboxSnapshotCaptureResponse, SnapshotCaptureDisposition,
+};
+use hosted_execution::protocol::{SandboxSnapshotCaptureRequest, SANDBOX_SNAPSHOT_CAPTURE_SCHEMA};
 
 static NEXT_CAPTURE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -53,13 +35,7 @@ fn capture_and_cache(
     let result = collect(&request)?;
     let next = match &result {
         SnapshotCaptureResult::Snapshot(artifact) => {
-            artifact
-                .manifest
-                .as_ref()
-                .map(|manifest| SnapshotCaptureCache {
-                    descriptor: artifact.descriptor.clone(),
-                    manifest: manifest.clone(),
-                })
+            SnapshotCaptureCache::from_verified_snapshot(artifact)
         }
         SnapshotCaptureResult::Unchanged => {
             if request.baseline.is_none() {
@@ -265,16 +241,9 @@ mod tests {
 
     #[test]
     fn cache_requires_all_authoritative_descriptor_fields() {
-        let descriptor = WorkspaceSnapshotDescriptor {
-            sha256: format!("sha256:{}", "a".repeat(64)),
-            size_bytes: 300,
-            expanded_size_bytes: 3,
-            file_count: 1,
-        };
-        let cache = SnapshotCaptureCache {
-            descriptor: descriptor.clone(),
-            manifest: manifest(),
-        };
+        let artifact = artifact();
+        let descriptor = artifact.descriptor.clone();
+        let cache = SnapshotCaptureCache::from_verified_snapshot(&artifact).unwrap();
         assert!(cache.baseline_for(&descriptor).is_some());
         for field in ["hash", "size", "expanded", "count"] {
             let mut other = descriptor.clone();
@@ -523,7 +492,15 @@ mod tests {
             )
             .is_err());
         });
-        assert_eq!(events.len(), 1, "only the valid bound counter is forwarded");
+        assert_eq!(
+            events.len(),
+            2,
+            "the valid counter and explicit missing measurement are recorded"
+        );
+        assert_eq!(events[1]["metric"], "scannedEntries");
+        assert_eq!(events[1]["outcome"], "unavailable");
+        assert!(events[1]["value"].is_null());
+        assert_eq!(events[1]["operationId"], events[0]["operationId"]);
         assert_eq!(events[0]["value"], 17);
         assert_eq!(events[0]["outcome"], "error");
         assert_eq!(events[0]["trigger"], "recoveryCheckpoint");

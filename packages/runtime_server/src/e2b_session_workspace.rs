@@ -3,6 +3,7 @@
 use crate::agent_run_authorization::{EnvironmentProfile, SessionWorkspace};
 use crate::e2b_execution_host::E2bHostError;
 use crate::observations::{ProtectionMetric, ProtectionTrigger, WorkspaceProtection};
+use crate::session_workspace::snapshot::capture_cache::SnapshotCaptureCache;
 use crate::session_workspace::snapshot::{
     capture_snapshot_artifact_observed, read_capture, snapshot_matches_frozen_workspace,
     SnapshotCaptureResult, WorkspaceSnapshotDescriptor, SESSION_WORKSPACE_MANIFEST_LIMIT,
@@ -16,7 +17,7 @@ use hosted_execution::protocol::{SandboxSnapshotCaptureRequest, SANDBOX_SNAPSHOT
 use std::fs::File;
 use std::io::Seek;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // API transfer admission reserves this overhead independently of any guest
 // filesystem quota. Snapshot framing is validated by the shared wire reader.
@@ -33,6 +34,17 @@ pub(crate) trait WorkspaceHelperPort: Send + Sync {
 /// Success means exit zero and a fully received helper result. This is neither
 /// VM cleanup proof nor permission to resume an environment.
 pub(crate) trait WorkspaceHelperSession {
+    /// Consume before any capture side effect; failures cannot retain a stale entry.
+    fn take_capture_baseline(
+        &self,
+        expected: &WorkspaceSnapshotDescriptor,
+        profile_digest: &str,
+    ) -> Result<Option<SnapshotCaptureCache>, E2bHostError>;
+    fn set_capture_baseline(
+        &self,
+        entry: Option<SnapshotCaptureCache>,
+        profile_digest: &str,
+    ) -> Result<(), E2bHostError>;
     fn require_quiescent(&self) -> Result<(), E2bHostError>;
     fn quiesce(&self) -> Result<(), E2bHostError>;
     fn restore_snapshot(
@@ -44,6 +56,7 @@ pub(crate) trait WorkspaceHelperSession {
         &self,
         request: &SandboxSnapshotCaptureRequest,
         output_limit: u64,
+        observation: &WorkspaceProtection,
     ) -> Result<File, E2bHostError>;
 }
 
@@ -67,7 +80,7 @@ impl E2bSessionWorkspace {
         let EnvironmentProfile::E2b(value) = &profile else {
             return Err("e2b_workspace_profile_unsupported".into());
         };
-        if value.lifetime != "perRun"
+        if !matches!(value.lifetime.as_str(), "perRun" | "retained")
             || value.workspace_root != "/mnt/data"
             || value.user != "agent"
         {
@@ -117,20 +130,37 @@ impl E2bSessionWorkspace {
         self.transfer_limit() + SESSION_WORKSPACE_MANIFEST_LIMIT as u64 + 4
     }
 
+    pub(crate) fn resolve(
+        &self,
+        lease: &SessionWorkspaceLease,
+        frozen: &SessionWorkspace,
+    ) -> Result<SessionWorkspaceResolution, SessionWorkspaceApiError> {
+        self.api().resolve(lease, frozen)
+    }
+
     pub(crate) fn restore(
         &self,
         lease: &SessionWorkspaceLease,
         frozen: &SessionWorkspace,
         input_upper_bound_bytes: u64,
     ) -> Result<SessionWorkspaceResolution, SessionWorkspaceApiError> {
-        frozen
-            .validate()
-            .map_err(SessionWorkspaceApiError::Rejected)?;
         let Some(session) = self.helpers.try_exclusive().map_err(restore_helper_error)? else {
             return Err(SessionWorkspaceApiError::Unavailable(
                 "e2b_workspace_exclusion_busy".into(),
             ));
         };
+        let profile_digest = self
+            .profile
+            .digest()
+            .map_err(SessionWorkspaceApiError::Rejected)?;
+        // Invalidate before validating or applying a new restore. Only a fully
+        // verified frame and successful fixed helper application seed a baseline.
+        session
+            .set_capture_baseline(None, &profile_digest)
+            .map_err(restore_helper_error)?;
+        frozen
+            .validate()
+            .map_err(SessionWorkspaceApiError::Rejected)?;
         let resolution = self.api().resolve(lease, frozen)?;
         if resolution == SessionWorkspaceResolution::Advanced {
             return Ok(resolution);
@@ -213,6 +243,12 @@ impl E2bSessionWorkspace {
                 session.restore_snapshot(&mut artifact.file, &artifact.descriptor)
             })
             .map_err(restore_helper_error)?;
+        session
+            .set_capture_baseline(
+                SnapshotCaptureCache::from_verified_snapshot(&artifact),
+                &profile_digest,
+            )
+            .map_err(restore_helper_error)?;
         Ok(resolution)
     }
 
@@ -222,12 +258,58 @@ impl E2bSessionWorkspace {
         frozen: &SessionWorkspace,
         input_upper_bound_bytes: u64,
     ) -> Result<SessionWorkspaceCommitOutcome, String> {
+        let observation = WorkspaceProtection::new().with_context(
+            ProtectionTrigger::TerminalCommit,
+            &self.agent_run_id,
+            Some(&lease.job_id),
+        );
+        let started = Instant::now();
+        let mut already_advanced = false;
+        let result = self.collect_and_commit_observed(
+            lease,
+            frozen,
+            input_upper_bound_bytes,
+            &observation,
+            &mut already_advanced,
+        );
+        let disposition = match &result {
+            Ok(SessionWorkspaceCommitOutcome::Accepted) if already_advanced => "alreadyAdvanced",
+            Ok(SessionWorkspaceCommitOutcome::Accepted) => "full",
+            Ok(SessionWorkspaceCommitOutcome::Unchanged) => "unchanged",
+            Ok(
+                SessionWorkspaceCommitOutcome::Pending
+                | SessionWorkspaceCommitOutcome::ProtectionDeferred,
+            ) => "pending",
+            Ok(SessionWorkspaceCommitOutcome::Rejected(_)) | Err(_) => "rejected",
+        };
+        observation.elapsed(
+            ProtectionMetric::WorkspaceCommitElapsedMs,
+            started.elapsed(),
+            matches!(
+                &result,
+                Ok(SessionWorkspaceCommitOutcome::Accepted
+                    | SessionWorkspaceCommitOutcome::Unchanged)
+            ),
+        );
+        observation.workspace_commit_disposition(disposition);
+        result
+    }
+
+    fn collect_and_commit_observed(
+        &self,
+        lease: &SessionWorkspaceLease,
+        frozen: &SessionWorkspace,
+        input_upper_bound_bytes: u64,
+        observation: &WorkspaceProtection,
+        already_advanced: &mut bool,
+    ) -> Result<SessionWorkspaceCommitOutcome, String> {
         if let Err(reason) = frozen.validate() {
             return Ok(SessionWorkspaceCommitOutcome::Rejected(reason));
         }
         match self.api().resolve(lease, frozen) {
             Ok(SessionWorkspaceResolution::Advanced) => {
-                return Ok(SessionWorkspaceCommitOutcome::Accepted)
+                *already_advanced = true;
+                return Ok(SessionWorkspaceCommitOutcome::Accepted);
             }
             Ok(SessionWorkspaceResolution::Empty | SessionWorkspaceResolution::Download) => {}
             Ok(SessionWorkspaceResolution::RetainedLive) => {
@@ -236,7 +318,8 @@ impl E2bSessionWorkspace {
                 ))
             }
             Err(SessionWorkspaceApiError::Unavailable(_)) => {
-                return Ok(SessionWorkspaceCommitOutcome::Pending)
+                eprintln!("e2b_workspace_protection: stage=resolve; code=api_unavailable");
+                return Ok(SessionWorkspaceCommitOutcome::Pending);
             }
             Err(SessionWorkspaceApiError::Rejected(reason)) => {
                 return Ok(SessionWorkspaceCommitOutcome::Rejected(reason))
@@ -247,28 +330,34 @@ impl E2bSessionWorkspace {
         }
         let session = match self.helpers.try_exclusive() {
             Ok(Some(session)) => session,
-            Ok(None) => return Ok(SessionWorkspaceCommitOutcome::Pending),
-            Err(error) => return Ok(capture_helper_error(error)),
+            Ok(None) => {
+                eprintln!("e2b_workspace_protection: stage=exclusive; code=activity_busy");
+                return Ok(SessionWorkspaceCommitOutcome::Pending);
+            }
+            Err(error) => return Ok(capture_helper_error(error, "exclusive")),
+        };
+        let profile_digest = self.profile.digest()?;
+        let expected = WorkspaceSnapshotDescriptor::from(frozen);
+        let previous = match session.take_capture_baseline(&expected, &profile_digest) {
+            Ok(previous) => previous,
+            Err(error) => return Ok(capture_helper_error(error, "capture")),
         };
         if let Err(error) = session.quiesce() {
-            return Ok(capture_helper_error(error));
+            return Ok(capture_helper_error(error, "quiesce"));
         }
         let request = SandboxSnapshotCaptureRequest {
             schema: SANDBOX_SNAPSHOT_CAPTURE_SCHEMA.into(),
             capture_id: format!("capture-{}", uuid::Uuid::new_v4()),
-            baseline: None,
+            baseline: previous
+                .as_ref()
+                .and_then(|entry| entry.baseline_for(&expected)),
         };
-        let observation = WorkspaceProtection::new().with_context(
-            ProtectionTrigger::TerminalCommit,
-            &self.agent_run_id,
-            Some(&lease.job_id),
-        );
         let output_limit = self.snapshot_limit() + CAPTURE_RESPONSE_LIMIT;
         let mut output = match observation.timed(ProtectionMetric::CaptureElapsedMs, || {
-            session.capture_snapshot(&request, output_limit)
+            session.capture_snapshot(&request, output_limit, observation)
         }) {
             Ok(output) => output,
-            Err(error) => return Ok(capture_helper_error(error)),
+            Err(error) => return Ok(capture_helper_error(error, "capture")),
         };
         if output
             .metadata()
@@ -288,9 +377,23 @@ impl E2bSessionWorkspace {
         }) {
             Ok(SnapshotCaptureResult::Snapshot(artifact)) => artifact,
             Ok(SnapshotCaptureResult::Unchanged) => {
-                return Ok(SessionWorkspaceCommitOutcome::Rejected(
-                    "e2b_workspace_capture_has_no_baseline".into(),
-                ))
+                if let Err(reason) = self
+                    .require_transfer_budget(frozen.expanded_size_bytes, input_upper_bound_bytes)
+                {
+                    return Ok(SessionWorkspaceCommitOutcome::Rejected(reason));
+                }
+                observation.count(ProtectionMetric::SpoolWrittenBytes, 0, true);
+                observation.count(
+                    ProtectionMetric::SnapshotLogicalBytes,
+                    frozen.expanded_size_bytes,
+                    true,
+                );
+                observation.count(ProtectionMetric::UploadAttempts, 0, true);
+                observation.count(ProtectionMetric::UploadedBytes, 0, true);
+                if let Err(error) = session.set_capture_baseline(previous, &profile_digest) {
+                    return Ok(capture_helper_error(error, "capture"));
+                }
+                return Ok(SessionWorkspaceCommitOutcome::Unchanged);
             }
             Err(reason) => return Ok(SessionWorkspaceCommitOutcome::Rejected(reason)),
         };
@@ -305,7 +408,17 @@ impl E2bSessionWorkspace {
             artifact.descriptor.expanded_size_bytes,
             true,
         );
-        self.api().commit_snapshot(lease, frozen, artifact)
+        let next = SnapshotCaptureCache::from_verified_snapshot(&artifact);
+        let result = self.api().commit_snapshot(lease, frozen, artifact)?;
+        if matches!(
+            result,
+            SessionWorkspaceCommitOutcome::Accepted | SessionWorkspaceCommitOutcome::Unchanged
+        ) {
+            if let Err(error) = session.set_capture_baseline(next, &profile_digest) {
+                return Ok(capture_helper_error(error, "capture"));
+            }
+        }
+        Ok(result)
     }
 }
 
@@ -319,7 +432,11 @@ fn restore_helper_error(error: E2bHostError) -> SessionWorkspaceApiError {
     }
 }
 
-fn capture_helper_error(error: E2bHostError) -> SessionWorkspaceCommitOutcome {
+fn capture_helper_error(error: E2bHostError, stage: &'static str) -> SessionWorkspaceCommitOutcome {
+    let code = match &error {
+        E2bHostError::NotDispatched(code) | E2bHostError::Unknown(code) => *code,
+    };
+    eprintln!("e2b_workspace_protection: stage={stage}; code={code}");
     match error {
         E2bHostError::NotDispatched(reason) => {
             SessionWorkspaceCommitOutcome::Rejected(reason.into())

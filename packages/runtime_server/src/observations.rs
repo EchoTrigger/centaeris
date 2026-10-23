@@ -1,4 +1,6 @@
 //! Opt-in, bounded timing records; no bodies, credentials or error messages.
+pub(crate) mod power;
+
 use std::cell::RefCell;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -21,6 +23,9 @@ thread_local! { static PROTECTION_LOG: RefCell<Option<ProtectionLog>> = const { 
 #[derive(Clone, Copy)]
 pub enum ProtectionMetric {
     SpoolWrittenBytes,
+    RawCaptureSpoolWrittenBytes,
+    SdkDownloadFrameBytes,
+    WorkspaceCommitElapsedMs,
     SnapshotLogicalBytes,
     UploadAttempts,
     UploadedBytes,
@@ -51,6 +56,9 @@ impl ProtectionMetric {
     fn name(self) -> &'static str {
         match self {
             Self::SpoolWrittenBytes => "runtimeSpoolWrittenBytes",
+            Self::RawCaptureSpoolWrittenBytes => "rawCaptureSpoolWrittenBytes",
+            Self::SdkDownloadFrameBytes => "sdkDownloadFrameBytes",
+            Self::WorkspaceCommitElapsedMs => "workspaceCommitElapsedMs",
             Self::SnapshotLogicalBytes => "snapshotLogicalBytes",
             Self::UploadAttempts => "uploadAttempts",
             Self::UploadedBytes => "uploadedBytes",
@@ -131,18 +139,43 @@ impl WorkspaceProtection {
     }
 
     fn missing(&self, metric: &'static str) {
-        if !self.enabled {
-            return;
-        }
         #[cfg(test)]
-        if let Some(log) = &self.log {
-            log.lock().unwrap().missing.push(metric);
-            return;
+        if self.enabled {
+            if let Some(log) = &self.log {
+                log.lock().unwrap().missing.push(metric);
+            }
         }
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "Workspace protection observation unavailable: {metric}"
-        );
+        self.record("runtime", metric, serde_json::Value::Null, "unavailable");
+    }
+
+    pub fn unavailable(&self, metric: ProtectionMetric) {
+        self.missing(metric.name());
+    }
+
+    /// The only accepted strings are fixed public commit dispositions.
+    pub fn workspace_commit_disposition(&self, disposition: &str) {
+        if [
+            "full",
+            "unchanged",
+            "alreadyAdvanced",
+            "pending",
+            "rejected",
+        ]
+        .contains(&disposition)
+        {
+            self.record(
+                "runtime",
+                "workspaceCommitDisposition",
+                disposition.into(),
+                if disposition == "pending" {
+                    "interrupted"
+                } else if disposition == "rejected" {
+                    "error"
+                } else {
+                    "ok"
+                },
+            );
+        }
     }
 
     fn record(&self, source: &str, metric: &str, value: serde_json::Value, outcome: &str) {
@@ -646,10 +679,18 @@ mod tests {
             operation.forward_sandbox(not_measured.to_string().as_bytes());
             operation.forward_sandbox(b"private diagnostic\n");
         });
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["source"], "sandbox");
-        assert_eq!(events[0]["value"], 41);
-        assert_eq!(events[0]["outcome"], "error");
+        let measured: Vec<_> = events
+            .iter()
+            .filter(|event| event["outcome"] != "unavailable")
+            .collect();
+        assert_eq!(measured.len(), 1);
+        assert_eq!(measured[0]["source"], "sandbox");
+        assert_eq!(measured[0]["value"], 41);
+        assert_eq!(measured[0]["outcome"], "error");
+        assert!(events
+            .iter()
+            .filter(|event| event["outcome"] == "unavailable")
+            .all(|event| event["value"].is_null()));
         assert!(!serde_json::to_string(&events).unwrap().contains("private"));
     }
 
@@ -743,5 +784,34 @@ mod tests {
         );
         assert_eq!(route("/arbitrary/private/path"), "other");
         assert_eq!(route("/agent-runs/step"), "/agent-runs/step");
+    }
+}
+
+#[cfg(test)]
+mod measurement_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn missing_guest_measurements_are_correlated_unavailable_records() {
+        let (_, events) = capture_protection(|| {
+            WorkspaceProtection::new()
+                .with_context(
+                    ProtectionTrigger::TerminalCommit,
+                    "run-measured",
+                    Some("job-measured"),
+                )
+                .forward_sandbox(b"private diagnostic must never be forwarded");
+        });
+        assert_eq!(events.len(), 2);
+        for (event, metric) in events.iter().zip(["scannedEntries", "sourceReadBytes"]) {
+            assert_eq!(event["metric"], metric);
+            assert_eq!(event["outcome"], "unavailable");
+            assert!(event["value"].is_null());
+            assert_eq!(event["runId"], "run-measured");
+            assert_eq!(event["jobId"], "job-measured");
+            assert_eq!(event["trigger"], "terminalCommit");
+            assert_eq!(event["operationId"], events[0]["operationId"]);
+        }
+        assert!(!serde_json::to_string(&events).unwrap().contains("private"));
     }
 }

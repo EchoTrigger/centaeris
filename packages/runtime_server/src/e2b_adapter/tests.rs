@@ -19,6 +19,9 @@ fn fixture(mode: &str) -> Command {
     command.arg(r#"
 import json, sys, time
 mode = sys.argv[1]
+if mode == 'diagnostics':
+    sys.stderr.write('private diagnostic '*1024+'\n')
+    sys.stderr.flush()
 if mode == 'stallInput':
     time.sleep(30)
 for line in sys.stdin:
@@ -171,4 +174,40 @@ fn invalid_local_envelopes_do_not_dispatch() {
     assert!(adapter
         .call("valid", "inspect", json!({}), Duration::from_secs(10))
         .is_ok());
+}
+
+#[test]
+fn observed_sdk_lane_preserves_ipc_and_discards_nonmeasurement_diagnostics() {
+    use crate::observations::power::{capture_power_observations, PowerObservation};
+    let (response, records) = capture_power_observations(|| {
+        let adapter = AdapterProcess::spawn_observed(
+            fixture("diagnostics"),
+            PowerObservation::new("power-transport", "pause"),
+        )
+        .unwrap();
+        adapter
+            .call("power-request", "pause", json!({}), Duration::from_secs(10))
+            .unwrap()
+    });
+    assert_eq!(response.outcome, AdapterOutcome::Succeeded);
+    assert_eq!(response.request_id, "power-request");
+    assert!(records.is_empty());
+}
+
+#[test]
+fn observed_sdk_lane_keeps_lost_ack_unknown_and_never_retries() {
+    use crate::observations::power::PowerObservation;
+    let adapter = AdapterProcess::spawn_observed(
+        fixture("exit"),
+        PowerObservation::new("power-lost", "resume"),
+    )
+    .unwrap();
+    assert!(matches!(
+        adapter.call("power-lost", "connect", json!({}), Duration::from_secs(10)),
+        Err(AdapterFailure::Unknown(_))
+    ));
+    assert_eq!(
+        adapter.call("power-lost", "connect", json!({}), Duration::from_secs(10)),
+        Err(AdapterFailure::NotDispatched("adapter_closed"))
+    );
 }

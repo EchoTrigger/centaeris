@@ -15,6 +15,7 @@ from uuid import UUID
 
 from .attach import attach_existing
 from .bulk import BulkSpool, BulkTransferError, MAX_TRANSFER_BYTES, TRANSFER_CHUNK_BYTES
+from .observations import PowerTiming
 from .control import (CONTROL_HELPERS, EXPECTED_METADATA_KEYS, WORKSPACE_ROOT, WORKSPACE_USER,
                       ControlHelperError, start_control_helper)
 
@@ -130,6 +131,7 @@ class AdapterConfig:
     idempotency_supported: bool = False
     lane: str = "ordinary"
     request_timeout_seconds: float = 30
+    power_observations: bool = False
 
     def __post_init__(self):
         if not self.api_key:
@@ -195,8 +197,10 @@ def _strings(value):
 
 
 class Adapter:
-    def __init__(self, config: AdapterConfig, *, client=None, command_stream_factory=None):
+    def __init__(self, config: AdapterConfig, *, client=None, command_stream_factory=None,
+                 timing_writer=None, timing_clock=None):
         self.config = config
+        self._power_timing = PowerTiming(config.power_observations, writer=timing_writer, clock=timing_clock)
         self._sandboxes = OrderedDict()
         self._commands = OrderedDict()
         self._spool = BulkSpool(config.spool_root) if config.spool_root is not None else None
@@ -208,16 +212,26 @@ class Adapter:
             # Each lane is a dedicated process, including its SDK connection pool.
             # A connection failure cannot silently multiply a caller's dispatches.
             os.environ["E2B_CONNECTION_RETRIES"] = "0"
-            if importlib.metadata.version("e2b") != SDK_VERSION:
-                raise ValueError("Unsupported E2B SDK version")
-            from e2b import E2B
+            with self._power_timing.startup_span("sdkImport"):
+                if importlib.metadata.version("e2b") != SDK_VERSION:
+                    raise ValueError("Unsupported E2B SDK version")
+                from e2b import E2B
 
-            client = E2B(api_key=config.api_key, domain=config.domain,
-                         api_url=config.api_url, sandbox_url=config.sandbox_url, retries=0, debug=False,
-                         request_timeout=config.request_timeout_seconds)
+            with self._power_timing.startup_span("sdkClientSetup"):
+                client = E2B(api_key=config.api_key, domain=config.domain,
+                             api_url=config.api_url, sandbox_url=config.sandbox_url, retries=0, debug=False,
+                             request_timeout=config.request_timeout_seconds)
         self.client = client
 
     def handle(self, request):
+        timing = self._power_timing.request_context(request)
+        with timing.span("sdkHandle") as span:
+            response = self._handle(request, timing)
+            if response["outcome"] != "succeeded":
+                span.outcome = "error"
+            return response
+
+    def _handle(self, request, timing):
         request_id = None
         known = {}
         transfer = None
@@ -247,7 +261,7 @@ class Adapter:
         except (RequestError, BulkTransferError, OSError, UnicodeError, TypeError) as error:
             return self._response(request_id, "notDispatched", **({"result": known} if known else {}), error={"code": getattr(error, "code", "invalidRequest"), "message": str(error) if isinstance(error, (RequestError, BulkTransferError)) else "Invalid request or unavailable private spool"})
         try:
-            result = self._execute(operation, payload, known, transfer)
+            result = self._execute(operation, payload, known, transfer, timing)
             if transfer is not None:
                 transfer.close()
                 transfer = None
@@ -273,7 +287,7 @@ class Adapter:
         allowed = {
             "ordinary": {"capabilities", "create", "connect", "attach", "inspect", "readFile", "writeFile", "uploadFile", "downloadFile", "runCommand", "waitCommand", "recoverCommand", "cancelCommand"},
             "control": {"capabilities", "inspect", "invokeControlHelper"},
-            "cleanup": {"capabilities", "inspect", "kill", "pause"},
+            "cleanup": {"capabilities", "inspect", "kill", "pause", "connect"},
         }
         if operation not in allowed[self.config.lane]:
             raise RequestError("laneForbidden", "Operation is not permitted in this adapter lane")
@@ -282,11 +296,11 @@ class Adapter:
         specs = {
             "capabilities": ((), ()),
             "create": (("attemptId", "idempotencyKey", "templateRef", "metadata", "timeoutSeconds", "allowInternetAccess", "onTimeout"), ()),
-            "connect": (("sandboxId", "timeoutSeconds", "onResume"), ()),
+            "connect": (("sandboxId", "timeoutSeconds", "onResume", "expectedTemplateId", "expectedMetadata"), ()),
             "inspect": (("sandboxId",), ()),
             "attach": (("sandboxId", "expectedTemplateId", "expectedMetadata", "workspaceRoot", "workspaceUser"), ()),
             "kill": (("sandboxId",), ()),
-            "pause": (("sandboxId", "mode"), ()),
+            "pause": (("sandboxId", "mode", "expectedTemplateId", "expectedMetadata"), ()),
             "readFile": (("sandboxId", "path"), ("user", "maxBytes")),
             "writeFile": (("sandboxId", "path", "dataBase64"), ("user",)),
             "uploadFile": (("sandboxId", "path", "transferId", "byteLength", "sha256"), ("user",)),
@@ -334,8 +348,9 @@ class Adapter:
         if operation in ("invokeControlHelper", "attach"):
             if value["workspaceRoot"] != WORKSPACE_ROOT or value["workspaceUser"] != WORKSPACE_USER:
                 raise RequestError("invalidRequest", "Fixed control helpers require the supported template workspace identity")
+        if operation in ("invokeControlHelper", "attach", "pause", "connect"):
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", _text(value["expectedTemplateId"], 128)):
-                raise RequestError("invalidRequest", "Fixed control helpers require a canonical expected template ID")
+                raise RequestError("invalidRequest", "Operation requires a canonical expected template ID")
             value["expectedMetadata"] = _strings(_object(value["expectedMetadata"], EXPECTED_METADATA_KEYS))
         if operation == "create":
             if not re.fullmatch(r"[a-z0-9-]+", _text(value["idempotencyKey"], 255)):
@@ -394,7 +409,17 @@ class Adapter:
         state = getattr(info.state, "value", info.state)
         return {"sandboxId": info.sandbox_id, "templateId": info.template_id, "metadata": info.metadata, "state": state}
 
-    def _execute(self, operation, payload, known, transfer=None):
+    def _bound_info(self, info, payload, *, running=False):
+        value = self._info(info, payload["sandboxId"])
+        # The original creation metadata remains immutable across successor Runs.
+        if (value["templateId"] != payload["expectedTemplateId"]
+                or value["metadata"] != payload["expectedMetadata"]):
+            raise RequestError("identityMismatch", "Provider identity does not match the frozen creation record")
+        if value["state"] not in (("running",) if running else ("running", "paused")):
+            raise RequestError("providerStateMismatch", "Provider state does not permit the requested operation")
+        return value
+
+    def _execute(self, operation, payload, known, transfer, timing):
         if operation == "capabilities":
             return {"sdkVersion": SDK_VERSION, "lane": self.config.lane, "createIdempotencyConfigured": self.config.idempotency_supported,
                     "readOnlyAttach": True,
@@ -431,11 +456,18 @@ class Adapter:
             return {**info, "attemptId": payload["attemptId"]}
         sandbox_id = payload["sandboxId"]
         if operation == "connect":
-            sandbox = sdk.connect(sandbox_id, timeout=payload["timeoutSeconds"], on_resume=payload["onResume"])
-            if sandbox.sandbox_id != sandbox_id:
-                raise RequestError("identityMismatch", "Provider returned a different sandbox identity")
-            provider_info = sandbox.get_info()
-            info = self._info(provider_info, sandbox_id)
+            # A failed or uncertain reconnect must not leave an older runnable
+            # handle behind. Only the fully checked reply can be remembered.
+            self._sandboxes.pop(sandbox_id, None)
+            with timing.span("sdkIdentityGet"):
+                self._bound_info(sdk.get_info(sandbox_id, retries=0), payload)
+            with timing.span("sdkConnect"):
+                sandbox = sdk.connect(sandbox_id, timeout=payload["timeoutSeconds"], on_resume=payload["onResume"], retries=0)
+                if sandbox.sandbox_id != sandbox_id:
+                    raise RequestError("identityMismatch", "Provider returned a different sandbox identity")
+            with timing.span("sdkResumeVerifyGet"):
+                provider_info = sandbox.get_info(retries=0)
+                info = self._bound_info(provider_info, payload, running=True)
             self._remember(sandbox, provider_info.envd_version)
             return info
         if operation == "inspect":
@@ -445,8 +477,11 @@ class Adapter:
             self._sandboxes.pop(sandbox_id, None)
             return {"sandboxId": sandbox_id, "deleteAcknowledged": True, "providerReportedKilled": changed}
         if operation == "pause":
-            changed = sdk.pause(sandbox_id, mode=payload["mode"])
             self._sandboxes.pop(sandbox_id, None)
+            with timing.span("sdkIdentityGet"):
+                self._bound_info(sdk.get_info(sandbox_id, retries=0), payload)
+            with timing.span("sdkPause"):
+                changed = sdk.pause(sandbox_id, mode=payload["mode"], retries=0)
             return {"sandboxId": sandbox_id, "requestedMode": payload["mode"], "changed": changed}
         connection = self._sandboxes[sandbox_id]
         sandbox = connection.sandbox

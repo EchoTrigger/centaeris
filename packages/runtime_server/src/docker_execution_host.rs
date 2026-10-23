@@ -18,15 +18,17 @@ use crate::execution_recovery_policy::{
     WorkspaceReuseEvidence,
 };
 use crate::observations::{ProtectionMetric, ProtectionTrigger, WorkspaceProtection};
+use crate::session_workspace::snapshot::capture_cache::SnapshotCaptureCache;
 #[cfg(test)]
-use crate::session_workspace::snapshot::{capture_snapshot_artifact, inspect_workspace_snapshot};
 use crate::session_workspace::snapshot::{
-    capture_snapshot_artifact_observed, copy_exact, manifest_digest, read_capture,
-    snapshot_matches_frozen_workspace, snapshot_matches_recovery_workspace,
-    ImmutableWorkspaceSnapshot, SessionWorkspaceUploadBody, SnapshotCaptureResult,
-    WorkspaceSnapshotDescriptor,
+    capture_snapshot_artifact, inspect_workspace_snapshot, manifest_digest,
+    snapshot_matches_frozen_workspace,
 };
-use snapshot_capture::SnapshotCaptureCache;
+use crate::session_workspace::snapshot::{
+    capture_snapshot_artifact_observed, copy_exact, read_capture,
+    snapshot_matches_recovery_workspace, ImmutableWorkspaceSnapshot, SessionWorkspaceUploadBody,
+    SnapshotCaptureResult, WorkspaceSnapshotDescriptor,
+};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
@@ -66,13 +68,15 @@ use centaeris_core::runtime::contracts::RecoveryWorkspaceSnapshotV1;
 #[cfg(test)]
 use hosted_execution::memory::MEMORY_CONTAINER_ROOT;
 use hosted_execution::memory::{is_memory_uri, MemoryPath};
-#[cfg(test)]
-use hosted_execution::protocol::SandboxFileSystemResult;
 use hosted_execution::protocol::{
     SandboxArtifactMetadata, SandboxArtifactRequest, SandboxFileSystemRequest,
     SandboxInputInventory, SandboxInputRevokeRequest, SandboxMaterializedInput,
-    SandboxWorkspaceGeneration, SandboxWorkspaceSnapshotFile, SandboxWorkspaceSnapshotManifest,
-    SANDBOX_INPUT_INVENTORY_SCHEMA, SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA,
+    SandboxWorkspaceGeneration, SANDBOX_INPUT_INVENTORY_SCHEMA,
+};
+#[cfg(test)]
+use hosted_execution::protocol::{
+    SandboxFileSystemResult, SandboxWorkspaceSnapshotFile, SandboxWorkspaceSnapshotManifest,
+    SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

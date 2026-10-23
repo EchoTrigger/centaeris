@@ -1,6 +1,9 @@
 //! Core execution port backed by the pinned E2B SDK transport.
 //! Command receipts are runner-local observations, never durable replay authority.
 use crate::agent_run_authorization::{EnvironmentProfile, ExecutionNetwork};
+use crate::execution_recovery_policy::{DispatchActivityGuard, ExecutionActivityWitness};
+use crate::observations::{ProtectionMetric, WorkspaceProtection};
+use crate::session_workspace::snapshot::capture_cache::SnapshotCaptureCache;
 use centaeris_core::execution::*;
 use hosted_execution::host_supervisor::TrustedHelperKind;
 use sha2::{Digest, Sha256};
@@ -13,7 +16,8 @@ use std::time::Duration;
 pub(crate) mod authority;
 pub(crate) mod sdk_transport;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
+mod workspace_port;
 
 const MAX_COMMAND_EVIDENCE: usize = 128;
 const COMMAND_OUTPUT_LIMIT: usize = 64 * 1024;
@@ -58,6 +62,19 @@ pub(crate) trait E2bHostTransport: Send + Sync {
         input: &[u8],
         output_limit: usize,
     ) -> Result<Vec<u8>, E2bHostError>;
+    fn helper_observed(
+        &self,
+        binding: &E2bSandboxBinding,
+        kind: TrustedHelperKind,
+        input: &[u8],
+        output_limit: usize,
+        observation: &WorkspaceProtection,
+    ) -> Result<Vec<u8>, E2bHostError> {
+        let result = self.helper(binding, kind, input, output_limit);
+        observation.forward_sandbox(&[]);
+        observation.unavailable(ProtectionMetric::SdkDownloadFrameBytes);
+        result
+    }
     fn start(
         &self,
         binding: &E2bSandboxBinding,
@@ -101,14 +118,22 @@ enum CommandState {
     Unknown,
 }
 
+// One physical environment outlives individual Run handles. Its uncertainty and
+// capture evidence must not be reset when a successor receives fresh authority.
+struct E2bEnvironmentState {
+    activity: ExecutionActivityWitness,
+    unknown_helper_effects: AtomicBool,
+    snapshot_capture_cache: Mutex<Option<SnapshotCaptureCache>>,
+}
+
 pub(crate) struct E2bExecutionHostRunner {
     profile: EnvironmentProfile,
     binding: E2bSandboxBinding,
     policy: ExecutionPolicy,
+    environment: Arc<E2bEnvironmentState>,
     transport: Arc<dyn E2bHostTransport>,
     authority: Arc<dyn E2bDispatchAuthority>,
     commands: Mutex<HashMap<String, Arc<CommandRecord>>>,
-    unknown_helper_effects: AtomicBool,
 }
 
 impl E2bExecutionHostRunner {
@@ -122,7 +147,7 @@ impl E2bExecutionHostRunner {
         let EnvironmentProfile::E2b(value) = &profile else {
             return Err("e2b_host_profile_unsupported".into());
         };
-        if value.lifetime != "perRun"
+        if !matches!(value.lifetime.as_str(), "perRun" | "retained")
             || value.workspace_root != "/mnt/data"
             || value.user != "agent"
             || value.template_ref.template_id != binding.template_id
@@ -166,19 +191,155 @@ impl E2bExecutionHostRunner {
         policy.filesystem.denied_read_paths =
             vec!["/run/centaeris".into(), "/run/centaeris-host".into()];
         policy.filesystem.denied_write_paths = policy.filesystem.denied_read_paths.clone();
+        // This registry shares activity only inside this Runtime process. A
+        // replacement process must rely on the factory's conservative recovery.
+        let activity = ExecutionActivityWitness::for_execution(
+            uuid::Uuid::new_v4().as_u128() as u64,
+            &format!(
+                "e2b:{}:{}",
+                binding.sandbox_id, binding.metadata["executionId"]
+            ),
+        )
+        .map_err(|_| "e2b_activity_unavailable")?;
         Ok(Self {
             profile,
             binding,
             policy,
+            environment: Arc::new(E2bEnvironmentState {
+                activity,
+                unknown_helper_effects: AtomicBool::new(false),
+                snapshot_capture_cache: Mutex::new(None),
+            }),
             transport,
             authority,
             commands: Mutex::new(HashMap::new()),
-            unknown_helper_effects: AtomicBool::new(false),
         })
     }
 
+    /// A successor receives an independent Run authority and command history.
+    /// The caller must already hold the current Environment binding; this does
+    /// not authorize transfer or change any immutable provider provenance.
+    pub(crate) fn successor(
+        &self,
+        authority: Arc<dyn E2bDispatchAuthority>,
+    ) -> Result<Self, String> {
+        let Some(_exclusive) =
+            crate::e2b_session_workspace::WorkspaceHelperPort::try_exclusive(self)
+                .map_err(|_| "e2b_successor_environment_unavailable")?
+        else {
+            return Err("e2b_successor_environment_busy".into());
+        };
+        self.require_closed_commands()
+            .map_err(|_| "e2b_successor_commands_unresolved")?;
+        Ok(Self {
+            profile: self.profile.clone(),
+            binding: self.binding.clone(),
+            policy: self.policy.clone(),
+            environment: self.environment.clone(),
+            transport: self.transport.clone(),
+            authority,
+            commands: Mutex::new(HashMap::new()),
+        })
+    }
+
+    fn require_closed_commands(&self) -> Result<(), E2bHostError> {
+        let records = self
+            .commands
+            .lock()
+            .map_err(|_| E2bHostError::Unknown("e2b_command_evidence_unavailable"))?;
+        for record in records.values() {
+            // A command can own its record while waiting for activity. Never
+            // wait on it while holding the Environment's exclusive guard.
+            let state = record
+                .state
+                .try_lock()
+                .map_err(|_| E2bHostError::NotDispatched("e2b_run_commands_unresolved"))?;
+            if !matches!(
+                &*state,
+                CommandState::Completed(_) | CommandState::NotDispatched(_)
+            ) {
+                return Err(E2bHostError::NotDispatched("e2b_run_commands_unresolved"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Call only inside the Store's current Cleanup-authority callback, with
+    /// its controller, Job and exact provider-target pins still held. This
+    /// deliberately does not revive the Run's expired Execute authority.
+    /// Success proves closed local command evidence and zero observed agent-UID
+    /// processes, not arbitrary task-tree cleanup or Environment retirement.
+    pub(crate) fn confirm_run_quiescence_under_cleanup_pins(
+        &self,
+        expected_instance_id: &str,
+        expected_sandbox_id: &str,
+    ) -> Result<(), E2bHostError> {
+        if self.binding.metadata.get("instanceId").map(String::as_str) != Some(expected_instance_id)
+            || self.binding.sandbox_id != expected_sandbox_id
+        {
+            return Err(E2bHostError::NotDispatched("e2b_cleanup_target_rejected"));
+        }
+        let Some(_exclusive) =
+            crate::e2b_session_workspace::WorkspaceHelperPort::try_exclusive(self)?
+        else {
+            return Err(E2bHostError::NotDispatched("e2b_cleanup_environment_busy"));
+        };
+        self.require_closed_commands()?;
+        let result = (|| {
+            self.transport.quiesce(&self.binding)?;
+            let output = self.transport.helper(
+                &self.binding,
+                TrustedHelperKind::AgentProcessState,
+                &[],
+                1024 * 1024,
+            )?;
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+            struct State {
+                active_process_count: u64,
+            }
+            let state: State = serde_json::from_slice(&output)
+                .map_err(|_| E2bHostError::Unknown("e2b_cleanup_process_state_invalid"))?;
+            if state.active_process_count != 0 {
+                return Err(E2bHostError::Unknown("e2b_cleanup_quiescence_unconfirmed"));
+            }
+            Ok(())
+        })();
+        if matches!(result, Err(E2bHostError::Unknown(_))) {
+            self.latch_unknown_helper_effects();
+        }
+        result
+    }
+
+    fn latch_unknown_helper_effects(&self) {
+        self.environment
+            .unknown_helper_effects
+            .store(true, Ordering::Release);
+        if let Ok(mut cache) = self.environment.snapshot_capture_cache.lock() {
+            cache.take();
+        }
+    }
+
     pub(crate) fn helper_effects_known(&self) -> bool {
-        !self.unknown_helper_effects.load(Ordering::Acquire)
+        !self
+            .environment
+            .unknown_helper_effects
+            .load(Ordering::Acquire)
+    }
+
+    pub(crate) fn prepare_workspace(&self) -> Result<(), E2bHostError> {
+        // Keep dispatch activity through semantic validation, so an uncertain
+        // response cannot become an idle workspace observation in between.
+        let _activity = self.begin_activity()?;
+        let output =
+            self.invoke_authorized_helper(TrustedHelperKind::PrepareWorkspace, &[], 1024)?;
+        if !output.is_empty() {
+            self.latch_unknown_helper_effects();
+            return Err(E2bHostError::Unknown(
+                "e2b_workspace_preparation_output_invalid",
+            ));
+        }
+        Ok(())
     }
     pub(crate) fn execution_policy(&self) -> ExecutionPolicy {
         self.policy.clone()
@@ -186,6 +347,7 @@ impl E2bExecutionHostRunner {
     pub(crate) fn workspace_root(&self) -> &str {
         self.profile.workspace_root()
     }
+    #[cfg(test)]
     pub(crate) fn execution_id(&self) -> &str {
         &self.binding.metadata["executionId"]
     }
@@ -200,6 +362,13 @@ impl E2bExecutionHostRunner {
             });
         }
         Ok(())
+    }
+
+    fn begin_activity(&self) -> Result<DispatchActivityGuard, E2bHostError> {
+        self.environment
+            .activity
+            .begin_dispatch_activity()
+            .map_err(|_| E2bHostError::NotDispatched("e2b_activity_unavailable"))
     }
 
     fn dispatch(
@@ -222,6 +391,30 @@ impl E2bExecutionHostRunner {
         input: &[u8],
         output_limit: usize,
     ) -> Result<Vec<u8>, E2bHostError> {
+        // Retain the activity guard until the result and uncertainty latch have
+        // both been committed in this runner.
+        let _activity = self.begin_activity()?;
+        self.invoke_authorized_helper(kind, input, output_limit)
+    }
+
+    /// The caller owns either ordinary dispatch activity or an exclusive
+    /// workspace guard. Current DB authority is still checked for every helper.
+    fn invoke_authorized_helper(
+        &self,
+        kind: TrustedHelperKind,
+        input: &[u8],
+        output_limit: usize,
+    ) -> Result<Vec<u8>, E2bHostError> {
+        self.invoke_authorized_helper_observed(kind, input, output_limit, None)
+    }
+
+    fn invoke_authorized_helper_observed(
+        &self,
+        kind: TrustedHelperKind,
+        input: &[u8],
+        output_limit: usize,
+        observation: Option<&WorkspaceProtection>,
+    ) -> Result<Vec<u8>, E2bHostError> {
         if !self.helper_effects_known()
             && !matches!(
                 kind,
@@ -236,20 +429,43 @@ impl E2bExecutionHostRunner {
         {
             return Err(E2bHostError::NotDispatched("e2b_helper_budget_invalid"));
         }
+        if matches!(
+            kind,
+            TrustedHelperKind::PrepareWorkspace
+                | TrustedHelperKind::FileSystem
+                | TrustedHelperKind::MaterializeInput
+                | TrustedHelperKind::RevokeInput
+                | TrustedHelperKind::SnapshotRestore
+        ) {
+            self.environment
+                .activity
+                .invalidate_before_dispatch()
+                .map_err(|_| E2bHostError::NotDispatched("e2b_activity_unavailable"))?;
+        }
         let result = self.dispatch(|| {
-            self.transport
-                .helper(&self.binding, kind, input, output_limit)
-                .map(E2bDispatchResult::Helper)
+            match observation {
+                Some(observation) => self.transport.helper_observed(
+                    &self.binding,
+                    kind,
+                    input,
+                    output_limit,
+                    observation,
+                ),
+                None => self
+                    .transport
+                    .helper(&self.binding, kind, input, output_limit),
+            }
+            .map(E2bDispatchResult::Helper)
         });
         match result {
             Ok(E2bDispatchResult::Helper(bytes)) if bytes.len() <= output_limit => Ok(bytes),
             Err(error @ E2bHostError::NotDispatched(_)) => Err(error),
             Err(error @ E2bHostError::Unknown(_)) => {
-                self.unknown_helper_effects.store(true, Ordering::Release);
+                self.latch_unknown_helper_effects();
                 Err(error)
             }
             _ => {
-                self.unknown_helper_effects.store(true, Ordering::Release);
+                self.latch_unknown_helper_effects();
                 Err(E2bHostError::Unknown("e2b_helper_result_invalid"))
             }
         }
@@ -431,6 +647,12 @@ impl ExecutionHostRunner for E2bExecutionHostRunner {
     }
     fn status(&self, policy: &ExecutionPolicy) -> Result<ExecutionHostStatus, ExecutionError> {
         self.validate_policy(policy)?;
+        if !self.helper_effects_known() {
+            return Err(unavailable("e2b_prior_helper_effects_unknown"));
+        }
+        let _activity = self
+            .begin_activity()
+            .map_err(|_| unavailable("e2b_activity_unavailable"))?;
         let observed = match self.dispatch(|| {
             self.transport
                 .inspect(&self.binding)
@@ -439,6 +661,9 @@ impl ExecutionHostRunner for E2bExecutionHostRunner {
             Ok(E2bDispatchResult::Observation(observed)) => observed,
             _ => return Err(unavailable("e2b_host_inspect_unavailable")),
         };
+        if !self.helper_effects_known() {
+            return Err(unavailable("e2b_prior_helper_effects_unknown"));
+        }
         if observed.binding != self.binding
             || !observed.running
             || !observed.on_timeout_kill
@@ -502,6 +727,10 @@ impl ExecutionHostRunner for E2bExecutionHostRunner {
             }
             CommandState::Prepared | CommandState::NotDispatched(_) => (),
         }
+        if !self.helper_effects_known() {
+            *state = CommandState::NotDispatched("e2b_prior_helper_effects_unknown");
+            return Err(unavailable("e2b_prior_helper_effects_unknown"));
+        }
         if let Some(probe) = probe {
             match probe() {
                 Ok(None) => (),
@@ -517,7 +746,23 @@ impl ExecutionHostRunner for E2bExecutionHostRunner {
                 }
             }
         }
+        // Activity spans Start, the original stream wait and the final local
+        // receipt. Snapshot admission cannot treat a blocked waiter as idle.
+        let _activity = self
+            .begin_activity()
+            .map_err(|_| unavailable("e2b_activity_unavailable"))?;
+        self.environment
+            .activity
+            .invalidate_before_dispatch()
+            .map_err(|_| unavailable("e2b_activity_unavailable"))?;
         let started = self.dispatch(|| {
+            // Authority acquisition can wait. Recheck the runner-local latch
+            // at the actual send boundary, while the current grant is pinned.
+            if !self.helper_effects_known() {
+                return Err(E2bHostError::NotDispatched(
+                    "e2b_prior_helper_effects_unknown",
+                ));
+            }
             self.transport
                 .start(&self.binding, &request)
                 .map(E2bDispatchResult::Process)

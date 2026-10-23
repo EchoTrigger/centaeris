@@ -13,7 +13,8 @@ def main():
         config = AdapterConfig(api_key=os.environ.get("E2B_API_KEY", ""), domain=os.environ.get("E2B_DOMAIN"),
                                api_url=os.environ.get("E2B_API_URL"), sandbox_url=os.environ.get("E2B_SANDBOX_URL"),
                                spool_root=os.environ.get("E2B_ADAPTER_SPOOL_ROOT"),
-                               idempotency_supported=os.environ.get("E2B_ADAPTER_IDEMPOTENCY_SUPPORTED") == "true", lane=args.lane)
+                               idempotency_supported=os.environ.get("E2B_ADAPTER_IDEMPOTENCY_SUPPORTED") == "true", lane=args.lane,
+                               power_observations=os.environ.get("CENTAERIS_E2B_POWER_OBSERVATIONS") == "1")
         adapter = Adapter(config)
     except Exception:
         print("E2B adapter startup failed: invalid configuration or unavailable pinned SDK", file=sys.stderr)

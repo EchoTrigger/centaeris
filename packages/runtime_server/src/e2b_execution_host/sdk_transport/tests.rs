@@ -3,6 +3,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn process(log: &Path, frame: &[u8]) -> Arc<SpoolingAdapterProcess> {
+    process_with_capture_outcome(log, frame, "default")
+}
+fn process_with_capture_outcome(
+    log: &Path,
+    frame: &[u8],
+    mode: &str,
+) -> Arc<SpoolingAdapterProcess> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let python = std::env::var_os("E2B_ADAPTER_TEST_PYTHON")
         .map(PathBuf::from)
@@ -17,26 +24,38 @@ fn process(log: &Path, frame: &[u8]) -> Arc<SpoolingAdapterProcess> {
     command.args(["-u","-c"]).arg(r#"
 import base64,hashlib,json,os,sys
 from pathlib import Path
-root=Path(os.environ['E2B_ADAPTER_SPOOL_ROOT']); log=Path(sys.argv[1]); output=bytes.fromhex(sys.argv[2]); pid=100
+root=Path(os.environ['E2B_ADAPTER_SPOOL_ROOT']); log=Path(sys.argv[1]); output=bytes.fromhex(sys.argv[2]); pid=100; contexts={}; mode=sys.argv[3]
 for line in sys.stdin:
  request=json.loads(line); p=request['payload']; op=request['operation']
  with log.open('a',encoding='utf-8') as stream:stream.write(json.dumps(request)+'\n')
  if op=='runCommand':
-  pid+=1;result={'sandboxId':p['sandboxId'],'pid':pid}
+  pid+=1;contexts[pid]=p.get('envs',{});result={'sandboxId':p['sandboxId'],'pid':pid}
  elif op in ('waitCommand','invokeControlHelper'):
   data=b'{"activeProcessCount":0}' if op=='invokeControlHelper' and p['helper']=='agent-process-state' else b''
   result={'sandboxId':p['sandboxId'],'pid':p.get('pid',999),'exitCode':0,'stdout':data.decode(),'stderr':'','stdoutBytesBase64':base64.b64encode(data).decode(),'stderrBytesBase64':'','stdoutByteLength':len(data),'stderrByteLength':0}
   if op=='invokeControlHelper':result['helper']=p['helper']
+  env=contexts.get(p.get('pid'),{})
+  if env.get('WORKSPACE_PERF_OBSERVATIONS')=='1' and mode!='default':
+   stderr=b'private diagnostic and credential must never be forwarded\n'
+   for metric,value in [('scannedEntries',2),('sourceReadBytes',51)]:
+    event={'schema':'workspace.perf.v1','source':'sandbox','phase':'workspaceProtection','operationId':env['WORKSPACE_PERF_OPERATION_ID'],'metric':metric,'value':value,'outcome':'error' if mode=='helperError' else 'ok'}
+    stderr+=json.dumps(event).encode()+b'\n'
+   event['message']='private injected field'; stderr+=json.dumps(event).encode()+b'\n'
+   result.update({'stderrBytesBase64':base64.b64encode(stderr).decode(),'stderrByteLength':len(stderr),'exitCode':7 if mode=='helperError' else 0})
  elif op=='uploadFile':
   data=(root/(p['transferId']+'.upload')).read_bytes()
   assert hashlib.sha256(data).hexdigest()==p['sha256'] and len(data)==p['byteLength']
   result={'sandboxId':p['sandboxId'],'transferId':p['transferId'],'byteLength':len(data),'sha256':hashlib.sha256(data).hexdigest()}
  elif op=='downloadFile':
+  if mode=='partialDownload':
+   with (root/(p['transferId']+'.download')).open('xb') as stream:stream.write(b'partial')
+   print(json.dumps({'schema':'runtime.e2b.adapter.response.v1','requestId':request['requestId'],'outcome':'unknown','errorCode':'unknown'}),flush=True)
+   continue
   with (root/(p['transferId']+'.download')).open('xb') as stream:stream.write(output)
   result={'sandboxId':p['sandboxId'],'transferId':p['transferId'],'byteLength':len(output),'sha256':hashlib.sha256(output).hexdigest()}
  else:raise AssertionError('unexpected operation')
  print(json.dumps({'schema':'runtime.e2b.adapter.response.v1','requestId':request['requestId'],'outcome':'succeeded','result':result}),flush=True)
-"#).arg(log).arg(frame.iter().map(|b|format!("{b:02x}")).collect::<String>());
+"#).arg(log).arg(frame.iter().map(|b|format!("{b:02x}")).collect::<String>()).arg(mode);
     Arc::new(SpoolingAdapterProcess::spawn(command).unwrap())
 }
 fn requests(log: &Path) -> Vec<Value> {
@@ -96,8 +115,9 @@ fn helper_frame_uses_private_bulk_staging_and_fixed_executable_then_exact_cleanu
         .as_str()
         .unwrap()
         .contains("'/opt/centaeris/bin/execution_agent' 'filesystem-once'"));
-    assert!(helper["command"].as_str().unwrap().contains("ulimit -f"));
     assert_eq!(helper["envs"]["CENTAERIS_WORKSPACE_USER"], "10001:10001");
+    assert!(helper["envs"].get("WORKSPACE_PERF_OBSERVATIONS").is_none());
+    assert!(helper["envs"].get("WORKSPACE_PERF_OPERATION_ID").is_none());
     assert_eq!(seen[5]["payload"]["path"], format!("{directory}/response"));
     assert_eq!(seen[5]["payload"]["maxBytes"], 1024);
     let cleanup = seen[6]["payload"]["command"].as_str().unwrap();
@@ -194,4 +214,289 @@ fn helper_budget_and_long_lived_helper_are_rejected_before_any_request() {
     ));
     assert!(!log.exists());
     assert!(!control_log.exists());
+}
+
+#[test]
+fn filesystem_helper_keeps_private_frames_but_runs_as_workload_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("ordinary.jsonl");
+    let transport = E2bSdkTransport::new(
+        process(&log, b"result"),
+        process(&temp.path().join("control.jsonl"), b""),
+    );
+    transport
+        .helper(&binding(), TrustedHelperKind::FileSystem, b"input", 1024)
+        .unwrap();
+    let seen = requests(&log);
+    let helper = &seen[3]["payload"];
+    assert_eq!(
+        helper["user"], "root",
+        "the SDK broker must open the root-private frame descriptors"
+    );
+    let command = helper["command"].as_str().unwrap();
+    assert!(command.contains("exec '/usr/bin/setpriv' '--reuid=10001' '--regid=10001' '--clear-groups' '--' '/opt/centaeris/bin/execution_agent' 'filesystem-once'"), "the dispatched filesystem helper must drop to the frozen workload UID before processing the frame");
+    assert_eq!(seen[2]["payload"]["user"], "root");
+    assert_eq!(seen[5]["payload"]["user"], "root");
+}
+
+#[test]
+fn observed_capture_propagates_operation_context_to_the_dispatched_guest_helper() {
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("ordinary.jsonl");
+    let transport = E2bSdkTransport::new(
+        process(&log, b"capture-frame"),
+        process(&temp.path().join("control.jsonl"), b""),
+    );
+    let (id, events) = crate::observations::capture_protection(|| {
+        let observation = WorkspaceProtection::new().with_context(
+            crate::observations::ProtectionTrigger::TerminalCommit,
+            "run-a",
+            Some("job-a"),
+        );
+        assert_eq!(
+            transport
+                .helper_observed(
+                    &binding(),
+                    TrustedHelperKind::SnapshotCapture,
+                    b"request",
+                    1024,
+                    &observation
+                )
+                .unwrap(),
+            b"capture-frame"
+        );
+        observation.operation_id().to_owned()
+    });
+    let seen = requests(&log);
+    assert_eq!(seen.len(), 8, "observations add no SDK roundtrip");
+    assert_eq!(
+        seen[3]["payload"]["envs"]["WORKSPACE_PERF_OBSERVATIONS"],
+        "1"
+    );
+    assert_eq!(
+        seen[3]["payload"]["envs"]["WORKSPACE_PERF_OPERATION_ID"],
+        id
+    );
+    assert!(seen[0]["payload"]["envs"]
+        .get("WORKSPACE_PERF_OPERATION_ID")
+        .is_none());
+    let count = events
+        .iter()
+        .find(|e| e["metric"] == "sdkDownloadFrameBytes")
+        .unwrap();
+    assert_eq!(count["value"], 13);
+    assert_eq!(count["outcome"], "ok");
+    assert!(events
+        .iter()
+        .all(|e| e["operationId"] == id && e["runId"] == "run-a" && e["jobId"] == "job-a"));
+}
+
+#[test]
+fn observed_capture_forwards_only_valid_numeric_guest_records_even_on_helper_failure() {
+    for mode in ["guestSuccess", "helperError", "partialDownload"] {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("ordinary.jsonl");
+        let transport = E2bSdkTransport::new(
+            process_with_capture_outcome(&log, b"capture-frame", mode),
+            process(&temp.path().join("control.jsonl"), b""),
+        );
+        let (result, events) = crate::observations::capture_protection(|| {
+            let observation = WorkspaceProtection::new().with_context(
+                crate::observations::ProtectionTrigger::TerminalCommit,
+                "run-capture",
+                Some("job-capture"),
+            );
+            transport.helper_observed(
+                &binding(),
+                TrustedHelperKind::SnapshotCapture,
+                b"request",
+                1024,
+                &observation,
+            )
+        });
+        if mode == "guestSuccess" {
+            assert_eq!(result.unwrap(), b"capture-frame");
+        } else {
+            assert!(matches!(
+                result,
+                Err(E2bHostError::Unknown(
+                    "e2b_helper_process_failed" | "e2b_helper_output_staging_unconfirmed"
+                ))
+            ));
+        }
+        for (metric, value) in [("sourceReadBytes", 51), ("scannedEntries", 2)] {
+            let counters: Vec<_> = events.iter().filter(|e| e["metric"] == metric).collect();
+            assert_eq!(counters.len(), 1);
+            assert_eq!(counters[0]["source"], "sandbox");
+            assert_eq!(counters[0]["value"], value);
+            assert_eq!(
+                counters[0]["outcome"],
+                if mode == "helperError" { "error" } else { "ok" }
+            );
+        }
+        let download = events
+            .iter()
+            .find(|e| e["metric"] == "sdkDownloadFrameBytes")
+            .unwrap();
+        if mode == "guestSuccess" {
+            assert_eq!(download["value"], 13);
+        } else {
+            assert_eq!(download["outcome"], "unavailable");
+            assert!(download["value"].is_null());
+        }
+        assert!(events
+            .iter()
+            .all(|e| e["runId"] == "run-capture" && e["jobId"] == "job-capture"));
+        assert!(!serde_json::to_string(&events).unwrap().contains("private"));
+        let seen = requests(&log);
+        assert_eq!(
+            seen.len(),
+            if mode == "guestSuccess" {
+                8
+            } else if mode == "helperError" {
+                5
+            } else {
+                6
+            }
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct NativeHelperWrapper {
+    _root: tempfile::TempDir,
+    command: String,
+    response: PathBuf,
+    workspace_file: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+impl NativeHelperWrapper {
+    fn run(&self) -> std::process::Output {
+        Command::new("/bin/bash")
+            .args(["-c", &self.command])
+            .env("CENTAERIS_TEST_WORKSPACE_FILE", &self.workspace_file)
+            .output()
+            .unwrap()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn native_restore_wrapper(output_limit: usize, helper_body: &str) -> NativeHelperWrapper {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let log = root.path().join("ordinary.jsonl");
+    let transport = E2bSdkTransport::new(
+        process(&log, b""),
+        process(&root.path().join("control.jsonl"), b""),
+    );
+    transport
+        .helper(
+            &binding(),
+            TrustedHelperKind::SnapshotRestore,
+            b"fixture request",
+            output_limit,
+        )
+        .unwrap();
+    let seen = requests(&log);
+    let remote_request = seen[2]["payload"]["path"].as_str().unwrap();
+    let remote_response = seen[5]["payload"]["path"].as_str().unwrap();
+    let request = root.path().join("request");
+    let response = root.path().join("response");
+    let workspace_file = root.path().join("restored-workspace-file");
+    let helper = root.path().join("fixture-helper");
+    std::fs::write(&request, b"fixture request").unwrap();
+    std::fs::write(
+        &helper,
+        format!(
+            "#!/bin/bash\nset -e\n[[ \"$1\" == snapshot-restore ]] || exit 23\n{helper_body}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    // Exercise the command sent by the real transport; only its fixed helper
+    // and generated private frame paths are redirected into this owned fixture.
+    let command = seen[3]["payload"]["command"]
+        .as_str()
+        .unwrap()
+        .replace(&quote(HELPER_PATH), &quote(helper.to_str().unwrap()))
+        .replace(&quote(remote_request), &quote(request.to_str().unwrap()))
+        .replace(&quote(remote_response), &quote(response.to_str().unwrap()));
+    NativeHelperWrapper {
+        _root: root,
+        command,
+        response,
+        workspace_file,
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn restore_wrapper_limits_stdout_without_limiting_restored_workspace_files() {
+    let wrapper = native_restore_wrapper(
+        1024 * 1024,
+        "printf '%*s' 8388608 '' > \"$CENTAERIS_TEST_WORKSPACE_FILE\"\nprintf 'restored'",
+    );
+    let result = wrapper.run();
+    assert!(
+        result.status.success(),
+        "a bounded restore receipt must not impose its limit on workspace writes: status={:?}, stderr={}",
+        result.status,
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        std::fs::metadata(&wrapper.workspace_file).unwrap().len(),
+        8 * 1024 * 1024
+    );
+    assert_eq!(std::fs::read(&wrapper.response).unwrap(), b"restored");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn restore_wrapper_rejects_stdout_overflow_with_a_bounded_response_file() {
+    let output_limit = 1031;
+    let wrapper = native_restore_wrapper(output_limit, "printf '%*s' 8192 ''");
+    let result = wrapper.run();
+    assert!(
+        !result.status.success(),
+        "an oversized helper result must not be accepted"
+    );
+    assert!(
+        std::fs::metadata(&wrapper.response).unwrap().len() <= output_limit as u64 + 1,
+        "the response sink may retain at most one overflow-detection byte"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn restore_wrapper_accepts_stdout_at_the_exact_requested_budget() {
+    let output_limit = 1031;
+    let wrapper = native_restore_wrapper(output_limit, "printf '%*s' 1031 ''");
+    let result = wrapper.run();
+    assert!(
+        result.status.success(),
+        "a complete helper result at the exact byte limit must remain valid"
+    );
+    assert_eq!(
+        std::fs::read(&wrapper.response).unwrap(),
+        vec![b' '; output_limit]
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn restore_wrapper_preserves_nonzero_helper_exit_after_small_output() {
+    let wrapper = native_restore_wrapper(1024, "printf 'plausible-but-failed'\nexit 7");
+    let result = wrapper.run();
+    assert_eq!(
+        result.status.code(),
+        Some(7),
+        "collecting bounded stdout must not turn helper failure into success"
+    );
+    assert_eq!(
+        std::fs::read(&wrapper.response).unwrap(),
+        b"plausible-but-failed"
+    );
 }
