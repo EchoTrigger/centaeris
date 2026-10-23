@@ -10,6 +10,8 @@ import { AgentInputComposer } from "../agent-chat/AgentInputComposer";
 import { AgentFilePreview } from "../agent-chat/AgentPreviewContent";
 import { AgentOverviewPanel } from "../agent-chat/AgentOverviewPanel";
 import { useAgentWorkSessions } from "../agent-chat/useAgentWorkSessions";
+import { useAgentPresentation } from "../agent-chat/useAgentPresentation";
+import { useRevisionRefresh } from "../chat/useRevisionRefresh";
 import { AgentPreviewPanel } from "../agent-chat/AgentPreviewPanel";
 import { parsePreparedAgentInputPage } from "../agent-chat/preparedAgentInput";
 import { AgentSessionPreviewShell } from "../agent-chat/AgentSessionPreviewShell";
@@ -58,6 +60,7 @@ export function AgentChatPageContent({ agentId }: Readonly<{ agentId: string }>)
     return () => observer.disconnect();
   }, []);
   const pageBusyRef = useRef(false);
+  const pageCompletionRef = useRef(Promise.resolve());
   const failedRequestRef = useRef<HistoryRequest | null>(null);
   const scrollUpdateRef = useRef<{ items: readonly AgentHistoryItem[]; replace: boolean; older: boolean; top: number; messageHeight: number; following: boolean; followingTop: number } | null>(null);
   const finalFollowTopRef = useRef<number | null>(null);
@@ -74,26 +77,30 @@ export function AgentChatPageContent({ agentId }: Readonly<{ agentId: string }>)
     sessionsRef.current = new Map(); setSessions(sessionsRef.current);
     setSelection(null); setPanelOpen(false); setReferenceError(false);
   }, []);
-  const works = useAgentWorkSessions(agentId, workspace.id, panelOpen && selection === null, clearAuthority);
+  const presentation = useAgentPresentation(workspace.id, agentId, clearAuthority);
+  const works = useAgentWorkSessions(agentId, workspace.id, panelOpen && selection === null, clearAuthority, presentation.workRevision);
   clearWorksRef.current = works.reset;
   workSessionsRef.current = new Map(works.sessions.map(session => [session.sessionId, session]));
   const allSessions = new Map(sessions);
   for (const session of works.sessions) allSessions.set(session.sessionId, { ...session, runState: sessions.get(session.sessionId)?.runState ?? session.runState });
   allSessionsRef.current = allSessions;
-  const loadPage = useCallback(async (afterCursor: string | null, replace = false, direction: "older" | "newer" = "newer") => {
+  const loadPage = useCallback(async (afterCursor: string | null, replace = false, direction: "older" | "newer" = "newer", refreshSignal?: AbortSignal) => {
     if (pageBusyRef.current) return;
     pageBusyRef.current = true;
+    let complete!: () => void;
+    pageCompletionRef.current = new Promise<void>(resolve => { complete = resolve; });
     const older = replace || direction === "older";
     failedRequestRef.current = null; finalFollowTopRef.current = null;
     requestRef.current?.abort();
     const controller = new AbortController(); requestRef.current = controller;
-    const signal = controller.signal;
+    const signal = refreshSignal ? AbortSignal.any([controller.signal, refreshSignal]) : controller.signal;
     const scrollStart = repliesRef.current;
     const followingAtStart = scrollStart ? { top: scrollStart.scrollTop, following: scrollStart.scrollHeight - scrollStart.clientHeight - scrollStart.scrollTop <= 24 } : null;
     setFeed(previous => ({ ...previous, loading: true, error: false }));
     try {
       const value = await apiJson<unknown>(agentHistoryPath(agentId, afterCursor, 50, older ? "older" : "newer"), { signal });
       const page = parseAgentHistoryPage(value, agentId, afterCursor, replace ? undefined : feedRef.current.sessionId, 50, older ? "older" : "newer");
+      if (!older && page.hasMore && (page.newestCursor === null || page.newestCursor === afterCursor)) throw new Error("agent_history_cursor_did_not_advance");
       if (signal.aborted) return;
       const previous = feedRef.current;
       const items = replace ? page.items : older ? prependAgentHistory(previous.items, page.items) : mergeAgentHistory(previous.items, page.items);
@@ -162,7 +169,7 @@ export function AgentChatPageContent({ agentId }: Readonly<{ agentId: string }>)
           } catch { if (!signal.aborted) setReferenceError(true); }
         }
       }));
-      if (!signal.aborted) setFeed(previous => ({ ...previous, loading: false }));
+      if (!signal.aborted) { setFeed(previous => ({ ...previous, loading: false })); return nextFeed.newerHasMore; }
     } catch (error) {
       if (signal.aborted) return;
       if (error instanceof ApiError && [401, 403, 404].includes(error.status)) clearAuthority();
@@ -170,21 +177,24 @@ export function AgentChatPageContent({ agentId }: Readonly<{ agentId: string }>)
         failedRequestRef.current = { cursor: afterCursor, replace, direction };
         setFeed(previous => ({ ...previous, loading: false, error: true }));
       }
-    } finally { if (requestRef.current === controller) pageBusyRef.current = false; }
+    } finally { if (requestRef.current === controller) pageBusyRef.current = false; complete(); }
   }, [agentId, workspace.id, clearAuthority]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Changing the owner invalidates authorized cached history before the revision-triggered request.
   useEffect(() => {
     pageBusyRef.current = false; failedRequestRef.current = null; scrollUpdateRef.current = null; finalFollowTopRef.current = null;
     feedRef.current = emptyFeed; sessionsRef.current = new Map();
     fileRequestRef.current?.abort(); filePreviewRef.current = null; setFilePreview(null); setFileError(false);
     setFeed(emptyFeed); setSessions(new Map()); setSelection(null); setPanelOpen(false);
-    void loadPage(null, true);
     return () => { requestRef.current?.abort(); fileRequestRef.current?.abort(); };
-  }, [loadPage]);
-  useEffect(() => {
-    if (!feed.sessionId || feed.loading || feed.error) return;
-    const timer = setTimeout(() => { void loadPage(feedRef.current.newestCursor, feedRef.current.newestCursor === null); }, feed.newerHasMore ? 0 : 5000);
-    return () => { clearTimeout(timer); };
-  }, [feed.sessionId, feed.loading, feed.error, feed.newerHasMore, loadPage]);
+  }, [agentId, workspace.id]);
+  const continueHistory = useRevisionRefresh(JSON.stringify([workspace.id, agentId]), presentation.historyRevision, true, async signal => {
+    while (pageBusyRef.current && !signal.aborted) await pageCompletionRef.current;
+    for (let page = 0; page < 4; page++) {
+      if (signal.aborted || (typeof document !== "undefined" && document.visibilityState === "hidden")) return;
+      const more = await loadPage(feedRef.current.newestCursor, feedRef.current.newestCursor === null, "newer", signal);
+      if (!more) return;
+    }
+  });
   // biome-ignore lint/correctness/useExhaustiveDependencies: Session metadata changes the measured message-list height after the older rows commit.
   useLayoutEffect(() => {
     const replies = repliesRef.current;
@@ -263,7 +273,7 @@ export function AgentChatPageContent({ agentId }: Readonly<{ agentId: string }>)
     fileRequestRef.current?.abort(); filePreviewRef.current = null; setFilePreview(null); setFileError(true);
     filePreview.invalidateMetadata();
   }, [filePreview]);
-  return <ShellPage initialTab="chat" activeAgent={agent} mainClassName="agentChatMain" showRecentSessions recentRevision={referenceTime}>
+  return <ShellPage initialTab="chat" activeAgent={agent} mainClassName="agentChatMain" showRecentSessions presentationNavigation={presentation.navigation} onNavigationRetry={presentation.retry}>
     <header className="agentChatRouteHeader">
       <AgentBreadcrumb agent={agent} label={t("agentChat.path")} />
       <button className={`agentChatPanelToggle ${panelOpen ? "isActive" : ""}`} type="button" aria-label={t("agentChat.toggleOverview")} title={t("agentChat.toggleOverview")} aria-expanded={panelOpen} aria-controls="agent-chat-preview" onClick={() => setPanelOpen(value => !value)}><List aria-hidden="true" /></button>
@@ -272,10 +282,11 @@ export function AgentChatPageContent({ agentId }: Readonly<{ agentId: string }>)
       <div className="agentChatConversationColumn">
       <section ref={repliesRef} onScroll={onRepliesScroll} className="agentChatRouteReplies" aria-label={t("agentChat.replies")}>
         <div className="agentChatContentWidth">
-        {feed.error ? <div role="alert"><p>{t("agentChat.loadError")}</p><button type="button" onClick={retryHistory}>{t("agentChat.retry")}</button></div> : null}
+        {feed.error || presentation.error ? <div role="alert"><p>{t("agentChat.loadError")}</p><button type="button" onClick={() => { if (presentation.error) presentation.retry(); retryHistory(); }}>{t("agentChat.retry")}</button></div> : null}
         {referenceError ? <p role="alert">{t("agentChat.referencesError")}</p> : null}
         {fileError ? <p role="alert">{t("agentChat.filesError")}</p> : null}
         <AgentMessageList messages={projectAgentHistory(feed.items, t("agentChat.you"), agent.name, allSessions, !feed.error && !feed.newerHasMore, feed.sessionId ? { agentId, sessionId: feed.sessionId } : undefined)} referenceTime={referenceTime} readLabel={t("agentChat.read")} onPreviewFile={(file, sessionId) => void previewFile(file, sessionId)} onPreviewSession={selectSession} />
+        {feed.newerHasMore && !feed.error ? <button type="button" className="agentChatShowMore" disabled={feed.loading} onClick={() => continueHistory()}>{t("agentChat.loadMore")}</button> : null}
         </div>
       </section>
       <div className="agentChatComposerDock" ref={composerDockRef}><AgentInputComposer key={JSON.stringify([user.id, workspace.id, agentId])} agentId={agentId} workspaceId={workspace.id} userId={user.id} sessionId={feed.sessionId} onAccepted={refreshAccepted} onAuthorityLost={clearAuthority} /></div>

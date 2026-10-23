@@ -1,12 +1,13 @@
 import { validateTranscriptPatchPage, type TranscriptPage } from './transcriptContract.ts';
 import type { TranscriptViewStore } from './transcriptViewStore.ts';
-import { validatePresentationFrame, PresentationProtocolError, type PresentationIdentity, type PresentationEntry, type PresentationCheckpoint, type PresentationSession, type PresentationOperation } from './workspacePresentationProtocol.ts';
+import { validatePresentationFrame, PresentationProtocolError, type PresentationIdentity, type PresentationEntry, type PresentationCheckpoint, type PresentationSession, type PresentationOperation, type PresentationViewRevision } from './workspacePresentationProtocol.ts';
 
 type Options = PresentationIdentity & Readonly<{
   store: TranscriptViewStore;
   signal?: AbortSignal;
   isCurrent?(): boolean;
   applySnapshot?(page: TranscriptPage, signal: AbortSignal): number | Promise<number>;
+  onViewRevision?(revision: PresentationViewRevision): void;
   onSnapshot?(page: TranscriptPage, epoch: number): void;
   onNavigation?(sessions: readonly PresentationSession[]): void;
   onOperation?(detail: PresentationOperation): void;
@@ -28,6 +29,7 @@ export class WorkspacePresentationController {
   private navigation: { snapshotId: string; rows: PresentationSession[]; ids: Set<string> } | null = null;
   private disposed = false;
   private applying = false;
+  private viewRevision: PresentationViewRevision | null = null;
   constructor(options: Options) {
     if (!options.workspaceId || !options.agentId) throw new Error('presentation identity is required');
     this.options = options;
@@ -47,6 +49,18 @@ export class WorkspacePresentationController {
       const item = validatePresentationFrame(entry.item, this.identity);
       if (entry.cursor !== null && item.kind !== 'checkpoint') throw new PresentationProtocolError('only checkpoints can carry a cursor');
       switch (item.kind) {
+        case 'viewRevision': {
+          const previous = this.viewRevision;
+          const current = { ...item };
+          for (const key of ['contextRevision', 'historyRevision', 'workRevision'] as const) {
+            if (previous && BigInt(previous[key]) > BigInt(current[key])) current[key] = previous[key];
+          }
+          if (!previous || current.contextRevision !== previous.contextRevision || current.historyRevision !== previous.historyRevision || current.workRevision !== previous.workRevision) {
+            this.viewRevision = current;
+            this.options.onViewRevision?.(current);
+          }
+          break;
+        }
         case 'navigation': {
           if (item.offset === 0) this.navigation = { snapshotId: item.snapshotId, rows: [], ids: new Set() };
           if (this.navigation === null || this.navigation.snapshotId !== item.snapshotId || this.navigation.rows.length !== item.offset) throw new PresentationProtocolError('navigation snapshot made no progress');

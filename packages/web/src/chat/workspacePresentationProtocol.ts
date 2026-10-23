@@ -10,8 +10,10 @@ export type PresentationOperation = Readonly<{
   resultState: string | null; operations: readonly Record<string, unknown>[]; previewTruncated: boolean; sourceEventId: string;
 }>;
 type Common = PresentationIdentity & Readonly<{ schema: 'workspace.presentation.v1' }>;
+export type PresentationViewRevision = Common & Readonly<{ kind: 'viewRevision'; contextRevision: string; historyRevision: string; workRevision: string }>;
 export type PresentationCheckpoint = Common & Readonly<{ kind: 'checkpoint'; projectionGeneration: string | null; sourceHighWater: string; agentRun: PresentationAgentRun | null }>;
 export type PresentationFrame =
+  | PresentationViewRevision
   | (Common & Readonly<{ kind: 'navigation'; snapshotId: string; offset: number; hasMore: boolean; sessions: readonly PresentationSession[] }>)
   | (Common & Readonly<{ kind: 'snapshot'; page: TranscriptPage }>)
   | (Common & Readonly<{ kind: 'patches'; page: TranscriptPatchPage }>)
@@ -23,6 +25,7 @@ export type PresentationFrame =
 export type PresentationEntry = Readonly<{ cursor: string | null; item: PresentationFrame }>;
 const COMMON = ['schema', 'kind', 'workspaceId', 'agentId', 'sessionId'];
 const FIELDS: Record<PresentationFrame['kind'], readonly string[]> = {
+  viewRevision: ['contextRevision', 'historyRevision', 'workRevision'],
   navigation: ['snapshotId', 'offset', 'hasMore', 'sessions'], snapshot: ['page'], patches: ['page'], content: ['range'],
   live: ['agentRunId', 'live'], operation: ['detail'], checkpoint: ['projectionGeneration', 'sourceHighWater', 'agentRun'], reset: ['reason'],
 };
@@ -40,6 +43,9 @@ export function validatePresentationFrame(value: unknown, identity: Presentation
     || !Object.hasOwn(FIELDS, value.kind) || !hasExactFields(value, [...COMMON, ...FIELDS[value.kind as PresentationFrame['kind']]])
     || value.workspaceId !== identity.workspaceId || value.agentId !== identity.agentId || value.sessionId !== identity.sessionId) invalid();
   switch (value.kind) {
+    case 'viewRevision':
+      if (![value.contextRevision, value.historyRevision, value.workRevision].every(isPresentationWater)) invalid('invalid presentation view revision');
+      break;
     case 'navigation': {
       if (!Array.isArray(value.sessions) || typeof value.snapshotId !== 'string' || !value.snapshotId
         || !Number.isSafeInteger(value.offset) || Number(value.offset) < 0 || typeof value.hasMore !== 'boolean') invalid('invalid presentation navigation');

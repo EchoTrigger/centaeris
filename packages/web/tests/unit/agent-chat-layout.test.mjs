@@ -348,3 +348,22 @@ test("background Session deletion completes against the current conversation sel
     assert.deepEqual(navigation, ["current conversation"]);
   } finally { subject.unmount(); }
 });
+
+test("pushed Agent navigation updates sessions without rereading the list or project catalog", async () => {
+  const calls = [];
+  const env = environment({ request: async path => { calls.push(path); return path.includes("session-projects") ? { projects: [] } : { sessions: [] }; } });
+  const item = { id: "work", workspaceId: "workspace", agentId: "agent", projectId: null, title: "Initial",
+    status: "active", updatedAt: "2026-10-05T00:00:00Z", hasActiveAgentRun: false };
+  const props = { children: null, activeAgent: env.agents[0], showRecentSessions: true, presentationNavigation: null };
+  const subject = renderer(ShellPage, props, env);
+  try {
+    await subject.settle();
+    assert.deepEqual(calls, ["/api/workspaces/workspace/session-projects?agentId=agent"]);
+    props.presentationNavigation = [item]; await subject.settle();
+    const sidebar = nodes(subject.tree, node => node.type.name === "ShellSidebar")[0];
+    assert.equal(sidebar.props.recentNavigation.sessions[0].title, "Initial");
+    props.presentationNavigation = [{ ...item, title: "Renamed by stream" }]; await subject.settle();
+    assert.equal(nodes(subject.tree, node => node.type.name === "ShellSidebar")[0].props.recentNavigation.sessions[0].title, "Renamed by stream");
+    assert.equal(calls.length, 1);
+  } finally { subject.unmount(); }
+});

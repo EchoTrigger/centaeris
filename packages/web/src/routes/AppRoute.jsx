@@ -129,6 +129,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   const [projects, setProjects] = useState([]);
   const [sessionId, setSessionId] = useState("");
   const [presentationAttempt, setPresentationAttempt] = useState(0);
+  const [contextVersion, setContextVersion] = useState(null);
   const [readableThrough, setReadableThrough] = useState("0");
   const [readingLatest, setReadingLatest] = useState(true);
   const [pageVisible, setPageVisible] = useState(() => typeof document === "undefined" || !document.hidden);
@@ -498,6 +499,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
           setSessionId(next.find(session => session.id === requestedSessionId)?.id || next[0]?.id || "");
         }
       },
+      onViewRevision: revision => { if (isCurrent()) setContextVersion({ sessionId: selectedSessionId, revision: revision.contextRevision }); },
       onOperation: detail => { if (isCurrent()) toolOperations.applyPresentationDetail(detail); },
       onCheckpoint: checkpoint => {
         if (!isCurrent() || selectedSessionId === null) return;
@@ -1183,6 +1185,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
             uploadingAttachment={uploadingAttachment}
             onUploadAttachment={uploadAttachment}
             sessionId={sessionId}
+            contextRevision={contextVersion?.sessionId === sessionId ? contextVersion.revision : "0"}
             currentModel={currentModel}
             thinkingMode={thinkingMode}
             onThinkingModeChange={selectThinkingMode}
