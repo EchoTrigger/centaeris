@@ -170,6 +170,16 @@ def provider_fixture(mode="success"):
                 self.connection.close()
                 self.close_connection = True
                 return
+            idempotency_errors = {
+                "idempotencyInProgress": (409, "idempotency_in_progress"),
+                "idempotencyRequestMismatch": (409, "idempotency_request_mismatch"),
+                "idempotencyOutcomeUnknown": (422, "idempotency_outcome_unknown"),
+            }
+            if fixture.mode in idempotency_errors:
+                status, semantic_code = idempotency_errors[fixture.mode]
+                self.reply(status, {"code": status, "error_code": semantic_code,
+                    "message": "fixture-private-provider-diagnostic " + self.headers.get("X-API-Key", "")})
+                return
             if fixture.mode in ("refused503", "refused429", "refusedSecret"):
                 status = 503 if fixture.mode == "refused503" else 429
                 message = ("fixture-private-token " + self.headers.get("X-API-Key", "")
@@ -441,9 +451,36 @@ class SdkTransportAcceptanceTests(unittest.TestCase):
                 with self.subTest(mode=mode, configured=configured), provider_fixture(mode) as fixture:
                     response = adapter_for(fixture, idempotency_supported=configured).handle(create_request())
                 self.assertEqual(response["outcome"], "unknown", response)
+                self.assertEqual(response["error"]["code"],
+                                 "providerUnavailable" if mode == "refused503" else "providerRateLimited")
                 self.assertEqual(response["result"]["attemptId"], "attempt-fixture")
                 self.assertEqual([(item["method"], item["path"]) for item in fixture.requests],
                                  [("POST", "/v2/sandboxes")])
+
+    def test_idempotency_http_refusals_keep_unknown_without_claiming_semantic_code(self):
+        modes = (("idempotencyInProgress", "providerConflict"),
+                 ("idempotencyRequestMismatch", "providerConflict"),
+                 ("idempotencyOutcomeUnknown", "providerUnprocessable"))
+        for configured in (False, True):
+            for mode, code in modes:
+                with self.subTest(mode=mode, configured=configured), provider_fixture(mode) as fixture:
+                    adapter = adapter_for(fixture, idempotency_supported=configured)
+                    response = adapter.handle(create_request())
+                    capabilities = adapter.handle({"schema": "runtime.e2b.adapter.request.v1",
+                        "requestId": "capabilities", "operation": "capabilities", "payload": {}})
+                self.assertEqual(response["outcome"], "unknown", response)
+                self.assertEqual(response["error"]["code"], code)
+                self.assertEqual(set(response["error"]), {"code", "message"})
+                self.assertEqual(response["result"], {"attemptId": "attempt-fixture"})
+                self.assertEqual([(item["method"], item["path"]) for item in fixture.requests],
+                                 [("POST", "/v2/sandboxes")])
+                self.assertEqual(fixture.requests[0]["headers"]["idempotency-key"], "request-key-fixture")
+                # A configured declaration and a refusal do not verify server support.
+                self.assertIs(capabilities["result"]["createIdempotencyConfigured"], configured)
+                wire = json.dumps(response)
+                self.assertNotIn("fixture-private-provider-diagnostic", wire)
+                self.assertNotIn("e2b_" + "a" * 64, wire)
+                self.assertNotIn("idempotency_", wire)
 
     def test_control_and_cleanup_lanes_cannot_dispatch_create(self):
         for configured in (False, True):

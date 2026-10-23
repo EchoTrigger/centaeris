@@ -44,6 +44,16 @@ again because an idempotency header was supplied, a capability is configured, or
 a lookup is empty. A lost reply or provider refusal remains Unknown for the
 caller's investigation and settlement protocol.
 
+Unknown provider failures retain a fixed, redacted message. When the pinned SDK
+provides an HTTP status, `error.code` distinguishes 409 (`providerConflict`),
+422 (`providerUnprocessable`), 429 (`providerRateLimited`) and 503
+(`providerUnavailable`); other failures use `providerRequestFailed`. These codes
+neither establish non-dispatch nor authorize retries or settlement. SDK 2.58.0
+discards the provider body's semantic `error_code`, so a 409 cannot distinguish
+`idempotency_in_progress` from `idempotency_request_mismatch`, and a 422 is not
+reported as verified `idempotency_outcome_unknown`. Provider messages and bodies
+are not returned, and these classifications do not verify server idempotency.
+
 Each stdin line is one bounded UTF-8 JSON request:
 
 ```json

@@ -258,6 +258,54 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(len(self.client.calls), 1)
         self.assertNotIn("do-not-expose", json.dumps(response))
 
+    def test_provider_http_status_keeps_unknown_and_safe_classification(self):
+        from http import HTTPStatus
+        from e2b.exceptions import RateLimitException, SandboxException, ServiceBusyException
+
+        failures = ((SandboxException("private", status_code=HTTPStatus.CONFLICT), "providerConflict"),
+                    (SandboxException("private", status_code=422), "providerUnprocessable"),
+                    (RateLimitException("private"), "providerRateLimited"),
+                    (ServiceBusyException("private"), "providerUnavailable"),
+                    (SandboxException("private", status_code=500), "providerRequestFailed"))
+        for error, code in failures:
+            with self.subTest(code=code):
+                self.client.calls.clear()
+                self.client.failure = error
+                response = self.adapter.handle(request("create", create_payload()))
+                self.assertEqual(response["outcome"], "unknown", response)
+                self.assertEqual(response["error"]["code"], code)
+                self.assertEqual(set(response["error"]), {"code", "message"})
+                self.assertEqual(response["result"], {"attemptId": "attempt-a"})
+                self.assertEqual(len(self.client.calls), 1)
+                self.assertNotIn("private", json.dumps(response))
+
+    def test_non_sdk_status_and_semantic_message_do_not_claim_http_classification(self):
+        from e2b.exceptions import SandboxException
+
+        error = RuntimeError("409 idempotency_in_progress private")
+        error.status_code = 409
+        for error in (error, TimeoutError("422 idempotency_outcome_unknown private"),
+                      SandboxException("private", status_code="409"),
+                      SandboxException("private", status_code=409.0)):
+            with self.subTest(error_type=type(error).__name__, status=getattr(error, "status_code", None)):
+                self.client.failure = error
+                response = self.adapter.handle(request("create", create_payload()))
+                self.assertEqual(response["outcome"], "unknown", response)
+                self.assertEqual(response["error"]["code"], "providerRequestFailed")
+                self.assertNotIn("private", json.dumps(response))
+
+    def test_create_verification_http_failure_keeps_known_identity(self):
+        from e2b.exceptions import SandboxException
+
+        self.client.sandbox.get_info = lambda: (_ for _ in ()).throw(
+            SandboxException("private", status_code=422))
+        response = self.adapter.handle(request("create", create_payload()))
+        self.assertEqual(response["outcome"], "unknown", response)
+        self.assertEqual(response["error"]["code"], "providerUnprocessable")
+        self.assertEqual(response["result"], {"attemptId": "attempt-a", "sandboxId": "sandbox-a"})
+        self.assertEqual(len(self.client.calls), 1)
+        self.assertNotIn("private", json.dumps(response))
+
     def test_create_inspection_failure_retains_known_id(self):
         self.client.sandbox.get_info = lambda: (_ for _ in ()).throw(TimeoutError())
         response = self.adapter.handle(request("create", create_payload()))

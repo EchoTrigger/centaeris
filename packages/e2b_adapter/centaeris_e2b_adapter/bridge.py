@@ -35,6 +35,21 @@ class RequestError(ValueError):
         self.code = code
 
 
+def _provider_failure_code(error):
+    # The pinned SDK exposes the HTTP status but discards error_code. Never
+    # infer idempotency semantics or retry permission from an exception message.
+    try:
+        from e2b.exceptions import RateLimitException, SandboxException, ServiceBusyException
+    except ImportError:
+        return "providerRequestFailed"
+    if isinstance(error, (SandboxException, RateLimitException, ServiceBusyException)):
+        status = error.status_code
+        if isinstance(status, int) and not isinstance(status, bool):
+            return {409: "providerConflict", 422: "providerUnprocessable",
+                    429: "providerRateLimited", 503: "providerUnavailable"}.get(status, "providerRequestFailed")
+    return "providerRequestFailed"
+
+
 @dataclass(frozen=True)
 class _ConnectedSandbox:
     sandbox: object
@@ -271,9 +286,9 @@ class Adapter:
             return self._response(request_id, "succeeded", result=result)
         except (RequestError, BulkTransferError, ControlHelperError) as error:
             return self._response(request_id, "unknown", result=known, error={"code": error.code, "message": str(error)})
-        except Exception:
+        except Exception as error:
             # Provider diagnostics may contain credentials, URLs or user content.
-            return self._response(request_id, "unknown", result=known, error={"code": "providerRequestFailed", "message": "The provider result is unknown; retain the operation responsibility."})
+            return self._response(request_id, "unknown", result=known, error={"code": _provider_failure_code(error), "message": "The provider result is unknown; retain the operation responsibility."})
         finally:
             if transfer is not None:
                 try:
