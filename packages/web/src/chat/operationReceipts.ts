@@ -32,6 +32,12 @@ function receipt(value: unknown, command: Command, operationId: string): Receipt
   return item;
 }
 
+function isUnconfirmedRequest(error: unknown) {
+  return error instanceof TypeError
+    || (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name))
+    || (error instanceof ApiError && error.status >= 500);
+}
+
 function samePendingVersion(current: Pending | null, expected: Pending) {
   return current?.operationId === expected.operationId && current.fingerprint === expected.fingerprint && current.inputChanged === expected.inputChanged;
 }
@@ -145,11 +151,11 @@ export class OperationClient {
       // A response lost after admission is recovered by identity, never by a
       // second POST. Keep corrected-input ambiguity and stale-tab guards intact.
       if (!item.inputChanged && samePendingVersion(current, item)
-        && (error instanceof TypeError || (error instanceof ApiError && error.status >= 500))) {
+        && isUnconfirmedRequest(error)) {
         try { return await this.lookup(item); }
         catch (recoveryError) {
-          const unavailable = recoveryError instanceof TypeError || (recoveryError instanceof ApiError
-            && ((recoveryError.status === 404 && recoveryError.message === "operation_not_found") || recoveryError.status >= 500));
+          const unavailable = isUnconfirmedRequest(recoveryError) || (recoveryError instanceof ApiError
+            && recoveryError.status === 404 && recoveryError.message === "operation_not_found");
           if (!unavailable) throw recoveryError;
         }
       }
