@@ -23,15 +23,17 @@ capacity 8 / 4 / 8.
 | Evidence | Current boundary |
 | --- | --- |
 | Earlier real-provider product builds | perRun A/B, retained A/B with Runtime restart, explicit pause/resume with queued work, and independent retirement passed on the identified builds below |
-| Current recovery and diagnostic changes | Focused automated contracts cover late-target creator cleanup, missing-context and Unknown preservation, and distinct lifecycle failure stages; final candidate gate results must be recorded separately from the historical build counts |
+| Current affected automated checks | Runtime 658, focused Core query_loop 129, SDK adapter 112, related API 130 and required PostgreSQL 214 passed; Harbor 216 passed separately. Full release-gate limits are recorded below |
 | Interrupted instrumented real-provider sample | Stopped in Run A before pause/resume with an unresolved dispatched create and no locator or settlement. After reboot the tmpfs PostgreSQL ledger is absent; its original owner record and Unknown responsibility remain preserved |
-| Release and legacy-removal acceptance | Current full lifecycle stage timings, combined saturation, the wider restart/failure matrix, and the legacy drain/removal gate remain incomplete |
+| Current isolated same-build samples | Same-Session perRun A/B in distinct VMs and explicit retained pause/resume A/B passed once each, with complete lifecycle/startup observations and explicit transport attribution on the exact build identified below |
+| Release and legacy-removal acceptance | Exact first-useful-tool latency, combined saturation, the wider restart/failure matrix, and the legacy drain/removal gate remain incomplete |
 
 The executable hashes, image digests, test counts and measurements below identify
-historical builds. They do not establish that later source changes passed real
-provider acceptance or the complete release gate. The original Unknown must not be settled or its owner replaced. A separately
-owned isolated current-build scheduling sample is explicitly authorized; it must
-keep a distinct ledger and may not imply resolution of the original create.
+their respective builds. Historical results do not accept later source changes;
+the current isolated samples accept only their stated functional and observation
+boundaries, not the complete release gate. The original Unknown and an earlier
+isolated trial's Unknown remain unresolved. Their owners and duties are preserved
+separately from the current successful samples.
 
 ## Current execution flow
 
@@ -532,8 +534,9 @@ into one error without refreshing state. The current fixture distinguishes those
 four stages, refreshes the latest Run/Job state when available, and emits bounded
 static error categories and safe workspace diagnostics. It preserves the primary
 failure when observation itself fails and does not expose raw exception values.
-That diagnostic correction cannot reconstruct the earlier lost provider result. Service recovery, an empty lookup or
-timeout expiry cannot settle this dispatched operation. A candidate locator
+That diagnostic correction cannot reconstruct the earlier lost provider result.
+Service recovery, an empty lookup or timeout expiry cannot settle this dispatched
+operation. A candidate locator
 must be attached to the original immutable attempt and verified against its
 creation metadata, environment and provider configuration before cleanup can
 proceed through current authority. If no locator or authoritative operation
@@ -556,12 +559,255 @@ lifecycle or later source changes.
 Automatic idle policy remains unimplemented and frozen outside this change.
 Future work must be configurable and explicitly opt-in, with deterministic clock
 and controlled-provider tests. Resume admission must be bounded by business
-execution capacity before queued demand can trigger power operations. The original sample remains blocked and has no completed stage timings. Its
-provider API listener failures did not establish the actual create send/result
-boundary. The separately authorized current-build experiment must report its own
-lifecycle and timing outcome without treating the lost original ledger as settled.
-Timing results, when available, must precede decisions about process pooling,
-validation removal or provider request counts.
+execution capacity before queued demand can trigger power operations. The original
+sample remains blocked and has no completed stage timings. Its provider API
+listener failures did not establish the actual create send/result boundary.
+The separately owned completed samples below provide current-build observations
+without settling the lost original ledger. These measurements inform later work;
+they do not authorize removing identity validation or changing provider request
+counts.
+
+### Current isolated lifecycle scheduling samples
+
+One `perRun` sample and one explicit retained-power sample passed on commit
+`da37ef714f73cfa508c4bab03efe6404c4de5494`, source tree
+`dddc6711b3691dd52643c3469fed37e9c518638d`, product image
+`sha256:9f739ba78c5d4e23bdbbb863421d2f6f4dc0f7eead48af30286dbbbcce4b645a`,
+and Runtime test executable SHA-256
+`a667a28f256fee86d8cb1e66a889d48166998389f2bb781e4854b704aab9d7c8`.
+Both used the same Debug test-profile executable with `debug=0`, `opt-level=0`,
+SDK 2.58.0 and a 512 MiB diagnostic sandbox. Their local report identifiers are
+`6fa86dce84fd43a5bbb368f73ee0fcba` (`perRun`) and
+`78945a45883743169688a15ad4d77e95` (retained power). Full child output, original
+structured reports and resource JSONL remain OS-temporary measurement artifacts.
+These are one sample per scenario, not a latency distribution or an optimized
+release-build benchmark.
+
+The perRun sample completed A, protected its workspace and removed its VM. B in
+the same Session used a distinct VM, restored A's committed files, performed the
+real Core read/Bash/artifact workflow, and completed its own cleanup and release.
+The power sample completed retained A/B, explicit pause/resume with a queued B,
+Runtime restarts, Run cleanup/release and independent Environment retirement.
+Both verified exact provider absence and zero outstanding duties before removing
+their independently owned state; the original Unknown owner bytes were unchanged.
+
+| Observation coverage | perRun | Retained power |
+| --- | ---: | ---: |
+| Lifecycle calls, all `ok`, none in flight | 26 | 33 |
+| Bound Run startup profiles, complete | 2 | 2 |
+| Adapter span records, no invalid/foreign/dropped/oversized/error observations | 273 | 272 |
+| Explicitly unassigned adapter spans | 0 | 12 |
+| Central adapter method calls / spawn-plus-handshake spans | 261 / 12 | 258 / 14 |
+
+The power transport collector's own coverage is `incomplete` solely because its
+12 independent pause/resume/retire spans have no bound Run. The report retains
+that status and explicit `unassigned` attribution; it does not infer Run ownership.
+The enclosing measurement check accepted observed, loss-free transport with that
+stated boundary, complete lifecycle/startup/power observations, and successful
+first-read receipts. All observation loss/error counters were zero.
+
+#### Same-Session VM turnover and useful-tool bounds
+
+The perRun product record supplies the A/B roles; startup records are mapped by
+those Run IDs, not by lexical record order. B's first verified tool was the real
+`read`, call `e2b-1-0`, with a successful Core result.
+
+| Collector-clock interval | Observed ms | Interpretation |
+| --- | ---: | --- |
+| perRun A lifecycle complete to B's first-tool follow-up | 2,268.687 | Upper bound including intervening fixture artifact/session checks, public admission, new VM and first-read result persistence/model callback transit |
+| perRun B admission request to accepted response | 65.640 | Public enqueue HTTP interval including client/server work |
+| perRun B accepted response to first-tool follow-up | 2,146.512 | New Run scheduling/startup and verified first-read follow-up upper bound |
+| Retained resume response to B's first-tool follow-up | 2,311.055 | Upper bound including the deliberately forced post-resume Runtime restart and fixture checks |
+| Retained resume response to first subsequent step return | 4,934.420 | Upper bound including that whole returned step |
+
+Each interval uses two markers from the same fixture monotonic clock. The
+follow-up marker is arrival at the next model callback after the tool, not its
+exact completion time. The Core tool's own latency was 97 ms for perRun B and
+95 ms for retained B; those Core clock records are not correlated with the
+collector, database, Linux sampler or Windows wrapper clocks. Do not subtract
+those clocks. Neither admission interval nor adapter RTT measures pure network
+RTT. The 2.147 s perRun and 2.311 s retained intervals have different start
+conditions and forced-restart work, so they do not establish which policy is
+faster. Exact first-tool availability, representative repeats and percentiles
+remain unmeasured.
+
+| Rust startup or adapter boundary | perRun A | perRun B | Retained A | Retained B |
+| --- | ---: | ---: | ---: | ---: |
+| Startup total ms | 1,010 | 1,062 | 831 | 730 |
+| Sandbox ensure ms, nested within startup | 919 | 638 | 743 | 583 |
+| Workspace restore stage ms | 34 | 290 | 33 | 0 |
+| Session-start commit ms | 28 | 112 | 28 | 119 |
+| Adapter create / attach RTT ms | create 332.192 | create 103.491 | create 113.965 | attach 26.596 |
+
+The startup profiles use existing Rust `Instant` elapsed stages. Sandbox ensure
+includes adapter setup/handshakes and lifecycle work; adapter RTTs measure the
+Runtime-to-adapter request/result boundary, not provider-internal VM creation.
+Startup, handshake, capabilities and method spans overlap and must not be added.
+Retained B verified no archive restore. Its startup includes fresh authorized
+attachment after Runtime restart, not a second create.
+
+#### Explicit power cost boundaries
+
+| Nested span | Pause ms | Resume ms |
+| --- | ---: | ---: |
+| Full HTTP request | 527.256 | 608.166 |
+| Runtime power, including adapter close | 510.251 | 590.149 |
+| Store advance | 501.742 | 586.840 |
+| Store prepare / dispatch CAS / side-effect pins | 39.662 / 35.877 / 27.882 | 93.790 / 35.763 / 28.578 |
+| Store callback / ACK commit | 389.824 / 6.993 | 414.221 / 13.209 |
+| Adapter handshake, including SDK startup | 275.680 | 290.614 |
+| SDK import | 227.544 | 240.853 |
+| SDK identity GET | 18.535 | 18.490 |
+| SDK pause / SDK connect | 86.964 | 100.557 |
+| SDK post-resume verification GET | not applicable | 2.228 |
+| Adapter round trip / close | 106.154 / 8.308 | 121.955 / 3.088 |
+
+Fresh pause/resume each started a new SDK child; SDK import alone exceeded the
+provider SDK mutation interval. The acknowledged historical pause replay took
+5.857 ms in Runtime, emitted only prepare/advance/Runtime observations, and made
+no SDK mutation. These nested boundaries identify cold child/import overhead,
+not additive costs or pure provider HTTP/physical snapshot IO. The retained Run
+A/B lifecycle intervals were 5,124.223 / 5,002.803 ms; paused/post-resume Runtime
+restarts were 423.121 / 412.876 ms, and independent retirement HTTP was 417.057 ms.
+
+| Lifecycle request category | perRun count / sum ms / max ms | Power count / sum ms / max ms |
+| --- | --- | --- |
+| Runtime step | 2 / 9,238.677 / 4,668.948 | 2 / 8,772.942 / 4,448.215 |
+| Runtime teardown | 2 / 1,045.507 / 567.570 | 2 / 379.962 / 191.290 |
+| API resolve | 4 / 338.454 / 90.939 | 5 / 402.181 / 87.411 |
+| API release | 2 / 195.875 / 100.589 | 2 / 226.953 / 114.581 |
+| API project | 4 / 167.552 / 61.454 | 4 / 164.728 / 60.752 |
+
+Each sum is local to its endpoint category. Nested Worker/API/Runtime/power work
+overlaps, so these rows cannot reconstruct lifecycle elapsed time by addition.
+The retained fixture has one deliberate wait/yield before resume; neither sample
+is a natural two-slot task pipeline or an eight-execution saturation trial.
+
+#### Helper requests and small-payload amplification
+
+The final workspace collector reports unique operations, not cumulative reports
+printed at intermediate Runtime stops. PerRun has one `terminalCommit` capture
+for A and one `sessionRestore` plus one `terminalCommit` for B. Retained has one
+`terminalCommit` per Run and no B archive restore. There were no additional
+observed capture operations hidden behind the helper request count.
+
+PerRun recorded **15 framed helper invocations per Run**, not 15 captures. In
+`E2bSdkTransport::helper_frame`, every successful ordinary frame uses a staging
+mkdir (`runCommand` + `waitCommand`), upload, helper command (`run` + `wait`),
+download and staging cleanup (`run` + `wait`): eight central method calls.
+Thus 15 frames explain 45 run/wait pairs plus 15 uploads and 15 downloads per
+Run. The one real Bash command adds the 46th run/wait pair. Across both Runs,
+those 244 method calls plus six capabilities, two creates, two kills and seven
+control-helper calls account for all 261 central calls. Six process spawns and
+six handshake spans bring the observed span count to 273. The existing span
+schema does not label each ordinary helper kind, so its remaining helper-kind
+breakdown cannot be inferred from capture metrics.
+
+The power sample had 15 frames for A and 14 for B: 89 run/wait pairs, 29 uploads
+and 29 downloads in total. Retained B avoided the restore frame. The full 258
+central calls include independent maintenance, and 14 spawn/handshake spans
+bring the total to 272. A capability call is nested in its handshake; a recorded
+method call is not necessarily one wire-level provider HTTP request.
+
+| Unique terminal capture | perRun A | perRun B | Retained A | Retained B |
+| --- | ---: | ---: | ---: | ---: |
+| Logical source bytes / source-read bytes | 30 / 60 | 73 / 146 | 30 / 60 | 73 / 146 |
+| SDK frame / raw capture spool bytes | 618 / 618 | 804 / 804 | 618 / 618 | 804 / 804 |
+| Canonical Runtime spool / consumed upload-body bytes | 367 / 850 | 553 / 1,036 | 367 / 850 | 553 / 1,036 |
+| Capture / upload / full workspace commit ms | 96.717 / 60.044 / 322.985 | 94.558 / 62.878 / 326.893 | 93.852 / 62.713 / 318.126 | 93.709 / 64.310 / 326.858 |
+
+Source reads are exactly 2x logical bytes. Frame/logical ratios are 20.60x for A
+and 11.01x for B; consumed multipart upload-body/logical ratios are 28.33x and
+14.19x. These tiny payloads expose framing/control metadata, not extra source
+content, durable provider bytes or physical IO. PerRun B's restore downloaded
+the canonical 367-byte archive into the Runtime spool; its measured download
+and sandbox apply intervals were 0.073 / 100.435 ms, nested inside the 290 ms
+startup restore stage. Physical provider IO and partial SDK staging are unmeasured.
+
+#### Host resource observation and HugeTLB capacity
+
+The earlier host-capacity fault was addressed by expanding the local 2 MiB
+HugeTLB pool from 512 to 768 pages (1,024 to 1,536 MiB). This changed environment
+capacity, not product behavior. Both current samples used the fixed 768-page
+pool; their 512 MiB sandbox does not validate Terminal-Bench 2–8 GiB tasks.
+The single WSL sampler collected 119 frames over 29.500 s for perRun and 123
+over 30.500 s for power at 250 ms intervals. Maximum per-frame read windows were
+6.469 / 4.624 ms. The following states use only each sampler's monotonic clock;
+labels describe inferred host resource states rather than exact ACK times.
+
+Let `T`, `F`, `R`, and `P` denote HugePages_Total, HugePages_Free, HugePages_Rsvd
+and Hugepagesize. Pool backing in use is `(T-F)*P`, future-fault reservation is
+`R*P`, used-plus-reserved capacity is `(T-F+R)*P`, and free capacity available to
+new reservations is `(F-R)*P`. Reserved-for-fault is not already mapped memory.
+
+| Sample and resource-state window, seconds from its sampler start | Pages T / F / R | Used MiB | Reserved-for-fault MiB | Used + reserved MiB | Unreserved free MiB |
+| --- | --- | ---: | ---: | ---: | ---: |
+| perRun A stable, 19.00–21.75 s | 768 / 555 / 343 | 426 | 686 | 1,112 | 424 |
+| Between perRun VMs, 22.00–22.75 s | 768 / 646 / 178 | 244 | 356 | 600 | 936 |
+| perRun B stable, 24.75–27.50 s | 768 / 555 / 343 | 426 | 686 | 1,112 | 424 |
+| Retained A stable, 17.50–21.50 s | 768 / 555 / 343 | 426 | 686 | 1,112 | 424 |
+| Paused-type interval, 21.75–22.75 s | 768 / 646 / 178 | 244 | 356 | 600 | 936 |
+| Retained B stable, 25.25–28.75 s | 768 / 555 / 343 | 426 | 686 | 1,112 | 424 |
+
+Both transitions return 512 MiB of reservable capacity: 182 MiB less used backing
+plus 330 MiB less future-fault reservation. The entire 1,536 MiB pool remains
+reserved from the normal allocator. These host-wide differences include other
+consumers and do not prove that 512 MiB was returned as ordinary host RAM or that
+full guest memory/process state was preserved.
+
+| Host-wide resource observation | perRun | Retained power |
+| --- | ---: | ---: |
+| Busy CPU core-seconds / observed capacity utilization | 49.480 / 20.15% | 50.150 / 19.69% |
+| Matching Firecracker CPU, observed lower bound core-seconds | 1.880 | 1.830 |
+| Sampler CPU-seconds | 0.480 | 0.495 |
+| Peak normal non-available MiB | 3,220.207 | 3,207.992 |
+| Peak normal non-available + default HugeTLB used MiB | 3,646.207 | 3,633.992 |
+| Peak Firecracker ordinary RSS MiB | 3.176 | 3.051 |
+| `sdd` read / write MiB | 44.844 / 103.312 | 0.004 / 397.379 |
+| Separate network-block devices, read / write MiB | `nbd5` 5.207 / 0; `nbd6` 5.164 / 0.148 | `nbd7` 4.980 / 0; `nbd8` 2.801 / 0.172 |
+
+Normal non-available is `MemTotal - MemAvailable - Hugetlb`. Its derived sum with
+default-pool used pages excludes unused reserved backing and is not total physical
+host consumption. Ordinary RSS excludes the separate guest HugeTLB mappings.
+Firecracker process IO was unavailable; process exit tails and entirely
+between-frame processes can be missed. Device counters are host-wide, include
+setup/database/background and sampler/output work, and may overlap across device
+layers: do not sum them, attribute them to a VM, or derive snapshot write
+amplification. No background baseline was subtracted.
+
+#### Candidate gates and acceptance limits
+
+Current affected checks passed: 658 Runtime tests, 129 focused Core `query_loop`
+tests, 112 SDK adapter tests, 130 related API tests, and all 214 required
+PostgreSQL tests. Each required PostgreSQL identity appears exactly once in the
+compiled fixture executable. The separate Harbor Python suite passed 216 tests.
+These are separate behavioral/registration results, not a complete release gate:
+the full Windows Core gate encountered LLVM out-of-memory, installed Node
+24.19 does not satisfy the required 22.21 toolchain, and the hosted native gate
+was interrupted and did not pass.
+
+The original pre-reboot dispatched Unknown remains unresolved with its owner
+unchanged and its tmpfs ledger absent. The earlier independently owned trial
+with database suffix `a9ff586a…` also retains its Unknown responsibility and
+owner. Neither is deleted, refunded or settled by these new zero-duty samples.
+Malformed or incomplete older call reports were not repaired, combined with
+these records, or used as current timing evidence.
+
+Both current results use deliberately serial deterministic model fixtures, with
+explicit checks and forced Runtime restarts in the power case. They accept only
+the described lifecycle and observation boundaries. They do not accept automatic
+idle selection/resume, eight concurrent executions, a full admission queue,
+fairness, combined saturation, full-memory preservation, 2–8 GiB task sizing,
+GPU execution, p99/SLOs, or the complete release/legacy-removal gate.
+
+The existing Harbor runner can supply the later natural pipeline: its FIFO
+`Admission` reserves declared memory/CPU/storage vectors for at most two trials,
+keeps 8 GiB-or-larger tasks exclusive, and holds allocations through setup,
+verification, artifact collection and confirmed cleanup. Those existing rules
+are reusable; the E2B provision/template resource mapping, task-specific 2–8 GiB
+or GPU environments, setup and independent verifier handoff are not connected.
+The current helper-only 512 MiB template and these serial A/B samples do not
+validate that two-slot Terminal-Bench pipeline.
 
 ### Single-instance pause and memory diagnostic
 
@@ -880,10 +1126,10 @@ characterize existing behavior before extraction.
 
 | Boundary | Implemented behavior | Remaining acceptance |
 | --- | --- | --- |
-| Correlated measurements | Bounded workspace and power observations, explicit stream completeness, safe lifecycle failure stages | Latest real-product pause/resume stage durations and first-useful-tool clock correlation |
+| Correlated measurements | Current-build lifecycle calls, existing Rust startup stages, adapter create/attach RTT, verified first-read follow-up bounds, bounded workspace/power observations and explicit transport attribution | Exact first-tool completion correlation, provider-internal creation stages and repeat/distribution evidence |
 | Conditional capture | Verified descriptor/manifest survives with the runner; validated restore seeds it; equal content avoids body transfer and spooling | Broader workload and release gates; existing paired perRun measurements above remain specific to their identified builds |
-| Environment continuity | Environment-owned creation binding, separately authorized Run uses, scoped cleanup, successor reuse and independent maintenance retirement | Current-build real-provider rerun and the complete admission-versus-retirement race matrix |
-| Explicit pause/resume | Durable intent, single-use dispatch, Unknown barrier, immutable ACK replay and atomic queued-Job wake | Current-build real-provider stage timing, large-workload reclamation and wider race/failure coverage |
+| Environment continuity | Environment-owned creation binding, separately authorized Run uses, scoped cleanup, current-build successor reuse and independent maintenance retirement | Complete admission-versus-retirement race matrix |
+| Explicit pause/resume | Durable intent, single-use dispatch, Unknown barrier, immutable ACK replay, atomic queued-Job wake and current-build stage timing | Large-workload reclamation, exact first-useful-tool timing and wider race/failure coverage |
 | Retained preparation recovery | Verified late creator target, cleanup-only control transport and preserved missing-context/Unknown responsibility | Recovery of the original real-provider attempt still requires a locator or authoritative result |
 | Automatic idle policy | Deferred and disabled | Explicit opt-in configuration, deterministic clock/provider tests, capacity-bounded demand resume, then separate real-provider acceptance |
 | Harbor task lifecycle | Existing Core remains the execution harness | Original task image/workdir/user/resources, independent verifier handoff, representative tasks and the frozen regression |
@@ -981,7 +1227,7 @@ Before deleting the legacy call graph, reconcile authoritative records for:
    runsc or private supervisor; preserve failure, cancellation, release and
    completion behavior as well as successful execution.
 
-This inventory and the current-build replacement acceptance are still open;
+This inventory and complete legacy-removal acceptance are still open;
 there is no verified basis for deleting a whole legacy module in this candidate.
 Keep historical authorization, cleanup and settlement records and their read
 contracts. Do not switch active Runs or claim that runsc process state converts
@@ -1009,10 +1255,11 @@ result or exception. Monotonic clocks determine durations; Unix timestamps only
 align the host resource stream. At most 2,048 records are retained; aggregate
 counts continue after overflow and coverage becomes incomplete.
 
-Resume request/return markers share the collector's monotonic clock. Time from
-resume return to the first step return is an upper bound on tool availability,
-not an exact first successful tool duration. Endpoint durations may overlap and
-must not be summed into lifecycle elapsed time. Exact provider creation stages,
-Runtime startup stages and first-tool intervals remain unavailable until their
-own clocks are measured. Request counts expose polling/retry amplification
-without adding calls or changing responsibility settlement.
+Resume request/return, successor admission and verified first-tool follow-up
+markers share the collector's monotonic clock. Their intervals and the first
+subsequent step return provide the stated bounds, not exact tool completion or
+network RTT. Existing Rust startup stages and adapter method RTTs are observed
+separately; nested endpoint, handshake and method durations must not be summed.
+Provider-internal creation stages and cross-clock first-tool completion remain
+unavailable. Request counts expose helper/polling amplification without adding
+calls or changing responsibility settlement.
