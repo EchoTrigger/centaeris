@@ -33,6 +33,8 @@ def sha(value):
 
 
 class WorkspaceSnapshotPublicationTests(OperationFixture, TransactionTestCase):
+    serialized_rollback = True
+
     def setUp(self):
         super().setUp()
         directory = tempfile.TemporaryDirectory(prefix="snapshot-publication-")
