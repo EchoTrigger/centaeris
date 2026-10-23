@@ -2,6 +2,7 @@ from app_core.models import (
     Agent,
     Artifact,
     Session,
+    SessionEnvironment,
     SessionProject,
     ModelConfig,
     ModelProvider,
@@ -65,6 +66,17 @@ def serialize_agent_definition_version(version) -> dict:
     }
 
 
+def environment_execution_mode(environment: SessionEnvironment) -> str:
+    from app_core.environment_profile import E2B_PROFILE_SCHEMA, environment_profile_digest
+
+    profile = environment.environment_profile
+    if profile is None:
+        return "perRun"
+    if environment_profile_digest(profile) != environment.environment_profile_digest:
+        raise ValueError("environment_profile_digest_invalid")
+    return profile["lifetime"] if profile["schema"] == E2B_PROFILE_SCHEMA else "perRun"
+
+
 def serialize_session(session: Session, has_active_agent_run: bool | None = None) -> dict:
     from app_core.agent_work_presentation import initial_input_origin
     if has_active_agent_run is None:
@@ -77,7 +89,7 @@ def serialize_session(session: Session, has_active_agent_run: bool | None = None
         "agentId": session.agent_id,
         "projectId": session.project_id,
         "currentEnvironmentId": session.current_environment_id,
-        "executionMode": "perRun",
+        "executionMode": environment_execution_mode(session.current_environment),
         "title": session.title,
         "origin": session.origin,
         "initialInputOrigin": initial_input_origin(session),

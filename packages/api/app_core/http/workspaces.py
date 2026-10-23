@@ -107,6 +107,7 @@ from .library import (
 from .schema import ErrorResponse, StrictSchema
 from .security import session_auth, usage_auth
 from .serialization import (
+    environment_execution_mode,
     serialize_model,
     serialize_session,
     serialize_session_project,
@@ -497,7 +498,7 @@ def list_workspace_sessions(request, workspace_id: str):
         sessions_query = sessions_query.filter(coordination_binding__isnull=True)
         if grant is not None:
             sessions_query = sessions_query.filter(agent__definition_id=grant.definition_id)
-    sessions = list(sessions_query.select_related("work_binding__operation").order_by("-isPinned", "-updatedAt"))
+    sessions = list(sessions_query.select_related("work_binding__operation", "current_environment").order_by("-isPinned", "-updatedAt"))
     running_session_ids = set(
         AgentRun.objects.filter(
             session__in=sessions, status__in=["queued", "running"]
@@ -625,7 +626,8 @@ def get_agent_run_environment(request, response: HttpResponse, session_id: str, 
     if not agent_run_environment_matches(run, session=session):
         return Status(409, {"error": "agent_run_environment_binding_invalid"})
     return {"sessionId": session.id, "agentRunId": run.id,
-            "environmentId": run.environment_id, "executionMode": "perRun"}
+            "environmentId": run.environment_id,
+            "executionMode": environment_execution_mode(run.environment)}
 
 
 @router.patch(

@@ -20,7 +20,8 @@ class WorkReturnError(ValueError):
 
 
 def _bound_work(run_id, *, source_event=...):
-    child = AgentRun.objects.select_related("session__agent", "authorization", "user").get(id=run_id)
+    child = AgentRun.objects.select_related(
+        "session__agent", "session__current_environment", "authorization", "user").get(id=run_id)
     work = AgentWorkSession.objects.select_related("operation", "source_run__authorization",
         "source_run__session__agent", "coordination_session").filter(pk=child.session_id).first()
     if work is None or work.operation.agentRunId != child.id:

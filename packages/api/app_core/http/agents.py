@@ -307,7 +307,7 @@ def list_trashed_agent_sessions(request, agent_id: str):
             raise ValueError("trash_cursor_invalid")
     except (TypeError, ValueError) as error:
         return Status(400, {"error": str(error)})
-    sessions = agent.sessions.all()
+    sessions = agent.sessions.select_related("current_environment", "work_binding__operation")
     if cursor:
         same_pin_after = Q(isPinned=cursor["isPinned"]) & (
             Q(updatedAt__lt=updated_at)

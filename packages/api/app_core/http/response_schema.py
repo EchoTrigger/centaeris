@@ -368,7 +368,7 @@ class SessionResponse(StrictSchema):
     agent_id: str
     project_id: str | None
     current_environment_id: str
-    execution_mode: Literal["perRun"]
+    execution_mode: Literal["perRun", "retained"]
     title: str
     origin: str
     initial_input_origin: InitialInputOriginResponse | None
@@ -388,7 +388,7 @@ class AgentRunEnvironmentResponse(StrictSchema):
     session_id: str
     agent_run_id: str
     environment_id: str
-    execution_mode: Literal["perRun"]
+    execution_mode: Literal["perRun", "retained"]
 
 
 class SessionsEnvelope(StrictSchema):

@@ -20,11 +20,18 @@ may bind an unused environment to explicit values before provisioning it.
 Harbor uses this same profile and lifecycle. Profile digests bind the complete
 configuration, and existing physical instances must match that digest.
 
-Session responses expose `currentEnvironmentId` and `executionMode`.
+Session responses expose `currentEnvironmentId` and `executionMode`. The mode
+is derived from the selected environment's validated frozen profile; unbound
+environments and the original profile retain `perRun`. A retained profile is
+reported as `retained`, independently of other Sessions under the same Agent.
 `GET /api/sessions/{sessionId}/agent-runs/{agentRunId}/environment` returns the
-Run's immutable association with current access checks and `Cache-Control:
-no-store`. It performs no writes. Resetting a Session's logical environment is
-not part of this API.
+Run's captured environment and its mode, rather than following a later Session
+selection. Current access checks and `Cache-Control: no-store` still apply, and
+the read performs no writes.
+
+This projection does not select execution policy. The Worker configuration must
+still match the frozen profile and signed environment authorization. Resetting
+a Session's logical environment is not part of this API.
 
 ## One current authorization contract
 

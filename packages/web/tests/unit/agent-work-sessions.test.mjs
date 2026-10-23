@@ -33,11 +33,14 @@ const { agentWorkSessionsPath, parseAgentWorkSessionsPage, parseSessionInputOrig
 
 test("work pages accept the stable environment binding and reject unsupported execution modes", () => {
   const bound = { ...session(), currentEnvironmentId: "environment-work", executionMode: "perRun" };
-  assert.equal(parseAgentWorkSessionsPage(page([bound]), "agent", "workspace", null).sessions[0].sessionId, bound.id);
+  for (const executionMode of ["perRun", "retained"]) {
+    const selected = { ...bound, executionMode };
+    assert.equal(parseAgentWorkSessionsPage(page([selected]), "agent", "workspace", null).sessions[0].sessionId, selected.id);
+  }
   for (const invalid of [
     { ...bound, currentEnvironmentId: "" }, { ...bound, currentEnvironmentId: null },
     { ...bound, currentEnvironmentId: " environment-work" },
-    { ...bound, executionMode: "persistent" }, { ...bound, executionMode: undefined },
+    ...["persistent", "retained ", "", null, undefined, 0].map(executionMode => ({ ...bound, executionMode })),
     Object.fromEntries(Object.entries(bound).filter(([key]) => key !== "currentEnvironmentId")),
   ]) assert.throws(() => parseAgentWorkSessionsPage(page([invalid]), "agent", "workspace", null));
 });

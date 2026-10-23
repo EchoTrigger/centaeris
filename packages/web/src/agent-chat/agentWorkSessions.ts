@@ -38,7 +38,7 @@ export function parseAgentWorkSessionsPage(value: unknown, agentId: string, work
   const sessions = page.sessions.map(value => {
     const session = record(value); exact(session, SESSION_KEYS);
     if (!opaque(session.id) || ids.has(session.id) || session.id === afterSessionId || typeof session.origin !== "string"
-      || !opaque(session.currentEnvironmentId) || session.executionMode !== "perRun"
+      || !opaque(session.currentEnvironmentId) || (session.executionMode !== "perRun" && session.executionMode !== "retained")
       || session.deletedAt !== null || typeof session.isPinned !== "boolean" || typeof session.isUnread !== "boolean"
       || (session.projectId !== null && !opaque(session.projectId)) || typeof session.updatedAt !== "string" || !Number.isFinite(Date.parse(session.updatedAt))) throw new Error("agent_work_sessions_invalid");
     ids.add(session.id); inputOrigin(session.initialInputOrigin);
