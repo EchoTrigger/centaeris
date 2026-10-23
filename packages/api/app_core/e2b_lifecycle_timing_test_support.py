@@ -30,7 +30,8 @@ _PATHS = {
         "/internal/agent-runs/transition": "project",
     },
 }
-_MARKERS = frozenset(("sampleStart", "resumeRequested", "resumeReturned", "sampleEnd"))
+_MARKERS = frozenset(("sampleStart", "resumeRequested", "resumeReturned", "sampleEnd", "firstSuccessorToolFollowup",
+    "successorAdmissionStarted", "successorAdmitted", "predecessorLifecycleCompleted"))
 _UNAVAILABLE = ("runtimeProcessReadyElapsedMs", "providerCreateElapsedMs", "firstToolAfterResumeElapsedMs")
 _MAX_U64 = 2**64 - 1
 
@@ -131,6 +132,75 @@ def feed_runtime_line(collector, line):
             collector._transport_observation_failed()
         except BaseException:
             pass
+
+
+def observe_first_successor_tool_followup(collector, index, ordinal):
+    """Observe the first successor tool's next model callback in this process.
+
+    This arrival only bounds completion after the real Run and its first read
+    receipt have been verified successful; it is never an exact tool duration.
+    Only closed integer ordinals are inspected, never tool arguments or output.
+    """
+    if collector is None or type(index) is not int or index != 1 or type(ordinal) is not int or ordinal != 1:
+        return
+    try:
+        collector.marker("firstSuccessorToolFollowup")
+    except BaseException:
+        try:
+            collector._note_error()
+        except BaseException:
+            pass
+
+
+def observe_lifecycle_marker(collector, name):
+    """Record a closed local marker without changing its business callback."""
+    if collector is None or type(name) is not str or name not in _MARKERS:
+        return
+    try:
+        collector.marker(name)
+    except BaseException:
+        try:
+            collector._note_error()
+        except BaseException:
+            pass
+
+
+def per_run_acceptance_report(*, run_a_id=None, run_b_id=None, sandbox_a_id=None, sandbox_b_id=None,
+        same_session=None, provider_absent=None, pending_duties=None, first_tool_event_id=None,
+        first_tool_created_at_ms=None, first_tool_payload=None):
+    """Export verified fixture facts, never infer absent lifecycle evidence.
+
+    The first result uses its existing Core duration and event clock. These
+    values must not be subtracted from the fixture's monotonic clock markers.
+    """
+    def identity(value):
+        return value if type(value) is str and _STARTUP_IDENTITY.fullmatch(value) is not None else None
+    run_a, run_b = identity(run_a_id), identity(run_b_id)
+    sandbox_a, sandbox_b = identity(sandbox_a_id), identity(sandbox_b_id)
+    first_result = None
+    try:
+        from .e2b_power_timing_test_support import first_successful_read_timing
+        event_id = identity(first_tool_event_id)
+        timing = first_successful_read_timing(first_tool_payload, first_tool_created_at_ms)
+        if event_id is not None and timing["status"] == "observed" and timing["callId"] == "e2b-1-0":
+            first_result = {"eventId": event_id, "createdAtUnixMs": first_tool_created_at_ms,
+                "source": "coreEventClock", "timing": timing}
+    except BaseException:
+        pass
+    facts = {"sameSession": same_session if type(same_session) is bool else None,
+        "distinctSandboxes": sandbox_a != sandbox_b if sandbox_a is not None and sandbox_b is not None else None,
+        "runAId": run_a, "runBId": run_b, "sandboxAId": sandbox_a, "sandboxBId": sandbox_b,
+        "providerAbsent": provider_absent if type(provider_absent) is bool else None,
+        "pendingDuties": pending_duties if type(pending_duties) is int and 0 <= pending_duties <= _MAX_U64 else None,
+        "firstToolResult": first_result}
+    missing = [key for key, value in facts.items() if value is None]
+    failed = [key for key in ("sameSession", "distinctSandboxes", "providerAbsent") if facts[key] is False]
+    if run_a is not None and run_b is not None and run_a == run_b:
+        failed.append("distinctRuns")
+    if facts["pendingDuties"] is not None and facts["pendingDuties"] != 0:
+        failed.append("pendingDuties")
+    return {"schema": "e2b.perRun.acceptance.v1", "coverageStatus": "incomplete" if missing or failed else "complete",
+        **facts, "missingFields": missing, "failedChecks": failed}
 
 
 def _endpoint(lane, path):

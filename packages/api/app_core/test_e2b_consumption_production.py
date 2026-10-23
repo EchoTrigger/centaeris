@@ -29,7 +29,8 @@ from django.db import connection
 from django.test import LiveServerTestCase, SimpleTestCase, override_settings
 
 from . import test_native_consumption_production as native_fixture
-from .e2b_lifecycle_timing_test_support import LifecycleCallCollector, feed_runtime_line
+from .e2b_lifecycle_timing_test_support import (LifecycleCallCollector, feed_runtime_line,
+    observe_first_successor_tool_followup, observe_lifecycle_marker, per_run_acceptance_report)
 from .e2b_workspace_test_support import collect_runtime_output, workspace_observation_collector
 from .e2b_workspace_trace_test_support import expected_manifest, fixed_trace_case, trace_steps, trace_workload_report
 from .model_adapter.common import fake_tool_call, zero_usage
@@ -508,6 +509,7 @@ if os.environ.get('CENTAERIS_E2B_PRODUCT_ACCEPTANCE') == '1':
             index = self.runs.index(run_id)
             if getattr(self, 'fixed_trace', None) is not None:
                 return fixed_trace_model_response(self.fixed_trace, index, ordinal)
+            observe_first_successor_tool_followup(getattr(self, 'lifecycle_calls', None), index, ordinal)
             if index == 0:
                 script = [
                     ('write', {'path': '/mnt/data/product-proof.txt', 'content': 'workspace-A\n'}),
@@ -529,12 +531,16 @@ if os.environ.get('CENTAERIS_E2B_PRODUCT_ACCEPTANCE') == '1':
             return fake_tool_call(f'e2b-{index}-{ordinal}', name, arguments)
 
         def admit(self, session_id, text):
+            if len(self.runs) == 1:
+                observe_lifecycle_marker(self.lifecycle_calls, 'successorAdmissionStarted')
             response = self.client.post(f'/api/workspaces/{self.workspace.pk}/sessions/{session_id}/messages',
                 data=json.dumps({'operationId': 'e2b-product-' + str(len(self.runs)), 'text': text,
                     'agentId': self.agent.pk, 'modelConfigRef': self.model.pk, 'attachmentRefs': []}), content_type='application/json')
             self.assertEqual(response.status_code, 202, 'E2B public message admission failed')
             body = response.json()
             self.assertEqual(body.get('status'), 'accepted')
+            if len(self.runs) == 1:
+                observe_lifecycle_marker(self.lifecycle_calls, 'successorAdmitted')
             self.runs.append(body['agentRunId'])
             if self.lifecycle_calls is not None:
                 self.lifecycle_calls.bind_run(body['agentRunId'])
@@ -599,6 +605,7 @@ if os.environ.get('CENTAERIS_E2B_PRODUCT_ACCEPTANCE') == '1':
             with override_settings(RUNTIME_URL=self.runtime_url), patch('app_core.model_adapter.fake_model_response', side_effect=self.model_response):
                 first = self.admit('new', 'Create the deterministic A proof files and publish delivery A.')
                 first_sandbox = self.execute(first)
+                observe_lifecycle_marker(self.lifecycle_calls, 'predecessorLifecycleCompleted')
                 self.assert_artifact(first, ARTIFACT_A)
                 session = Session.objects.get(pk=first.session_id)
                 self.assertGreater(session.workspaceGeneration, 0)
@@ -612,7 +619,23 @@ if os.environ.get('CENTAERIS_E2B_PRODUCT_ACCEPTANCE') == '1':
                 self.assertGreater(session.workspaceGeneration, 1)
                 self.assertNotEqual(session.workspaceSnapshotSha256, first_hash)
                 self.assertEqual(len(self.requests), 10)
+                self.assertEqual(first.session_id, second.session_id)
+                first_tool = second.events.filter(payload__type='tool_result').order_by('agent_run_sequence').first()
+                self.assertIsNotNone(first_tool)
+                self.assertEqual(first_tool.payload['payload']['callId'], 'e2b-1-0')
+                self.assertEqual(first_tool.payload['payload']['toolName'], 'read')
+                self.assertIn(first_tool.payload['payload']['resultState'], ('successWithOutput', 'successNoOutput'))
+                with connection.cursor() as cursor:
+                    cursor.execute('SELECT count(*) FROM runtime.provider_creation_operations WHERE settlement_id IS NULL')
+                    pending_duties = cursor.fetchone()[0]
+                self.assertEqual(pending_duties, 0)
+                report = per_run_acceptance_report(run_a_id=first.pk, run_b_id=second.pk,
+                    sandbox_a_id=first_sandbox, sandbox_b_id=second_sandbox,
+                    same_session=first.session_id == second.session_id, provider_absent=True, pending_duties=pending_duties,
+                    first_tool_event_id=first_tool.eventId, first_tool_created_at_ms=first_tool.createdAtMs,
+                    first_tool_payload=first_tool.payload)
             self.lifecycle_passed = True
+            print('e2b-per-run-product-measurements:' + json.dumps(report, sort_keys=True), flush=True)
 
 
         def assert_trace_workspace_archive(self, session, case, *, final):

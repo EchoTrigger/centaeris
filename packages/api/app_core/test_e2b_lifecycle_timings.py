@@ -277,6 +277,142 @@ class LifecycleCallTimingTests(unittest.TestCase):
 
 
 
+class SuccessorToolFollowupTimingTests(unittest.TestCase):
+    def test_only_exact_successor_followup_emits_same_clock_marker_without_business_call(self):
+        from .e2b_lifecycle_timing_test_support import observe_first_successor_tool_followup
+        ticks = iter((10_000_000, 35_000_000))
+        collector = LifecycleCallCollector(monotonic_ns=lambda: next(ticks), wall_time_ns=lambda: 1_700_000_000_000_000_000)
+        collector.marker("resumeReturned")
+        for index, ordinal in ((0, 1), (1, 0), (1, 2), (2, 1), (True, 1), (1, True), (1.0, 1), (1, 1.0),
+                ("1", 1), (1, "1"), (PrivateValue(), 1), (1, PrivateValue())):
+            observe_first_successor_tool_followup(collector, index, ordinal)
+        observe_first_successor_tool_followup(collector, 1, 1)
+        summary = collector.summary()
+        self.assertEqual(summary["callsStarted"], 0)
+        self.assertEqual(summary["rejectedMarkers"], 0)
+        self.assertEqual(summary["records"], [
+            {"kind": "marker", "sequence": 1, "name": "resumeReturned", "atMonotonicNs": 10_000_000, "atUnixMs": 1_700_000_000_000},
+            {"kind": "marker", "sequence": 2, "name": "firstSuccessorToolFollowup", "atMonotonicNs": 35_000_000, "atUnixMs": 1_700_000_000_000}])
+        self.assertIn("firstToolAfterResumeElapsedMs", summary["unavailableMetrics"])
+
+    def test_optional_or_failed_followup_observer_preserves_callback_return_and_failure(self):
+        from types import SimpleNamespace
+        from .e2b_lifecycle_timing_test_support import observe_first_successor_tool_followup
+        def broken(*_args):
+            raise PrivateFailure()
+        observer = SimpleNamespace(marker=broken, _note_error=broken)
+        response, calls = object(), []
+        def callback(value):
+            observe_first_successor_tool_followup(value, 1, 1)
+            calls.append(True)
+            return response
+        self.assertIs(callback(None), response)
+        self.assertIs(callback(observer), response)
+        self.assertEqual(calls, [True, True])
+        failure = PrivateFailure()
+        def failed_callback():
+            observe_first_successor_tool_followup(observer, 1, 1)
+            raise failure
+        try:
+            failed_callback()
+        except BaseException as actual:
+            self.assertIs(actual, failure)
+        else:
+            self.fail("original callback failure was swallowed")
+
+
+class PerRunRotationTimingTests(unittest.TestCase):
+    def inputs(self):
+        return {"run_a_id": "run-a", "run_b_id": "run-b", "sandbox_a_id": "sandbox-a", "sandbox_b_id": "sandbox-b",
+            "same_session": True, "provider_absent": True, "pending_duties": 0, "first_tool_event_id": "event-read-b",
+            "first_tool_created_at_ms": 1234, "first_tool_payload": {"type": "tool_result", "payload": {
+                "callId": "e2b-1-0", "toolName": "read", "resultState": "successWithOutput", "latencyMs": 37,
+                "output": PrivateValue(), "arguments": PrivateValue()}}}
+
+    def test_rotation_markers_share_same_process_clock_and_never_dispatch_business_calls(self):
+        from .e2b_lifecycle_timing_test_support import observe_lifecycle_marker
+        clock = itertools.count(100)
+        collector = LifecycleCallCollector(monotonic_ns=lambda: next(clock), wall_time_ns=lambda: 0)
+        markers = ("predecessorLifecycleCompleted", "successorAdmissionStarted", "successorAdmitted")
+        for marker in markers:
+            observe_lifecycle_marker(collector, marker)
+        observe_lifecycle_marker(collector, "private-marker")
+        observe_lifecycle_marker(collector, PrivateValue())
+        summary = collector.summary()
+        self.assertEqual([row["name"] for row in summary["records"]], list(markers))
+        self.assertEqual([row["atMonotonicNs"] for row in summary["records"]], [100, 101, 102])
+        self.assertEqual(summary["callsStarted"], 0)
+        self.assertNotIn("private", json.dumps(summary))
+
+    def test_complete_report_exposes_verified_identities_and_existing_read_timing_only(self):
+        from .e2b_lifecycle_timing_test_support import per_run_acceptance_report
+        report = per_run_acceptance_report(**self.inputs())
+        self.assertEqual(report["schema"], "e2b.perRun.acceptance.v1")
+        self.assertEqual(report["coverageStatus"], "complete")
+        self.assertEqual(report["missingFields"], [])
+        self.assertEqual(report["failedChecks"], [])
+        self.assertIs(report["sameSession"], True)
+        self.assertIs(report["distinctSandboxes"], True)
+        self.assertIs(report["providerAbsent"], True)
+        self.assertEqual(report["pendingDuties"], 0)
+        self.assertEqual((report["runAId"], report["runBId"], report["sandboxAId"], report["sandboxBId"]),
+            ("run-a", "run-b", "sandbox-a", "sandbox-b"))
+        self.assertEqual(report["firstToolResult"], {"eventId": "event-read-b", "createdAtUnixMs": 1234,
+            "source": "coreEventClock", "timing": {"status": "observed", "callId": "e2b-1-0", "toolName": "read",
+                "resultState": "successWithOutput", "latencyMs": 37, "completedAtUnixMs": 1234,
+                "clockSource": "coreEventClock", "resumeClockCorrelation": "notCorrelated"}})
+        self.assertNotIn("arguments", json.dumps(report))
+        self.assertNotIn("output", json.dumps(report))
+
+    def test_missing_invalid_or_unverified_rotation_facts_are_incomplete_instead_of_assumed(self):
+        from .e2b_lifecycle_timing_test_support import per_run_acceptance_report
+        empty = per_run_acceptance_report()
+        self.assertEqual(empty["coverageStatus"], "incomplete")
+        for key in ("sameSession", "distinctSandboxes", "runAId", "runBId", "sandboxAId", "sandboxBId",
+                "providerAbsent", "pendingDuties", "firstToolResult"):
+            self.assertIsNone(empty[key])
+            self.assertIn(key, empty["missingFields"])
+        invalid = self.inputs() | {"run_a_id": PrivateValue(), "sandbox_b_id": "private/path", "same_session": 1,
+            "provider_absent": "true", "pending_duties": False, "first_tool_event_id": "private/path"}
+        report = per_run_acceptance_report(**invalid)
+        self.assertEqual(report["coverageStatus"], "incomplete")
+        self.assertIsNone(report["firstToolResult"])
+        self.assertNotIn("private", json.dumps(report))
+        report = per_run_acceptance_report(**(self.inputs() | {"sandbox_b_id": "sandbox-a", "run_b_id": "run-a",
+            "same_session": False, "provider_absent": False, "pending_duties": 1}))
+        self.assertEqual(report["coverageStatus"], "incomplete")
+        self.assertEqual(set(report["failedChecks"]), {"sameSession", "distinctSandboxes", "distinctRuns", "providerAbsent", "pendingDuties"})
+
+    def test_first_read_requires_exact_successor_call_and_valid_existing_timing(self):
+        from .e2b_lifecycle_timing_test_support import per_run_acceptance_report
+        for changes in ({"callId": "e2b-1-2"}, {"toolName": "bash"}, {"resultState": "error"}, {"latencyMs": None}):
+            with self.subTest(changes=changes):
+                values = self.inputs()
+                values["first_tool_payload"]["payload"].update(changes)
+                report = per_run_acceptance_report(**values)
+                self.assertEqual(report["coverageStatus"], "incomplete")
+                self.assertIsNone(report["firstToolResult"])
+                self.assertIn("firstToolResult", report["missingFields"])
+        with patch("app_core.e2b_power_timing_test_support.first_successful_read_timing", side_effect=PrivateFailure()):
+            self.assertEqual(per_run_acceptance_report(**self.inputs())["coverageStatus"], "incomplete")
+
+    def test_rotation_marker_observer_failure_preserves_original_callback_result(self):
+        from types import SimpleNamespace
+        from .e2b_lifecycle_timing_test_support import observe_lifecycle_marker
+        def broken(*_args):
+            raise PrivateFailure()
+        collector = SimpleNamespace(marker=broken, _note_error=broken)
+        response, calls = object(), []
+        def callback(observer):
+            observe_lifecycle_marker(observer, "successorAdmissionStarted")
+            calls.append(True)
+            observe_lifecycle_marker(observer, "successorAdmitted")
+            return response
+        self.assertIs(callback(collector), response)
+        self.assertIs(callback(None), response)
+        self.assertEqual(calls, [True, True])
+
+
 class LifecycleStartupTimingTests(unittest.TestCase):
     fields = ("serverCount", "credentialCount", "mcpConnectionCount", "runtimePreludeMs",
         "sandboxEnsureMs", "mcpCredentialResolveMs", "mcpDiscoveryMs", "workspaceRestoreMs",
