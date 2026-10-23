@@ -135,11 +135,45 @@ def observe_lifecycle_worker(worker, collector):
 
 
 def emit_lifecycle_call_report(collector):
+    import tempfile
+    from pathlib import Path
+    prefix = 'e2b-lifecycle-call-measurements:'
+    incomplete = '{"coverageStatus":"incomplete","observationUnavailable":true}'
+    deferred_path = os.environ.get('CENTAERIS_E2B_LIFECYCLE_CALL_REPORT_PATH')
     try:
         collector.marker('sampleEnd')
-        print('e2b-lifecycle-call-measurements:' + json.dumps(collector.summary(), sort_keys=True), flush=True)
+        report = json.dumps(collector.summary(), sort_keys=True)
     except Exception:
-        print('e2b-lifecycle-call-measurements:{"coverageStatus":"incomplete","observationUnavailable":true}', flush=True)
+        report = incomplete
+    if deferred_path is None:
+        print(prefix + report, flush=True)
+        return
+    target = None
+    created = None
+    try:
+        target = Path(deferred_path)
+        if not target.is_absolute() or '..' in target.parts or target.is_symlink():
+            return
+        if any(parent.is_symlink() for parent in target.parents):
+            return
+        temporary_root = Path(tempfile.gettempdir()).resolve(strict=True)
+        parent = target.parent.resolve(strict=True)
+        parent.relative_to(temporary_root)
+        target = parent / target.name
+        with target.open('x', encoding='utf-8', newline='') as output:
+            created = os.fstat(output.fileno())
+            output.write(report)
+            output.flush()
+            os.fsync(output.fileno())
+    except Exception:
+        # Only remove our own incomplete file. The wrapper emits a static
+        # unavailable record after Django's progress output has finished.
+        if created is not None:
+            try:
+                if not target.is_symlink() and os.path.samestat(created, target.lstat()):
+                    target.unlink()
+            except Exception:
+                pass
 
 
 def drive_lifecycle_job(worker, job_id, claim, observe, *, clock=time.monotonic, diagnostics=lambda: ()):
