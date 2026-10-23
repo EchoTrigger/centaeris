@@ -7,6 +7,7 @@ from contextlib import contextmanager
 import redis
 from django.contrib.auth import get_user_model
 from django.db import connection, transaction
+from django.db.models import QuerySet
 from django.http import JsonResponse, QueryDict
 from ninja import Router
 
@@ -24,7 +25,7 @@ from app_core.workspace_access import workspace_membership_for
 from .query import valid_query_fields
 from .security import usage_auth
 from .stream_response import OwnedAsyncStreamingHttpResponse, stream_database_call
-from .workspaces import list_workspace_sessions
+from .workspaces import list_workspace_sessions, prepare_workspace_session_list
 
 
 router = Router(tags=["presentation"], by_alias=True)
@@ -78,10 +79,10 @@ class PresentationLoader:
                 return False
             if agent.definition_id and not available_agent_definitions(membership).filter(id=agent.definition_id).exists():
                 return False
-            # Re-run the established list scope on navigation-only connections,
-            # including credential rotation and delegated branch restrictions.
-            result = list_workspace_sessions(self.request, self.scope.workspace_id)
-            return isinstance(result, dict)
+            # Recheck the exact list scope, including credential rotation and
+            # delegated branch restrictions, without materializing its rows.
+            scoped = prepare_workspace_session_list(self.request, self.scope.workspace_id)
+            return isinstance(scoped, QuerySet)
 
     @stream_database_call
     def navigation(self):

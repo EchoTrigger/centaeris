@@ -161,7 +161,8 @@ instance configured through `TEST_POSTGRES_*`, never an application database.
 
 ```sh
 uv run --frozen --package api python packages/api/manage.py test \
-  app_core.test_presentation_stream app_core.test_session_attention \
+  app_core.test_presentation_stream app_core.test_presentation_authority \
+  app_core.test_session_attention \
   app_core.test_session_attention_migration app_core.test_schema_wire_contract \
   app_core.test_workspace_session_list_queries app_core.test_session_projection_concurrency \
   --settings=api.test_settings --noinput
@@ -177,6 +178,25 @@ must protect existing facts, read history and the forward-only reversal guard.
 Concurrent HTTP ACKs and repeated terminal projection must not regress read state.
 The ordinary Session-list query-growth test also protects batched discovery from
 introducing one database query per Session.
+
+Session listing and navigation-only SSE authorization share a fully filtered,
+unevaluated query scope. Characterization coverage preserves empty-list access,
+active-user and definition visibility checks, delegation credential versions,
+membership replacement, native branch bindings, public rejection statuses and
+request grant/branch refreshes. Cost and side-effect tests observe actual reads
+and writes: repeated authorization must not materialize navigation rows or
+advance attention projections. Actual navigation reads still refresh and return
+the complete allowed snapshot. These checks establish behavior and removed work,
+not an unmeasured latency or capacity claim.
+
+For changes limited to this authorization/list boundary, run:
+
+```sh
+uv run --frozen --package api python packages/api/manage.py test \
+  app_core.test_presentation_authority app_core.test_workspace_session_list_queries \
+  app_core.test_http_query_contract app_core.test_http_error_contract \
+  --settings=api.test_settings --noinput
+```
 
 ## Focused Core gate
 

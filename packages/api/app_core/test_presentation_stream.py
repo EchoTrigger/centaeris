@@ -450,6 +450,50 @@ class PresentationHttpTests(OperationFixture, TransactionTestCase):
         self.assertEqual(item["sessions"][0]["id"], self.session_id)
         page.assert_not_called()
 
+    def test_navigation_authority_cost_is_independent_of_session_rows(self):
+        from django.db import connection
+        from django.test import RequestFactory
+        from django.test.utils import CaptureQueriesContext
+        from .http.presentation import PresentationLoader
+        from .models import Session
+        request = RequestFactory().get("/")
+        request.user = self.user
+        loader = PresentationLoader(request, PresentationScope(self.workspace.pk, self.agent.pk))
+        counts = []
+        for count in (1, 40):
+            while Session.objects.filter(agent=self.agent).count() < count:
+                Session.objects.create(workspace=self.workspace, owner=self.user, agent=self.agent)
+            with CaptureQueriesContext(connection) as queries, patch.object(Session, "from_db", wraps=Session.from_db) as hydrate:
+                self.assertTrue(async_to_sync(loader.authorized)())
+            # Checking an Agent scope must not hydrate every conversation merely
+            # because its complete navigation list can be displayed later.
+            self.assertEqual(hydrate.call_count, 0)
+            counts.append(len(queries))
+        self.assertEqual(counts[0], counts[1])
+        rows = async_to_sync(loader.navigation)()
+        self.assertEqual(len(rows), 40, "only the actual navigation read materializes the complete scoped list")
+
+    def test_navigation_authority_leaves_notification_projection_to_navigation(self):
+        from django.test import RequestFactory
+        from .http.presentation import PresentationLoader
+        from .models import AgentRun, Session
+        from .tests import append_started, append_session_records, session_record
+        session = Session.objects.get(pk=self.session_id)
+        run = AgentRun.objects.create(workspace=self.workspace, session=session, user=self.user,
+            modelConfig=self.model, prompt="Synthetic attention")
+        append_started(run)
+        append_session_records(run, [session_record(run, 3, "agent_run_completed", {"doneReason": "finalized"})])
+        request = RequestFactory().get("/")
+        request.user = self.user
+        loader = PresentationLoader(request, PresentationScope(self.workspace.pk, self.agent.pk))
+        self.assertTrue(async_to_sync(loader.authorized)())
+        session.refresh_from_db()
+        self.assertEqual((session.latestAttentionSequence, session.attentionRevision), (0, 0))
+        rows = async_to_sync(loader.navigation)()
+        session.refresh_from_db()
+        self.assertEqual((session.latestAttentionSequence, session.attentionRevision), (3, 1))
+        self.assertTrue(next(row for row in rows if row["id"] == session.pk)["isUnread"])
+
     def test_closing_browser_delivery_does_not_cancel_the_accepted_run(self):
         from .models import AgentRun, SessionEvent
         accepted = self.post(self.create_url + f"/{self.session_id}/messages").json()

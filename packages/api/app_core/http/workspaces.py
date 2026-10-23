@@ -465,12 +465,8 @@ def create_session_project(
     return Status(201, {"project": serialize_session_project(project)})
 
 
-@router.get(
-    "/workspaces/{workspace_id}/sessions",
-    auth=usage_auth("sessions:read"),
-    response={200: SessionsEnvelope} | COMMON_ERROR_RESPONSES,
-)
-def list_workspace_sessions(request, workspace_id: str):
+def prepare_workspace_session_list(request, workspace_id: str):
+    """Authorize and scope navigation without loading or projecting its rows."""
     workspace = _workspace_for_user(request.user, workspace_id)
     if workspace is None:
         return Status(404, {"error": "workspace_not_found"})
@@ -509,6 +505,18 @@ def list_workspace_sessions(request, workspace_id: str):
         sessions_query = sessions_query.filter(coordination_binding__isnull=True)
         if grant is not None:
             sessions_query = sessions_query.filter(agent__definition_id=grant.definition_id)
+    return sessions_query
+
+
+@router.get(
+    "/workspaces/{workspace_id}/sessions",
+    auth=usage_auth("sessions:read"),
+    response={200: SessionsEnvelope} | COMMON_ERROR_RESPONSES,
+)
+def list_workspace_sessions(request, workspace_id: str):
+    sessions_query = prepare_workspace_session_list(request, workspace_id)
+    if isinstance(sessions_query, Status):
+        return sessions_query
     sessions = list(sessions_query.select_related("work_binding__operation").order_by("-isPinned", "-updatedAt"))
     from app_core.session_attention import refresh_session_attention_many
     refresh_session_attention_many(sessions)

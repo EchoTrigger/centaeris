@@ -104,7 +104,8 @@ snapshot explicitly ends delivery and enters bounded reconnect recovery; it is
 not silently truncated. Committed normal content still recovers through the
 range stream. Arbitrarily large live-snapshot fragmentation is outside this
 contract. Navigation discovery also reads the current scoped list and retains
-authorization checks; chunking bounds wire frames, not all list-query costs.
+authorization checks; chunking bounds wire frames, not the cost of evaluating
+and serializing an actual navigation snapshot.
 
 ## Attention and explicit read acknowledgement
 
@@ -180,6 +181,29 @@ sending heartbeats forever. Ephemeral Redis reads have their own shorter bound;
 Redis loss does not replace durable PostgreSQL authority. Disconnect cancels the
 subscription's reads and returns connections; it does not cancel an AgentRun.
 
+HTTP Session listing and navigation-only stream authorization share
+`prepare_workspace_session_list`. It rechecks workspace membership, current
+delegation credentials and, when `agentId` is supplied, the owned active Agent.
+It returns the complete filtered Session QuerySet without evaluating it. Native
+branch and published definition filters remain in that shared scope. Original
+rejection order, statuses and request grant/branch refreshes are preserved.
+An empty list still authorizes navigation; a row-existence check is not an
+access requirement.
+
+The navigation-only stream also retains its fresh active-user and definition
+visibility checks. A selected Session continues through the existing Session
+authority helper. Credential versions and business-branch identities stay bound
+to initial authentication while current grants and branch state are rechecked;
+a cached grant cannot bypass rotation, expiry or revocation.
+
+Authorization checks do not load the Session list, refresh attention projections
+or serialize sidebar rows. The actual `navigation()` read performs those steps
+and sends a changed snapshot through the same filtered listing path. This removes
+duplicate display work from authorization without changing which rows navigation
+can return. Actual navigation discovery still has full-list query and
+serialization costs; this contract does not establish a latency or capacity
+improvement.
+
 Responses use `text/event-stream`, `Cache-Control: no-store, no-transform`, and
 `X-Accel-Buffering: no`. These headers do not prove that an external WAF forwards
 bytes promptly. Proxy buffering, idle limits, compression and reconnection through
@@ -195,7 +219,8 @@ old-schema databases. Set `PGCONNECT_TIMEOUT` to bound a missing test service.
 
 ```sh
 uv run --frozen --package api python packages/api/manage.py test \
-  app_core.test_presentation_stream app_core.test_session_attention \
+  app_core.test_presentation_stream app_core.test_presentation_authority \
+  app_core.test_session_attention \
   app_core.test_session_attention_migration app_core.test_schema_wire_contract \
   app_core.test_workspace_session_list_queries app_core.test_session_projection_concurrency \
   app_core.test_http_query_contract app_core.test_http_error_contract \
@@ -217,6 +242,8 @@ pnpm --filter web run test:components
 | Invalid binding/generation or projection rebuild | Explicit reset; no cross-Session application. |
 | Redis unavailable, slow consumer, or cancellation | Durable state remains authoritative; bounded work and owned resources are released. |
 | Grant revoked during a pending read | No subsequent protected payload is emitted. |
+| Navigation authorization repeated with empty or growing Session lists | Access decisions and rejection contracts hold without loading rows or updating attention. |
+| Cached credential rotates, membership is replaced, or a business branch changes | Fresh authority checks preserve the original credential, definition and branch boundaries. |
 | Split navigation interrupted before its last chunk | Existing complete list remains; no fabricated truncation. |
 | Current view, background view, manual unread, or reading older text | Only eligible visible applied attention is automatically acknowledged. |
 | Concurrent/stale read ACK, repeated terminal projection, late HTTP metadata | Read water and revisions remain monotonic; newer attention/manual choice survives. |
