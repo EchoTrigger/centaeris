@@ -45,6 +45,7 @@ mod prompt_compaction_live_chain_tests;
 mod prompt_compaction_recovery_tests;
 mod recovery_tool_origin_tests;
 mod wait_recovery_tests;
+mod workspace_instruction_tests;
 
 #[tokio::test]
 async fn query_loop_agent_creation_reconciles_lost_reply_without_repeating_the_write() {
