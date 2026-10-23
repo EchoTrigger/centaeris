@@ -3,15 +3,18 @@ import type { RuntimeConfig } from "./config";
 export class ApiError extends Error {
   readonly status: number;
   readonly payload: unknown;
+  readonly retryAfter: string | null;
 
   constructor(
     message: string,
     status: number,
     payload: unknown = null,
+    retryAfter: string | null = null,
   ) {
     super(message);
     this.status = status;
     this.payload = payload;
+    this.retryAfter = retryAfter;
   }
 }
 
@@ -111,7 +114,7 @@ export async function apiResponse(path: string, options: ApiRequestOptions = {})
     const message = body && typeof body === "object" && "error" in body && typeof body.error === "string"
       ? body.error
       : `request_failed:${response.status}`;
-    const error = new ApiError(message, response.status, body);
+    const error = new ApiError(message, response.status, body, response.headers.get("Retry-After"));
     if (response.status === 403 && message === "csrf_failed") clearCsrfToken();
     if (isAuthenticationRequired(error)) authenticationRequiredHandler?.();
     throw error;

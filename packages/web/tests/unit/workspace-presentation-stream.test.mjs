@@ -227,7 +227,7 @@ test('repeated clean EOF without an applied checkpoint exhausts bounded retry in
   const { controller } = fixture();
   let requests = 0;
   const delays = [];
-  await assert.rejects(streamWorkspacePresentation({ ...identity, controller, signal: new AbortController().signal, onConnection() {}, retryLimit: 2,
+  await assert.rejects(streamWorkspacePresentation({ ...identity, controller, signal: new AbortController().signal, onConnection() {}, retryLimit: 2, random: () => 0.5,
     request: async () => { requests++; return new Response('', { headers: { 'content-type': 'text/event-stream' } }); },
     wait: async ms => { delays.push(ms); },
   }), /repeatedly ended/);
@@ -333,19 +333,21 @@ test('the API emitted public presentation fixtures are accepted without a second
   assert.equal(store.getBlockSnapshot('message').body.content.inlineContent, 'Ready');
 });
 
-test('healthy navigation-only subscriptions reset reconnect failures after a complete applied navigation snapshot', async () => {
+test('stable navigation-only connections replenish consecutive retries after sustained liveness', async () => {
   const store = createTranscriptViewStore();
   const controller = new WorkspacePresentationController({ ...identity, sessionId: null, store });
   const abort = new AbortController();
   const delays = [];
-  let requests = 0;
-  await assert.rejects(streamWorkspacePresentation({ ...identity, sessionId: null, controller, signal: abort.signal,
+  let requests = 0, now = 0;
+  await assert.rejects(streamWorkspacePresentation({ ...identity, sessionId: null, controller, signal: abort.signal, now: () => now, random: () => 0.5,
     onConnection() {}, retryLimit: 1,
     request: async () => {
       if (++requests === 4) { abort.abort(); throw new DOMException('Aborted', 'AbortError'); }
       const item = { ...envelope('navigation', { snapshotId: 'navigation', offset: 0, hasMore: false, sessions: [] }), sessionId: null };
-      return new Response(wire([{ cursor: null, item }]), { headers: { 'content-type': 'text/event-stream' } });
-    }, wait: async delay => { delays.push(delay); },
+      return new Response(new ReadableStream({ start(writer) { setImmediate(() => {
+        now += 30_001; writer.enqueue(new TextEncoder().encode(wire([{ cursor: null, item }]))); writer.close();
+      }); } }), { headers: { 'content-type': 'text/event-stream' } });
+    }, wait: async delay => { delays.push(delay); now += delay; },
   }), { name: 'AbortError' });
   assert.equal(requests, 4);
   assert.deepEqual(delays, [500, 500, 500]);
