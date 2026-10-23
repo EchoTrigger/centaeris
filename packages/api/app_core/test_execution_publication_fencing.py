@@ -19,6 +19,7 @@ from django.core.files.storage import default_storage
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import connection, connections
+from django.db.models.deletion import ProtectedError
 from django.test import Client, TransactionTestCase, override_settings
 from django.utils import timezone
 
@@ -27,6 +28,8 @@ from .http import internal, workspaces
 from .models import Agent, AgentRun, ModelConfig, StorageCleanupRetry, Workspace
 from .testing import create_session
 from .runtime_schema_test_helpers import isolate_runtime_schema
+from .runtime_contract import session_workspace_for_session
+from .workspace_snapshot_protection import collect_session_workspace_protection
 
 
 class ExecutionPublicationFixture:
@@ -72,11 +75,11 @@ class ExecutionPublicationFixture:
             )
             cursor.execute("SELECT pg_backend_pid()")
             self.main_connection_pid = cursor.fetchone()[0]
-        self.addCleanup(self._delete_job)
+        self.addCleanup(self._delete_job, self.job_id)
 
-    def _delete_job(self):
+    def _delete_job(self, job_id):
         with connection.cursor() as cursor:
-            cursor.execute("DELETE FROM runtime.runtime_jobs WHERE job_id=%s", [self.job_id])
+            cursor.execute("DELETE FROM runtime.runtime_jobs WHERE job_id=%s", [job_id])
 
     def _lease(self, owner, *, expired=False):
         with connection.cursor() as cursor:
@@ -402,31 +405,27 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
                     output = io.StringIO()
                     with patch.object(workspace_snapshot_gc, "delete_stored_object_for_gc",
                                       wraps=workspace_snapshot_gc.delete_stored_object_for_gc) as delete:
-                        try:
-                            with patch.object(gc_deleted_resources, "collect_workspace_snapshot_gc", collect):
-                                call_command("gc_deleted_resources", older_than_seconds=0, stdout=output)
-                        except CommandError as error:
-                            gc_state.update(output=output.getvalue(), deleteCalls=delete.call_args_list)
-                            self.assertFalse(recent_temporary, gc_state)
-                            self.assertEqual(os.name, "nt", gc_state)
-                            self.assertIn("Workspace snapshot GC failed", str(error), gc_state)
-                            self.assertEqual(delete.call_args_list, [((gc_state["key"],), {})], gc_state)
-                            self.assertEqual(gc_state["report"]["blocked"], [], gc_state)
-                            self.assertEqual(len(gc_state["report"]["failures"]), 1, gc_state)
-                            self.assertTrue(gc_state["report"]["failures"][0].startswith(gc_state["key"] + ": "), gc_state)
-                        else:
-                            gc_state.update(output=output.getvalue(), deleteCalls=delete.call_args_list)
-                            self.assertEqual(gc_state["report"]["failures"], [], gc_state)
-                            if recent_temporary:
-                                self.assertEqual(gc_state["report"]["blocked"], [gc_state["key"]], gc_state)
-                                self.assertEqual(gc_state["report"]["cleaned"], [], gc_state)
-                                self.assertEqual(delete.call_count, 0, gc_state)
-                                self.assertTrue(temporaries[0].exists(), gc_state)
-                            else:
-                                self.assertEqual(gc_state["report"]["blocked"], [], gc_state)
-                                self.assertEqual(gc_state["report"]["cleaned"], [gc_state["key"]], gc_state)
-                                self.assertEqual(delete.call_args_list, [((gc_state["key"],), {})], gc_state)
-                                self.assertFalse(temporaries[0].exists(), gc_state)
+                        with patch.object(gc_deleted_resources, "collect_workspace_snapshot_gc", collect):
+                            call_command("gc_deleted_resources", older_than_seconds=0, stdout=output)
+                        gc_state.update(output=output.getvalue(), deleteCalls=delete.call_args_list)
+                        self.assertEqual(gc_state["report"]["failures"], [], gc_state)
+                        self.assertEqual(gc_state["report"]["blocked"], [gc_state["key"]], gc_state)
+                        self.assertEqual(gc_state["report"]["cleaned"], [], gc_state)
+                        self.assertEqual(delete.call_count, 0, gc_state)
+                        self.assertTrue(temporaries[0].exists(), gc_state)
+                        self.assertFalse(StorageCleanupRetry.objects.filter(storageKey=gc_state["key"]).exists(),
+                            "pending publication is a legitimate wait, not a cleanup failure")
+                        publication = self.run.snapshot_publications.get()
+                        self.assertEqual(publication.state, "pending")
+                        self.assertIsNone(publication.confirmed_at)
+                        self.assertEqual(publication.snapshot_sha256, "sha256:" + hashlib.sha256(snapshot).hexdigest())
+                        self.assertEqual(publication.snapshot_size_bytes, len(snapshot))
+                        self.assertEqual(Path(publication.storage_key).parent.as_posix(),
+                                         Path(gc_state["key"]).parent.as_posix())
+                        retained = temporaries[0].read_bytes()
+                        self.assertGreater(len(retained), 0)
+                        self.assertEqual(retained, snapshot[:len(retained)],
+                            "GC must preserve the in-flight payload prefix until its writer finishes")
                 finally:
                     release.set()
                 rejected = pending.result(timeout=10)
@@ -435,6 +434,13 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
         self.assertEqual(rejected.json(), {"error": "session_workspace_session_unavailable"}, gc_state)
         self.assertEqual(list(self.storage_root.rglob("*.snapshot")), [], gc_state)
         self.assertEqual(list(self.storage_root.rglob(".centaeris-immutable-*.tmp")), [], gc_state)
+        publication.refresh_from_db()
+        self.assertEqual(publication.state, "pending", "request rejection does not settle publication responsibility")
+        self.assertIsNone(publication.confirmed_at)
+        inventory = collect_session_workspace_protection(self.session.pk)
+        self.assertIn("snapshotPublicationUnconfirmed:" + publication.pk, inventory.unresolved)
+        self.assertTrue(any(root.source_kind == "snapshotPublication" and root.storage_key == publication.storage_key
+                            for root in inventory.roots))
         call_command("gc_deleted_resources", older_than_seconds=0, stdout=io.StringIO())
         self.assertEqual(list(self.storage_root.rglob("*.snapshot")), [], gc_state)
         self.assertEqual(list(self.storage_root.rglob(".centaeris-immutable-*.tmp")), [], gc_state)
@@ -479,15 +485,38 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
         body, snapshot = self._body()
         self.assertEqual(self._post(body).status_code, 201)
         self.session.refresh_from_db()
-        self.authorization.delete()
+        previous_run = self.run
+        previous_authorization = self.authorization
+        previous_publication = previous_run.snapshot_publications.get()
+        with self.assertRaises(ProtectedError):
+            previous_authorization.delete()
+        previous_authorization.refresh_from_db()
+        previous_publication.refresh_from_db()
+        self.assertEqual(previous_publication.authorization_id, previous_authorization.pk)
+        self.assertEqual(previous_publication.state, "committed")
+        # A successor freezes the newly committed head; the previous Run's grant
+        # and publication remain immutable instead of rebinding its frozen input.
+        AgentRun.objects.filter(pk=previous_run.pk).update(status="completed")
+        self.run = AgentRun.objects.create(
+            workspace=previous_run.workspace, session=self.session, user=previous_run.user,
+            modelConfig=previous_run.modelConfig, prompt="read committed files", status="running",
+        )
         self.authorization = create_agent_run_authorization(
             self.run, image_digest="sha256:" + "a" * 64,
         )
+        self.assertNotEqual(self.authorization.pk, previous_authorization.pk)
+        self.assertEqual(self.authorization.payload["sessionWorkspace"], session_workspace_for_session(self.session))
+        self.job_id = f"agent_run.lifecycle:{self.run.id}"
         with connection.cursor() as cursor:
             cursor.execute(
-                "UPDATE runtime.runtime_jobs SET idempotency_key=%s WHERE job_id=%s",
-                [f"{self.job_id}:{self.authorization.digest}", self.job_id],
+                "INSERT INTO runtime.runtime_jobs(job_id,job_kind,status,lease_owner,"
+                "lease_expires_at_ms,idempotency_key,session_id,payload_ref) "
+                "VALUES(%s,'agent_run.lifecycle','running',%s,"
+                "(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint+60000,%s,%s,%s)",
+                [self.job_id, self.owner, f"{self.job_id}:{self.authorization.digest}",
+                 self.session.id, f"record:agent_run:{self.run.id}"],
             )
+        self.addCleanup(self._delete_job, self.job_id)
         return {
             "schema": "runtime.session_workspace.download.v1",
             "jobId": self.job_id, "leaseOwner": self.owner,
@@ -634,7 +663,21 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
                 call_command("gc_deleted_resources", older_than_seconds=0, stdout=io.StringIO())
         else:
             call_command("gc_deleted_resources", older_than_seconds=0, stdout=io.StringIO())
-        self.assertFalse(default_storage.exists(key))
+        if checkpoint:
+            self.assertTrue(default_storage.exists(key), "staged responsibility survives owner purge")
+            with default_storage.open(key, "rb") as retained:
+                self.assertEqual(retained.read(), snapshot)
+            publication = self.run.snapshot_publications.get(storage_key=key)
+            self.assertEqual(publication.state, "staged")
+            self.assertIsNotNone(publication.confirmed_at)
+            self.assertFalse(StorageCleanupRetry.objects.filter(storageKey=key).exists(),
+                "unacknowledged staged bytes must wait without spending deletion attempts")
+            inventory = collect_session_workspace_protection(self.session.pk)
+            self.assertIn("snapshotPublicationUnconfirmed:" + publication.pk, inventory.unresolved)
+            self.assertTrue(any(root.source_kind == "snapshotPublication" and root.storage_key == key
+                                for root in inventory.roots))
+        else:
+            self.assertFalse(default_storage.exists(key))
         self._assert_error(
             self._thread_download(body, checkpoint=checkpoint), "session_workspace_session_unavailable",
         )
