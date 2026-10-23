@@ -27,8 +27,8 @@ const run = (executable, args, options = {}) => new Promise((resolve, reject) =>
   child.once("close", code => { clearTimeout(timeout); resolve({ code, output }); });
 });
 const installedEntry = async () => {
-  const result = await run(powershell, ["-NoProfile", "-NonInteractive", "-Command",
-    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); Get-ChildItem HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall | Get-ItemProperty | Where-Object { $_.DisplayName -like 'Centaeris Desktop*' } | Select-Object DisplayName,DisplayVersion,UninstallString | ConvertTo-Json -Compress"]);
+  const result = await run(powershell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
+    path.join(import.meta.dirname, "installer-registration.ps1")]);
   assert.equal(result.code, 0, result.output);
   return result.output.trim() ? JSON.parse(result.output) : null;
 };
