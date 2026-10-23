@@ -29,9 +29,9 @@ capacity 8 / 4 / 8.
 | Evidence | Current boundary |
 | --- | --- |
 | Earlier real-provider product builds | perRun A/B, retained A/B with Runtime restart, explicit pause/resume with queued work, and independent retirement passed on the identified builds below |
-| Current affected automated checks | Runtime 681, focused Core query_loop 129, SDK adapter 122, related API 149 and required PostgreSQL 214 passed; Harbor 216 passed separately. Full release-gate failures are recorded below |
+| Current affected automated checks | Runtime 684, focused Core query_loop 129, SDK adapter 122, related API 151 and required PostgreSQL 214 passed; Harbor 216 passed earlier and separately. Full release-gate failures are recorded below |
 | Interrupted instrumented real-provider sample | Stopped in Run A before pause/resume with an unresolved dispatched create and no locator or settlement. After reboot the tmpfs PostgreSQL ledger is absent; its original owner record and Unknown responsibility remain preserved |
-| Current isolated same-build samples | Three same-Session perRun A/B samples and three explicit retained pause/resume A/B samples passed, including correlated successful tool-receipt milestones. perRun Store subspans are measured; retained execution/cleanup Store subspans remain an explicit coverage gap |
+| Current isolated comparisons | Twelve lifecycle samples compare baseline and candidate, three per scenario/build; six workspace IO samples add one per case/build. All passed with confirmed cleanup. perRun, retained execution and Run-cleanup Store subspans are measured separately |
 | Release and legacy-removal acceptance | TB2.1 replacement, automatic idle policy, combined saturation, the wider restart/failure matrix, full release gates and historical-duty drain remain incomplete |
 
 The executable hashes, image digests, test counts and measurements below identify
@@ -821,219 +821,264 @@ or GPU environments, setup and independent verifier handoff are not connected.
 The current helper-only 512 MiB template and these serial A/B samples do not
 validate that two-slot Terminal-Bench pipeline.
 
-### Current correlated lifecycle samples
+### Current authority and lifecycle comparison
 
-Three serial samples per scenario passed on code commit
-`bef323b47908f345d9f100cfb659e62286468d3e`, source tree
-`a76a8bff69fa597a7fedf5a6543bd4fb81fb48ff`, image
-`sha256:8c5335ab1ffc29eb102a770c4e3ae3bdf0a2297c396041e486bc74903cb56d77`,
-and Runtime executable SHA-256
-`ac48c018b62a2657a6bd7c0d4081944d418da60814c36a5cc05fd7919a182339`.
-All used SDK 2.58.0, the same 512 MiB diagnostic template and the Debug test
-profile (`debug=0`, `opt-level=0`). They alternated perRun/power, with one live
-sample at a time. No idle-selection or performance policy changed.
+The current production candidate is commit
+`07fb38b248800e959881146db361b9e7270a1a6d`. It adds explicit parameter types to
+14 controller-authority queries so PostgreSQL can prepare and execute each in
+one protocol send. SQL, parameter order, lock order, post-lock expiry checks,
+timeout restoration, grant validation and before/after callback revalidation
+remain unchanged. It adds no authorization cache. Characterization coverage
+passed before and after this behavior-preserving change.
 
-| Scenario | Local OS-temporary report IDs, sample order |
+| Build | Source tree | Image digest | Runtime executable SHA-256 |
+| --- | --- | --- | --- |
+| Baseline: `8122ee87` production code plus characterization tests | `78b4f6c980f4ef2f5a80d34f9551b803dc117481` | `3f4c743ee34059b9f2004abe27c3df07979c7141dba5da1e155849b53f869805` | `448739a1491471a6325b6671864fe4c17410b16e5e23a69d20f1ca47b1d6e86a` |
+| Candidate: `07fb38b2` | `19a5e267e808d4e06aa183b506f2ec8caf2db5da` | `db364e9bb78ead6bdb2ca9ca4fe1038f1f685cf795ed2caa33a08dac21fb7517` | `c84380cef9d49f0919fe4fced769a3edf80d6dd60b6cd9e690983125ce7ad8af` |
+
+Both use SDK 2.58.0, the same 512 MiB diagnostic template (identity digest
+`dc05f652df4d1d28eb6af6234478021b9f92fafa0eb2373be737ffc386d159e9`), and the
+Debug test profile (`debug=0`, `opt-level=0`). Global / Workspace / ordinary Worker
+execution limits remain 8 / 4 / 8. Three samples per build and scenario alternate
+baseline/candidate, one live sample at a time, after build and database gates
+finished. These are descriptive repeats, not p99/SLO or release-profile results.
+
+All twelve completed Core read/Bash/artifact execution, Run cleanup, release,
+exact provider absence and zero outstanding duties. perRun rotates distinct A/B
+VMs in one Session. Explicit retained power reuses A/B, preserves queued work,
+pauses, resumes, survives deliberate Runtime restarts and retires independently.
+Both earlier Unknown owners remain byte-for-byte unchanged and unresolved.
+
+| Scenario / build | OS-temporary report IDs, sample order |
 | --- | --- |
-| perRun | `6a46db7e5892437ca67a7a689ccfd406`, `b0d392117a6e462aa265dec8d08d226f`, `b609147c7c464c7a99a429bba66db087` |
-| Explicit retained power | `d38d00016d334371b1aa94904034322b`, `8e762953459d4c17b038aa959c7c383e`, `d2db8a301bdf429e8a1d9e4426630f68` |
-
-All six completed the existing Core read/Bash/artifact workflow, Run cleanup,
-release, exact provider absence and zero outstanding duties. perRun used distinct
-A/B VMs in one Session; power used retained A/B, queued work, explicit pause and
-resume, forced Runtime restarts and independent retirement. Both earlier Unknown
-owners remain unchanged. Success of these independently owned samples does not
-resolve their earlier physical uncertainty.
+| perRun baseline | `45af56035f3045b3a67145cfac2a1c0e`, `8a63cf3455964d0c9d8b0283d0b046ab`, `b87020fca1ef4453b78d36d6026541d6` |
+| perRun candidate | `073224d38d0048d895e03f94b06ac547`, `8f38ec44b2a549cd956c024022ee8150`, `698d6af8b2df4080b4c3f0c355181ad7` |
+| Retained power baseline | `33a5df61189d47ecb4198333156f9fb1`, `0cf2cd5d8bb94828844d55d5889c7331`, `494ff4cb67844eb089bfe8bb9f654fbc` |
+| Retained power candidate | `dca03380aecd4646bb4cf4957a4a4d76`, `216c12acbdd34f5690b5a2b1c237a5d2`, `ee638c96b75f48bba69ae069ff20a47d` |
 
 #### Clock and attribution boundaries
 
-Opt-in observations now separate logical helper stages, SDK work and the perRun
-Store dispatch. Run-owned diagnostic context survives scoped Store/wait threads
-and retained successors; an unbound successor cannot inherit a reused lane's
-previous Run. These diagnostics do not supply execution authority.
-
 Fixture markers and receipt milestones use Linux `CLOCK_MONOTONIC` only after
-matching a SHA-256 domain of boot ID and time-namespace inode. Receipt ready is
-arrival of the first successful tool result at Core's existing DurableReceipt
-safe point. Receipt committed is acceptance of the existing tool-record commit,
-before downstream transcript work. Neither marker claims to be the raw tool
-return or a user-visible render timestamp. Core's own tool duration stays
-independent; wall clocks and `atUnixMs` emission times are never subtracted to
-manufacture an interval.
+matching the boot-ID/time-namespace clock-domain digest. Receipt ready means
+Core's successful DurableReceipt safe point; committed means acceptance of the
+existing tool-record commit, before downstream transcript work. Neither is raw
+tool return or a rendered timestamp. Core tool duration is separate. Wall clocks
+and emission times are never subtracted to invent intervals.
 
-Loss, invalid, foreign, error and interrupted counters were zero. perRun had 494
-explicitly unassigned SDK request records per sample; power had 475 request
-records plus six independent startup records unassigned. Other startup records
-may keep their actual child-spawn owner. Requests from a shared SDK child are
-not assigned to a Run by order or by its spawn owner. Independent transport
-maintenance remains unassigned as well. This is stated attribution coverage,
-not a claim of complete per-Run SDK ownership.
+Startup, transport and execution loss/invalid/foreign/interrupted/binding-error
+counters are zero. perRun has 494 explicitly unassigned SDK observation records
+per sample; power has 481. These are diagnostic records, not counts of provider
+requests. Startup may retain its actual child-spawn owner; requests in shared
+SDK children remain unassigned. Raw execution attribution therefore stays
+`incomplete`, while the strict wrapper confirms loss-free observation. This is
+not complete per-Run SDK ownership. Resource observation gaps remain separate.
 
-All following triples are **min / median / max across three samples, ms**.
-They are descriptive repeats, not p99, SLOs or a release-build comparison.
+#### Store authority and remaining call expansion
 
-| Receipt interval | perRun | Retained power |
-| --- | ---: | ---: |
-| B admitted / resume returned to successful receipt ready | 1,855.952 / 2,169.695 / 3,190.435 | 1,948.311 / 2,084.818 / 2,136.298 |
-| B admitted / resume returned to receipt committed | 1,899.260 / 2,211.376 / 3,230.617 | 1,989.511 / 2,126.685 / 2,181.804 |
-| Step request started to receipt committed | 1,758.077 / 2,067.200 / 2,825.789 | 1,369.755 / 1,483.809 / 1,502.819 |
-| Runtime Run step entered to receipt committed | 1,751.810 / 2,060.264 / 2,808.441 | 1,363.006 / 1,476.405 / 1,495.542 |
-| Receipt ready to committed | 40.182 / 41.681 / 43.308 | 41.199 / 41.866 / 45.507 |
-| Receipt committed to next model callback | 376.065 / 376.573 / 380.077 | 369.247 / 383.470 / 391.092 |
-| Independent Core read latency | 99.000 / 102.000 / 108.000 | 99.000 / 101.000 / 106.000 |
+`providerDispatch` now requires a closed `dispatchKind`: `perRunExecution`,
+`retainedExecution` or `retainedRunCleanup`. Each has checkout, authority-before,
+callback, authority-after, commit, connection-return and total boundaries. A
+cleanup ACK replay emits only stages actually traversed. Missing work is never
+represented by invented zero-duration spans.
 
-PerRun A lifecycle complete to B's next model callback was
-2,398.696 / 2,727.560 / 3,935.384 ms, an upper bound including fixture checks,
-public admission, startup and callback transit. Retained resume-response
-intervals include the deliberate post-resume Runtime restart but exclude the
-resume HTTP call itself. The scenarios therefore do not establish a policy
-speedup or an optimal idle threshold.
+Each perRun sample has 41 dispatches and 37 helpers. Each power sample has 40
+retained execution and two Run-cleanup dispatches, with 39 helpers. Every helper
+joins its same-Run dispatch uniquely; helper, SDK operation and transport counts
+match between builds. Validation may have no helper, and one cleanup dispatch
+can include multiple helpers. Cleanup authority-after includes proof validation,
+receipt digest, update and readback, so it is not pure authorization cost.
 
-#### Store, helper and startup amplification
+The following are **min / median / max across three samples, ms**. Authority cost
+is each sample's mean per dispatch of before plus after, then summarized across
+samples; it is not a sum of independently selected component medians.
 
-Each perRun sample has 41 Store dispatches and 37 helpers; all 37 helpers join a
-unique same-Run dispatch by `dispatchId`, with no missing or duplicate stages.
+| Dispatch kind | Baseline authority cost | Candidate authority cost | Median change |
+| --- | ---: | ---: | ---: |
+| perRunExecution | 51.086 / 51.735 / 52.996 | 35.242 / 35.732 / 35.748 | -30.9% |
+| retainedExecution | 49.866 / 50.361 / 51.688 | 39.058 / 39.917 / 40.374 | -20.7% |
+| retainedRunCleanup | 60.503 / 60.951 / 63.049 | 48.303 / 50.207 / 50.399 | -17.6% |
 
-| Store boundary | Cumulative per sample, ms | Mean per dispatch, ms |
-| --- | ---: | ---: |
-| Checkout | 18.183 / 19.044 / 19.782 | 0.443 / 0.464 / 0.482 |
-| Authority before callback | 1,492.565 / 1,492.806 / 1,549.160 | 36.404 / 36.410 / 37.784 |
-| Callback, including helper waits | 1,413.562 / 1,770.360 / 1,854.979 | 34.477 / 43.180 / 45.243 |
-| Authority after callback | 677.314 / 680.395 / 699.600 | 16.520 / 16.595 / 17.063 |
-| Commit | 180.529 / 187.535 / 222.339 | 4.403 / 4.574 / 5.423 |
-| Connection return | 34.988 / 35.454 / 35.631 | 0.853 / 0.865 / 0.869 |
-| Total, parent of the above | 3,862.766 / 4,260.877 / 4,262.913 | 94.214 / 103.924 / 103.973 |
+The repeated authority boundary improved without reducing freshness checks or
+physical operations. Store transactions and authority/use pins still span the
+whole callback, including helper waits. This serial experiment does not establish
+whether those pins delay cancellation or maintenance under contention.
 
-Authority-before plus authority-after accounts for
-50.931% / 52.752% / 56.254% of dispatch total. These boundaries include transaction
-begin, locks and current-state checks; they do not isolate SQL CPU, network or
-lock waiting. Checkout and connection return are small in these serial samples.
-The total minus its six sequential children is only 0.733–0.845 ms per sample.
-Callback minus strictly associated helper totals is 3.568–3.887 ms over 37 joins.
-Parent and child spans overlap and must not be summed.
-
-The retained execution path uses `with_retained_provider_execution_dispatch`,
-which is not covered by these new perRun Store spans. Its missing records are
-**unmeasured**, not zero. Source review confirms that it also holds transaction
-and authority/use pins across the full helper callback, including helper waits.
-Validation invokes a no-op callback; restart attach performs a real read-only
-SDK call under the same Store guard. Store invocation counts therefore need not
-equal helper counts. Retained Run cleanup uses
-`confirm_retained_provider_run_cleanup` and the cleanup pool, another
-separate observation boundary. Pause/resume's power Store spans below do not
-substitute for either boundary. Serial samples establish no lock-contention or
-pool-saturation result.
-
-Each perRun sample has 30 bulk helper frames: 25 fileSystem, two readArtifact,
-two snapshotCapture and one snapshotRestore. Seven control helpers add two
-prepareWorkspace, two quiesceAgentProcesses and three agentProcessState calls.
-Power has 29 bulk frames, no restore, and ten controls: two prepareWorkspace,
-four quiesceAgentProcesses and four agentProcessState calls. It still has exactly
-two unique terminal captures, not one capture per helper invocation.
-
-A successful bulk frame expands into mkdir, upload, execute, wait, download and
+PerRun still expands 30 bulk frames into mkdir/upload/execute/wait/download/
 cleanup stages: three run/wait pairs plus upload/download, eight central SDK
-operation boundaries. Thus 30 frames account for 240 of perRun's 261 adapter
-calls. Power has 258 adapter calls. Including spawn/handshake spans yields
-273 / 272 transport records respectively. An adapter call is not necessarily
-one provider HTTP request. SDK command-start handles averaged 3.219–4.103 ms
-per sample in perRun and 3.369–4.522 ms in power; a short command wait averaged
-6.758–7.738 / 6.889–13.605 ms. These SDK boundaries include client/network work.
+operation boundaries per frame. It has 261 adapter calls / 273 transport records;
+power has 258 / 272. An adapter operation is not necessarily one provider HTTP
+request. Six / seven SDK imports and cold handshakes remain per sample; this
+optimization does not remove child startup or change helper framing.
 
-| Startup boundary, ms | perRun | Retained power |
+#### Successful tool receipt and turnover
+
+| Boundary, ms min / median / max | Baseline | Candidate |
 | --- | ---: | ---: |
-| B startup total | 1,114.000 / 1,302.000 / 2,173.000 | 735.000 / 821.000 / 824.000 |
-| B environment ensure | 670.000 / 818.000 / 1,274.000 | 588.000 / 668.000 / 670.000 |
-| B workspace restore | 306.000 / 318.000 / 718.000 | 0.000 / 0.000 / 0.000 |
-| SDK import, per-sample sum | 1,449.082 / 1,585.988 / 2,033.768 | 1,657.042 / 1,856.481 / 1,952.076 |
+| perRun B admitted to receipt committed | 1,823.075 / 1,853.183 / 1,877.035 | 1,726.777 / 1,732.728 / 1,742.449 |
+| Retained resume returned to receipt committed | 2,013.045 / 2,040.447 / 4,883.981 | 1,891.057 / 1,911.206 / 1,972.423 |
+| perRun independent Core read | 97 / 97 / 97 | 82 / 83 / 87 |
+| Retained independent Core read | 97 / 99 / 111 | 83 / 86 / 87 |
+| perRun predecessor lifecycle complete to successor model callback, upper bound | 2,327.108 / 2,350.796 / 2,372.181 | 2,186.066 / 2,207.185 / 2,207.287 |
 
-There are six / seven SDK imports per sample. A single import's mean is
-241.514–338.961 / 236.720–278.868 ms. PerRun sample 2's B startup spike is
-2,173 ms, including ensure 1,274 and restore 718; its Core read is still 99 ms.
-Power sample 1 has a 383.863 ms command-wait handle and a 786.701 ms fileSystem
-helper spike, not repeated in its other two samples. The background load is not
-subtracted, so these observations locate the boundary, not the spike's cause.
+The median admitted/resume-returned to receipt interval falls 6.5% / 6.3%.
+Resume-response intervals include the deliberate post-resume Runtime restart and
+exclude resume HTTP. The two scenarios cannot establish an idle-policy speedup
+or an optimal threshold. Receipt ready-to-commit and callback transit remain
+separate from Core's read latency.
 
-#### Explicit pause/resume stages
+The 4,883.981 ms baseline power result is retained. Its B fileSystem helper totals
+are 1,805.380 and 780.205 ms, with prepareWorkspace 232.704 ms. The first helper
+includes mkdir 479.903, command wait 564.394 and cleanup 558.664 ms. The spike is
+inside helper work rather than an authority-before/after spike; these observations
+do not identify its cause.
 
-| Nested boundary, ms min / median / max | Pause | Resume |
+#### Creation, explicit pause/resume and retirement
+
+In current perRun samples, the per-sample mean SDK create mutation is
+107.526 / 110.602 / 118.861 ms (min / median / max across n=3); the enclosing
+SDK create handle is 110.377 / 113.593 / 121.780 ms. These are SDK client/network
+boundaries, not provider-internal VM boot time. B startup total is
+1,013 / 1,016 / 1,017 ms, including environment ensure 607 / 615 / 621 and workspace
+restore 261 / 262 / 274 ms. In retained power, B startup is 703 / 711 / 768 ms,
+ensure 558 / 568 / 621 ms, with no restore. Parent/child spans overlap.
+
+The following use **candidate n=3 medians, ms**; each row has its own observations
+and nested rows must not be added together.
+
+| Boundary | Pause | Resume |
 | --- | ---: | ---: |
-| HTTP | 532.937 / 554.968 / 557.514 | 604.557 / 724.542 / 756.109 |
-| Runtime power total | 515.402 / 537.286 / 539.196 | 587.550 / 705.710 / 737.751 |
-| Store advance | 510.791 / 532.733 / 533.406 | 583.316 / 701.835 / 732.844 |
-| Store prepare | 41.181 / 42.518 / 42.940 | 94.469 / 98.171 / 112.011 |
-| Store dispatch CAS | 37.280 / 38.986 / 39.249 | 38.226 / 39.326 / 41.257 |
-| Store side-effect pins | 31.845 / 31.906 / 35.438 | 29.266 / 30.650 / 33.093 |
-| Store callback | 386.374 / 409.991 / 411.527 | 405.092 / 512.044 / 536.087 |
-| Adapter handshake | 279.617 / 282.849 / 303.256 | 277.136 / 368.004 / 412.583 |
-| SDK import inside handshake | 230.111 / 233.963 / 250.831 | 227.614 / 294.490 / 323.239 |
-| Adapter request RTT | 96.873 / 99.560 / 118.143 | 121.862 / 126.421 / 141.512 |
-| SDK pause / connect inside RTT | 77.551 / 78.176 / 98.280 | 96.336 / 104.331 / 111.571 |
-| Store ACK commit | 6.967 / 7.259 / 8.670 | 13.479 / 14.739 / 15.742 |
+| Public HTTP | 555.094 | 643.515 |
+| Runtime power total | 537.825 | 626.751 |
+| Store prepare | 38.777 | 97.180 |
+| Store dispatch CAS | 36.134 | 37.530 |
+| Store side-effect pins | 28.567 | 30.124 |
+| Store callback | 410.475 | 443.022 |
+| Store ACK commit | 17.455 | 14.145 |
+| Adapter handshake | 271.247 | 320.513 |
+| SDK import within handshake | 226.106 | 256.223 |
+| SDK pause / connect | 111.425 | 100.330 |
+| SDK identity GET | 17.971 | 20.389 |
+| SDK resume verification GET | not applicable | 2.198 |
 
-These rows are nested, not additive. Cold import/handshake exceeds the SDK's
-pause/connect mutation interval. Store advance's unassigned sequential residual
-is 1.399–1.712 ms; callback residual is 0.357–0.529 ms. SDK mutation spans are not
-provider-internal snapshot-IO measurements.
+The pause Runtime median changes 533.558 to 537.825 ms (+0.8%); resume changes
+712.697 to 626.751 ms (-12.1%). SDK cold import was not changed and its variation
+cannot be attributed to typed queries. Independent environment retirement's
+fixture workflow is 450.580 / 452.778 / 580.994 ms baseline and
+403.624 / 431.586 / 457.791 ms candidate, including its confirmed lifecycle
+work rather than just the provider kill call.
 
-#### CPU, memory commitments and actual device IO
+#### CPU, hugepage commitments and actual device IO
 
-The 250 ms sampler includes unrelated WSL services and its own work. It observed
-124–136 / 134–145 frames over 30.750–33.750 / 33.250–36.000 seconds. This is
-host-wide observation without a subtracted background baseline.
+The 250 ms sampler covers all host work, including other services, fixture and
+database work and its own output. It does not subtract a background baseline.
 
-| Resource, min / median / max per sample | perRun | Retained power |
+| Per-sample resource median | perRun baseline / candidate | Retained power baseline / candidate |
 | --- | ---: | ---: |
-| Host CPU utilization, % | 19.503 / 20.185 / 20.639 | 20.061 / 20.069 / 20.491 |
-| Visible Firecracker CPU seconds, lower bound | 1.960 / 2.850 / 3.250 | 1.970 / 2.040 / 3.220 |
-| Normal non-available + used HugeTLB + reserved-for-fault, peak increase from first frame, MiB | 898.926 / 980.051 / 982.926 | 952.875 / 955.688 / 985.355 |
-| Host `sdd` read MiB | 2.953 / 7.820 / 56.863 | 4.777 / 8.484 / 120.930 |
-| Host `sdd` write MiB | 74.203 / 76.914 / 89.488 | 410.688 / 415.711 / 430.055 |
+| Host busy CPU, core-seconds | 53.29 / 51.87 | 57.90 / 56.91 |
+| Normal non-available + used HugeTLB + reserved-for-fault, same-frame peak, MiB | 4,542.367 / 4,535.914 | 4,552.449 / 4,516.465 |
 
-The memory commitment formula is evaluated per frame before taking its peak;
-reserved-for-fault pages are future commitments, not already mapped memory.
-In all three power samples the active VM adds 512 MiB to HugeTLB used plus
-reserved commitments; the stable paused window returns to baseline: 182 MiB
-less used backing and 330 MiB less reserved-for-fault. There are 5 / 6 / 5 stable
-paused frames. In samples 2 and 3 the first frame without a visible Firecracker
-still carries the 512 MiB commitment, which disappears in the next frame.
-Process disappearance therefore does not prove instantaneous physical release.
-The fixed 1,536 MiB HugeTLB pool remains reserved from normal host allocation.
+Normal memory excludes the fixed HugeTLB pool. Used pages are actual backing;
+`HugePages_Rsvd` represents already promised but not yet faulted pages. The
+commitment formula is evaluated in each frame before taking its peak. Separate
+peaks must not be added. Small host envelope differences do not prove a CPU or
+memory saving caused by typed queries.
 
-Device counters are actual kernel read/write deltas, but include database,
-setup, cache, other services and sampler output. Network-block devices are
-retained separately in the reports and cannot be added to underlying devices.
-VM-process IO is unavailable. The higher host write totals in power are a
-measurement lead, not a provider snapshot amplification ratio or a causal
-attribution. In every new sample, each Run publishes one product archive: API
-consumed multipart bodies are 850 / 1,036 bytes for A/B, with archive writes of
-367 / 553 bytes. These exact application counters do not measure provider disk
-writes or VM snapshots. Tiny helper fixtures and prior 8 MiB trace results do
-not accept current large-workload snapshot behavior or block-level deduplication.
+For all six power samples, stable active frames have used 430 MiB plus reserved
+682 MiB, or 1,112 MiB committed. The common paused window is defined by time,
+`[pause ACK + 250 ms, resume request start)`, without filtering by memory value.
+Baseline windows have 2 / 3 / 2 frames and candidate windows 2 / 2 / 2. Every
+frame has used 248 MiB plus reserved 352 MiB, or 600 MiB committed: pause releases
+182 MiB backing plus 330 MiB promised-for-fault, **512 MiB total commitment**.
+The fixed 1,536 MiB pool remains reserved from normal allocation.
 
-#### Evaluation and remaining checks
+Release is not immediate at ACK. Four boundary frames retain 1,112 MiB at ACK
++8 / +72 / +24 / +94 ms; subsequent frames at +258 / +322 / +274 / +344 ms show
+600 MiB. All boundary frames are retained in the raw observations. A short
+explicit pause therefore demonstrates commitment release but does not establish
+long-idle CPU savings, a policy threshold or fleet memory efficiency.
 
-The evidence supports first evaluating repeated perRun authority/transaction
-work, bulk helper call expansion and SDK child cold startup. Preserve freshness,
-lock ordering, exact ownership and Unknown barriers while testing any change.
-Retained execution and Run-cleanup Store subspans need coverage before comparing
-their internal cost. Whether holding authority pins across slower helper waits
-blocks cancellation or maintenance remains a concurrency-test question.
-No idle threshold, automatic policy, new scheduler or performance fix is accepted
-by these measurements. TB2.1 resource mapping, setup/verifier/artifact/cleanup
-handoff and two-slot natural rotation remain the replacement gate.
+| Host `sdd` IO, MiB min / median / max | Read | Write |
+| --- | ---: | ---: |
+| perRun baseline | 4.711 / 10.344 / 323.691 | 52.184 / 65.578 / 70.988 |
+| perRun candidate | 0.039 / 3.406 / 3.969 | 52.062 / 56.215 / 66.332 |
+| Retained power baseline | 2.117 / 8.801 / 10.996 | 378.234 / 378.465 / 383.570 |
+| Retained power candidate | 13.895 / 14.719 / 19.832 | 375.578 / 377.562 / 378.848 |
 
-On this exact code tree, Runtime 681, focused Core query_loop 129, SDK 122,
-related API 149 and all 214 required PostgreSQL identities passed. Runtime
-all-target Clippy and native formatting passed; private measurement-boundary
-and wrapper tests passed 14 + 2. The existing Harbor suite passed 216 separately.
-The final native `scripts/ci.py Source` attempt passed its earlier checks and
-package unit/integration suites but failed four Core Rustdoc cases with E0460
-(`tokio` dependency metadata/version mismatch in existing target artifacts).
-The separate Node gate stopped on Node 24.19.0 / pnpm 11.25.0 versus required
-22.21.0 / 12.10.1. No source remedy or toolchain replacement was made for these
-failures. The full hosted native gate and release packaging remain unpassed.
-These affected checks and live samples are not a green complete release gate.
+These are actual kernel counters at the host virtual-block layer. They include
+background work and are not provider snapshot writes or a causal IO saving from
+the query change. Other devices, including NBDs, remain separate in each report;
+they cannot be added across stacked layers. Firecracker process IO is unavailable
+and process CPU has exit-window coverage limits. Product success and zero
+observation loss do not remove these resource-attribution gaps.
+
+#### Current workspace IO traces
+
+Six further samples passed: one per build for each deterministic trace. Seed,
+case manifests, A full capture, B restore, B terminal capture, byte-for-byte
+archive validation and confirmed cleanup match. All loss counters are zero;
+262 SDK observations per sample remain explicitly unassigned. These Bash traces
+have no first-read receipt; its interval is `notApplicable`, not zero or failed.
+Each case/build has n=1, so timing differences are exploratory coverage only.
+
+| Case | Baseline report ID | Candidate report ID |
+| --- | --- | --- |
+| unchanged | `11773fa264bd4c349a49d80b90a419a5` | `e2d9155c0f7d415891f25efc8643cabb` |
+| smallChange | `7196a90dd69744f1b797812de97a7a5c` | `66dccb9617654ae78583b09f1b11e3e3` |
+| manyFiles | `4d73562c944b4fc38a336eac89a2793d` | `983cbda273194ff9b806aa4916b34db5` |
+
+The following B terminal byte results are identical in both builds. Download
+frames include the protocol envelope; raw capture spooling includes those frames.
+Archive spooling and uploaded-body counters are distinct boundaries.
+
+| Case | Corpus / changed bytes | Source read bytes | SDK frame / raw spool bytes | Archive spool bytes | Uploaded body bytes | Disposition |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| unchanged | 8,388,608 / 0 | 16,777,216 | 321 | 0 | 0 | unchanged |
+| smallChange | 8,388,608 / 4,096 | 16,777,216 | 8,389,051 | 8,388,800 | 8,389,292 | full |
+| manyFiles | 2,097,152 / 16,384 | 4,194,304 | 2,174,251 | 2,174,000 | 2,174,494 | full |
+
+Unchanged capture still reads content twice, but avoids archive body transfer,
+archive spooling and upload. Its 321-byte proof frame is still written to the
+Runtime raw capture spool. A 4 KiB change still uploads a complete archive:
+uploaded-body bytes
+are about 2,048.167 times changed logical bytes; the many-file case is 132.721
+times. This is application-level byte amplification, not provider VM snapshot or
+physical write amplification. The authority optimization preserves these bytes.
+
+| B terminal boundary, ms baseline / candidate | unchanged | smallChange | manyFiles |
+| --- | ---: | ---: | ---: |
+| Capture | 118.873 / 91.919 | 503.510 / 510.778 | 235.274 / 208.023 |
+| Upload | not applicable: no attempt | 155.966 / 150.266 | 86.474 / 83.003 |
+| Commit, parent of capture/upload | 324.802 / 229.632 | 1,226.386 / 1,156.649 | 590.506 / 574.963 |
+| B restore apply | 581.968 / 553.325 | 532.764 / 522.174 | 460.026 / 402.417 |
+
+These nested durations are not additive. Changed capture remains whole-archive
+work. No block/chunk delta, deduplication or snapshot optimization is accepted
+by these samples.
+
+#### Validation and remaining acceptance
+
+The observation boundary had focused Rust/API RED-to-GREEN coverage. Before the
+query refactor, the added authorization characterization and all 214 required
+PostgreSQL identities passed on the baseline. On the exact candidate tree,
+Runtime 684, focused Core query_loop 129, SDK 122, related API 151 and all 214
+required PostgreSQL identities passed. Runtime all-target Clippy and native
+formatting passed. Private analysis/preflight/measurement tests passed 51; the
+Harbor suite's earlier 216 pass remains separate from these current samples.
+
+The final native `scripts/ci.py Source` attempt failed four Core Rustdoc cases
+with E0460 (`windows_sys` / `tokio` dependency metadata mismatch). The separate
+Node gate remains unpassed after its Node 24.19.0 / pnpm 11.25.0 versus required
+22.21.0 / 12.10.1 refusal. No source workaround or toolchain replacement was made.
+Full hosted native gates and release packaging remain unpassed. These affected
+gates and eighteen product samples are not a complete release gate.
+
+Automatic idle policy, threshold selection, eight concurrent executions, full
+queues, resume bursts, cancellation under pinned helper waits and mid-operation
+restart/lost-reply recovery remain unaccepted. The 100-environment preflight is
+reported separately below. TB2.1 resource mapping, setup, independent verifier,
+artifact handoff and two-slot natural rotation remain the replacement gate;
+512 MiB fixtures do not accept 2–8 GiB or GPU tasks. The frozen untracked idle
+skeleton is not compiled or enabled by this delivery.
 
 ### Single-instance pause and memory diagnostic
 
@@ -1096,6 +1141,54 @@ run is not counted as a clean diagnostic-launcher acceptance pass. The local
 controller exit defect was fixed with two offline behavior tests; the provider
 experiment was not repeated. The independently confirmed provider and physical
 cleanup allowed the temporary owner record and probe files to be removed.
+
+### Resident microVM coexistence preflight
+
+The authorized coexistence target is 100 resident managed microVM environments,
+each retaining a 50 MiB touched payload. Execution admission remains
+`EXECUTION_GLOBAL_LIMIT=8`, `EXECUTION_TENANT_LIMIT=4` and
+`WORKER_CONCURRENCY=8`; resident environment count does not raise these limits.
+The start condition is at least 10 GiB of Linux host `MemAvailable` immediately
+before dispatch. It does not require keeping 10 GiB free after adding the load.
+Existing services must continue running. Windows and WSL available-memory figures
+are separate budgets and are never added together.
+
+The bounded host preflight observed about 11.28 GiB of WSL `MemAvailable`, a
+512 MiB guest template, `CREATE_MEMORY_REFUSAL=true`, and the following
+physical constraints:
+
+| Resource boundary | Observed or required amount | Static result |
+| --- | --- | --- |
+| Touched workload payload | 100 x 50 MiB = 5,000 MiB | Payload bytes are distinct from whole-template commitment and guest baseline use |
+| Whole-template memory commitment | 100 x 512 MiB = 51,200 MiB, or 50 GiB | The current template requires its full commitment regardless of the smaller payload |
+| Existing HugeTLB pool | 768 pages total; 645 free; 177 reserved; 2 MiB per page | Only `(645 - 177) x 2 MiB = 936 MiB` can be newly committed; at most one additional 512 MiB environment fits this bound |
+| NBD device inventory | 64 devices configured | At most 64 environments before subtracting existing non-reassignable use; the target needs 100 devices |
+
+For the current Embed backend, each running VM holds one NBD device and
+`nbds_max` bounds that inventory, as documented in the
+[official Embed reference](https://github.com/e2b-dev/runtime/blob/main/embed/compose/README.md#everyday-commands). Reusable devices in the warm NBD pool can be
+assigned to VMs; `NBD_POOL_SIZE=32` is neither an additional occupancy debit nor
+the device ceiling. Existing VM, build and other non-reassignable use must be
+subtracted separately.
+
+The result is `blockedBeforeDispatch`, with
+`hugeTlbCommitmentInsufficient` and `nbdSlotsInsufficient`. The 100-environment
+experiment has not been dispatched. Reducing the touched payload from 100 MiB
+to 50 MiB leaves these whole-template and device constraints in place. The
+[official API lower bound of 128 MiB](https://github.com/e2b-dev/E2B/blob/main/spec/openapi.yml)
+is only a hypothetical budget comparison:
+100 such commitments require 12,800 MiB, while this existing pool can newly
+commit only seven. The current guest template and its 50 MiB workload have not
+been validated at 128 MiB.
+
+The private pure-function preflight has 21 passing offline tests, including the
+observed blocked case, the 10 GiB start boundary, per-environment hugepage
+rounding, reserved-page and NBD occupancy subtraction, fixed 8/4/8 admission,
+and rejection of missing, invalid or overflowing inputs. An `eligible` result
+means only that its explicit static prerequisites pass. Dynamic guest and host
+overhead, CPU, IO, successful creation and coexistence still require physical
+measurement; the offline result is not product acceptance. The preflight performs
+no provider dispatch, host configuration change or responsibility settlement.
 
 ## Measurement and comparison contract
 
