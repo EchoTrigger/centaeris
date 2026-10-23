@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 
-CONTROL_HELPERS = ("prepare-workspace", "agent-process-state", "quiesce-agent-processes")
+CONTROL_HELPERS = ("prepare-workspace", "prepare-managed-workspace", "agent-process-state", "quiesce-agent-processes")
 EXPECTED_METADATA_KEYS = ("centaerisAttemptId", "environmentId", "instanceId", "executionId", "agentRunId",
                           "sessionId", "workspaceId", "profileDigest", "authorizationDigest", "processingJobId")
 HELPER_PATH = "/opt/centaeris/bin/execution_agent"
@@ -67,8 +67,11 @@ def start_control_helper(config, payload, start_process):
     from e2b.envd.process import process_pb
 
     context = read_existing_per_run(config, payload)
-    process = process_pb.ProcessConfig(cmd=HELPER_PATH, args=[payload["helper"]], cwd="/",
-        envs={"CENTAERIS_WORKSPACE_ROOT": WORKSPACE_ROOT, "CENTAERIS_WORKSPACE_USER": WORKSPACE_IDENTITY})
+    envs = {"CENTAERIS_WORKSPACE_ROOT": WORKSPACE_ROOT, "CENTAERIS_WORKSPACE_USER": WORKSPACE_IDENTITY}
+    if payload["helper"] == "prepare-managed-workspace":
+        envs.update({"CENTAERIS_MANAGED_ENVIRONMENT_ID": context.detail.metadata["environmentId"],
+                     "CENTAERIS_MANAGED_SANDBOX_ID": context.detail.sandbox_id})
+    process = process_pb.ProcessConfig(cmd=HELPER_PATH, args=[payload["helper"]], cwd="/", envs=envs)
     user = WORKSPACE_USER if payload["helper"] == "quiesce-agent-processes" else "root"
     return start_process(context.envd_url, context.connection,
                          context.detail.envd_version, user, process, payload["timeoutSeconds"])

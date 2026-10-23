@@ -14,11 +14,11 @@ const AGENT_RUN_AUTHORIZATION_SIGNATURE_DOMAIN: &str = "workspace:agent-run-auth
 const MAX_DECLARED_INPUTS: usize = 64;
 
 mod environment_profile;
-pub use environment_profile::EnvironmentProfile;
 #[cfg(test)]
 pub use environment_profile::EnvironmentResources;
 #[cfg(test)]
 pub use environment_profile::LegacyEnvironmentProfile;
+pub use environment_profile::{EnvironmentProfile, WorkspaceInitialization};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

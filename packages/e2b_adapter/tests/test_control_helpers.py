@@ -99,6 +99,27 @@ class ControlHelperTests(unittest.TestCase):
                 self.assertNotIn("fixture-envd-access-token", json.dumps(response))
                 self.assertEqual(fixture.detail()["endAt"], end_at)
 
+    def test_managed_workspace_scope_comes_from_fresh_verified_provider_identity(self):
+        with direct_fixture_network(), provider_fixture() as fixture:
+            setup_detail(fixture)
+            response = control_adapter(fixture).handle(helper_request("prepare-managed-workspace"))
+            self.assertEqual(response["outcome"], "succeeded", response)
+            self.assertEqual([(entry["method"], entry["path"]) for entry in fixture.requests],
+                             [("GET", "/sandboxes/sandbox-fixture"), ("POST", "/process.Process/Start")])
+            process = fixture.requests[1]["body"]["process"]
+            self.assertEqual(process, {"cmd": "/opt/centaeris/bin/execution_agent",
+                "args": ["prepare-managed-workspace"], "cwd": "/", "envs": {
+                    "CENTAERIS_WORKSPACE_ROOT": "/mnt/data", "CENTAERIS_WORKSPACE_USER": "10001:10001",
+                    "CENTAERIS_MANAGED_ENVIRONMENT_ID": EXPECTED_METADATA["environmentId"],
+                    "CENTAERIS_MANAGED_SANDBOX_ID": "sandbox-fixture"}})
+            self.assertEqual(fixture.requests[1]["headers"]["authorization"],
+                             "Basic " + base64.b64encode(b"root:").decode())
+        for lane in ("ordinary", "cleanup"):
+            with self.subTest(lane=lane), direct_fixture_network(), provider_fixture() as fixture:
+                setup_detail(fixture)
+                response = control_adapter(fixture, lane).handle(helper_request("prepare-managed-workspace"))
+                self.assertEqual(response["outcome"], "notDispatched", response)
+                self.assertEqual(fixture.requests, [])
     def test_malformed_or_generic_execution_payload_never_reaches_provider(self):
         with direct_fixture_network(), provider_fixture() as fixture:
             setup_detail(fixture)

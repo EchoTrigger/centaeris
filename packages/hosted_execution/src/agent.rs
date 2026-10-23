@@ -21,6 +21,7 @@ use unicode_normalization::UnicodeNormalization;
 #[cfg(test)]
 use centaeris_core::execution::WORKSPACE_DATA_ROOT;
 
+mod managed_workspace;
 mod snapshot_capture;
 mod workspace;
 
@@ -58,6 +59,13 @@ fn workspace_root() -> Result<&'static Path, String> {
 pub fn run_prepare_workspace_once() -> Result<(), String> {
     require_root()?;
     workspace::prepare()?;
+    secure_roots()
+}
+
+pub fn run_prepare_managed_workspace_once() -> Result<(), String> {
+    require_root()?;
+    workspace::prepare()?;
+    managed_workspace::prepare()?;
     secure_roots()
 }
 

@@ -2734,6 +2734,8 @@ fn postgres_runtime_store_persists_core_state_and_claims_jobs_once() {
         super::schema::RUNTIME_TABLES
             .iter()
             .copied()
+            // information_schema.tables also includes the admission view.
+            .chain(["provider_environment_power_admission"])
             .map(str::to_string)
             .collect()
     );

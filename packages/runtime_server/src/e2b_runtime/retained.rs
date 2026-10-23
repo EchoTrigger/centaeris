@@ -261,10 +261,11 @@ impl E2bRuntime {
                 E2bAdapterLane::Ordinary,
                 self.config.request_timeout,
             )?;
-            require_capabilities(
+            require_capabilities_for_profile(
                 &control,
                 E2bAdapterLane::Control,
                 self.config.request_timeout,
+                &self.config.profile,
             )?;
             // Read-only attach never resumes, extends TTL, creates or replays work.
             self.store.with_retained_provider_execution_dispatch(authority, &value,

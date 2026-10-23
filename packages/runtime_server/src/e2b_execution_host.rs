@@ -138,6 +138,25 @@ pub(crate) struct E2bExecutionHostRunner {
     commands: Mutex<HashMap<String, Arc<CommandRecord>>>,
 }
 
+pub(crate) fn execution_policy_for_profile(profile: &EnvironmentProfile) -> ExecutionPolicy {
+    let mut policy = match profile.network() {
+        ExecutionNetwork::Disabled => ExecutionPolicy::workspace_write_no_network("/mnt/data"),
+        ExecutionNetwork::PublicInternet => {
+            ExecutionPolicy::workspace_write_public_internet("/mnt/data")
+        }
+    };
+    policy.filesystem.denied_read_paths =
+        vec!["/run/centaeris".into(), "/run/centaeris-host".into()];
+    if profile.managed_files() {
+        policy
+            .filesystem
+            .denied_read_paths
+            .push("/var/lib/centaeris-host".into());
+    }
+    policy.filesystem.denied_write_paths = policy.filesystem.denied_read_paths.clone();
+    policy
+}
+
 impl E2bExecutionHostRunner {
     pub(crate) fn new(
         profile: EnvironmentProfile,
@@ -184,15 +203,7 @@ impl E2bExecutionHostRunner {
         {
             return Err("e2b_host_binding_invalid".into());
         }
-        let mut policy = match profile.network() {
-            ExecutionNetwork::Disabled => ExecutionPolicy::workspace_write_no_network("/mnt/data"),
-            ExecutionNetwork::PublicInternet => {
-                ExecutionPolicy::workspace_write_public_internet("/mnt/data")
-            }
-        };
-        policy.filesystem.denied_read_paths =
-            vec!["/run/centaeris".into(), "/run/centaeris-host".into()];
-        policy.filesystem.denied_write_paths = policy.filesystem.denied_read_paths.clone();
+        let policy = execution_policy_for_profile(&profile);
         // This registry shares activity only inside this Runtime process. A
         // replacement process must rely on the factory's conservative recovery.
         let activity = ExecutionActivityWitness::for_execution(
@@ -337,8 +348,12 @@ impl E2bExecutionHostRunner {
         // Keep dispatch activity through semantic validation, so an uncertain
         // response cannot become an idle workspace observation in between.
         let _activity = self.begin_activity()?;
-        let output =
-            self.invoke_authorized_helper(TrustedHelperKind::PrepareWorkspace, &[], 1024)?;
+        let kind = if self.profile.managed_files() {
+            TrustedHelperKind::PrepareManagedWorkspace
+        } else {
+            TrustedHelperKind::PrepareWorkspace
+        };
+        let output = self.invoke_authorized_helper(kind, &[], 1024)?;
         if !output.is_empty() {
             self.latch_unknown_helper_effects();
             return Err(E2bHostError::Unknown(
@@ -443,6 +458,7 @@ impl E2bExecutionHostRunner {
         if matches!(
             kind,
             TrustedHelperKind::PrepareWorkspace
+                | TrustedHelperKind::PrepareManagedWorkspace
                 | TrustedHelperKind::FileSystem
                 | TrustedHelperKind::MaterializeInput
                 | TrustedHelperKind::RevokeInput

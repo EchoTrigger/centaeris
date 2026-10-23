@@ -403,10 +403,11 @@ impl E2bRuntime {
             E2bAdapterLane::Ordinary,
             self.config.request_timeout,
         )?;
-        require_capabilities(
+        require_capabilities_for_profile(
             &control,
             E2bAdapterLane::Control,
             self.config.request_timeout,
+            &self.config.profile,
         )?;
         let adapter = RecordingCreationAdapter {
             ordinary: &ordinary,
@@ -696,6 +697,34 @@ fn require_capabilities(
     lane: E2bAdapterLane,
     timeout: Duration,
 ) -> Result<(), E2bRuntimeError> {
+    require_capabilities_with_requirement(process, lane, timeout, false)
+}
+
+fn require_capabilities_for_profile(
+    process: &SpoolingAdapterProcess,
+    lane: E2bAdapterLane,
+    timeout: Duration,
+    profile: &EnvironmentProfile,
+) -> Result<(), E2bRuntimeError> {
+    require_capabilities_with_requirement(
+        process,
+        lane,
+        timeout,
+        managed_workspace_required(profile),
+    )
+}
+
+fn managed_workspace_required(profile: &EnvironmentProfile) -> bool {
+    matches!(profile, EnvironmentProfile::E2b(value)
+        if value.workspace_initialization == Some(crate::agent_run_authorization::WorkspaceInitialization::ManagedFiles))
+}
+
+fn require_capabilities_with_requirement(
+    process: &SpoolingAdapterProcess,
+    lane: E2bAdapterLane,
+    timeout: Duration,
+    managed_workspace_required: bool,
+) -> Result<(), E2bRuntimeError> {
     let mut span = crate::observations::enabled().then(|| {
         crate::observations::Span::new(match lane {
             E2bAdapterLane::Ordinary => "e2bAdapterHandshakeOrdinary",
@@ -703,7 +732,7 @@ fn require_capabilities(
             E2bAdapterLane::Cleanup => "e2bAdapterHandshakeCleanup",
         })
     });
-    let result = require_capabilities_inner(process, lane, timeout);
+    let result = require_capabilities_inner(process, lane, timeout, managed_workspace_required);
     if let Some(span) = &mut span {
         span.finished(result.is_ok());
     }
@@ -714,6 +743,7 @@ fn require_capabilities_inner(
     process: &SpoolingAdapterProcess,
     lane: E2bAdapterLane,
     timeout: Duration,
+    managed_workspace_required: bool,
 ) -> Result<(), E2bRuntimeError> {
     let response = process
         .call(
@@ -732,18 +762,43 @@ fn require_capabilities_inner(
         E2bRuntimeError::Rejected("e2b_runtime_capabilities_invalid"),
     )?)
     .map_err(|_| E2bRuntimeError::Rejected("e2b_runtime_capabilities_invalid"))?;
+    validate_capabilities(capabilities, lane, managed_workspace_required)
+}
+
+fn validate_capabilities(
+    capabilities: AdapterCapabilities,
+    lane: E2bAdapterLane,
+    managed_workspace_required: bool,
+) -> Result<(), E2bRuntimeError> {
     // A configured idempotency declaration is never used as permission to send
     // or retry. The durable creation CAS remains the only such authority.
     let _configured_idempotency = capabilities.create_idempotency_configured;
-    let mut helpers = capabilities.fixed_control_helpers;
-    helpers.sort();
-    let expected_helpers: Vec<String> = match lane {
-        E2bAdapterLane::Ordinary | E2bAdapterLane::Cleanup => vec![],
-        E2bAdapterLane::Control => vec![
-            "agent-process-state".into(),
-            "prepare-workspace".into(),
-            "quiesce-agent-processes".into(),
-        ],
+    let mut helpers: Vec<_> = capabilities
+        .fixed_control_helpers
+        .iter()
+        .map(String::as_str)
+        .collect();
+    helpers.sort_unstable();
+    // Accept only the two complete known advertisements, never an arbitrary
+    // superset or a deduplicated list that could conceal a malformed contract.
+    let helpers_supported = match lane {
+        E2bAdapterLane::Ordinary | E2bAdapterLane::Cleanup => helpers.is_empty(),
+        E2bAdapterLane::Control => {
+            helpers.as_slice()
+                == [
+                    "agent-process-state",
+                    "prepare-managed-workspace",
+                    "prepare-workspace",
+                    "quiesce-agent-processes",
+                ]
+                || (!managed_workspace_required
+                    && helpers.as_slice()
+                        == [
+                            "agent-process-state",
+                            "prepare-workspace",
+                            "quiesce-agent-processes",
+                        ])
+        }
     };
     if capabilities.sdk_version != "2.58.0"
         || capabilities.lane != lane.as_str()
@@ -756,7 +811,7 @@ fn require_capabilities_inner(
         || capabilities.command_output_recovery != "adapterLifetime"
         || !capabilities.wait_budget_must_cover_original_stream
         || capabilities.max_command_evidence != 128
-        || helpers != expected_helpers
+        || !helpers_supported
         || !capabilities.bulk_file_transfer
         || capabilities.max_transfer_bytes != MAX_TRANSFER_BYTES
         || capabilities.transfer_chunk_bytes != TRANSFER_CHUNK_BYTES
@@ -770,4 +825,171 @@ fn require_capabilities_inner(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    const ORIGINAL_HELPERS: [&str; 3] = [
+        "agent-process-state",
+        "prepare-workspace",
+        "quiesce-agent-processes",
+    ];
+    const EXTENDED_HELPERS: [&str; 4] = [
+        "agent-process-state",
+        "prepare-workspace",
+        "prepare-managed-workspace",
+        "quiesce-agent-processes",
+    ];
+
+    fn capabilities(lane: E2bAdapterLane, helpers: &[&str]) -> AdapterCapabilities {
+        serde_json::from_value(json!({
+            "sdkVersion":"2.58.0", "lane":lane.as_str(),
+            "createIdempotencyConfigured":false, "readOnlyAttach":true,
+            "commandStartIdempotency":false, "runProcessTreeCancellation":false,
+            "controlCommandCancellation":false, "commandOutputBytes":true,
+            "commandOutputRestartRecovery":false, "commandOutputRecovery":"adapterLifetime",
+            "waitBudgetMustCoverOriginalStream":true, "maxCommandEvidence":128,
+            "fixedControlHelpers":helpers, "bulkFileTransfer":true,
+            "maxTransferBytes":MAX_TRANSFER_BYTES, "transferChunkBytes":TRANSFER_CHUNK_BYTES,
+            "storageQuota":false, "fullMemoryPauseVerified":false,
+            "maxFileBytes":256 * 1024, "maxOutputBytes":64 * 1024,
+        }))
+        .unwrap()
+    }
+
+    fn unsupported() -> Result<(), E2bRuntimeError> {
+        Err(E2bRuntimeError::Rejected(
+            "e2b_runtime_capabilities_unsupported",
+        ))
+    }
+
+    #[test]
+    fn legacy_control_accepts_original_or_known_extended_helpers() {
+        for helpers in [ORIGINAL_HELPERS.as_slice(), EXTENDED_HELPERS.as_slice()] {
+            let mut reordered = helpers.to_vec();
+            reordered.reverse();
+            for values in [helpers, reordered.as_slice()] {
+                assert_eq!(
+                    validate_capabilities(
+                        capabilities(E2bAdapterLane::Control, values),
+                        E2bAdapterLane::Control,
+                        false
+                    ),
+                    Ok(())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn managed_control_requires_the_exact_managed_workspace_extension() {
+        let mut profile: EnvironmentProfile = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/workspace/fixtures/e2b_environment_profile/v1/valid.json"
+        )))
+        .unwrap();
+        assert!(!managed_workspace_required(&profile));
+        let EnvironmentProfile::E2b(value) = &mut profile else {
+            unreachable!()
+        };
+        value.workspace_initialization =
+            Some(crate::agent_run_authorization::WorkspaceInitialization::ManagedFiles);
+        assert!(managed_workspace_required(&profile));
+        assert_eq!(
+            validate_capabilities(
+                capabilities(E2bAdapterLane::Control, &ORIGINAL_HELPERS),
+                E2bAdapterLane::Control,
+                true
+            ),
+            unsupported()
+        );
+        assert_eq!(
+            validate_capabilities(
+                capabilities(E2bAdapterLane::Control, &EXTENDED_HELPERS),
+                E2bAdapterLane::Control,
+                true
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn control_rejects_unknown_missing_and_duplicate_helpers() {
+        let cases = [
+            vec!["agent-process-state", "prepare-workspace"],
+            vec![
+                "agent-process-state",
+                "prepare-workspace",
+                "quiesce-agent-processes",
+                "unknown-helper",
+            ],
+            vec![
+                "agent-process-state",
+                "prepare-workspace",
+                "quiesce-agent-processes",
+                "prepare-workspace",
+            ],
+            vec![
+                "agent-process-state",
+                "prepare-workspace",
+                "quiesce-agent-processes",
+                "prepare-managed-workspace",
+                "prepare-managed-workspace",
+            ],
+        ];
+        for helpers in cases {
+            for managed in [false, true] {
+                assert_eq!(
+                    validate_capabilities(
+                        capabilities(E2bAdapterLane::Control, &helpers),
+                        E2bAdapterLane::Control,
+                        managed
+                    ),
+                    unsupported()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn noncontrol_lanes_require_an_empty_helper_advertisement() {
+        for lane in [E2bAdapterLane::Ordinary, E2bAdapterLane::Cleanup] {
+            for managed in [false, true] {
+                assert_eq!(
+                    validate_capabilities(capabilities(lane, &[]), lane, managed),
+                    Ok(())
+                );
+                for helpers in [ORIGINAL_HELPERS.as_slice(), EXTENDED_HELPERS.as_slice()] {
+                    assert_eq!(
+                        validate_capabilities(capabilities(lane, helpers), lane, managed),
+                        unsupported()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn helper_negotiation_preserves_the_other_capability_requirements() {
+        for changed in ["sdk", "lane", "attach", "output", "bulk", "quota", "pause"] {
+            let mut value = capabilities(E2bAdapterLane::Control, &ORIGINAL_HELPERS);
+            match changed {
+                "sdk" => value.sdk_version = "unsupported".into(),
+                "lane" => value.lane = "ordinary".into(),
+                "attach" => value.read_only_attach = false,
+                "output" => value.command_output_bytes = false,
+                "bulk" => value.bulk_file_transfer = false,
+                "quota" => value.storage_quota = true,
+                "pause" => value.full_memory_pause_verified = true,
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                validate_capabilities(value, E2bAdapterLane::Control, false),
+                unsupported(),
+                "{changed}"
+            );
+        }
+    }
 }

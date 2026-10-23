@@ -20,6 +20,46 @@ def profile():
 
 
 class E2BEnvironmentProfileTests(SimpleTestCase):
+    def test_managed_workspace_initialization_uses_the_shared_explicit_profile(self):
+        root = Path(__file__).resolve().parents[3] / 'tests/workspace/fixtures/e2b_environment_profile/v1'
+        managed = json.loads((root / 'managed-files.json').read_text(encoding='utf-8'))
+        from .test_agent_run_authorization import corpus, payload_for
+        case = next(case for case in corpus() if case['id'] == 'e2b_managed_files')
+        signed = payload_for(case)
+        self.assertTrue(case['supportedSignerOutput'])
+        self.assertEqual(signed['environmentProfile'], managed)
+        self.assertEqual(signed['environmentProfileDigest'], environment_profile_digest(managed))
+        validate_environment_profile(managed)
+        original = managed.copy()
+        original.pop('workspaceInitialization')
+        validate_environment_profile(original)
+        self.assertNotIn('workspaceInitialization', original)
+        self.assertNotEqual(environment_profile_digest(managed), environment_profile_digest(original))
+        response = {'schema': 'runtime.execution_profile.v2', 'environmentProfile': managed}
+        with patch('app_core.runtime_client.request_json', return_value=response):
+            self.assertEqual(request_execution_profile(), response)
+
+    def test_managed_workspace_initialization_rejects_unknown_null_and_unmanaged_roots(self):
+        for value in (None, True, False, 0, [], {}, '', 'preserve', 'managed_files'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_environment_profile(profile() | {'workspaceInitialization': value})
+        for changed in ({'workspaceRoot': '/home/user', 'user': 'agent'},
+                        {'workspaceRoot': '/mnt/data', 'user': 'user'}):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                validate_environment_profile(profile() | {'workspaceInitialization': 'managedFiles'} | changed)
+
+    def test_managed_initialization_is_part_of_the_signed_run_profile(self):
+        from .runtime_contract import verify_agent_run_authorization_signature
+        selected = profile() | {'workspaceInitialization': 'managedFiles', 'workspaceRoot': '/mnt/data', 'user': 'agent'}
+        value = fixture() | {'environmentProfile': selected, 'environmentProfileDigest': environment_profile_digest(selected)}
+        signature = authorization_signature(value, 'test-key')
+        verify_agent_run_authorization_signature(value, 'test-key', signature)
+        changed = copy.deepcopy(value)
+        del changed['environmentProfile']['workspaceInitialization']
+        changed['environmentProfileDigest'] = environment_profile_digest(changed['environmentProfile'])
+        with self.assertRaises(ValueError):
+            verify_agent_run_authorization_signature(changed, 'test-key', signature)
+
     def test_explicit_provider_profile_validates_and_binds_template_build(self):
         value = profile()
         validate_environment_profile(value)
@@ -121,6 +161,23 @@ class E2BEnvironmentProfileTests(SimpleTestCase):
 
 
 class E2BEnvironmentProfilePersistenceTests(OperationFixture, TestCase):
+    def test_managed_initialization_is_frozen_before_signing_and_survives_later_defaults(self):
+        from .models import AgentRun
+        selected = profile() | {'workspaceInitialization': 'managedFiles', 'workspaceRoot': '/mnt/data', 'user': 'agent'}
+        self.profile.return_value = {'schema': 'runtime.execution_profile.v2', 'environmentProfile': selected}
+        accepted = self.post()
+        self.assertEqual(accepted.status_code, 202, accepted.content)
+        first = AgentRun.objects.get(pk=accepted.json()['agentRunId'])
+        first.environment.refresh_from_db()
+        self.assertEqual(first.environment.environment_profile, selected)
+        self.assertEqual(first.authorization.payload['environmentProfile'], selected)
+        AgentRun.objects.filter(pk=first.pk).update(status='completed')
+        self.profile.return_value = {'schema': 'runtime.execution_profile.v2', 'environmentProfile': profile()}
+        later = self.post(self.create_url + f'/{first.session_id}/messages', operationId='managed-later')
+        self.assertEqual(later.status_code, 202, later.content)
+        second = AgentRun.objects.get(pk=later.json()['agentRunId'])
+        self.assertEqual(second.authorization.payload['environmentProfile'], selected)
+
     def test_first_use_freezes_provider_build_and_policy_before_signing(self):
         from .models import AgentRun
         self.profile.return_value = {'schema': 'runtime.execution_profile.v2', 'environmentProfile': profile()}

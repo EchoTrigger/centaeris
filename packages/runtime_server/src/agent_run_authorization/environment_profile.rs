@@ -139,6 +139,25 @@ pub struct E2bEnvironmentProfile {
     pub lifetime: String,
     pub timeout_seconds: u32,
     pub input_budget_bytes: u64,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_workspace_initialization"
+    )]
+    pub workspace_initialization: Option<WorkspaceInitialization>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkspaceInitialization {
+    ManagedFiles,
+}
+
+fn deserialize_workspace_initialization<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<WorkspaceInitialization>, D::Error> {
+    // Only absence is optional; explicit null must not create another wire spelling.
+    WorkspaceInitialization::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -226,6 +245,11 @@ impl LegacyEnvironmentProfile {
 
 impl E2bEnvironmentProfile {
     pub fn validate(&self) -> Result<(), String> {
+        if self.workspace_initialization == Some(WorkspaceInitialization::ManagedFiles)
+            && (self.workspace_root != "/mnt/data" || self.user != "agent")
+        {
+            return Err("environment_profile_workspace_initialization_invalid".into());
+        }
         if self.schema != "runtime.e2b_environment_profile.v1" || self.provider != "e2b" {
             return Err("environment_profile_schema_invalid".into());
         }
@@ -298,6 +322,11 @@ fn validate_workspace_root(root: &str) -> Result<(), String> {
 }
 
 impl EnvironmentProfile {
+    pub fn managed_files(&self) -> bool {
+        matches!(self, Self::E2b(profile)
+            if profile.workspace_initialization == Some(WorkspaceInitialization::ManagedFiles))
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         match self {
             Self::Legacy(value) => value.validate(),

@@ -6,6 +6,9 @@ fn main() {
         Some("runsc-control") => hosted_execution::runsc_task::run(),
         Some("filesystem-once") => hosted_execution::agent::run_filesystem_once(),
         Some("prepare-workspace") => hosted_execution::agent::run_prepare_workspace_once(),
+        Some("prepare-managed-workspace") => {
+            hosted_execution::agent::run_prepare_managed_workspace_once()
+        }
         Some("agent-process-state") => hosted_execution::agent::run_agent_process_state_once(),
         Some("input-inventory") => hosted_execution::agent::run_input_inventory_once(),
         Some("materialize-input") => hosted_execution::agent::run_materialize_input_once(),

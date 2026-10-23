@@ -808,3 +808,36 @@ fn restore_wrapper_preserves_nonzero_helper_exit_after_small_output() {
         b"plausible-but-failed"
     );
 }
+
+#[test]
+fn managed_workspace_preparation_uses_control_without_staging_or_generic_shell() {
+    let temp = tempfile::tempdir().unwrap();
+    let ordinary_log = temp.path().join("ordinary.jsonl");
+    let control_log = temp.path().join("control.jsonl");
+    let transport = E2bSdkTransport::new(process(&ordinary_log, b""), process(&control_log, b""));
+    transport
+        .helper(
+            &binding(),
+            TrustedHelperKind::PrepareManagedWorkspace,
+            b"",
+            1024,
+        )
+        .unwrap();
+    assert!(
+        control_log.exists(),
+        "managed initialization must use the fixed control lane"
+    );
+    assert!(
+        !ordinary_log.exists(),
+        "managed initialization must not stage or run a generic shell"
+    );
+    let sent = requests(&control_log);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["operation"], "invokeControlHelper");
+    assert_eq!(sent[0]["payload"]["helper"], "prepare-managed-workspace");
+    assert_eq!(
+        sent[0]["payload"]["expectedMetadata"],
+        serde_json::to_value(binding().metadata).unwrap()
+    );
+    assert!(!ordinary_log.exists());
+}

@@ -17,7 +17,10 @@ pub mod e2b_adapter;
 #[cfg(test)]
 mod e2b_consumption_tests;
 pub mod e2b_creation;
+mod e2b_deferred_execution;
 mod e2b_execution_host;
+#[cfg(test)]
+mod e2b_lazy_execution_tests;
 mod e2b_run_registry;
 mod e2b_runtime;
 mod e2b_session_workspace;
@@ -1826,6 +1829,24 @@ fn require_e2b_product_capabilities_at(
     Ok(())
 }
 
+fn e2b_lazy_workspace_eligible(
+    profile: &agent_run_authorization::EnvironmentProfile,
+    frozen: &agent_run_authorization::SessionWorkspace,
+    has_inputs: bool,
+    has_live_context: bool,
+    has_creation_operation: bool,
+) -> bool {
+    profile.managed_files()
+        && matches!(profile, agent_run_authorization::EnvironmentProfile::E2b(value) if value.lifetime == "perRun")
+        && frozen.validate().is_ok()
+        && frozen.snapshot_sha256.is_empty()
+        && frozen.snapshot_size_bytes == 0
+        && frozen.expanded_size_bytes == 0
+        && frozen.file_count == 0
+        && !has_inputs
+        && !has_live_context
+        && !has_creation_operation
+}
 fn prepare_e2b_product_host(
     provider: &e2b_runtime::E2bRuntime,
     context: &mut Option<e2b_run_registry::E2bLiveContext>,
@@ -2363,14 +2384,118 @@ fn execute_agent_run(
     let mut recovery_reservation_error = None;
     let mut recovery_retirement_error = None;
     let mut recovery_projection_receipt = None;
-    let prepared_execution = if let Some(context) = e2b_context.as_mut() {
+    let mut deferred_e2b_execution = None;
+    let mut deferred_e2b_scope = None;
+    let prepared_execution = if e2b_context.is_some() {
         (|| {
             let client = reqwest::blocking::Client::builder()
                 .build()
                 .map_err(|_| "e2b_workspace_client_unavailable")?;
+            let provider = e2b_runtime.as_ref().ok_or("e2b_runtime_not_configured")?;
+            let has_live = e2b_context.as_ref().is_some_and(|slot| slot.is_some());
+            let frozen = &agent_run_start.authorization.session_workspace;
+            if e2b_lazy_workspace_eligible(
+                &agent_run_start.authorization.environment_profile,
+                frozen,
+                !agent_run_start.authorization.asset_refs.is_empty(),
+                has_live,
+                false,
+            ) {
+                use postgres_store::controller_authority::{
+                    ControllerAuthorityRequest, ControllerPurpose,
+                };
+                let signing_key = env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY")
+                    .map_err(|_| "AGENT_RUN_AUTHORIZATION_SIGNING_KEY is required")?;
+                let authority = ControllerAuthorityRequest {
+                    environment_authorization: &agent_run_start.environment_authorization,
+                    signing_key: signing_key.as_bytes(),
+                    workspace_id: &agent_run_start.authorization.workspace_id,
+                    lease: &terminal_lease_fence,
+                    purpose: ControllerPurpose::Execute,
+                };
+                let key = provider
+                    .attempt_key(&authority, &agent_run_start.authorization, &execution_id)
+                    .map_err(e2b_runtime_error_code)?;
+                // Existing attempts retain their original recovery and cleanup
+                // obligations; unknown creation can never be called "unused".
+                let attempted = job_store
+                    .provider_creation_operation(&key.attempt_id)?
+                    .is_some();
+                if !attempted {
+                    let scope = Arc::new(Mutex::new(
+                        e2b_context.take().ok_or("e2b_step_scope_missing")?,
+                    ));
+                    let weak_scope = Arc::downgrade(&scope);
+                    let provider = provider.clone();
+                    let start = agent_run_start.clone();
+                    let lease = terminal_lease_fence.clone();
+                    let id = execution_id.clone();
+                    let factory_client = client.clone();
+                    let factory_url = api_url.clone();
+                    let factory_token = token.clone();
+                    let restore_lease = recovery_workspace_lease.clone();
+                    let deferred = Arc::new(e2b_deferred_execution::DeferredE2bExecution::new(
+                        move || {
+                            // Retained tool layers only hold this Weak pointer.
+                            // They cannot create after the owning step ends.
+                            let scope = weak_scope.upgrade().ok_or("e2b_step_scope_expired")?;
+                            let mut context =
+                                scope.lock().map_err(|_| "e2b_step_scope_poisoned")?;
+                            let host = prepare_e2b_product_host(
+                                &provider,
+                                &mut context,
+                                None,
+                                &start,
+                                &lease,
+                                &id,
+                                session_workspace::SessionWorkspaceApi {
+                                    client: &factory_client,
+                                    api_url: &factory_url,
+                                    api_token: &factory_token,
+                                    agent_run_id: &start.agent_run_id,
+                                    authorization_digest: &start.authorization_digest,
+                                },
+                            )?;
+                            match host.restore_session_workspace(
+                                &restore_lease,
+                                &start.authorization.session_workspace,
+                                0,
+                            ) {
+                                Ok(SessionWorkspaceResolution::Empty) => Ok(host),
+                                _ => Err("e2b_deferred_workspace_restore_unconfirmed".into()),
+                            }
+                        },
+                        e2b_deferred_execution::DeferredWorkspaceBinding {
+                            client,
+                            api_url: api_url.clone(),
+                            api_token: token.clone(),
+                            agent_run_id: agent_run_start.agent_run_id.clone(),
+                            authorization_digest: agent_run_start.authorization_digest.clone(),
+                            lease: recovery_workspace_lease.clone(),
+                            frozen: frozen.clone(),
+                        },
+                        cancellation_probe.clone(),
+                    ));
+                    let policy = e2b_execution_host::execution_policy_for_profile(
+                        &agent_run_start.authorization.environment_profile,
+                    );
+                    let host = hosted_execution_context::HostedExecutionContext::e2b_ports(
+                        hosted_execution_context::HostedExecutionPorts {
+                            runner: deferred.clone(),
+                            artifact_reader: deferred.clone(),
+                            workspace: deferred.clone(),
+                        },
+                        execution_id.clone(),
+                        policy,
+                    );
+                    deferred_e2b_scope = Some(scope);
+                    deferred_e2b_execution = Some(deferred);
+                    return Ok(host);
+                }
+            }
             prepare_e2b_product_host(
-                e2b_runtime.as_deref().ok_or("e2b_runtime_not_configured")?,
-                context,
+                provider,
+                e2b_context.as_mut().ok_or("e2b_step_scope_missing")?,
                 e2b_environment.as_deref_mut(),
                 &agent_run_start,
                 &terminal_lease_fence,
@@ -2623,6 +2748,8 @@ fn execute_agent_run(
     };
     let sandbox_ensure_ms = sandbox_started.elapsed().as_millis();
     let execution = Arc::new(execution);
+    // Keep the owned registry guard through completion and workspace commit.
+    let _deferred_scope_owner = deferred_e2b_scope;
     let e2b_reused_live = e2b_context
         .as_ref()
         .and_then(|context| context.as_ref())
@@ -2808,6 +2935,9 @@ fn execute_agent_run(
     .with_execution_owner(agent_run_start.agent_run_id.clone())
     .with_resource_claim_store(Arc::new((*store).clone()))
     .with_resolved_input_manifest(resolved_inputs.clone());
+    if let Some(deferred) = &deferred_e2b_execution {
+        tool_layer = tool_layer.with_workspace_instruction_read_port(deferred.clone());
+    }
     tool_layer.register_dynamic_tool_provider(Arc::new(WorkspaceArtifactToolProvider::new(
         artifact_publication,
     )))?;
@@ -3363,6 +3493,11 @@ fn execute_agent_run(
         None
     };
     let mut commit_tool_safe_point = |safe_point: ToolSafePoint| {
+        // Native Core children share the execution namespace. Materialize
+        // after durable call commit, before Core can detach a child worker.
+        let needs_shared_execution = matches!(
+            &safe_point, ToolSafePoint::DurableToolCall { call, .. } if call.name == "agent"
+        );
         let safe_point_started = Instant::now();
         let first_receipt = first_tool_timing.receipt_ready(&safe_point);
         let stage = match &safe_point {
@@ -3750,6 +3885,11 @@ fn execute_agent_run(
                 )?,
             };
             if events.is_empty() {
+                if needs_shared_execution {
+                    if let Some(deferred) = &deferred_e2b_execution {
+                        deferred.ensure_ready()?;
+                    }
+                }
                 return fatal_execution_reason
                     .map(|reason| Err(format!("fatal_execution_outcome:{reason}")))
                     .unwrap_or(Ok(()));
@@ -3773,6 +3913,11 @@ fn execute_agent_run(
                 .lock()
                 .map_err(|_| "session record sequence lock poisoned".to_string())? =
                 committed_sequence;
+            if needs_shared_execution {
+                if let Some(deferred) = &deferred_e2b_execution {
+                    deferred.ensure_ready()?;
+                }
+            }
             first_tool_timing.receipt_committed(first_receipt.as_deref());
             // Capture publication is downstream of the durable Core event and
             // must never change its successful tool outcome or trigger replay.

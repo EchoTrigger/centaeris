@@ -764,5 +764,40 @@
     "verifierError": "missing field",
     "rationale": "Required transport field must be present.",
     "supportedSignerOutput": false
+  },
+  {
+    "id": "e2b_managed_files",
+    "changes": [
+      {
+        "path": "/environmentProfile",
+        "value": {
+          "schema": "runtime.e2b_environment_profile.v1",
+          "provider": "e2b",
+          "providerConfigDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "templateRef": {
+            "templateId": "centaeris-core",
+            "buildId": "e8e0d749-b6a4-4985-a50c-a239c77536f1"
+          },
+          "workspaceRoot": "/mnt/data",
+          "user": "agent",
+          "network": "disabled",
+          "lifetime": "perRun",
+          "timeoutSeconds": 3600,
+          "inputBudgetBytes": 67108864,
+          "workspaceInitialization": "managedFiles"
+        }
+      },
+      {
+        "path": "/environmentProfileDigest",
+        "value": "sha256:e57884f41e98458a0d0770efe9b5fbd3fb745ba7685ce7683ee8f7f45864e626"
+      }
+    ],
+    "signerError": "",
+    "verifierStage": "accept",
+    "verifierError": "",
+    "rationale": "The explicit managed-files initialization profile is part of the authorization digest and is verified unchanged by the Rust consumer.",
+    "supportedSignerOutput": true,
+    "digest": "sha256:85c2eff9090cd0783b6a807ec30fafe55824d898b36b6692dbc45efed53b80df",
+    "signature": "hmac-sha256:7dccf90d17f28ae88af9ca01e3c567a28a86eacee470c2a3f7140e7f240827d6"
   }
 ]

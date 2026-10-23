@@ -208,3 +208,69 @@ fn profile_wire_rejects_duplicate_fields_in_both_variants_and_nested_contracts()
         }
     }
 }
+
+#[test]
+fn managed_workspace_initialization_is_explicit_shared_and_signed() {
+    let value: Value = serde_json::from_str(include_str!(
+        "../../../../tests/workspace/fixtures/e2b_environment_profile/v1/managed-files.json"
+    ))
+    .unwrap();
+    let profile: EnvironmentProfile = serde_json::from_value(value.clone()).unwrap();
+    profile.validate().unwrap();
+    assert!(profile.managed_files());
+    assert_eq!(serde_json::to_value(&profile).unwrap(), value);
+    let mut original = value.clone();
+    original
+        .as_object_mut()
+        .unwrap()
+        .remove("workspaceInitialization");
+    let old: EnvironmentProfile = serde_json::from_value(original.clone()).unwrap();
+    old.validate().unwrap();
+    assert!(!old.managed_files());
+    assert_eq!(serde_json::to_value(&old).unwrap(), original);
+    assert_ne!(profile.digest().unwrap(), old.digest().unwrap());
+
+    let mut authorization = wire();
+    authorization["environmentProfile"] = value;
+    authorization["environmentProfileDigest"] = profile.digest().unwrap().into();
+    let signed: WorkspaceAgentRunAuthorization =
+        serde_json::from_value(authorization.clone()).unwrap();
+    signed.validate().unwrap();
+    let signature = signed.signature(b"test-key").unwrap();
+    authorization["environmentProfile"] = original;
+    authorization["environmentProfileDigest"] = old.digest().unwrap().into();
+    let changed: WorkspaceAgentRunAuthorization = serde_json::from_value(authorization).unwrap();
+    assert!(changed.verify_signature(b"test-key", &signature).is_err());
+}
+
+#[test]
+fn managed_workspace_initialization_rejects_unknown_null_and_unmanaged_roots() {
+    for value in [
+        serde_json::json!(null),
+        serde_json::json!(true),
+        serde_json::json!(0),
+        serde_json::json!([]),
+        serde_json::json!({}),
+        serde_json::json!(""),
+        serde_json::json!("preserve"),
+        serde_json::json!("managed_files"),
+    ] {
+        let mut changed = e2b_profile();
+        changed["workspaceInitialization"] = value;
+        if let Ok(profile) = serde_json::from_value::<EnvironmentProfile>(changed) {
+            assert!(profile.validate().is_err());
+        }
+    }
+    for (root, user) in [("/home/user", "agent"), ("/mnt/data", "user")] {
+        let mut changed = e2b_profile();
+        changed["workspaceInitialization"] = "managedFiles".into();
+        changed["workspaceRoot"] = root.into();
+        changed["user"] = user.into();
+        if let Ok(profile) = serde_json::from_value::<EnvironmentProfile>(changed) {
+            assert!(profile.validate().is_err());
+        }
+    }
+    let raw = serde_json::to_string(&e2b_profile()).unwrap();
+    let duplicate = raw.replacen("{", "{\"workspaceInitialization\":\"managedFiles\",\"workspaceInitialization\":\"managedFiles\",", 1);
+    assert!(serde_json::from_str::<EnvironmentProfile>(&duplicate).is_err());
+}

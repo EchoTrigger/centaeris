@@ -39,6 +39,7 @@ struct FixtureTransport {
     wait_error: Mutex<Option<E2bHostError>>,
     helper_error: Mutex<Option<E2bHostError>>,
     prepare_response: Mutex<Vec<u8>>,
+    helper_kinds: Mutex<Vec<TrustedHelperKind>>,
 }
 impl FixtureTransport {
     fn new() -> Self {
@@ -72,6 +73,7 @@ impl FixtureTransport {
             wait_error: Mutex::new(None),
             helper_error: Mutex::new(None),
             prepare_response: Mutex::new(Vec::new()),
+            helper_kinds: Mutex::new(Vec::new()),
         }
     }
 }
@@ -88,6 +90,7 @@ impl E2bHostTransport for FixtureTransport {
         _: usize,
     ) -> Result<Vec<u8>, E2bHostError> {
         self.helpers.fetch_add(1, Ordering::SeqCst);
+        self.helper_kinds.lock().unwrap().push(kind);
         if matches!(
             kind,
             TrustedHelperKind::AgentProcessState | TrustedHelperKind::QuiesceAgentProcesses
@@ -97,7 +100,10 @@ impl E2bHostTransport for FixtureTransport {
         if let Some(error) = *self.helper_error.lock().unwrap() {
             return Err(error);
         }
-        if kind == TrustedHelperKind::PrepareWorkspace {
+        if matches!(
+            kind,
+            TrustedHelperKind::PrepareWorkspace | TrustedHelperKind::PrepareManagedWorkspace
+        ) {
             assert!(input.is_empty());
             return Ok(self.prepare_response.lock().unwrap().clone());
         }
@@ -902,4 +908,41 @@ fn retained_run_context_unbound_successor_suppresses_creator_fallback_without_gu
             ("after-unbound", Some("agent_run.lifecycle:context-A".into())),
         ], "an unbound Run must not inherit the physical creator's Job or leak its diagnostic barrier");
     });
+}
+
+#[test]
+fn managed_profile_selects_owned_workspace_and_denies_private_backing_paths() {
+    let fixture = Arc::new(FixtureTransport::new());
+    let mut profile = profile();
+    let EnvironmentProfile::E2b(value) = &mut profile else {
+        unreachable!()
+    };
+    value.workspace_initialization =
+        Some(crate::agent_run_authorization::WorkspaceInitialization::ManagedFiles);
+    let mut binding = binding();
+    binding
+        .metadata
+        .insert("profileDigest".into(), profile.digest().unwrap());
+    fixture.inspect.lock().unwrap().binding = binding.clone();
+    let host = E2bExecutionHostRunner::new(
+        profile,
+        binding,
+        fixture.clone(),
+        Arc::new(FixtureAuthority::new()),
+    )
+    .unwrap();
+    host.prepare_workspace().unwrap();
+    assert_eq!(
+        *fixture.helper_kinds.lock().unwrap(),
+        vec![TrustedHelperKind::PrepareManagedWorkspace]
+    );
+    let policy = host.execution_policy();
+    assert!(policy
+        .filesystem
+        .denied_read_paths
+        .contains(&"/var/lib/centaeris-host".into()));
+    assert!(policy
+        .filesystem
+        .denied_write_paths
+        .contains(&"/var/lib/centaeris-host".into()));
 }

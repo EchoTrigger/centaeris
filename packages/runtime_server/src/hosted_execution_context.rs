@@ -88,6 +88,12 @@ impl SessionWorkspacePort for E2bSessionWorkspace {
     }
 }
 
+pub(crate) struct HostedExecutionPorts {
+    pub(crate) runner: Arc<dyn ExecutionHostRunner>,
+    pub(crate) artifact_reader: Arc<dyn ArtifactReadPort>,
+    pub(crate) workspace: Arc<dyn SessionWorkspacePort>,
+}
+
 pub(crate) struct HostedExecutionContext {
     runner: Arc<dyn ExecutionHostRunner>,
     artifact_reader: Arc<dyn ArtifactReadPort>,
@@ -132,6 +138,22 @@ impl HostedExecutionContext {
         })
     }
 
+    pub(crate) fn e2b_ports(
+        ports: HostedExecutionPorts,
+        logical_execution_id: String,
+        policy: ExecutionPolicy,
+    ) -> Self {
+        Self {
+            runner: ports.runner,
+            artifact_reader: ports.artifact_reader,
+            hook_runner: Arc::new(UnsupportedLifecycleHooks),
+            workspace: ports.workspace,
+            execution_id: logical_execution_id,
+            workspace_root: "/mnt/data".into(),
+            policy,
+            legacy: None,
+        }
+    }
     /// Call during provider preflight, before any physical creation.
     pub(crate) fn require_no_lifecycle_hooks(
         activation: &PluginActivationSnapshotV1,

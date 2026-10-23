@@ -40,6 +40,7 @@ impl E2bSdkTransport {
         if !matches!(
             kind,
             TrustedHelperKind::PrepareWorkspace
+                | TrustedHelperKind::PrepareManagedWorkspace
                 | TrustedHelperKind::AgentProcessState
                 | TrustedHelperKind::QuiesceAgentProcesses
         ) {
@@ -137,6 +138,7 @@ impl E2bSdkTransport {
             if matches!(
                 kind,
                 TrustedHelperKind::PrepareWorkspace
+                    | TrustedHelperKind::PrepareManagedWorkspace
                     | TrustedHelperKind::AgentProcessState
                     | TrustedHelperKind::QuiesceAgentProcesses
             ) {

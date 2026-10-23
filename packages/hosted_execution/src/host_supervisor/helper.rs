@@ -12,6 +12,7 @@ pub const HELPER_STREAM_LIMIT: u64 = 1024 * 1024 * 1024;
 #[serde(rename_all = "camelCase")]
 pub enum TrustedHelperKind {
     PrepareWorkspace,
+    PrepareManagedWorkspace,
     FileSystem,
     InputInventory,
     MaterializeInput,
@@ -31,6 +32,7 @@ impl TrustedHelperKind {
     pub fn entrypoint(self) -> &'static str {
         match self {
             Self::PrepareWorkspace => "prepare-workspace",
+            Self::PrepareManagedWorkspace => "prepare-managed-workspace",
             Self::FileSystem => "filesystem-once",
             Self::InputInventory => "input-inventory",
             Self::MaterializeInput => "materialize-input",
@@ -50,6 +52,7 @@ impl TrustedHelperKind {
     pub fn input_limit(self) -> u64 {
         match self {
             Self::PrepareWorkspace
+            | Self::PrepareManagedWorkspace
             | Self::InputInventory
             | Self::SnapshotCollect
             | Self::WorkspaceGeneration
