@@ -32,8 +32,17 @@ export function AnimatedDisclosure({ expanded, children }: { expanded: boolean; 
       element.style.opacity = "";
     };
     if (preference.matches) { finish(); return; }
+    // A just-mounted process can still contain skipped transcript rows with
+    // intrinsic height estimates. Measure their natural layout synchronously,
+    // then restore normal visibility before the browser paints the animation.
+    let targetHeight = 0;
+    if (expanded) {
+      element.style.setProperty("--disclosure-content-visibility", "visible");
+      try { targetHeight = element.scrollHeight; }
+      finally { element.style.removeProperty("--disclosure-content-visibility"); }
+    }
     const animation = animate(element, {
-      height: [`${height}px`, expanded ? `${element.scrollHeight}px` : "0px"],
+      height: [`${height}px`, `${targetHeight}px`],
       opacity: [Number(opacity), expanded ? 1 : 0],
     }, { duration: 0.18, ease: [0.2, 0, 0, 1] });
     animationRef.current = animation;

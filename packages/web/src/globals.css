@@ -386,7 +386,7 @@ svg { width: 16px; height: 16px; stroke-width: 1.9; }
 .workspaceVirtualAgentRun { position: absolute; top: 0; left: 0; width: 100%; }
 .workspaceVirtualAgentRunInner { padding-bottom: 34px; }
 .workspaceTranscriptBlocks { display: grid; grid-template-columns: minmax(0, 1fr); width: min(820px, 100%); gap: 18px; margin: 0 auto; }
-.workspaceTranscriptBlock { min-width: 0; content-visibility: auto; contain-intrinsic-size: auto 80px; }
+.workspaceTranscriptBlock { min-width: 0; content-visibility: var(--disclosure-content-visibility, auto); contain-intrinsic-size: auto 80px; }
 .workspaceTranscriptUser { display: grid; max-width: min(620px, 82%); justify-self: end; }
 .workspaceTranscriptAssistant, .workspaceTranscriptLive { display: grid; min-width: 0; gap: 8px; }
 .workspaceTranscriptReasoning > summary { width: fit-content; cursor: pointer; color: var(--reasoning-label); font-size: var(--font-size-process); }
