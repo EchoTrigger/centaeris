@@ -29,10 +29,10 @@ capacity 8 / 4 / 8.
 | Evidence | Current boundary |
 | --- | --- |
 | Earlier real-provider product builds | perRun A/B, retained A/B with Runtime restart, explicit pause/resume with queued work, and independent retirement passed on the identified builds below |
-| Current affected automated checks | Runtime 684, focused Core query_loop 129, SDK adapter 122, related API 151 and required PostgreSQL 214 passed; Harbor 216 passed earlier and separately. Full release-gate failures are recorded below |
+| Integrated boundary checks | Core query_loop 134; SDK 127; retained 54 plus migration/schema regressions; snapshot 86; model client 28 and configuration 4; Linux API/Worker no-VM product cases 2 pass on their identified source trees below. Source Rust/Node and hosted Rust/Web/Python passed; the final complete API run executed 1727 with zero failures/errors/skips |
 | Interrupted instrumented real-provider sample | Stopped in Run A before pause/resume with an unresolved dispatched create and no locator or settlement. After reboot the tmpfs PostgreSQL ledger is absent; its original owner record and Unknown responsibility remain preserved |
-| Current isolated comparisons | Twelve lifecycle samples compare baseline and candidate, three per scenario/build; six workspace IO samples add one per case/build. All passed with confirmed cleanup. perRun, retained execution and Run-cleanup Store subspans are measured separately |
-| Release and legacy-removal acceptance | TB2.1 replacement, automatic idle policy, combined saturation, the wider restart/failure matrix, full release gates and historical-duty drain remain incomplete |
+| Identified earlier isolated comparisons | Twelve lifecycle samples compare baseline and candidate, three per scenario/build; six workspace IO samples add one per case/build. All passed with confirmed cleanup. perRun, retained execution and Run-cleanup Store subspans are measured separately |
+| Release and legacy-removal acceptance | TB2.1 replacement, automatic idle policy, combined saturation, the wider restart/failure matrix, packaged-release acceptance and historical-duty drain remain incomplete |
 
 The executable hashes, image digests, test counts and measurements below identify
 their respective builds. Historical results do not accept later source changes;
@@ -1560,14 +1560,19 @@ settlement to the same operation record. Migration 18 to 19 adds explicit
 Environment bindings, Run uses and retirement intent without rewriting old
 payloads, signatures or provider ownership history.
 
-Startup, execution, workspace protection, artifact publication and teardown now
-have E2B routing through the existing Core flow. The remaining legacy symbols
-are reachable through explicit legacy selection or historical cleanup contracts;
-absence from the E2B branch alone does not make an entire module unused.
+AgentRun startup, execution, workspace protection, artifact publication and
+teardown have E2B routing through the existing Core flow. Independent provision,
+observe, and maintenance task/file endpoints still call the Docker backend
+directly; the current benchmark adapter still builds a native image profile.
+These are active legacy callers and require provider-aware ownership and
+execution before the TB2.1 replacement gate can pass. Other legacy callers
+remain behind explicit selection or historical cleanup contracts. Absence from
+the E2B AgentRun branch alone does not make an entire module unused.
 
 | Call graph boundary | Additional removal condition after the E2B TB2.1 replacement gate |
 | --- | --- |
 | `execution_backend_config::ExecutionBackendConfig::Legacy` and the `docker` selector -> `main` -> `DockerExecutionHostRunner::validate_host`, `resolve_workspace_image_digest`, `reconcile_residency` and Docker create limits | Stop new legacy admission and prove no active or recoverable legacy Run still needs this deployment; retain an owner for outstanding cleanup before removing startup selection |
+| `http::environment_provision` provision/observe and `http::environment_maintenance` task/file routes -> Docker backend; Harbor adapter -> native image profile | Introduce provider-aware provision, observation, setup/verifier execution and file transfer with exact instance authority. Validate setup, Agent and verifier against one retained trial instance before retiring it |
 | `main` legacy preparation/recovery -> `DockerExecutionHostRunner::new_with_admitted` -> `HostedExecutionContext::from_legacy`; later `legacy()` branches supply legacy restore, hooks, MCP stdio and recovery | All legacy execution bindings have completed or been explicitly retired; then remove these execution-only branches and the Docker workspace-port implementation together |
 | `http::agent_runs::teardown_owned_tasks` legacy branch -> `with_cleanup_authority` -> `retained_cleanup::DockerCleanupHost` / `remove_cleaned_environment` | Every legacy Run has its actual scoped cleanup receipt and controller release; exact perRun removal and resource release are confirmed, and no uncertain legacy creation remains unresolved |
 | `http::environment_retirement::RetirementEnvelope::Legacy` -> `retire_retained_instance` -> `retire_physical` | Every legacy retained instance has an exact completed retirement or a proven non-dispatch outcome; a terminal Run alone is insufficient |
@@ -1882,10 +1887,10 @@ workflows passed on the published revision. Those workflows do not replace the
 skipped required product jobs.
 
 This round made local commits only. Remote CI for these follow-up commits has
-not run, and the earlier native source-gate Rustdoc cache/Node toolchain issues
-are not claimed resolved by the successful product measurements. The current
-Core/SDK lifecycle fixtures, private offline tests, source-layout correction and
-still-pending full release/benchmark acceptance remain distinct evidence.
+not run. Source Rust/Node and hosted Rust/Web/Python passed on the integrated
+product implementation; the final complete Python command exited zero on
+`ad77d59`. Core/SDK fixtures, controlled product cases, source gates and pending
+packaged-release, real-provider and benchmark acceptance remain distinct.
 
 ## Lifecycle separation implementation boundaries
 
@@ -1905,32 +1910,141 @@ The [workspace protection inventory](WorkspaceSnapshotProtection.md) reports
 Session heads, frozen Run versions and recovery checkpoint references without
 reading payloads. Core and Python validate a shared checkpoint corpus. Missing
 indexes, concurrent changes and truncated or invalid records remain explicit;
-`deletionAuthorized` is always false. Upload protection, prepared-completion
-roots, shared blobs and active-version GC still require implementation.
+`deletionAuthorized` is always false. Pending/staged snapshot publication is
+now indexed as described below; prepared-completion roots, shared blobs and
+active-version GC remain incomplete.
 
 These changes have automated evidence only. The mode projection passed 95
 focused PostgreSQL API tests and the related frontend checks. The slot refactor
 passed its 13 pre-change characterization tests and 15 post-change tests.
-Source Rust, Node, Web and hosted Rust gates passed; Runtime Server reported
-686 passed with 306 integration entries left to their dedicated runners, and
-Web reported 452 passed. The latest complete hosted Python gate stopped at
-Outbox PostgreSQL connection timeout, before database tests ran. The tightened
-inventory parser passed 19 database-free record tests and 75 shared contract
-cases through both the real Core type and Python; its latest PostgreSQL
-regression run remains pending. Earlier inventory database
-results precede that parser tightening and are not final-candidate acceptance.
+The protection inventory now passes 60 PostgreSQL regressions, including the
+tightened parser; 19 database-free record tests and 75 shared checkpoint cases
+remain independently validated. A complete Python baseline exposed an omitted
+admission view in the Runtime schema test's expected inventory. That expectation
+is corrected without changing the production schema; the final full gate must
+run against the current candidate.
 
-Runs still prepare their physical environment before the model. Safe on-demand
-preparation must connect authoritative startup-file reads, first-use preparation
-and the never-materialized finalizer. Existing template preparation preserves
-root files, so an empty Session archive cannot prove `AGENTS.md` is absent.
-A trustworthy exact-build startup baseline is required before avoiding that
-read. Physical binding generations, rebuildable release and separate resource
-budgets remain pending; `perRun` and 8/4/8 remain the current baseline.
+### Managed files and deferred physical preparation
 
-The legacy execution route remains reachable for non-E2B profiles and existing
-signed bindings and cleanup duties. Its retirement requires the replacement
-TB2.1 product path to pass and the outstanding legacy responsibilities to drain.
-The frozen idle-policy skeleton is not part of this implementation. No new
-real-provider lifecycle timing or resource-savings result is established here;
-the original Unknown creation responsibilities remain open.
+An explicit signed profile field, `workspaceInitialization: "managedFiles"`,
+makes the frozen Session workspace and authorized inputs the logical workspace
+source. Missing the field retains the existing template-content policy and its
+exact serialized digest. Explicit null, unknown values and a different root or
+identity are rejected. The capability is frozen before Run signing and survives
+later Runtime defaults. Templates whose task files must remain visible require
+their existing policy until those files enter the managed workspace.
+
+The fixed root helper `prepare-managed-workspace` initializes a disk-backed
+directory below `/var/lib/centaeris-host` and bind-mounts it at `/mnt/data`.
+It preserves the underlying template files. A root-private marker binds the
+Environment and exact sandbox identity, supplied only after fresh provider
+identity verification. Initialization holds an exclusive file lock, persists
+intent and directory identity before binding, and verifies the mount before
+marking ready. Known completed directory or mount work is reused after a lost
+reply. A mismatched scope, foreign mount, uncertain permissions or partial
+directory initialization fails closed and preserves responsibility. The helper
+does not clear a directory, adopt an unowned one or recreate one to hide failure.
+Memory-backed storage and missing mount capability are explicit errors.
+
+Only a managed-files `perRun` workspace with an empty frozen version, no inputs,
+no live context and no prior creation attempt uses deferred preparation. Core
+keeps prompt construction, instruction limits and cache identity; the host
+provides the authoritative startup-file read. Initial model context does not
+create a physical environment merely to look for `AGENTS.md`. Actual filesystem,
+command, status and artifact demand invoke the existing signed provider factory
+once. Before exposing the host, the factory rechecks and restores the authorized
+empty workspace. Later model requests read the same live instruction file.
+
+Concurrent first demand shares one result. Failure, panic and Unknown are
+latched, never retried by the deferred port. Waiting callers continue checking
+cancellation. A retained ToolLayer cannot create after its owning step ends.
+Native Core `agent` calls conservatively materialize their shared execution
+namespace after the durable call and before child scheduling; a replayed native
+call may still incur this preparation. API coordination tools do not trigger
+that barrier. Command recovery queries do not create a missing original host.
+
+An unused workspace finalizer rechecks its exact lease and frozen version
+through the authoritative API. Only an unchanged empty version can finish
+without a snapshot mutation; unavailable or advanced state cannot be described
+as unchanged. This is no-provider-effects cleanup, with no invented physical
+removal or resource-release receipt. Existing creation attempts, including
+Unknown, continue through their original conservative recovery and settlement.
+
+The integrated implementation and final fixture repairs are local commit
+`ad77d594f12ae773110bc17ac552d6ebcefa0107`, with source tree
+`3d0bd6e4f87a658b7dbd37e787bf6f12a8fef82c`. The behavior boundaries were
+validated and committed separately:
+
+| Local behavior commit | Direct evidence |
+| --- | --- |
+| `682a7ef` managed workspace and deferred creation | SDK 127; profile/authorization PostgreSQL 20; 15 real Python-to-Rust signature vectors; Linux E2B 172 passed/29 dedicated entries not executed; hosted library 143 passed/21 dedicated entries not executed; Core query_loop 134 and Clippy |
+| `bdb0540` fixture isolation and no-VM product cases | Exact tree `bff84b1c81ba59162752abc54ece95c75effb82a`: related PostgreSQL 85 and Linux product cases 2, zero skips; Core 134 and Clippy |
+| `36adb28` historical physical-attempt anchors | Exact tree `acd4c637e10358aa9f76f416716c87281f219562`: retained 54 (52 PostgreSQL, two protocol cases), six migration regressions, three current-schema cases, related Django 85 and product cases 2, zero skips; Core 134 and Clippy. Required identities 224/224 registered in the 1028-test Linux binary; this is not 224 executions |
+| `1dcf760` snapshot publication responsibility | Exact tree `8061dcae6cbd631ebbca83b8edabc7632e5c4d80`: Windows PostgreSQL/storage 86, Linux publication 21 and product cases 2, zero skips; migration drift clean. Four durability cases first failed, then verified transaction-local synchronous commit for pending and final confirmation, independently visible intent before temporary creation, and rejection before IO when fsync is disabled |
+| `00e1e0a` process-local model RPC admission | Exact tree `f0da608cb5bf8c0e71f835e305514f7ce96a3d1a`: full model client 28, configuration 4, Core 134, all-target Clippy and Linux product cases 2, zero skips. Client clones and native subagents share Core capacity; JSON/SSE hold through body/EOF and release before retry backoff |
+| `1253ced` provider migration expectation | Complete PostgreSQL found one remaining final-version expectation at 20; the exact regression then passed at 21, and complete Runtime PostgreSQL 282 passed |
+| `d31961d` structural migration backend boundary | Fresh SQLite migration first failed on PostgreSQL function DDL; a real subprocess regression then passed with the existing backend guard, migration drift stayed clean and PostgreSQL publication 21 passed with zero skips |
+| `fe62d47` publication test isolation | Mixed publication/old migration/structural suite first found 24 cases but executed 23 with a serialized-fixture setup error. Adding the existing serialized baseline setting only to the new publication class produced 24 executed, zero failures/errors/skips; old tests and the global runner remain intact |
+| `704f9ac` work Runtime fixture isolation | A real single-case teardown error reproduced a power-view dependency; the minimal four-case work/provision sequence then reproduced four errors. Existing schema isolation produced 23 passing work/provision/cleanup cases, zero skips, without CASCADE or production changes |
+| `719e660` snapshot race expectations | Six cases reproduced four failures and two errors. The fixture now preserves old Run/grant/publication, freezes the committed head in a successor and explicitly verifies PROTECT; GC keeps pending prefixes and staged bytes without spending deletion retries. Fencing/publication/protection/GC/environment lifecycle 114 passed, zero skips |
+| `90b12a6` final-publication fault injection | Two old commit-ordinal injections failed before final publication. Injection now surrounds the actual final publisher and occurs exactly once; complete observation/publication 25 passed, zero skips, preserving unknown-result and secret-redaction assertions |
+| `a25c5c0` snapshot CAS fixture isolation | The real formal-table precondition reproduced missing run_at_ms; the same probe passed while preserving original object OIDs, marker data and constraints. Seven CAS/cleanup cases also passed, zero skips |
+| `ad77d59` native control cleanup fixture | Both parallel cases first failed at zero completed Jobs although child Runs and returns were complete. The fixture now uses the real filtered control cleanup path and checks the same Job succeeds without model/step/event replay. Full native production module 10 and Worker 110 passed, zero skips; production claim, capacity and timeout policy are unchanged |
+
+The product cases use authenticated admission, the actual Worker, Runtime and
+Core. A text-only Run completes durable no-provider-effects cleanup, API release
+and its Job with zero SDK launches or creation operations. A controlled Unknown
+is dispatched through the real driver, then preparation fails before any model
+request; the complete ledger remains unchanged, with no new SDK dispatch,
+cleanup or release. Model and provider responses are controlled substitutes.
+These cases do not establish real-provider acceptance, daemon heartbeat or
+restart reconciliation. These focused validation databases were checked for
+their exact owner marker and zero connections before removal.
+
+Source Rust and Node, hosted Rust and Web passed. Hosted Rust ran 716 Runtime
+cases with 316 dedicated entries left to their separate runners, plus 101
+execution-library cases; Web ran 452 with zero skips. The final complete hosted
+Python command exited zero on `ad77d59`: Runtime PostgreSQL 282, Worker 110,
+SDK 127, retained-fixture guards 118, performance-harness 112 and document
+processor 16 passed. Fresh SQLite migration and drift passed. The full API suite
+executed 1727 with zero failures, errors, skips or expected failures. Its
+first-party MCP gate used real Rust calls and verified credential refresh,
+durable receipts and preview; performance-artifact validation and Compose
+structure also passed. Python-to-Rust authorization verified 15 signed vectors.
+The final Windows Runtime test binary SHA256 is
+`91b991347e7353c778775c8bb23e700d2452ae7d46f733171d22a63dd5431661`.
+
+The earlier complete Python baseline failed at 1695 cases (47 failures, 128
+errors). The intermediate `fe62d47` run executed 1727 with zero skips but failed
+with eight failures and seven errors; the five independently validated repairs
+above cover those cases. Neither failed run is counted as a passing gate.
+The Linux snapshot validation initially lacked Node for the shared Core corpus;
+the full 86-case run passed using the existing Windows Node/Cargo toolchain.
+The earlier native Runtime codegen LLVM OOM is not counted as behavior RED or a
+passing gate. Subsequent changes after the successful Rust/Node/Web runs were
+Python migration and fixture repairs, covered by the final complete Python run.
+Packaged-application release checks and the real-provider/TB2.1 gates have not
+run on this implementation.
+
+Runtime schema 21 now preserves each retained Run-use's historical creation
+attempt independently of current selection; live dispatch and cleanup still
+require the current binding and controller. Actual physical replacement and
+rebuildable release remain unimplemented. Pending and staged snapshot records
+retain ownership through IO and uncertain final commits; committed history is
+handoff evidence rather than a permanent content pin. Shared blobs and
+active-version garbage collection remain pending.
+
+TB2.1 has not run on this integrated implementation. Its task image/template
+binding and provider-aware independent provision/observe, maintenance setup,
+verifier and file-transfer paths must be implemented first. Agent and verifier
+must use the same authorized retained trial instance, followed by confirmed
+retirement and two-slot rotation under declared resource limits. A template's
+task files must not be hidden by the managed-files workspace policy.
+
+No new real-provider pause/resume timings or resource-savings conclusion is
+claimed for this build. Earlier measurements remain tied to their stated
+binaries. The legacy execution route still owns native admission, provision,
+maintenance and historical cleanup duties. Keep it until the E2B TB2.1 product
+replacement passes and those obligations drain. `perRun` and 8/4/8 remain the
+baseline; no Session API concurrency setting is added. The idle-policy skeleton
+remains frozen. Original Unknown creation responsibilities remain open.
