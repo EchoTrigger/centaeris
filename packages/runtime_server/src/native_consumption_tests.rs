@@ -60,7 +60,9 @@ fn native_consumption_production_server() {
         store: store.clone(),
         job_store: backend.clone(),
         tool_layers: Arc::new(Mutex::new(HashMap::new())),
-        execution_profile: Arc::new(RuntimeExecutionProfile {
+        e2b_runtime: None,
+        e2b_runs: Arc::new(e2b_run_registry::E2bRunRegistry::default()),
+        execution_profile: Arc::new(RuntimeExecutionProfile::Legacy {
             schema: RUNTIME_EXECUTION_PROFILE_SCHEMA,
             image_digest: format!("sha256:{}", "a".repeat(64)),
         }),

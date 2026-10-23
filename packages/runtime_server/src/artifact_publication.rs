@@ -1,10 +1,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use hosted_execution::protocol::SandboxArtifactMetadata;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::docker_execution_host::DockerExecutionHostRunner;
+
+#[cfg(test)]
+mod tests;
 
 const API_STATUS_SCHEMA: &str = "artifact.publication.status.v1";
 const API_METADATA_SCHEMA: &str = "artifact.publication.v1";
@@ -26,8 +30,18 @@ pub(crate) struct ArtifactPublicationReceipt {
     pub(crate) sha256: String,
 }
 
+pub(crate) trait ArtifactReadPort: Send + Sync {
+    fn read_artifact(&self, path: &str) -> Result<(SandboxArtifactMetadata, Vec<u8>), String>;
+}
+
+impl ArtifactReadPort for DockerExecutionHostRunner {
+    fn read_artifact(&self, path: &str) -> Result<(SandboxArtifactMetadata, Vec<u8>), String> {
+        DockerExecutionHostRunner::read_artifact(self, path)
+    }
+}
+
 pub(crate) struct WorkspaceArtifactPublicationPort {
-    sandbox: Arc<DockerExecutionHostRunner>,
+    sandbox: Arc<dyn ArtifactReadPort>,
     api_url: String,
     api_token: String,
     agent_run_id: String,
@@ -37,7 +51,7 @@ pub(crate) struct WorkspaceArtifactPublicationPort {
 
 impl WorkspaceArtifactPublicationPort {
     pub(crate) fn new(
-        sandbox: Arc<DockerExecutionHostRunner>,
+        sandbox: Arc<dyn ArtifactReadPort>,
         api_url: String,
         api_token: String,
         agent_run_id: String,
@@ -174,6 +188,12 @@ impl WorkspaceArtifactPublicationPort {
             return Ok(receipt);
         }
         let (artifact, bytes) = self.sandbox.read_artifact(request.path.as_str())?;
+        if artifact.size_bytes != bytes.len() as u64
+            || artifact.size_bytes > centaeris_core::execution::MAX_PUBLISHED_ARTIFACT_BYTES
+            || artifact.sha256 != format!("sha256:{:x}", Sha256::digest(bytes.as_slice()))
+        {
+            return Err("artifact reader result integrity mismatch".into());
+        }
         let metadata = ApiPublicationMetadata {
             schema: API_METADATA_SCHEMA,
             publication_id: publication_id.as_str(),

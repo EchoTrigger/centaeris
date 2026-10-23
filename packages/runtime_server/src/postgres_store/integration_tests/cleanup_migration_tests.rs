@@ -120,7 +120,10 @@ fn postgres_cleanup_migration_fresh_store_creates_receipt_table() {
         receipt_table_exists(&mut db),
         "fresh store must persist cleanup receipts"
     );
-    assert_eq!(history(&mut db).last().unwrap().0, 13);
+    assert_eq!(
+        history(&mut db).iter().map(|row| row.0).collect::<Vec<_>>(),
+        (1..=20).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -141,7 +144,10 @@ fn postgres_cleanup_migration_preserves_allocations_resources_and_receipts_on_re
     assert_eq!(allocation_facts(&mut db), before_facts);
     let migrated_history = history(&mut db);
     assert_eq!(&migrated_history[..9], before_history.as_slice());
-    assert_eq!(migrated_history.len(), 13);
+    assert_eq!(
+        migrated_history.iter().map(|row| row.0).collect::<Vec<_>>(),
+        (1..=20).collect::<Vec<_>>()
+    );
     assert_eq!(migrated_history[9].0, 10);
 
     insert_receipt(&mut db, serde_json::json!({})).unwrap();

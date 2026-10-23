@@ -19,7 +19,7 @@ impl AllocationOrigin {
         &self,
     ) -> Result<crate::agent_run_authorization::ExecutionNetwork, String> {
         self.environment_profile.validate()?;
-        Ok(self.environment_profile.network)
+        Ok(self.environment_profile.network())
     }
 }
 impl From<WorkspaceAgentRunAuthorization> for AllocationOrigin {
@@ -102,7 +102,7 @@ pub(super) fn load(
             }
         }
     };
-    if origin.environment_profile.image_digest != a.image_digest
+    if origin.environment_profile.legacy()?.image_digest != a.image_digest
         || origin.environment_profile.digest()? != a.profile_digest
     {
         return Err("allocation_origin_profile_rejected".into());

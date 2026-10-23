@@ -55,8 +55,9 @@ from app_core.runtime_job_client import get_runtime_job
 from app_core.environment_lifecycle import (
     EnvironmentControllerBusy, EnvironmentControllerTerminal,
     acquire_environment_controller, acquire_environment_cleanup_controller,
-    get_environment_release_receipt, release_environment_controller,
+    get_environment_release_receipt, release_environment_controller, read_control_authorization,
 )
+from app_core.environment_profile import EnvironmentPowerPending
 from app_core.session_event import (
     committed_session_terminal_state,
     project_committed_agent_run,
@@ -548,7 +549,7 @@ def _require_workspace_eof(request) -> None:
 def _locked_session_workspace_agent_run(body: dict) -> tuple[AgentRun, Session, dict]:
     lease_query = (
         "SELECT session_id FROM runtime.runtime_jobs "
-        "WHERE job_id=%s AND job_kind='agent_run.lifecycle' AND status='running' "
+        "WHERE job_id=%s AND job_kind='agent_run.lifecycle' AND status='running' AND lease_purpose='execute' "
         "AND lease_owner=%s AND payload_ref=%s AND idempotency_key=%s "
         "AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint"
     )
@@ -679,6 +680,7 @@ def _workspace_advanced_by_agent_run(session: Session, frozen: dict, agent_run: 
 
 
 def _workspace_tmpfs_fits(agent_run: AgentRun, expanded_size_bytes: int) -> bool:
+    from ..environment_profile import environment_workspace_transfer_limit_bytes
     inputs_size_bytes = sum(
         item["sizeBytes"] for item in agent_run.authorization.payload["assetRefs"]
     )
@@ -686,7 +688,7 @@ def _workspace_tmpfs_fits(agent_run: AgentRun, expanded_size_bytes: int) -> bool
         expanded_size_bytes
         + inputs_size_bytes
         + SESSION_WORKSPACE_RESTORE_OVERHEAD_BYTES
-        <= agent_run.authorization.payload["environmentProfile"]["resources"]["dataTmpfsBytes"]
+        <= environment_workspace_transfer_limit_bytes(agent_run.authorization.payload['environmentProfile'])
     )
 
 
@@ -799,7 +801,8 @@ def commit_session_workspace(request):
             with transaction.atomic():
                 agent_run, session, frozen = _locked_session_workspace_agent_run(body)
                 protection_observations.bind(sessionId=str(session.id), runId=str(agent_run.id), jobId=body["jobId"])
-                max_bytes = agent_run.authorization.payload["environmentProfile"]["resources"]["dataTmpfsBytes"]
+                from ..environment_profile import environment_workspace_transfer_limit_bytes
+                max_bytes = environment_workspace_transfer_limit_bytes(agent_run.authorization.payload['environmentProfile'])
                 if (
                     body["snapshotSizeBytes"] > max_bytes
                     or body["expandedSizeBytes"] > max_bytes
@@ -1520,6 +1523,22 @@ def materialize_agent_work(request):
         return JsonResponse({"error": "agent_work_materialize_invalid"}, status=400)
 
 
+@_internal_post("/agent-run-lifecycle/control")
+def resolve_agent_run_control(request):
+    try:
+        body = decode_json_object(request)
+        _retained_lifecycle_binding(body, "runtime.agent_run_lifecycle.control.resolve.v1")
+        control = read_control_authorization(body["agentRunId"], body["leaseOwner"])
+        if control["authorizationDigest"] != body["authorizationDigest"]:
+            raise ValueError("agent_run_lifecycle_binding_mismatch")
+        return JsonResponse({"schema": "runtime.agent_run_lifecycle.control.resolved.v1",
+                             "agentRunControl": control})
+    except AgentRun.DoesNotExist:
+        return JsonResponse({"error": "agent_run_not_found"}, status=404)
+    except (RuntimeError, ValueError, TypeError, KeyError):
+        return JsonResponse({"error": "agent_run_control_rejected"}, status=409)
+
+
 @_internal_post("/agent-run-lifecycle/resolve")
 def resolve_agent_run_lifecycle(request):
     try:
@@ -1568,6 +1587,8 @@ def _resolve_agent_run(body):
         # rejection permits resolving again. Other authority errors stay errors.
         for attempt in range(2):
             run, terminal = _retained_run_projection(body["agentRunId"], body["authorizationDigest"])
+            from ..environment_profile import validate_environment_lifetime
+            validate_environment_lifetime(run.environment.environment_profile, body['executionMode'])
             receipt = get_environment_release_receipt(run.pk, body["leaseOwner"])
             common = {"schema": "runtime.agent_run_lifecycle.resolved.v1"}
             if receipt is not None:
@@ -1589,6 +1610,9 @@ def _resolve_agent_run(body):
                 "agentRunStart": build_agent_run_start(run, controller_authority=authority, execution_mode=body["executionMode"])})
     except AgentRun.DoesNotExist:
         return JsonResponse({"error": "agent_run_not_found"}, status=404)
+    except EnvironmentPowerPending:
+        return JsonResponse({"schema": "runtime.agent_run_lifecycle.resolved.v1",
+            "disposition": "waiting", "waitReason": "environment_power_pending"})
     except EnvironmentControllerBusy:
         return JsonResponse({"error": "environment_controller_busy"}, status=409)
     except (RuntimeError, ValueError, TypeError) as error:
@@ -1611,7 +1635,20 @@ def release_agent_run_lifecycle(request):
             raise ValueError("agent_run_semantic_terminal_missing")
         released = get_environment_release_receipt(run.pk, body["leaseOwner"])
         if released is None:
-            receipt = get_agent_run_cleanup_receipt(run.pk, body["authorizationDigest"], body["cleanupReceiptId"])
+            from ..environment_profile import E2B_PROFILE_SCHEMA, environment_profile_digest
+            profile = run.environment.environment_profile
+            signed_profile = run.authorization.payload.get('environmentProfile')
+            provider_profile = any(isinstance(value, dict) and value.get('schema') == E2B_PROFILE_SCHEMA
+                for value in (profile, signed_profile))
+            receipt_binding = {}
+            if provider_profile:
+                profile_digest = environment_profile_digest(profile)
+                if (profile != signed_profile or profile_digest != run.environment.environment_profile_digest
+                        or profile_digest != run.authorization.payload.get('environmentProfileDigest')):
+                    raise ValueError("agent_run_cleanup_receipt_invalid")
+                receipt_binding = {'frozen_profile': profile, 'frozen_profile_digest': profile_digest}
+            receipt = get_agent_run_cleanup_receipt(run.pk, body["authorizationDigest"], body["cleanupReceiptId"],
+                **receipt_binding)
             if (receipt["environmentId"] != run.environment_id
                     or not 1 <= receipt["controllerEpoch"] <= body["controllerEpoch"] or receipt["cleanupComplete"] is not True):
                 raise ValueError("agent_run_cleanup_receipt_invalid")

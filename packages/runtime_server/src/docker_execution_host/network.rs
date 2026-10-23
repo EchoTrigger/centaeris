@@ -70,7 +70,13 @@ mod tests {
         let mut runner = super::super::tests::test_docker_execution_host_runner();
         for network in [ExecutionNetwork::Disabled, ExecutionNetwork::PublicInternet] {
             runner.network = network;
-            runner.environment_profile.as_mut().unwrap().network = network;
+            runner
+                .environment_profile
+                .as_mut()
+                .unwrap()
+                .legacy_mut()
+                .unwrap()
+                .network = network;
             let body = super::super::environment_container::create_body_with_proxy_environment(
                 &runner.container_expectation(),
                 runner.environment_profile.as_ref().unwrap(),

@@ -162,6 +162,75 @@ pub(crate) fn claim(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult
     Ok(json!({"jobs":jobs}))
 }
 
+pub(crate) fn control_claim(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
+    // Deserialize explicitly: flatten plus deny_unknown_fields is not a protocol fallback.
+    let value: serde_json::Value = decode(body)?;
+    let object = value.as_object().ok_or((400, "control_claim_invalid"))?;
+    if object.keys().any(|k| {
+        ![
+            "schema", "workerId", "jobId", "jobKind", "nowMs", "leaseMs", "limit", "stage",
+        ]
+        .contains(&k.as_str())
+    }) {
+        return Err((400, "control_claim_invalid"));
+    }
+    let stage = object
+        .get("stage")
+        .and_then(|v| v.as_str())
+        .ok_or((400, "control_claim_invalid"))?;
+    let mut ordinary = object.clone();
+    ordinary.remove("stage");
+    let request: ClaimRequest = serde_json::from_value(serde_json::Value::Object(ordinary))
+        .map_err(|_| (400, "control_claim_invalid"))?;
+    if request.schema != "runtime.job.control.claim.v1"
+        || !matches!(stage, "advance" | "cleanup")
+        || request.job_kind != "agent_run.lifecycle"
+        || !bounded(&request.worker_id, 16, 160)
+        || !request.worker_id.starts_with("worker:")
+        || request
+            .job_id
+            .as_deref()
+            .is_some_and(|id| !runtime_job_id(id))
+        || !(1000..=300000).contains(&request.lease_ms)
+        || !(1..=2).contains(&request.limit)
+    {
+        return Err((400, "control_claim_invalid"));
+    }
+    let jobs = store
+        .claim_control_jobs(
+            ClaimDueRuntimeJobsRequest {
+                now_ms: request.now_ms,
+                worker_id: request.worker_id,
+                job_id: request.job_id,
+                job_kind: Some(request.job_kind),
+                session_id: None,
+                limit: request.limit,
+                lease_ms: request.lease_ms,
+            },
+            stage,
+        )
+        .map_err(|_| (409, "control_claim_rejected"))?;
+    let jobs = jobs
+        .into_iter()
+        .map(|job| {
+            let mut value = serde_json::to_value(job).expect("RuntimeJob serialization");
+            value["leasePurpose"] = json!("control");
+            value["controlStage"] = json!(stage);
+            value
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({"jobs":jobs}))
+}
+
+pub(crate) fn control_start(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
+    let request: LeaseTransitionRequest = decode(body)?;
+    validate_lease_request(&request, "runtime.job.control.start.v1")?;
+    store
+        .start_control_job(&request.job_id, &request.lease_owner)
+        .map_err(|_| (409, "control_start_rejected"))?;
+    Ok(json!({"ok":true}))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WaitRequest {
@@ -337,6 +406,9 @@ pub(crate) fn complete(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolRes
         return Err((409, "job_complete_output_contract_mismatch"));
     }
     if job.status == RuntimeJobStatus::Succeeded {
+        store
+            .verify_lifecycle_completion(&request.job_id)
+            .map_err(|_| (409, "job_complete_rejected"))?;
         return if job.output_refs == request.output_refs {
             Ok(json!({"ok":true}))
         } else {
@@ -378,6 +450,9 @@ pub(crate) fn fail(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult 
         .get_runtime_job(&request.job_id)
         .map_err(|_| (500, "job_store_failed"))?
         .ok_or((404, "job_not_found"))?;
+    store
+        .require_execute_lease(&request.job_id, &request.lease_owner)
+        .map_err(|_| (409, "control_job_failure_forbidden"))?;
     let attempt = job.retry_count.saturating_add(1);
     let fail_job = if !request.retryable {
         FailRuntimeJobRequest {
@@ -966,4 +1041,23 @@ mod tests {
         .expect("decode work return wait request");
         assert!(valid_wait_request(&request));
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ControlReadyRequest {
+    schema: String,
+    stage: String,
+}
+pub(crate) fn control_ready(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
+    let request: ControlReadyRequest = decode(body)?;
+    if request.schema != "runtime.job.control.ready.v1"
+        || !matches!(request.stage.as_str(), "advance" | "cleanup")
+    {
+        return Err((400, "control_ready_invalid"));
+    }
+    let ready = store
+        .control_ready(&request.stage)
+        .map_err(|_| (503, "control_ready_unavailable"))?;
+    Ok(json!({"schema":"runtime.job.control.ready.result.v1","ready":ready}))
 }

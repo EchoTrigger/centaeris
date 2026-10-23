@@ -5,7 +5,9 @@ use crate::postgres_store::execution_instances::{instance_id, RetainedInstanceAl
 use crate::resident_capacity::{
     declared_usage, ObservedResidentSandbox, ResidentCapacity, RESIDENT_CAPACITY_WAIT,
 };
-use centaeris_core::execution::{admit_resident_resources, EnvironmentTaskOwner};
+use centaeris_core::execution::{
+    admit_resident_resources, EnvironmentTaskOwner, ResidentResourceClaim,
+};
 use sha2::{Digest, Sha256};
 
 fn locked(
@@ -116,8 +118,8 @@ impl PostgresRuntimeStore {
             let mut tx=client.transaction().map_err(|_|"provision_store_unavailable")?;
             super::resource_commit::require_durable_resource_commit(&mut tx)?;locked(&mut tx,auth,key)?;
             let b=&auth.payload;let execution=format!("provision:{}",b.operation_id);let owner=EnvironmentTaskOwner::MaintenanceOperation{operation_id:b.operation_id.clone()};
-            let mut a=RetainedInstanceAllocation{allocation_execution_id:execution.clone(),allocation_agent_run_id:None,allocation_owner:owner.clone(),instance_id:instance_id(&execution),environment_id:b.environment_id.clone(),host_id:host.into(),image_digest:b.environment_profile.image_digest.clone(),authorization_digest:auth.digest()?,binding_digest:auth.digest()?,profile_digest:b.environment_profile_digest.clone(),container_id:None,reused:false};
-            let usage=declared_usage(b.environment_profile.resources.sandbox_resources());
+            let mut a=RetainedInstanceAllocation{allocation_execution_id:execution.clone(),allocation_agent_run_id:None,allocation_owner:owner.clone(),instance_id:instance_id(&execution),environment_id:b.environment_id.clone(),host_id:host.into(),image_digest:b.environment_profile.legacy()?.image_digest.clone(),authorization_digest:auth.digest()?,binding_digest:auth.digest()?,profile_digest:b.environment_profile_digest.clone(),container_id:None,reused:false};
+            let usage=declared_usage(b.environment_profile.legacy()?.resources.sandbox_resources());
             if let Some(row)=tx.query_opt("SELECT i.execution_id,i.instance_id,i.host_id,i.authorization_digest,i.binding_digest,i.profile_digest,i.allocation_owner_json,s.container_id,s.state,s.workspace_id,s.memory_bytes,s.cpu_milli,s.pids,s.workspace_bytes FROM runtime.execution_instances i LEFT JOIN runtime.resident_sandboxes s ON s.execution_id=i.execution_id WHERE i.environment_id=$1 AND i.allocation_execution_id=i.execution_id FOR SHARE OF i",&[&b.environment_id]).map_err(|_|"provision_store_unavailable")?{
                 if row.get::<_,String>(0)!=execution||row.get::<_,String>(1)!=a.instance_id||row.get::<_,String>(2)!=host||row.get::<_,String>(3)!=a.authorization_digest||row.get::<_,String>(4)!=a.binding_digest||row.get::<_,Option<String>>(5).as_deref()!=Some(&a.profile_digest)||serde_json::from_str::<EnvironmentTaskOwner>(&row.get::<_,String>(6)).map_err(|_|"allocation_owner_invalid")?!=owner||row.get::<_,Option<String>>(8).is_none_or(|s|s!="reserved"&&s!="resident")||row.get::<_,Option<String>>(9).as_deref()!=Some(&b.workspace_id){return Err("provision_allocation_conflict".into());}
                 for(i,n)in [(10,usage.memory_bytes),(11,usage.cpu_milli),(12,usage.pids),(13,usage.workspace_bytes)]{if row.get::<_,Option<i64>>(i).and_then(|n|u64::try_from(n).ok())!=Some(n){return Err("provision_resource_binding_rejected".into());}}
@@ -125,7 +127,7 @@ impl PostgresRuntimeStore {
             }else{
                 if tx.query_opt("SELECT operation_id FROM runtime.environment_retirements WHERE environment_id=$1",&[&b.environment_id]).map_err(|_|"provision_store_unavailable")?.is_some(){return Err("provision_environment_retired".into());}
                 let(global,tenant,used)=super::residency::used(&mut tx,host,&b.workspace_id)?;
-                if !admit_resident_resources(global,tenant,usage,limits.global,limits.tenant)?||!used.checked_add(usage)?.fits(limits.host){return Err(RESIDENT_CAPACITY_WAIT.into());}
+                if !admit_resident_resources(global,tenant,ResidentResourceClaim::fully_reserved(usage)?,limits.global,limits.tenant)?||!used.checked_add(usage)?.fits(limits.host){return Err(RESIDENT_CAPACITY_WAIT.into());}
                 let owner_json=serde_json::to_string(&owner).map_err(|_|"allocation_owner_invalid")?;
                 tx.execute("INSERT INTO runtime.execution_instances(execution_id,instance_id,environment_id,session_id,agent_run_id,host_id,authorization_digest,binding_digest,image_digest,allocation_execution_id,allocation_mode,profile_digest,allocation_owner_json) VALUES($1,$2,$3,$4,NULL,$5,$6,$7,$8,$1,'retained',$9,$10)",&[&execution,&a.instance_id,&b.environment_id,&b.session_id,&host,&a.authorization_digest,&a.binding_digest,&a.image_digest,&a.profile_digest,&owner_json]).map_err(|_|"provision_allocation_unavailable")?;
                 super::residency::insert(&mut tx,host,&execution,None,&b.workspace_id,None,"reserved",usage)?;

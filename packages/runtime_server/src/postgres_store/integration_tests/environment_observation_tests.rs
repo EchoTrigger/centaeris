@@ -24,7 +24,7 @@ fn seed_allocation(
     profile: &crate::agent_run_authorization::EnvironmentProfile,
     digest: &str,
 ) {
-    db.execute("INSERT INTO runtime.execution_instances(execution_id,instance_id,environment_id,session_id,agent_run_id,host_id,authorization_digest,binding_digest,image_digest,allocation_execution_id,allocation_mode,profile_digest,allocation_owner_json) VALUES('provision:observe','instance-observe','environment','sess_1',NULL,'host','origin-grant','origin-binding',$1,'provision:observe','retained',$2,'{\"kind\":\"maintenanceOperation\",\"operationId\":\"observe-operation\"}')", &[&profile.image_digest,&digest]).unwrap();
+    db.execute("INSERT INTO runtime.execution_instances(execution_id,instance_id,environment_id,session_id,agent_run_id,host_id,authorization_digest,binding_digest,image_digest,allocation_execution_id,allocation_mode,profile_digest,allocation_owner_json) VALUES('provision:observe','instance-observe','environment','sess_1',NULL,'host','origin-grant','origin-binding',$1,'provision:observe','retained',$2,'{\"kind\":\"maintenanceOperation\",\"operationId\":\"observe-operation\"}')", &[&profile.legacy().unwrap().image_digest,&digest]).unwrap();
     db.batch_execute("INSERT INTO runtime.resident_sandboxes(host_id,execution_id,agent_run_id,workspace_id,container_id,state,memory_bytes,cpu_milli,pids,workspace_bytes,created_at_ms,updated_at_ms,instance_id,environment_id,allocation_mode,allocation_owner_json) VALUES('host','provision:observe',NULL,'ws_1',NULL,'reserved',1,1,1,1,0,0,'instance-observe','environment','retained','{\"kind\":\"maintenanceOperation\",\"operationId\":\"observe-operation\"}')").unwrap();
 }
 

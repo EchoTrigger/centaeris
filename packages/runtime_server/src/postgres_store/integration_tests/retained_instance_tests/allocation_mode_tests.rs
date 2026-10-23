@@ -109,7 +109,12 @@ fn postgres_per_run_in_flight_admission_returns_wait_and_reuses_after_release() 
                         allocation_owner: allocation.allocation_owner.clone(),
                         container_id: "physical-container".into(),
                         resources: declared_usage(
-                            a.original.environment_profile.resources.sandbox_resources(),
+                            a.original
+                                .environment_profile
+                                .legacy()
+                                .unwrap()
+                                .resources
+                                .sandbox_resources(),
                         ),
                     });
                 Ok("physical-container".into())

@@ -275,7 +275,7 @@ pub(super) fn filesystem(
         key.as_bytes(),
         |target| {
             let core = &dispatch.request.request;
-            if core.cwd != std::path::Path::new(&target.profile.workspace_root)
+            if core.cwd != std::path::Path::new(target.profile.workspace_root())
                 || core.policy != maintenance_policy(&target.profile)
             {
                 return Err("maintenance_filesystem_policy_rejected".into());
@@ -371,7 +371,7 @@ mod frame_tests {
         let (metadata, raw) = FileSystemFrameMetadata::from_request(
             centaeris_core::execution::ExecutionFileSystemRequest {
                 operation_id: None,
-                cwd: profile.workspace_root.clone().into(),
+                cwd: profile.workspace_root().into(),
                 model_path: "/app/input".into(),
                 operation: centaeris_core::execution::ExecutionFileSystemOperation::WriteFile {
                     content,

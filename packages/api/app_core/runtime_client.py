@@ -44,16 +44,11 @@ def request_execution_profile() -> dict:
         if isinstance(error, urllib.error.HTTPError):
             error.close()
         raise RuntimeError("runtime_execution_profile_request_failed") from error
-    if (
-        not isinstance(result, dict)
-        or set(result) != {"schema", "imageDigest"}
-        or result["schema"] != RUNTIME_EXECUTION_PROFILE_SCHEMA
-        or not isinstance(result["imageDigest"], str)
-        or len(result["imageDigest"]) != 71
-        or not result["imageDigest"].startswith("sha256:")
-        or any(character not in "0123456789abcdef" for character in result["imageDigest"][7:])
-    ):
-        raise RuntimeError("runtime_execution_profile_response_invalid")
+    from .environment_profile import validate_execution_profile_advertisement
+    try:
+        validate_execution_profile_advertisement(result)
+    except (ValueError, TypeError) as error:
+        raise RuntimeError("runtime_execution_profile_response_invalid") from error
     return result
 
 
@@ -174,7 +169,9 @@ def build_agent_run_cleanup(agent_run, controller_authority, *, execution_mode="
             execution_mode=execution_mode)}
 
 
-def get_agent_run_cleanup_receipt(agent_run_id, digest, receipt_id):
+def get_agent_run_cleanup_receipt(agent_run_id, digest, receipt_id, *, frozen_profile=None, frozen_profile_digest=None):
+    if frozen_profile is not None or frozen_profile_digest is not None:
+        return _get_provider_cleanup_receipt(agent_run_id, digest, receipt_id, frozen_profile, frozen_profile_digest)
     result = request_json('/internal/agent-runs/cleanup-receipt', {
         'schema': 'runtime.agent_run.cleanup_receipt.get.v1', 'agentRunId': agent_run_id,
         'authorizationDigest': digest, 'cleanupReceiptId': receipt_id}, timeout=10)
@@ -194,6 +191,51 @@ def get_agent_run_cleanup_receipt(agent_run_id, digest, receipt_id):
             require_opaque_ref('allocation.instanceId', allocation['instanceId'])
         elif allocation != {'kind': 'neverAllocated'}:
             raise ValueError
+    except (ValueError, TypeError):
+        raise ValueError('agent_run_cleanup_receipt_invalid') from None
+    return result
+
+
+def _get_provider_cleanup_receipt(agent_run_id, digest, receipt_id, profile, profile_digest):
+    from .environment_profile import E2B_PROFILE_SCHEMA, environment_profile_digest
+    from .runtime_contract import require_sha256
+    try:
+        if (environment_profile_digest(profile) != profile_digest or profile['schema'] != E2B_PROFILE_SCHEMA):
+            raise ValueError
+    except (ValueError, TypeError, KeyError):
+        raise ValueError('agent_run_cleanup_receipt_invalid') from None
+    result = request_json('/internal/agent-runs/cleanup-receipt', {
+        'schema': 'runtime.agent_run.cleanup_receipt.get.v2', 'agentRunId': agent_run_id,
+        'authorizationDigest': digest, 'cleanupReceiptId': receipt_id}, timeout=10)
+    common = {'schema', 'receiptId', 'agentRunId', 'environmentId', 'authorizationDigest',
+        'controllerEpoch', 'cleanupComplete', 'provider', 'profileDigest', 'providerConfigDigest'}
+    if not isinstance(result, dict):
+        raise ValueError('agent_run_cleanup_receipt_invalid')
+    physical = result.get('schema') == 'runtime.agent_run.cleanup_receipt.v2'
+    absent = result.get('schema') == 'runtime.agent_run.cleanup_receipt.no_provider_effects.v1'
+    retained = result.get('schema') == 'runtime.agent_run.cleanup_receipt.retained_provider.v1'
+    expected = common | ({'settlementDigest', 'operationCount'} if physical else
+        {'scope', 'providerUseId', 'providerUseDigest'} if retained else {'scope'})
+    if (not (physical or absent or retained) or set(result) != expected
+            or (retained and profile['lifetime'] != 'retained')
+            or result['receiptId'] != receipt_id or result['agentRunId'] != agent_run_id
+            or result['authorizationDigest'] != digest or result['cleanupComplete'] is not True
+            or result['provider'] != 'e2b' or result['profileDigest'] != profile_digest
+            or result['providerConfigDigest'] != profile['providerConfigDigest']
+            or type(result['controllerEpoch']) is not int or not 1 <= result['controllerEpoch'] <= 2**63 - 1):
+        raise ValueError('agent_run_cleanup_receipt_invalid')
+    if physical:
+        if type(result['operationCount']) is not int or not 1 <= result['operationCount'] <= 2**32 - 1:
+            raise ValueError('agent_run_cleanup_receipt_invalid')
+    elif result['scope'] != ('runEffectsOnly' if retained else 'noProviderEffectsForRun'):
+        raise ValueError('agent_run_cleanup_receipt_invalid')
+    try:
+        require_opaque_ref('environmentId', result['environmentId'])
+        if physical:
+            require_sha256('settlementDigest', result['settlementDigest'])
+        elif retained:
+            require_opaque_ref('providerUseId', result['providerUseId'])
+            require_sha256('providerUseDigest', result['providerUseDigest'])
     except (ValueError, TypeError):
         raise ValueError('agent_run_cleanup_receipt_invalid') from None
     return result

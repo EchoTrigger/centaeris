@@ -67,10 +67,11 @@ def _bind_pending(run, pending, *, initial=None):
                 raise AgentInputError(409, "agent_input_attachment_identity_conflict")
             proposed[item["inputRef"]] = item
         from .runtime_contract import MAX_DECLARED_INPUTS
+        from .environment_profile import environment_input_budget_bytes
         if (len(proposed) > MAX_DECLARED_INPUTS or sum(item["sizeBytes"] for item in proposed.values())
-                > authorization.payload["environmentProfile"]["resources"]["dataTmpfsBytes"] // 2):
+                > environment_input_budget_bytes(authorization.payload['environmentProfile'])):
             # The accepted carrier remains pending for the next serialized Run;
-            # admitting it here would exceed the existing sandbox resource grant.
+            # admitting it here would exceed the frozen input transfer budget.
             break
         if AgentWorkConsumeAttempt.objects.filter(coordinator_run=run, pk=fact.input_id).exists():
             raise AgentInputError(409, "agent_input_identity_collision")
@@ -112,7 +113,7 @@ def dispatch_agent_inputs(agent_id):
                     definition_version=version,
                     agent_instructions=version.instructions if version else agent_configuration(agent).instructions)
                 create_agent_run_authorization(run, [item["inputRef"] for item in initial.attachments],
-                    image_digest=profile["imageDigest"], declared_inputs=initial.attachments)
+                    execution_profile=profile, declared_inputs=initial.attachments)
                 _bind_pending(run, pending, initial=initial)
     if run is not None:
         try:

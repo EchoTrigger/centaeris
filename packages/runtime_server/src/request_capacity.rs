@@ -8,6 +8,7 @@ pub(crate) struct RequestCapacity {
     ordinary: Arc<Semaphore>,
     listeners: Arc<Semaphore>,
     control: Arc<Semaphore>,
+    cleanup: Arc<Semaphore>,
     ordinary_deadline: Duration,
     control_deadline: Duration,
 }
@@ -16,6 +17,7 @@ pub(crate) struct RequestLane {
     pub(crate) slots: Arc<Semaphore>,
     pub(crate) deadline: Option<Duration>,
     pub(crate) control: bool,
+    pub(crate) cleanup: bool,
 }
 
 impl RequestCapacity {
@@ -25,6 +27,7 @@ impl RequestCapacity {
             ordinary: Arc::new(Semaphore::new(1)),
             listeners: Arc::new(Semaphore::new(1)),
             control: Arc::new(Semaphore::new(1)),
+            cleanup: Arc::new(Semaphore::new(1)),
             ordinary_deadline: deadline,
             control_deadline: deadline,
         }
@@ -35,6 +38,7 @@ impl RequestCapacity {
             ordinary: Arc::new(Semaphore::new(capacity("RUNTIME_HTTP_REQUEST_LIMIT", 24)?)),
             listeners: Arc::new(Semaphore::new(capacity("RUNTIME_HTTP_LISTENER_LIMIT", 8)?)),
             control: Arc::new(Semaphore::new(capacity("RUNTIME_HTTP_CONTROL_LIMIT", 4)?)),
+            cleanup: Arc::new(Semaphore::new(capacity("RUNTIME_HTTP_CLEANUP_LIMIT", 2)?)),
             ordinary_deadline: Duration::from_secs(capacity(
                 "RUNTIME_HTTP_REQUEST_TIMEOUT_SECONDS",
                 30,
@@ -51,13 +55,26 @@ impl RequestCapacity {
             && matches!(
                 path,
                 "/agent-runs/cancel"
+                    | "/agent-runs/control"
+                    | "/internal/jobs/control/ready"
+                    | "/internal/jobs/control/claim"
+                    | "/internal/jobs/control/start"
+                    | "/internal/jobs/yield"
+                    | "/internal/jobs/complete"
                     | "/internal/jobs/heartbeat"
-                    | "/internal/environments/retire"
                     | "/internal/environments/maintenance/task"
                     | "/internal/environments/observe"
+                    | "/internal/agent-runs/cleanup-receipt"
             ))
             || (method == "GET" && path.starts_with("/internal/jobs/"));
         let listener = method == "POST" && path == "/internal/jobs/wait";
+        let cleanup = method == "POST"
+            && matches!(
+                path,
+                "/agent-runs/teardown"
+                    | "/internal/environments/retire"
+                    | "/internal/environments/power"
+            );
         // A step can contain long tools and provider streams. Its lifetime is
         // governed by the execution lease/cancellation protocol, not a short RPC timer.
         // Benchmark exec authenticates maintenance authority, validates its
@@ -65,14 +82,16 @@ impl RequestCapacity {
         let execution =
             method == "POST" && matches!(path, "/agent-runs/step" | "/internal/benchmark/exec");
         RequestLane {
-            slots: if control {
+            slots: if cleanup {
+                self.cleanup.clone()
+            } else if control {
                 self.control.clone()
             } else if listener {
                 self.listeners.clone()
             } else {
                 self.ordinary.clone()
             },
-            deadline: if execution {
+            deadline: if execution || cleanup {
                 None
             } else if control {
                 Some(self.control_deadline)
@@ -82,6 +101,7 @@ impl RequestCapacity {
                 Some(self.ordinary_deadline)
             },
             control,
+            cleanup,
         }
     }
 }
@@ -99,11 +119,129 @@ mod tests {
     use super::*;
 
     #[test]
+    fn power_uses_bounded_slow_control_without_blocking_cancel_or_heartbeat() {
+        let limits = RequestCapacity::for_http_tests(Duration::from_secs(2));
+        let _ordinary = limits
+            .lane("POST", "/agent-runs/step")
+            .slots
+            .try_acquire_owned()
+            .unwrap();
+        let power = limits.lane("POST", "/internal/environments/power");
+        let _power = power
+            .slots
+            .clone()
+            .try_acquire_owned()
+            .expect("pause and resume must not wait for an ordinary execution slot");
+        assert!(power.cleanup);
+        assert!(power.deadline.is_none());
+        for path in ["/agent-runs/cancel", "/internal/jobs/heartbeat"] {
+            assert!(limits.lane("POST", path).slots.try_acquire_owned().is_ok());
+        }
+        assert!(limits
+            .lane("POST", "/internal/environments/retire")
+            .slots
+            .try_acquire_owned()
+            .is_err());
+        assert!(!limits.lane("GET", "/internal/environments/power").cleanup);
+    }
+
+    #[test]
+    fn retirement_keeps_short_control_available_while_using_bounded_slow_cleanup() {
+        let limits = RequestCapacity::for_http_tests(Duration::from_secs(2));
+        let _ordinary = limits
+            .lane("POST", "/agent-runs/step")
+            .slots
+            .try_acquire_owned()
+            .unwrap();
+        let retirement = limits.lane("POST", "/internal/environments/retire");
+        let _retirement = retirement.slots.clone().try_acquire_owned().unwrap();
+        for path in ["/agent-runs/cancel", "/internal/jobs/heartbeat"] {
+            let _short = limits
+                .lane("POST", path)
+                .slots
+                .try_acquire_owned()
+                .expect("a slow provider retirement must leave cancel and heartbeat available");
+        }
+        assert!(retirement.cleanup);
+        assert!(!retirement.control);
+        assert!(retirement.deadline.is_none());
+        assert!(
+            limits
+                .lane("POST", "/agent-runs/teardown")
+                .slots
+                .try_acquire_owned()
+                .is_err(),
+            "retirement must share the existing bounded slow cleanup budget"
+        );
+    }
+
+    #[test]
+    fn slow_cleanup_has_capacity_separate_from_ordinary_and_short_control() {
+        let limits = RequestCapacity::for_http_tests(Duration::from_secs(2));
+        let _ordinary = limits
+            .lane("POST", "/agent-runs/step")
+            .slots
+            .try_acquire_owned()
+            .unwrap();
+        let _cleanup = limits
+            .lane("POST", "/agent-runs/teardown")
+            .slots
+            .try_acquire_owned()
+            .expect("slow cleanup must have its own bounded capacity");
+        let control = limits
+            .lane("POST", "/agent-runs/control")
+            .slots
+            .try_acquire_owned()
+            .expect("slow cleanup must leave short control available");
+        drop(control);
+    }
+
+    #[test]
+    fn cleanup_receipt_query_uses_short_control_while_execution_and_cleanup_are_full() {
+        let limits = RequestCapacity::for_http_tests(Duration::from_secs(2));
+        let _ordinary = limits
+            .lane("POST", "/agent-runs/step")
+            .slots
+            .try_acquire_owned()
+            .unwrap();
+        let _cleanup = limits
+            .lane("POST", "/agent-runs/teardown")
+            .slots
+            .try_acquire_owned()
+            .unwrap();
+        let receipt = limits.lane("POST", "/internal/agent-runs/cleanup-receipt");
+        assert!(
+            receipt.control,
+            "receipt reads must retain short control capacity"
+        );
+        assert!(!receipt.cleanup);
+        assert_eq!(receipt.deadline, Some(Duration::from_secs(2)));
+        let _receipt = receipt
+            .slots
+            .try_acquire_owned()
+            .expect("full ordinary and slow cleanup must not block receipt queries");
+        assert!(
+            limits
+                .lane("POST", "/agent-runs/cancel")
+                .slots
+                .try_acquire_owned()
+                .is_err(),
+            "receipt queries share the bounded short control budget"
+        );
+        assert!(
+            !limits
+                .lane("GET", "/internal/agent-runs/cleanup-receipt")
+                .control
+        );
+    }
+
+    #[test]
     fn full_execution_and_listener_lanes_leave_control_available() {
         let limits = RequestCapacity {
             ordinary: Arc::new(Semaphore::new(1)),
             listeners: Arc::new(Semaphore::new(1)),
             control: Arc::new(Semaphore::new(1)),
+            cleanup: Arc::new(Semaphore::new(1)),
             ordinary_deadline: Duration::from_secs(30),
             control_deadline: Duration::from_secs(5),
         };
@@ -119,7 +257,6 @@ mod tests {
             .try_acquire_owned()
             .is_err());
         for (method, path) in [
-            ("POST", "/internal/environments/retire"),
             ("POST", "/agent-runs/cancel"),
             ("POST", "/internal/jobs/heartbeat"),
             ("GET", "/internal/jobs/job_1"),

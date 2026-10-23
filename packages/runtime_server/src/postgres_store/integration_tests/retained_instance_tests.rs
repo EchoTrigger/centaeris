@@ -51,11 +51,18 @@ impl Run {
             execution_id,
             workspace_id: &self.original.workspace_id,
             host_id: "host",
-            image_digest: &self.original.environment_profile.image_digest,
+            image_digest: &self
+                .original
+                .environment_profile
+                .legacy()
+                .unwrap()
+                .image_digest,
             profile_digest,
             resources: declared_usage(
                 self.original
                     .environment_profile
+                    .legacy()
+                    .unwrap()
                     .resources
                     .sandbox_resources(),
             ),
@@ -146,6 +153,8 @@ pub(super) fn limits(run: &Run) -> ResidentCapacity {
     let one = declared_usage(
         run.original
             .environment_profile
+            .legacy()
+            .unwrap()
             .resources
             .sandbox_resources(),
     );
@@ -181,6 +190,8 @@ pub(super) fn prepare(
                 resources: declared_usage(
                     run.original
                         .environment_profile
+                        .legacy()
+                        .unwrap()
                         .resources
                         .sandbox_resources(),
                 ),

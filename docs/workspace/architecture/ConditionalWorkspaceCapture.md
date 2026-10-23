@@ -2,7 +2,7 @@
 
 Hosted recovery preparation and final workspace collection use
 `execution_agent snapshot-capture`. A repeated capture can return a small
-unchanged receipt instead of sending file content through Docker and writing
+unchanged receipt instead of sending file content through the host transport and writing
 another Runtime spool. Persisted snapshots remain exact `workspace.snapshot.v1`
 frames; restore, API publication, object references and authorization retain
 their existing contracts.
@@ -18,16 +18,22 @@ by a revert can require capture while still matching the cached content.
 The runner retains one manifest, bounded by the existing 1 MiB manifest limit.
 It binds the manifest to all four descriptor fields: frame SHA-256, frame byte
 size, expanded byte size and file count. A missing or mismatched baseline causes
-a full capture. Creating a runner, replacing an execution or beginning streamed restore
-leaves the cache empty. Restore does not seed it; the first subsequent capture
-still transfers and spools a full frame. Capture failure discards the cache.
+a full capture. Creating a runner or replacing an execution leaves the cache
+empty. Beginning restore discards any prior baseline. Docker restore keeps the
+cache empty, so its next capture still transfers and spools a full frame. E2B
+restore seeds the current runner only after the complete frame, file hashes and
+frozen descriptor are verified and the fixed restore helper succeeds under the
+existing exclusive guard. That runner survives per-step workspace service
+replacement. Its immutable profile binding must match before a baseline can be
+used. Failed or unknown restore, capture failure and rejected receipts cannot
+retain a usable baseline; the existing unknown-effect latch remains authoritative.
 An empty workspace has no cached manifest and keeps the existing zero-byte
 persisted representation.
 
 For matching nonempty content of size B, both complete source reads remain:
 one to construct the manifest and one to verify the copied content. The second
-pass writes to a sink. File-body transfer through Docker and Runtime spool
-writes drop from B to zero; the small request manifest and response remain.
+pass writes to a sink. File-body download through the transport and canonical
+Runtime snapshot spool writes drop from B to zero; the small request manifest and response remain.
 Changed and cold captures still transfer a full frame. API upload/publication
 already skipped equal descriptors, so this change does not claim a new saving
 there or a reduction in source reads. No latency claim follows from byte counts.
@@ -38,13 +44,16 @@ failure, including zero source reads for early rejection. Both content passes
 use the same measured read loop as forced-full capture. Runtime supplies one
 operation ID, validates forwarded helper records, and associates them with the
 Run, job and recovery/final trigger. A verified unchanged result records zero
-spool writes; full results retain measured spool and later upload observations.
+canonical snapshot spool writes and upload attempts. E2B still downloads and
+spools the small receipt; `sdkDownloadFrameBytes` and
+`rawCaptureSpoolWrittenBytes` record those actual nonzero bytes. Full results
+retain measured spool and later upload observations.
 Logical bytes are content size, not transferred bytes. Missing helper evidence
 remains missing rather than becoming a zero estimate.
 
 ## Capture contract
 
-The root helper receives bounded JSON on stdin and requires EOF:
+The fixed helper receives bounded JSON on stdin and requires EOF:
 
 ```json
 {
@@ -126,7 +135,7 @@ the previous full-capture implementation can read all stored frames. Do not
 deploy mismatched helper/Runtime command contracts or silently fall back after
 a malformed response.
 
-The helper is copied into the tool image by
+For Docker, the helper is copied into the tool image by
 `packages/hosted_execution/Dockerfile.agent`; Runtime executes that image's
 `/opt/centaeris/bin/execution_agent`. It does not inject a replacement binary.
 `WORKSPACE_GENERAL_IMAGE` is resolved to an immutable image ID and container
@@ -138,3 +147,10 @@ the existing recovery/terminal policy; this change does not authorize killing
 its processes or substituting a new image behind its execution identity. Do not
 let the new Runtime adopt old-helper instances. Compatible v1 snapshot bytes
 alone do not bypass the normal execution/image binding checks on restore.
+
+E2B uses the fixed helper included in the immutable template/build selected by
+the frozen provider profile. Snapshot publication and unchanged receipts still
+require current dispatch authority, transfer admission and workspace exclusion.
+A cached manifest grants neither execution permission nor permission to recover
+an unknown helper operation. Its successful restore seed preserves the existing
+workspace snapshot format and does not claim whole-environment recovery.

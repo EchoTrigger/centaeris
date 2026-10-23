@@ -72,7 +72,7 @@ def leased_lifecycle_job_fixture(test_case, agent_run):
     with connection.cursor() as cursor:
         cursor.execute("CREATE SCHEMA IF NOT EXISTS runtime")
         cursor.execute("CREATE TABLE IF NOT EXISTS runtime.runtime_jobs("
-            "job_id text PRIMARY KEY, job_kind text NOT NULL, status text NOT NULL, "
+            "job_id text PRIMARY KEY, job_kind text NOT NULL, status text NOT NULL, lease_purpose text NOT NULL DEFAULT 'execute', "
             "lease_owner text, lease_expires_at_ms bigint, idempotency_key text NOT NULL, "
             "session_id text, payload_ref text)")
         cursor.execute("INSERT INTO runtime.runtime_jobs(job_id,job_kind,status,lease_owner,"

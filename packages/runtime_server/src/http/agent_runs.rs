@@ -1,13 +1,65 @@
 use super::*;
+mod control;
 pub(crate) mod retained_cleanup;
+pub(super) use control::advance as advance_control;
 
 pub(super) fn cleanup_receipt(
     state: HttpServerState,
     request: Request<Bytes>,
 ) -> Result<Response<Body>, String> {
-    cleanup_receipt_response(request.into_body().as_ref(), |query| {
-        state.job_store.get_cleanup_receipt(query)
-    })
+    cleanup_receipt_dispatch_response(
+        request.into_body().as_ref(),
+        |query| state.job_store.get_cleanup_receipt(query),
+        |query| state.job_store.get_provider_cleanup_receipt(query),
+    )
+}
+
+fn cleanup_receipt_dispatch_response(
+    body: &[u8],
+    read_legacy: impl FnOnce(
+        &crate::postgres_store::cleanup_receipts::CleanupReceiptQuery,
+    ) -> Result<
+        Option<crate::postgres_store::cleanup_receipts::CleanupReceipt>,
+        String,
+    >,
+    read_provider: impl FnOnce(
+        &crate::postgres_store::provider_operations::cleanup::ProviderCleanupReceiptQuery,
+    ) -> Result<
+        Option<crate::postgres_store::provider_operations::cleanup::ProviderRunCleanupReceipt>,
+        String,
+    >,
+) -> Result<Response<Body>, String> {
+    #[derive(serde::Deserialize)]
+    struct QueryVersion {
+        schema: String,
+    }
+    let version = match serde_json::from_slice::<QueryVersion>(body) {
+        Ok(version) => version,
+        Err(_) => return json_error_response(400, "cleanup_receipt_query_invalid"),
+    };
+    match version.schema.as_str() {
+        "runtime.agent_run.cleanup_receipt.get.v1" => cleanup_receipt_response(body, read_legacy),
+        "runtime.agent_run.cleanup_receipt.get.v2" => {
+            let query = match serde_json::from_slice::<
+                crate::postgres_store::provider_operations::cleanup::ProviderCleanupReceiptQuery,
+            >(body)
+            {
+                Ok(query) if query.validate().is_ok() => query,
+                _ => return json_error_response(400, "cleanup_receipt_query_invalid"),
+            };
+            match read_provider(&query) {
+                Ok(Some(receipt)) => Ok(http_response(
+                    200,
+                    "application/json",
+                    serde_json::to_vec(&receipt)
+                        .map_err(|_| "cleanup receipt response encoding failed")?,
+                )),
+                Ok(None) => json_error_response(404, "cleanup_receipt_not_found"),
+                Err(_) => json_error_response(503, "cleanup_receipt_unavailable"),
+            }
+        }
+        _ => json_error_response(400, "cleanup_receipt_query_invalid"),
+    }
 }
 
 fn cleanup_receipt_response(
@@ -247,6 +299,111 @@ fn teardown_owned_tasks(
     {
         return json_error_response(503, "terminal_subagent_cleanup_unavailable");
     }
+    if let crate::agent_run_authorization::EnvironmentProfile::E2b(profile) =
+        &cleanup.authorization.environment_profile
+    {
+        use crate::e2b_runtime::E2bCleanupOutcome;
+        use crate::postgres_store::controller_authority::{
+            ControllerAuthorityRequest, ControllerPurpose,
+        };
+        use crate::postgres_store::provider_operations::cleanup::ProviderRunCleanupReceipt;
+        let Some(provider) = state.e2b_runtime.as_ref() else {
+            return json_error_response(503, "e2b_cleanup_not_configured");
+        };
+        let authority = ControllerAuthorityRequest {
+            environment_authorization: &cleanup.environment_authorization,
+            signing_key: signing_key.as_bytes(),
+            workspace_id: &cleanup.authorization.workspace_id,
+            lease: &lease,
+            purpose: ControllerPurpose::Cleanup,
+        };
+        let receipt: ProviderRunCleanupReceipt = if profile.lifetime == "retained" {
+            let binding = crate::e2b_run_registry::E2bEnvironmentBinding {
+                environment_id: cleanup
+                    .environment_authorization
+                    .payload
+                    .environment_id
+                    .clone(),
+                profile_digest: cleanup.authorization.environment_profile_digest.clone(),
+                provider_config_digest: profile.provider_config_digest.clone(),
+            };
+            // Use the same nonblocking Environment -> Run order as preparation.
+            // These guards precede the current cleanup store callback and pins.
+            let environment_slot = state.e2b_runs.existing_environment(&binding)?;
+            let environment = if let Some(slot) = environment_slot.as_ref() {
+                match slot.try_enter()? {
+                    Some(context) => Some(context),
+                    None => return json_error_response(503, "e2b_environment_already_active"),
+                }
+            } else {
+                None
+            };
+            let run_slot = state
+                .e2b_runs
+                .current_run(&cleanup.agent_run_id, &cleanup.authorization_digest)?;
+            let original = if let Some(slot) = run_slot.as_ref() {
+                match slot.try_enter()? {
+                    Some(context) => Some(context),
+                    None => return json_error_response(503, "e2b_step_already_active"),
+                }
+            } else {
+                None
+            };
+            // A queued successor has no original Run context. The factory must
+            // prove NoEffects rather than borrow the previous consumer's host.
+            let host = original
+                .as_ref()
+                .and_then(|context| context.as_ref())
+                .map(|context| context.host.as_ref());
+            let receipt = match provider.cleanup_retained(&authority, host) {
+                Ok(receipt) => receipt,
+                Err(_) => return json_error_response(503, "e2b_cleanup_unconfirmed"),
+            };
+            if !matches!(&receipt, ProviderRunCleanupReceipt::RetainedProvider(_)) {
+                if let (Some(slot), Some(context)) =
+                    (environment_slot.as_ref(), environment.as_ref())
+                {
+                    if context.is_none() {
+                        // Confirmed unsent/no-effects can release only this
+                        // empty reservation, while its guard is still held.
+                        state.e2b_runs.remove_environment(&binding, slot)?;
+                    }
+                }
+            }
+            receipt
+        } else {
+            let outcome = match provider.cleanup(&authority) {
+                Ok(E2bCleanupOutcome::Complete { operation_count }) => operation_count,
+                Ok(E2bCleanupOutcome::Pending { identity, stage }) => {
+                    eprintln!(
+                        "e2b_cleanup_pending: attemptId={}; stage={stage:?}",
+                        identity.attempt_id
+                    );
+                    return json_error_response(503, "e2b_cleanup_unconfirmed");
+                }
+                Err(_) => return json_error_response(503, "e2b_cleanup_unconfirmed"),
+            };
+            match if outcome == 0 {
+                state
+                    .job_store
+                    .confirm_provider_run_no_effects(&authority)
+                    .map(Into::into)
+            } else {
+                state
+                    .job_store
+                    .confirm_provider_run_cleanup(&authority)
+                    .map(Into::into)
+            } {
+                Ok(receipt) => receipt,
+                Err(_) => return json_error_response(503, "e2b_cleanup_unconfirmed"),
+            }
+        };
+        state
+            .e2b_runs
+            .remove_settled(&cleanup.agent_run_id, &cleanup.authorization_digest)?;
+        remove_run_tool_layer(&state, &cleanup)?;
+        return teardown_confirmed_response(&cleanup.agent_run_id, receipt.receipt_id());
+    }
     let host_context = || {
         #[cfg(test)]
         if crate::native_consumption_tests::owns_run(&cleanup.agent_run_id) {
@@ -273,7 +430,9 @@ fn teardown_owned_tasks(
             crate::docker_execution_host::observed_resident_sandboxes()
         },
         |target, verified| match target {
-            CleanupTarget::NeverAllocated | CleanupTarget::Destroyed { .. } => {
+            CleanupTarget::NeverAllocated
+            | CleanupTarget::Destroyed { .. }
+            | CleanupTarget::Unmaterialized { .. } => {
                 Ok(crate::postgres_store::cleanup_receipts::CleanupPhysicalResult::Retained)
             }
             CleanupTarget::Instance {
@@ -340,6 +499,14 @@ fn teardown_owned_tasks(
             return json_error_response(503, "retained_cleanup_unconfirmed");
         }
     };
+    remove_run_tool_layer(&state, &cleanup)?;
+    teardown_confirmed_response(&cleanup.agent_run_id, &receipt.receipt_id)
+}
+
+fn remove_run_tool_layer(
+    state: &HttpServerState,
+    cleanup: &crate::contract::AgentRunCleanup,
+) -> Result<(), String> {
     let mut contexts = state
         .tool_layers
         .lock()
@@ -351,12 +518,16 @@ fn teardown_owned_tasks(
     {
         contexts.remove(session_id);
     }
+    Ok(())
+}
+
+fn teardown_confirmed_response(run: &str, receipt: &str) -> Result<Response<Body>, String> {
     Ok(http_response(
         200,
         "application/json",
         serde_json::to_vec(&json!({
-            "schema":"runtime.agent_run.teardown.result.v1", "agentRunId":cleanup.agent_run_id,
-            "status":"cleanupConfirmed", "cleanupReceiptId":receipt.receipt_id,
+            "schema":"runtime.agent_run.teardown.result.v1", "agentRunId":run,
+            "status":"cleanupConfirmed", "cleanupReceiptId":receipt,
         }))
         .map_err(|_| "cleanup response encoding failed")?,
     ))
@@ -372,6 +543,8 @@ pub(super) fn step(
         store,
         job_store,
         tool_layers,
+        e2b_runtime,
+        e2b_runs,
         ..
     } = state;
     let agent_run_step = match serde_json::from_slice::<AgentRunStepRequest>(body.as_ref())
@@ -386,6 +559,12 @@ pub(super) fn step(
             return json_error_response(400, error.as_str());
         }
     };
+    if job_store
+        .require_execute_lease(&agent_run_step.job_id, &agent_run_step.lease_owner)
+        .is_err()
+    {
+        return json_error_response(409, "agent_run_execute_lease_required");
+    }
     if let Err(error) = validate_agent_run_lifecycle_job(
         agent_run_step.job_id.as_str(),
         agent_run_step.lease_owner.as_str(),
@@ -409,7 +588,11 @@ pub(super) fn step(
             job_store,
             agent_run_step.job_id,
             agent_run_step.lease_owner,
-            tool_layers.clone(),
+            AgentRunExecutionState {
+                tool_layers: tool_layers.clone(),
+                e2b_runtime,
+                e2b_runs,
+            },
         )
     });
     let outcome = match execution {
@@ -544,6 +727,167 @@ mod cleanup_receipt_http_tests {
         assert_eq!(value["schema"], "runtime.agent_run.step.result.v1");
         assert_eq!(value["terminalState"], "completed");
     }
+    fn query(schema: &str) -> serde_json::Value {
+        json!({"schema":schema,"agentRunId":"run-1",
+            "authorizationDigest":format!("sha256:{}","a".repeat(64)),"cleanupReceiptId":"receipt-1"})
+    }
+
+    fn provider_receipt(
+    ) -> crate::postgres_store::provider_operations::cleanup::ProviderCleanupReceipt {
+        serde_json::from_value(json!({"schema":"runtime.agent_run.cleanup_receipt.v2",
+            "receiptId":"receipt-1","agentRunId":"run-1","environmentId":"environment-1",
+            "authorizationDigest":format!("sha256:{}","a".repeat(64)),"controllerEpoch":3,
+            "cleanupComplete":true,"provider":"e2b","profileDigest":format!("sha256:{}","b".repeat(64)),
+            "providerConfigDigest":format!("sha256:{}","c".repeat(64)),
+            "settlementDigest":format!("sha256:{}","d".repeat(64)),"operationCount":1})).unwrap()
+    }
+
+    fn response_json(response: Response<Body>) -> serde_json::Value {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let bytes = runtime
+            .block_on(axum::body::to_bytes(response.into_body(), 4096))
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn provider_receipt_query_routes_exact_identity_and_serializes_provider_evidence() {
+        let expected = provider_receipt();
+        let response = cleanup_receipt_dispatch_response(
+            &serde_json::to_vec(&query("runtime.agent_run.cleanup_receipt.get.v2")).unwrap(),
+            |_| panic!("provider query reached legacy storage"),
+            |query| {
+                assert_eq!(query.agent_run_id, "run-1");
+                assert_eq!(query.cleanup_receipt_id, "receipt-1");
+                assert_eq!(
+                    query.authorization_digest,
+                    format!("sha256:{}", "a".repeat(64))
+                );
+                Ok(Some(expected.clone().into()))
+            },
+        )
+        .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response_json(response),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn owned_no_provider_effects_receipt_uses_same_exact_query_without_physical_facts() {
+        let mut value = serde_json::to_value(provider_receipt()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("operationCount");
+        object.remove("settlementDigest");
+        object.insert(
+            "schema".into(),
+            json!("runtime.agent_run.cleanup_receipt.no_provider_effects.v1"),
+        );
+        object.insert("scope".into(), json!("noProviderEffectsForRun"));
+        let receipt = serde_json::from_value::<
+            crate::postgres_store::provider_operations::cleanup::NoProviderEffectsReceipt,
+        >(value.clone())
+        .unwrap();
+        let response = cleanup_receipt_dispatch_response(
+            &serde_json::to_vec(&query("runtime.agent_run.cleanup_receipt.get.v2")).unwrap(),
+            |_| panic!("provider absence query reached legacy read protocol"),
+            |_| Ok(Some(receipt.into())),
+        )
+        .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response_json(response), value);
+    }
+
+    #[test]
+    fn provider_receipt_missing_or_unavailable_has_existing_bounded_errors() {
+        let body = serde_json::to_vec(&query("runtime.agent_run.cleanup_receipt.get.v2")).unwrap();
+        let missing = cleanup_receipt_dispatch_response(
+            &body,
+            |_| panic!("provider query reached legacy storage"),
+            |_| Ok(None),
+        )
+        .unwrap();
+        assert_eq!(missing.status(), 404);
+        assert_eq!(
+            response_json(missing),
+            json!({"error":"cleanup_receipt_not_found"})
+        );
+        let unavailable = cleanup_receipt_dispatch_response(
+            &body,
+            |_| panic!("provider query reached legacy storage"),
+            |_| Err("private connection diagnostic".into()),
+        )
+        .unwrap();
+        assert_eq!(unavailable.status(), 503);
+        assert_eq!(
+            response_json(unavailable),
+            json!({"error":"cleanup_receipt_unavailable"})
+        );
+    }
+
+    #[test]
+    fn provider_receipt_invalid_queries_never_read_either_store() {
+        let good = query("runtime.agent_run.cleanup_receipt.get.v2");
+        let mut invalid = Vec::new();
+        for field in [
+            "schema",
+            "agentRunId",
+            "authorizationDigest",
+            "cleanupReceiptId",
+        ] {
+            let mut missing = good.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            invalid.push(serde_json::to_vec(&missing).unwrap());
+        }
+        for (field, value) in [
+            ("schema", json!("runtime.agent_run.cleanup_receipt.get.v3")),
+            ("agentRunId", json!("bad/path")),
+            ("authorizationDigest", json!("not-a-digest")),
+            ("cleanupReceiptId", json!("bad/path")),
+            ("extra", json!(true)),
+            ("agent_run_id", json!("run-1")),
+            ("allocation", json!({"kind":"neverAllocated"})),
+        ] {
+            let mut changed = good.clone();
+            changed[field] = value;
+            invalid.push(serde_json::to_vec(&changed).unwrap());
+        }
+        invalid.push(br#"{"schema":"runtime.agent_run.cleanup_receipt.get.v2","schema":"runtime.agent_run.cleanup_receipt.get.v2","agentRunId":"run-1","authorizationDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","cleanupReceiptId":"receipt-1"}"#.to_vec());
+        for body in invalid {
+            let response = cleanup_receipt_dispatch_response(
+                &body,
+                |_| panic!("invalid query reached legacy storage"),
+                |_| panic!("invalid query reached provider storage"),
+            )
+            .unwrap();
+            assert_eq!(response.status(), 400);
+            assert_eq!(
+                response_json(response),
+                json!({"error":"cleanup_receipt_query_invalid"})
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_receipt_dispatch_keeps_exact_response_and_never_calls_provider_store() {
+        let expected = serde_json::from_value::<crate::postgres_store::cleanup_receipts::CleanupReceipt>(json!({
+            "schema":"runtime.agent_run.cleanup_receipt.v1","receiptId":"receipt-1","agentRunId":"run-1",
+            "environmentId":"environment-1","allocation":{"kind":"neverAllocated"},
+            "authorizationDigest":format!("sha256:{}","a".repeat(64)),"controllerEpoch":3,"cleanupComplete":true})).unwrap();
+        let response = cleanup_receipt_dispatch_response(
+            &serde_json::to_vec(&query("runtime.agent_run.cleanup_receipt.get.v1")).unwrap(),
+            |_| Ok(Some(expected.clone())),
+            |_| panic!("legacy query reached provider storage"),
+        )
+        .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response_json(response),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+
     #[test]
     fn receipt_query_rejects_unsupported_schema_and_unknown_fields_before_storage() {
         let good = json!({"schema":"runtime.agent_run.cleanup_receipt.get.v1","agentRunId":"run-1",

@@ -49,8 +49,10 @@ mod lease_renewal_tests;
 mod maintenance_authority_tests;
 mod maintenance_completion_schema_tests;
 mod owned_database;
+mod provider_operation_tests;
 mod provision_authority_tests;
 mod residency_tests;
+mod resource_lifecycle_tests;
 pub(super) mod retained_instance_tests;
 mod snapshot_cas_tests;
 mod tool_result_storage_tests;
@@ -1647,22 +1649,34 @@ fn postgres_hosted_worker_reclaim_changes_claim_identity() {
     assert!(store
         .complete_runtime_job(CompleteRuntimeJobRequest {
             job_id: id.into(),
-            lease_owner: old,
+            lease_owner: old.clone(),
             output_refs: vec![],
             completed_at_ms: now + 1
         })
         .is_err());
+    assert!(
+        store
+            .start_runtime_job(StartRuntimeJobRequest {
+                job_id: id.into(),
+                lease_owner: old,
+                started_at_ms: now + 1,
+            })
+            .is_err(),
+        "the replaced claim cannot start work"
+    );
+    // A new lease permits starting this scheduling-only fixture. It does not
+    // supply the terminal/cleanup/release facts required for lifecycle completion;
+    // resource_lifecycle_tests exercises that complete contract with real grants.
     store
-        .complete_runtime_job(CompleteRuntimeJobRequest {
+        .start_runtime_job(StartRuntimeJobRequest {
             job_id: id.into(),
             lease_owner: current,
-            output_refs: vec![],
-            completed_at_ms: now + 1,
+            started_at_ms: now + 1,
         })
         .unwrap();
     assert_eq!(
         store.get_runtime_job(id).unwrap().unwrap().status,
-        RuntimeJobStatus::Succeeded
+        RuntimeJobStatus::Running
     );
 }
 
@@ -2929,6 +2943,12 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
             r#"
             DROP TABLE IF EXISTS public.app_core_sessionevent;
             DROP TABLE IF EXISTS public.app_core_session CASCADE;
+            DROP TABLE IF EXISTS public.app_core_agentrunenvironmentrelease;
+            DROP TABLE IF EXISTS public.app_core_agentrunauthorization;
+            DROP TABLE IF EXISTS public.app_core_agentrun CASCADE;
+            CREATE TABLE public.app_core_agentrun(id text PRIMARY KEY,session_id text NOT NULL,"preAdmissionCancelledAt" timestamptz);
+            CREATE TABLE public.app_core_agentrunauthorization(agent_run_id text PRIMARY KEY,digest text NOT NULL,payload jsonb NOT NULL,signature text NOT NULL);
+            CREATE TABLE public.app_core_agentrunenvironmentrelease(agent_run_id text PRIMARY KEY,environment_id text NOT NULL,authorization_digest text NOT NULL,controller_epoch bigint NOT NULL);
             CREATE TABLE public.app_core_session(
                 id varchar(64) PRIMARY KEY,
                 workspace_id varchar(64) NOT NULL
@@ -2950,6 +2970,7 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
             );
             INSERT INTO public.app_core_session(id, workspace_id)
             VALUES('session_fenced_terminal', 'workspace_fenced_terminal');
+            INSERT INTO public.app_core_agentrun(id,session_id) VALUES('agent_run_fenced_terminal','session_fenced_terminal');
             "#,
         )
         .expect("create session event table");
@@ -2995,9 +3016,16 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
         coordination_session_id: None,
         native_coordination_session_id: None,
     };
+    store.with_client(|db| {
+        db.execute("INSERT INTO public.app_core_agentrunauthorization(agent_run_id,digest,payload,signature) VALUES($1,$2,$3::text::jsonb,$4)", &[&start.agent_run_id, &start.authorization_digest, &serde_json::to_string(&start.authorization).unwrap(), &start.authorization_signature]).map_err(|e| e.to_string())?;
+        Ok(())
+    }).expect("persist original signed lifecycle grant");
     let mut lifecycle_job = job(
         "agent_run.lifecycle:agent_run_fenced_terminal",
-        "fenced-terminal",
+        &format!(
+            "agent_run.lifecycle:agent_run_fenced_terminal:{}",
+            start.authorization_digest
+        ),
     );
     lifecycle_job.job_kind = "agent_run.lifecycle".to_string();
     lifecycle_job.session_id = Some(session_id.to_string());
@@ -3299,14 +3327,31 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
         Some(expected_state),
         "committed terminal history is authoritative before any terminal outbox"
     );
-    store
-        .complete_runtime_job(CompleteRuntimeJobRequest {
-            job_id: "agent_run.lifecycle:agent_run_fenced_terminal".into(),
-            lease_owner: new_owner,
-            output_refs: vec![],
-            completed_at_ms: now_ms + 14,
-        })
+    let completion = CompleteRuntimeJobRequest {
+        job_id: "agent_run.lifecycle:agent_run_fenced_terminal".into(),
+        lease_owner: new_owner,
+        output_refs: vec![],
+        completed_at_ms: now_ms + 14,
+    };
+    assert!(
+        store
+            .complete_runtime_job(completion.clone())
+            .unwrap_err()
+            .contains("cleanup and release receipts required"),
+        "terminal history alone cannot complete a lifecycle Job"
+    );
+    // This transcript fixture never allocated a physical instance. Supply its
+    // matching never-allocated cleanup and controller release before exercising
+    // terminal outbox publication and acknowledgement below.
+    let environment = &start.environment_authorization.payload.environment_id;
+    audit.execute("INSERT INTO runtime.agent_run_cleanup_receipts(receipt_id,agent_run_id,environment_id,authorization_digest,controller_epoch,allocation_kind,instance_id,cleanup_complete,file_protection,recorded_at_ms,physical_removed,removed_container_id) VALUES('cleanup:fenced_terminal',$1,$2,$3,1,'neverAllocated',NULL,true,'deferred',$4,false,NULL)",&[&agent_run_id,&environment,&start.authorization_digest,&(now_ms+14)]).unwrap();
+    audit
+        .execute(
+            "INSERT INTO public.app_core_agentrunenvironmentrelease VALUES($1,$2,$3,1)",
+            &[&agent_run_id, &environment, &start.authorization_digest],
+        )
         .unwrap();
+    store.complete_runtime_job(completion).unwrap();
     let pending = store.list_pending_runtime_job_outbox(10).unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(

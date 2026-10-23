@@ -1,5 +1,5 @@
 use super::*;
-use crate::docker_execution_host::inspect_workspace_snapshot_manifest_for_test;
+use crate::session_workspace::snapshot::inspect_workspace_snapshot_manifest_for_test;
 
 #[test]
 fn cross_language_fixture_restores_identical_manifest_and_bodies() {

@@ -287,8 +287,9 @@ fn validate_manifest(
     limits: ArchiveLimits,
 ) -> io::Result<u64> {
     validate_limits(limits)?;
-    let expanded = crate::docker_execution_host::validate_workspace_snapshot_manifest(manifest)
-        .map_err(invalid)?;
+    let expanded =
+        crate::session_workspace::snapshot::validate_workspace_snapshot_manifest(manifest)
+            .map_err(invalid)?;
     if manifest.files.len() as u64 > u64::from(limits.file_count)
         || expanded > limits.expanded_bytes
     {

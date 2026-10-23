@@ -1,8 +1,72 @@
 //! Internal maintenance authority is independent of Run execute/cleanup grants.
 use super::*;
+use crate::e2b_run_registry::{E2bEnvironmentBinding, E2bRunRegistry};
+use crate::e2b_runtime::E2bRuntimeError;
+use crate::postgres_store::provider_operations::retained::retirement::{
+    ProviderEnvironmentRetirementRequest, ProviderEnvironmentRetirementResult,
+};
 use crate::postgres_store::residency::retirement::{
     RetirementError, RetirementRequest, RetirementTarget,
 };
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RetirementEnvelope {
+    Provider(ProviderEnvironmentRetirementRequest),
+    Legacy(RetirementRequest),
+}
+
+impl RetirementEnvelope {
+    fn decode(body: &[u8]) -> Result<Self, ()> {
+        let request: Self = serde_json::from_slice(body).map_err(|_| ())?;
+        match &request {
+            Self::Provider(request) => request.validate(),
+            Self::Legacy(request) => request.validate(),
+        }
+        .map_err(|_| ())?;
+        Ok(request)
+    }
+}
+
+fn with_retirement_environment(
+    registry: &E2bRunRegistry,
+    binding: &E2bEnvironmentBinding,
+    retire: impl FnOnce() -> Result<ProviderEnvironmentRetirementResult, E2bRuntimeError>,
+) -> Result<ProviderEnvironmentRetirementResult, E2bRuntimeError> {
+    let slot = registry
+        .existing_environment(binding)
+        .map_err(|_| E2bRuntimeError::Rejected("e2b_retirement_binding_rejected"))?;
+    // The existing Environment guard precedes all durable retirement pins.
+    // A restart may have no live slot; maintenance must not allocate one.
+    let mut context = if let Some(slot) = slot.as_ref() {
+        Some(
+            slot.try_enter()
+                .map_err(|_| E2bRuntimeError::Unavailable("e2b_retirement_context_unavailable"))?
+                .ok_or(E2bRuntimeError::Unavailable(
+                    "e2b_environment_already_active",
+                ))?,
+        )
+    } else {
+        None
+    };
+    let result = retire()?;
+    if result.environment_id != binding.environment_id {
+        return Err(E2bRuntimeError::Unknown(
+            "e2b_retirement_result_binding_rejected",
+        ));
+    }
+    if result.status == "removed" {
+        if let Some(context) = context.as_mut() {
+            **context = None;
+        }
+        if let Some(slot) = slot.as_ref() {
+            registry
+                .remove_environment(binding, slot)
+                .map_err(|_| E2bRuntimeError::Unknown("e2b_retirement_registry_unconfirmed"))?;
+        }
+    }
+    Ok(result)
+}
 
 pub(super) fn maintenance_authorized(
     configured: Option<&str>,
@@ -16,25 +80,17 @@ pub(super) fn retire(
     state: HttpServerState,
     request: Request<Bytes>,
 ) -> Result<Response<Body>, String> {
-    let key = env::var("ENVIRONMENT_MAINTENANCE_TOKEN").ok();
-    let internal = env::var("INTERNAL_API_TOKEN").ok();
-    if !maintenance_authorized(
-        key.as_deref(),
-        internal.as_deref(),
-        request
-            .headers()
-            .get("x-environment-maintenance-token")
-            .and_then(|v| v.to_str().ok()),
-    ) {
-        return json_error_response(403, "environment_maintenance_authority_required");
+    if let Err((status, code)) = super::environment_maintenance::body_authority(&request) {
+        return json_error_response(status, code);
     }
-    let request: RetirementRequest = match serde_json::from_slice(request.body()) {
+    let request = match RetirementEnvelope::decode(request.body()) {
         Ok(r) => r,
         Err(_) => return json_error_response(400, "environment_retirement_request_invalid"),
     };
-    if request.validate().is_err() {
-        return json_error_response(400, "environment_retirement_request_invalid");
-    }
+    let request = match request {
+        RetirementEnvelope::Provider(request) => return retire_provider(state, request),
+        RetirementEnvelope::Legacy(request) => request,
+    };
     // Host identity comes from the same local daemon used for allocation.
     let host = crate::docker_execution_host::resident_host_context().map(|(id, _)| id);
     if host.as_ref() != Ok(&request.host_id) {
@@ -50,6 +106,29 @@ pub(super) fn retire(
             serde_json::to_vec(&result).map_err(|e| e.to_string())?,
         )),
         Err(error) => retirement_error_response(error),
+    }
+}
+
+fn retire_provider(
+    state: HttpServerState,
+    request: ProviderEnvironmentRetirementRequest,
+) -> Result<Response<Body>, String> {
+    let Some(provider) = state.e2b_runtime.as_ref() else {
+        return json_error_response(503, "e2b_retirement_not_configured");
+    };
+    let result = provider.retirement_binding(&request).and_then(|binding| {
+        with_retirement_environment(&state.e2b_runs, &binding, || provider.retire(&request))
+    });
+    match result {
+        Ok(result) => Ok(http_response(
+            if result.status == "pending" { 202 } else { 200 },
+            "application/json",
+            serde_json::to_vec(&result).map_err(|_| "e2b_retirement_response_unavailable")?,
+        )),
+        Err(E2bRuntimeError::Rejected(code)) => json_error_response(409, code),
+        Err(E2bRuntimeError::Unavailable(code) | E2bRuntimeError::Unknown(code)) => {
+            json_error_response(503, code)
+        }
     }
 }
 
@@ -116,6 +195,119 @@ fn retire_observed(
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    fn provider_binding() -> E2bEnvironmentBinding {
+        E2bEnvironmentBinding {
+            environment_id: "environment".into(),
+            profile_digest: "frozen-profile".into(),
+            provider_config_digest: "frozen-provider".into(),
+        }
+    }
+
+    fn provider_result(status: &'static str) -> ProviderEnvironmentRetirementResult {
+        ProviderEnvironmentRetirementResult {
+            schema: "runtime.provider_environment.retire.result.v1",
+            operation_id: "retire-environment".into(),
+            environment_id: "environment".into(),
+            creation_attempt_id: "original-attempt".into(),
+            sandbox_id: "original-sandbox".into(),
+            status,
+        }
+    }
+
+    #[test]
+    fn provider_and_legacy_retirement_wires_remain_exact_distinct_variants() {
+        let provider = json!({"schema":"runtime.provider_environment.retire.v1",
+            "operationId":"retirement", "environmentId":"environment",
+            "creationAttemptId":"original-attempt", "sandboxId":"original-sandbox",
+            "providerConfigDigest":format!("sha256:{}", "c".repeat(64)),
+            "expectedControllerEpoch":2, "acknowledgeDataLoss":true});
+        let legacy = json!({"schema":"runtime.environment.retire.v1",
+            "operationId":"retirement", "environmentId":"environment", "instanceId":"instance",
+            "hostId":"host", "expectedControllerEpoch":2, "acknowledgeTmpfsLoss":true});
+        assert!(matches!(
+            RetirementEnvelope::decode(&serde_json::to_vec(&provider).unwrap()),
+            Ok(RetirementEnvelope::Provider(_))
+        ));
+        assert!(matches!(
+            RetirementEnvelope::decode(&serde_json::to_vec(&legacy).unwrap()),
+            Ok(RetirementEnvelope::Legacy(_))
+        ));
+        for (source, field, value) in [
+            (&provider, "schema", json!("runtime.environment.retire.v1")),
+            (
+                &legacy,
+                "schema",
+                json!("runtime.provider_environment.retire.v1"),
+            ),
+            (&provider, "reason", json!("unsupported")),
+            (&provider, "acknowledgeTmpfsLoss", json!(true)),
+            (&legacy, "sandboxId", json!("original-sandbox")),
+            (&provider, "acknowledgeDataLoss", json!(false)),
+        ] {
+            let mut changed = source.clone();
+            changed[field] = value;
+            assert!(RetirementEnvelope::decode(&serde_json::to_vec(&changed).unwrap()).is_err());
+        }
+        let duplicated = serde_json::to_string(&provider).unwrap().replacen(
+            "\"operationId\":\"retirement\"",
+            "\"operationId\":\"retirement\",\"operationId\":\"other\"",
+            1,
+        );
+        assert!(RetirementEnvelope::decode(duplicated.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn active_or_foreign_environment_rejects_retirement_before_store_pins() {
+        let registry = E2bRunRegistry::default();
+        let binding = provider_binding();
+        let slot = registry.environment(binding.clone()).unwrap().unwrap();
+        let _guard = slot.try_enter().unwrap().unwrap();
+        for foreign in [false, true] {
+            let mut requested = binding.clone();
+            if foreign {
+                requested.profile_digest = "different-profile".into();
+            }
+            let called = Cell::new(false);
+            let result = with_retirement_environment(&registry, &requested, || {
+                called.set(true);
+                Ok(provider_result("removed"))
+            });
+            assert!(result.is_err());
+            assert!(
+                !called.get(),
+                "busy or foreign context reached durable/physical work"
+            );
+        }
+    }
+
+    #[test]
+    fn maintenance_without_live_context_does_not_allocate_an_environment_slot() {
+        let registry = E2bRunRegistry::default();
+        let binding = provider_binding();
+        with_retirement_environment(&registry, &binding, || {
+            assert!(registry.existing_environment(&binding).unwrap().is_none());
+            Ok(provider_result("pending"))
+        })
+        .unwrap();
+        assert!(registry.existing_environment(&binding).unwrap().is_none());
+    }
+
+    #[test]
+    fn only_confirmed_retirement_removes_the_exact_existing_environment_slot() {
+        let registry = E2bRunRegistry::default();
+        let binding = provider_binding();
+        let original = registry.environment(binding.clone()).unwrap().unwrap();
+        with_retirement_environment(&registry, &binding, || Ok(provider_result("pending")))
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &original,
+            &registry.existing_environment(&binding).unwrap().unwrap()
+        ));
+        with_retirement_environment(&registry, &binding, || Ok(provider_result("removed")))
+            .unwrap();
+        assert!(registry.existing_environment(&binding).unwrap().is_none());
+    }
     #[test]
     fn unaccepted_epoch_conflict_has_a_distinct_bounded_http_error() {
         let runtime = tokio::runtime::Runtime::new().unwrap();

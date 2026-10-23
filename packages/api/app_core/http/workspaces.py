@@ -1409,7 +1409,7 @@ def create_session_message(
             create_agent_run_authorization(
                 agent_run,
                 message_asset_refs=attachment_refs,
-                image_digest=execution_profile["imageDigest"],
+                execution_profile=execution_profile,
             )
             if session.title == "New chat":
                 session.title = prompt[:80]

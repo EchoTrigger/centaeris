@@ -42,7 +42,7 @@ def _authority(environment):
         "controllerPurpose": environment.controller_purpose}
 
 
-def _locked_binding(run_id, lease_owner, *, acquiring):
+def _locked_binding(run_id, lease_owner, *, acquiring, lease_purpose=None):
     controller_lease_digest(lease_owner)
     initial = AgentRun.objects.only("session_id", "environment_id", "workspace_id", "membership_ref", "user_id").get(pk=run_id)
     workspace = Workspace.objects.select_for_update().get(pk=initial.workspace_id)
@@ -64,13 +64,17 @@ def _locked_binding(run_id, lease_owner, *, acquiring):
     verify_agent_run_authorization_signature(grant.payload, settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY, grant.signature)
     job = f"agent_run.lifecycle:{run.pk}"
     with connection.cursor() as cursor:
-        cursor.execute("SELECT job_id FROM runtime.runtime_jobs WHERE job_id=%s "
+        cursor.execute("SELECT lease_purpose FROM runtime.runtime_jobs WHERE job_id=%s "
             "AND job_kind='agent_run.lifecycle' AND status IN ('leased','running') "
             "AND lease_owner=%s AND session_id=%s AND idempotency_key=%s AND payload_ref=%s "
             "AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint FOR SHARE NOWAIT",
             [job, lease_owner, run.session_id, f"{job}:{grant.digest}", f"record:agent_run:{run.pk}"])
-        if cursor.fetchone() is None:
+        current = cursor.fetchone()
+        if current is None or (lease_purpose is not None and current[0] != lease_purpose):
             raise ValueError("environment_controller_lease_rejected")
+    if acquiring:
+        from .environment_profile import require_environment_admission
+        require_environment_admission(environment, for_execution=True)
     return run, environment
 
 
@@ -89,7 +93,7 @@ def _translate_contention(operation):
 
 def _acquire_controller(run_id, lease_owner, purpose):
     def acquire():
-        run, environment = _locked_binding(run_id, lease_owner, acquiring=purpose == "execute")
+        run, environment = _locked_binding(run_id, lease_owner, acquiring=purpose == "execute", lease_purpose="execute" if purpose == "execute" else None)
         if purpose == "execute":
             from .session_event import committed_session_terminal_state
             if committed_session_terminal_state(run) is not None:
@@ -178,3 +182,13 @@ def release_environment_controller(run_id, controller_epoch, lease_owner):
             controller_lease_digest=controller_lease_digest(lease_owner))
         return _release_result(receipt)
     return _translate_contention(release)
+
+
+def read_control_authorization(run_id, lease_owner):
+    """Read the original Run grant under a current control lease, without taking Environment control."""
+    def read():
+        run, _ = _locked_binding(run_id, lease_owner, acquiring=False, lease_purpose="control")
+        return {"agentRunId": run.pk, "authorizationDigest": run.authorization.digest,
+                "authorizationSignature": run.authorization.signature,
+                "authorization": run.authorization.payload}
+    return _translate_contention(read)

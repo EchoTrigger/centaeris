@@ -11,7 +11,9 @@ fn http_state(runtime: Arc<tokio::runtime::Runtime>) -> HttpServerState {
         store: Arc::new(RuntimeStoreActor::start(job_store.clone()).unwrap()),
         job_store: Arc::new(job_store),
         tool_layers: Default::default(),
-        execution_profile: Arc::new(RuntimeExecutionProfile {
+        e2b_runtime: None,
+        e2b_runs: Arc::new(e2b_run_registry::E2bRunRegistry::default()),
+        execution_profile: Arc::new(RuntimeExecutionProfile::Legacy {
             schema: RUNTIME_EXECUTION_PROFILE_SCHEMA,
             image_digest: "sha256:synthetic-http-fixture".into(),
         }),

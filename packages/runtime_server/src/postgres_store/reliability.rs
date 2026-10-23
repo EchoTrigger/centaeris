@@ -92,15 +92,16 @@ fn next_runtime_job(
     job_kinds: &[String],
 ) -> Result<(i64, Option<i64>), String> {
     let limits = crate::execution_capacity::ExecutionCapacity::from_env()?;
+    let due = super::capacity_wait::DUE_AT;
     let row = client
         .query_one(
-            &format!("{} SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,MIN(GREATEST(j.run_at_ms,COALESCE(j.lease_reclaim_not_before_ms,j.run_at_ms)))
+            &format!("{} SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,MIN(GREATEST({due},COALESCE(j.lease_reclaim_not_before_ms,{due})))
                 FROM runtime_jobs j LEFT JOIN execution_job_tenants t ON t.job_id=j.job_id
                 LEFT JOIN tenant_usage u ON u.workspace_id=t.workspace_id
                 WHERE j.status='queued' AND j.job_kind=ANY($1)
                 AND (j.job_kind<>'agent_run.lifecycle' OR
-                    (t.job_id IS NOT NULL AND (SELECT COUNT(*) FROM active)<$2 AND COALESCE(u.used,0)<$3))",
-                super::execution_capacity::ACTIVE_EXECUTIONS),
+                    (t.job_id IS NOT NULL AND (SELECT COUNT(*) FROM active)<$2 AND COALESCE(u.used,0)<$3 AND NOT({})))",
+                super::execution_capacity::ACTIVE_EXECUTIONS, super::lifecycle_control::PENDING),
             &[&job_kinds, &(limits.global as i64), &(limits.tenant as i64)],
         )
         .map_err(|error| format!("query next Postgres runtime job failed: {error}"))?;
@@ -165,7 +166,7 @@ impl RuntimeJobStorePort for PostgresRuntimeStore {
         self.with_client(|c|{let mut tx=c.transaction().map_err(|e|format!("begin Postgres job claim failed: {e}"))?;let ids=tx.query("SELECT job_id FROM runtime_jobs WHERE status='queued' AND run_at_ms<=$1 AND COALESCE(lease_reclaim_not_before_ms,run_at_ms)<=$1 AND ($2::text IS NULL OR job_id=$2) AND ($3::text IS NULL OR job_kind=$3) AND ($4::text IS NULL OR session_id=$4) ORDER BY run_at_ms,created_at_ms,job_id FOR UPDATE SKIP LOCKED LIMIT $5", &[&req.now_ms,&req.job_id,&req.job_kind,&req.session_id,&to_i64(req.limit)?]).map_err(|e|format!("select Postgres due jobs failed: {e}"))?.iter().map(|r|r.get::<_,String>(0)).collect::<Vec<_>>();if !ids.is_empty(){tx.execute("UPDATE runtime_jobs SET status='leased',lease_owner=gen_random_uuid()::text,lease_expires_at_ms=$1,updated_at_ms=$2,heartbeat_at_ms=$2 WHERE job_id=ANY($3) AND status='queued'",&[&until,&req.now_ms,&ids]).map_err(|e|format!("claim Postgres jobs failed: {e}"))?;}let jobs=load_jobs(&mut tx,&ids)?;tx.commit().map_err(|e|format!("commit Postgres job claim failed: {e}"))?;Ok(jobs)})
     }
     fn start_runtime_job(&self, r: StartRuntimeJobRequest) -> Result<(), String> {
-        self.with_client(|c|updated(c.execute("UPDATE runtime_jobs SET status='running',updated_at_ms=$1,heartbeat_at_ms=$1 WHERE job_id=$2 AND status='leased' AND lease_owner=$3 AND lease_expires_at_ms>$1", &[&r.started_at_ms,&r.job_id,&r.lease_owner]),"start runtime job"))
+        self.with_client(|c|updated(c.execute("UPDATE runtime_jobs SET status='running',updated_at_ms=$1,heartbeat_at_ms=$1 WHERE job_id=$2 AND status='leased' AND lease_owner=$3 AND lease_expires_at_ms>$1 AND lease_purpose='execute'", &[&r.started_at_ms,&r.job_id,&r.lease_owner]),"start runtime job"))
     }
     fn renew_runtime_job_lease(&self, r: RenewRuntimeJobLeaseRequest) -> Result<(), String> {
         let until = r
@@ -240,6 +241,11 @@ impl RuntimeJobStorePort for PostgresRuntimeStore {
                 || lease_expires_at_ms.is_none_or(|expires| expires <= r.yielded_at_ms)
             {
                 return Err(format!("yield runtime job lease mismatch or expired: {}", r.job_id));
+            }
+            if r.transition_reason != crate::resident_capacity::RESIDENT_CAPACITY_WAIT {
+                super::capacity_wait::clear(&mut tx,&centaeris_core::session::RuntimeJobLeaseFence {
+                    job_id:r.job_id.clone(), job_kind:"agent_run.lifecycle".into(),lease_owner:r.lease_owner.clone()
+                })?;
             }
             let pending_wake_ids = tx
                 .query(
@@ -380,6 +386,7 @@ impl RuntimeJobStorePort for PostgresRuntimeStore {
             let mut tx = client
                 .transaction()
                 .map_err(|e| format!("begin Postgres complete runtime job failed: {e}"))?;
+            super::lifecycle_control::require_lifecycle_completion(&mut tx,&r.job_id)?;
             updated(tx.execute("UPDATE runtime_jobs SET status='succeeded',output_refs_json=$1,updated_at_ms=$2,lease_owner=NULL,lease_expires_at_ms=NULL,last_error=NULL WHERE job_id=$3 AND status IN('leased','running') AND lease_owner=$4 AND lease_expires_at_ms>$2", &[&out,&r.completed_at_ms,&r.job_id,&r.lease_owner]),"complete runtime job")?;
             upsert_job_outbox(&mut tx, r.job_id.as_str(), RUNTIME_JOB_TERMINAL_EVENT)?;
             tx.commit()
@@ -431,7 +438,13 @@ impl RuntimeJobStorePort for PostgresRuntimeStore {
                 let session_id = row.get::<_, Option<String>>(1);
                 let lease_owner = row.get::<_, Option<String>>(2);
                 let prior_status = job_status_from(&row.get::<_, String>(4))?;
-                let decision = policy.decide(&job_id, u32::try_from(row.get::<_, i64>(3)).map_err(|error| error.to_string())?, &prior_status, now)?;
+                let mut decision = policy.decide(&job_id, u32::try_from(row.get::<_, i64>(3)).map_err(|error| error.to_string())?, &prior_status, now)?;
+                let control_pending=tx.query_one(&format!("SELECT {} FROM runtime_jobs j WHERE j.job_id=$1",super::lifecycle_control::PENDING),&[&job_id]).map_err(|e|e.to_string())?.get::<_,bool>(0);
+                if control_pending {
+                    decision.status=RuntimeJobStatus::Queued;
+                    decision.not_before_ms=now.saturating_add(1000);
+                    decision.reason="control_lease_reclaimed";
+                }
                 tx.execute("UPDATE runtime_jobs SET status=$1,run_at_ms=$2,updated_at_ms=$3,lease_owner=NULL,lease_expires_at_ms=NULL,lease_reclaim_count=$4,lease_reclaim_not_before_ms=$2,last_error=$5 WHERE job_id=$6",
                     &[&job_status(&decision.status), &decision.not_before_ms, &now, &i64::from(decision.reclaim_count), &decision.reason, &job_id])
                     .map_err(|error| format!("update expired lease failed: {error}"))?;

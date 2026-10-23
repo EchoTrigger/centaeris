@@ -90,6 +90,7 @@ CREATE TRIGGER environment_provision_completion_facts BEFORE UPDATE OR DELETE ON
 /// Build the released predecessor shape only in exclusively owned migration fixtures.
 #[cfg(test)]
 pub(super) fn restore_previous_fixture(db: &mut postgres::Client) {
+    super::creation_attempts::restore_previous_fixture(db);
     let version: i64 = db
         .query_one("SELECT max(version) FROM runtime.schema_migrations", &[])
         .unwrap()

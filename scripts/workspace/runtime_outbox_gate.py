@@ -131,6 +131,11 @@ def main():
         'postgres_transcript_generation_rotation_switches_pointer_without_deleting_old_rows',
         'postgres_transcript_old_block_encoding_generation_is_invalidated_and_reinitialized',
     ]
+    exact_tests.extend(
+        name.removeprefix('postgres_store::integration_tests::')
+        for name in required_tests()
+        if name.startswith('postgres_store::integration_tests::resource_lifecycle_tests::')
+    )
     commands.extend([
         ['cargo', 'test', '--locked', '-p', 'runtime_server',
          f'postgres_store::integration_tests::{name}', '--', '--exact']
@@ -138,6 +143,9 @@ def main():
     ])
     commands.append(['cargo', 'test', '--locked', '-p', 'runtime_server',
                      'postgres_store::integration_tests::environment_observation_tests',
+                     '--'])
+    commands.append(['cargo', 'test', '--locked', '-p', 'runtime_server',
+                     'postgres_store::integration_tests::provider_operation_tests',
                      '--'])
     names = []
     for command in commands:

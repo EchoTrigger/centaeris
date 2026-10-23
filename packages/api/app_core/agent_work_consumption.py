@@ -296,7 +296,7 @@ def consume_work_return(notice_id, operation_id):
             run = AgentRun.objects.create(workspace_id=source.workspace_id, user=source.user, session=session,
                 modelConfig=model, thinkingMode=mode, prompt=pending_users[0].body if pending_users else _initial_objective(session, source),
                 agent_instructions=agent_configuration(agent).instructions)
-            create_agent_run_authorization(run, image_digest=profile["imageDigest"])
+            create_agent_run_authorization(run, execution_profile=profile)
             if pending_users:
                 from .agent_input_delivery import _bind_pending
                 _bind_pending(run, pending_users, initial=pending_users[0])

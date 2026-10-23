@@ -202,7 +202,7 @@ def materialize_work_request(event_id):
         child = AgentRun.objects.create(workspace_id=run.workspace_id, session=work, user=run.user,
             modelConfig=run.modelConfig, thinkingMode=run.thinkingMode, prompt=args["objective"],
             agent_instructions=run.agent_instructions if branch_for_agent(run.session.agent_id) else work.agent.instructions)
-        create_agent_run_authorization(child, message_asset_refs=refs, image_digest=profile["imageDigest"])
+        create_agent_run_authorization(child, message_asset_refs=refs, execution_profile=profile)
         operation = accept_operation(run.user, run.workspace, "submitMessage", key, digest, work, child)
         binding = AgentWorkSession.objects.create(**_binding(result, run, operation))
         response = _response(binding)

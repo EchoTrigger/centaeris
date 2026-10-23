@@ -188,7 +188,7 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
             "terminalFacts": list(run.events.filter(payload__type__in=[
                 "agent_run_completed", "agent_run_failed", "agent_run_interrupted"]).values_list("payload", flat=True))})
 
-    def claim_due_job(self, worker, job_id, job_kind, worker_id):
+    def claim_due_job(self, worker, job_id, job_kind, worker_id, *, observations=None):
         """Observe durable due time under a monotonic deadline before claiming."""
         deadline = time.monotonic() + 5
         def poll_request(path, body=None):
@@ -197,6 +197,8 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
             return worker.json_request(f"{worker.RUNTIME_INTERNAL_URL}{path}", body,
                 "X-Internal-Token", worker.INTERNAL_API_TOKEN, "native_job_claim_unavailable",
                 timeout=remaining)
+        if observations is not None:
+            poll_request = observations.wrap('runtime', poll_request)
         while True:
             jobs = poll_request("/internal/jobs/claim", {
                 "schema": "runtime.job.claim.v1", "workerId": worker_id,

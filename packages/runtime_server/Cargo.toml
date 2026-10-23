@@ -30,13 +30,18 @@ hyper-util = { workspace = true, features = ["service", "tokio"] }
 reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls", "stream"] }
 rmcp.workspace = true
 redis.workspace = true
+same-file = "=1.0.6"
 postgres.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt-multi-thread", "sync", "time"] }
 unicode-normalization.workspace = true
+uuid = { version = "=1.23.1", features = ["v4"] }
 zstd.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
 centaeris-runtime-sqlite.workspace = true

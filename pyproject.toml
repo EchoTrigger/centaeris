@@ -12,6 +12,7 @@ package = false
 members = [
   "packages/api",
   "packages/document_processor",
+  "packages/e2b_adapter",
   "packages/hosted_execution",
   "packages/worker",
 ]

@@ -144,6 +144,8 @@ class InternalModelImageTests(TransactionTestCase):
         session = create_session(workspace=workspace, owner=user)
         run = AgentRun.objects.create(workspace=workspace, session=session, user=user, modelConfig=model, prompt="image")
         authorization = create_agent_run_authorization(run, image_digest="sha256:" + "a" * 64)
+        from app_core.testing import leased_lifecycle_job_fixture
+        leased_lifecycle_job_fixture(self, run)
         path = core_fixture("model_images.json")
         prompt = json.loads(path.read_text(encoding="utf-8"))["cases"][0]["preparedPrompt"]
         decoded = base64.b64decode(prompt["inputImages"][0]["dataBase64"])

@@ -1,3 +1,4 @@
+mod capacity_wake_tests;
 use std::sync::{Arc, Mutex};
 
 use centaeris_core::execution::ResidentResourceUsage;
@@ -440,6 +441,8 @@ impl SandboxFixture {
         crate::resident_capacity::declared_usage(
             self.original
                 .environment_profile
+                .legacy()
+                .unwrap()
                 .resources
                 .sandbox_resources(),
         )
@@ -455,7 +458,12 @@ impl SandboxFixture {
             execution_id: &self.execution,
             workspace_id: &self.tenant,
             host_id,
-            image_digest: &self.original.environment_profile.image_digest,
+            image_digest: &self
+                .original
+                .environment_profile
+                .legacy()
+                .unwrap()
+                .image_digest,
             profile_digest: &self.original.environment_profile_digest,
             resources: self.resources(),
             lease: fence,
@@ -518,7 +526,7 @@ fn sandbox_with_resources(
     original.id = format!("authorization-{id}");
     original.workspace_id = tenant.into();
     original.session_id = format!("session-{id}");
-    let profile = &mut original.environment_profile.resources;
+    let profile = &mut original.environment_profile.legacy_mut().unwrap().resources;
     profile.memory_bytes = usage.memory_bytes;
     profile.cpu_milli = usage.cpu_milli.try_into().unwrap();
     profile.pids_limit = usage.pids.try_into().unwrap();
@@ -665,7 +673,7 @@ fn seed_historical_resident(
     let usage = observed.resources;
     let mut db = Client::connect(url, NoTls).unwrap();
     super::owned_database::require_owned_database(&mut db);
-    db.execute("INSERT INTO runtime.execution_instances(execution_id,instance_id,environment_id,session_id,agent_run_id,host_id,authorization_digest,binding_digest,image_digest,allocation_execution_id,allocation_mode) VALUES($1,$2,$3,$4,$5,'fake-docker-host',$6,$7,$8,$1,'perRun')", &[&fixture.execution,&crate::postgres_store::execution_instances::instance_id(&fixture.execution),&fixture.grant.payload.environment_id,&fixture.original.session_id,&fixture.run,&fixture.original.digest().unwrap(),&fixture.grant.payload.digest().unwrap(),&fixture.original.environment_profile.image_digest]).unwrap();
+    db.execute("INSERT INTO runtime.execution_instances(execution_id,instance_id,environment_id,session_id,agent_run_id,host_id,authorization_digest,binding_digest,image_digest,allocation_execution_id,allocation_mode) VALUES($1,$2,$3,$4,$5,'fake-docker-host',$6,$7,$8,$1,'perRun')", &[&fixture.execution,&crate::postgres_store::execution_instances::instance_id(&fixture.execution),&fixture.grant.payload.environment_id,&fixture.original.session_id,&fixture.run,&fixture.original.digest().unwrap(),&fixture.grant.payload.digest().unwrap(),&fixture.original.environment_profile.legacy().unwrap().image_digest]).unwrap();
     db.execute("INSERT INTO runtime.resident_sandboxes(host_id,execution_id,agent_run_id,workspace_id,container_id,state,memory_bytes,cpu_milli,pids,workspace_bytes,created_at_ms,updated_at_ms) VALUES('fake-docker-host',$1,$2,$3,$4,'resident',$5,$6,$7,$8,1,1)", &[&fixture.execution,&fixture.run,&fixture.tenant,&observed.container_id,&(usage.memory_bytes as i64),&(usage.cpu_milli as i64),&(usage.pids as i64),&(usage.workspace_bytes as i64)]).unwrap();
     host.lock().unwrap().push(observed);
 }
@@ -1473,8 +1481,9 @@ fn postgres_resident_legal_question_and_runtime_job_waits_reuse_their_live_execu
 #[ignore = "requires destructive dedicated Postgres test database"]
 fn postgres_resident_unavailable_or_corrupt_restore_source_preserves_old_execution() {
     use crate::docker_execution_host::{
-        prepare_recovery_workspace_restore, RecoveryRestoreBinding, SessionWorkspaceLease,
+        prepare_recovery_workspace_restore, RecoveryRestoreBinding,
     };
+    use crate::session_workspace::SessionWorkspaceLease;
     use centaeris_core::runtime::contracts::RecoveryWorkspaceSnapshotV1;
     use sha2::{Digest, Sha256};
     use std::io::{Read, Write};

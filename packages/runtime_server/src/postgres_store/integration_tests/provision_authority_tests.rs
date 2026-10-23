@@ -48,6 +48,8 @@ fn limits(auth: &ProvisionAuthorization) -> ResidentCapacity {
     let one = declared_usage(
         auth.payload
             .environment_profile
+            .legacy()
+            .unwrap()
             .resources
             .sandbox_resources(),
     );
@@ -69,7 +71,7 @@ fn postgres_provision_pins_real_authority_and_commits_holding_before_host_withou
             let mut read=Client::connect(&url,NoTls).unwrap();
             assert!(read.query_one("SELECT agent_run_id IS NULL AND state IN('reserved','resident') FROM runtime.resident_sandboxes",&[]).unwrap().get::<_,bool>(0));
             assert_eq!(a.allocation_agent_run_id,None);assert_eq!(a.allocation_owner,EnvironmentTaskOwner::MaintenanceOperation{operation_id:auth.payload.operation_id.clone()});
-            if a.container_id.is_none(){creates+=1;physical.lock().unwrap().push(ObservedResidentSandbox{execution_id:a.allocation_execution_id.clone(),allocation_owner:a.allocation_owner.clone(),container_id:"c".repeat(64),resources:declared_usage(auth.payload.environment_profile.resources.sandbox_resources())});}
+            if a.container_id.is_none(){creates+=1;physical.lock().unwrap().push(ObservedResidentSandbox{execution_id:a.allocation_execution_id.clone(),allocation_owner:a.allocation_owner.clone(),container_id:"c".repeat(64),resources:declared_usage(auth.payload.environment_profile.legacy().unwrap().resources.sandbox_resources())});}
             Ok("c".repeat(64))
         }).unwrap();
         assert_eq!(result.container_id, Some("c".repeat(64)));
@@ -111,6 +113,8 @@ fn postgres_provision_lost_ack_retains_reservation_and_recovers_exact_instance()
                 resources: declared_usage(
                     auth.payload
                         .environment_profile
+                        .legacy()
+                        .unwrap()
                         .resources
                         .sandbox_resources(),
                 ),

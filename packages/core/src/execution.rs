@@ -14,7 +14,7 @@ mod policy;
 mod process;
 mod residency;
 
-pub use residency::{admit_resident_resources, ResidentResourceUsage};
+pub use residency::{admit_resident_resources, ResidentResourceClaim, ResidentResourceUsage};
 
 pub use policy::{ExecutionPolicy, FileSystemPolicy, NetworkPolicy};
 pub use process::{

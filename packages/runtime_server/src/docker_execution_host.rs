@@ -4,6 +4,8 @@ mod maintenance;
 mod network;
 mod retained;
 mod retained_commands;
+#[cfg(test)]
+mod session_workspace_tests;
 mod snapshot_capture;
 pub(crate) use maintenance::{
     maintenance_helper, maintenance_task, observe_environment, provision_environment,
@@ -15,10 +17,19 @@ use crate::execution_recovery_policy::{
     ExecutionActivityWitness, HostFailureEvidence, SnapshotActivityGuard, SnapshotCaptureError,
     WorkspaceReuseEvidence,
 };
-use crate::observations::{
-    MeasuredWriter, ProtectionMetric, ProtectionTrigger, WorkspaceProtection,
+use crate::observations::{ProtectionMetric, ProtectionTrigger, WorkspaceProtection};
+use crate::session_workspace::snapshot::capture_cache::SnapshotCaptureCache;
+#[cfg(test)]
+use crate::session_workspace::snapshot::{
+    capture_snapshot_artifact, inspect_workspace_snapshot, manifest_digest,
+    snapshot_matches_frozen_workspace,
 };
-use snapshot_capture::{SnapshotCaptureCache, SnapshotCaptureResult};
+use crate::session_workspace::snapshot::{
+    capture_snapshot_artifact_observed, copy_exact, read_capture,
+    snapshot_matches_recovery_workspace, ImmutableWorkspaceSnapshot, SessionWorkspaceUploadBody,
+    SnapshotCaptureResult, WorkspaceSnapshotDescriptor,
+};
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
@@ -57,25 +68,35 @@ use centaeris_core::runtime::contracts::RecoveryWorkspaceSnapshotV1;
 #[cfg(test)]
 use hosted_execution::memory::MEMORY_CONTAINER_ROOT;
 use hosted_execution::memory::{is_memory_uri, MemoryPath};
-#[cfg(test)]
-use hosted_execution::protocol::SandboxFileSystemResult;
 use hosted_execution::protocol::{
     SandboxArtifactMetadata, SandboxArtifactRequest, SandboxFileSystemRequest,
     SandboxInputInventory, SandboxInputRevokeRequest, SandboxMaterializedInput,
-    SandboxWorkspaceGeneration, SandboxWorkspaceSnapshotFile, SandboxWorkspaceSnapshotManifest,
-    SANDBOX_INPUT_INVENTORY_SCHEMA, SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA,
+    SandboxWorkspaceGeneration, SANDBOX_INPUT_INVENTORY_SCHEMA,
+};
+#[cfg(test)]
+use hosted_execution::protocol::{
+    SandboxFileSystemResult, SandboxWorkspaceSnapshotFile, SandboxWorkspaceSnapshotManifest,
+    SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use unicode_normalization::UnicodeNormalization;
 
 use crate::agent_run_authorization::SessionWorkspace;
 use crate::agent_run_authorization::{EnvironmentProfile, ExecutionNetwork, SandboxResources};
 use crate::postgres_store::PostgresRuntimeStore;
+#[cfg(test)]
+use crate::session_workspace::SESSION_WORKSPACE_RESOLVED_SCHEMA;
+use crate::session_workspace::{
+    resolved_resolution, SessionWorkspaceApi, SessionWorkspaceApiError,
+    SessionWorkspaceCommitOutcome, SessionWorkspaceLease, SessionWorkspaceLeaseRequest,
+    SessionWorkspaceResolution, SessionWorkspaceResolveResponse, SESSION_WORKSPACE_DOWNLOAD_SCHEMA,
+    SESSION_WORKSPACE_RESOLVE_SCHEMA,
+};
+
 use crate::resident_capacity::{declared_usage, ObservedResidentSandbox, ResidentCapacity};
 
 pub(crate) fn environment_policy(profile: &EnvironmentProfile) -> ExecutionPolicy {
-    let mut policy = network::policy(profile.network, &profile.workspace_root);
+    let mut policy = network::policy(profile.network(), profile.workspace_root());
     policy.filesystem.denied_read_paths =
         vec!["/run/centaeris".into(), "/run/centaeris-host".into()];
     policy.filesystem.denied_write_paths = policy.filesystem.denied_read_paths.clone();
@@ -95,46 +116,10 @@ const WORKSPACE_GENERAL_IMAGE_ENV: &str = "WORKSPACE_GENERAL_IMAGE";
 const MEMORY_RUNTIME_VOLUME_ROOT: &str = "/var/lib/centaeris-agent-memory";
 const BASE_COMMAND_PATH: &str =
     "/opt/centaeris/bin:/opt/centaeris/venv/bin:/usr/local/bin:/usr/bin:/bin";
-const SESSION_WORKSPACE_RESOLVE_SCHEMA: &str = "runtime.session_workspace.resolve.v1";
-const SESSION_WORKSPACE_RESOLVED_SCHEMA: &str = "runtime.session_workspace.resolved.v1";
-const SESSION_WORKSPACE_DOWNLOAD_SCHEMA: &str = "runtime.session_workspace.download.v1";
-const SESSION_WORKSPACE_COMMIT_SCHEMA: &str = "runtime.session_workspace.commit.v1";
-const SESSION_WORKSPACE_COMMIT_RESULT_SCHEMA: &str = "runtime.session_workspace.commit.result.v1";
 const EXECUTION_WORKSPACE_STAGE_SCHEMA: &str = "runtime.execution_workspace.stage.v1";
 const EXECUTION_WORKSPACE_STAGE_RESULT_SCHEMA: &str = "runtime.execution_workspace.stage.result.v1";
 const EXECUTION_WORKSPACE_DOWNLOAD_SCHEMA: &str = "runtime.execution_workspace.download.v1";
-const SESSION_WORKSPACE_MANIFEST_LIMIT: usize = 1024 * 1024;
-const SESSION_WORKSPACE_IO_BUFFER_BYTES: usize = 64 * 1024;
 const SESSION_WORKSPACE_RESTORE_OVERHEAD_BYTES: u64 = 64 * 1024;
-
-#[derive(Debug, Clone)]
-pub(crate) struct SessionWorkspaceLease {
-    pub job_id: String,
-    pub lease_owner: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SessionWorkspaceResolution {
-    RetainedLive,
-    Empty,
-    Download,
-    Advanced,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SessionWorkspaceApiError {
-    Rejected(String),
-    Unavailable(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SessionWorkspaceCommitOutcome {
-    ProtectionDeferred,
-    Accepted,
-    Unchanged,
-    Rejected(String),
-    Pending,
-}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -392,9 +377,7 @@ impl DockerExecutionHostRunner {
     pub(crate) fn workspace_root(&self) -> &str {
         self.environment_profile
             .as_ref()
-            .map_or(WORKSPACE_DATA_ROOT, |profile| {
-                profile.workspace_root.as_str()
-            })
+            .map_or(WORKSPACE_DATA_ROOT, |profile| profile.workspace_root())
     }
     pub(crate) fn recovery_continuity(&self) -> OwnedExecutionContinuity {
         match inspect_container(&self.container_name) {
@@ -437,6 +420,9 @@ impl DockerExecutionHostRunner {
         request: DockerExecutionHostRequest<'_>,
         before_create: &mut (dyn FnMut(&mut postgres::Client) -> Result<(), String> + Send),
     ) -> Result<Self, String> {
+        if let Some(profile) = &request.environment_profile {
+            profile.legacy()?;
+        }
         if request.environment_authorization.payload.agent_run_id != request.agent_run_id
             || request
                 .environment_authorization
@@ -449,7 +435,7 @@ impl DockerExecutionHostRunner {
         if request
             .environment_profile
             .as_ref()
-            .is_some_and(|profile| profile.network != request.network)
+            .is_some_and(|profile| profile.network() != request.network)
         {
             return Err("benchmark network differs from signed authorization".into());
         }
@@ -1062,50 +1048,22 @@ impl DockerExecutionHostRunner {
         Ok((metadata, bytes.to_vec()))
     }
 
+    fn session_workspace_api(&self) -> SessionWorkspaceApi<'_> {
+        SessionWorkspaceApi {
+            client: &self.api_client,
+            api_url: &self.api_url,
+            api_token: &self.api_token,
+            agent_run_id: &self.agent_run_id,
+            authorization_digest: &self.authorization_digest,
+        }
+    }
+
     pub(crate) fn resolve_session_workspace(
         &self,
         lease: &SessionWorkspaceLease,
         frozen: &SessionWorkspace,
     ) -> Result<SessionWorkspaceResolution, SessionWorkspaceApiError> {
-        let response = self
-            .api_client
-            .post(format!(
-                "{}/internal/agent-runs/session-workspace/resolve",
-                self.api_url
-            ))
-            .header("X-Internal-Token", self.api_token.as_str())
-            .json(&SessionWorkspaceLeaseRequest::new(
-                SESSION_WORKSPACE_RESOLVE_SCHEMA,
-                self,
-                lease,
-            ))
-            .timeout(Duration::from_secs(10))
-            .send()
-            .map_err(|error| {
-                SessionWorkspaceApiError::Unavailable(format!(
-                    "resolve session workspace failed: {error}"
-                ))
-            })?;
-        if response.status().is_server_error() {
-            return Err(SessionWorkspaceApiError::Unavailable(format!(
-                "resolve session workspace returned {}",
-                response.status().as_u16()
-            )));
-        }
-        if !response.status().is_success() {
-            return Err(SessionWorkspaceApiError::Rejected(format!(
-                "resolve session workspace returned {}",
-                response.status().as_u16()
-            )));
-        }
-        let resolved = response
-            .json::<SessionWorkspaceResolveResponse>()
-            .map_err(|error| {
-                SessionWorkspaceApiError::Rejected(format!(
-                    "decode session workspace resolve failed: {error}"
-                ))
-            })?;
-        resolved_resolution(&resolved, frozen)
+        self.session_workspace_api().resolve(lease, frozen)
     }
 
     pub(crate) fn restore_session_workspace(
@@ -1147,7 +1105,8 @@ impl DockerExecutionHostRunner {
             .header("X-Internal-Token", self.api_token.as_str())
             .json(&SessionWorkspaceLeaseRequest::new(
                 SESSION_WORKSPACE_DOWNLOAD_SCHEMA,
-                self,
+                self.agent_run_id.as_str(),
+                self.authorization_digest.as_str(),
                 lease,
             ))
             .timeout(Duration::from_secs(30))
@@ -1225,115 +1184,8 @@ impl DockerExecutionHostRunner {
                 descriptor.expanded_size_bytes,
                 input_upper_bound_bytes,
             )?;
-            if snapshot_matches_frozen_workspace(descriptor, frozen) {
-                artifact
-                    .observation
-                    .count(ProtectionMetric::UploadAttempts, 0, true);
-                artifact
-                    .observation
-                    .count(ProtectionMetric::UploadedBytes, 0, true);
-                return Ok(SessionWorkspaceCommitOutcome::Unchanged);
-            }
-            let candidate = SessionWorkspace {
-                generation: frozen
-                    .generation
-                    .checked_add(1)
-                    .ok_or_else(|| "session workspace generation overflow".to_string())?,
-                snapshot_sha256: descriptor.sha256.clone(),
-                snapshot_size_bytes: descriptor.size_bytes,
-                expanded_size_bytes: descriptor.expanded_size_bytes,
-                file_count: descriptor.file_count,
-            };
-            candidate.validate()?;
-            let metadata = SessionWorkspaceCommitRequest {
-                schema: SESSION_WORKSPACE_COMMIT_SCHEMA,
-                job_id: lease.job_id.as_str(),
-                lease_owner: lease.lease_owner.as_str(),
-                agent_run_id: self.agent_run_id.as_str(),
-                authorization_digest: self.authorization_digest.as_str(),
-                snapshot_sha256: candidate.snapshot_sha256.as_str(),
-                snapshot_size_bytes: candidate.snapshot_size_bytes,
-                expanded_size_bytes: candidate.expanded_size_bytes,
-                file_count: candidate.file_count,
-            };
-            let metadata = serde_json::to_vec(&metadata)
-                .map_err(|error| format!("encode session workspace commit failed: {error}"))?;
-            let metadata_length = u32::try_from(metadata.len())
-                .map_err(|_| "session workspace commit metadata is too large".to_string())?;
-            let mut prefix = Vec::with_capacity(4 + metadata.len());
-            prefix.extend_from_slice(&metadata_length.to_be_bytes());
-            prefix.extend_from_slice(metadata.as_slice());
-            let observation = &artifact.observation;
-            let length = u64::try_from(prefix.len())
-                .map_err(|_| "session workspace commit length overflow".to_string())?
-                .checked_add(descriptor.size_bytes)
-                .ok_or_else(|| "session workspace commit length overflow".to_string())?;
-            let response = observation.timed(ProtectionMetric::UploadElapsedMs, || {
-                observation.count(ProtectionMetric::UploadAttempts, 1, true);
-                if descriptor.size_bytes == 0 {
-                    self.api_client
-                        .post(format!(
-                            "{}/internal/agent-runs/session-workspace/commit",
-                            self.api_url
-                        ))
-                        .header("X-Internal-Token", self.api_token.as_str())
-                        .header("Content-Length", prefix.len().to_string())
-                        .header("Content-Type", "application/octet-stream")
-                        .body(reqwest::blocking::Body::sized(
-                            observation.upload_reader(Cursor::new(prefix), length),
-                            length,
-                        ))
-                        .timeout(Duration::from_secs(30))
-                        .send()
-                } else {
-                    let snapshot = artifact.file;
-                    let body = SessionWorkspaceUploadBody {
-                        prefix: Cursor::new(prefix),
-                        snapshot,
-                    };
-                    self.api_client
-                        .post(format!(
-                            "{}/internal/agent-runs/session-workspace/commit",
-                            self.api_url
-                        ))
-                        .header("X-Internal-Token", self.api_token.as_str())
-                        .header("Content-Length", length.to_string())
-                        .header("Content-Type", "application/octet-stream")
-                        .body(reqwest::blocking::Body::sized(
-                            observation.upload_reader(body, length),
-                            length,
-                        ))
-                        .timeout(Duration::from_secs(300))
-                        .send()
-                }
-            });
-            match response {
-                Ok(response) if response.status().is_success() => {
-                    let committed =
-                        response
-                            .json::<SessionWorkspaceCommitResponse>()
-                            .map_err(|error| {
-                                format!("decode session workspace commit failed: {error}")
-                            })?;
-                    if committed.schema != SESSION_WORKSPACE_COMMIT_RESULT_SCHEMA
-                        || !matches!(committed.disposition.as_str(), "committed" | "idempotent")
-                        || committed.session_workspace != candidate
-                    {
-                        return Ok(SessionWorkspaceCommitOutcome::Rejected(
-                            "session workspace commit response binding mismatch".to_string(),
-                        ));
-                    }
-                    Ok(SessionWorkspaceCommitOutcome::Accepted)
-                }
-                Ok(response) if response.status().is_server_error() => {
-                    Ok(self.reconcile_session_workspace_commit(lease, frozen)?)
-                }
-                Ok(response) => Ok(SessionWorkspaceCommitOutcome::Rejected(format!(
-                    "session workspace commit returned {}",
-                    response.status().as_u16()
-                ))),
-                Err(_) => Ok(self.reconcile_session_workspace_commit(lease, frozen)?),
-            }
+            self.session_workspace_api()
+                .commit_snapshot(lease, frozen, artifact)
         })
     }
 
@@ -1749,28 +1601,13 @@ impl DockerExecutionHostRunner {
             .map_err(SessionWorkspaceApiError::Rejected)
     }
 
+    #[cfg(test)]
     fn reconcile_session_workspace_commit(
         &self,
         lease: &SessionWorkspaceLease,
         frozen: &SessionWorkspace,
     ) -> Result<SessionWorkspaceCommitOutcome, String> {
-        match self.resolve_session_workspace(lease, frozen) {
-            Ok(SessionWorkspaceResolution::RetainedLive) => {
-                Ok(SessionWorkspaceCommitOutcome::ProtectionDeferred)
-            }
-            Ok(SessionWorkspaceResolution::Advanced) => Ok(SessionWorkspaceCommitOutcome::Accepted),
-            Ok(SessionWorkspaceResolution::Empty | SessionWorkspaceResolution::Download) => {
-                Ok(SessionWorkspaceCommitOutcome::Rejected(
-                    "session workspace commit was not accepted".to_string(),
-                ))
-            }
-            Err(SessionWorkspaceApiError::Unavailable(_)) => {
-                Ok(SessionWorkspaceCommitOutcome::Pending)
-            }
-            Err(SessionWorkspaceApiError::Rejected(reason)) => {
-                Ok(SessionWorkspaceCommitOutcome::Rejected(reason))
-            }
-        }
+        self.session_workspace_api().reconcile_commit(lease, frozen)
     }
 
     fn require_workspace_capacity(
@@ -2054,7 +1891,7 @@ impl DockerExecutionHostRunner {
                 && self
                     .environment_profile
                     .as_ref()
-                    .is_none_or(|profile| user != profile.user)
+                    .is_none_or(|profile| user != profile.user())
         }) {
             return Err("environment_helper_user_override_rejected".into());
         }
@@ -2967,46 +2804,6 @@ fn filesystem_unavailable(message: impl Into<String>) -> ExecutionFileSystemErro
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SessionWorkspaceLeaseRequest<'a> {
-    schema: &'a str,
-    job_id: &'a str,
-    lease_owner: &'a str,
-    agent_run_id: &'a str,
-    authorization_digest: &'a str,
-}
-
-impl<'a> SessionWorkspaceLeaseRequest<'a> {
-    fn new(
-        schema: &'a str,
-        runner: &'a DockerExecutionHostRunner,
-        lease: &'a SessionWorkspaceLease,
-    ) -> Self {
-        Self {
-            schema,
-            job_id: lease.job_id.as_str(),
-            lease_owner: lease.lease_owner.as_str(),
-            agent_run_id: runner.agent_run_id.as_str(),
-            authorization_digest: runner.authorization_digest.as_str(),
-        }
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SessionWorkspaceCommitRequest<'a> {
-    schema: &'a str,
-    job_id: &'a str,
-    lease_owner: &'a str,
-    agent_run_id: &'a str,
-    authorization_digest: &'a str,
-    snapshot_sha256: &'a str,
-    snapshot_size_bytes: u64,
-    expanded_size_bytes: u64,
-    file_count: u32,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 struct ExecutionWorkspaceStageRequest<'a> {
     schema: &'a str,
     job_id: &'a str,
@@ -3040,37 +2837,6 @@ struct ExecutionWorkspaceDownloadRequest<'a> {
     agent_run_id: &'a str,
     authorization_digest: &'a str,
     checkpoint_id: &'a str,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SessionWorkspaceResolveResponse {
-    schema: String,
-    disposition: String,
-    session_workspace: SessionWorkspace,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SessionWorkspaceCommitResponse {
-    schema: String,
-    disposition: String,
-    session_workspace: SessionWorkspace,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct WorkspaceSnapshotDescriptor {
-    sha256: String,
-    size_bytes: u64,
-    expanded_size_bytes: u64,
-    file_count: u32,
-}
-
-struct ImmutableWorkspaceSnapshot {
-    file: fs::File,
-    descriptor: WorkspaceSnapshotDescriptor,
-    observation: WorkspaceProtection,
-    manifest: Option<SandboxWorkspaceSnapshotManifest>,
 }
 
 pub(crate) struct PreparedRecoveryWorkspaceRestore {
@@ -3247,34 +3013,6 @@ fn require_workspace_capacity_for_limit(
     Ok(())
 }
 
-fn resolved_resolution(
-    resolved: &SessionWorkspaceResolveResponse,
-    frozen: &SessionWorkspace,
-) -> Result<SessionWorkspaceResolution, SessionWorkspaceApiError> {
-    if resolved.schema != SESSION_WORKSPACE_RESOLVED_SCHEMA {
-        return Err(SessionWorkspaceApiError::Rejected(
-            "session workspace resolve schema mismatch".into(),
-        ));
-    }
-    match resolved.disposition.as_str() {
-        "empty" if &resolved.session_workspace == frozen && frozen.snapshot_size_bytes == 0 => {
-            Ok(SessionWorkspaceResolution::Empty)
-        }
-        "download" if &resolved.session_workspace == frozen && frozen.snapshot_size_bytes != 0 => {
-            Ok(SessionWorkspaceResolution::Download)
-        }
-        "advanced"
-            if Some(resolved.session_workspace.generation) == frozen.generation.checked_add(1)
-                && resolved.session_workspace.validate().is_ok() =>
-        {
-            Ok(SessionWorkspaceResolution::Advanced)
-        }
-        _ => Err(SessionWorkspaceApiError::Rejected(
-            "session workspace resolve binding mismatch".into(),
-        )),
-    }
-}
-
 pub(crate) struct PreparedRecoveryWorkspace {
     content: PreparedRecoveryContent,
     evidence: WorkspaceReuseEvidence,
@@ -3293,64 +3031,6 @@ enum PreparedRecoveryContent {
         lease: SessionWorkspaceLease,
         checkpoint_id: String,
     },
-}
-
-struct SnapshotSpoolReader<'a, R, W> {
-    source: &'a mut R,
-    file: &'a mut W,
-    remaining: u64,
-}
-
-impl<R: Read, W: Write> Read for SnapshotSpoolReader<'_, R, W> {
-    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-        let count = self.source.read(bytes)?;
-        if count as u64 > self.remaining {
-            return Err(std::io::Error::other("snapshot exceeds spool capacity"));
-        }
-        self.file.write_all(&bytes[..count])?;
-        self.remaining -= count as u64;
-        Ok(count)
-    }
-}
-
-#[cfg(test)]
-fn capture_snapshot_artifact(
-    source: &mut impl Read,
-    limit: u64,
-) -> Result<ImmutableWorkspaceSnapshot, String> {
-    capture_snapshot_artifact_observed(source, limit, WorkspaceProtection::new())
-}
-
-fn capture_snapshot_artifact_observed(
-    source: &mut impl Read,
-    limit: u64,
-    observation: WorkspaceProtection,
-) -> Result<ImmutableWorkspaceSnapshot, String> {
-    let mut file =
-        tempfile::tempfile().map_err(|error| format!("create snapshot spool failed: {error}"))?;
-    let mut measured = MeasuredWriter {
-        inner: &mut file,
-        written: 0,
-    };
-    let descriptor = inspect_workspace_snapshot_with_manifest(&mut SnapshotSpoolReader {
-        source,
-        file: &mut measured,
-        remaining: limit,
-    });
-    observation.count(
-        ProtectionMetric::SpoolWrittenBytes,
-        measured.written,
-        descriptor.is_ok(),
-    );
-    let (descriptor, manifest) = descriptor?;
-    file.rewind()
-        .map_err(|error| format!("rewind snapshot spool failed: {error}"))?;
-    Ok(ImmutableWorkspaceSnapshot {
-        file,
-        descriptor,
-        observation,
-        manifest,
-    })
 }
 
 pub(crate) fn resolve_workspace_image_digest() -> Result<String, String> {
@@ -3384,241 +3064,6 @@ fn parse_docker_image_digest(output: &[u8]) -> Result<String, String> {
         return Err("Docker execution image digest is invalid".to_string());
     }
     Ok(digest.to_string())
-}
-
-struct SessionWorkspaceUploadBody {
-    prefix: Cursor<Vec<u8>>,
-    snapshot: fs::File,
-}
-
-impl Read for SessionWorkspaceUploadBody {
-    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        let prefix = self.prefix.read(buffer)?;
-        if prefix != 0 {
-            return Ok(prefix);
-        }
-        self.snapshot.read(buffer)
-    }
-}
-
-#[cfg(test)]
-fn inspect_workspace_snapshot(
-    source: &mut impl Read,
-) -> Result<WorkspaceSnapshotDescriptor, String> {
-    inspect_workspace_snapshot_with_manifest(source).map(|(descriptor, _)| descriptor)
-}
-
-#[cfg(test)]
-pub(crate) fn inspect_workspace_snapshot_manifest_for_test(
-    source: &mut impl Read,
-) -> Result<Option<SandboxWorkspaceSnapshotManifest>, String> {
-    inspect_workspace_snapshot_with_manifest(source).map(|(_, manifest)| manifest)
-}
-
-fn inspect_workspace_snapshot_with_manifest(
-    source: &mut impl Read,
-) -> Result<
-    (
-        WorkspaceSnapshotDescriptor,
-        Option<SandboxWorkspaceSnapshotManifest>,
-    ),
-    String,
-> {
-    let mut header = [0_u8; 4];
-    let first = source
-        .read(&mut header)
-        .map_err(|error| format!("read snapshot collect frame failed: {error}"))?;
-    if first == 0 {
-        return Ok((
-            WorkspaceSnapshotDescriptor {
-                sha256: String::new(),
-                size_bytes: 0,
-                expanded_size_bytes: 0,
-                file_count: 0,
-            },
-            None,
-        ));
-    }
-    let mut digest = Sha256::new();
-    digest.update(&header[..first]);
-    read_snapshot_exact(source, &mut header[first..], &mut digest)?;
-    let manifest_length = u32::from_be_bytes(header) as usize;
-    if manifest_length == 0 || manifest_length > SESSION_WORKSPACE_MANIFEST_LIMIT {
-        return Err("snapshot manifest length is invalid".to_string());
-    }
-    let mut manifest_bytes = vec![0_u8; manifest_length];
-    read_snapshot_exact(source, manifest_bytes.as_mut_slice(), &mut digest)?;
-    let manifest =
-        serde_json::from_slice::<SandboxWorkspaceSnapshotManifest>(manifest_bytes.as_slice())
-            .map_err(|error| format!("decode snapshot manifest failed: {error}"))?;
-    if serde_json::to_vec(&manifest)
-        .map_err(|error| format!("encode snapshot manifest failed: {error}"))?
-        != manifest_bytes
-    {
-        return Err("snapshot manifest is not canonical".to_string());
-    }
-    let expanded_size_bytes = validate_workspace_snapshot_manifest(&manifest)?;
-    for file in &manifest.files {
-        let mut file_digest = Sha256::new();
-        let mut remaining = file.size_bytes;
-        let mut buffer = [0_u8; SESSION_WORKSPACE_IO_BUFFER_BYTES];
-        while remaining != 0 {
-            let wanted = usize::try_from(remaining.min(buffer.len() as u64))
-                .map_err(|_| "snapshot file size is invalid".to_string())?;
-            read_snapshot_exact(source, &mut buffer[..wanted], &mut digest)?;
-            file_digest.update(&buffer[..wanted]);
-            remaining -= wanted as u64;
-        }
-        if format!("sha256:{:x}", file_digest.finalize()) != file.sha256 {
-            return Err("snapshot file integrity mismatch".to_string());
-        }
-    }
-    let mut trailing = [0_u8; 1];
-    if source
-        .read(&mut trailing)
-        .map_err(|error| format!("read snapshot collect trailing bytes failed: {error}"))?
-        != 0
-    {
-        return Err("snapshot collect frame has trailing bytes".to_string());
-    }
-    let size_bytes = 4_u64
-        .checked_add(manifest_length as u64)
-        .and_then(|value| value.checked_add(expanded_size_bytes))
-        .ok_or_else(|| "snapshot size overflow".to_string())?;
-    Ok((
-        WorkspaceSnapshotDescriptor {
-            sha256: format!("sha256:{:x}", digest.finalize()),
-            size_bytes,
-            expanded_size_bytes,
-            file_count: u32::try_from(manifest.files.len())
-                .map_err(|_| "snapshot file count overflow".to_string())?,
-        },
-        Some(manifest),
-    ))
-}
-
-fn snapshot_matches_frozen_workspace(
-    descriptor: &WorkspaceSnapshotDescriptor,
-    frozen: &SessionWorkspace,
-) -> bool {
-    descriptor.sha256 == frozen.snapshot_sha256
-        && descriptor.size_bytes == frozen.snapshot_size_bytes
-        && descriptor.expanded_size_bytes == frozen.expanded_size_bytes
-        && descriptor.file_count == frozen.file_count
-}
-
-fn snapshot_matches_recovery_workspace(
-    descriptor: &WorkspaceSnapshotDescriptor,
-    snapshot: &RecoveryWorkspaceSnapshotV1,
-) -> bool {
-    descriptor.sha256 == snapshot.snapshot_sha256
-        && descriptor.size_bytes == snapshot.snapshot_size_bytes
-        && descriptor.expanded_size_bytes == snapshot.expanded_size_bytes
-        && descriptor.file_count == snapshot.file_count
-}
-
-fn read_snapshot_exact(
-    source: &mut impl Read,
-    bytes: &mut [u8],
-    digest: &mut Sha256,
-) -> Result<(), String> {
-    let mut offset = 0;
-    while offset < bytes.len() {
-        let count = source
-            .read(&mut bytes[offset..])
-            .map_err(|error| format!("read snapshot bytes failed: {error}"))?;
-        if count == 0 {
-            return Err("snapshot frame is truncated".to_string());
-        }
-        digest.update(&bytes[offset..offset + count]);
-        offset += count;
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_workspace_snapshot_manifest(
-    manifest: &SandboxWorkspaceSnapshotManifest,
-) -> Result<u64, String> {
-    if manifest.schema != SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA || manifest.files.is_empty() {
-        return Err("snapshot manifest is invalid".to_string());
-    }
-    let mut previous = None;
-    let mut expanded_size_bytes = 0_u64;
-    for SandboxWorkspaceSnapshotFile {
-        path,
-        size_bytes,
-        sha256,
-        ..
-    } in &manifest.files
-    {
-        if path.is_empty()
-            || path.trim() != path
-            || path.len() > 4 * 1024
-            || path.split('/').count() > 64
-            || path.contains('\\')
-            || path.starts_with('/')
-            || path.chars().any(char::is_control)
-            || path.split('/').any(|part| matches!(part, "" | "." | ".."))
-            || path.nfc().collect::<String>() != *path
-            || !is_workspace_sha256(sha256)
-            || previous.is_some_and(|value: &str| value >= path.as_str())
-            || previous.is_some_and(|value: &str| {
-                path.strip_prefix(value)
-                    .is_some_and(|suffix| suffix.starts_with('/'))
-            })
-        {
-            return Err("snapshot manifest paths or hashes are invalid".to_string());
-        }
-        expanded_size_bytes = expanded_size_bytes
-            .checked_add(*size_bytes)
-            .ok_or_else(|| "snapshot expanded size overflow".to_string())?;
-        previous = Some(path.as_str());
-    }
-    Ok(expanded_size_bytes)
-}
-
-fn is_workspace_sha256(value: &str) -> bool {
-    value.len() == 71
-        && value.starts_with("sha256:")
-        && value[7..]
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn copy_exact(
-    source: &mut impl Read,
-    target: &mut impl Write,
-    expected_size_bytes: u64,
-    expected_sha256: &str,
-) -> Result<(), String> {
-    let mut digest = Sha256::new();
-    let mut remaining = expected_size_bytes;
-    let mut buffer = [0_u8; SESSION_WORKSPACE_IO_BUFFER_BYTES];
-    while remaining != 0 {
-        let wanted = usize::try_from(remaining.min(buffer.len() as u64))
-            .map_err(|_| "snapshot download size is invalid".to_string())?;
-        let count = source
-            .read(&mut buffer[..wanted])
-            .map_err(|error| format!("read snapshot download failed: {error}"))?;
-        if count == 0 {
-            return Err("snapshot download is truncated".to_string());
-        }
-        target
-            .write_all(&buffer[..count])
-            .map_err(|error| format!("write snapshot restore input failed: {error}"))?;
-        digest.update(&buffer[..count]);
-        remaining -= count as u64;
-    }
-    let mut trailing = [0_u8; 1];
-    if source
-        .read(&mut trailing)
-        .map_err(|error| format!("read snapshot download trailing bytes failed: {error}"))?
-        != 0
-        || format!("sha256:{:x}", digest.finalize()) != expected_sha256
-    {
-        return Err("snapshot download integrity mismatch".to_string());
-    }
-    Ok(())
 }
 
 #[derive(Serialize)]
@@ -3762,7 +3207,7 @@ mod tests {
             retained::profile_digest(&next, &original.plugin_activation).unwrap()
         );
         let mut changed = original.environment_profile.clone();
-        changed.resources.memory_bytes += 1;
+        changed.legacy_mut().unwrap().resources.memory_bytes += 1;
         next.environment_profile = Some(&changed);
         assert_ne!(
             first,
@@ -3837,7 +3282,7 @@ mod tests {
                 .clone(),
         )
         .unwrap();
-        profile.workspace_root = "/app".into();
+        profile.legacy_mut().unwrap().workspace_root = "/app".into();
         runner.environment_profile = Some(profile);
         let read = ExecutionFileSystemOperation::ReadFile { max_bytes: 32 };
         assert!(runner
@@ -5515,8 +4960,8 @@ mod tests {
         runner.resources.cpu_milli = 4000;
         runner.resources.memory_bytes = 8 * 1024 * 1024 * 1024;
         let profile = runner.environment_profile.as_mut().unwrap();
-        profile.resources.cpu_milli = runner.resources.cpu_milli;
-        profile.resources.memory_bytes = runner.resources.memory_bytes;
+        profile.legacy_mut().unwrap().resources.cpu_milli = runner.resources.cpu_milli;
+        profile.legacy_mut().unwrap().resources.memory_bytes = runner.resources.memory_bytes;
         let body = container_create_body(&runner.container_expectation()).unwrap();
         assert_eq!(body["Image"], runner.image_digest);
         assert_eq!(
@@ -5582,7 +5027,13 @@ mod tests {
             ),
         ] {
             runner.network = network;
-            runner.environment_profile.as_mut().unwrap().network = network;
+            runner
+                .environment_profile
+                .as_mut()
+                .unwrap()
+                .legacy_mut()
+                .unwrap()
+                .network = network;
             let body = container_create_body(&runner.container_expectation()).unwrap();
             assert_eq!(body["HostConfig"]["NetworkMode"], mode);
             assert_eq!(body["HostConfig"]["ReadonlyRootfs"], false);
@@ -5618,8 +5069,18 @@ mod tests {
                 "../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
             ))
             .unwrap();
-        runner.resources = original.environment_profile.resources.sandbox_resources();
-        runner.image_digest = original.environment_profile.image_digest.clone();
+        runner.resources = original
+            .environment_profile
+            .legacy()
+            .unwrap()
+            .resources
+            .sandbox_resources();
+        runner.image_digest = original
+            .environment_profile
+            .legacy()
+            .unwrap()
+            .image_digest
+            .clone();
         runner.retained_allocation.as_mut().unwrap().image_digest = runner.image_digest.clone();
         runner.environment_profile = Some(original.environment_profile.clone());
         runner.benchmark_helper = Some("/tmp/execution_agent".into());
@@ -5655,7 +5116,7 @@ mod tests {
             "a new network grant cannot reuse the old physical mode"
         );
         let mut changed_profile = original.environment_profile.clone();
-        changed_profile.network = ExecutionNetwork::PublicInternet;
+        changed_profile.legacy_mut().unwrap().network = ExecutionNetwork::PublicInternet;
         let changed = ContainerExpectation {
             environment_profile: Some(&changed_profile),
             ..changed
@@ -6148,20 +5609,22 @@ mod tests {
             retained_allocation: None,
             environment_authorization: None,
             retained_workspace_id: None,
-            environment_profile: Some(EnvironmentProfile {
-                schema: "runtime.environment_profile.v1".into(),
-                image_digest: format!("sha256:{}", "b".repeat(64)),
-                workspace_root: WORKSPACE_DATA_ROOT.into(),
-                user: AGENT_USER.into(),
-                network: ExecutionNetwork::Disabled,
-                resources: crate::agent_run_authorization::EnvironmentResources {
-                    cpu_milli: 1,
-                    memory_bytes: 1,
-                    pids_limit: 1,
-                    data_tmpfs_bytes: 1,
-                    storage_bytes: 1,
+            environment_profile: Some(EnvironmentProfile::Legacy(
+                crate::agent_run_authorization::LegacyEnvironmentProfile {
+                    schema: "runtime.environment_profile.v1".into(),
+                    image_digest: format!("sha256:{}", "b".repeat(64)),
+                    workspace_root: WORKSPACE_DATA_ROOT.into(),
+                    user: AGENT_USER.into(),
+                    network: ExecutionNetwork::Disabled,
+                    resources: crate::agent_run_authorization::EnvironmentResources {
+                        cpu_milli: 1,
+                        memory_bytes: 1,
+                        pids_limit: 1,
+                        data_tmpfs_bytes: 1,
+                        storage_bytes: 1,
+                    },
                 },
-            }),
+            )),
             benchmark_helper: Some("/tmp/execution_agent".into()),
         }
     }

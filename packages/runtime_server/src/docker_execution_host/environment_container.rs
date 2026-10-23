@@ -20,6 +20,7 @@ pub(super) fn create_body_with_proxy_environment(
     proxy_environment: &BTreeMap<String, String>,
 ) -> Result<serde_json::Value, String> {
     profile.validate()?;
+    let profile = profile.legacy()?;
     if expected.image_digest != profile.image_digest
         || expected.resources != profile.resources.sandbox_resources()
         || expected.network != profile.network
@@ -86,10 +87,10 @@ fn helper_path_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_run_authorization::EnvironmentResources;
+    use crate::agent_run_authorization::{EnvironmentResources, LegacyEnvironmentProfile};
 
     fn profile() -> EnvironmentProfile {
-        EnvironmentProfile {
+        EnvironmentProfile::Legacy(LegacyEnvironmentProfile {
             schema: "runtime.environment_profile.v1".into(),
             image_digest: format!("sha256:{}", "a".repeat(64)),
             workspace_root: "/app".into(),
@@ -102,7 +103,7 @@ mod tests {
                 data_tmpfs_bytes: 64 * 1024 * 1024,
                 storage_bytes: 10 * 1024 * 1024 * 1024,
             },
-        }
+        })
     }
 
     #[test]
@@ -122,9 +123,11 @@ mod tests {
         .expect("a configured regular helper needs no operator-supplied digest");
         let mut runner = super::super::tests::retained_test_runner();
         let profile = profile();
-        runner.image_digest.clone_from(&profile.image_digest);
-        runner.resources = profile.resources.sandbox_resources();
-        runner.network = profile.network;
+        runner
+            .image_digest
+            .clone_from(&profile.legacy().unwrap().image_digest);
+        runner.resources = profile.legacy().unwrap().resources.sandbox_resources();
+        runner.network = profile.network();
         runner.plugin_mounts.clear();
         let body = create_body_with_proxy_environment(
             &runner.container_expectation(),
@@ -149,9 +152,11 @@ mod tests {
         let mut runner = super::super::tests::retained_test_runner();
         let profile = profile();
         runner.oci_runtime = OciRuntime::Runsc;
-        runner.image_digest.clone_from(&profile.image_digest);
-        runner.resources = profile.resources.sandbox_resources();
-        runner.network = profile.network;
+        runner
+            .image_digest
+            .clone_from(&profile.legacy().unwrap().image_digest);
+        runner.resources = profile.legacy().unwrap().resources.sandbox_resources();
+        runner.network = profile.network();
         runner.plugin_mounts.clear();
         let body = create_body_with_proxy_environment(
             &runner.container_expectation(),
@@ -161,8 +166,8 @@ mod tests {
         )
         .expect("runsc must accept the same signed environment profile");
         assert_eq!(body["HostConfig"]["Runtime"], "runsc");
-        assert_eq!(body["Image"], profile.image_digest);
-        assert_eq!(body["User"], profile.user);
+        assert_eq!(body["Image"], profile.legacy().unwrap().image_digest);
+        assert_eq!(body["User"], profile.user());
         assert_eq!(body["HostConfig"]["CapDrop"], serde_json::json!(["ALL"]));
         assert_eq!(body["HostConfig"]["Mounts"][0]["ReadOnly"], true);
         runner.resources.memory_bytes += 1;
@@ -220,9 +225,11 @@ mod tests {
     fn original_image_paths_user_and_download_policy_are_applied_without_private_volumes() {
         let mut runner = super::super::tests::retained_test_runner();
         let profile = profile();
-        runner.image_digest.clone_from(&profile.image_digest);
-        runner.resources = profile.resources.sandbox_resources();
-        runner.network = profile.network;
+        runner
+            .image_digest
+            .clone_from(&profile.legacy().unwrap().image_digest);
+        runner.resources = profile.legacy().unwrap().resources.sandbox_resources();
+        runner.network = profile.network();
         runner.plugin_mounts.clear();
         let body = create_body(
             &runner.container_expectation(),
@@ -230,7 +237,7 @@ mod tests {
             "/srv/helpers/execution_agent",
         )
         .unwrap();
-        assert_eq!(body["Image"], profile.image_digest);
+        assert_eq!(body["Image"], profile.legacy().unwrap().image_digest);
         assert_eq!(body["WorkingDir"], "/");
         assert_eq!(body["Env"][0], "CENTAERIS_WORKSPACE_ROOT=/app");
         assert_eq!(body["Env"][1], "CENTAERIS_WORKSPACE_USER=0:0");
@@ -287,9 +294,11 @@ mod tests {
     fn public_task_and_verifier_inherit_the_same_host_proxy_defaults() {
         let mut runner = super::super::tests::retained_test_runner();
         let profile = profile();
-        runner.image_digest.clone_from(&profile.image_digest);
-        runner.resources = profile.resources.sandbox_resources();
-        runner.network = profile.network;
+        runner
+            .image_digest
+            .clone_from(&profile.legacy().unwrap().image_digest);
+        runner.resources = profile.legacy().unwrap().resources.sandbox_resources();
+        runner.network = profile.network();
         runner.plugin_mounts.clear();
         let proxy = BTreeMap::from([
             ("HTTP_PROXY".into(), "http://172.17.0.1:17890".into()),
@@ -315,11 +324,11 @@ mod tests {
         for (key, value) in &proxy {
             assert_eq!(actual.get(key.as_str()), Some(&value.as_str()));
         }
-        let offline = EnvironmentProfile {
+        let offline = EnvironmentProfile::Legacy(LegacyEnvironmentProfile {
             network: ExecutionNetwork::Disabled,
-            ..profile
-        };
-        runner.network = offline.network;
+            ..profile.legacy().unwrap().clone()
+        });
+        runner.network = offline.network();
         let body = create_body_with_proxy_environment(
             &runner.container_expectation(),
             &offline,
@@ -334,5 +343,43 @@ mod tests {
         assert_eq!(actual.len(), 2);
         assert_eq!(actual[0], "CENTAERIS_WORKSPACE_ROOT=/app");
         assert_eq!(actual[1], "CENTAERIS_WORKSPACE_USER=0:0");
+    }
+    #[test]
+    #[ignore = "requires explicit paths for an owned physical storage probe"]
+    fn export_owned_runsc_storage_probe_request() {
+        let input = std::env::var("CENTAERIS_STORAGE_PROBE_INPUT").expect("probe input required");
+        let output =
+            std::env::var("CENTAERIS_STORAGE_PROBE_OUTPUT").expect("probe output required");
+        let input: serde_json::Value = serde_json::from_slice(&fs::read(input).unwrap()).unwrap();
+        let profile: EnvironmentProfile = serde_json::from_value(input["profile"].clone()).unwrap();
+        let mut runner = super::super::tests::retained_test_runner();
+        runner.oci_runtime = OciRuntime::Runsc;
+        runner
+            .image_digest
+            .clone_from(&profile.legacy().unwrap().image_digest);
+        runner.resources = profile.legacy().unwrap().resources.sandbox_resources();
+        runner.network = profile.network();
+        runner.plugin_mounts.clear();
+        let body = create_body_with_proxy_environment(
+            &runner.container_expectation(),
+            &profile,
+            input["helperPath"].as_str().unwrap(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(body["HostConfig"]["Runtime"], "runsc");
+        assert_eq!(
+            body["HostConfig"]["Memory"],
+            profile.legacy().unwrap().resources.memory_bytes
+        );
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(output)
+            .unwrap();
+        use std::io::Write;
+        file.write_all(&serde_json::to_vec_pretty(&body).unwrap())
+            .unwrap();
+        file.sync_all().unwrap();
     }
 }

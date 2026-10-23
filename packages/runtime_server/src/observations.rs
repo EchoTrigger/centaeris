@@ -1,5 +1,11 @@
 //! Opt-in, bounded timing records; no bodies, credentials or error messages.
-use std::cell::RefCell;
+pub(crate) mod helper;
+pub(crate) mod lifecycle;
+pub(crate) mod power;
+pub(crate) mod provider_dispatch;
+pub(crate) mod sdk;
+
+use std::cell::{Cell, RefCell};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 #[cfg(test)]
@@ -21,6 +27,9 @@ thread_local! { static PROTECTION_LOG: RefCell<Option<ProtectionLog>> = const { 
 #[derive(Clone, Copy)]
 pub enum ProtectionMetric {
     SpoolWrittenBytes,
+    RawCaptureSpoolWrittenBytes,
+    SdkDownloadFrameBytes,
+    WorkspaceCommitElapsedMs,
     SnapshotLogicalBytes,
     UploadAttempts,
     UploadedBytes,
@@ -51,6 +60,9 @@ impl ProtectionMetric {
     fn name(self) -> &'static str {
         match self {
             Self::SpoolWrittenBytes => "runtimeSpoolWrittenBytes",
+            Self::RawCaptureSpoolWrittenBytes => "rawCaptureSpoolWrittenBytes",
+            Self::SdkDownloadFrameBytes => "sdkDownloadFrameBytes",
+            Self::WorkspaceCommitElapsedMs => "workspaceCommitElapsedMs",
             Self::SnapshotLogicalBytes => "snapshotLogicalBytes",
             Self::UploadAttempts => "uploadAttempts",
             Self::UploadedBytes => "uploadedBytes",
@@ -131,18 +143,43 @@ impl WorkspaceProtection {
     }
 
     fn missing(&self, metric: &'static str) {
-        if !self.enabled {
-            return;
-        }
         #[cfg(test)]
-        if let Some(log) = &self.log {
-            log.lock().unwrap().missing.push(metric);
-            return;
+        if self.enabled {
+            if let Some(log) = &self.log {
+                log.lock().unwrap().missing.push(metric);
+            }
         }
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "Workspace protection observation unavailable: {metric}"
-        );
+        self.record("runtime", metric, serde_json::Value::Null, "unavailable");
+    }
+
+    pub fn unavailable(&self, metric: ProtectionMetric) {
+        self.missing(metric.name());
+    }
+
+    /// The only accepted strings are fixed public commit dispositions.
+    pub fn workspace_commit_disposition(&self, disposition: &str) {
+        if [
+            "full",
+            "unchanged",
+            "alreadyAdvanced",
+            "pending",
+            "rejected",
+        ]
+        .contains(&disposition)
+        {
+            self.record(
+                "runtime",
+                "workspaceCommitDisposition",
+                disposition.into(),
+                if disposition == "pending" {
+                    "interrupted"
+                } else if disposition == "rejected" {
+                    "error"
+                } else {
+                    "ok"
+                },
+            );
+        }
     }
 
     fn record(&self, source: &str, metric: &str, value: serde_json::Value, outcome: &str) {
@@ -385,7 +422,16 @@ fn capture_protection_records<T>(operation: impl FnOnce() -> T) -> (T, Protectio
     (result, records)
 }
 
-thread_local! { static JOB: RefCell<Option<String>> = const { RefCell::new(None) }; }
+thread_local! {
+    static JOB: RefCell<Option<String>> = const { RefCell::new(None) };
+    // An owned Run's explicit absence must not adopt a reused adapter's creator.
+    // This flag controls diagnostic attribution only, never business authority.
+    static OWNED_CONTEXT: Cell<bool> = const { Cell::new(false) };
+}
+#[cfg(test)]
+type TimingLog = std::rc::Rc<RefCell<Vec<serde_json::Value>>>;
+#[cfg(test)]
+thread_local! { static TIMING_LOG: RefCell<Option<(bool, TimingLog)>> = const { RefCell::new(None) }; }
 static IN_FLIGHT: [AtomicUsize; 3] = [const { AtomicUsize::new(0) }; 3];
 const LANES: [&str; 3] = ["ordinary", "control", "listener"];
 
@@ -413,16 +459,27 @@ impl Drop for Span {
 }
 
 pub fn enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = TIMING_LOG.with(|log| log.borrow().as_ref().map(|(enabled, _)| *enabled))
+    {
+        return enabled;
+    }
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("WORKSPACE_PERF_OBSERVATIONS").as_deref() == Ok("1"))
 }
 
-fn emit(mut event: serde_json::Value) {
+fn emit(event: serde_json::Value) {
+    emit_from(event, "runtime");
+}
+fn emit_sdk(event: serde_json::Value) {
+    emit_from(event, "sdk");
+}
+fn emit_from(mut event: serde_json::Value, source: &'static str) {
     if !enabled() {
         return;
     }
     event["schema"] = "workspace.perf.v1".into();
-    event["source"] = "runtime".into();
+    event["source"] = source.into();
     event["atUnixMs"] = (SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -433,11 +490,81 @@ fn emit(mut event: serde_json::Value) {
             event["jobId"] = job.clone().into();
         }
     });
+    #[cfg(test)]
+    if TIMING_LOG.with(|log| {
+        if let Some((_, log)) = log.borrow().as_ref() {
+            log.borrow_mut().push(event.clone());
+            true
+        } else {
+            false
+        }
+    }) {
+        return;
+    }
     let _ = writeln!(std::io::stderr().lock(), "{event}");
 }
 
-pub struct Context(Option<String>);
+#[cfg(test)]
+pub(crate) fn capture_timings<T>(
+    enabled: bool,
+    operation: impl FnOnce() -> T,
+) -> (T, Vec<serde_json::Value>) {
+    let log = std::rc::Rc::new(RefCell::new(Vec::new()));
+    struct Reset(Option<(bool, TimingLog)>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TIMING_LOG.with(|log| log.replace(self.0.take()));
+        }
+    }
+    let _reset = Reset(TIMING_LOG.with(|current| current.replace(Some((enabled, log.clone())))));
+    let result = operation();
+    let records = std::mem::take(&mut *log.borrow_mut());
+    (result, records)
+}
+
+pub struct Context(Option<String>, bool);
+/// Safe diagnostic context admitted by Context; an owned absence is explicit.
+pub(crate) struct ContextSnapshot(Option<String>, bool);
 impl Context {
+    pub(crate) fn snapshot() -> ContextSnapshot {
+        ContextSnapshot(
+            JOB.with(|job| job.borrow().clone()),
+            OWNED_CONTEXT.with(Cell::get),
+        )
+    }
+
+    pub(crate) fn enter_if_absent(snapshot: &ContextSnapshot) -> Self {
+        let previous_owned = OWNED_CONTEXT.with(Cell::get);
+        Self(
+            JOB.with(|job| {
+                let mut current = job.borrow_mut();
+                let previous = current.clone();
+                if current.is_none() && !previous_owned {
+                    *current = snapshot.0.clone();
+                    OWNED_CONTEXT.with(|owned| owned.set(snapshot.1));
+                }
+                previous
+            }),
+            previous_owned,
+        )
+    }
+
+    /// Prefer an existing ambient context. Otherwise use this Run's immutable
+    /// snapshot, including explicit None, and suppress transport-creator fallback.
+    pub(crate) fn enter_owned(snapshot: &ContextSnapshot) -> Self {
+        let previous_owned = OWNED_CONTEXT.with(Cell::get);
+        let previous = JOB.with(|job| {
+            let mut current = job.borrow_mut();
+            let previous = current.clone();
+            if current.is_none() && !previous_owned {
+                *current = snapshot.0.clone();
+            }
+            previous
+        });
+        OWNED_CONTEXT.with(|owned| owned.set(true));
+        Self(previous, previous_owned)
+    }
+
     pub fn enter(body: &[u8]) -> Self {
         let identity = if enabled() {
             serde_json::from_slice::<serde_json::Value>(body)
@@ -463,12 +590,16 @@ impl Context {
         } else {
             None
         };
-        Self(JOB.with(|job| job.replace(identity)))
+        Self(
+            JOB.with(|job| job.replace(identity)),
+            OWNED_CONTEXT.with(|owned| owned.replace(false)),
+        )
     }
 }
 impl Drop for Context {
     fn drop(&mut self) {
         JOB.with(|job| job.replace(self.0.take()));
+        OWNED_CONTEXT.with(|owned| owned.set(self.1));
     }
 }
 
@@ -646,10 +777,18 @@ mod tests {
             operation.forward_sandbox(not_measured.to_string().as_bytes());
             operation.forward_sandbox(b"private diagnostic\n");
         });
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["source"], "sandbox");
-        assert_eq!(events[0]["value"], 41);
-        assert_eq!(events[0]["outcome"], "error");
+        let measured: Vec<_> = events
+            .iter()
+            .filter(|event| event["outcome"] != "unavailable")
+            .collect();
+        assert_eq!(measured.len(), 1);
+        assert_eq!(measured[0]["source"], "sandbox");
+        assert_eq!(measured[0]["value"], 41);
+        assert_eq!(measured[0]["outcome"], "error");
+        assert!(events
+            .iter()
+            .filter(|event| event["outcome"] == "unavailable")
+            .all(|event| event["value"].is_null()));
         assert!(!serde_json::to_string(&events).unwrap().contains("private"));
     }
 
@@ -743,5 +882,34 @@ mod tests {
         );
         assert_eq!(route("/arbitrary/private/path"), "other");
         assert_eq!(route("/agent-runs/step"), "/agent-runs/step");
+    }
+}
+
+#[cfg(test)]
+mod measurement_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn missing_guest_measurements_are_correlated_unavailable_records() {
+        let (_, events) = capture_protection(|| {
+            WorkspaceProtection::new()
+                .with_context(
+                    ProtectionTrigger::TerminalCommit,
+                    "run-measured",
+                    Some("job-measured"),
+                )
+                .forward_sandbox(b"private diagnostic must never be forwarded");
+        });
+        assert_eq!(events.len(), 2);
+        for (event, metric) in events.iter().zip(["scannedEntries", "sourceReadBytes"]) {
+            assert_eq!(event["metric"], metric);
+            assert_eq!(event["outcome"], "unavailable");
+            assert!(event["value"].is_null());
+            assert_eq!(event["runId"], "run-measured");
+            assert_eq!(event["jobId"], "job-measured");
+            assert_eq!(event["trigger"], "terminalCommit");
+            assert_eq!(event["operationId"], events[0]["operationId"]);
+        }
+        assert!(!serde_json::to_string(&events).unwrap().contains("private"));
     }
 }
