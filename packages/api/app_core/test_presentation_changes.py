@@ -14,7 +14,7 @@ from django.test import SimpleTestCase, TransactionTestCase
 from django.utils import timezone
 
 from .models import Agent, AgentInput, AgentInputDelivery, AgentInputQueue, AgentRun, ModelConfig, PresentationChange, PresentationChangeOutbox, Session, Workspace
-from .presentation_changes import CHANNEL, PROJECTED_CHANNEL, agent_change_key, drain_pending_changes, read_presentation_versions, session_change_key
+from .presentation_changes import CHANNEL, PROJECTED_CHANNEL, agent_change_key, drain_pending_changes, read_presentation_versions, presentation_change_keys, session_change_key
 from .testing import create_session
 
 
@@ -148,10 +148,11 @@ class PresentationChangeTests(TransactionTestCase):
         AgentRun.objects.filter(pk=self.run.pk).update(transitionReason="lease bookkeeping")
         self.assertEqual(self.versions(), before)
 
-    def test_permission_changes_advance_authority_without_copying_private_fields(self):
+    def test_permission_changes_leave_display_versions_and_outbox_unchanged(self):
         before = self.versions()
         get_user_model().objects.filter(pk=self.user.pk).update(is_active=False)
-        self.assertChangedOnly(before, "authority")
+        self.assertEqual(PresentationChangeOutbox.objects.count(), 0)
+        self.assertEqual(self.versions(), before)
 
     def test_committed_notification_is_only_a_key_and_rollback_emits_nothing(self):
         cfg = connection.settings_dict
@@ -280,15 +281,15 @@ class PresentationChangeTests(TransactionTestCase):
             self.assertEqual(PresentationChangeOutbox.objects.count(), 1)
         self.assertEqual(drain_pending_changes(), 1)
 
-    def test_membership_and_session_authority_changes_are_not_metadata_noise(self):
+    def test_membership_changes_keep_display_caches_and_session_removal_invalidates_views(self):
         before = self.versions()
         self.workspace.memberships.filter(user=self.user).update(role="admin")
-        self.assertChangedOnly(before, "authority")
-        before = self.versions()
+        self.assertEqual(PresentationChangeOutbox.objects.count(), 0)
+        self.assertEqual(self.versions(), before)
         Session.objects.filter(pk=self.session.pk).update(status="deleted", deletedAt=timezone.now())
-        self.assertChangedOnly(before, "navigation", "state", "history", "work", "authority")
+        self.assertChangedOnly(before, "navigation", "state", "history", "work")
 
-    def test_browser_logout_and_password_rotation_invalidate_authority(self):
+    def test_browser_logout_and_password_rotation_leave_display_invalidations_unchanged(self):
         from .models import BrowserLoginSession
         from .persistent_sessions import SessionStore
         login = SessionStore()
@@ -296,10 +297,12 @@ class PresentationChangeTests(TransactionTestCase):
         login.save()
         before = self.versions()
         BrowserLoginSession.objects.filter(pk=login.session_key).delete()
-        self.assertChangedOnly(before, "authority")
+        self.assertEqual(PresentationChangeOutbox.objects.count(), 0)
+        self.assertEqual(self.versions(), before)
         before = self.versions()
         get_user_model().objects.filter(pk=self.user.pk).update(password="synthetic-password-rotation")
-        self.assertChangedOnly(before, "authority")
+        self.assertEqual(PresentationChangeOutbox.objects.count(), 0)
+        self.assertEqual(self.versions(), before)
 
     def test_relay_commit_notifies_other_processes_but_empty_drain_does_not(self):
         self.versions()
@@ -390,6 +393,13 @@ class PresentationChangeGcTests(TransactionTestCase):
 
 
 class PresentationChangeBackendTests(SimpleTestCase):
+    def test_display_scope_tracks_only_its_five_data_views(self):
+        self.assertEqual(presentation_change_keys('workspace', 'agent', 'session'), {
+            'navigation': 'agent:agent:navigation', 'history': 'agent:agent:history',
+            'work': 'agent:agent:work', 'state': 'session:session:state',
+            'context': 'session:session:context',
+        })
+
     def test_live_readers_reject_non_postgres_backends_before_querying(self):
         with patch.object(connections["default"], "vendor", "sqlite"):
             for operation in (lambda: read_presentation_versions("workspace", "agent"),

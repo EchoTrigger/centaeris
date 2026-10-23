@@ -55,7 +55,7 @@ class PresentationServiceTests(SimpleTestCase):
             return SimpleNamespace()
         scope = SimpleNamespace(workspace_id="workspace", agent_id="agent", session_id="session")
         connection = MagicMock()
-        positions = dict(navigation=0, state=0, context=0, history=0, work=0, authority=0)
+        positions = dict(navigation=0, state=0, context=0, history=0, work=0)
         with patch.object(service, "PresentationObserverHub", side_effect=make_hub), patch.object(service, "_listener_connection_parameters") as parameters, patch.object(service, "connection", connection), patch.object(service.transaction, "atomic", return_value=nullcontext()), patch.object(service, "read_presentation_versions", return_value=positions) as read, patch.object(service, "drain_pending_changes", return_value=3) as drain:
             service.create_presentation_hub()
             parameters.assert_not_called()

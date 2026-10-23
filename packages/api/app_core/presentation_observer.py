@@ -128,7 +128,7 @@ class _Observation:
     async def refresh(self):
         async with self.refresh_lock:
             result = await asyncio.wait_for(self.hub.read_versions(self.scope), self.hub.read_timeout)
-            expected = {"navigation", "state", "context", "history", "work", "authority"}
+            expected = {"navigation", "state", "context", "history", "work"}
             if set(result) != expected or any(type(value) is not int or value < 0 for value in result.values()):
                 raise RuntimeError("presentation change versions invalid")
             async with self.condition:

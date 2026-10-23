@@ -38,7 +38,7 @@ class PresentationStreamTests(SimpleTestCase):
         self.loader.content = AsyncMock()
         self.loader.operations = AsyncMock(return_value=[])
         self.loader.live = AsyncMock(return_value=None)
-        self.loader.revisions = AsyncMock(return_value=dict(navigation=0, state=0, context=0, history=0, work=0, authority=0, live=0))
+        self.loader.revisions = AsyncMock(return_value=dict(navigation=0, state=0, context=0, history=0, work=0, live=0))
         async def wait_for_change(_previous):
             await asyncio.Event().wait()
         self.loader.wait_for_change = AsyncMock(side_effect=wait_for_change)
@@ -171,6 +171,46 @@ class PresentationStreamTests(SimpleTestCase):
                                      authority_seconds=.005, read_timeout_seconds=.1)
         frames = [frame async for frame in source]
         self.assertFalse(any('"kind":"snapshot"' in frame for frame in frames))
+
+    async def test_idle_revocation_closes_without_a_display_change_or_notification(self):
+        permitted = True
+        self.loader.authorized.side_effect = lambda: permitted
+        source = stream_presentation(self.scope, self.loader, heartbeat_seconds=.002,
+                                     authority_seconds=.01, read_timeout_seconds=.1)
+        try:
+            await self.until(source, lambda item, _frame: item["kind"] == "viewRevision")
+            checks = self.loader.authorized.await_count
+            permitted = False
+            async with asyncio.timeout(.2):
+                remaining = [frame async for frame in source]
+            self.assertTrue(all(frame.startswith(":") for frame in remaining))
+            self.assertGreater(self.loader.authorized.await_count, checks)
+            self.loader.wait_for_change.assert_awaited_once()
+        finally:
+            await source.aclose()
+
+    async def test_revocation_during_page_preparation_prevents_prepared_payload_emission(self):
+        permitted = True
+        preparing, release = asyncio.Event(), asyncio.Event()
+        async def page(*_args):
+            preparing.set()
+            await release.wait()
+            return self.page
+        self.loader.page.side_effect = page
+        self.loader.authorized.side_effect = lambda: permitted
+        source = stream_presentation(self.scope, self.loader, read_timeout_seconds=.5)
+        try:
+            self.assertEqual(data(await anext(source))["kind"], "navigation")
+            self.assertEqual(data(await anext(source))["kind"], "checkpoint")
+            prepared = asyncio.create_task(anext(source))
+            await asyncio.wait_for(preparing.wait(), .2)
+            permitted = False
+            release.set()
+            with self.assertRaises(StopAsyncIteration):
+                await asyncio.wait_for(prepared, .2)
+        finally:
+            release.set()
+            await source.aclose()
 
     async def test_cancellation_closes_pending_load_without_cancelling_any_run(self):
         started = asyncio.Event()
@@ -373,7 +413,7 @@ class PresentationRouteContractTests(SimpleTestCase):
             ready.set()
             await asyncio.Event().wait()
             yield PresentationHint(None, True)
-        hub = PresentationObserverHub(AsyncMock(return_value=dict(navigation=0, state=0, context=0, history=0, work=0, authority=0)), hints, lambda _: ())
+        hub = PresentationObserverHub(AsyncMock(return_value=dict(navigation=0, state=0, context=0, history=0, work=0)), hints, lambda _: ())
         with patch.object(ProductSessionAuth, "authenticate", authenticate), \
                 patch("app_core.http.presentation.create_presentation_hub", return_value=hub), \
                 patch.object(PresentationLoader, "authorized", AsyncMock(return_value=True)), \

@@ -8,15 +8,28 @@ from .presentation_notifications import PresentationHint
 from .presentation_stream import PresentationScope
 
 class PresentationObserverTests(SimpleTestCase):
+    async def test_display_observation_uses_five_versions_without_an_authorization_epoch(self):
+        async def hints(ready):
+            ready.set()
+            await asyncio.Event().wait()
+            yield PresentationHint(None, True)
+        versions = dict(navigation=1, state=2, context=3, history=4, work=5)
+        hub = PresentationObserverHub(AsyncMock(return_value=versions), hints, lambda _: ())
+        try:
+            async with hub.observe(('owner',), PresentationScope('workspace', 'agent'), SimpleNamespace()) as observed:
+                self.assertEqual(await observed.revisions(), {**versions, 'live': 0})
+        finally:
+            await hub.aclose()
+
     async def test_two_identical_readers_share_initial_data_and_idle_does_not_reload_it(self):
         queue = asyncio.Queue()
         async def hints(ready):
             ready.set()
             while True: yield PresentationHint(await queue.get(), True)
-        versions = dict(navigation=1,state=1,context=0,history=0,work=0,authority=0)
+        versions = dict(navigation=1,state=1,context=0,history=0,work=0)
         reader = AsyncMock(side_effect=lambda scope:dict(versions))
-        loader = SimpleNamespace(navigation=AsyncMock(return_value=[]),state=AsyncMock(return_value={'agentRun':None,'sourceHighWater':'0'}),authorized=AsyncMock(return_value=True),authority_revision=AsyncMock(return_value=0))
-        hub = PresentationObserverHub(reader,hints,lambda scope:{'agent:agent:navigation','session:session:state','authority'})
+        loader = SimpleNamespace(navigation=AsyncMock(return_value=[]),state=AsyncMock(return_value={'agentRun':None,'sourceHighWater':'0'}),authorized=AsyncMock(return_value=True))
+        hub = PresentationObserverHub(reader,hints,lambda scope:{'agent:agent:navigation','session:session:state'})
         scope = PresentationScope('workspace','agent','session')
         try:
             async with hub.observe(('owner',scope),scope,loader) as first, hub.observe(('owner',scope),scope,loader) as second:
@@ -41,9 +54,9 @@ class PresentationObserverTests(SimpleTestCase):
         async def hints(ready):
             ready.set()
             while True: yield PresentationHint(await queue.get(), True)
-        reader=AsyncMock(return_value=dict(navigation=0,state=0,context=0,history=0,work=0,authority=0))
-        loader=SimpleNamespace(navigation=AsyncMock(return_value=[]),authorized=AsyncMock(return_value=True),authority_revision=AsyncMock(return_value=0))
-        hub=PresentationObserverHub(reader,hints,lambda scope:{'authority'},max_observers=1)
+        reader=AsyncMock(return_value=dict(navigation=0,state=0,context=0,history=0,work=0))
+        loader=SimpleNamespace(navigation=AsyncMock(return_value=[]),authorized=AsyncMock(return_value=True))
+        hub=PresentationObserverHub(reader,hints,lambda scope:{'agent:agent:navigation'},max_observers=1)
         scope=PresentationScope('workspace','agent')
         try:
             async with hub.observe(('owner-A',scope),scope,loader):
@@ -56,10 +69,10 @@ class PresentationObserverTests(SimpleTestCase):
         async def hints(ready):
             ready.set()
             while True: yield PresentationHint(await queue.get(), True)
-        versions=dict(navigation=0,state=0,context=0,history=0,work=0,authority=0)
+        versions=dict(navigation=0,state=0,context=0,history=0,work=0)
         reader=AsyncMock(side_effect=lambda scope:dict(versions))
-        loader=SimpleNamespace(navigation=AsyncMock(return_value=[]),authorized=AsyncMock(return_value=True),authority_revision=AsyncMock(return_value=0))
-        hub=PresentationObserverHub(reader,hints,lambda scope:{'agent:agent:navigation','authority'})
+        loader=SimpleNamespace(navigation=AsyncMock(return_value=[]),authorized=AsyncMock(return_value=True))
+        hub=PresentationObserverHub(reader,hints,lambda scope:{'agent:agent:navigation'})
         try:
             async with hub.observe(('owner',),PresentationScope('workspace','agent'),loader) as observed:
                 await observed.navigation()
@@ -74,7 +87,7 @@ class PresentationObserverTests(SimpleTestCase):
         async def hints(ready):
             ready.set()
             while True: yield PresentationHint(await queue.get(), True)
-        versions=dict(navigation=0,state=0,context=0,history=0,work=0,authority=0)
+        versions=dict(navigation=0,state=0,context=0,history=0,work=0)
         calls=0
         async def read(scope):
             nonlocal calls
@@ -83,7 +96,7 @@ class PresentationObserverTests(SimpleTestCase):
             if calls==2:
                 entered.set(); await release.wait()
             return result
-        loader=SimpleNamespace(navigation=AsyncMock(return_value=[]),authorized=AsyncMock(return_value=True),authority_revision=AsyncMock(return_value=0))
+        loader=SimpleNamespace(navigation=AsyncMock(return_value=[]),authorized=AsyncMock(return_value=True))
         hub=PresentationObserverHub(read,hints,lambda scope:{'agent:agent:navigation'})
         try:
             async with hub.observe(('owner',),PresentationScope('workspace','agent'),loader) as observed:
@@ -99,7 +112,7 @@ class PresentationObserverTests(SimpleTestCase):
             await asyncio.Event().wait()
             yield PresentationHint(None, True)
         loader = SimpleNamespace(authorized=AsyncMock(side_effect=[True, False]))
-        reader = AsyncMock(return_value=dict(navigation=0,state=0,context=0,history=0,work=0,authority=0))
+        reader = AsyncMock(return_value=dict(navigation=0,state=0,context=0,history=0,work=0))
         hub = PresentationObserverHub(reader, hints, lambda _: ())
         scope = PresentationScope('workspace', 'agent')
         try:
@@ -116,7 +129,7 @@ class PresentationObserverTests(SimpleTestCase):
             yield PresentationHint(None, True)
             await asyncio.Event().wait()
         drain = AsyncMock(return_value=256)
-        reader = AsyncMock(return_value=dict(navigation=0,state=0,context=0,history=0,work=0,authority=0))
+        reader = AsyncMock(return_value=dict(navigation=0,state=0,context=0,history=0,work=0))
         hub = PresentationObserverHub(reader, hints, lambda _: (), drain=drain)
         try:
             async with hub.observe(('owner',), PresentationScope('workspace','agent'), SimpleNamespace()) as observed:
@@ -154,7 +167,7 @@ class PresentationObserverTests(SimpleTestCase):
                         except asyncio.CancelledError:
                             pass
                 active.discard(task)
-        versions = dict(navigation=0, state=0, context=0, history=0, work=0, authority=0)
+        versions = dict(navigation=0, state=0, context=0, history=0, work=0)
         loader = SimpleNamespace(state=AsyncMock(return_value={"sourceHighWater": "0", "agentRun": {"agentRunId": "A", "status": "running"}}),
             live_signal_tail=tail, wait_live_signal=wait)
         hub = PresentationObserverHub(AsyncMock(side_effect=lambda scope: dict(versions)), hints, lambda scope: {"state"})
@@ -205,7 +218,7 @@ class PresentationObserverTests(SimpleTestCase):
                 old_read.set()
                 await finish_old.wait()
             return {"text": run}
-        versions = dict(navigation=0, state=0, context=0, history=0, work=0, authority=0)
+        versions = dict(navigation=0, state=0, context=0, history=0, work=0)
         loader = SimpleNamespace(state=AsyncMock(return_value={"sourceHighWater": "0", "agentRun": {"agentRunId": "A", "status": "running"}}),
             live_signal_tail=tail, wait_live_signal=wait, live=AsyncMock(side_effect=live))
         hub = PresentationObserverHub(AsyncMock(side_effect=lambda scope: dict(versions)), hints, lambda scope: {"state"})
@@ -237,7 +250,7 @@ class PresentationObserverTests(SimpleTestCase):
             ready.set()
             while True:
                 yield await queue.get()
-        versions = dict(navigation=0,state=0,context=0,history=0,work=0,authority=0)
+        versions = dict(navigation=0,state=0,context=0,history=0,work=0)
         drain = AsyncMock(return_value=256)
         hub = PresentationObserverHub(AsyncMock(side_effect=lambda _: dict(versions)), hints, lambda _: {'agent:agent:navigation'}, drain=drain)
         try:
@@ -279,7 +292,7 @@ class PresentationObserverTests(SimpleTestCase):
             await finish.wait()
             if False:
                 yield PresentationHint(None, True)
-        reader = AsyncMock(return_value=dict(navigation=0,state=0,context=0,history=0,work=0,authority=0))
+        reader = AsyncMock(return_value=dict(navigation=0,state=0,context=0,history=0,work=0))
         hub = PresentationObserverHub(reader, hints, lambda _: ())
         try:
             async with hub.observe(('owner',), PresentationScope('workspace','agent'), SimpleNamespace()) as observed:

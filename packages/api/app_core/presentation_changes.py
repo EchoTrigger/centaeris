@@ -3,9 +3,8 @@
 PostgreSQL triggers append scoped dirtiness in the source transaction, including
 writes from Runtime. A bounded relay advances versions and consumes the outbox
 atomically. NOTIFY carries only a key and is a hint; lost wakeups remain pending.
-The authority version is also a projection: it must never replace an authoritative
-pre-emission permission check. These positions never replace transcript water,
-read acknowledgements or authorization checks.
+These display versions never replace transcript water, read acknowledgements or
+authorization checks. Permission checks remain independent of display invalidation.
 """
 from django.db import connections, transaction
 
@@ -14,7 +13,6 @@ from .models import PresentationChange, PresentationChangeOutbox
 
 CHANNEL = "workspace_presentation_changed_v1"
 PROJECTED_CHANNEL = "workspace_presentation_projected_v1"
-AUTHORITY_KEY = "authority"
 
 
 def _identity(value):
@@ -40,7 +38,6 @@ def presentation_change_keys(workspace_id, agent_id, session_id=None):
     # caller's authorized binding rather than a broad content invalidation key.
     _identity(workspace_id)
     keys = {kind: agent_change_key(agent_id, kind) for kind in ("navigation", "history", "work")}
-    keys["authority"] = AUTHORITY_KEY
     if session_id is not None:
         keys.update({kind: session_change_key(session_id, kind) for kind in ("state", "context")})
     return keys
@@ -52,7 +49,7 @@ def read_presentation_versions(workspace_id, agent_id, session_id=None, *, using
     keys = presentation_change_keys(workspace_id, agent_id, session_id)
     positions = dict(PresentationChange.objects.using(using).filter(key__in=keys.values()).values_list("key", "revision"))
     return {kind: positions.get(keys.get(kind), 0)
-            for kind in ("navigation", "history", "work", "state", "context", "authority")}
+            for kind in ("navigation", "history", "work", "state", "context")}
 
 
 def drain_pending_changes(limit=256, *, using="default"):
