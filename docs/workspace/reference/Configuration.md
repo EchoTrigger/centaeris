@@ -190,6 +190,28 @@ API's `agent_run_initial_queue` partial index. Schema numbers stay at v1; existi
 pre-release databases are not migrated or backfilled automatically. Isolated
 verification must initialize the current schema, not reuse an incompatible one.
 
+### Optional model RPC admission
+
+| Variable | Default | Scope |
+| --- | --- | --- |
+| `HOSTED_MODEL_RPC_ADMISSION_DOMAIN` | unset (`None`) | Explicit host label for the Runtime process's selected model RPC domain |
+| `HOSTED_MODEL_RPC_MAX_IN_FLIGHT` | unset (`None`) | Concurrent Runtime-to-API model attempts in that local domain; integer from 1 to 1000000 |
+
+Configure both variables together to opt in. With neither set, admission stays
+disabled and the existing request/retry behavior remains. A partial pair, zero,
+invalid integer, or empty domain fails startup; domain labels contain at most
+128 bytes and no whitespace or control characters. Startup freezes the domain
+table. Every production model client in this Runtime, including its clones and
+native subagents, shares the selected coordinator. Another process with the same
+label has an independent coordinator.
+
+A ticket covers the complete JSON body or SSE stream of one attempt and is
+released before retry backoff. Cancellation returns only local RPC capacity;
+it does not prove remote provider cancellation or a quota/charge refund. These
+settings do not alter Session API fields or the execution/residency limits and
+do not implement distributed provider quotas. See the
+[hosted model boundary](../architecture/HostedModelAdmission.md).
+
 ## Execution and processing
 
 ### Resident sandbox capacity

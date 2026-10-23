@@ -1,3 +1,4 @@
+use centaeris_core::model::admission::ModelAdmission;
 use centaeris_core::model::prepared_prompt::PreparedPromptV1;
 use centaeris_core::model::TruncatedToolCall;
 use centaeris_core::model::{
@@ -77,6 +78,7 @@ pub struct ApiModelClient {
     thinking_mode: Option<String>,
     model_max_output_tokens: u32,
     client: reqwest::Client,
+    admission: Option<ModelAdmission>,
 }
 
 pub struct ApiModelClientConfig {
@@ -102,7 +104,13 @@ impl ApiModelClient {
             thinking_mode: config.thinking_mode,
             model_max_output_tokens: config.model_max_output_tokens,
             client: reqwest::Client::new(),
+            admission: None,
         }
+    }
+
+    pub(crate) fn with_admission(mut self, admission: Option<ModelAdmission>) -> Self {
+        self.admission = admission;
+        self
     }
 
     fn prepared_prompt_max_output_tokens(
@@ -150,6 +158,12 @@ impl ApiModelClient {
         request: &ModelClientRequest,
     ) -> Result<ModelClientResponse, ModelClientError> {
         let model_run_request = self.model_run_request(request)?;
+        // Own only this RPC attempt, including full JSON/SSE consumption. Returning
+        // or dropping this future releases local capacity before retry/backoff.
+        let _attempt = match &self.admission {
+            Some(admission) => Some(admission.acquire_attempt(&self.agent_run_id).await),
+            None => None,
+        };
         let url = format!(
             "{}/internal/model-runs",
             self.api_internal_url.trim_end_matches('/')
@@ -244,6 +258,12 @@ impl ApiModelClient {
         sink: &mut (dyn FnMut(ModelClientStreamEvent) + Send),
     ) -> Result<ModelClientResponse, ModelClientError> {
         let model_run_request = self.model_run_request(request)?;
+        // Own only this RPC attempt, including full JSON/SSE consumption. Returning
+        // or dropping this future releases local capacity before retry/backoff.
+        let _attempt = match &self.admission {
+            Some(admission) => Some(admission.acquire_attempt(&self.agent_run_id).await),
+            None => None,
+        };
         let url = format!(
             "{}/internal/model-runs",
             self.api_internal_url.trim_end_matches('/')
@@ -1211,7 +1231,7 @@ mod tests {
         }
     }
 
-    async fn read_http_request(stream: &mut tokio::net::TcpStream) -> serde_json::Value {
+    pub(super) async fn read_http_request(stream: &mut tokio::net::TcpStream) -> serde_json::Value {
         let mut request = Vec::new();
         let mut buffer = [0_u8; 4_096];
         loop {
@@ -1307,7 +1327,7 @@ mod tests {
         decoder.finish().expect("clean finish");
     }
 
-    fn model_request() -> ModelClientRequest {
+    pub(super) fn model_request() -> ModelClientRequest {
         ModelClientRequest {
             session_id: "chat-1".to_string(),
             turn_id: "turn-1".to_string(),
@@ -1336,7 +1356,7 @@ mod tests {
         }
     }
 
-    fn model_client(
+    pub(super) fn model_client(
         api_internal_url: String,
         thinking_mode: Option<String>,
         model_max_output_tokens: u32,
@@ -1852,3 +1872,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "api_model_client/admission_tests.rs"]
+mod admission_tests;

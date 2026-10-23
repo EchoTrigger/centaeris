@@ -31,8 +31,25 @@ Provider status and `Retry-After` remain on `ModelProviderError`. Django does no
 sleep or automatically resend after an upstream rejection. Runtime retains its
 existing proxy retry loop: the current proxy error body does not forward
 `Retry-After`, and ambiguous network failures can still cause a later external
-attempt. No exactly-once provider execution is promised. Core's local in-process
-model admission is outside this hosted change.
+attempt. No exactly-once provider execution is promised.
+
+Runtime can opt into process-local model RPC admission through the paired
+`HOSTED_MODEL_RPC_ADMISSION_DOMAIN` and `HOSTED_MODEL_RPC_MAX_IN_FLIGHT` settings
+([configuration](../reference/Configuration.md#optional-model-rpc-admission)).
+Both are absent by default. Runtime owns a fixed explicit domain table and gives
+all clients in its selected domain the same Core `ModelAdmission`; client clones,
+continued Runs and native subagents share it. Domain labels are host decisions,
+never inferred from credentials, provider names or model names. A matching label
+in another Runtime process does not share this capacity.
+
+Each actual Runtime-to-API attempt holds a Core `ModelAttemptTicket` through the
+complete JSON body or SSE stream. It releases the ticket on return, error or
+future cancellation, before the existing retry backoff; queued cancellation
+removes its queue entry without dispatch. This release concerns only this
+process's RPC capacity. It does not prove that remote model computation stopped,
+that a provider cancelled the request, or that any charge or quota was refunded.
+The guard introduces no model responsibility ledger, distributed quota, Session
+API field, or execution/residency memory budget.
 
 Retained transcript failures keep their original diagnostic codes. Retired
 quota reasons use the generic failure label rather than instructing operators

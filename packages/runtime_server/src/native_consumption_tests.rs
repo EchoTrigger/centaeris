@@ -62,6 +62,8 @@ fn native_consumption_production_server() {
         tool_layers: Arc::new(Mutex::new(HashMap::new())),
         e2b_runtime: None,
         e2b_runs: Arc::new(e2b_run_registry::E2bRunRegistry::default()),
+        model_admission: hosted_model_admission::HostedModelAdmission::from_env()
+            .expect("native product model RPC admission invalid"),
         execution_profile: Arc::new(RuntimeExecutionProfile::Legacy {
             schema: RUNTIME_EXECUTION_PROFILE_SCHEMA,
             image_digest: format!("sha256:{}", "a".repeat(64)),

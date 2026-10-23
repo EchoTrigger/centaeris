@@ -261,6 +261,7 @@ fn e2b_lazy_consumption_server() {
         e2b_runtime: Some(provider.clone()),
         e2b_runs: Arc::new(e2b_run_registry::E2bRunRegistry::default()),
         request_capacity: request_capacity::RequestCapacity::from_env().unwrap(),
+        model_admission: crate::hosted_model_admission::HostedModelAdmission::default(),
     };
     let server = runtime.spawn(serve_http(listener, state));
     println!("e2b-lazy-product-ready:http://{address}");

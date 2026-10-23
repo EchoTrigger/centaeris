@@ -545,6 +545,7 @@ pub(super) fn step(
         tool_layers,
         e2b_runtime,
         e2b_runs,
+        model_admission,
         ..
     } = state;
     let agent_run_step = match serde_json::from_slice::<AgentRunStepRequest>(body.as_ref())
@@ -592,6 +593,7 @@ pub(super) fn step(
                 tool_layers: tool_layers.clone(),
                 e2b_runtime,
                 e2b_runs,
+                model_admission,
             },
         )
     });

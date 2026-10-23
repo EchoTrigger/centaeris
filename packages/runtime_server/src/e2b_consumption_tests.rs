@@ -73,6 +73,8 @@ fn e2b_consumption_production_server() {
         execution_profile,
         e2b_runtime: Some(e2b_runtime),
         e2b_runs: Arc::new(e2b_run_registry::E2bRunRegistry::default()),
+        model_admission: hosted_model_admission::HostedModelAdmission::from_env()
+            .expect("E2B product model RPC admission invalid"),
         request_capacity: request_capacity::RequestCapacity::from_env()
             .unwrap_or_else(|_| panic!("E2B product request capacity invalid")),
     };

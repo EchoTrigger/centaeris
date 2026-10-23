@@ -38,6 +38,7 @@ mod host_retirement;
 mod hosted_execution_context;
 #[cfg(test)]
 mod hosted_lifecycle_fixture;
+mod hosted_model_admission;
 mod http;
 mod job_protocol;
 mod lifecycle_hooks;
@@ -423,6 +424,7 @@ fn cached_execution_control_reason(
 }
 
 fn main() -> Result<(), String> {
+    let model_admission = hosted_model_admission::HostedModelAdmission::from_env()?;
     let backend_configuration = execution_backend_config::ExecutionBackendConfig::from_env()?;
     let execution_profile = Arc::new(match &backend_configuration {
         execution_backend_config::ExecutionBackendConfig::Legacy => {
@@ -494,6 +496,7 @@ fn main() -> Result<(), String> {
         execution_profile,
         e2b_runtime,
         e2b_runs: Arc::new(e2b_run_registry::E2bRunRegistry::default()),
+        model_admission,
         request_capacity: request_capacity::RequestCapacity::from_env()?,
     };
     runtime.block_on(serve_http(listener, state))
@@ -1114,6 +1117,7 @@ struct HttpServerState {
     execution_profile: Arc<RuntimeExecutionProfile>,
     e2b_runtime: Option<Arc<e2b_runtime::E2bRuntime>>,
     e2b_runs: Arc<e2b_run_registry::E2bRunRegistry>,
+    model_admission: hosted_model_admission::HostedModelAdmission,
     request_capacity: request_capacity::RequestCapacity,
 }
 
@@ -1979,6 +1983,7 @@ struct AgentRunExecutionState {
     tool_layers: ToolLayerRegistry,
     e2b_runtime: Option<Arc<e2b_runtime::E2bRuntime>>,
     e2b_runs: Arc<e2b_run_registry::E2bRunRegistry>,
+    model_admission: hosted_model_admission::HostedModelAdmission,
 }
 
 fn execute_agent_run(
@@ -1994,6 +1999,7 @@ fn execute_agent_run(
         tool_layers,
         e2b_runtime,
         e2b_runs,
+        model_admission,
     } = execution_state;
     let startup_started = Instant::now();
     let mut first_tool_timing = observations::lifecycle::FirstToolTiming::new(
@@ -2049,7 +2055,8 @@ fn execute_agent_run(
         authorization_digest: agent_run_start.authorization_digest.clone(),
         thinking_mode: agent_run_start.authorization.thinking_mode.clone(),
         model_max_output_tokens: agent_run_start.model_max_output_tokens,
-    });
+    })
+    .with_admission(model_admission.selected());
     let session_log = job_store
         .session_log(
             agent_run_start.authorization.workspace_id.clone(),
