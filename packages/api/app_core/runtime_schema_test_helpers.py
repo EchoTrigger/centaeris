@@ -16,6 +16,9 @@ def isolate_runtime_schema(test):
 
     def restore_runtime_schema():
         with connection.cursor() as cursor:
+            # This fixture owns the current Runtime admission projection. Drop
+            # it before its source table; unrelated views still block cleanup.
+            cursor.execute("DROP VIEW IF EXISTS runtime.provider_environment_power_admission")
             cursor.execute("SELECT tablename FROM pg_tables WHERE schemaname='runtime'")
             tables = [row[0] for row in cursor.fetchall()]
             if tables:
@@ -35,5 +38,15 @@ def remove_runtime_trigger_functions(cursor):
                  "verify_resident_allocation", "protect_environment_retirement",
                  "protect_environment_maintenance_completion",
                  "protect_agent_run_cleanup_receipt",
-                 "protect_environment_provision_completion"):
+                 "protect_environment_provision_completion",
+                 "protect_environment_creation_attempt",
+                 "protect_lifecycle_lease_purpose",
+                 "protect_provider_creation_operation",
+                 "protect_provider_run_cleanup_receipt",
+                 "protect_provider_environment_binding",
+                 "protect_retained_provider_run_use",
+                 "protect_provider_environment_retirement",
+                 "protect_provider_environment_power",
+                 "resident_capacity_release",
+                 "resident_capacity_job_change"):
         cursor.execute("DROP FUNCTION IF EXISTS runtime." + name + "()")

@@ -9,6 +9,8 @@ use serde_json::Value;
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Fixture {
+    live_server_url: String,
+    internal_token: String,
     database: Value,
     cases: Vec<Case>,
 }
@@ -49,29 +51,32 @@ fn django_committed_work_return_facts() {
         let session = &start.authorization.session_id;
         let job = format!("agent_run.lifecycle:{run}");
         store
-            .schedule_runtime_job(ScheduleRuntimeJobRequest {
-                job: RuntimeJobRecord {
-                    job_id: job.clone(),
-                    job_kind: "agent_run.lifecycle".into(),
-                    status: RuntimeJobStatus::Queued,
-                    run_at_ms: now,
-                    lease_owner: None,
-                    lease_expires_at_ms: None,
-                    heartbeat_at_ms: None,
-                    retry_count: 0,
-                    max_retries: 0,
-                    backoff_policy: RuntimeBackoffPolicy::default(),
-                    idempotency_key: format!("{job}:{}", start.authorization_digest),
-                    session_id: Some(session.clone()),
-                    branch_id: None,
-                    checkpoint_id: None,
-                    payload_ref: Some(format!("record:agent_run:{run}")),
-                    output_refs: vec![],
-                    last_error: None,
-                    created_at_ms: now,
-                    updated_at_ms: now,
+            .schedule_worker_job(
+                ScheduleRuntimeJobRequest {
+                    job: RuntimeJobRecord {
+                        job_id: job.clone(),
+                        job_kind: "agent_run.lifecycle".into(),
+                        status: RuntimeJobStatus::Queued,
+                        run_at_ms: now,
+                        lease_owner: None,
+                        lease_expires_at_ms: None,
+                        heartbeat_at_ms: None,
+                        retry_count: 0,
+                        max_retries: 0,
+                        backoff_policy: RuntimeBackoffPolicy::default(),
+                        idempotency_key: format!("{job}:{}", start.authorization_digest),
+                        session_id: Some(session.clone()),
+                        branch_id: None,
+                        checkpoint_id: None,
+                        payload_ref: Some(format!("record:agent_run:{run}")),
+                        output_refs: vec![],
+                        last_error: None,
+                        created_at_ms: now,
+                        updated_at_ms: now,
+                    },
                 },
-            })
+                Some(start.authorization.workspace_id.as_str()),
+            )
             .unwrap();
         let owner = store
             .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
@@ -196,6 +201,17 @@ fn django_committed_work_return_facts() {
             }
         }
         if case.kind != "lifecycleFailure" {
+            crate::hosted_lifecycle_fixture::confirm_unallocated_cleanup_and_release(
+                &store,
+                &start,
+                &fence,
+                &fixture.live_server_url,
+                &fixture.internal_token,
+                std::env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY")
+                    .expect("fixture signing key")
+                    .as_bytes(),
+            )
+            .unwrap();
             store
                 .complete_runtime_job(CompleteRuntimeJobRequest {
                     job_id: job.clone(),

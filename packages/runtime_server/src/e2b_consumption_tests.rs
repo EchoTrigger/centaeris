@@ -90,3 +90,6 @@ fn e2b_consumption_production_server() {
         let _ = server.await;
     });
 }
+
+#[cfg(target_os = "linux")]
+mod lazy_product;

@@ -13,6 +13,7 @@ from django.test import TransactionTestCase, override_settings
 
 from .models import SessionEnvironment, Workspace
 from .testing import create_session
+from .runtime_schema_test_helpers import isolate_runtime_schema
 
 
 TOKEN = 'maintenance-fixture-' + 'm' * 32
@@ -24,6 +25,7 @@ class EnvironmentMaintenanceTests(TransactionTestCase):
 
     def setUp(self):
         super().setUp()
+        isolate_runtime_schema(self)
         user = User.objects.create_user(username='maintenance-owner')
         self.workspace = Workspace.objects.create(name='Maintenance', createdBy=user)
         self.session = create_session(workspace=self.workspace, owner=user)
@@ -268,8 +270,10 @@ class EnvironmentMaintenanceTests(TransactionTestCase):
         job = f'agent_run.lifecycle:{run.pk}'
         with connection.cursor() as cursor:
             cursor.execute('CREATE TABLE IF NOT EXISTS runtime.runtime_jobs(job_id text PRIMARY KEY,job_kind text,status text,'
-                'lease_owner text,lease_expires_at_ms bigint,idempotency_key text,session_id text,payload_ref text)')
-            cursor.execute('INSERT INTO runtime.runtime_jobs VALUES(%s,%s,%s,%s,'
+                "lease_purpose text NOT NULL DEFAULT 'execute',lease_owner text,lease_expires_at_ms bigint,"
+                'idempotency_key text,session_id text,payload_ref text)')
+            cursor.execute('INSERT INTO runtime.runtime_jobs(job_id,job_kind,status,lease_owner,'
+                'lease_expires_at_ms,idempotency_key,session_id,payload_ref) VALUES(%s,%s,%s,%s,'
                 '(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint+60000,%s,%s,%s)',
                 [job, 'agent_run.lifecycle', 'running', 'worker-test', f'{job}:{grant.digest}',
                  self.session.pk, f'record:agent_run:{run.pk}'])

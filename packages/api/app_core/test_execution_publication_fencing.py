@@ -26,11 +26,13 @@ from .agent_run_authorization_factory import create_agent_run_authorization
 from .http import internal, workspaces
 from .models import Agent, AgentRun, ModelConfig, StorageCleanupRetry, Workspace
 from .testing import create_session
+from .runtime_schema_test_helpers import isolate_runtime_schema
 
 
 class ExecutionPublicationFixture:
     def setUp(self):
         super().setUp()
+        isolate_runtime_schema(self)
         storage = tempfile.TemporaryDirectory(prefix="execution-publication-")
         self.storage_root = Path(storage.name)
         self.addCleanup(storage.cleanup)

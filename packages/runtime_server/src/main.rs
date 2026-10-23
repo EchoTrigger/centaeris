@@ -36,6 +36,8 @@ mod failure_diagnostics;
 mod file_mutation_commit;
 mod host_retirement;
 mod hosted_execution_context;
+#[cfg(test)]
+mod hosted_lifecycle_fixture;
 mod http;
 mod job_protocol;
 mod lifecycle_hooks;

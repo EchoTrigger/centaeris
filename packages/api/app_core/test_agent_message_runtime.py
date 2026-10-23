@@ -5,6 +5,9 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Thread
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 from unittest.mock import patch
@@ -14,19 +17,167 @@ from django.contrib.auth import get_user_model
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.db import connection, transaction
-from django.test import LiveServerTestCase, override_settings
+from django.test import LiveServerTestCase, SimpleTestCase, override_settings
 
 from .agent_messages import message_contract_digest, validate_agent_message
 from .agent_run_authorization_factory import create_agent_run_authorization
 from .models import Agent, AgentRun, ModelConfig, Session, SessionAssetLink, SessionEvent, UserLibraryObject, Workspace, WorkspaceMembership
 from .testing import fenced_start_fixture
-from .runtime_schema_test_helpers import remove_runtime_trigger_functions
+from .runtime_schema_test_helpers import isolate_runtime_schema
+
+
+def _unallocated_receipt_query(raw, *, path, token, allowed_run_ids):
+    """Closed request contract for the fixture's read-only receipt transport."""
+    from .runtime_contract import require_opaque_ref, require_sha256
+    if path != "/internal/agent-runs/cleanup-receipt":
+        raise LookupError("fixture_cleanup_receipt_not_found")
+    if token != settings.INTERNAL_API_TOKEN:
+        raise PermissionError("fixture_cleanup_receipt_unauthorized")
+
+    def unique_object(pairs):
+        result = {}
+        for name, value in pairs:
+            if name in result:
+                raise ValueError("fixture_cleanup_receipt_duplicate_field")
+            result[name] = value
+        return result
+
+    body = json.loads(raw, object_pairs_hook=unique_object)
+    if (not isinstance(body, dict)
+            or set(body) != {"schema", "agentRunId", "authorizationDigest", "cleanupReceiptId"}
+            or body["schema"] != "runtime.agent_run.cleanup_receipt.get.v1"):
+        raise ValueError("fixture_cleanup_receipt_query_invalid")
+    require_opaque_ref("agentRunId", body["agentRunId"])
+    require_opaque_ref("cleanupReceiptId", body["cleanupReceiptId"])
+    require_sha256("authorizationDigest", body["authorizationDigest"])
+    if body["agentRunId"] not in allowed_run_ids:
+        raise LookupError("fixture_cleanup_receipt_not_found")
+    return body
+
+
+def _read_unallocated_store_receipt(body):
+    """Read the fact written by Rust Store; never create or repair any receipt."""
+    if (connection.settings_dict["ENGINE"] != "django.db.backends.postgresql"
+            or not connection.settings_dict["NAME"].startswith("test_")):
+        raise RuntimeError("fixture_cleanup_receipt_database_invalid")
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT receipt_id,agent_run_id,environment_id,authorization_digest,"
+            "controller_epoch,allocation_kind,instance_id,cleanup_complete,"
+            "physical_removed,removed_container_id "
+            "FROM runtime.agent_run_cleanup_receipts "
+            "WHERE agent_run_id=%s AND authorization_digest=%s AND receipt_id=%s",
+            [body["agentRunId"], body["authorizationDigest"], body["cleanupReceiptId"]],
+        )
+        row = cursor.fetchone()
+    if row is None:
+        raise LookupError("fixture_cleanup_receipt_not_found")
+    if (row[5] != "neverAllocated" or row[6] is not None or row[7] is not True
+            or row[8] is not False or row[9] is not None):
+        raise RuntimeError("fixture_cleanup_receipt_allocation_invalid")
+    return {
+        "schema": "runtime.agent_run.cleanup_receipt.v1",
+        "receiptId": row[0], "agentRunId": row[1], "environmentId": row[2],
+        "authorizationDigest": row[3], "controllerEpoch": row[4],
+        "allocation": {"kind": "neverAllocated"}, "cleanupComplete": row[7],
+    }
+
+
+@contextmanager
+def unallocated_receipt_bridge(allowed_run_ids):
+    """Replace only transport, preserving real Store writes and API release."""
+    allowed_run_ids = frozenset(allowed_run_ids)
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 4096:
+                    raise ValueError("fixture_cleanup_receipt_size_invalid")
+                query = _unallocated_receipt_query(
+                    self.rfile.read(length), path=self.path,
+                    token=self.headers.get("X-Internal-Token"),
+                    allowed_run_ids=allowed_run_ids,
+                )
+                receipt = _read_unallocated_store_receipt(query)
+                requests.append(query)
+                status, payload = 200, receipt
+            except PermissionError:
+                status, payload = 403, {"error": "fixture_cleanup_receipt_unauthorized"}
+            except LookupError:
+                status, payload = 404, {"error": "fixture_cleanup_receipt_not_found"}
+            except (ValueError, TypeError, UnicodeError):
+                status, payload = 400, {"error": "fixture_cleanup_receipt_query_invalid"}
+            except Exception:
+                status, payload = 503, {"error": "fixture_cleanup_receipt_unavailable"}
+            finally:
+                connection.close()
+            encoded = json.dumps(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with override_settings(RUNTIME_URL=f"http://127.0.0.1:{server.server_port}"), \
+                patch.dict(os.environ, {"NO_PROXY": "127.0.0.1,localhost,::1",
+                                        "no_proxy": "127.0.0.1,localhost,::1"}):
+            yield requests
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        assert not thread.is_alive(), "fixture receipt transport did not stop"
+
+
+class HostedLifecycleReceiptQueryTests(SimpleTestCase):
+    def query(self, body, **changes):
+        options = {"path": "/internal/agent-runs/cleanup-receipt",
+                   "token": "fixture-internal-token", "allowed_run_ids": {"run-1"}} | changes
+        with override_settings(INTERNAL_API_TOKEN="fixture-internal-token"):
+            return _unallocated_receipt_query(body, **options)
+
+    def test_closed_receipt_query_preserves_exact_requested_identities(self):
+        body = {"schema": "runtime.agent_run.cleanup_receipt.get.v1", "agentRunId": "run-1",
+                "authorizationDigest": "sha256:" + "a" * 64, "cleanupReceiptId": "receipt-1"}
+        self.assertEqual(self.query(json.dumps(body)), body)
+        for change in ({"extra": True}, {"schema": "unsupported"}, {"agentRunId": True},
+                       {"authorizationDigest": "bad"}, {"cleanupReceiptId": ""}):
+            with self.subTest(change=change), self.assertRaises((ValueError, TypeError)):
+                self.query(json.dumps(body | change))
+
+    def test_foreign_identity_token_path_and_duplicate_fields_are_rejected(self):
+        body = json.dumps({"schema": "runtime.agent_run.cleanup_receipt.get.v1",
+                           "agentRunId": "run-1", "authorizationDigest": "sha256:" + "a" * 64,
+                           "cleanupReceiptId": "receipt-1"})
+        with self.assertRaises(PermissionError):
+            self.query(body, token="wrong")
+        for change in ({"path": "/another"}, {"allowed_run_ids": {"other-run"}}):
+            with self.subTest(change=change), self.assertRaises(LookupError):
+                self.query(body, **change)
+        duplicate = body[:-1] + ', "agentRunId": "run-1"}'
+        with self.assertRaises(ValueError):
+            self.query(duplicate)
+        for raw in ("[]", "null", "invalid"):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                self.query(raw)
 
 
 class AgentMessageRuntimeTests(LiveServerTestCase):
     serialized_rollback = True
 
     def _runtime_fixture(self):
+        isolate_runtime_schema(self)
         storage = tempfile.TemporaryDirectory(prefix="agent-message-contract-")
         self.addCleanup(storage.cleanup)
         self.enterContext(override_settings(MEDIA_ROOT=storage.name))
@@ -55,34 +206,6 @@ class AgentMessageRuntimeTests(LiveServerTestCase):
         database = connection.settings_dict
         self.assertEqual(database["ENGINE"], "django.db.backends.postgresql")
         self.assertTrue(database["NAME"].startswith("test_"), "requires an isolated Django test database")
-        # Django flush does not manage Core's native runtime schema. Remove only
-        # tables this fixture creates, so later API lease fixtures keep their
-        # own schema instead of inheriting Core's additional required columns.
-        runtime_tables_query = """SELECT c.relname FROM pg_class c
-            JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE n.nspname = 'runtime' AND c.relkind IN ('r', 'p')"""
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'runtime')")
-            previous_schema_exists = cursor.fetchone()[0]
-            cursor.execute(runtime_tables_query)
-            previous_tables = {row[0] for row in cursor.fetchall()}
-
-        def remove_created_runtime_tables():
-            with connection.cursor() as cursor:
-                cursor.execute(runtime_tables_query)
-                created = {row[0] for row in cursor.fetchall()} - previous_tables
-                if created:
-                    names = ", ".join("runtime." + connection.ops.quote_name(name) for name in sorted(created))
-                    cursor.execute("DROP TABLE " + names)
-                cursor.execute(runtime_tables_query)
-                self.assertEqual({row[0] for row in cursor.fetchall()}, previous_tables)
-                if not previous_schema_exists:
-                    # A second production-store fixture must see the original
-                    # absent schema, rather than an empty migrated namespace.
-                    remove_runtime_trigger_functions(cursor)
-                    cursor.execute("DROP SCHEMA IF EXISTS runtime")
-
-        self.addCleanup(remove_created_runtime_tables)
         fixture = {"liveServerUrl": self.live_server_url, "agentRunStart": fenced_start_fixture(run),
             "internalToken": settings.INTERNAL_API_TOKEN, "cookieName": settings.SESSION_COOKIE_NAME,
             "cookieValue": self.client.cookies[settings.SESSION_COOKIE_NAME].value,
@@ -95,16 +218,20 @@ class AgentMessageRuntimeTests(LiveServerTestCase):
 
     def _invoke_runtime(self, fixture, test_name, receipt):
         root = Path(__file__).resolve().parents[3]
-        result = subprocess.run(["cargo", "test", "--locked", "-p", "runtime_server",
-            "agent_messages::tests::runtime::" + test_name, "--", "--ignored", "--exact", "--nocapture"],
-            cwd=root, env={**os.environ, "CARGO_BUILD_JOBS": "1", "CENTAERIS_AGENT_MESSAGE_FIXTURE": json.dumps(fixture),
-                           "NO_PROXY": "127.0.0.1,localhost," + os.environ.get("NO_PROXY", "")},
-            capture_output=True, text=True, encoding="utf-8", timeout=300)
+        with unallocated_receipt_bridge({fixture["agentRunStart"]["agentRunId"]}) as receipt_reads:
+            result = subprocess.run(["cargo", "test", "--locked", "-p", "runtime_server",
+                "agent_messages::tests::runtime::" + test_name, "--", "--ignored", "--exact", "--nocapture"],
+                cwd=root, env={**os.environ, "CARGO_BUILD_JOBS": "1", "CENTAERIS_AGENT_MESSAGE_FIXTURE": json.dumps(fixture),
+                               "AGENT_RUN_AUTHORIZATION_SIGNING_KEY": settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY,
+                               "NO_PROXY": "127.0.0.1,localhost,::1", "no_proxy": "127.0.0.1,localhost,::1"},
+                capture_output=True, text=True, encoding="utf-8", timeout=300)
         output = result.stdout + result.stderr
         self.assertEqual(result.returncode, 0, output)
         self.assertIn("running 1 test", output)
         self.assertIn("1 passed; 0 failed; 0 ignored", output)
         self.assertIn(receipt, output)
+        self.assertEqual([row["agentRunId"] for row in receipt_reads],
+                         [fixture["agentRunStart"]["agentRunId"]])
 
     def test_real_message_provider_commits_continue_turn_and_rechecks_revoked_authority(self):
         fixture, run, source, work, membership = self._runtime_fixture()

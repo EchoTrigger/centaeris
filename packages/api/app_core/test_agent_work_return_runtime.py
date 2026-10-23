@@ -14,7 +14,8 @@ from . import test_agent_work as fixture
 from . import test_agent_work_returns as returns_fixture
 from .models import AgentRun, AgentWorkReturn, AgentWorkSession, HostedOperationReceipt
 from .testing import fenced_start_fixture
-from .runtime_schema_test_helpers import remove_runtime_trigger_functions
+from .test_agent_message_runtime import unallocated_receipt_bridge
+from .runtime_schema_test_helpers import isolate_runtime_schema
 
 
 class WorkReturnRuntimeTests(LiveServerTestCase):
@@ -28,33 +29,24 @@ class WorkReturnRuntimeTests(LiveServerTestCase):
     query = returns_fixture.AgentWorkReturnTests.query
 
     def commit_facts(self, cases):
-        tables_query = "SELECT tablename FROM pg_tables WHERE schemaname='runtime'"
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='runtime')")
-            previous_schema_exists = cursor.fetchone()[0]
-            cursor.execute(tables_query)
-            previous_tables = {row[0] for row in cursor.fetchall()}
-
-        def cleanup_runtime_tables():
-            with connection.cursor() as cursor:
-                cursor.execute(tables_query)
-                created = {row[0] for row in cursor.fetchall()} - previous_tables
-                if created:
-                    cursor.execute("DROP TABLE " + ", ".join("runtime." + connection.ops.quote_name(name) for name in sorted(created)))
-                if not previous_schema_exists:
-                    remove_runtime_trigger_functions(cursor)
-                    cursor.execute("DROP SCHEMA IF EXISTS runtime")
-        self.addCleanup(cleanup_runtime_tables)
+        isolate_runtime_schema(self)
         database = settings.DATABASES["default"]
-        runtime_fixture = {"database": {key: database[key] for key in ("NAME", "USER", "PASSWORD", "HOST", "PORT")},
+        runtime_fixture = {"liveServerUrl": self.live_server_url, "internalToken": settings.INTERNAL_API_TOKEN,
+            "database": {key: database[key] for key in ("NAME", "USER", "PASSWORD", "HOST", "PORT")},
             "cases": [{"kind": kind, "agentRunStart": fenced_start_fixture(child)} for kind, child in cases]}
-        result = subprocess.run(["cargo", "test", "--locked", "-p", "runtime_server",
-            "agent_work::tests::returns::django_committed_work_return_facts", "--", "--ignored", "--exact", "--nocapture"],
-            cwd=Path(__file__).resolve().parents[3],
-            env={**os.environ, "CARGO_BUILD_JOBS": "1", "CENTAERIS_WORK_RETURN_FIXTURE": json.dumps(runtime_fixture)},
-            capture_output=True, text=True, encoding="utf-8", timeout=300)
+        with unallocated_receipt_bridge({child.id for _, child in cases}) as receipt_reads:
+            result = subprocess.run(["cargo", "test", "--locked", "-p", "runtime_server",
+                "agent_work::tests::returns::django_committed_work_return_facts", "--", "--ignored", "--exact", "--nocapture"],
+                cwd=Path(__file__).resolve().parents[3],
+                env={**os.environ, "CARGO_BUILD_JOBS": "1", "CENTAERIS_WORK_RETURN_FIXTURE": json.dumps(runtime_fixture),
+                    "AGENT_RUN_AUTHORIZATION_SIGNING_KEY": settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY,
+                    "NO_PROXY": "127.0.0.1,localhost,::1", "no_proxy": "127.0.0.1,localhost,::1"},
+                capture_output=True, text=True, encoding="utf-8", timeout=300)
         diagnostic = result.stdout + result.stderr
         self.assertEqual(result.returncode, 0, diagnostic)
+        self.assertEqual({row["agentRunId"] for row in receipt_reads},
+                         {child.id for kind, child in cases if kind != "lifecycleFailure"})
+        self.assertEqual(len(receipt_reads), len([kind for kind, _ in cases if kind != "lifecycleFailure"]))
         for kind, _ in cases:
             marker = "work-return-fenced-fact-ok: " + kind
             self.assertIn(marker, diagnostic)
