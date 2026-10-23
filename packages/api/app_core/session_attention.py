@@ -54,7 +54,7 @@ def _apply_latest_attention(session, latest):
         )
         # A stale in-memory Session may rediscover a fact already projected by a
         # different writer. Return the persisted revision and owner read state.
-        session.refresh_from_db(fields=["latestAttentionSequence", "readThroughSequence", "isUnread", "attentionRevision"])
+        session.refresh_from_db(fields=["latestAttentionSequence", "readThroughSequence", "isManuallyUnread", "attentionRevision"])
 
 
 def session_attention_snapshot(session):
@@ -62,8 +62,8 @@ def session_attention_snapshot(session):
         "attentionRevision": str(session.attentionRevision),
         "latestAttentionSequence": str(session.latestAttentionSequence),
         "readThroughSequence": str(session.readThroughSequence),
-        "isManuallyUnread": session.isUnread,
-        "isUnread": session.isUnread or session.latestAttentionSequence > session.readThroughSequence,
+        "isManuallyUnread": session.isManuallyUnread,
+        "isUnread": session.isManuallyUnread or session.latestAttentionSequence > session.readThroughSequence,
     }
 
 
@@ -91,9 +91,9 @@ def set_manual_session_unread(session, unread):
     through = session.readThroughSequence if unread else max(
         session.readThroughSequence, durable_session_high_water(session),
     )
-    if session.isUnread != unread or session.readThroughSequence != through:
-        session.isUnread = unread
+    if session.isManuallyUnread != unread or session.readThroughSequence != through:
+        session.isManuallyUnread = unread
         session.readThroughSequence = through
         session.attentionRevision += 1
-        session.save(update_fields=["isUnread", "readThroughSequence", "attentionRevision"])
+        session.save(update_fields=["isManuallyUnread", "readThroughSequence", "attentionRevision"])
     return session

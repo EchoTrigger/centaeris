@@ -179,6 +179,20 @@ Concurrent HTTP ACKs and repeated terminal projection must not regress read stat
 The ordinary Session-list query-growth test also protects batched discovery from
 introducing one database query per Session.
 
+The manual-unread storage rename is covered by
+`test_session_attention_characterization` and
+`test_session_manual_unread_migration`. Preserve the old field in historical
+migration fixtures; assert stored choices, read watermarks, revisions, recency
+and source facts survive the forward rename, and that writes to the renamed
+column still invalidate navigation. Automatic read ACK and explicit mark-read
+commands retain different effects. Compare generated OpenAPI plus validation and
+serialization schemas across this storage-only change.
+
+Removing a display invalidation axis must retain fresh authorization while an
+SSE producer is blocked and before prepared payloads are emitted. The migration
+coverage seeds legacy global versions and pending rows and verifies that only
+those derived rows are removed while useful scoped invalidations still work.
+
 Session listing and navigation-only SSE authorization share a fully filtered,
 unevaluated query scope. Characterization coverage preserves empty-list access,
 active-user and definition visibility checks, delegation credential versions,

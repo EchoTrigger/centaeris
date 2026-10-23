@@ -1259,7 +1259,7 @@ class Session(models.Model):
     purgedAt = models.DateTimeField(null=True, blank=True)
     isPinned = models.BooleanField(default=False)
     # Explicit owner action only; automatic notification state is derived from watermarks.
-    isUnread = models.BooleanField(default=False)
+    isManuallyUnread = models.BooleanField(default=False)
     attentionRevision = models.PositiveBigIntegerField(default=0, db_default=0)
     latestAttentionSequence = models.PositiveBigIntegerField(default=0, db_default=0)
     readThroughSequence = models.PositiveBigIntegerField(default=0, db_default=0)

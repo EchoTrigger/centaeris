@@ -121,6 +121,14 @@ writes do not take locks on shared version rows; a separate relay advances
 stable key order. These versions are display projections, never authorization
 fences or substitutes for transcript source water.
 
+The active invalidation axes are `navigation`, `state`, `context`, `history` and
+`work`. Migration `0029_remove_presentation_authority` removes the unused global
+permission-change axis and its dedicated source triggers. It removes only that
+axis's derived version and pending rows; scoped versions, source facts and read
+watermarks remain intact. Permission-only changes do not broadcast display
+invalidations. Full authorization remains independent on its existing timer and
+before each payload, including while producer reads are blocked.
+
 Each ASGI application owns one lazy dedicated LISTEN connection, independent of
 the ORM transaction pool. The configured database endpoint must preserve the
 listener session; a transaction-pooling proxy cannot stand in for that session.
@@ -220,6 +228,20 @@ read can clear it. Identities, events, owner, and recency are preserved. Once
 nonzero watermark/revision history exists, rollback is rejected in favor of a
 forward migration.
 
+Migration `0030_session_manual_unread` renames the stored Session boolean to
+`isManuallyUnread` without reconstructing events or changing stored choices,
+watermarks, revisions or recency. The public derived `isUnread`, response
+`isManuallyUnread` and explicit `PATCH isUnread` command retain their meanings.
+The atomic migration also replaces the Session change-capture function, whose
+column references PostgreSQL does not rewrite when a column is renamed.
+
+Stop API writers and drain active API requests before applying this physical
+column rename, then start the matching API revision. Old and new API versions
+cannot run concurrently against the renamed column. Apply the migration chain
+through `0030` before accepting new API traffic; upgrading only the Web image
+cannot install these database and API changes. Historical migrations retain their
+original field names, while current ORM code uses only the new stored name.
+
 ## Failure detection, authorization and resource ownership
 
 HTTP commands/JSON reads have finite waits. The SSE client separately bounds
@@ -287,10 +309,12 @@ old-schema databases. Set `PGCONNECT_TIMEOUT` to bound a missing test service.
 uv run --frozen --package api python packages/api/manage.py test \
   app_core.test_presentation_stream app_core.test_presentation_authority \
   app_core.test_presentation_changes app_core.test_presentation_changes_migration \
+  app_core.test_presentation_authority_removal_migration \
   app_core.test_presentation_observer app_core.test_presentation_notifications \
   app_core.test_presentation_service \
   app_core.test_session_attention \
-  app_core.test_session_attention_migration app_core.test_schema_wire_contract \
+  app_core.test_session_attention_migration app_core.test_session_attention_characterization \
+  app_core.test_session_manual_unread_migration app_core.test_schema_wire_contract \
   app_core.test_workspace_session_list_queries app_core.test_session_projection_concurrency \
   app_core.test_http_query_contract app_core.test_http_error_contract \
   --settings=api.test_settings --noinput

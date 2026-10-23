@@ -2181,7 +2181,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
         )
         pinned.refresh_from_db()
         self.assertEqual(pinned.updatedAt, original_updated_at)
-        self.assertFalse(pinned.isUnread)
+        self.assertFalse(pinned.isManuallyUnread)
 
         listed = self.client.get(f"/api/workspaces/{workspace.id}/sessions")
 

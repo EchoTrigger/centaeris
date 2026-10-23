@@ -90,7 +90,7 @@ class PresentationChangeTests(TransactionTestCase):
         self.event("assistant_message")
         self.event("checkpoint_ref", {"status": "paused_question"})
         for fields in ({"title": "renamed"}, {"isPinned": True}, {"readThroughSequence": 1},
-                       {"isUnread": True}, {"latestAttentionSequence": 2, "attentionRevision": 1}):
+                       {"isManuallyUnread": True}, {"latestAttentionSequence": 2, "attentionRevision": 1}):
             before = self.versions()
             Session.objects.filter(pk=self.session.pk).update(**fields)
             self.assertChangedOnly(before, "navigation")
