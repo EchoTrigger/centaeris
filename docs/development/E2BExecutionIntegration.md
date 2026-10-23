@@ -1145,9 +1145,27 @@ cleanup allowed the temporary owner record and probe files to be removed.
 ### Resident microVM coexistence preflight
 
 The authorized coexistence target is 100 resident managed microVM environments,
-each retaining a 50 MiB touched payload. Execution admission remains
+each retaining a 50 MiB touched payload. Current defaults remain
 `EXECUTION_GLOBAL_LIMIT=8`, `EXECUTION_TENANT_LIMIT=4` and
-`WORKER_CONCURRENCY=8`; resident environment count does not raise these limits.
+`WORKER_SLOT_COUNT=8`; resident environment count does not raise these limits.
+
+The first two limits count only `agent_run.lifecycle` Jobs whose execution
+lease has `lease_purpose=execute` and status `leased` or `running`. The tenant
+key is the business Workspace (`execution_job_tenants.workspace_id`), shared
+across its Sessions. A Job occupies capacity from claim until it yields or leaves
+the active states; this is a lifecycle execution-lease interval, not a tool-call
+count. `WORKER_SLOT_COUNT` separately bounds ordinary Job threads per Worker
+process.
+
+Native `subagent.run` Jobs are outside that 8/4 aggregation. The hosted native
+subagent runner currently shares a three-way batch budget across Sessions in
+each Runtime process and passes its selected policy to Core. Core does not fix
+three subagents per Session; one parent plus three children does not derive the
+Workspace limit of four. Resident environments and their CPU/memory commitments
+have separate accounting. These are current implementation semantics; how these
+limits should combine in the subsequent capacity design remains open, with no
+default change or capacity fix claimed by this clarification.
+
 The start condition is at least 10 GiB of Linux host `MemAvailable` immediately
 before dispatch. It does not require keeping 10 GiB free after adding the load.
 Existing services must continue running. Windows and WSL available-memory figures
@@ -1183,7 +1201,7 @@ been validated at 128 MiB.
 
 The private pure-function preflight has 21 passing offline tests, including the
 observed blocked case, the 10 GiB start boundary, per-environment hugepage
-rounding, reserved-page and NBD occupancy subtraction, fixed 8/4/8 admission,
+rounding, reserved-page and NBD occupancy subtraction, fixed 8/4/8 configuration,
 and rejection of missing, invalid or overflowing inputs. An `eligible` result
 means only that its explicit static prerequisites pass. Dynamic guest and host
 overhead, CPU, IO, successful creation and coexistence still require physical
