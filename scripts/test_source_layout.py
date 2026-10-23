@@ -46,7 +46,7 @@ class SourceLayoutTests(unittest.TestCase):
     def test_python_workspace_and_database_migrations_are_retained(self):
         project = tomllib.loads((ROOT / "pyproject.toml").read_text())
         self.assertEqual(project["tool"]["uv"]["workspace"]["members"],
-                         ["packages/api", "packages/document_processor", "packages/hosted_execution", "packages/worker"])
+                         ["packages/api", "packages/document_processor", "packages/e2b_adapter", "packages/hosted_execution", "packages/worker"])
         manifest = json.loads((ROOT / "docs/workspace/source-snapshot/manifest.json").read_text())
         import hashlib
         for entry in manifest["files"]:
