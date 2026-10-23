@@ -27,7 +27,7 @@
     "presmoke:window": "node ./scripts/ensure-electron.mjs",
     "smoke:window": "node ./scripts/build-dist.mjs && node ./scripts/smoke-window.mjs",
     "build:installer": "node ./scripts/build-installer.mjs",
-    "test:installer": "node --test ./scripts/installer-preflight.test.mjs ./scripts/installer-input.test.mjs ./scripts/distribution-output.test.mjs",
+    "test:installer": "node --test ./scripts/installer-preflight.test.mjs ./scripts/installer-input.test.mjs ./scripts/installer-registration.test.mjs ./scripts/distribution-output.test.mjs",
     "smoke:installer": "node ./scripts/smoke-installer.mjs"
   },
   "devDependencies": {
