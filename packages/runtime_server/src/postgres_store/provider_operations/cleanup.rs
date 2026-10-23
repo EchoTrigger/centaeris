@@ -173,8 +173,10 @@ impl PostgresRuntimeStore {
         configured_digest: &str,
         dispatch: impl FnOnce(&ProviderVerifiedTarget) -> Result<T, E> + Send,
     ) -> Result<T, ProviderExecutionDispatchError<E>> {
-        use crate::observations::provider_dispatch::{DispatchMetric, DispatchObservation};
-        let mut observation = DispatchObservation::new();
+        use crate::observations::provider_dispatch::{
+            DispatchKind, DispatchMetric, DispatchObservation,
+        };
+        let mut observation = DispatchObservation::new(DispatchKind::PerRunExecution);
         let mut callback_started = false;
         let result: Result<T, ProviderExecutionDispatchError<E>> =
             self.with_client_error(|client| {

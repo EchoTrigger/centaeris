@@ -29,6 +29,7 @@ _HELPER_METRICS = frozenset(("mkdirElapsedMs", "uploadElapsedMs", "executeElapse
     "cleanupElapsedMs", "controlElapsedMs", "totalElapsedMs"))
 _DISPATCH_METRICS = frozenset(("checkoutElapsedMs", "authorityBeforeElapsedMs", "callbackElapsedMs", "authorityAfterElapsedMs",
     "commitElapsedMs", "connectionReturnElapsedMs", "totalElapsedMs"))
+_DISPATCH_KINDS = frozenset(("perRunExecution", "retainedExecution", "retainedRunCleanup"))
 _SDK_STAGES = {
     "sdkImport": frozenset(("startup",)), "sdkClientSetup": frozenset(("startup",)),
     "sdkCreate": frozenset(("create",)), "sdkCreateVerifyGet": frozenset(("create",)),
@@ -119,8 +120,9 @@ def _decode(line):
                     or ("dispatchId" in event and not _identity(event["dispatchId"]))):
                 raise ValueError("invalid helper observation")
         elif phase == "providerDispatch":
-            required |= {"dispatchId", "metric"}
-            if (not _identity(event.get("dispatchId")) or type(event.get("metric")) is not str
+            required |= {"dispatchId", "dispatchKind", "metric"}
+            if (not _identity(event.get("dispatchId")) or type(event.get("dispatchKind")) is not str
+                    or event["dispatchKind"] not in _DISPATCH_KINDS or type(event.get("metric")) is not str
                     or event["metric"] not in _DISPATCH_METRICS):
                 raise ValueError("invalid dispatch observation")
         else:
@@ -137,7 +139,7 @@ def _decode(line):
 def _labels(event):
     phase = event["phase"]
     labels = {"phase": phase}
-    fields = {"e2bHelper": ("helperKind", "metric"), "providerDispatch": ("metric",),
+    fields = {"e2bHelper": ("helperKind", "metric"), "providerDispatch": ("dispatchKind", "metric"),
         "e2bSdk": ("stage", "operation"), "runMilestone": ("milestone",), "executionObservationLoss": ("metric",)}[phase]
     return labels | {key: event[key] for key in fields}
 

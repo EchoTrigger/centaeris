@@ -341,17 +341,42 @@ impl PostgresRuntimeStore {
         configured_digest: &str,
         dispatch: impl FnOnce(&ProviderVerifiedTarget) -> Result<T, E> + Send,
     ) -> Result<T, ProviderExecutionDispatchError<E>> {
+        use crate::observations::provider_dispatch::{
+            DispatchKind, DispatchMetric, DispatchObservation,
+        };
         require_execute(authority)?;
+        let mut observation = DispatchObservation::new(DispatchKind::RetainedExecution);
         let mut started = false;
-        let result=self.with_client_error(|client| { let mut tx=client.transaction().map_err(|e|e.to_string())?;
-            super::super::resource_commit::require_durable_resource_commit(&mut tx)?;
-            require_current_use(&mut tx,authority,value,configured_digest)?;
-            let closed:bool=tx.query_one("SELECT cleanup_receipt_id IS NOT NULL FROM runtime.provider_environment_run_uses WHERE provider_use_id=$1 FOR SHARE",&[&value.provider_use_id]).map_err(|e|e.to_string())?.get(0);
-            if closed { return Err(ProviderExecutionDispatchError::Rejected("retained_provider_use_already_closed".into())); }
-            started=true; let result=dispatch(&value.target).map_err(ProviderExecutionDispatchError::Callback)?;
-            require_current_use(&mut tx,authority,value,configured_digest).map_err(ProviderExecutionDispatchError::AfterDispatch)?;
-            tx.commit().map_err(|e|ProviderExecutionDispatchError::AfterDispatch(e.to_string()))?; Ok(result)
+        let result = self.with_client_error(|client| {
+            observation.entered_client();
+            let result = (|| {
+                let mut tx = observation.timed(DispatchMetric::AuthorityBefore, || {
+                    let mut tx = client.transaction().map_err(|e| e.to_string())?;
+                    super::super::resource_commit::require_durable_resource_commit(&mut tx)?;
+                    require_current_use(&mut tx, authority, value, configured_digest)?;
+                    let closed: bool = tx.query_one("SELECT cleanup_receipt_id IS NOT NULL FROM runtime.provider_environment_run_uses WHERE provider_use_id=$1 FOR SHARE", &[&value.provider_use_id]).map_err(|e| e.to_string())?.get(0);
+                    if closed {
+                        return Err(ProviderExecutionDispatchError::Rejected("retained_provider_use_already_closed".into()));
+                    }
+                    Ok::<_, ProviderExecutionDispatchError<E>>(tx)
+                })?;
+                started = true;
+                let result = observation.callback(|| {
+                    dispatch(&value.target).map_err(ProviderExecutionDispatchError::Callback)
+                })?;
+                observation.timed(DispatchMetric::AuthorityAfter, || {
+                    require_current_use(&mut tx, authority, value, configured_digest)
+                        .map_err(ProviderExecutionDispatchError::AfterDispatch)
+                })?;
+                observation.timed(DispatchMetric::Commit, || {
+                    tx.commit().map_err(|e| ProviderExecutionDispatchError::AfterDispatch(e.to_string()))
+                })?;
+                Ok(result)
+            })();
+            observation.leaving_client();
+            result
         });
+        observation.finish(result.is_ok());
         match result {
             Err(ProviderExecutionDispatchError::Rejected(error)) if started => {
                 Err(ProviderExecutionDispatchError::AfterDispatch(error))

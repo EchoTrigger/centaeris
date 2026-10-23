@@ -1,4 +1,4 @@
-//! Timings for the existing provider execution-dispatch scope only.
+//! Timings for the existing provider execution and retained Run-cleanup scopes.
 //!
 //! `totalElapsedMs` contains every other stage; do not add it to its children.
 //! Checkout includes the existing blocking handoff, pool checkout and timeout
@@ -7,6 +7,9 @@
 //! rollback and bookkeeping can remain unattributed inside total. The return
 //! outcome describes the enclosing result, not a separate pool-health verdict.
 //! Callback includes the entire physical callback, including framed-helper waits.
+//! Retained cleanup's authority-after stage also contains proof validation and
+//! receipt persistence/readback before the existing transaction commit. Replay
+//! has no callback or authority-after stage; validation/attach need not run helpers.
 //! No pool, lock, authority, callback or transaction policy is changed here.
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,6 +20,22 @@ thread_local! {
     static CURRENT_DISPATCH: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 static NEXT_DISPATCH: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy)]
+pub(crate) enum DispatchKind {
+    PerRunExecution,
+    RetainedExecution,
+    RetainedRunCleanup,
+}
+impl DispatchKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::PerRunExecution => "perRunExecution",
+            Self::RetainedExecution => "retainedExecution",
+            Self::RetainedRunCleanup => "retainedRunCleanup",
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) enum DispatchMetric {
@@ -95,6 +114,7 @@ pub(crate) fn current_id() -> Option<String> {
 /// Buffer until the caller is back outside its existing connection scope: no
 /// diagnostic stderr write is introduced while the transaction pins are held.
 pub(crate) struct DispatchObservation {
+    kind: DispatchKind,
     started: Option<Instant>,
     dispatch_id: Option<String>,
     records: Vec<Measurement>,
@@ -102,9 +122,10 @@ pub(crate) struct DispatchObservation {
     connection_return_started: Option<Instant>,
 }
 impl DispatchObservation {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(kind: DispatchKind) -> Self {
         if !super::enabled() {
             return Self {
+                kind,
                 started: None,
                 dispatch_id: None,
                 records: Vec::new(),
@@ -119,6 +140,7 @@ impl DispatchObservation {
             .as_nanos();
         let ordinal = NEXT_DISPATCH.fetch_add(1, Ordering::Relaxed);
         Self {
+            kind,
             started: Some(started),
             dispatch_id: Some(format!(
                 "dispatch-{}-{timestamp}-{ordinal}",
@@ -209,6 +231,7 @@ impl DispatchObservation {
             // super::emit supplies schema/source/wall emission time/current Job.
             super::emit(serde_json::json!({
                 "phase":"providerDispatch", "dispatchId":self.dispatch_id,
+                "dispatchKind":self.kind.name(),
                 "metric":record.metric, "value":record.duration.as_secs_f64()*1000.0,
                 "outcome":record.outcome.name(),
             }));
@@ -228,7 +251,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn successful_dispatch() -> Result<u32, &'static str> {
-        let mut observation = DispatchObservation::new();
+        let mut observation = DispatchObservation::new(DispatchKind::PerRunExecution);
         observation.entered_client();
         observation.timed(
             DispatchMetric::AuthorityBefore,
@@ -278,6 +301,7 @@ mod tests {
             assert_eq!(row["phase"], "providerDispatch");
             assert_eq!(row["jobId"], "agent_run.lifecycle:dispatch-test");
             assert_eq!(row["dispatchId"], identity);
+            assert_eq!(row["dispatchKind"], "perRunExecution");
             assert_eq!(row["outcome"], "ok");
             assert!(row["value"].as_f64().unwrap() >= 0.0);
             let mut keys: Vec<_> = row
@@ -292,6 +316,7 @@ mod tests {
                 [
                     "atUnixMs",
                     "dispatchId",
+                    "dispatchKind",
                     "jobId",
                     "metric",
                     "outcome",
@@ -315,7 +340,7 @@ mod tests {
             for succeeds in [false, true] {
                 let calls = AtomicUsize::new(0);
                 let (result, records) = capture_timings(enabled, || {
-                    let mut observation = DispatchObservation::new();
+                    let mut observation = DispatchObservation::new(DispatchKind::PerRunExecution);
                     observation.entered_client();
                     let result = observation.timed(DispatchMetric::Callback, || {
                         calls.fetch_add(1, Ordering::SeqCst);
@@ -349,7 +374,7 @@ mod tests {
     #[test]
     fn callback_error_does_not_invent_unexecuted_authority_or_commit_stages() {
         let (_, records) = capture_timings(true, || {
-            let mut observation = DispatchObservation::new();
+            let mut observation = DispatchObservation::new(DispatchKind::PerRunExecution);
             observation.entered_client();
             let result = observation.timed(DispatchMetric::Callback, || Err::<(), _>("secret"));
             observation.leaving_client();
@@ -374,7 +399,9 @@ mod tests {
 
     #[test]
     fn failure_before_client_entry_records_only_failed_checkout_and_total() {
-        let (_, records) = capture_timings(true, || DispatchObservation::new().finish(false));
+        let (_, records) = capture_timings(true, || {
+            DispatchObservation::new(DispatchKind::PerRunExecution).finish(false)
+        });
         let metrics: Vec<_> = records
             .iter()
             .map(|row| row["metric"].as_str().unwrap())
@@ -387,10 +414,10 @@ mod tests {
     fn callback_identity_is_scoped_nested_and_restored_after_panic() {
         let _ = capture_timings(true, || {
             assert_eq!(current_id(), None);
-            let outer = DispatchObservation::new();
+            let outer = DispatchObservation::new(DispatchKind::PerRunExecution);
             outer.callback_context(|| {
                 let outer_id = current_id().expect("outer callback identity");
-                let inner = DispatchObservation::new();
+                let inner = DispatchObservation::new(DispatchKind::PerRunExecution);
                 let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     inner.callback_context(|| {
                         assert_ne!(current_id().as_deref(), Some(outer_id.as_str()));
@@ -408,7 +435,7 @@ mod tests {
     fn callback_identity_is_thread_local_and_disabled_diagnostics_are_absent() {
         for enabled in [false, true] {
             let _ = capture_timings(enabled, || {
-                let observation = DispatchObservation::new();
+                let observation = DispatchObservation::new(DispatchKind::PerRunExecution);
                 observation.callback_context(|| {
                     assert_eq!(current_id().is_some(), enabled);
                     assert_eq!(std::thread::spawn(current_id).join().unwrap(), None);
@@ -421,7 +448,7 @@ mod tests {
     #[test]
     fn panic_stage_is_recorded_as_interrupted_without_error_text() {
         let (_, records) = capture_timings(true, || {
-            let mut observation = DispatchObservation::new();
+            let mut observation = DispatchObservation::new(DispatchKind::PerRunExecution);
             observation.entered_client();
             let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 observation.timed(DispatchMetric::Callback, || -> Result<(), ()> {
@@ -438,5 +465,107 @@ mod tests {
         assert!(!serde_json::to_string(&records)
             .unwrap()
             .contains("never retain this secret"));
+    }
+
+    #[test]
+    fn dispatch_kind_is_required_for_all_execution_and_cleanup_stages() {
+        for (kind, expected) in [
+            (DispatchKind::PerRunExecution, "perRunExecution"),
+            (DispatchKind::RetainedExecution, "retainedExecution"),
+            (DispatchKind::RetainedRunCleanup, "retainedRunCleanup"),
+        ] {
+            let calls = AtomicUsize::new(0);
+            let (result, records) = capture_timings(true, || {
+                let mut observation = DispatchObservation::new(kind);
+                observation.entered_client();
+                observation.timed(
+                    DispatchMetric::AuthorityBefore,
+                    || Ok::<_, &'static str>(()),
+                )?;
+                let value = observation.callback(|| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    assert!(current_id().is_some());
+                    Ok::<_, &'static str>(53)
+                })?;
+                observation.timed(DispatchMetric::AuthorityAfter, || Ok::<_, &'static str>(()))?;
+                observation.timed(DispatchMetric::Commit, || Ok::<_, &'static str>(()))?;
+                observation.leaving_client();
+                observation.finish(true);
+                Ok::<_, &'static str>(value)
+            });
+            assert_eq!(result, Ok(53));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(records.len(), 7);
+            assert!(records.iter().all(|row| row["dispatchKind"] == expected));
+            assert_eq!(current_id(), None);
+        }
+    }
+
+    #[test]
+    fn retained_dispatch_kind_preserves_callback_errors_and_disabled_behavior() {
+        for enabled in [false, true] {
+            for (kind, expected) in [
+                (DispatchKind::RetainedExecution, "retainedExecution"),
+                (DispatchKind::RetainedRunCleanup, "retainedRunCleanup"),
+            ] {
+                let calls = AtomicUsize::new(0);
+                let (result, records) = capture_timings(enabled, || {
+                    let mut observation = DispatchObservation::new(kind);
+                    observation.entered_client();
+                    let result = observation.callback(|| {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        assert_eq!(current_id().is_some(), enabled);
+                        Err::<(), _>("private retained callback failure")
+                    });
+                    observation.leaving_client();
+                    observation.finish(false);
+                    result
+                });
+                assert_eq!(result, Err("private retained callback failure"));
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                assert_eq!(records.is_empty(), !enabled);
+                assert!(records.iter().all(|row| row["dispatchKind"] == expected));
+                assert_eq!(current_id(), None);
+                assert!(!serde_json::to_string(&records)
+                    .unwrap()
+                    .contains("private retained callback failure"));
+            }
+        }
+    }
+
+    #[test]
+    fn retained_cleanup_replay_records_no_callback_or_post_callback_stages() {
+        let (result, records) = capture_timings(true, || {
+            let mut observation = DispatchObservation::new(DispatchKind::RetainedRunCleanup);
+            observation.entered_client();
+            observation.timed(
+                DispatchMetric::AuthorityBefore,
+                || Ok::<_, &'static str>(()),
+            )?;
+            let receipt = observation.timed(DispatchMetric::Commit, || {
+                Ok::<_, &'static str>("original receipt")
+            })?;
+            observation.leaving_client();
+            observation.finish(true);
+            Ok::<_, &'static str>(receipt)
+        });
+        assert_eq!(result, Ok("original receipt"));
+        assert_eq!(
+            records
+                .iter()
+                .map(|row| row["metric"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "checkoutElapsedMs",
+                "authorityBeforeElapsedMs",
+                "commitElapsedMs",
+                "connectionReturnElapsedMs",
+                "totalElapsedMs",
+            ]
+        );
+        assert!(records
+            .iter()
+            .all(|row| row["dispatchKind"] == "retainedRunCleanup"));
+        assert_eq!(current_id(), None);
     }
 }

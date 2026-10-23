@@ -43,7 +43,7 @@ class ExecutionTimingTests(unittest.TestCase):
         if phase == "e2bHelper":
             event.update(operationId="helper-local-1", helperKind="fileSystem", metric="executeElapsedMs", value=2.5, outcome="ok")
         elif phase == "providerDispatch":
-            event.update(dispatchId="dispatch-local-1", metric="callbackElapsedMs", value=2.5, outcome="ok")
+            event.update(dispatchId="dispatch-local-1", dispatchKind="perRunExecution", metric="callbackElapsedMs", value=2.5, outcome="ok")
         elif phase == "e2bSdk":
             event.update(stage="sdkCreate", operation="create", value=2.5, outcome="ok")
         elif phase == "runMilestone":
@@ -69,6 +69,34 @@ class ExecutionTimingTests(unittest.TestCase):
         self.assertEqual(summary["records"][0]["dispatchId"], "dispatch-local")
         self.assertNotIn("jobId", summary["records"][0])
         self.assertIs(summary["durationsAdditive"], False)
+
+    def test_dispatch_kinds_preserve_separate_execution_and_cleanup_buckets(self):
+        collector = self.collector()
+        kinds = ("perRunExecution", "retainedExecution", "retainedRunCleanup")
+        for kind in kinds:
+            for index in range(2):
+                self.feed(collector, "providerDispatch", dispatchKind=kind, dispatchId=f"dispatch-{kind}-{index}")
+        summary = collector.summary()
+        self.assertEqual(summary["counters"]["invalidRecords"], 0)
+        self.assertEqual(len(summary["records"]), 6)
+        self.assertEqual(len(summary["aggregates"]), 3)
+        self.assertEqual({row["dispatchKind"] for row in summary["aggregates"]}, set(kinds))
+        for row in summary["aggregates"]:
+            self.assertEqual((row["count"], row["sumElapsedMs"]), (2, 5.0))
+            self.assertNotIn("dispatchId", row)
+
+    def test_dispatch_kind_is_required_closed_and_never_inferred(self):
+        collector = self.collector()
+        missing = self.event("providerDispatch")
+        del missing["dispatchKind"]
+        collector.feed_line(json.dumps(missing))
+        invalid = (None, True, 1, [], {}, "", "retained", "private-secret")
+        for value in invalid:
+            self.feed(collector, "providerDispatch", dispatchKind=value)
+        summary = collector.summary()
+        self.assertEqual(summary["counters"]["invalidRecords"], 1 + len(invalid))
+        self.assertEqual(summary["records"], [])
+        self.assertEqual(summary["aggregates"], [])
 
     def test_dispatch_errors_and_interruptions_are_preserved_without_inventing_missing_commit_zero(self):
         collector = self.collector()

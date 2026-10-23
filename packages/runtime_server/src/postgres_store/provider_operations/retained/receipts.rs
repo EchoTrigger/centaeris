@@ -109,26 +109,60 @@ impl PostgresRuntimeStore {
         quiesce: impl FnOnce(&RetainedProviderRunUse) -> Result<RetainedProviderQuiescence, String>
             + Send,
     ) -> Result<RetainedProviderCleanupReceipt, String> {
+        use crate::observations::provider_dispatch::{
+            DispatchKind, DispatchMetric, DispatchObservation,
+        };
         if authority.purpose != ControllerPurpose::Cleanup {
             return Err("retained_provider_cleanup_requires_cleanup_authority".into());
         }
-        self.cleanup_view().with_client(|client| { let mut tx=client.transaction().map_err(|e|e.to_string())?;
-            super::super::super::resource_commit::require_durable_resource_commit(&mut tx)?;
-            let grant=require_current_use(&mut tx,authority,value,configured_digest)?;
-            if let Some(receipt)=load_receipt(&mut tx,&value.agent_run_id)? {
-                if receipt.controller_epoch>grant.controller_epoch { return Err("retained_provider_cleanup_epoch_rejected".into()); }
-                tx.commit().map_err(|e|e.to_string())?;return Ok(receipt);
-            }
-            let conflict:bool=tx.query_one("SELECT EXISTS(SELECT 1 FROM runtime.provider_run_cleanup_receipts WHERE agent_run_id=$1) OR EXISTS(SELECT 1 FROM runtime.agent_run_cleanup_receipts WHERE agent_run_id=$1)",&[&value.agent_run_id]).map_err(|e|e.to_string())?.get(0);
-            if conflict { return Err("provider_cleanup_receipt_scope_conflict".into()); }
-            let proof=quiesce(value)?;
-            if !proof.quiescent || proof.agent_run_id!=value.agent_run_id || proof.execution_id!=value.execution_id || proof.instance_id!=value.target.identity.instance_id || proof.sandbox_id!=value.target.sandbox_id || proof.controller_epoch!=grant.controller_epoch { return Err("retained_provider_quiescence_rejected".into()); }
-            require_current_use(&mut tx,authority,value,configured_digest)?;
-            let id=receipt_id(value)?; let quiescence=quiescence_digest(value,grant.controller_epoch)?;
-            let changed=tx.execute("UPDATE runtime.provider_environment_run_uses SET cleanup_receipt_id=$2,cleanup_controller_epoch=$3,quiescence_digest=$4,cleanup_recorded_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE provider_use_id=$1 AND cleanup_receipt_id IS NULL",&[&value.provider_use_id,&id,&grant.controller_epoch,&quiescence]).map_err(|e|e.to_string())?;
-            if changed!=1 { return Err("retained_provider_cleanup_receipt_conflict".into()); }
-            let receipt=load_receipt(&mut tx,&value.agent_run_id)?.ok_or("retained_provider_cleanup_receipt_missing")?;
-            tx.commit().map_err(|e|e.to_string())?;Ok(receipt)
-        })
+        let mut observation = DispatchObservation::new(DispatchKind::RetainedRunCleanup);
+        let result = self.cleanup_view().with_client(|client| {
+            observation.entered_client();
+            let result = (|| {
+                let (mut tx, grant, existing_receipt) = observation.timed(DispatchMetric::AuthorityBefore, || {
+                    let mut tx = client.transaction().map_err(|e| e.to_string())?;
+                    super::super::super::resource_commit::require_durable_resource_commit(&mut tx)?;
+                    let grant = require_current_use(&mut tx, authority, value, configured_digest)?;
+                    if let Some(receipt) = load_receipt(&mut tx, &value.agent_run_id)? {
+                        if receipt.controller_epoch > grant.controller_epoch {
+                            return Err("retained_provider_cleanup_epoch_rejected".into());
+                        }
+                        return Ok::<_, String>((tx, grant, Some(receipt)));
+                    }
+                    let conflict: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM runtime.provider_run_cleanup_receipts WHERE agent_run_id=$1) OR EXISTS(SELECT 1 FROM runtime.agent_run_cleanup_receipts WHERE agent_run_id=$1)", &[&value.agent_run_id]).map_err(|e| e.to_string())?.get(0);
+                    if conflict {
+                        return Err("provider_cleanup_receipt_scope_conflict".into());
+                    }
+                    Ok((tx, grant, None))
+                })?;
+                if let Some(receipt) = existing_receipt {
+                    observation.timed(DispatchMetric::Commit, || tx.commit().map_err(|e| e.to_string()))?;
+                    return Ok(receipt);
+                }
+                let proof = observation.callback(|| quiesce(value))?;
+                // This post-callback transaction stage includes receipt SQL;
+                // commitElapsedMs below remains the existing tx.commit alone.
+                let receipt = observation.timed(DispatchMetric::AuthorityAfter, || {
+                    if !proof.quiescent || proof.agent_run_id != value.agent_run_id || proof.execution_id != value.execution_id || proof.instance_id != value.target.identity.instance_id || proof.sandbox_id != value.target.sandbox_id || proof.controller_epoch != grant.controller_epoch {
+                        return Err("retained_provider_quiescence_rejected".into());
+                    }
+                    require_current_use(&mut tx, authority, value, configured_digest)?;
+                    let id = receipt_id(value)?;
+                    let quiescence = quiescence_digest(value, grant.controller_epoch)?;
+                    let changed = tx.execute("UPDATE runtime.provider_environment_run_uses SET cleanup_receipt_id=$2,cleanup_controller_epoch=$3,quiescence_digest=$4,cleanup_recorded_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE provider_use_id=$1 AND cleanup_receipt_id IS NULL", &[&value.provider_use_id,&id,&grant.controller_epoch,&quiescence]).map_err(|e| e.to_string())?;
+                    if changed != 1 {
+                        return Err("retained_provider_cleanup_receipt_conflict".into());
+                    }
+                    let receipt = load_receipt(&mut tx, &value.agent_run_id)?.ok_or("retained_provider_cleanup_receipt_missing")?;
+                    Ok::<_, String>(receipt)
+                })?;
+                observation.timed(DispatchMetric::Commit, || tx.commit().map_err(|e| e.to_string()))?;
+                Ok(receipt)
+            })();
+            observation.leaving_client();
+            result
+        });
+        observation.finish(result.is_ok());
+        result
     }
 }
