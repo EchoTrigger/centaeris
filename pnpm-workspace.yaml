@@ -9,6 +9,7 @@ storeDir: .cache/pnpm
 
 allowBuilds:
   electron: true
+  electron-winstaller: false
   fsevents: true
 
 overrides:
