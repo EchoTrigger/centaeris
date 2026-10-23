@@ -86,6 +86,11 @@ def collect_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSnapshotGcR
                         if not _owner_reclaimable(agent, owner, session, cutoff):
                             report.blocked.append(key)
                             continue
+                        from .workspace_snapshot_publication import blocks_deleted_owner_gc
+                        if blocks_deleted_owner_gc(owner.pk, key,
+                                temporary=bool(_TEMPORARY_FILE.fullmatch(key.rsplit("/", 1)[-1]))):
+                            report.blocked.append(key)
+                            continue
                     claim = claim_storage_key(key, "workspaceSnapshot")
                     if claim is None:
                         report.blocked.append(key)
@@ -100,6 +105,11 @@ def collect_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSnapshotGcR
                         "status", "purgedAt", "workspace_id", "agent_id",
                     ).get(pk=session.id)
                     if not _owner_reclaimable(agent, owner, session, cutoff):
+                        report.blocked.append(key)
+                        continue
+                    from .workspace_snapshot_publication import blocks_deleted_owner_gc
+                    if blocks_deleted_owner_gc(owner.pk, key,
+                            temporary=bool(_TEMPORARY_FILE.fullmatch(key.rsplit("/", 1)[-1]))):
                         report.blocked.append(key)
                         continue
                     try:

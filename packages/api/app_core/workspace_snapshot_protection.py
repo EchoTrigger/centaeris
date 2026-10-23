@@ -12,7 +12,7 @@ import unicodedata
 
 from django.db import DatabaseError, connection, transaction
 
-from .models import AgentRunAuthorization, Session
+from .models import AgentRunAuthorization, Session, WorkspaceSnapshotPublication
 from .runtime_contract import require_opaque_ref, require_sha256, session_workspace_for_session, validate_session_workspace
 from .workspace_snapshot_gc import _safe_component, _session_prefix
 
@@ -267,4 +267,35 @@ def collect_session_workspace_protection(session_id, *, max_records=1000):
     except DatabaseError:
         checkpoints = None
     inventory = snapshot_protection_for_session(session, authorizations=grants, recovery_checkpoints=checkpoints)
-    return replace(inventory, unresolved=tuple(sorted(set(inventory.unresolved) | gaps)))
+    roots = list(inventory.roots)
+    from .workspace_snapshot_publication import SnapshotPublicationError, validate_record
+    try:
+        with transaction.atomic():
+            publications = list(WorkspaceSnapshotPublication.objects.filter(session_id=session_id)
+                .select_related("agent_run", "authorization")
+                .only("id", "session_id", "agent_run_id", "authorization_id", "purpose", "purpose_key",
+                    "checkpoint_id", "storage_key", "request_digest", "generation", "encoding",
+                    "snapshot_sha256", "snapshot_size_bytes", "expanded_size_bytes", "file_count",
+                    "state", "created_at", "confirmed_at", "agent_run__id", "agent_run__session_id",
+                    "agent_run__workspace_id", "authorization__id", "authorization__digest", "authorization__agent_run_id")
+                .order_by("id")[:max_records + 1])
+        if len(publications) > max_records:
+            gaps.add("snapshotPublicationsTruncated")
+            publications.pop()
+        for record in publications:
+            try:
+                validate_record(record, session)
+                if record.storage_key and record.state != "committed":
+                    roots.append(SnapshotProtectionRoot(record.storage_key, "snapshotPublication",
+                                                       record.pk, record.agent_run_id))
+                if record.state != "committed":
+                    gaps.add("snapshotPublicationUnconfirmed:" + record.pk)
+            except (SnapshotPublicationError, AttributeError, KeyError, TypeError, ValueError):
+                gaps.add("snapshotPublicationInvalid:" + record.pk)
+    except DatabaseError:
+        gaps.add("snapshotPublicationsUnavailable")
+    # Old in-flight writes cannot be reconstructed from object names or mtimes.
+    # Keep the existing coverage gap until a separately verified cutover exists.
+    return replace(inventory,
+        roots=tuple(sorted(roots, key=lambda root: (root.source_kind, root.source_id, root.storage_key))),
+        unresolved=tuple(sorted(set(inventory.unresolved) | gaps)))

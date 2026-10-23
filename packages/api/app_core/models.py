@@ -3051,3 +3051,34 @@ class WorkReturnAuditCursor(models.Model):
     nextPageAtMs = models.BigIntegerField(default=0)
     leaseOwner = models.CharField(max_length=64, blank=True, default="")
     leaseExpiresAtMs = models.BigIntegerField(default=0)
+
+
+class WorkspaceSnapshotPublication(models.Model):
+    """Durable write responsibility, distinct from recovery permission or GC authority."""
+    id = models.CharField(primary_key=True, max_length=96)
+    session = models.ForeignKey(Session, on_delete=models.PROTECT, related_name="snapshot_publications")
+    agent_run = models.ForeignKey(AgentRun, on_delete=models.PROTECT, related_name="snapshot_publications")
+    authorization = models.ForeignKey(AgentRunAuthorization, on_delete=models.PROTECT, related_name="snapshot_publications")
+    purpose = models.CharField(max_length=32)
+    purpose_key = models.CharField(max_length=64)
+    checkpoint_id = models.TextField(blank=True, default="")
+    storage_key = models.CharField(max_length=1000, blank=True, default="", db_index=True)
+    request_digest = models.CharField(max_length=71)
+    generation = models.PositiveBigIntegerField()
+    encoding = models.CharField(max_length=16)
+    snapshot_sha256 = models.CharField(max_length=71, blank=True, default="")
+    snapshot_size_bytes = models.PositiveBigIntegerField()
+    expanded_size_bytes = models.PositiveBigIntegerField()
+    file_count = models.PositiveIntegerField()
+    state = models.CharField(max_length=16, default="pending")
+    created_at = models.DateTimeField(auto_now_add=True)
+    confirmed_at = models.DateTimeField(null=True, default=None)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["agent_run", "purpose", "purpose_key"], name="unique_snapshot_publication_purpose"),
+            models.CheckConstraint(condition=models.Q(purpose__in=["sessionCommit", "executionCheckpoint"]), name="snapshot_publication_purpose_valid"),
+            models.CheckConstraint(condition=models.Q(encoding="frameV1"), name="snapshot_publication_encoding_valid"),
+            models.CheckConstraint(condition=(models.Q(state="pending", confirmed_at__isnull=True)
+                | models.Q(state__in=["staged", "committed"], confirmed_at__isnull=False)), name="snapshot_publication_confirmation_valid"),
+        ]

@@ -1,3 +1,4 @@
+from ..workspace_snapshot_publication import (SnapshotPublicationError, locked_publication, confirm_publication)
 import hashlib
 import json
 import logging
@@ -336,6 +337,16 @@ def _workspace_snapshot_upload(storage_key: str):
         protection_observations.gauge("temporaryBytes", 0)
 
 
+def _open_publication_upload(body, candidate, storage_key, uploads, *, advance_session):
+    # The preceding transaction committed the durable pending responsibility.
+    # Recheck owners before creating any name, with all byte I/O still outside.
+    with transaction.atomic():
+        agent_run, session, _frozen = _locked_session_workspace_agent_run(body)
+        locked_publication(agent_run, session, body, candidate, storage_key,
+                           advance_session=advance_session)
+        return uploads.enter_context(_workspace_snapshot_upload(storage_key))
+
+
 def _store_workspace_snapshot(
     request, candidate: dict, storage_key: str, upload: _WorkspaceSnapshotUpload | None,
     body: dict,
@@ -404,6 +415,8 @@ def _publish_workspace_snapshot(
         nonlocal commit_pending
         with transaction.atomic():
             agent_run, session, frozen = _locked_session_workspace_agent_run(body)
+            publication = locked_publication(agent_run, session, body, candidate, storage_key,
+                                             advance_session=advance_session)
             replay = advance_session and _is_workspace_commit_replay(
                 session, candidate, agent_run, storage_key,
             )
@@ -412,8 +425,10 @@ def _publish_workspace_snapshot(
             if not _link_workspace_snapshot(storage_key, upload):
                 return None
             if not advance_session:
+                confirm_publication(publication, advance_session=False)
                 return "staged"
             if replay:
+                confirm_publication(publication, advance_session=True)
                 return "idempotent"
             session.workspaceGeneration = candidate["generation"]
             session.workspaceStorageKey = storage_key
@@ -427,6 +442,7 @@ def _publish_workspace_snapshot(
                 "workspaceSnapshotSizeBytes", "workspaceExpandedSizeBytes", "workspaceFileCount",
                 "workspaceLastAdvancedAgentRun", "updatedAt",
             ])
+            confirm_publication(publication, advance_session=True)
             commit_pending = True
             return "committed"
 
@@ -830,12 +846,16 @@ def commit_session_workspace(request):
                     and not _is_workspace_commit_replay(session, candidate, agent_run, storage_key)
                 ):
                     raise SessionWorkspaceError("session_workspace_baseline_conflict")
-                upload = uploads.enter_context(_workspace_snapshot_upload(storage_key))
+                locked_publication(agent_run, session, body, candidate, storage_key,
+                                   advance_session=True, create=True)
 
+            upload = _open_publication_upload(body, candidate, storage_key, uploads, advance_session=True)
             _store_workspace_snapshot(request, candidate, storage_key, upload, body)
             disposition = _publish_workspace_snapshot(
                 body, candidate, storage_key, upload, advance_session=True,
             )
+    except SnapshotPublicationError:
+        return JsonResponse({"error": "workspace_snapshot_publication_conflict"}, status=409)
     except SessionWorkspaceError as error:
         return JsonResponse({"error": error.code}, status=error.status)
     except Exception:
@@ -883,11 +903,15 @@ def stage_execution_workspace(request):
                         f"agent-runs/{agent_run.id}/execution-checkpoints/{checkpoint_key}/"
                         f"{candidate['snapshotSha256'].removeprefix('sha256:')}.snapshot"
                     )
-                upload = uploads.enter_context(_workspace_snapshot_upload(storage_key))
+                locked_publication(agent_run, _session, body, candidate, storage_key,
+                                   advance_session=False, create=True)
+            upload = _open_publication_upload(body, candidate, storage_key, uploads, advance_session=False)
             _store_workspace_snapshot(request, candidate, storage_key, upload, body)
             _publish_workspace_snapshot(
                 body, candidate, storage_key, upload, advance_session=False,
             )
+    except SnapshotPublicationError:
+        return JsonResponse({"error": "workspace_snapshot_publication_conflict"}, status=409)
     except SessionWorkspaceError as error:
         return JsonResponse({"error": error.code}, status=error.status)
     except (TypeError, ValueError):
