@@ -12,14 +12,13 @@ from unittest.mock import patch
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.db import connection
 from django.test import LiveServerTestCase
 from django.utils import timezone
 
 from .agent_run_authorization_factory import create_agent_run_authorization
 from .models import Agent, AgentCoordinationSession, AgentDefinition, AgentDefinitionVersion, AgentRun, AgentWorkSession, BusinessApplication, HostedOperationReceipt, ModelConfig, Session, UserAppDelegation, Workspace, WorkspaceMembership
 from .testing import fenced_start_fixture
-from .runtime_schema_test_helpers import remove_runtime_trigger_functions
+from .runtime_schema_test_helpers import isolate_runtime_schema
 
 
 class AgentWorkRuntimeTests(LiveServerTestCase):
@@ -95,24 +94,7 @@ class AgentWorkRuntimeTests(LiveServerTestCase):
         run = AgentRun.objects.create(workspace=workspace, session=source, user=user, modelConfig=model,
                                       prompt="Validate work and continue", status="running")
         create_agent_run_authorization(run, image_digest="sha256:" + "a" * 64)
-        tables_query = "SELECT tablename FROM pg_tables WHERE schemaname='runtime'"
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='runtime')")
-            previous_schema_exists = cursor.fetchone()[0]
-            cursor.execute(tables_query)
-            previous_tables = {row[0] for row in cursor.fetchall()}
-
-        def cleanup_runtime_tables():
-            with connection.cursor() as cursor:
-                cursor.execute(tables_query)
-                created = {row[0] for row in cursor.fetchall()} - previous_tables
-                if created:
-                    names = ", ".join("runtime." + connection.ops.quote_name(name) for name in sorted(created))
-                    cursor.execute("DROP TABLE " + names)
-                if not previous_schema_exists:
-                    remove_runtime_trigger_functions(cursor)
-                    cursor.execute("DROP SCHEMA IF EXISTS runtime")
-        self.addCleanup(cleanup_runtime_tables)
+        isolate_runtime_schema(self)
         database = settings.DATABASES["default"]
         fixture = {"liveServerUrl": self.live_server_url, "agentRunStart": fenced_start_fixture(run),
             "internalToken": settings.INTERNAL_API_TOKEN, "failCommit": fail_commit,
