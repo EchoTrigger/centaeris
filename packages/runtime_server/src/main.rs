@@ -14,6 +14,8 @@ mod deferred_input_resolver;
 mod docker_engine;
 mod docker_execution_host;
 pub mod e2b_adapter;
+#[cfg(test)]
+mod e2b_consumption_tests;
 pub mod e2b_creation;
 mod e2b_execution_host;
 mod e2b_run_registry;
