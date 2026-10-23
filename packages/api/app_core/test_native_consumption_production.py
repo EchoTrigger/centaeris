@@ -451,6 +451,16 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
         original_execute = worker.execute_claimed_job
         original_step = worker.agent_run_step_request
         original_wait = worker.wait_for_jobs
+        original_json_request = worker.json_request
+        pending_cleanup = {}
+
+        def json_request(url, body, token_header, token, reason, timeout=10):
+            # Include step/API/teardown waits in this fixture's existing budget.
+            # Preserve every shorter production timeout; change no worker policy.
+            remaining = deadline - time.monotonic()
+            self.assertGreater(remaining, 0, "parallel child HTTP deadline exceeded")
+            return original_json_request(url, body, token_header, token, reason,
+                timeout=min(remaining, timeout if timeout is not None else remaining))
 
         def request(path, body=None, **kwargs):
             nonlocal last_empty_claim
@@ -477,6 +487,8 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
         def wait_for_jobs():
             nonlocal progress
             progress += 1
+            if pending_cleanup and finish_pending_cleanup():
+                return
             return original_wait()
 
         def work_state(run):
@@ -486,6 +498,56 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
                 "executionEvents": list(run.events.filter(payload__type="agent_run_execution_started")
                     .order_by("agent_run_sequence").values_list("eventId", flat=True)),
             }
+
+        def finish_pending_cleanup():
+            # Production drains these terminal Jobs through its independent
+            # control workers. Drive that same channel while this test slot is
+            # idle; a control-pending Job must never regain an execute lease.
+            target = next(iter(pending_cleanup.values()))["job"]
+            original_control_request = worker.runtime_request
+
+            def control_request(path, body=None, **kwargs):
+                if path == "/internal/jobs/control/claim":
+                    # Select this fixture's yielded Job through the supported
+                    # public filter; another slot still owns its own handoff.
+                    body = {**body, "jobId": target["jobId"]}
+                return original_control_request(path, body, **kwargs)
+
+            with patch.object(worker, "runtime_request", side_effect=control_request):
+                control = worker.claim_control_job("cleanup", f"worker:native-cleanup:{slot}")
+            if control is not None:
+                run_id, _digest = worker.agent_run_lifecycle_binding(control)
+                self.assertIn(run_id, pending_cleanup)
+                self.assertEqual(control["jobId"], target["jobId"])
+                self.assertEqual((control["leasePurpose"], control["controlStage"]),
+                                 ("control", "cleanup"))
+                run = children[run_id]
+                before = work_state(run)
+                worker.execute_control_job(control)
+                self.assertEqual(work_state(run), before,
+                    "control cleanup must not reexecute a model, step or execution event")
+            for run_id, retry in list(pending_cleanup.items()):
+                current = original_request("/internal/jobs/" + retry["job"]["jobId"])["job"]
+                self.assertIn(current["status"], ("queued", "leased", "running", "succeeded"), current)
+                if current["status"] != "succeeded":
+                    continue
+                self.assertEqual(tuple(current[name] for name in
+                    ("jobId", "jobKind", "payloadRef", "idempotencyKey")),
+                    tuple(retry["job"][name] for name in
+                    ("jobId", "jobKind", "payloadRef", "idempotencyKey")))
+                self.assertEqual((current["leaseOwner"], current["leaseExpiresAtMs"]), (None, None))
+                run = children[run_id]
+                run.refresh_from_db()
+                self.assertEqual(run.status, "completed")
+                self.assertEqual(work_state(run), retry["work"],
+                    "cleanup completion must preserve the original execution")
+                with self.parallel_mutex:
+                    self.assertEqual(self.child_cleanup_retries.pop(run_id), retry)
+                del pending_cleanup[run_id]
+                completed.append(run_id)
+                stopped.set()
+                return True
+            return False
 
         def step(body):
             run = children[body["agentRunStart"]["agentRunId"]]
@@ -541,7 +603,9 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
                 self.assertEqual((current["leaseOwner"], current["leaseExpiresAtMs"]), (None, None))
                 self.assertGreater(current["runAtMs"], current["updatedAtMs"])
                 with self.parallel_mutex:
-                    self.child_cleanup_retries[run_id] = {"job": current, "work": work_state(run)}
+                    retry = {"job": current, "work": work_state(run)}
+                    self.child_cleanup_retries[run_id] = retry
+                    pending_cleanup[run_id] = retry
                 return
             self.assertEqual(current["status"], "succeeded", json.dumps({"job": current,
                 "agentRunId": run.pk, "transitionReason": run.transitionReason,
@@ -563,7 +627,8 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
         timer = threading.Timer(45, stopped.set)
         timer.start()
         try:
-            with patch.object(worker, "runtime_request", side_effect=request), \
+            with patch.object(worker, "json_request", side_effect=json_request), \
+                 patch.object(worker, "runtime_request", side_effect=request), \
                  patch.object(worker, "agent_run_step_request", side_effect=step), \
                  patch.object(worker, "execute_claimed_job", side_effect=execute), \
                  patch.object(worker, "wait_for_jobs", side_effect=wait_for_jobs), \
