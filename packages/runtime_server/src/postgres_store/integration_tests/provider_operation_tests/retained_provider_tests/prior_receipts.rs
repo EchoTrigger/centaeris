@@ -54,7 +54,7 @@ fn invalid_prior(kind: usize) -> (PostgresRuntimeStore, Client, Run) {
         };
         // The existing INSERT guard preserves these fields but does not prove
         // their digest binding. This uses ordinary SQL with every guard enabled.
-        db.execute("INSERT INTO runtime.provider_environment_run_uses(provider_use_id,agent_run_id,environment_id,authorization_digest,execution_id,provider_use_digest,recorded_at_ms) VALUES($1,$2,'environment',$3,$4,$5,(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint)", &[&value.provider_use_id,&value.agent_run_id,&value.authorization_digest,&value.execution_id,&value.provider_use_digest]).unwrap();
+        db.execute("INSERT INTO runtime.provider_environment_run_uses(provider_use_id,agent_run_id,environment_id,authorization_digest,execution_id,provider_use_digest,recorded_at_ms,creation_attempt_id) VALUES($1,$2,'environment',$3,$4,$5,(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,$6)", &[&value.provider_use_id,&value.agent_run_id,&value.authorization_digest,&value.execution_id,&value.provider_use_digest,&value.target.identity.attempt_id]).unwrap();
         (a, value)
     } else {
         let (a, _, value) = candidate(&store, &mut db);

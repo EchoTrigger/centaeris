@@ -50,9 +50,18 @@ pub(in crate::postgres_store::provider_operations) fn load_receipt(
     db: &mut impl GenericClient,
     run: &str,
 ) -> Result<Option<RetainedProviderCleanupReceipt>, String> {
+    load_receipt_with_target_lookup(db, run, resolve_target)
+}
+
+pub(in crate::postgres_store) fn load_receipt_with_target_lookup<C: GenericClient>(
+    db: &mut C,
+    run: &str,
+    lookup: impl FnOnce(&mut C, TargetLookup) -> Result<ProviderVerifiedTarget, String>,
+) -> Result<Option<RetainedProviderCleanupReceipt>, String> {
     let row=db.query_opt("SELECT cleanup_receipt_id,cleanup_controller_epoch,quiescence_digest FROM runtime.provider_environment_run_uses WHERE agent_run_id=$1 AND cleanup_receipt_id IS NOT NULL",&[&run]).map_err(|e|e.to_string())?;
     let Some(row) = row else { return Ok(None) };
-    let value = load_use(db, run)?.ok_or("retained_provider_use_missing")?;
+    let value =
+        load_use_with_target_lookup(db, run, lookup)?.ok_or("retained_provider_use_missing")?;
     let epoch: i64 = row.get(1);
     let recorded_quiescence: String = row.get(2);
     let id: String = row.get(0);
@@ -61,27 +70,6 @@ pub(in crate::postgres_store::provider_operations) fn load_receipt(
         || id != receipt_id(&value)?
     {
         return Err("retained_provider_cleanup_fact_rejected".into());
-    }
-    let original=db.query_opt("SELECT r.environment_id,g.digest,g.payload::text FROM public.app_core_agentrun r JOIN public.app_core_agentrunauthorization g ON g.agent_run_id=r.id WHERE r.id=$1",&[&run]).map_err(|e|e.to_string())?.ok_or("retained_provider_original_missing")?;
-    let grant: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
-        serde_json::from_str(&original.get::<_, String>(2))
-            .map_err(|_| "retained_provider_original_invalid")?;
-    grant
-        .checked_binding(run)?
-        .verify_digest_binding(&value.authorization_digest)?;
-    let EnvironmentProfile::E2b(profile) = &grant.environment_profile else {
-        return Err("retained_provider_original_rejected".into());
-    };
-    if original.get::<_, Option<String>>(0).as_deref()
-        != Some(value.target.identity.environment_id.as_str())
-        || original.get::<_, String>(1) != value.authorization_digest
-        || grant.session_id != value.target.identity.session_id
-        || grant.workspace_id != value.target.identity.workspace_id
-        || grant.environment_profile_digest != value.target.identity.profile_digest
-        || profile.provider_config_digest != value.target.identity.provider_config_digest
-        || profile.lifetime != "retained"
-    {
-        return Err("retained_provider_original_rejected".into());
     }
     Ok(Some(RetainedProviderCleanupReceipt {
         schema: "runtime.agent_run.cleanup_receipt.retained_provider.v1".into(),

@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use postgres::{Client, GenericClient};
 
-const STORE_SCHEMA_VERSION: i64 = 20;
+const STORE_SCHEMA_VERSION: i64 = 21;
 const MAINTENANCE_COMPLETION_DDL: &str = r#"
 CREATE TABLE runtime.environment_maintenance_completions(
  operation_id text PRIMARY KEY,environment_id text NOT NULL,instance_id text NOT NULL,
@@ -306,6 +306,7 @@ pub(super) fn ensure_schema(client: &mut Client) -> Result<(), String> {
         upgrade_provider_cleanup(client)?;
         upgrade_retained_provider_uses(client)?;
         upgrade_provider_environment_power(client)?;
+        upgrade_retained_provider_history(client)?;
     }
     validate_schema_version(client)?;
     validate_schema(client, CURRENT_OBSERVATION_KINDS)
@@ -488,6 +489,30 @@ fn upgrade_environment_retirements(client: &mut Client) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     tx.execute(
         "INSERT INTO runtime.schema_migrations(version,applied_at_ms) VALUES(11,$1)",
+        &[&now_ms()?],
+    )
+    .map_err(|e| e.to_string())?;
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+fn upgrade_retained_provider_history(client: &mut Client) -> Result<(), String> {
+    if schema_versions(client)? != (1..=20).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    let mut tx = client.transaction().map_err(|e| e.to_string())?;
+    super::resource_commit::require_durable_resource_commit(&mut tx)?;
+    tx.batch_execute("LOCK TABLE runtime.schema_migrations IN ACCESS EXCLUSIVE MODE")
+        .map_err(|e| e.to_string())?;
+    if schema_versions(&mut tx)? != (1..=20).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.batch_execute(super::provider_operations::retained::schema::DDL)
+        .map_err(|e| format!("upgrade retained provider history failed: {e}"))?;
+    super::provider_operations::retained::schema::validate_backfill(&mut tx)?;
+    tx.execute(
+        "INSERT INTO runtime.schema_migrations(version,applied_at_ms) VALUES(21,$1)",
         &[&now_ms()?],
     )
     .map_err(|e| e.to_string())?;
@@ -815,6 +840,8 @@ fn create_schema(client: &mut Client) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     tx.batch_execute(super::provider_operations::retained::power::schema::DDL)
         .map_err(|e| e.to_string())?;
+    tx.batch_execute(super::provider_operations::retained::schema::DDL)
+        .map_err(|e| e.to_string())?;
     for version in 1..=STORE_SCHEMA_VERSION {
         tx.execute(
             "INSERT INTO runtime.schema_migrations(version, applied_at_ms) VALUES($1, $2)",
@@ -857,6 +884,7 @@ fn validate_schema_with_resource_budgets(
     let provider_cleanup = provider_operations && schema_versions(client)?.contains(&18);
     let retained_provider = provider_cleanup && schema_versions(client)?.contains(&19);
     let provider_power = retained_provider && schema_versions(client)?.contains(&20);
+    let provider_history = provider_power && schema_versions(client)?.contains(&21);
     let tables = object_names(client, "BASE TABLE")?;
     let expected_tables = RUNTIME_TABLES
         .iter()
@@ -946,6 +974,11 @@ fn validate_schema_with_resource_budgets(
         };
         let expected = if provider_cleanup && *table == "provider_creation_operations" {
             format!("{expected},verified_sandbox_id:text:YES,verification_digest:text:YES,verified_at_ms:bigint:YES,settlement_id:text:YES,settlement_kind:text:YES,settlement_sandbox_id:text:YES,settlement_controller_epoch:bigint:YES,settled_at_ms:bigint:YES")
+        } else {
+            expected
+        };
+        let expected = if provider_history && *table == "provider_environment_run_uses" {
+            format!("{expected},creation_attempt_id:text:NO")
         } else {
             expected
         };
@@ -1540,7 +1573,7 @@ mod tests {
 
     #[test]
     fn transcript_read_model_and_wait_handoff_have_explicit_store_schema() {
-        assert_eq!(STORE_SCHEMA_VERSION, 20);
+        assert_eq!(STORE_SCHEMA_VERSION, 21);
         for table in [
             "transcript_projection_heads",
             "transcript_projection_current_generations",

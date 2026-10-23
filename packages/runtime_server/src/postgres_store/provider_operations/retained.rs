@@ -7,8 +7,9 @@ use super::*;
 use sha2::{Digest, Sha256};
 
 pub(crate) mod power;
-pub(super) mod receipts;
+pub(in crate::postgres_store) mod receipts;
 pub(crate) mod retirement;
+pub(crate) mod schema;
 pub use receipts::{RetainedProviderCleanupReceipt, RetainedProviderQuiescence};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,12 +38,33 @@ pub(super) fn bind_creation(
     Ok(())
 }
 
-pub(crate) fn load_environment_target(
+/// Live admission follows the current Environment binding; historical consumers
+/// can resolve a creation fact without following the live selection.
+#[derive(Debug)]
+pub(in crate::postgres_store) enum TargetLookup {
+    CurrentEnvironment {
+        environment_id: String,
+    },
+    CreationAttempt {
+        environment_id: String,
+        creation_attempt_id: String,
+    },
+}
+
+fn resolve_target(
     db: &mut impl GenericClient,
-    environment_id: &str,
+    lookup: TargetLookup,
 ) -> Result<ProviderVerifiedTarget, String> {
-    let row = db.query_opt("SELECT creation_attempt_id FROM runtime.provider_environment_bindings WHERE environment_id=$1 FOR SHARE", &[&environment_id]).map_err(|e|e.to_string())?.ok_or("retained_provider_environment_binding_missing")?;
-    let attempt: String = row.get(0);
+    let (environment_id, attempt) = match lookup {
+        TargetLookup::CurrentEnvironment { environment_id } => {
+            let row = db.query_opt("SELECT creation_attempt_id FROM runtime.provider_environment_bindings WHERE environment_id=$1 FOR SHARE", &[&environment_id]).map_err(|e|e.to_string())?.ok_or("retained_provider_environment_binding_missing")?;
+            (environment_id, row.get::<_, String>(0))
+        }
+        TargetLookup::CreationAttempt {
+            environment_id,
+            creation_attempt_id,
+        } => (environment_id, creation_attempt_id),
+    };
     let operation =
         super::load(db, &attempt, false)?.ok_or("retained_provider_creation_missing")?;
     if operation.identity.environment_id != environment_id {
@@ -50,6 +72,18 @@ pub(crate) fn load_environment_target(
     }
     cleanup::load_target(db, &operation.identity)?
         .ok_or("retained_provider_verified_target_required".into())
+}
+
+pub(crate) fn load_environment_target(
+    db: &mut impl GenericClient,
+    environment_id: &str,
+) -> Result<ProviderVerifiedTarget, String> {
+    resolve_target(
+        db,
+        TargetLookup::CurrentEnvironment {
+            environment_id: environment_id.into(),
+        },
+    )
 }
 
 fn reject_retirement(db: &mut impl GenericClient, environment_id: &str) -> Result<(), String> {
@@ -176,7 +210,7 @@ fn insert_use(
     let run = &grant.authorization.agent_run_id;
     let digest = binding_digest(run, &grant.authorization_digest, execution_id, target)?;
     let id = format!("provider_use_{}", &digest[7..]);
-    db.execute("INSERT INTO runtime.provider_environment_run_uses(provider_use_id,agent_run_id,environment_id,authorization_digest,execution_id,provider_use_digest,recorded_at_ms) VALUES($1,$2,$3,$4,$5,$6,(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint) ON CONFLICT(agent_run_id) DO NOTHING", &[&id,run,&target.identity.environment_id,&grant.authorization_digest,&execution_id,&digest]).map_err(|_|"retained_provider_use_conflict")?;
+    db.execute("INSERT INTO runtime.provider_environment_run_uses(provider_use_id,agent_run_id,environment_id,authorization_digest,execution_id,provider_use_digest,recorded_at_ms,creation_attempt_id) VALUES($1,$2,$3,$4,$5,$6,(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,$7) ON CONFLICT(agent_run_id) DO NOTHING", &[&id,run,&target.identity.environment_id,&grant.authorization_digest,&execution_id,&digest,&target.identity.attempt_id]).map_err(|_|"retained_provider_use_conflict")?;
     let value = load_use(db, run)?.ok_or("retained_provider_use_missing")?;
     if value.provider_use_id != id || value.provider_use_digest != digest || &value.target != target
     {
@@ -189,10 +223,28 @@ pub(super) fn load_use(
     db: &mut impl GenericClient,
     run: &str,
 ) -> Result<Option<RetainedProviderRunUse>, String> {
-    let row = db.query_opt("SELECT provider_use_id,authorization_digest,execution_id,provider_use_digest,environment_id FROM runtime.provider_environment_run_uses WHERE agent_run_id=$1", &[&run]).map_err(|e|e.to_string())?;
+    load_use_with_target_lookup(db, run, resolve_target)
+}
+
+pub(in crate::postgres_store) fn load_use_with_target_lookup<C: GenericClient>(
+    db: &mut C,
+    run: &str,
+    lookup: impl FnOnce(&mut C, TargetLookup) -> Result<ProviderVerifiedTarget, String>,
+) -> Result<Option<RetainedProviderRunUse>, String> {
+    let row = db.query_opt("SELECT provider_use_id,authorization_digest,execution_id,provider_use_digest,environment_id,creation_attempt_id FROM runtime.provider_environment_run_uses WHERE agent_run_id=$1", &[&run]).map_err(|e|e.to_string())?;
     let Some(row) = row else { return Ok(None) };
     let environment: String = row.get(4);
-    let target = load_environment_target(db, &environment)?;
+    let attempt: String = row.get(5);
+    let target = lookup(
+        db,
+        TargetLookup::CreationAttempt {
+            environment_id: environment.clone(),
+            creation_attempt_id: attempt.clone(),
+        },
+    )?;
+    if target.identity.environment_id != environment || target.identity.attempt_id != attempt {
+        return Err("retained_provider_environment_binding_rejected".into());
+    }
     let value = RetainedProviderRunUse {
         provider_use_id: row.get(0),
         provider_use_digest: row.get(3),
@@ -212,7 +264,37 @@ pub(super) fn load_use(
     {
         return Err("retained_provider_use_fact_rejected".into());
     }
+    require_original_use_scope(db, &value)?;
     Ok(Some(value))
+}
+
+fn require_original_use_scope(
+    db: &mut impl GenericClient,
+    value: &RetainedProviderRunUse,
+) -> Result<(), String> {
+    let run = value.agent_run_id.as_str();
+    let original=db.query_opt("SELECT r.environment_id,g.digest,g.payload::text FROM public.app_core_agentrun r JOIN public.app_core_agentrunauthorization g ON g.agent_run_id=r.id WHERE r.id=$1",&[&run]).map_err(|e|e.to_string())?.ok_or("retained_provider_original_missing")?;
+    let grant: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
+        serde_json::from_str(&original.get::<_, String>(2))
+            .map_err(|_| "retained_provider_original_invalid")?;
+    grant
+        .checked_binding(run)?
+        .verify_digest_binding(&value.authorization_digest)?;
+    let EnvironmentProfile::E2b(profile) = &grant.environment_profile else {
+        return Err("retained_provider_original_rejected".into());
+    };
+    if original.get::<_, Option<String>>(0).as_deref()
+        != Some(value.target.identity.environment_id.as_str())
+        || original.get::<_, String>(1) != value.authorization_digest
+        || grant.session_id != value.target.identity.session_id
+        || grant.workspace_id != value.target.identity.workspace_id
+        || grant.environment_profile_digest != value.target.identity.profile_digest
+        || profile.provider_config_digest != value.target.identity.provider_config_digest
+        || profile.lifetime != "retained"
+    {
+        return Err("retained_provider_original_rejected".into());
+    }
+    Ok(())
 }
 
 fn require_current_use(
@@ -221,13 +303,39 @@ fn require_current_use(
     value: &RetainedProviderRunUse,
     configured_digest: &str,
 ) -> Result<VerifiedOriginalGrant, String> {
+    require_current_use_with_target_lookup(
+        tx,
+        authority,
+        value,
+        configured_digest,
+        &mut |db, selection| resolve_target(db, selection),
+    )
+}
+
+fn require_current_use_with_target_lookup(
+    tx: &mut postgres::Transaction<'_>,
+    authority: &ControllerAuthorityRequest<'_>,
+    value: &RetainedProviderRunUse,
+    configured_digest: &str,
+    lookup: &mut impl FnMut(
+        &mut postgres::Transaction<'_>,
+        TargetLookup,
+    ) -> Result<ProviderVerifiedTarget, String>,
+) -> Result<VerifiedOriginalGrant, String> {
     let grant = require_authority(tx, authority, Some(configured_digest))?;
     if authority.purpose == ControllerPurpose::Execute {
         power::require_admission(tx, &value.target.identity.environment_id)?;
     }
     if value.agent_run_id != grant.authorization.agent_run_id
         || value.authorization_digest != grant.authorization_digest
-        || load_use(tx, &value.agent_run_id)?.as_ref() != Some(value)
+        || load_use_with_target_lookup(tx, &value.agent_run_id, &mut *lookup)?.as_ref()
+            != Some(value)
+        || lookup(
+            tx,
+            TargetLookup::CurrentEnvironment {
+                environment_id: value.target.identity.environment_id.clone(),
+            },
+        )? != value.target
     {
         return Err("retained_provider_use_authority_rejected".into());
     }
@@ -341,6 +449,30 @@ impl PostgresRuntimeStore {
         configured_digest: &str,
         dispatch: impl FnOnce(&ProviderVerifiedTarget) -> Result<T, E> + Send,
     ) -> Result<T, ProviderExecutionDispatchError<E>> {
+        self.with_retained_provider_execution_dispatch_with_target_lookup(
+            authority,
+            value,
+            configured_digest,
+            |db, selection| resolve_target(db, selection),
+            dispatch,
+        )
+    }
+
+    pub(in crate::postgres_store) fn with_retained_provider_execution_dispatch_with_target_lookup<
+        T: Send,
+        E: Send,
+    >(
+        &self,
+        authority: &ControllerAuthorityRequest<'_>,
+        value: &RetainedProviderRunUse,
+        configured_digest: &str,
+        mut lookup: impl FnMut(
+                &mut postgres::Transaction<'_>,
+                TargetLookup,
+            ) -> Result<ProviderVerifiedTarget, String>
+            + Send,
+        dispatch: impl FnOnce(&ProviderVerifiedTarget) -> Result<T, E> + Send,
+    ) -> Result<T, ProviderExecutionDispatchError<E>> {
         use crate::observations::provider_dispatch::{
             DispatchKind, DispatchMetric, DispatchObservation,
         };
@@ -353,7 +485,7 @@ impl PostgresRuntimeStore {
                 let mut tx = observation.timed(DispatchMetric::AuthorityBefore, || {
                     let mut tx = client.transaction().map_err(|e| e.to_string())?;
                     super::super::resource_commit::require_durable_resource_commit(&mut tx)?;
-                    require_current_use(&mut tx, authority, value, configured_digest)?;
+                    require_current_use_with_target_lookup(&mut tx, authority, value, configured_digest, &mut lookup)?;
                     let closed: bool = tx.query_one("SELECT cleanup_receipt_id IS NOT NULL FROM runtime.provider_environment_run_uses WHERE provider_use_id=$1 FOR SHARE", &[&value.provider_use_id]).map_err(|e| e.to_string())?.get(0);
                     if closed {
                         return Err(ProviderExecutionDispatchError::Rejected("retained_provider_use_already_closed".into()));
@@ -365,7 +497,7 @@ impl PostgresRuntimeStore {
                     dispatch(&value.target).map_err(ProviderExecutionDispatchError::Callback)
                 })?;
                 observation.timed(DispatchMetric::AuthorityAfter, || {
-                    require_current_use(&mut tx, authority, value, configured_digest)
+                    require_current_use_with_target_lookup(&mut tx, authority, value, configured_digest, &mut lookup)
                         .map_err(ProviderExecutionDispatchError::AfterDispatch)
                 })?;
                 observation.timed(DispatchMetric::Commit, || {
@@ -469,6 +601,13 @@ CREATE TRIGGER provider_environment_retirement_facts BEFORE UPDATE OR DELETE ON 
 "#;
 
 pub(crate) fn validate(db: &mut impl GenericClient) -> Result<(), String> {
+    let history: bool = db
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM runtime.schema_migrations WHERE version=21)",
+            &[],
+        )
+        .map_err(|e| e.to_string())?
+        .get(0);
     for (table, name, kind) in [
         (
             "provider_environment_bindings",
@@ -496,7 +635,12 @@ pub(crate) fn validate(db: &mut impl GenericClient) -> Result<(), String> {
         if !found {
             return Err("retained_provider_schema_trigger_rejected".into());
         }
-        let expected = DDL
+        let guard = if history && table == "provider_environment_run_uses" {
+            schema::DDL
+        } else {
+            DDL
+        };
+        let expected = guard
             .split_once(&format!(
                 "CREATE FUNCTION runtime.{function}() RETURNS trigger LANGUAGE plpgsql AS $$"
             ))
@@ -518,13 +662,19 @@ pub(crate) fn validate(db: &mut impl GenericClient) -> Result<(), String> {
     }
     for (table, expected) in [
         ("provider_environment_bindings", 4i64),
-        ("provider_environment_run_uses", 6i64),
+        (
+            "provider_environment_run_uses",
+            if history { 7i64 } else { 6i64 },
+        ),
         ("provider_environment_retirements", 4i64),
     ] {
         let row=db.query_one("SELECT count(*),bool_and(convalidated AND NOT condeferrable) FROM pg_constraint WHERE conrelid=to_regclass($1) AND contype<>'n'",&[&format!("runtime.{table}")]).map_err(|e|e.to_string())?;
         if row.get::<_, i64>(0) != expected || row.get::<_, Option<bool>>(1) != Some(true) {
             return Err("retained_provider_schema_constraints_rejected".into());
         }
+    }
+    if history {
+        schema::validate(db)?;
     }
     Ok(())
 }

@@ -76,7 +76,7 @@ fn postgres_retained_provider_forward_migration_keeps_original_signatures_and_ru
         db.query_one("SELECT max(version) FROM runtime.schema_migrations", &[])
             .unwrap()
             .get::<_, i64>(0),
-        20
+        21
     );
 }
 

@@ -104,6 +104,7 @@ pub(crate) fn validate(db: &mut impl GenericClient) -> Result<(), String> {
 
 #[cfg(test)]
 pub(in crate::postgres_store) fn restore_previous_fixture(db: &mut postgres::Client) {
+    super::super::schema::restore_previous_fixture(db);
     let exists: bool = db
         .query_one(
             "SELECT to_regclass('runtime.provider_environment_power_operations') IS NOT NULL",

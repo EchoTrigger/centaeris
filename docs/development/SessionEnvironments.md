@@ -124,6 +124,21 @@ and resource reservations; the [lifecycle reclamation contract](EnvironmentLifec
 describes creation-attempt evidence, execution/control lease purposes and their
 matching-stack upgrade boundary.
 
+Runtime schema 21 anchors every retained provider Run-use to its original
+creation attempt and verified physical identity. Historical use and cleanup
+receipt reads follow that anchor independently of the Environment's current
+binding. Live execution and cleanup still require the current binding and their
+existing controller authority.
+
+The schema 20 forward upgrade backfills only verifiable uses from their immutable
+bindings, validates the original grant and recorded facts, and commits schema 21
+in the same transaction. An unverifiable use rolls back the whole upgrade;
+dispatched Unknown creations without a use remain valid unresolved obligations.
+Original grants, use digests, receipts and Unknown evidence are not rewritten.
+Older binaries cannot read schema 21, and production has no downgrade path.
+Current bindings remain immutable; binding replacement, automatic release and
+automatic recreation are not implemented by this migration.
+
 Historical reconstruction is explicit migration code. Current execution readers
 define only the current structure. Signed historical payloads are never silently
 rewritten or inferred from current settings. Drain old live and waiting instances

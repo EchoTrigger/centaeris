@@ -706,7 +706,7 @@ fn postgres_provider_power_forward_migration_preserves_retained_bindings_receipt
         db.query_one("SELECT max(version) FROM runtime.schema_migrations", &[])
             .unwrap()
             .get::<_, i64>(0),
-        20
+        21
     );
     assert!(reopened
         .provider_environment_power_operation("pause-a")

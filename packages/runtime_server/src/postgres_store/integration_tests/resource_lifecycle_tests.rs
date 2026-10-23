@@ -559,7 +559,7 @@ fn postgres_creation_attempt_forward_migration_keeps_historical_unknown_charged(
         .iter()
         .map(|row| row.get::<_, i64>(0))
         .collect::<Vec<_>>(),
-        (1..=20).collect::<Vec<_>>()
+        (1..=21).collect::<Vec<_>>()
     );
     assert_eq!(allocation_facts(&mut db), before_facts);
     assert_eq!(

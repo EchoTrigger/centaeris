@@ -1,4 +1,5 @@
 use super::*;
+mod binding_history;
 mod migration;
 mod power;
 mod prior_receipts;
