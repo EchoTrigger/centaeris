@@ -203,6 +203,9 @@ importers:
       '@base-ui/react':
         specifier: 1.9.0
         version: 1.9.0(@types/react@19.2.14)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      '@centaeris/visualization-react':
+        specifier: workspace:*
+        version: link:../visualization-react
       class-variance-authority:
         specifier: 0.7.1
         version: 0.7.1
@@ -419,6 +422,9 @@ importers:
       '@centaeris/frontend-foundations':
         specifier: workspace:*
         version: link:../frontend-foundations
+      '@centaeris/visualization-react':
+        specifier: workspace:*
+        version: link:../visualization-react
       '@codemirror/autocomplete':
         specifier: 6.20.3
         version: 6.20.3

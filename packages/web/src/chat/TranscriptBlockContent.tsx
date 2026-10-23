@@ -98,8 +98,8 @@ function textSource(body: Record<string, unknown>) {
   };
 }
 
-function ReferencedContent({ store, reference, mode = "markdown" }: Readonly<{
-  store: TranscriptViewStore; reference: TranscriptContentRef; mode?: "markdown" | "plain";
+function ReferencedContent({ store, reference, mode = "markdown", allowVisuals = false }: Readonly<{
+  store: TranscriptViewStore; reference: TranscriptContentRef; mode?: "markdown" | "plain"; allowVisuals?: boolean;
 }>) {
   const identity = useTranscriptIdentity(store);
   useSyncExternalStore(store.subscribePresentationContent, store.getPresentationContentVersion, store.getPresentationContentVersion);
@@ -123,16 +123,16 @@ function ReferencedContent({ store, reference, mode = "markdown" }: Readonly<{
   if (!identity.sessionId || !identity.projectionGeneration) return null;
   if (pushed !== null && !pushed.complete && coveredByLive) return null;
   if (pushed !== null) return <div ref={streamedBody}>
-    {pushed.content ? (mode === "markdown" ? <MarkdownContent text={pushed.content} /> : pushed.content) : null}
+    {pushed.content ? (mode === "markdown" ? <MarkdownContent text={pushed.content} allowVisuals={allowVisuals} isStreaming={!pushed.complete} /> : pushed.content) : null}
     {pushed.limited ? <span role="status">{t("transcriptBlockContent.contentPreviewLimited")}</span> : null}
   </div>;
   if (evicted) return <div style={retainedHeight.current ? { minHeight: retainedHeight.current } : undefined}>
     <TranscriptReferencedContent sessionId={identity.sessionId} projectionGeneration={identity.projectionGeneration}
-      reference={reference} mode={mode} deferUntilVisible />
+      reference={reference} mode={mode} allowVisuals={allowVisuals} deferUntilVisible />
   </div>;
   return <TranscriptReferencedContent
     key={`${identity.viewEpoch}:${identity.sessionId}:${identity.projectionGeneration}:${reference.refId}:${reference.revision}`}
-    sessionId={identity.sessionId} projectionGeneration={identity.projectionGeneration} reference={reference} mode={mode}
+    sessionId={identity.sessionId} projectionGeneration={identity.projectionGeneration} reference={reference} mode={mode} allowVisuals={allowVisuals}
   />;
 }
 
@@ -477,8 +477,8 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
       <div className="workspaceTranscriptBlock workspaceTranscriptAssistant" data-block-id={block.blockId}>
         <div className="workspaceTerminalAnswer">
           {text === null
-            ? (reference ? <ReferencedContent store={store} reference={reference} mode="markdown" /> : null)
-            : <MarkdownContent text={text} />}
+            ? (reference ? <ReferencedContent store={store} reference={reference} mode="markdown" allowVisuals /> : null)
+            : <MarkdownContent text={text} allowVisuals isStreaming={body.status === "queued" || body.status === "running"} />}
         </div>
         {body.status !== "queued" && body.status !== "running" ? <TranscriptMessageMeta key={`${viewEpoch}:${block.blockRevision}`} answer text={text} reference={reference}
           sessionId={identity.sessionId} projectionGeneration={identity.projectionGeneration} observedAtMs={block.presentation?.observedAtMs} /> : null}
@@ -502,8 +502,8 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
   return (
     <div className="workspaceTranscriptBlock workspaceStageSummary" data-block-id={block.blockId}>
       {text === null
-        ? (reference ? <ReferencedContent store={store} reference={reference} mode="markdown" /> : null)
-        : <MarkdownContent text={text} />}
+        ? (reference ? <ReferencedContent store={store} reference={reference} mode="markdown" allowVisuals /> : null)
+        : <MarkdownContent text={text} allowVisuals />}
       {kind === "notice" && body.noticeType !== "run_boundary" ? <TranscriptMessageMeta key={`${viewEpoch}:${block.blockRevision}`} text={text} reference={reference}
         sessionId={identity.sessionId} projectionGeneration={identity.projectionGeneration} observedAtMs={block.presentation?.observedAtMs} /> : null}
     </div>
@@ -549,7 +549,7 @@ export const TranscriptLiveTail = memo(function TranscriptLiveTail({ live, mode 
         </div>
       ) : null}
       {text ? <div className="workspaceTranscriptAssistant workspaceTerminalAnswer" data-block-id={`live:${live.messageId}`}>
-        <MarkdownContent text={text} />
+        <MarkdownContent text={text} allowVisuals isStreaming />
       </div> : null}
     </div>
   );

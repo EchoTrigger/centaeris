@@ -1,5 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { createRequire } from "node:module";
 import { transformWithOxc } from "vite";
 
 // Lightweight component characterization through the project's existing JSX
@@ -32,7 +34,16 @@ export function createJsxSubjectLoader(overrides = new Map()) {
         const child = [base, ...[".jsx", ".js", ".tsx", ".ts"].map(extension => base + extension)].find(existsSync);
         if (!child) throw new Error(`Unresolved characterization import: ${specifier}`);
         target = await load(child);
-      } else target = import.meta.resolve(specifier);
+      } else {
+        let resolved;
+        try { resolved = import.meta.resolve(specifier); }
+        catch { resolved = pathToFileURL(createRequire(file).resolve(specifier)).href; }
+        // Workspace exports may point at JSX/TypeScript source. Apply the same
+        // transform used for relative imports before evaluating them in Node.
+        target = resolved.startsWith("file:") && /\.(?:jsx|tsx|ts)$/.test(new URL(resolved).pathname)
+          ? await load(fileURLToPath(resolved))
+          : resolved;
+      }
       replacements.set(specifier, target);
     }
     let code = result.code;

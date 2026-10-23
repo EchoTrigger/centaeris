@@ -291,18 +291,23 @@ contracts; the ordinary root prompt keeps general policy. The System Skill bundl
 is packaged with Desktop and discovered through the existing Runtime mechanism.
 
 The shared adapter validates content before delegating presentation to a host.
-Desktop lazily loads its Nova mapping and the accepted compact visual language.
+Desktop and Web lazily load the same Nova mapping and accepted compact visual
+language from `frontend-foundations`. Transport, message ownership and host
+interaction stay outside that adapter.
 Ordered explanations use a thin left guide and neutral circular nodes without progress
 states or number circles. The centered reference resource chain keeps its arrows;
-actual containment uses nested surfaces. Desktop visuals inherit the application
+actual containment uses nested surfaces. Both clients inherit their application
 surface, text, boundary and semantic status colors in both themes. Labels can
 wrap in narrow panels. Icons use the same Lucide dependency
-as other Desktop components. The preview uses the production Markdown and
+as other application components. The preview uses the production Markdown and
 renderer path, rather than example-specific presentation overrides.
 
-Web keeps its default renderer until Desktop acceptance. TUI continues to use
-Core text projection of the same portable content; React dependencies do not
-enter the terminal renderer. See [Inline visualizations](InlineVisualizations.md)
+Web rendering consumes the portable answer content independently of skill
+installation. Hosted deployments discover `inline-visualizations` only when
+the skill is installed in the Runtime catalog and execution environment;
+updating the Web container does not change either catalog or pinned environment.
+TUI continues to use Core text projection of the same portable content; React
+dependencies do not enter the terminal renderer. See [Inline visualizations](InlineVisualizations.md)
 for the content contract and validation limits.
 
 ## Acceptance

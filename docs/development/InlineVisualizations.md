@@ -99,8 +99,11 @@ acceptance aligned. Core retains pure Rust dependencies and no React runtime.
 A shared `packages/visualization-react` package owns the json-render wrapper,
 registry, theme styles, generated browser contract and block error boundary.
 Both `packages/ui`, used by Desktop, and `packages/web` consume that package.
-Its public interface takes a visual spec and presentation state; session
-transport and hosted authentication remain in their existing owners.
+The shared Nova mapping, compact layout selection and theme styles live in
+`packages/frontend-foundations`; both clients use that mapping rather than
+maintaining separate visual renderers. Its public interface takes a visual spec
+and presentation state; session transport and hosted authentication remain in
+their existing owners.
 
 TUI calls the Core parser and text projection, then adapts the resulting logical
 lines to Ratatui styles and terminal width. It preserves all titles,
@@ -178,9 +181,16 @@ from the Core catalog into the skill's `references/catalog.md`. The same check
 that verifies browser artifacts verifies this reference. The skill is packaged
 and discovered alongside other built-in System Skills.
 
-The model emits one portable format for every client. Desktop maps that content
-to Nova components, Web uses its host mapping, and TUI projects the same text and
-relationships. Skill content defines semantic structure; colors, spacing and
+Desktop bundles this skill with its application. Hosted discovery requires the
+same skill to be installed in both the Runtime catalog and execution environment.
+Updating only the Web container enables rendering without changing skill
+installation or an existing environment's pinned image. Discovery and file reads
+remain owned by the established skill mechanism; the browser does not inject
+model instructions or change Agent execution semantics.
+
+The model emits one portable format for every client. Desktop and Web use the
+shared Nova mapping, and TUI projects the same text and relationships.
+Skill content defines semantic structure; colors, spacing and
 platform interaction remain client responsibilities. A malformed block stays
 inspectable instead of silently requesting another model completion.
 
