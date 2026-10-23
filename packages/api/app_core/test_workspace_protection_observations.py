@@ -283,20 +283,24 @@ class ExecutionProtectionObservationTests(ExecutionPublicationFixture, Transacti
 
     def test_database_commit_failure_keeps_commit_result_unmeasured(self):
         body, snapshot_body = self._body(b"uploaded before commit failure")
-        real_commit = connection.commit
+        real_publish = internal._publish_workspace_snapshot
         commits = 0
         def fail_publication_commit():
             nonlocal commits
             commits += 1
-            if commits == 2:
-                raise DatabaseError("injected publication commit failure")
-            return real_commit()
+            raise DatabaseError("injected publication commit failure")
+        def publish_with_commit_failure(*args, **kwargs):
+            # Pending ownership and upload-open fences must commit normally.
+            # Inject only the final publication transaction's commit.
+            with patch.object(connection, "commit", side_effect=fail_publication_commit):
+                return real_publish(*args, **kwargs)
         output = io.StringIO()
         with patch.dict(os.environ, {"WORKSPACE_PERF_OBSERVATIONS": "1"}), redirect_stderr(output), \
-                patch.object(connection, "commit", side_effect=fail_publication_commit), \
+                patch.object(internal, "_publish_workspace_snapshot", side_effect=publish_with_commit_failure), \
                 self.assertLogs("app_core.workspace_observations", level="WARNING") as logs:
             response = self._post(body)
         self.assertEqual(response.status_code, 500)
+        self.assertEqual(commits, 1)
         records = protection_records(output)
         self.assertEqual(total(records, "apiWrittenBytes"), len(snapshot_body))
         self.assertEqual(total(records, "publishedLinks"), 1)
@@ -309,19 +313,24 @@ class ExecutionProtectionObservationTests(ExecutionPublicationFixture, Transacti
     def test_lost_commit_acknowledgement_does_not_report_zero_committed_snapshots(self):
         body, snapshot_body = self._body(b"DO-NOT-LOG-COMMITTED-BODY")
         real_commit = connection.commit
+        real_publish = internal._publish_workspace_snapshot
         commits = 0
         def lose_publication_acknowledgement():
             nonlocal commits
             commits += 1
             real_commit()
-            if commits == 2:
-                raise DatabaseError("DO-NOT-LOG-COMMIT-DETAILS")
+            raise DatabaseError("DO-NOT-LOG-COMMIT-DETAILS")
+        def publish_with_lost_acknowledgement(*args, **kwargs):
+            # Lose the final commit acknowledgement after the durable head update.
+            with patch.object(connection, "commit", side_effect=lose_publication_acknowledgement):
+                return real_publish(*args, **kwargs)
         output = io.StringIO()
         with patch.dict(os.environ, {"WORKSPACE_PERF_OBSERVATIONS": "1"}), redirect_stderr(output), \
-                patch.object(connection, "commit", side_effect=lose_publication_acknowledgement), \
+                patch.object(internal, "_publish_workspace_snapshot", side_effect=publish_with_lost_acknowledgement), \
                 self.assertLogs("app_core.workspace_observations", level="WARNING") as logs:
             response = self._post(body)
         self.assertEqual(response.status_code, 500)
+        self.assertEqual(commits, 1)
         self._assert_snapshot(snapshot_body)
         records = protection_records(output)
         self.assertEqual(total(records, "apiWrittenBytes"), len(snapshot_body))
