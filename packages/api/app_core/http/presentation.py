@@ -23,6 +23,7 @@ from app_core.session_event import committed_session_terminal_state, project_com
 from app_core.workspace_access import workspace_membership_for
 
 from .query import valid_query_fields
+from .response_schema import COMMON_ERROR_RESPONSES, PresentationOperationResponse
 from .security import usage_auth
 from .stream_response import OwnedAsyncStreamingHttpResponse, stream_database_call
 from .workspaces import list_workspace_sessions, prepare_workspace_session_list
@@ -145,7 +146,12 @@ class PresentationLoader:
             return None
 
 
-@router.get("/workspaces/{workspace_id}/presentation/events", auth=usage_auth("sessions:read"), response=None)
+@router.get("/workspaces/{workspace_id}/presentation/events", auth=usage_auth("sessions:read"),
+    response={200: None} | COMMON_ERROR_RESPONSES,
+    openapi_extra={"responses": {200: {
+        "description": "Resumable presentation events; resume with Last-Event-ID",
+        "content": {"text/event-stream": {"schema": {"type": "string"}}},
+    }}})
 async def presentation_events(request, workspace_id: str):
     if not valid_query_fields(request.GET, {"agentId", "sessionId"}, required={"agentId"}):
         return JsonResponse({"error": "presentation_query_invalid"}, status=400)
@@ -193,7 +199,8 @@ def _operation_download(request, session_id, event_id):
         return (loader, operation_detail(record, preview=False)) if record is not None else None
 
 
-@router.get("/sessions/{session_id}/presentation/operation", auth=usage_auth("sessions:read"), response=None)
+@router.get("/sessions/{session_id}/presentation/operation", auth=usage_auth("sessions:read"),
+    response={200: PresentationOperationResponse} | COMMON_ERROR_RESPONSES)
 async def presentation_operation(request, session_id: str):
     if not valid_query_fields(request.GET, {"sourceEventId"}, required={"sourceEventId"}) or not 0 < len(request.GET["sourceEventId"]) <= 320:
         return JsonResponse({"error": "presentation_operation_query_invalid"}, status=400)

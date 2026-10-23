@@ -291,6 +291,34 @@ class PresentationStreamTests(SimpleTestCase):
 
 class PresentationRouteContractTests(SimpleTestCase):
     """Exercise the actual ASGI HTTP route while isolating its storage boundary."""
+    def test_openapi_declares_presentation_as_event_stream(self):
+        from api.ninja_api import api
+        operation = api.get_openapi_schema()["paths"]["/api/workspaces/{workspace_id}/presentation/events"]["get"]
+        responses = {str(code): value for code, value in operation["responses"].items()}
+        self.assertEqual(responses["200"].get("content"), {
+            "text/event-stream": {"schema": {"type": "string"}},
+        })
+        for status in ("400", "401", "404", "503"):
+            self.assertIn("application/json", responses[status]["content"])
+
+    def test_openapi_declares_operation_download_json_fields(self):
+        from api.ninja_api import api
+        schema = api.get_openapi_schema()
+        operation = schema["paths"]["/api/sessions/{session_id}/presentation/operation"]["get"]
+        responses = {str(code): value for code, value in operation["responses"].items()}
+        content = responses["200"].get("content", {})
+        self.assertEqual(set(content), {"application/json"})
+        reference = content["application/json"]["schema"]["$ref"]
+        body = schema["components"]["schemas"][reference.rsplit("/", 1)[-1]]
+        fields = {"kind", "callId", "toolName", "normalizedInput", "resultState",
+            "operations", "previewTruncated", "sourceEventId"}
+        self.assertEqual(set(body["properties"]), fields)
+        self.assertEqual(set(body["required"]), fields)
+        self.assertEqual(body["properties"]["kind"]["enum"], ["call", "result"])
+        self.assertIs(body["additionalProperties"], False)
+        for status in ("400", "401", "404", "503"):
+            self.assertIn("application/json", responses[status]["content"])
+
     async def test_authenticated_http_stream_delivers_snapshot_and_acknowledges_only_after_apply_payloads(self):
         from .http.presentation import PresentationLoader
         from .http.security import ProductSessionAuth
@@ -307,6 +335,7 @@ class PresentationRouteContractTests(SimpleTestCase):
             response = await self.async_client.get("/api/workspaces/workspace/presentation/events", {"agentId": "agent_x", "sessionId": "session"})
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response["X-Accel-Buffering"], "no")
+            self.assertEqual(response["Content-Type"], "text/event-stream")
             try:
                 frames = []
                 async for frame in response:
@@ -323,7 +352,8 @@ class PresentationRouteContractTests(SimpleTestCase):
 
     async def test_operation_download_http_is_attachment_and_preserves_full_detail(self):
         from .http.security import ProductSessionAuth
-        detail = {"kind": "result", "callId": "call", "toolName": "edit", "normalizedInput": None,
+        from .http.response_schema import PresentationOperationResponse
+        detail = {"kind": "result", "callId": "call", "toolName": "edit", "normalizedInput": {"path": "a.py", "options": [True, None, 1]},
             "resultState": "successWithOutput", "operations": [{"diffPreview": "full diff"}],
             "previewTruncated": False, "sourceEventId": "event"}
         loader = SimpleNamespace(authorized=AsyncMock(return_value=True))
@@ -334,9 +364,11 @@ class PresentationRouteContractTests(SimpleTestCase):
                 patch("app_core.http.presentation._operation_download", AsyncMock(return_value=(loader, detail))):
             response = await self.async_client.get("/api/sessions/session/presentation/operation", {"sourceEventId": "event"})
             self.assertEqual(response.status_code, 200)
+            self.assertEqual(response["Content-Type"], "application/json")
             self.assertEqual(response["Content-Disposition"], 'attachment; filename="tool-operation.json"')
             content = b"".join([chunk async for chunk in response])
             self.assertEqual(json.loads(content), detail)
+            self.assertEqual(PresentationOperationResponse.model_validate(json.loads(content)).model_dump(by_alias=True), detail)
 
 
 class OperationPresentationTests(SimpleTestCase):

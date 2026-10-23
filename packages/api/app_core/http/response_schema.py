@@ -1,7 +1,7 @@
 from typing import Literal
 
 from ninja.responses import codes_4xx, codes_5xx
-from pydantic import Field
+from pydantic import Field, JsonValue
 
 from .schema import ErrorResponse, ModelResponse, StrictSchema
 
@@ -824,3 +824,14 @@ class TranscriptTurnMetadata(StrictSchema):
 
 class TranscriptTurnMetadataResponse(StrictSchema):
     turns: list[TranscriptTurnMetadata]
+
+
+class PresentationOperationResponse(StrictSchema):
+    kind: Literal["call", "result"]
+    call_id: str
+    tool_name: str
+    normalized_input: dict[str, JsonValue] | None
+    result_state: str | None
+    operations: list[JsonValue]
+    preview_truncated: bool
+    source_event_id: str
